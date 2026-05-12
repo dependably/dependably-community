@@ -1,0 +1,20 @@
+# Git
+.git/
+.github/
+
+# Test project
+tests/
+
+# Local build artifacts
+src/Dependably/bin/
+src/Dependably/obj/
+
+# Frontend dev artifacts
+web/node_modules/
+web/.vscode/
+
+# Docs and metadata
+docs/
+*.md
+renovate.json
+.claude/

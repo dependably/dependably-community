@@ -1,0 +1,150 @@
+using System.Diagnostics;
+using Prometheus;
+using Dependably.Infrastructure.Redis;
+
+namespace Dependably.Infrastructure.Health;
+
+/// <summary>
+/// Outbound healthcheck heartbeat. Pings a configured URL on an interval so
+/// external monitors (Healthchecks.io, Better Uptime, Cronitor, etc.) can alert
+/// when a replica is unreachable from the internet.
+///
+/// Silent when HEALTHCHECK_PING_URL is not set.
+///
+/// Environment variables:
+///   HEALTHCHECK_PING_URL               — required to enable
+///   HEALTHCHECK_PING_INTERVAL_SECONDS  — default 60
+///   HEALTHCHECK_PING_TIMEOUT_SECONDS   — default 10
+///   HEALTHCHECK_PING_METHOD            — GET (default) or POST
+///   HEALTHCHECK_PING_PAYLOAD           — none (default) or status (forces POST with JSON body)
+///   HEALTHCHECK_PING_INSTANCE_ID       — defaults to hostname; included in POST payload
+///   HEALTHCHECK_PING_FAIL_URL          — optional; called when local readiness fails
+///   HEALTHCHECK_PING_SCOPE             — replica (default) or leader
+/// </summary>
+public sealed class HealthcheckPinger : BackgroundService
+{
+    private static readonly Counter PingTotal = Metrics.CreateCounter(
+        "healthcheck_ping_total",
+        "Outbound healthcheck pings.",
+        new CounterConfiguration { LabelNames = ["result"] });
+
+    private static readonly Histogram PingDuration = Metrics
+        .CreateHistogram("healthcheck_ping_duration_seconds", "Outbound healthcheck ping duration.");
+
+    private readonly IHttpClientFactory _http;
+    private readonly IDistributedLock _locks;
+    private readonly ReadinessAggregator _readiness;
+    private readonly ILogger<HealthcheckPinger> _logger;
+    private readonly string? _pingUrl;
+    private readonly string? _failUrl;
+    private readonly TimeSpan _interval;
+    private readonly TimeSpan _timeout;
+    private readonly bool _usePost;
+    private readonly bool _sendPayload;
+    private readonly bool _leaderScope;
+    private readonly string _instanceId;
+    private readonly string _deploymentMode;
+    private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
+
+    public HealthcheckPinger(
+        IHttpClientFactory http,
+        IDistributedLock locks,
+        ReadinessAggregator readiness,
+        IConfiguration config,
+        ILogger<HealthcheckPinger> logger)
+    {
+        _http = http;
+        _locks = locks;
+        _readiness = readiness;
+        _logger = logger;
+
+        _pingUrl = config["HEALTHCHECK_PING_URL"];
+        _failUrl = config["HEALTHCHECK_PING_FAIL_URL"];
+        _interval = TimeSpan.FromSeconds(
+            int.TryParse(config["HEALTHCHECK_PING_INTERVAL_SECONDS"], out var i) ? i : 60);
+        _timeout = TimeSpan.FromSeconds(
+            int.TryParse(config["HEALTHCHECK_PING_TIMEOUT_SECONDS"], out var t) ? t : 10);
+        _usePost = string.Equals(config["HEALTHCHECK_PING_METHOD"], "POST", StringComparison.OrdinalIgnoreCase);
+        _sendPayload = string.Equals(config["HEALTHCHECK_PING_PAYLOAD"], "status", StringComparison.OrdinalIgnoreCase);
+        _leaderScope = string.Equals(config["HEALTHCHECK_PING_SCOPE"], "leader", StringComparison.OrdinalIgnoreCase);
+        _instanceId = config["HEALTHCHECK_PING_INSTANCE_ID"] ?? Environment.MachineName;
+        _deploymentMode = (config["DEPENDABLY_DEPLOYMENT_MODE"] ?? "standalone").ToLowerInvariant();
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        if (string.IsNullOrWhiteSpace(_pingUrl))
+            return; // Feature disabled — silent exit.
+
+        _logger.LogInformation(
+            "HealthcheckPinger enabled: url={Url} interval={Interval}s scope={Scope}",
+            _pingUrl, _interval.TotalSeconds, _leaderScope ? "leader" : "replica");
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            await Task.Delay(_interval, stoppingToken);
+            await PingOnceAsync(stoppingToken);
+        }
+    }
+
+    private async Task PingOnceAsync(CancellationToken ct)
+    {
+        // In leader scope, only the elected leader pings.
+        if (_leaderScope)
+        {
+            await using var handle = await _locks.TryAcquireAsync("healthcheck:leader-ping", _interval, ct);
+            if (handle is null) return;
+        }
+
+        var checks = await _readiness.CheckAsync(ct);
+        var ready = checks.Values.All(v => v is null);
+
+        var targetUrl = ready ? _pingUrl! : (_failUrl ?? _pingUrl!);
+        using var timer = PingDuration.NewTimer();
+
+        try
+        {
+            using var client = _http.CreateClient("healthcheck-pinger");
+            client.Timeout = _timeout;
+
+            HttpResponseMessage resp;
+            if (_usePost || _sendPayload)
+            {
+                var uptime = (long)(DateTimeOffset.UtcNow - _startedAt).TotalSeconds;
+                var body = new
+                {
+                    instance_id = _instanceId,
+                    uptime_seconds = uptime,
+                    deployment_mode = _deploymentMode,
+                    status = ready ? "ready" : "degraded",
+                    checks = checks.ToDictionary(
+                        kv => kv.Key,
+                        kv => kv.Value is null ? "ok" : "error"),
+                };
+                resp = await client.PostAsJsonAsync(targetUrl, body, ct);
+            }
+            else
+            {
+                resp = await client.GetAsync(targetUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+            }
+
+            if (resp.IsSuccessStatusCode)
+            {
+                PingTotal.WithLabels("success").Inc();
+                _logger.LogDebug("HealthcheckPinger: ping succeeded ({StatusCode}).", (int)resp.StatusCode);
+            }
+            else
+            {
+                PingTotal.WithLabels("failure").Inc();
+                _logger.LogWarning(
+                    "HealthcheckPinger: ping returned non-2xx ({StatusCode}) from {Url}.",
+                    (int)resp.StatusCode, targetUrl);
+            }
+        }
+        catch (Exception ex)
+        {
+            PingTotal.WithLabels("failure").Inc();
+            _logger.LogWarning(ex, "HealthcheckPinger: transport failure pinging {Url}.", targetUrl);
+        }
+    }
+}

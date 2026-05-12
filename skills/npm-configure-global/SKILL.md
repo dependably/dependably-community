@@ -1,0 +1,58 @@
+---
+name: npm-configure-global
+description: Point your machine-wide npm at a dependably org via ~/.npmrc
+ecosystem: npm
+scope: global
+inputs:
+  - DEPENDABLY_BASE_URL
+  - ORG_SLUG
+  - NPM_TOKEN
+---
+
+## When to use this
+
+You want every project on your machine to install from your dependably instance
+by default, without touching each repo's `.npmrc`. The token lives in your home
+directory only — not in source control.
+
+## Inputs
+
+Ask the user for:
+
+1. **DEPENDABLY_BASE_URL** — e.g. `https://repo.example.com`.
+2. **ORG_SLUG** — e.g. `default`.
+3. **NPM_TOKEN** — created in dependably under **Tokens**.
+
+## File to write
+
+Linux / macOS: `~/.npmrc`
+Windows: `%USERPROFILE%\.npmrc`
+
+```ini
+registry=https://repo.example.com/o/default/npm/
+//repo.example.com/o/default/npm/:_authToken=<token>
+# Uncomment the line below if dependably is served over plain HTTP:
+# strict-ssl=false
+```
+
+> Unlike the project-level recipe, the global file embeds the literal token
+> because it is not under source control. Keep file permissions tight:
+> ```bash
+> chmod 600 ~/.npmrc
+> ```
+
+## Verify it works
+
+```bash
+npm config get registry       # should print the dependably URL
+npm install is-odd
+```
+
+## Reverting
+
+Either delete `~/.npmrc` or run:
+
+```bash
+npm config delete registry --location=user
+npm config delete //repo.example.com/o/default/npm/:_authToken --location=user
+```

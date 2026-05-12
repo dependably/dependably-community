@@ -1,0 +1,354 @@
+namespace Dependably.Infrastructure;
+
+// Dapper-mapped DTOs. Using classes with public setters (not positional records) so Dapper
+// uses its property-setter path, which coerces SQLite's Int64/TEXT to C# bool/int/DateTimeOffset
+// via Convert.ChangeType and registered type handlers.
+
+public class Org
+{
+    public string Id { get; set; } = "";
+    public string Slug { get; set; } = "";
+    /// <summary>
+    /// Set when the tenant is soft-deleted. system_admin can restore within the grace window
+    /// (default 30 days); after that, <see cref="Background.TenantHardDeleteService"/> cascades.
+    /// </summary>
+    public DateTimeOffset? DeletedAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public class OrgSettings
+{
+    public string OrgId { get; set; } = "";
+    public bool AnonymousPull { get; set; }
+    public bool AllowlistMode { get; set; }
+    public long? MaxUploadBytes { get; set; }
+    public long? MaxUploadBytesPyPi { get; set; }
+    public long? MaxUploadBytesNpm { get; set; }
+    public long? MaxUploadBytesNuGet { get; set; }
+    public int? KeepVersions { get; set; }
+    public int? KeepDays { get; set; }
+    public int? ActivityRetentionDays { get; set; }
+    /// <summary>'off' | 'warn' | 'block'</summary>
+    public string LicenseEnforcementMode { get; set; } = "off";
+    public bool ProxyPassthroughEnabled { get; set; } = true;
+    public double MaxOsvScoreTolerance { get; set; } = 10.0;
+    /// <summary>BCP-47 short code (e.g. "en", "fr"). New users in this tenant inherit this value.</summary>
+    public string DefaultLanguage { get; set; } = "en";
+    /// <summary>
+    /// #45 replacement policy. When true, publishing a duplicate (name, version) overwrites
+    /// the existing artefact and emits a <c>package.replace</c> audit event recording both
+    /// hashes. Default false — the strict immutable-coordinate behaviour.
+    /// </summary>
+    public bool AllowVersionOverwrite { get; set; }
+}
+
+public class Package
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string Ecosystem { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string PurlName { get; set; } = "";
+    public bool IsProxy { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public int VersionCount { get; set; }
+    public int CriticalCount { get; set; }
+    public int HighCount { get; set; }
+    public int MediumCount { get; set; }
+    public int LowCount { get; set; }
+}
+
+public class PackageVersion
+{
+    public string Id { get; set; } = "";
+    public string PackageId { get; set; } = "";
+    public string Version { get; set; } = "";
+    public string Purl { get; set; } = "";
+    public string BlobKey { get; set; } = "";
+    public long SizeBytes { get; set; }
+    public string? ChecksumSha256 { get; set; }
+    public bool Yanked { get; set; }
+    public string? YankReason { get; set; }
+    public bool FirstFetch { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? VulnCheckedAt { get; set; }
+    public string? ManualBlockState { get; set; }
+    /// <summary>NULL = not deprecated; otherwise the upstream deprecation message (npm/NuGet).</summary>
+    public string? Deprecated { get; set; }
+    /// <summary>Provenance: 'proxy' (upstream cache) or 'uploaded' (user-pushed via protocol or /admin/upload).</summary>
+    public string Origin { get; set; } = "proxy";
+}
+
+public class User
+{
+    public string Id { get; set; } = "";
+    public string TenantId { get; set; } = "";
+    public string Email { get; set; } = "";
+    /// <summary>'member' | 'admin' | 'owner' — per-tenant role.</summary>
+    public string Role { get; set; } = "member";
+    /// <summary>'forms' | 'saml' — how the account was provisioned. SAML-linked forms users stay 'forms'.</summary>
+    public string AccountType { get; set; } = "forms";
+    public bool MustChangePassword { get; set; }
+    public DateTimeOffset? LastLoginAt { get; set; }
+    /// <summary>'active' | 'locked' | 'disabled'.</summary>
+    public string AccountStatus { get; set; } = "active";
+    public bool MfaEnabled { get; set; }
+    public DateTimeOffset? PasswordResetIssuedAt { get; set; }
+    /// <summary>Per-user locale override. Null means inherit org_settings.default_language.</summary>
+    public string? Language { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Operator identity. Distinct from <see cref="User"/>: system_admins live outside the
+/// tenant model entirely. Empty table in single-mode installs.
+/// </summary>
+public class SystemAdmin
+{
+    public string Id { get; set; } = "";
+    public string Email { get; set; } = "";
+    public bool MustChangePassword { get; set; }
+    public DateTimeOffset? LastLoginAt { get; set; }
+    public string? Language { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Projection returned by <c>GET /api/v1/system/users</c>. Strictly control-plane: never
+/// includes password_hash, tokens, packages, or any data-plane field. Per the locked
+/// "control plane vs data plane" decision.
+/// </summary>
+public class SystemUserLookupView
+{
+    public string Email { get; set; } = "";
+    public string TenantSlug { get; set; } = "";
+    public string Role { get; set; } = "";
+    public DateTimeOffset? LastLoginAt { get; set; }
+    public string AccountStatus { get; set; } = "active";
+    public bool MfaEnabled { get; set; }
+    public DateTimeOffset? PasswordResetIssuedAt { get; set; }
+    public bool MustChangePassword { get; set; }
+}
+
+/// <summary>
+/// Member listing view — projected from the <c>users</c> table directly (1:1 user:tenant).
+/// </summary>
+public class OrgMemberView
+{
+    public string UserId { get; set; } = "";
+    public string Email { get; set; } = "";
+    public string Role { get; set; } = "";
+    public string AccountType { get; set; } = "forms";
+    public DateTimeOffset JoinedAt { get; set; }
+}
+
+public class TokenRecord
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string? UserId { get; set; }
+    /// <summary>
+    /// Canonical JSON array of capability strings (e.g. <c>["publish:npm","read:metadata"]</c>).
+    /// Populated at issuance via <c>Capabilities.TryNormalizeAndAuthorize</c> and read at
+    /// auth time by <c>HasCapability</c>. NULL/malformed values deny everything.
+    /// </summary>
+    public string? Capabilities { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? ExpiresAt { get; set; }
+}
+
+public class CicdTokenRecord
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string Name { get; set; } = "";
+    /// <summary>See <see cref="TokenRecord.Capabilities"/>.</summary>
+    public string? Capabilities { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? ExpiresAt { get; set; }
+}
+
+public class InviteRecord
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string Email { get; set; } = "";
+    /// <summary>'member' | 'admin' | 'owner' — role the invitee receives on accept.</summary>
+    public string Role { get; set; } = "member";
+    public string CreatedBy { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    public DateTimeOffset? AcceptedAt { get; set; }
+}
+
+public class AllowlistEntry
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string Ecosystem { get; set; } = "";
+    public string PurlPattern { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public class BlocklistEntry
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string Ecosystem { get; set; } = "";
+    public string Pattern { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public class AuditEntry
+{
+    public string Id { get; set; } = "";
+    /// <summary>'tenant' | 'system'. system events are operator-only; tenant events are per-tenant.</summary>
+    public string Scope { get; set; } = "tenant";
+    public string? OrgId { get; set; }
+    public string? ActorId { get; set; }
+    public string? ActorEmail { get; set; }
+    public string Action { get; set; } = "";
+    public string? Ecosystem { get; set; }
+    public string? Purl { get; set; }
+    public string? Detail { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public class VulnerabilityRecord
+{
+    public string Id { get; set; } = "";
+    public string OsvId { get; set; } = "";
+    public string Ecosystem { get; set; } = "";
+    public string PackageName { get; set; } = "";
+    public string? Aliases { get; set; }       // JSON array
+    public string? Summary { get; set; }
+    public string? Severity { get; set; }
+    public double? CvssScore { get; set; }
+    public string? AffectedVersions { get; set; } // JSON array
+    public string? PublishedAt { get; set; }
+    public string? ModifiedAt { get; set; }
+    public DateTimeOffset FetchedAt { get; set; }
+}
+
+public class AffectedVersionRecord
+{
+    public string PackageName { get; set; } = "";
+    public string Version { get; set; } = "";
+    public string Purl { get; set; } = "";
+    public string? Severity { get; set; }
+    public double? CvssScore { get; set; }
+    public string OsvId { get; set; } = "";
+    public string? Summary { get; set; }
+    public string? VulnCheckedAt { get; set; }
+    public string OrgSlug { get; set; } = "";
+    public string Ecosystem { get; set; } = "";
+}
+
+public class PackageVersionLicense
+{
+    public string Id { get; set; } = "";
+    public string PackageVersionId { get; set; } = "";
+    public string LicenseSpdx { get; set; } = "";
+    /// <summary>'upstream' | 'sbom' | 'manual'</summary>
+    public string Source { get; set; } = "upstream";
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public class LicenseAllowlistEntry
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string LicenseSpdx { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public class LicenseBlocklistEntry
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string LicenseSpdx { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public class SpdxLicense
+{
+    public string Identifier { get; set; } = "";
+    public string Name { get; set; } = "";
+    public bool IsOsiApproved { get; set; }
+    public bool IsFsfLibre { get; set; }
+    public bool IsDeprecated { get; set; }
+    public string? ReferenceUrl { get; set; }
+    /// <summary>'permissive' | 'weak-copyleft' | 'strong-copyleft' | 'network-copyleft' | 'public-domain' | 'unclassified'</summary>
+    public string Copyleft { get; set; } = "unclassified";
+}
+
+/// <summary>One row in the admin review queue: a SPDX identifier seen during ingestion
+/// for this tenant that is on neither the allow- nor block-list.</summary>
+public class LicenseReviewEntry
+{
+    public string LicenseSpdx { get; set; } = "";
+    public int PackageCount { get; set; }
+    public DateTimeOffset FirstSeen { get; set; }
+    /// <summary>True if the SPDX string contains a compound operator (OR / AND / WITH).
+    /// Compound expressions currently bypass policy lookups; the UI surfaces them but
+    /// disables Approve/Block.</summary>
+    public bool IsCompound { get; set; }
+    /// <summary>True if a matching row in spdx_license is marked deprecated.</summary>
+    public bool IsDeprecated { get; set; }
+}
+
+public class ActivityEntry
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string Ecosystem { get; set; } = "";
+    public string Purl { get; set; } = "";
+    public string EventType { get; set; } = "";
+    public string? ActorId { get; set; }
+    public string? ActorEmail { get; set; }
+    public string? Detail { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Per-tenant SAML 2.0 SP configuration. <c>FormsLoginEnabled=false</c> requires a recent
+/// successful test (<see cref="LastTestAt"/>) so a misconfigured IdP can't lock the tenant out.
+/// </summary>
+public class TenantSamlConfig
+{
+    public string OrgId { get; set; } = "";
+    public bool Enabled { get; set; }
+    public bool FormsLoginEnabled { get; set; } = true;
+    public string? IdpEntityId { get; set; }
+    public string? IdpSsoUrl { get; set; }
+    /// <summary>Base64-encoded X.509 signing certificate parsed from uploaded metadata.</summary>
+    public string? IdpSigningCert { get; set; }
+    /// <summary>Raw uploaded IdP metadata XML, kept for re-parsing and audit.</summary>
+    public string? MetadataXml { get; set; }
+    /// <summary>SP entity ID. NULL = derive at request time from <c>https://{host}/saml/metadata</c>.</summary>
+    public string? SpEntityId { get; set; }
+    public string NameIdFormat { get; set; } = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress";
+    /// <summary>Override attribute name for email. NULL = use NameID.</summary>
+    public string? EmailAttribute { get; set; }
+    public string? ButtonLabel { get; set; }
+    public DateTimeOffset? LastTestAt { get; set; }
+    public string? LastTestEmail { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+/// <summary>
+/// IdP-issued identity linked to a local <see cref="User"/>. Identity is
+/// <c>(IdpEntityId, NameId)</c> — never email — so login keeps working when the IdP changes
+/// the user's email and cross-IdP collisions on the same email are impossible.
+/// </summary>
+public class ExternalIdentity
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string UserId { get; set; } = "";
+    public string IdpEntityId { get; set; } = "";
+    public string NameId { get; set; } = "";
+    public string? EmailSnapshot { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? LastLoginAt { get; set; }
+}

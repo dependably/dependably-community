@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" use="required" type="xsd:string" />
+              <xsd:attribute name="xml:space" default="preserve" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <data name="error.validation.title" xml:space="preserve">
+    <value>Erreur de validation</value>
+  </data>
+  <data name="error.conflict.title" xml:space="preserve">
+    <value>Conflit</value>
+  </data>
+  <data name="error.notFound.title" xml:space="preserve">
+    <value>Introuvable</value>
+  </data>
+  <data name="error.unauthorized.title" xml:space="preserve">
+    <value>Non autorisé</value>
+  </data>
+  <data name="error.forbidden.title" xml:space="preserve">
+    <value>Accès refusé</value>
+  </data>
+  <data name="error.payloadTooLarge.title" xml:space="preserve">
+    <value>Charge utile trop volumineuse</value>
+  </data>
+  <data name="error.org.notFound" xml:space="preserve">
+    <value>Organisation introuvable.</value>
+  </data>
+  <data name="error.auth.required" xml:space="preserve">
+    <value>Authentification requise.</value>
+  </data>
+  <data name="error.auth.forbidden" xml:space="preserve">
+    <value>Portée du jeton insuffisante.</value>
+  </data>
+  <data name="error.org.slugRequired" xml:space="preserve">
+    <value>L'identifiant est obligatoire.</value>
+  </data>
+  <data name="error.org.slugConflict" xml:space="preserve">
+    <value>Une organisation avec cet identifiant existe déjà.</value>
+  </data>
+  <data name="error.allowlist.fieldsRequired" xml:space="preserve">
+    <value>Les champs ecosystem et purl_pattern sont obligatoires.</value>
+  </data>
+  <data name="error.token.scopeInvalid" xml:space="preserve">
+    <value>La portée doit être « pull » ou « push ».</value>
+  </data>
+  <data name="error.token.nameRequired" xml:space="preserve">
+    <value>Le nom est obligatoire.</value>
+  </data>
+  <data name="error.invite.emailRequired" xml:space="preserve">
+    <value>L'adresse courriel est obligatoire.</value>
+  </data>
+  <data name="error.member.roleInvalid" xml:space="preserve">
+    <value>Le rôle doit être « member », « admin » ou « owner ».</value>
+  </data>
+  <data name="error.member.lastOwnerDemote" xml:space="preserve">
+    <value>Impossible de rétrograder le dernier propriétaire de l'organisation.</value>
+  </data>
+  <data name="error.member.lastOwnerRemove" xml:space="preserve">
+    <value>Impossible de retirer le dernier propriétaire de l'organisation.</value>
+  </data>
+</root>

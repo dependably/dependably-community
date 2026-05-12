@@ -1,0 +1,193 @@
+using System.Net;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using Dependably.Tests.Infrastructure;
+using Xunit;
+
+namespace Dependably.Tests.Integration;
+
+/// <summary>
+/// Manifest-driven import covers POST /api/v1/admin/import/manifest. Archive-style import is
+/// no longer a dedicated endpoint — operators send mixed-ecosystem batches through the
+/// unified <c>/api/v1/admin/upload</c> path (see <see cref="UploadEndpointTests"/>).
+/// </summary>
+[Trait("Category", "Integration")]
+public sealed class ImportArchiveAndManifestTests : IClassFixture<DependablyFactory>, IAsyncLifetime
+{
+    private readonly DependablyFactory _factory;
+    public ImportArchiveAndManifestTests(DependablyFactory factory) => _factory = factory;
+    public Task InitializeAsync() => Task.CompletedTask;
+    public Task DisposeAsync() => Task.CompletedTask;
+
+    private async Task<HttpClient> AdminClient()
+    {
+        var jwt = await _factory.CreateAdminJwt();
+        var c = _factory.CreateClient();
+        c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+        return c;
+    }
+
+    [Fact]
+    public async Task ImportManifest_NpmPackageLockV3_HappyPath()
+    {
+        var (lodashBytes, _, _) = NpmFixtures.BuildTarball("acme-mfst-lodash", "1.0.0");
+        var (reactBytes, _, _) = NpmFixtures.BuildTarball("acme-mfst-react", "2.0.0");
+
+        var lockfile = """
+            {
+              "name": "test",
+              "version": "1.0.0",
+              "lockfileVersion": 3,
+              "requires": true,
+              "packages": {
+                "": { "name": "test", "version": "1.0.0" },
+                "node_modules/acme-mfst-lodash": { "version": "1.0.0" },
+                "node_modules/acme-mfst-react":  { "version": "2.0.0" }
+              }
+            }
+            """;
+
+        using var client = await AdminClient();
+        using var content = new MultipartFormDataContent();
+        var manifestPart = new ByteArrayContent(Encoding.UTF8.GetBytes(lockfile));
+        manifestPart.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        content.Add(manifestPart, "manifest", "package-lock.json");
+        var p1 = new ByteArrayContent(lodashBytes); content.Add(p1, "files", "acme-mfst-lodash-1.0.0.tgz");
+        var p2 = new ByteArrayContent(reactBytes);  content.Add(p2, "files", "acme-mfst-react-2.0.0.tgz");
+
+        var resp = await client.PostAsync("/api/v1/admin/import/manifest", content);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("manifest-bulk", doc.GetProperty("mode").GetString());
+        Assert.Equal("NpmPackageLock", doc.GetProperty("manifest_type").GetString());
+        Assert.Equal(2, doc.GetProperty("accepted").GetInt32());
+        Assert.Equal(0, doc.GetProperty("rejected").GetInt32());
+    }
+
+    [Fact]
+    public async Task ImportManifest_MissingArtifact_RejectsEntireBatchAtomically()
+    {
+        var (lodashBytes, _, _) = NpmFixtures.BuildTarball("acme-mfst-atomic-a", "1.0.0");
+        // react manifest entry is declared but no artefact uploaded — the entire batch
+        // must be rejected with a 422 and zero side effects.
+        var lockfile = """
+            {
+              "name": "test", "version": "1.0.0", "lockfileVersion": 3,
+              "packages": {
+                "": { "name": "test", "version": "1.0.0" },
+                "node_modules/acme-mfst-atomic-a": { "version": "1.0.0" },
+                "node_modules/acme-mfst-atomic-b": { "version": "2.0.0" }
+              }
+            }
+            """;
+
+        using var client = await AdminClient();
+        using var content = new MultipartFormDataContent();
+        content.Add(new ByteArrayContent(Encoding.UTF8.GetBytes(lockfile)), "manifest", "package-lock.json");
+        content.Add(new ByteArrayContent(lodashBytes), "files", "acme-mfst-atomic-a-1.0.0.tgz");
+
+        var resp = await client.PostAsync("/api/v1/admin/import/manifest", content);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+        var missing = doc.GetProperty("manifest_entries_without_files").EnumerateArray().ToList();
+        Assert.Single(missing);
+        Assert.Equal("acme-mfst-atomic-b", missing[0].GetProperty("name").GetString());
+
+        // Pre-validation rejection: zero side effects. Re-uploading just the matching file
+        // through the unified endpoint confirms it's still importable (not already written).
+        using var content2 = new MultipartFormDataContent();
+        var part = new ByteArrayContent(lodashBytes);
+        content2.Add(part, "files", "acme-mfst-atomic-a-1.0.0.tgz");
+        var resp2 = await client.PostAsync("/api/v1/admin/upload", content2);
+        var doc2 = JsonDocument.Parse(await resp2.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(1, doc2.GetProperty("accepted").GetInt32());
+    }
+
+    [Fact]
+    public async Task ImportManifest_RequirementsTxtWithHashes_VerifiesHashes()
+    {
+        var (whlBytes, sha256) = PyPiFixtures.BuildWheel("acme_mfst_pip", "3.0.0");
+        var requirements = $"""
+            # comment
+            acme-mfst-pip==3.0.0 \
+                --hash=sha256:{sha256}
+            """;
+
+        using var client = await AdminClient();
+        using var content = new MultipartFormDataContent();
+        content.Add(new ByteArrayContent(Encoding.UTF8.GetBytes(requirements)), "manifest", "requirements.txt");
+        var part = new ByteArrayContent(whlBytes);
+        content.Add(part, "files", "acme_mfst_pip-3.0.0-py3-none-any.whl");
+
+        var resp = await client.PostAsync("/api/v1/admin/import/manifest", content);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("PipRequirements", doc.GetProperty("manifest_type").GetString());
+        Assert.Equal(1, doc.GetProperty("accepted").GetInt32());
+    }
+
+    [Fact]
+    public async Task ImportManifest_HashMismatch_Rejects422()
+    {
+        var (whlBytes, _) = PyPiFixtures.BuildWheel("acme_mfst_hash", "1.0.0");
+        var bogusHash = new string('a', 64);
+        var requirements = $"acme-mfst-hash==1.0.0 --hash=sha256:{bogusHash}\n";
+
+        using var client = await AdminClient();
+        using var content = new MultipartFormDataContent();
+        content.Add(new ByteArrayContent(Encoding.UTF8.GetBytes(requirements)), "manifest", "requirements.txt");
+        var part = new ByteArrayContent(whlBytes);
+        content.Add(part, "files", "acme_mfst_hash-1.0.0-py3-none-any.whl");
+
+        var resp = await client.PostAsync("/api/v1/admin/import/manifest", content);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+        var mismatches = doc.GetProperty("hash_mismatches").EnumerateArray().ToList();
+        Assert.Single(mismatches);
+    }
+
+    [Fact]
+    public async Task ImportManifest_OrphanArtifact_Rejects422()
+    {
+        // Manifest declares one package; operator uploads two. The orphan file must surface
+        // as a coverage error rather than being silently imported.
+        var (decBytes, _, _) = NpmFixtures.BuildTarball("acme-mfst-decl", "1.0.0");
+        var (orpBytes, _, _) = NpmFixtures.BuildTarball("acme-mfst-orph", "1.0.0");
+        var lockfile = """
+            {
+              "name": "test", "version": "1.0.0", "lockfileVersion": 3,
+              "packages": {
+                "": { "name": "test", "version": "1.0.0" },
+                "node_modules/acme-mfst-decl": { "version": "1.0.0" }
+              }
+            }
+            """;
+
+        using var client = await AdminClient();
+        using var content = new MultipartFormDataContent();
+        content.Add(new ByteArrayContent(Encoding.UTF8.GetBytes(lockfile)), "manifest", "package-lock.json");
+        content.Add(new ByteArrayContent(decBytes), "files", "acme-mfst-decl-1.0.0.tgz");
+        content.Add(new ByteArrayContent(orpBytes), "files", "acme-mfst-orph-1.0.0.tgz");
+
+        var resp = await client.PostAsync("/api/v1/admin/import/manifest", content);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+        var orphans = doc.GetProperty("files_without_manifest_entries").EnumerateArray().ToList();
+        Assert.Single(orphans);
+        Assert.Equal("acme-mfst-orph", orphans[0].GetProperty("name").GetString());
+    }
+
+    [Fact]
+    public async Task ImportManifest_UnrecognisedManifest_400()
+    {
+        using var client = await AdminClient();
+        using var content = new MultipartFormDataContent();
+        content.Add(new ByteArrayContent(Encoding.UTF8.GetBytes("garbage")), "manifest", "weird.lock");
+        var part = new ByteArrayContent([0x00]);
+        content.Add(part, "files", "x.tgz");
+
+        var resp = await client.PostAsync("/api/v1/admin/import/manifest", content);
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+}

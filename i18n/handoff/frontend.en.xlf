@@ -1,0 +1,1373 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xliff version="2.0" xmlns="urn:oasis:names:tc:xliff:document:2.0" srcLang="en" trgLang="fr">
+  <file id="frontend" original="web/src/locales/en.json">
+    <unit id="activity.allEvents">
+      <segment>
+        <source>All events</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="activity.columns.actor">
+      <segment>
+        <source>Actor</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="activity.columns.detail">
+      <segment>
+        <source>Detail</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="activity.columns.event">
+      <segment>
+        <source>Event</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="activity.columns.purl">
+      <segment>
+        <source>PURL</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="activity.columns.time">
+      <segment>
+        <source>Time</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="activity.empty">
+      <segment>
+        <source>No activity</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="activity.events.firstFetch">
+      <segment>
+        <source>First fetch</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="activity.events.pull">
+      <segment>
+        <source>Pull</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="activity.events.push">
+      <segment>
+        <source>Push</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="activity.events.vulnScan">
+      <segment>
+        <source>Vuln scan</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="activity.system">
+      <segment>
+        <source>system</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="activity.title">
+      <segment>
+        <source>Activity</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.orgs.columns.created">
+      <segment>
+        <source>Created</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.orgs.columns.id">
+      <segment>
+        <source>ID</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.orgs.columns.slug">
+      <segment>
+        <source>Slug</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.orgs.deleteConfirm">
+      <segment>
+        <source>Delete org &quot;{slug}&quot;? This is irreversible.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.orgs.empty">
+      <segment>
+        <source>No orgs</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.orgs.modal.slug">
+      <segment>
+        <source>Slug</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.orgs.modal.slugPlaceholder">
+      <segment>
+        <source>my-org</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.orgs.modal.title">
+      <segment>
+        <source>New Organization</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.orgs.newOrg">
+      <segment>
+        <source>New org</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.orgs.title">
+      <segment>
+        <source>Instance Admin — Orgs</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.settings.fields.DEFAULT_ORG_SLUG">
+      <segment>
+        <source>Default org slug</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.settings.fields.GC_SCHEDULE">
+      <segment>
+        <source>GC cron schedule</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.settings.fields.MAX_UPLOAD_BYTES">
+      <segment>
+        <source>Max upload bytes (all ecosystems)</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.settings.fields.MAX_UPLOAD_BYTES_NPM">
+      <segment>
+        <source>Max upload bytes — npm</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.settings.fields.MAX_UPLOAD_BYTES_NUGET">
+      <segment>
+        <source>Max upload bytes — NuGet</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.settings.fields.MAX_UPLOAD_BYTES_PYPI">
+      <segment>
+        <source>Max upload bytes — PyPI</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.settings.fields.METRICS_ALLOWED_IPS">
+      <segment>
+        <source>Metrics allowed IPs (comma-separated)</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.settings.notSet">
+      <segment>
+        <source>not set</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.settings.saved">
+      <segment>
+        <source>Settings saved.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="admin.settings.title">
+      <segment>
+        <source>Instance Settings</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="allowlist.addEntry">
+      <segment>
+        <source>Add entry</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="allowlist.columns.added">
+      <segment>
+        <source>Added</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="allowlist.columns.ecosystem">
+      <segment>
+        <source>Ecosystem</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="allowlist.columns.purlPattern">
+      <segment>
+        <source>PURL Pattern</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="allowlist.empty">
+      <segment>
+        <source>No allowlist entries</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="allowlist.modal.ecosystem">
+      <segment>
+        <source>Ecosystem</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="allowlist.modal.purlPattern">
+      <segment>
+        <source>PURL Pattern</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="allowlist.modal.purlPatternHint">
+      <segment>
+        <source>Omit @version to match any version</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="allowlist.modal.purlPatternPlaceholder">
+      <segment>
+        <source>pkg:npm/lodash or pkg:npm/lodash@4.17.21</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="allowlist.modal.title">
+      <segment>
+        <source>Add Allowlist Entry</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="allowlist.removeConfirm">
+      <segment>
+        <source>Remove this allowlist entry?</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="allowlist.title">
+      <segment>
+        <source>Allowlist</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="audit.columns.action">
+      <segment>
+        <source>Action</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="audit.columns.actor">
+      <segment>
+        <source>Actor</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="audit.columns.detail">
+      <segment>
+        <source>Detail</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="audit.columns.ecosystem">
+      <segment>
+        <source>Ecosystem</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="audit.columns.purl">
+      <segment>
+        <source>PURL</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="audit.columns.time">
+      <segment>
+        <source>Time</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="audit.empty">
+      <segment>
+        <source>No audit events</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="audit.forbidden">
+      <segment>
+        <source>Audit log is only accessible to org admins.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="audit.title">
+      <segment>
+        <source>Audit Log</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.join.confirmPassword">
+      <segment>
+        <source>Confirm Password</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.join.errorFailed">
+      <segment>
+        <source>Failed to accept invite.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.join.errorMinLength">
+      <segment>
+        <source>Password must be at least 12 characters.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.join.errorMismatch">
+      <segment>
+        <source>Passwords do not match.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.join.newPassword">
+      <segment>
+        <source>New Password</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.join.passwordHint">
+      <segment>
+        <source>(min 12 chars)</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.join.signIn">
+      <segment>
+        <source>Sign in</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.join.submit">
+      <segment>
+        <source>Accept Invite</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.join.submitting">
+      <segment>
+        <source>Creating account…</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.join.success">
+      <segment>
+        <source>Account created!</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.join.title">
+      <segment>
+        <source>Accept Invite</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.login.email">
+      <segment>
+        <source>Email</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.login.failed">
+      <segment>
+        <source>Login failed.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.login.password">
+      <segment>
+        <source>Password</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.login.submit">
+      <segment>
+        <source>Sign in</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.login.submitting">
+      <segment>
+        <source>Signing in…</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.login.subtitle">
+      <segment>
+        <source>Sign in to continue</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.login.title">
+      <segment>
+        <source>⚓ dependably</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="auth.login.tooManyAttempts">
+      <segment>
+        <source>Too many attempts. Try again in {seconds}s.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.columns.created">
+      <segment>
+        <source>Created</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.columns.expires">
+      <segment>
+        <source>Expires</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.columns.name">
+      <segment>
+        <source>Name</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.columns.scope">
+      <segment>
+        <source>Scope</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.empty">
+      <segment>
+        <source>No CI/CD tokens</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.expired">
+      <segment>
+        <source>expired</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.modal.expiresAt">
+      <segment>
+        <source>Expires at (optional)</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.modal.name">
+      <segment>
+        <source>Name</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.modal.namePlaceholder">
+      <segment>
+        <source>e.g. GitHub Actions</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.modal.nameRequired">
+      <segment>
+        <source>Name is required.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.modal.scope">
+      <segment>
+        <source>Scope</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.modal.title">
+      <segment>
+        <source>New CI/CD Token</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.newToken">
+      <segment>
+        <source>New token</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.revokeConfirm">
+      <segment>
+        <source>Revoke this CI/CD token?</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.title">
+      <segment>
+        <source>CI/CD Tokens</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="cicdTokens.tokenCreated">
+      <segment>
+        <source>Token created — copy it now, it will not be shown again.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.add">
+      <segment>
+        <source>Add</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.adding">
+      <segment>
+        <source>Adding…</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.back">
+      <segment>
+        <source>← Back</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.cancel">
+      <segment>
+        <source>Cancel</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.copied">
+      <segment>
+        <source>Copied!</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.copy">
+      <segment>
+        <source>Copy</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.create">
+      <segment>
+        <source>Create</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.creating">
+      <segment>
+        <source>Creating…</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.delete">
+      <segment>
+        <source>Delete</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.dismiss">
+      <segment>
+        <source>Dismiss</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.remove">
+      <segment>
+        <source>Remove</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.revoke">
+      <segment>
+        <source>Revoke</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.save">
+      <segment>
+        <source>Save</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.actions.saving">
+      <segment>
+        <source>Saving…</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.allEcosystems">
+      <segment>
+        <source>All ecosystems</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.loading">
+      <segment>
+        <source>Loading…</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.loadMore">
+      <segment>
+        <source>Load more</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.never">
+      <segment>
+        <source>never</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.noData">
+      <segment>
+        <source>No data</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.notAvailable">
+      <segment>
+        <source>Not available.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="common.notSet">
+      <segment>
+        <source>not set</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="nav.activity">
+      <segment>
+        <source>Activity</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="nav.admin">
+      <segment>
+        <source>Admin</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="nav.brand">
+      <segment>
+        <source>⚓ dependably</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="nav.packages">
+      <segment>
+        <source>Packages</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="nav.settings">
+      <segment>
+        <source>Settings</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="nav.setup">
+      <segment>
+        <source>Setup</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="nav.signOut">
+      <segment>
+        <source>Sign out</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="nav.toggleTheme">
+      <segment>
+        <source>Toggle theme</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="nav.tokens">
+      <segment>
+        <source>Tokens</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="nav.users">
+      <segment>
+        <source>Users</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="nav.vulnerabilities">
+      <segment>
+        <source>Vulnerabilities</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="packages.allSources">
+      <segment>
+        <source>All sources</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="packages.columns.created">
+      <segment>
+        <source>Created</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="packages.columns.ecosystem">
+      <segment>
+        <source>Ecosystem</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="packages.columns.name">
+      <segment>
+        <source>Name</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="packages.columns.purl">
+      <segment>
+        <source>PURL</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="packages.columns.source">
+      <segment>
+        <source>Source</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="packages.empty">
+      <segment>
+        <source>No packages found</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="packages.hosted">
+      <segment>
+        <source>Hosted</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="packages.proxy">
+      <segment>
+        <source>Proxy</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="packages.searchPlaceholder">
+      <segment>
+        <source>Search by name…</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="packages.title">
+      <segment>
+        <source>Packages</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.general.allowlistMode">
+      <segment>
+        <source>Allowlist mode</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.general.anonymousPull">
+      <segment>
+        <source>Anonymous pull</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.retention.activityDays">
+      <segment>
+        <source>Activity retention days</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.retention.keepDays">
+      <segment>
+        <source>Keep days (proxy blobs)</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.retention.keepVersions">
+      <segment>
+        <source>Keep versions</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.retention.unlimited">
+      <segment>
+        <source>unlimited</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.retentionSaved">
+      <segment>
+        <source>Retention settings saved.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.saved">
+      <segment>
+        <source>Settings saved.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.tabs.allowlist">
+      <segment>
+        <source>Allowlist</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.tabs.general">
+      <segment>
+        <source>General</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.tabs.retention">
+      <segment>
+        <source>Retention</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.tabs.uploadLimits">
+      <segment>
+        <source>Upload limits</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.title">
+      <segment>
+        <source>Org Settings</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.uploadLimits.allEcosystems">
+      <segment>
+        <source>All ecosystems</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.uploadLimits.bytesLabel">
+      <segment>
+        <source>{label} (bytes)</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.uploadLimits.exceedsCeiling">
+      <segment>
+        <source>Cannot exceed instance ceiling of {bytes} bytes.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.uploadLimits.inheritPlaceholder">
+      <segment>
+        <source>inherit from instance</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="settings.uploadLimits.instanceCeiling">
+      <segment>
+        <source>Instance ceiling: {mb} MB</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="setup.subtitle">
+      <segment>
+        <source>Configuration snippets for connecting your tools to this registry.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="setup.title">
+      <segment>
+        <source>Setup Snippets</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="tokens.columns.created">
+      <segment>
+        <source>Created</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="tokens.columns.expires">
+      <segment>
+        <source>Expires</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="tokens.columns.id">
+      <segment>
+        <source>ID</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="tokens.columns.scope">
+      <segment>
+        <source>Scope</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="tokens.empty">
+      <segment>
+        <source>No tokens</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="tokens.expired">
+      <segment>
+        <source>expired</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="tokens.modal.expiresAt">
+      <segment>
+        <source>Expires at (optional)</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="tokens.modal.scope">
+      <segment>
+        <source>Scope</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="tokens.modal.title">
+      <segment>
+        <source>New Access Token</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="tokens.newToken">
+      <segment>
+        <source>New token</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="tokens.title">
+      <segment>
+        <source>Access Tokens</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="tokens.tokenCreated">
+      <segment>
+        <source>Token created — copy it now, it will not be shown again.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.inviteLink">
+      <segment>
+        <source>Invite link (send to user):</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.invites.cancel">
+      <segment>
+        <source>Cancel</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.invites.columns.email">
+      <segment>
+        <source>Email</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.invites.columns.expires">
+      <segment>
+        <source>Expires</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.invites.columns.invited">
+      <segment>
+        <source>Invited</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.invites.columns.status">
+      <segment>
+        <source>Status</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.invites.empty">
+      <segment>
+        <source>No invites</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.invites.status.accepted">
+      <segment>
+        <source>accepted</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.invites.status.expired">
+      <segment>
+        <source>expired</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.invites.status.pending">
+      <segment>
+        <source>pending</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.inviteUser">
+      <segment>
+        <source>Invite user</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.members.columns.admin">
+      <segment>
+        <source>Admin</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.members.columns.email">
+      <segment>
+        <source>Email</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.members.columns.joined">
+      <segment>
+        <source>Joined</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.members.empty">
+      <segment>
+        <source>No members</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.members.removeConfirm">
+      <segment>
+        <source>Remove this user from the org?</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.modal.email">
+      <segment>
+        <source>Email</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.modal.sending">
+      <segment>
+        <source>Sending…</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.modal.sendInvite">
+      <segment>
+        <source>Send invite</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.modal.title">
+      <segment>
+        <source>Invite User</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.tabs.members">
+      <segment>
+        <source>Members ({count})</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.tabs.pendingInvites">
+      <segment>
+        <source>Pending Invites ({count})</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="users.title">
+      <segment>
+        <source>Users &amp; Invites</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.badges.firstFetch">
+      <segment>
+        <source>first-fetch</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.badges.yanked">
+      <segment>
+        <source>yanked</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.columns.actions">
+      <segment>
+        <source>Actions</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.columns.checksum">
+      <segment>
+        <source>Checksum</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.columns.flags">
+      <segment>
+        <source>Flags</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.columns.purl">
+      <segment>
+        <source>PURL</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.columns.pushed">
+      <segment>
+        <source>Pushed</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.columns.size">
+      <segment>
+        <source>Size</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.columns.version">
+      <segment>
+        <source>Version</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.columns.vulnScan">
+      <segment>
+        <source>Vuln Scan</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.del">
+      <segment>
+        <source>Del</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.deleteTitle">
+      <segment>
+        <source>Delete version {version}? This cannot be undone.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.empty">
+      <segment>
+        <source>No versions.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.rescan">
+      <segment>
+        <source>Rescan</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.rescanCooldown">
+      <segment>
+        <source>Cooldown: {minutes}m remaining</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.rescanning">
+      <segment>
+        <source>…</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.rescanTitle">
+      <segment>
+        <source>Scan for vulnerabilities</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.sbom">
+      <segment>
+        <source>SBOM</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.sbomTitle">
+      <segment>
+        <source>Download SBOM</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="versionDetail.vulnNever">
+      <segment>
+        <source>Never</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.catalog.columns.affectedVersions">
+      <segment>
+        <source>Affected versions</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.catalog.columns.aliases">
+      <segment>
+        <source>Aliases</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.catalog.columns.ecosystem">
+      <segment>
+        <source>Ecosystem</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.catalog.columns.osvId">
+      <segment>
+        <source>OSV ID</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.catalog.columns.package">
+      <segment>
+        <source>Package</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.catalog.columns.severity">
+      <segment>
+        <source>Severity</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.catalog.columns.summary">
+      <segment>
+        <source>Summary</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.catalog.empty">
+      <segment>
+        <source>No advisories found</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.catalog.versionCount">
+      <segment>
+        <source>{count} version(s)</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.report.columns.checkedAt">
+      <segment>
+        <source>Checked at</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.report.columns.osvId">
+      <segment>
+        <source>OSV ID</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.report.columns.package">
+      <segment>
+        <source>Package</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.report.columns.purl">
+      <segment>
+        <source>PURL</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.report.columns.severity">
+      <segment>
+        <source>Severity</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.report.columns.summary">
+      <segment>
+        <source>Summary</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.report.columns.version">
+      <segment>
+        <source>Version</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.report.empty">
+      <segment>
+        <source>No affected packages found</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.report.title">
+      <segment>
+        <source>Vulnerability Report</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.tabs.catalog">
+      <segment>
+        <source>Advisory Catalog</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.tabs.report">
+      <segment>
+        <source>Org Report</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.title">
+      <segment>
+        <source>Vulnerabilities</source>
+        <target/>
+      </segment>
+    </unit>
+  </file>
+</xliff>

@@ -1,0 +1,321 @@
+stages:
+  - build
+  - test
+  - sbom
+  - dast
+
+build-web:
+  stage: build
+  image: node:22-alpine
+  script:
+    - cd web && npm ci && npm run build
+  artifacts:
+    paths:
+      - src/Dependably/wwwroot/
+    expire_in: 1 hour
+
+build:
+  stage: build
+  image: mcr.microsoft.com/dotnet/sdk:10.0
+  needs: [build-web]
+  # Heavy job + produces the linux-x64 artifact consumed by e2e/zap. Pin to amd64
+  # runners so the publish happens natively (faster, and avoids qemu surprises).
+  tags: [amd64]
+  script:
+    # PublishSingleFile=true (set in csproj) requires a RID and emits to bin/Release/net10.0/<rid>/publish/.
+    # Pin linux-x64 so the artifact path and the e2e job's invocation are deterministic. Self-contained
+    # is required because csproj enables EnableCompressionInSingleFile, which the SDK rejects otherwise.
+    - dotnet publish src/Dependably -c Release -r linux-x64 --self-contained true
+  artifacts:
+    paths:
+      - src/Dependably/bin/Release/net10.0/linux-x64/publish/
+    expire_in: 1 hour
+
+lint:
+  stage: test
+  image: node:22-alpine
+  script:
+    - cd web && npm ci && npm run lint && npm run lint:css && npm run check
+
+csp-inline-style-guard:
+  stage: test
+  image: alpine:3
+  script:
+    - apk add --no-cache grep
+    - |
+      if grep -rn 'style="' web/src --include='*.svelte'; then
+        echo "Inline style=\"…\" attributes are forbidden — they violate the SPA's CSP style-src directive. Use CSS classes instead." >&2
+        exit 1
+      fi
+
+chrome-emoji-guard:
+  stage: test
+  image: alpine:3
+  script:
+    - apk add --no-cache grep
+    - |
+      if grep -rPn '[\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}\x{2700}-\x{27BF}\x{2300}-\x{23FF}]' web/src --include='*.svelte'; then
+        echo "Emoji codepoint detected in web/src. Use a sprite from web/public/icons.svg instead — DESIGN.md §11." >&2
+        exit 1
+      fi
+
+secret-scan:
+  stage: test
+  image:
+    name: trufflesecurity/trufflehog:latest
+    entrypoint: [""]
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - trufflehog git file://. --since-commit ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} --only-verified --fail
+
+secret-scan-deep:
+  stage: test
+  image:
+    name: trufflesecurity/trufflehog:latest
+    entrypoint: [""]
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - trufflehog git file://. --exclude-paths=.trufflehog-exclude --fail
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'main'
+
+unit-tests:
+  stage: test
+  image: mcr.microsoft.com/dotnet/sdk:10.0
+  tags: [amd64]
+  script:
+    # No --collect:"XPlat Code Coverage" here on purpose. The coverage it would produce is
+    # unused: sonarqube-check re-runs the suite with its own collector. Keeping this job to
+    # plain test + junit so it finishes fast.
+    - dotnet test --filter "Category!=Integration&&Category!=ApiContract" --logger "junit;LogFilePath=test-results/unit.xml"
+  artifacts:
+    when: always
+    expire_in: 7 days
+    reports:
+      junit: test-results/unit.xml
+
+api-contract:
+  stage: test
+  image: mcr.microsoft.com/dotnet/sdk:10.0
+  tags: [amd64]
+  script:
+    - dotnet test --filter "Category=ApiContract" --logger "junit;LogFilePath=test-results/contract.xml"
+  artifacts:
+    when: always
+    expire_in: 7 days
+    reports:
+      junit: test-results/contract.xml
+
+frontend-tests:
+  stage: test
+  image: node:22-alpine
+  script:
+    - cd web
+    - npm ci
+    - npm run test:coverage
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - web/coverage/
+
+e2e:
+  stage: test
+  image: mcr.microsoft.com/playwright:v1.59.1-noble
+  needs: [build]
+  # Playwright image is amd64-only; on Pi runners it ran under qemu and the slow
+  # emulation caused intermittent timing flakes. Pin to native amd64.
+  tags: [amd64]
+  script:
+    - cd web
+    - npm ci
+    - npx playwright install chromium
+    - npm run e2e -- --project=chromium
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - web/playwright-report/
+      - web/test-results/
+    reports:
+      junit: web/test-results/junit.xml
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+    - if: $CI_COMMIT_BRANCH == 'main'
+
+e2e_nightly:
+  stage: test
+  image: mcr.microsoft.com/playwright:v1.59.1-noble
+  needs: [build]
+  tags: [amd64]
+  script:
+    - cd web
+    - npm ci
+    - npx playwright install
+    - npm run e2e -- --project=firefox --project=webkit
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - web/playwright-report/
+      - web/test-results/
+    reports:
+      junit: web/test-results/junit.xml
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'schedule'
+
+sbom-backend:
+  stage: sbom
+  image: mcr.microsoft.com/dotnet/sdk:10.0
+  script:
+    - dotnet tool restore
+    - dotnet CycloneDX src/Dependably/Dependably.csproj -o . -fn sbom-backend.json -F json -spv 1.6 --exclude-dev
+  artifacts:
+    paths:
+      - sbom-backend.json
+    expire_in: 30 days
+
+sbom-frontend:
+  stage: sbom
+  image: node:22-alpine
+  script:
+    - cd web && npm ci && npm run sbom
+  artifacts:
+    paths:
+      - web/sbom-frontend.json
+    expire_in: 30 days
+
+sonarqube-check:
+  stage: test
+  image: mcr.microsoft.com/dotnet/sdk:10.0
+  needs: [frontend-tests]
+  tags: [amd64]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+    GIT_DEPTH: "0"
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script:
+    - apt-get update
+    - apt-get install --yes --no-install-recommends openjdk-17-jre-headless nodejs
+    - dotnet tool install --global dotnet-sonarscanner
+    - export PATH="$PATH:$HOME/.dotnet/tools"
+    # SonarQube 9.9 LTS's C# plugin v8.51 does NOT trigger the "C# Tests Coverage Report
+    # Import" sensor on `sonar.cs.cobertura.reportsPaths` in this stack — last scan log
+    # showed the cobertura file present + path-correct + the property set, yet the sensor
+    # never ran and "Zero Coverage Sensor" stamped every file at 0/N. OpenCover is the
+    # historically-preferred C# format for SonarQube and the sensor for it (sonar.cs.
+    # opencover.reportsPaths) is rock-solid. ReportGenerator converts cobertura → OpenCover.
+    - >
+      dotnet sonarscanner begin
+      /k:"$SONAR_PROJECT_KEY"
+      /d:sonar.token="$SONAR_TOKEN"
+      /d:sonar.host.url="$SONAR_HOST_URL"
+      /d:sonar.cs.opencover.reportsPaths="test-results/opencover.xml"
+      /d:sonar.cs.vstest.reportsPaths="test-results/tests.trx"
+      /d:sonar.javascript.lcov.reportPaths="web/coverage/lcov.info"
+      /d:sonar.coverage.exclusions="src/Dependably/Program.cs,src/Dependably/Infrastructure/Schema*.sql,web/src/main.js,web/src/App.svelte,web/src/locales/**"
+      /d:sonar.exclusions="web/e2e/**"
+    - dotnet build
+    - dotnet test --filter "Category!=Integration" --settings coverlet.runsettings --collect:"XPlat Code Coverage" --logger "trx;LogFileName=tests.trx" --results-directory ./test-results
+    # coverlet.collector now emits opencover (per coverlet.runsettings <Format>opencover</Format>)
+    # at test-results/<guid>/coverage.opencover.xml. Move to a deterministic path so the
+    # scanner config can point at a literal filename.
+    - find test-results -name 'coverage.opencover.xml' -exec mv -f {} test-results/opencover.xml \;
+    - echo "=== artifacts SonarScanner is about to ingest ==="
+    - ls -la test-results/opencover.xml test-results/tests.trx web/coverage/lcov.info
+    - echo "--- opencover header ---"
+    - head -10 test-results/opencover.xml
+    - dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'main'
+
+# ZAP baseline (passive only) — runs against the published binary booted on :8080.
+# Mirrors the Playwright CI webServer pattern in web/e2e/playwright.config.ts: same
+# binary path, same env-var shape, same /ready gate. -I keeps the job green on WARN
+# findings so the initial introduction doesn't turn the pipeline red — we tighten
+# this by dropping -I and listing accepted rules in .zap/baseline.conf once the
+# initial noise is triaged.
+.zap_app_boot: &zap_app_boot |
+  mkdir -p /tmp/dast/blobs
+  export DB_PATH=/tmp/dast/dependably.db
+  export LOCAL_STORAGE_PATH=/tmp/dast/blobs
+  export STORAGE_BACKEND=local
+  export ASPNETCORE_URLS=http://+:8080
+  export FIRST_BOOT_ADMIN_PASSWORD="$DAST_ADMIN_PASSWORD"
+  export LOGIN_RATE_LIMIT_PERMITS=100000
+  export TOKEN_CREATE_RATE_LIMIT_PERMITS=100000
+  cp -r src/Dependably/bin/Release/net10.0/linux-x64/publish /tmp/dast/app
+  chmod +x /tmp/dast/app/Dependably
+  /tmp/dast/app/Dependably > app.log 2>&1 &
+  APP_PID=$!
+  for i in $(seq 1 60); do
+    if curl -fsS http://localhost:8080/ready > /dev/null 2>&1; then
+      echo "App ready after ${i}s"
+      break
+    fi
+    if ! kill -0 "$APP_PID" 2>/dev/null; then
+      echo "App died during startup — log follows:" >&2
+      cat app.log >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  curl -fsS http://localhost:8080/ready || { echo "App not ready after 60s — log follows:" >&2; cat app.log >&2; exit 1; }
+
+zap-baseline:
+  stage: dast
+  image:
+    name: ghcr.io/zaproxy/zaproxy:stable
+    entrypoint: [""]
+  needs: [build]
+  # ZAP image is multi-arch; on a Pi runner Docker pulls the native arm64 variant
+  # and the x64 Dependably binary fails with "Exec format error". Pin to amd64
+  # runners so the published binary executes natively.
+  tags: [amd64]
+  script:
+    - *zap_app_boot
+    # ZAP scripts hardcode base_dir='/zap/wrk/' for report output, but the image
+    # ships without that directory (it's the conventional bind-mount target).
+    # Symlink it to $PWD so .zap/*.conf is in place and -J/-r land in the build
+    # dir where GitLab picks them up as artifacts.
+    - ln -sfn "$PWD" /zap/wrk
+    - zap-baseline.py -t http://localhost:8080 -c .zap/baseline.conf -J zap-baseline.json -r zap-baseline.html -I
+  after_script:
+    - echo "=== dependably app log ==="; cat app.log || true
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - zap-baseline.html
+      - zap-baseline.json
+      - app.log
+
+zap-full:
+  stage: dast
+  image:
+    name: ghcr.io/zaproxy/zaproxy:stable
+    entrypoint: [""]
+  needs: [build]
+  tags: [amd64]
+  script:
+    - *zap_app_boot
+    - ln -sfn "$PWD" /zap/wrk
+    - zap-full-scan.py -t http://localhost:8080 -c .zap/full.conf -J zap-full.json -r zap-full.html -I
+  after_script:
+    - echo "=== dependably app log ==="; cat app.log || true
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - zap-full.html
+      - zap-full.json
+      - app.log
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'main'

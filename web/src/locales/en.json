@@ -1,0 +1,794 @@
+{
+  "nav": {
+    "brand": "Dependably",
+    "packages": "Packages",
+    "upload": "Upload",
+    "airGapped": "Air-gapped",
+    "airGappedHint": "AIR_GAPPED=true. Proxy fetch from upstream registries is disabled; OSV scanning runs against the local mirror only.",
+    "insecureHttp": "http",
+    "insecureHttpHint": "Session cookies are not Secure. For internet-facing deployments, configure a TLS-terminating reverse proxy and set BASE_URL=https://...",
+    "tokens": "Tokens",
+    "users": "Users",
+    "audit": "Audit",
+    "settings": "Settings",
+    "vulnerabilities": "Vulnerabilities",
+    "licensePolicy": "Licenses",
+    "setup": "Setup",
+    "admin": "Admin",
+    "profile": "Profile",
+    "signOut": "Sign out"
+  },
+  "common": {
+    "actions": {
+      "save": "Save",
+      "saving": "Saving…",
+      "cancel": "Cancel",
+      "copy": "Copy",
+      "copied": "Copied!",
+      "copyFailed": "Copy failed",
+      "dismiss": "Dismiss",
+      "create": "Create",
+      "creating": "Creating…",
+      "delete": "Delete",
+      "remove": "Remove",
+      "edit": "Edit",
+      "revoke": "Revoke",
+      "add": "Add",
+      "adding": "Adding…",
+      "back": "← Back"
+    },
+    "loading": "Loading…",
+    "loadMore": "Load more",
+    "pagination": {
+      "summary": "{from}–{to} of {total}",
+      "prev": "Previous page",
+      "next": "Next page",
+      "perPage": "Per page:"
+    },
+    "noData": "No data",
+    "never": "never",
+    "notSet": "not set",
+    "notAvailable": "Not available.",
+    "allEcosystems": "All ecosystems"
+  },
+  "auth": {
+    "login": {
+      "title": "Dependably",
+      "subtitle": "Sign in to continue",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Sign in",
+      "submitting": "Signing in…",
+      "failed": "Login failed.",
+      "tooManyAttempts": "Too many attempts. Try again in {seconds}s.",
+      "or": "or",
+      "signInWithSso": "Sign in with SSO"
+    },
+    "join": {
+      "title": "Accept Invite",
+      "newPassword": "New Password",
+      "passwordHint": "(min 12 chars)",
+      "confirmPassword": "Confirm Password",
+      "submit": "Accept Invite",
+      "submitting": "Creating account…",
+      "success": "Account created!",
+      "signIn": "Sign in",
+      "errorMinLength": "Password must be at least 12 characters.",
+      "errorMismatch": "Passwords do not match.",
+      "errorFailed": "Failed to accept invite."
+    }
+  },
+  "packages": {
+    "title": "Packages",
+    "searchPlaceholder": "Search by name…",
+    "allSources": "All sources",
+    "hosted": "Hosted",
+    "proxy": "Proxy",
+    "columns": {
+      "name": "Name",
+      "ecosystem": "Ecosystem",
+      "purl": "PURL",
+      "versions": "Versions",
+      "vulns": "Vulns",
+      "created": "Created"
+    },
+    "empty": "No packages found"
+  },
+  "claims": {
+    "title": "Name claims",
+    "description": "Per-name policy controlling whether a tenant can publish under that name and whether the proxy serves it. Three states: unclaimed (proxy only), local_only (proxy disabled, local writes accepted), mixed (both, local wins).",
+    "ecosystem": "Ecosystem",
+    "name": "Name",
+    "state": "State",
+    "reason": "Reason",
+    "actions": "Actions",
+    "filters": {
+      "ecosystem": "All ecosystems",
+      "state": "All states",
+      "search": "Filter by name…"
+    },
+    "states": {
+      "unclaimed": "Unclaimed",
+      "local_only": "Local only",
+      "mixed": "Mixed"
+    },
+    "newClaim": "New claim",
+    "transition": "Transition",
+    "release": "Release",
+    "modal": {
+      "createTitle": "Create claim",
+      "transitionTitle": "Transition claim",
+      "releaseTitle": "Release claim",
+      "ecosystem": "Ecosystem",
+      "name": "Name",
+      "state": "State",
+      "newState": "New state",
+      "reason": "Reason (required)",
+      "reasonPlaceholder": "Why is this claim being created/changed?",
+      "mixedWarning": "'mixed' state allows local versions to take precedence over upstream. Acknowledge before continuing.",
+      "mixedAck": "I understand the supply-chain implication.",
+      "purgeWarning": "Transitioning to 'local_only' will purge cached proxy versions for this name.",
+      "create": "Create",
+      "save": "Save",
+      "confirmRelease": "Release",
+      "cancel": "Cancel"
+    },
+    "empty": "No claims for this tenant yet.",
+    "loadFailed": "Failed to load claims: {message}"
+  },
+  "upload": {
+    "title": "Upload packages",
+    "description": "Select package for upload",
+    "drop": "Drop files here, or click to choose",
+    "selected": "{count, plural, =0 {No files selected} =1 {1 file selected} other {# files selected}}",
+    "submit": "Upload",
+    "uploading": "Uploading…",
+    "remove": "Remove from upload",
+    "summary": "Batch {batchId}: {accepted} accepted, {rejected} rejected.",
+    "outcome": {
+      "accepted": "Accepted",
+      "rejected": "Rejected",
+      "would_accept": "Would accept",
+      "would_reject": "Would reject"
+    },
+    "claimAndUpload": "Claim and re-upload",
+    "claimModal": {
+      "title": "Claim name and re-upload",
+      "submit": "Claim and upload"
+    },
+    "preview": {
+      "title": "Pre-upload summary",
+      "fileCount": "Files",
+      "totalSize": "Total size",
+      "serverValidationNote": "Per-file outcomes (ecosystem detection, claim gate, dedup, hash) are evaluated server-side after upload."
+    }
+  },
+  "versionDetail": {
+    "columns": {
+      "version": "Version",
+      "checksum": "Checksum",
+      "size": "Size",
+      "pushed": "Pushed",
+      "license": "License",
+      "purl": "PURL",
+      "vulnScan": "Vuln Scan",
+      "origin": "Origin",
+      "status": "Status",
+      "actions": "Actions"
+    },
+    "origin": {
+      "proxy": "Proxy",
+      "uploaded": "Uploaded"
+    },
+    "empty": "No versions.",
+    "badges": {
+      "firstFetch": "first-fetch",
+      "yanked": "yanked",
+      "deprecated": "deprecated",
+      "verified": "verified",
+      "signed": "signed"
+    },
+    "status": {
+      "blocked": "Blocked",
+      "allowed": "Allowed",
+      "clean": "Clean",
+      "unscanned": "Unscanned"
+    },
+    "vulnNever": "Never",
+    "rescan": "Rescan",
+    "rescanning": "…",
+    "rescanCooldown": "Cooldown: {minutes}m remaining",
+    "rescanTitle": "Scan for vulnerabilities",
+    "deleteTitle": "Delete version {version}? This cannot be undone.",
+    "del": "Del",
+    "actionsMenu": {
+      "open": "Actions",
+      "rescan": "Rescan",
+      "block": "Block",
+      "unblock": "Unblock",
+      "delete": "Delete"
+    },
+    "detail": {
+      "purl": "PURL",
+      "checksum": "SHA-256",
+      "vulns": "Vulnerabilities",
+      "noVulns": "No known vulnerabilities",
+      "copy": "Copy"
+    }
+  },
+  "activity": {
+    "title": "Activity",
+    "allEvents": "All events",
+    "events": {
+      "firstFetch": "First fetch",
+      "push": "Push",
+      "pull": "Pull",
+      "vulnScan": "Vuln scan",
+      "vulnScanPass": "Vuln scan (daily)",
+      "vulnRescanPass": "Vuln rescan (daily)",
+      "delete": "Delete"
+    },
+    "columns": {
+      "time": "Time",
+      "event": "Event",
+      "purl": "PURL",
+      "detail": "Detail",
+      "actor": "Actor"
+    },
+    "system": "system",
+    "anonymous": "anonymous",
+    "empty": "No activity"
+  },
+  "audit": {
+    "title": "Audit",
+    "forbidden": "Audit log is only accessible to org admins.",
+    "tabs": {
+      "lifecycle": "Activity",
+      "adminActions": "Configuration"
+    },
+    "columns": {
+      "time": "Time",
+      "action": "Action",
+      "actor": "Actor",
+      "ecosystem": "Ecosystem",
+      "purl": "PURL",
+      "detail": "Detail"
+    },
+    "empty": "No audit events"
+  },
+  "tokens": {
+    "title": "Access Tokens",
+    "newToken": "New token",
+    "tokenCreated": "Token created — copy it now, it will not be shown again.",
+    "columns": {
+      "id": "ID",
+      "scope": "Scope",
+      "created": "Created",
+      "expires": "Expires"
+    },
+    "expired": "expired",
+    "empty": "No tokens",
+    "modal": {
+      "title": "New Access Token",
+      "scope": "Scope",
+      "expiresAt": "Expires at (optional)"
+    }
+  },
+  "cicdTokens": {
+    "title": "CI/CD Tokens",
+    "newToken": "New token",
+    "tokenCreated": "Token created — copy it now, it will not be shown again.",
+    "columns": {
+      "name": "Name",
+      "scope": "Scope",
+      "created": "Created",
+      "expires": "Expires"
+    },
+    "expired": "expired",
+    "empty": "No CI/CD tokens",
+    "revokeConfirm": "Revoke this CI/CD token?",
+    "modal": {
+      "title": "New CI/CD Token",
+      "name": "Name",
+      "namePlaceholder": "e.g. GitHub Actions",
+      "nameRequired": "Name is required.",
+      "scope": "Scope",
+      "expiresAt": "Expires at (optional)"
+    }
+  },
+  "settings": {
+    "title": "Settings",
+    "tabs": {
+      "general": "General",
+      "authentication": "Authentication",
+      "uploadLimits": "Upload limits",
+      "retention": "Retention",
+      "allowlist": "Allowlist",
+      "blocklist": "Blocklist",
+      "licenses": "Licenses",
+      "proxy": "Proxy",
+      "claims": "Claims"
+    },
+    "auth": {
+      "methodsTitle": "Sign-in methods",
+      "formsLogin": "Forms login (email + password)",
+      "samlLogin": "Show SAML on the sign-in page",
+      "samlLoginHint": "Only takes effect after IdP metadata is uploaded. Run a successful test before turning this on.",
+      "stateNotConfigured": "Not configured",
+      "stateConfiguredUnpublished": "Configured · not published",
+      "statePublished": "Published",
+      "formsDisableGuard": "Run a successful SAML test within the last 10 minutes before disabling forms login.",
+      "spInfoTitle": "Service provider info",
+      "spInfoHint": "Give these to your IdP administrator when registering this app.",
+      "spInfoAcs": "ACS URL",
+      "spInfoEntityId": "SP entity ID",
+      "spInfoMetadata": "SP metadata URL",
+      "idpMetadataTitle": "IdP metadata",
+      "idpMetadataHint": "Upload the SAML metadata XML exported from your IdP (Okta, Azure AD, ADFS, Google Workspace, …).",
+      "resetButton": "Clear SAML configuration",
+      "resetHint": "Wipes IdP metadata, SP overrides, and toggles. Forms login is re-enabled.",
+      "resetConfirm": "Clear all SAML configuration for this tenant? IdP metadata, connection settings, and the test history will be removed, and forms login will be re-enabled.",
+      "resetSuccess": "SAML configuration cleared.",
+      "idpEntityId": "IdP entity ID",
+      "idpSsoUrl": "IdP SSO URL",
+      "idpCertThumbprint": "Signing cert thumbprint",
+      "idpNotConfigured": "No IdP metadata uploaded yet.",
+      "metadataUploaded": "Metadata uploaded and parsed.",
+      "connectionTitle": "Connection settings",
+      "buttonLabel": "Login button label",
+      "buttonLabelPlaceholder": "Sign in with Acme SSO",
+      "emailAttribute": "Email attribute (override)",
+      "emailAttributePlaceholder": "e.g. mail, email, http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+      "emailAttributeHint": "Leave blank to use the NameID. Set this if your IdP delivers email in a separate attribute.",
+      "nameIdFormat": "NameID format",
+      "spEntityIdOverride": "SP entity ID override",
+      "spEntityIdHint": "Leave blank to use the host-derived default.",
+      "testTitle": "Test SSO",
+      "testHint": "Runs a SAML round-trip without creating a session. Required within the last 10 minutes before forms login can be disabled.",
+      "testButton": "Test SSO",
+      "testLastRun": "Last successful test: {when} (email: {email})",
+      "testRecentOk": "recent enough to disable forms login",
+      "testResultTitle": "SAML test successful",
+      "testResultSuccess": "The IdP authenticated and returned a valid signed assertion.",
+      "testResultAttributes": "Asserted attributes",
+      "testResultEmail": "Email",
+      "testResultNameId": "NameID",
+      "testResultTime": "Time",
+      "testResultHint": "Forms login can now be disabled within the next 10 minutes if you want to require SAML.",
+      "testResultBack": "Back to settings",
+      "testResultCloseWindow": "Close window",
+      "testResultAutoClose": "Closing in {seconds}s",
+      "testResultFailedTitle": "SAML test failed",
+      "testResultFailedBanner": "The SAML round-trip did not complete successfully.",
+      "testResultFailedHint": "Check the IdP-side configuration (entity ID, certificate, ACS URL) and try again. Forms login remains the only working method until a successful test is recorded.",
+      "testResultFailureDetails": "Failure details",
+      "testResultErrorCode": "Error",
+      "testResultErrorDetail": "Detail",
+      "testPopupBlocked": "The browser blocked the SAML test popup. Allow popups for this site and try again.",
+      "testSucceeded": "SAML test succeeded (asserted email: {email}). Forms login can now be safely disabled within the next 10 minutes.",
+      "testFailed": "SAML test failed: {reason}"
+    },
+    "saved": "Settings saved.",
+    "retentionSaved": "Retention settings saved.",
+    "general": {
+      "anonymousPull": "Anonymous pull",
+      "allowlistMode": "Proxy: allowlist & blocklist only",
+      "defaultLanguage": "Default language",
+      "defaultLanguageHint": "New users in this tenant start with this language. Each user can override it in their profile.",
+      "allowVersionOverwrite": "Allow version overwrite",
+      "allowVersionOverwriteHint": "When off, publishing a duplicate (name, version) is rejected. Operators must delete the existing version first.",
+      "allowVersionOverwriteWarning": "Enabling this lets a publish replace an existing version's bytes. The change is audited (package.replace records both hashes) but the supply-chain implications are real — packages your developers already pulled may have different contents on a refetch. Toggling this setting is itself audited."
+    },
+    "uploadLimits": {
+      "instanceCeiling": "Instance ceiling: {mb} MB",
+      "allEcosystems": "All ecosystems",
+      "exceedsCeiling": "Cannot exceed instance ceiling of {bytes} bytes.",
+      "bytesLabel": "{label} (bytes)",
+      "inheritPlaceholder": "inherit from instance"
+    },
+    "retention": {
+      "keepVersions": "Keep versions",
+      "keepDays": "Keep days (proxy blobs)",
+      "activityDays": "Activity retention days",
+      "unlimited": "unlimited"
+    },
+    "proxy": {
+      "passthroughEnabled": "Proxy passthrough enabled",
+      "passthroughHint": "When disabled, only packages already cached in this registry are served.",
+      "osvTolerance": "Max OSV score tolerance",
+      "osvToleranceHint": "Packages with a vulnerability score above this threshold are blocked (0 – 10). Default 10 allows all.",
+      "saved": "Proxy settings saved."
+    },
+    "licenses": {
+      "intro": "Govern which SPDX licenses are permitted for packages in this tenant. License metadata is extracted on publish and on proxy cache fill.",
+      "blockEmptyWarn": "Enforcement is set to Block but no licenses are allowed. Every publish and proxy fetch will be rejected until you approve at least one license below.",
+      "mode": {
+        "title": "Enforcement mode",
+        "off":   { "label": "Off",   "hint": "License metadata is recorded but no policy is enforced." },
+        "warn":  { "label": "Warn",  "hint": "Violations are logged and surfaced in audit, but downloads still succeed." },
+        "block": { "label": "Block", "hint": "Versions whose license violates this policy are blocked at download." }
+      },
+      "review": {
+        "title": "Review",
+        "intro": "Licenses observed during ingestion that are on neither the allow- nor block-list. Approve or block each one to drive the enforcement policy.",
+        "empty": "No licenses awaiting review.",
+        "includeDeprecated": "Include deprecated SPDX identifiers",
+        "approve": "Approve",
+        "block": "Block",
+        "compound": "compound",
+        "deprecated": "deprecated",
+        "compoundTooltip": "Compound expressions (e.g. \"MIT OR Apache-2.0\") cannot be added to the policy directly — they would not match a future lookup for a single license. Split them upstream.",
+        "columns": {
+          "packages": "Packages",
+          "firstSeen": "First seen",
+          "flags": "Flags"
+        }
+      },
+      "allow": {
+        "title": "Allowed licenses",
+        "addEntry": "Add license",
+        "empty": "No allowed licenses configured. When the allowlist is empty, only the blocklist applies."
+      },
+      "block": {
+        "title": "Blocked licenses",
+        "addEntry": "Add license",
+        "empty": "No blocked licenses configured."
+      },
+      "columns": {
+        "spdx": "SPDX identifier",
+        "added": "Added"
+      },
+      "removeConfirm": "Remove this license entry?",
+      "modal": {
+        "addAllowTitle": "Add allowed license",
+        "addBlockTitle": "Add blocked license",
+        "spdxLabel": "SPDX identifier",
+        "spdxPlaceholder": "Search SPDX identifier or name…",
+        "spdxHint": "Pick from the seeded SPDX 3.28.0 list. Deprecated identifiers are hidden by default."
+      }
+    }
+  },
+  "allowlist": {
+    "title": "Allowlist",
+    "addEntry": "Add entry",
+    "removeConfirm": "Remove this allowlist entry?",
+    "columns": {
+      "ecosystem": "Ecosystem",
+      "purlPattern": "PURL Pattern",
+      "added": "Added"
+    },
+    "empty": "No allowlist entries",
+    "modal": {
+      "title": "Add Allowlist Entry",
+      "ecosystem": "Ecosystem",
+      "purlPattern": "PURL Pattern",
+      "purlPatternPlaceholder": "pkg:npm/lodash or pkg:npm/lodash@4.17.21",
+      "purlPatternHint": "Omit @version to match any version"
+    }
+  },
+  "blocklist": {
+    "addEntry": "Add entry",
+    "removeConfirm": "Remove this blocklist entry?",
+    "columns": {
+      "ecosystem": "Ecosystem",
+      "pattern": "Regex Pattern",
+      "added": "Added"
+    },
+    "empty": "No blocklist entries",
+    "modal": {
+      "title": "Add Blocklist Entry",
+      "ecosystem": "Ecosystem",
+      "pattern": "Regex Pattern",
+      "patternPlaceholder": "e.g. ^pkg:npm/evil-.*",
+      "patternHint": "Matched against the full package PURL using regex"
+    }
+  },
+  "users": {
+    "title": "Users & Invites",
+    "inviteUser": "Invite user",
+    "inviteLink": "Invite link (send to user):",
+    "tabs": {
+      "members": "Members ({count})",
+      "pendingInvites": "Pending Invites ({count})"
+    },
+    "members": {
+      "columns": {
+        "email": "Email",
+        "role": "Role",
+        "type": "Type",
+        "joined": "Joined"
+      },
+      "role": {
+        "owner": "Owner",
+        "admin": "Admin",
+        "member": "Member",
+        "auditor": "Auditor"
+      },
+      "changeRole": "Change role",
+      "saveRole": "Save",
+      "cancelRole": "Cancel",
+      "ownerLocked": "Only owners can change owner roles",
+      "accountType": {
+        "forms": "Forms",
+        "saml": "SAML"
+      },
+      "empty": "No members",
+      "removeConfirm": "Remove this user from the org?"
+    },
+    "invites": {
+      "columns": {
+        "email": "Email",
+        "invited": "Invited",
+        "expires": "Expires",
+        "status": "Status"
+      },
+      "empty": "No invites",
+      "status": {
+        "accepted": "accepted",
+        "expired": "expired",
+        "pending": "pending"
+      },
+      "cancel": "Cancel"
+    },
+    "modal": {
+      "title": "Invite User",
+      "email": "Email",
+      "role": "Role",
+      "sending": "Sending…",
+      "sendInvite": "Send invite"
+    }
+  },
+  "setup": {
+    "title": "Setup Snippets",
+    "subtitle": "Configuration snippets for connecting your tools to this registry.",
+    "moreOptions": "More setup options (project + global recipes for npm, PyPI, NuGet) →"
+  },
+  "admin": {
+    "orgs": {
+      "title": "Instance Admin — Orgs",
+      "newOrg": "New org",
+      "columns": {
+        "slug": "Slug",
+        "id": "ID",
+        "created": "Created"
+      },
+      "empty": "No orgs",
+      "deleteConfirm": "Delete org \"{slug}\"? This is irreversible.",
+      "modal": {
+        "title": "New Organization",
+        "slug": "Slug",
+        "slugPlaceholder": "my-org"
+      }
+    },
+    "settings": {
+      "title": "Instance Settings",
+      "saved": "Settings saved.",
+      "notSet": "not set",
+      "fields": {
+        "MAX_UPLOAD_BYTES": "Max upload bytes (all ecosystems)",
+        "MAX_UPLOAD_BYTES_PYPI": "Max upload bytes — PyPI",
+        "MAX_UPLOAD_BYTES_NPM": "Max upload bytes — npm",
+        "MAX_UPLOAD_BYTES_NUGET": "Max upload bytes — NuGet",
+        "METRICS_ALLOWED_IPS": "Metrics allowed IPs (comma-separated)",
+        "GC_SCHEDULE": "GC cron schedule",
+        "DEFAULT_ORG_SLUG": "Default org slug"
+      }
+    }
+  },
+  "dashboard": {
+    "title": "Overview",
+    "totalPackages": "Total packages",
+    "totalDisk": "Total disk used",
+    "fetchesTitle": "Package fetches — last 24 hours",
+    "fetchesTotal": "Total: {n} fetches",
+    "vulnsTitle": "Vulnerabilities by ecosystem",
+    "ecosystem": "Ecosystem",
+    "total": "Total",
+    "newVulnsTitle": "New vulnerabilities detected",
+    "noNewVulns": "No new vulnerabilities",
+    "window24h": "24h",
+    "window7d": "7d",
+    "window30d": "30d",
+    "activeUsers": "Active users (7d)",
+    "blockedPulls": "Blocked pulls (30d)",
+    "packages": "Packages",
+    "diskUsed": "Disk used",
+    "vulns": "Vulnerabilities",
+    "packageBreakdown": "Packages by ecosystem",
+    "donutEmpty": "No packages",
+    "unscored": "UNSCORED"
+  },
+  "vulnerabilities": {
+    "title": "Vulnerabilities",
+    "columns": {
+      "package": "Package",
+      "version": "Version",
+      "severity": "Severity",
+      "score": "Score",
+      "osvId": "OSV ID",
+      "summary": "Summary",
+      "checkedAt": "Checked at"
+    },
+    "empty": "No vulnerable packages found"
+  },
+  "licensePolicy": {
+    "title": "License policy",
+    "mode": "Enforcement",
+    "modes": {
+      "off":   "Off",
+      "warn":  "Warn",
+      "block": "Block"
+    },
+    "intro": {
+      "off":   "Your tenant records the SPDX license of every package but does not enforce policy. The lists below show what would be allowed or blocked if enforcement were enabled.",
+      "warn":  "Your tenant logs license-policy violations to audit but still serves packages. Use the lists below to understand which licenses an admin has allowed or blocked.",
+      "block": "Your tenant blocks publish and proxy fetch for packages whose license isn't allowed below or appears on the block list."
+    },
+    "allow": {
+      "title": "Allowed licenses",
+      "empty": "No licenses on the allow list."
+    },
+    "block": {
+      "title": "Blocked licenses",
+      "empty": "No licenses on the block list."
+    },
+    "columns": {
+      "spdx": "SPDX",
+      "name": "Name",
+      "attributes": "Attributes"
+    }
+  },
+  "profile": {
+    "title": "Profile",
+    "forcedTitle": "Change your password",
+    "forcedReason": "You must change your password before continuing. The current password was set at first boot and may have been logged or shared during initial setup.",
+    "currentPassword": "Current password",
+    "newPassword": "New password",
+    "passwordHint": "(min 12 characters)",
+    "confirmPassword": "Confirm new password",
+    "submit": "Update password",
+    "success": "Password updated.",
+    "errorMinLength": "Password must be at least 12 characters.",
+    "errorMismatch": "Passwords do not match.",
+    "errorSame": "New password must differ from current password.",
+    "errorFailed": "Could not update password.",
+    "rows": {
+      "passwordTitle": "Password",
+      "passwordHelp": "Update the password for your account.",
+      "themeTitle": "Theme",
+      "themeHelp": "Choose how Dependably looks to you.",
+      "languageTitle": "Language",
+      "languageHelpTenantDefault": "Tenant default: {language}.",
+      "languageHelpSystemFallback": "Falls back to {language} when unset.",
+      "aboutTitle": "About",
+      "aboutHelp": "Open-source software used in Dependably."
+    },
+    "theme": {
+      "light": "Light",
+      "dark": "Dark"
+    },
+    "changePasswordButton": "Change password",
+    "changePasswordModalTitle": "Change password",
+    "openSourceNotices": "View notices"
+  },
+  "system": {
+    "badge": "system",
+    "nav": {
+      "tenants": "Tenants",
+      "users": "Users",
+      "audit": "Audit",
+      "settings": "Settings",
+      "profile": "Profile",
+      "signOut": "Sign out"
+    },
+    "login": {
+      "title": "Dependably",
+      "subtitle": "System administration",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Sign in",
+      "submitting": "Signing in…",
+      "failed": "Login failed."
+    },
+    "tenants": {
+      "title": "Tenants",
+      "newTenant": "+ New tenant",
+      "columns": {
+        "slug": "Slug",
+        "status": "Status",
+        "created": "Created",
+        "deleted": "Deleted"
+      },
+      "status": {
+        "active": "Active",
+        "softDeleted": "Soft-deleted"
+      },
+      "empty": "No tenants yet. Create one to get started.",
+      "delete": "Delete",
+      "restore": "Restore",
+      "deleteConfirm": "Soft-delete tenant '{slug}'? It will be inaccessible immediately and hard-deleted after the grace period (default 30 days).",
+      "modal": {
+        "title": "Create tenant",
+        "slug": "Slug",
+        "slugPlaceholder": "acme",
+        "ownerEmail": "Owner email",
+        "ownerEmailPlaceholder": "alice@example.com",
+        "create": "Create",
+        "creating": "Creating…"
+      },
+      "created": {
+        "title": "Tenant created",
+        "warning": "Save this owner password — it is only shown once.",
+        "tenantSlug": "Tenant slug",
+        "ownerEmail": "Owner email",
+        "ownerPassword": "Owner password",
+        "done": "Done"
+      }
+    },
+    "userLookup": {
+      "title": "User lookup",
+      "subtitle": "Control-plane metadata only — no tenant business data is shown.",
+      "email": "Email",
+      "tenantSlug": "Tenant slug",
+      "search": "Search",
+      "searching": "Searching…",
+      "needFilter": "Enter an email or tenant slug.",
+      "columns": {
+        "email": "Email",
+        "tenant": "Tenant",
+        "role": "Role",
+        "status": "Status",
+        "mfa": "MFA",
+        "lastLogin": "Last login",
+        "passwordReset": "Pwd reset",
+        "actions": "Actions"
+      },
+      "mustRotateSuffix": " · must rotate",
+      "noMatches": "No matches.",
+      "lock": "Lock",
+      "unlock": "Unlock",
+      "resetPassword": "Reset pwd",
+      "resetConfirm": "Issue a temporary password for {email} on tenant '{slug}'? They will be forced to rotate on next login.",
+      "resetBannerLine1": "Temporary password issued for {email} on '{slug}':",
+      "resetBannerLine2": "Hand this to the user out-of-band. They will be forced to rotate on next login. This is shown once.",
+      "dismiss": "Dismiss"
+    },
+    "audit": {
+      "title": "System audit log",
+      "subtitle": "Operator events only (tenant lifecycle, system_admin actions). Tenant business events are not surfaced here.",
+      "columns": {
+        "when": "When",
+        "event": "Event",
+        "actor": "Actor",
+        "tenant": "Tenant",
+        "detail": "Detail"
+      },
+      "empty": "No system events yet.",
+      "pageInfo": "Page {page} · {total} total",
+      "prev": "← Prev",
+      "next": "Next →"
+    },
+    "settings": {
+      "title": "Instance settings",
+      "subtitle": "Global limits and schedules — applied across every tenant.",
+      "labels": {
+        "maxUploadBytes": "Max upload size — global",
+        "maxUploadBytesPyPi": "Max upload size — PyPI",
+        "maxUploadBytesNpm": "Max upload size — npm",
+        "maxUploadBytesNuGet": "Max upload size — NuGet",
+        "gcSchedule": "GC schedule (cron)",
+        "siemMaxLookbackDays": "SIEM max lookback (days)"
+      },
+      "placeholders": {
+        "string": "unset",
+        "number": "—"
+      },
+      "save": "Save",
+      "saving": "Saving…",
+      "savedAt": "Saved {time}."
+    },
+    "profile": {
+      "title": "Profile"
+    }
+  }
+}

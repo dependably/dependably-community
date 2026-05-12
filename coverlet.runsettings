@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat code coverage">
+        <Configuration>
+          <!-- OpenCover format: SonarQube 9.9 LTS's C# plugin v8.51 reliably triggers its
+               coverage sensor on `sonar.cs.opencover.reportsPaths` but silently no-ops on
+               `sonar.cs.cobertura.reportsPaths` for this stack. coverlet.collector emits
+               opencover natively, so no conversion step is needed. -->
+          <Format>opencover</Format>
+
+          <!-- Anchor coverage to the production assembly. The test assembly itself
+               (and any future *.Tests assemblies) must not be measured. -->
+          <Include>[Dependably]*</Include>
+          <Exclude>[Dependably.Tests]*,[xunit.*]*,[Microsoft.*]*</Exclude>
+
+          <!-- File-level exclusions for code that can't be meaningfully unit-tested:
+               the embedded SQL migration script, generated regex partials, and the
+               Program top-level statements (the host-bootstrap path). -->
+          <ExcludeByFile>**/Schema*.sql,**/*.g.cs,**/Program.cs</ExcludeByFile>
+
+          <!-- Skip auto-generated and test-only attribute targets. -->
+          <ExcludeByAttribute>Obsolete,GeneratedCodeAttribute,CompilerGeneratedAttribute,ExcludeFromCodeCoverageAttribute</ExcludeByAttribute>
+
+          <SingleHit>false</SingleHit>
+          <UseSourceLink>true</UseSourceLink>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>

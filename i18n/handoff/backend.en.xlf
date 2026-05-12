@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xliff version="2.0" xmlns="urn:oasis:names:tc:xliff:document:2.0" srcLang="en" trgLang="fr">
+  <file id="backend" original="src/Dependably/Resources/SharedResource.resx">
+    <unit id="error.allowlist.fieldsRequired">
+      <segment>
+        <source>ecosystem and purl_pattern are required.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.auth.forbidden">
+      <segment>
+        <source>Insufficient token scope.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.auth.required">
+      <segment>
+        <source>Authentication required.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.conflict.title">
+      <segment>
+        <source>Conflict</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.forbidden.title">
+      <segment>
+        <source>Forbidden</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.invite.emailRequired">
+      <segment>
+        <source>Email is required.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.member.lastOwnerDemote">
+      <segment>
+        <source>Cannot demote the last owner of an org.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.member.lastOwnerRemove">
+      <segment>
+        <source>Cannot remove the last owner of an org.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.member.roleInvalid">
+      <segment>
+        <source>Role must be &apos;member&apos;, &apos;admin&apos;, or &apos;owner&apos;.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.notFound.title">
+      <segment>
+        <source>Not Found</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.org.notFound">
+      <segment>
+        <source>Organization not found.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.org.slugConflict">
+      <segment>
+        <source>An org with that slug already exists.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.org.slugRequired">
+      <segment>
+        <source>Slug is required.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.payloadTooLarge.title">
+      <segment>
+        <source>Payload Too Large</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.token.nameRequired">
+      <segment>
+        <source>Name is required.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.token.scopeInvalid">
+      <segment>
+        <source>Scope must be &apos;pull&apos; or &apos;push&apos;.</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.unauthorized.title">
+      <segment>
+        <source>Unauthorized</source>
+        <target/>
+      </segment>
+    </unit>
+    <unit id="error.validation.title">
+      <segment>
+        <source>Validation Error</source>
+        <target/>
+      </segment>
+    </unit>
+  </file>
+</xliff>

@@ -1,0 +1,31 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{cs,csproj,props,targets,sln}]
+indent_style = space
+indent_size = 4
+
+[*.{js,ts,svelte,json,yaml,yml,html,css,md}]
+indent_style = space
+indent_size = 2
+
+# Roslyn analyzer rule overrides
+[*.cs]
+
+# CA1873 "Avoid potentially expensive logging": most flagged sites pass cheap
+# property accesses (strings, ints, ternaries). The few genuine wins
+# (VulnerabilityScanService LINQ aggregations) need the LoggerMessage
+# source-generator pattern, which is a separate refactor. Until that lands the
+# noise of this rule outweighs its signal.
+dotnet_diagnostic.CA1873.severity = none
+
+[tests/**/*.cs]
+# CA1861 "Prefer 'static readonly' fields over constant array arguments": tests
+# routinely build expected arrays inline (Assert.Equal(new[] { ... }, actual)).
+# The allocations are per-test, not in a hot path; suppress for test code only.
+dotnet_diagnostic.CA1861.severity = none

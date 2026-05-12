@@ -1,0 +1,30 @@
+services:
+  dependably:
+    build:
+      context: .
+      args:
+        RID: linux-musl-arm64
+    ports:
+      - "8080:8080"
+    volumes:
+      - dependably-data:/data
+    environment:
+      BASE_URL: ${BASE_URL:-http://localhost:8080}
+      DEFAULT_ORG_SLUG: ${DEFAULT_ORG_SLUG:-default}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  dependably-data:

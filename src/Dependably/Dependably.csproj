@@ -1,0 +1,76 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <!-- IL trimming is incompatible with ASP.NET Core MVC controllers + ApiExplorer:
+         the trimmer flips Microsoft.AspNetCore.Mvc.ApiExplorer.IsEnhancedModelMetadataSupported
+         off and InferParameterBindingInfoConvention crashes on first request. ASP.NET Core
+         only supports trimming for minimal APIs. We keep single-file + compression for the
+         size win without the trim incompatibility. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(Configuration)' == 'Release'">
+    <Content Remove="appsettings.Development.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Infrastructure/schema/Schema.sql" />
+    <EmbeddedResource Include="Infrastructure/schema/Schema.pg.sql" />
+    <EmbeddedResource Include="Infrastructure/seed/spdx-licenses-3.28.0.json" />
+    <EmbeddedResource Include="Infrastructure/seed/spdx-copyleft.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Dependably.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Embed compiled Svelte frontend; run `npm run build` in /web first -->
+    <EmbeddedResource Include="wwwroot/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="4.0.20.3" />
+    <PackageReference Include="StackExchange.Redis" Version="2.8.41" />
+    <PackageReference Include="Microsoft.AspNetCore.DataProtection.StackExchangeRedis" Version="10.0.*" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.27.0" />
+    <PackageReference Include="BCrypt.Net-Next" Version="4.1.0" />
+    <PackageReference Include="Cronos" Version="0.11.1" />
+    <PackageReference Include="Dapper" Version="2.1.72" />
+    <PackageReference Include="IPAddressRange" Version="6.3.0" />
+    <PackageReference Include="ITfoxtec.Identity.Saml2.MvcCore" Version="4.17.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.*" />
+    <!-- Pin Microsoft.IdentityModel.* and System.IdentityModel.* to a coherent version. Without
+         these pins, ITfoxtec.Identity.Saml2 pulls in Microsoft.IdentityModel.Tokens 8.15.0 while
+         the JwtBearer chain stays on 8.0.1, producing a binary mismatch that surfaces at runtime
+         as `MissingMethodException: Base64UrlEncoder.Decode(...)` during JWT validation. -->
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.15.0" />
+    <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.15.0" />
+    <PackageReference Include="Microsoft.IdentityModel.Protocols" Version="8.15.0" />
+    <PackageReference Include="Microsoft.IdentityModel.Protocols.OpenIdConnect" Version="8.15.0" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.*" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.*" />
+    <PackageReference Include="Npgsql" Version="8.0.7" />
+    <PackageReference Include="NuGet.Versioning" Version="7.3.0" />
+    <PackageReference Include="prometheus-net.AspNetCore" Version="8.2.1" />
+    <PackageReference Include="Scalar.AspNetCore" Version="2.0.0" />
+    <PackageReference Include="SecurityCodeScan.VS2019" Version="5.6.7">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+      <DevelopmentDependency>true</DevelopmentDependency>
+    </PackageReference>
+    <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+  </ItemGroup>
+
+</Project>

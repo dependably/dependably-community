@@ -1,0 +1,215 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-and-compliance:
+    name: Unit, Compliance & Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Check for vulnerable packages
+        run: dotnet list package --vulnerable --include-transitive 2>&1 | tee /tmp/vuln.txt && ! grep -q "has the following vulnerable packages" /tmp/vuln.txt
+
+      - name: Build (with SecurityCodeScan Roslyn analyzer — fails on SQL injection patterns)
+        run: dotnet build --no-restore -c Release
+
+      - name: Check for string interpolation in Dapper calls (SQL injection prevention)
+        run: |
+          if grep -rn 'Execute\|Query\|QuerySingle\|QueryFirst' src/ --include="*.cs" | grep -E '\$"|\$@"'; then
+            echo "ERROR: String interpolation detected in a potential Dapper query call."
+            exit 1
+          fi
+
+      - name: Test (unit + compliance + security)
+        run: dotnet test --no-build -c Release --verbosity normal --filter "Category!=Integration" --collect:"XPlat Code Coverage"
+
+      - name: Upload unit coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-coverage
+          path: '**/TestResults/**/coverage.cobertura.xml'
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
+          head: ${{ github.sha }}
+          extra_args: --only-verified
+
+  frontend-lint:
+    name: Frontend Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci
+        working-directory: web
+
+      - name: Lint
+        run: npm run lint
+        working-directory: web
+
+      - name: Lint CSS
+        run: npm run lint:css
+        working-directory: web
+
+      - name: Type-check (svelte-check)
+        run: npm run check
+        working-directory: web
+
+      - name: Chrome emoji guard
+        run: |
+          if grep -rPn '[\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}\x{2700}-\x{27BF}\x{2300}-\x{23FF}]' web/src --include='*.svelte'; then
+            echo "Emoji codepoint detected in web/src. Use a sprite from web/public/icons.svg instead — DESIGN.md §11." >&2
+            exit 1
+          fi
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    services:
+      localstack:
+        image: localstack/localstack:latest
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3
+      azurite:
+        image: mcr.microsoft.com/azure-storage/azurite:latest
+        ports:
+          - 10000:10000
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore -c Release
+
+      - name: Integration Tests
+        env:
+          AWS_ENDPOINT: http://localhost:4566
+          AZURE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tiqsdG+fwYd=;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+        run: dotnet test --no-build -c Release --verbosity normal --filter "Category=Integration" --collect:"XPlat Code Coverage"
+
+      - name: Upload integration coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-coverage
+          path: '**/TestResults/**/coverage.cobertura.xml'
+
+  sbom:
+    name: Generate SBOMs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore dotnet tools
+        run: dotnet tool restore
+
+      - name: Generate backend SBOM
+        run: dotnet CycloneDX src/Dependably/Dependably.csproj -o . -fn sbom-backend.json -F json -spv 1.6 --exclude-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Generate frontend SBOM
+        run: npm run sbom
+        working-directory: web
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sboms
+          path: |
+            sbom-backend.json
+            web/sbom-frontend.json
+
+  publish:
+    name: Publish Docker Image
+    runs-on: ubuntu-latest
+    needs: [unit-and-compliance]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/dependably:latest
+            ghcr.io/${{ github.repository_owner }}/dependably:${{ steps.version.outputs.version }}
+          platforms: linux/amd64,linux/arm64

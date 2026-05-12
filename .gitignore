@@ -1,0 +1,16 @@
+node_modules/
+**/bin/
+**/obj/
+src/Dependably/wwwroot/
+.env.deploy
+dotnet-install.sh
+**/.DS_Store
+.claude/
+*.binlog
+sbom-backend.json
+web/sbom-frontend.json
+
+# Test + coverage outputs (generated)
+tests/**/TestResults/
+test-results/
+web/coverage/
