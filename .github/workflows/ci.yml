@@ -48,6 +48,10 @@ jobs:
   secret-scan:
     name: Secret Scan
     runs-on: ubuntu-latest
+    # Skip when there's no prior commit to diff against (initial push,
+    # force-push of a new branch). The scheduled deep scan in
+    # secret-scan-deep.yml covers full-history scanning in those cases.
+    if: github.event_name == 'pull_request' || github.event.before != '0000000000000000000000000000000000000000'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,8 +59,8 @@ jobs:
       - uses: trufflesecurity/trufflehog@main
         with:
           path: ./
-          base: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
-          head: ${{ github.sha }}
+          base: ${{ github.event.pull_request.base.sha || github.event.before }}
+          head: ${{ github.event.pull_request.head.sha || github.sha }}
           extra_args: --only-verified
 
   frontend-lint:
@@ -98,17 +102,6 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    services:
-      localstack:
-        image: localstack/localstack:latest
-        ports:
-          - 4566:4566
-        env:
-          SERVICES: s3
-      azurite:
-        image: mcr.microsoft.com/azure-storage/azurite:latest
-        ports:
-          - 10000:10000
     steps:
       - uses: actions/checkout@v4
 
@@ -124,9 +117,6 @@ jobs:
         run: dotnet build --no-restore -c Release
 
       - name: Integration Tests
-        env:
-          AWS_ENDPOINT: http://localhost:4566
-          AZURE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tiqsdG+fwYd=;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
         run: dotnet test --no-build -c Release --verbosity normal --filter "Category=Integration" --collect:"XPlat Code Coverage"
 
       - name: Upload integration coverage

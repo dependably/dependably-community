@@ -36,7 +36,7 @@ dotnet test --filter "Category!=Integration"
 # Run a single test class
 dotnet test --filter "ClassName=PurlNormalizerTests"
 
-# Run all tests including integration (requires LocalStack + Azurite)
+# Run all tests including integration (self-contained — uses in-memory blob + SQLite stores)
 dotnet test
 
 # Run the server locally (defaults to local blob store at /data)
