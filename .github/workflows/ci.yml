@@ -30,7 +30,10 @@ jobs:
 
       - name: Check for string interpolation in Dapper calls (SQL injection prevention)
         run: |
-          if grep -rn 'Execute\|Query\|QuerySingle\|QueryFirst' src/ --include="*.cs" | grep -E '\$"|\$@"'; then
+          # Match actual Dapper method-call sites: ".Execute*(" / ".Execute*<" /
+          # ".Query*(" / ".Query*<". Anchoring on the leading '.' and a trailing
+          # '(' or '<' avoids false positives on substrings like "SearchQueryService".
+          if grep -rnE '\.(Execute|Query)[A-Za-z]*\s*[(<]' src/ --include="*.cs" | grep -E '\$"|\$@"'; then
             echo "ERROR: String interpolation detected in a potential Dapper query call."
             exit 1
           fi

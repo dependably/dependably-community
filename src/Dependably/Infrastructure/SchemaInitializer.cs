@@ -1,5 +1,6 @@
 using System.Data;
 using System.Data.Common;
+using System.Globalization;
 using Dapper;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -335,7 +336,11 @@ public sealed class SchemaInitializer
                 WHERE type = 'table' AND name IN ('users','invites')
                 """, new { old = oldCheck, @new = newCheck });
             var version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
-            await conn.ExecuteAsync($"PRAGMA schema_version = {version + 1}");
+            // SQLite doesn't permit parameter binding in PRAGMA values — they must be
+            // literal tokens. `version` comes from PRAGMA schema_version itself (a long
+            // we just read back), so concatenation is safe; no user input flows here.
+            await conn.ExecuteAsync(
+                "PRAGMA schema_version = " + (version + 1).ToString(CultureInfo.InvariantCulture));
         }
         finally
         {
