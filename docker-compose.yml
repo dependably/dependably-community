@@ -2,8 +2,6 @@ services:
   dependably:
     build:
       context: .
-      args:
-        RID: linux-musl-arm64
     ports:
       - "8080:8080"
     volumes:

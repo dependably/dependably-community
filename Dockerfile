@@ -14,7 +14,7 @@ WORKDIR /src
 COPY Dependably.sln .
 COPY Directory.Build.props .
 COPY src/Dependably/Dependably.csproj src/Dependably/
-ARG TARGETARCH=arm64
+ARG TARGETARCH
 ARG VERSION=0.1.0
 RUN case "$TARGETARCH" in \
       amd64) echo linux-musl-x64 ;; \
