@@ -198,6 +198,20 @@ public sealed class SamlController : ControllerBase
         var (isTest, testActorId, testError) = await ResolveTestModeAsync(tenant.TenantId!, ct);
         if (testError is not null) return testError;
 
+        // When test mode detection fails (cookie blocked by SameSite=Lax + RelayState absent),
+        // isTest is false and the enabled gate below would return a JSON 404. If a SAMLResponse
+        // IS present the user completed the IdP round-trip — give them a proper test-result
+        // redirect instead of a raw error blob.
+        if (!isTest && cfg?.Enabled != true)
+        {
+            var hasSamlResponse = Request.HasFormContentType
+                ? Request.Form.ContainsKey("SAMLResponse")
+                : Request.Query.ContainsKey("SAMLResponse");
+            if (hasSamlResponse)
+                return RedirectToTestResult(error: "test_session_lost",
+                    detail: "Test session not found — the browser may have blocked the test cookie. Try the test again.");
+        }
+
         var configError = ValidateSamlConfigured(cfg, tenant.TenantId!, isTest);
         if (configError is not null) return configError;
 

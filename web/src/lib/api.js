@@ -93,7 +93,16 @@ export const api = {
 
   // Tenant settings (per-org config)
   getOrgSettings: () => req('GET', '/settings'),
-  updateOrgSettings: (s) => req('PUT', '/settings', s),
+  updateOrgSettings: (s) => req('PUT', '/settings', {
+    anonymousPull: s.anonymousPull,
+    allowlistMode: s.allowlistMode,
+    maxUploadBytes: s.maxUploadBytes,
+    maxUploadBytesPyPi: s.maxUploadBytesPyPi,
+    maxUploadBytesNpm: s.maxUploadBytesNpm,
+    maxUploadBytesNuGet: s.maxUploadBytesNuGet,
+    defaultLanguage: s.defaultLanguage,
+    allowVersionOverwrite: s.allowVersionOverwrite,
+  }),
   getRetention: () => req('GET', '/retention'),
   updateRetention: (r) => req('PUT', '/retention', r),
   getProxySettings: () => req('GET', '/proxy-settings'),

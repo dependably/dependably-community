@@ -64,8 +64,6 @@ LABEL org.opencontainers.image.source="https://github.com/dependably/dependably-
 COPY --from=build --chown=dependably:dependably /app/publish/ .
 COPY --from=notices --chown=dependably:dependably /work/notices.json ./notices.json
 
-ENV ASPNETCORE_ENVIRONMENT=Production
-ENV ASPNETCORE_URLS=http://+:8080
 EXPOSE 8080
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \

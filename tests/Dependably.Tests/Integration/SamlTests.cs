@@ -431,6 +431,25 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     }
 
     [Fact]
+    public async Task Acs_TestMode_NoSessionAndNoRelayState_RedirectsToTestResultError()
+    {
+        // When both the test cookie (SameSite=Lax blocked on IdP cross-site POST) AND the
+        // RelayState are absent, the ACS cannot detect test mode. Without the fix it returned
+        // "SAML SSO is not enabled" JSON; it should redirect to the test-result page with
+        // test_session_lost so the popup closes cleanly.
+        await SeedFakeSamlConfigAsync(enabled: false, formsLoginEnabled: true, withMetadata: true);
+
+        using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        // No cookie, no relay state — simulates stripped-RelayState + blocked-cookie path.
+        var resp = await client.GetAsync("/saml/acs?SAMLResponse=garbage&SigAlg=garbage&Signature=garbage");
+
+        Assert.Equal(HttpStatusCode.Redirect, resp.StatusCode);
+        var location = resp.Headers.Location?.OriginalString ?? "";
+        Assert.Contains("/saml-test-result", location);
+        Assert.Contains("error=test_session_lost", location);
+    }
+
+    [Fact]
     public async Task Acs_TestMode_ViaRelayState_DoesNotIssueSession()
     {
         // In test mode (relay state path), no session cookie must be issued.

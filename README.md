@@ -25,7 +25,7 @@ docker run -d \
   -p 8080:8080 \
   -v dependably-data:/data \
   -e BASE_URL=http://localhost:8080 \
-  registry.example.com/dependably:latest
+  ghcr.io/dependably/dependably:latest
 ```
 
 On first boot, Dependably prints the admin credentials to stdout:
@@ -48,7 +48,7 @@ Log in at `http://localhost:8080` to change the password and create your first o
 ```yaml
 services:
   dependably:
-    image: registry.example.com/dependably:latest
+    image: ghcr.io/dependably/dependably:latest
     ports:
       - "8080:8080"
     volumes:

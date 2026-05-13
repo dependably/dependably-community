@@ -167,7 +167,7 @@ public sealed class SchemaInitializer
             "SELECT COUNT(*) FROM _applied_migrations WHERE name = @name", new { name });
         if (already > 0)
         {
-            _logger.LogInformation("Schema migration {Migration} already applied; skipping.", name);
+            _logger.LogDebug("Schema migration {Migration} already applied; skipping.", name);
             return;
         }
         _logger.LogInformation("Schema migration {Migration} applying…", name);

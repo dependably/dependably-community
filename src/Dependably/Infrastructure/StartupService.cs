@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
@@ -38,6 +39,17 @@ public sealed class StartupService : IHostedService
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        var version = typeof(StartupService).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(StartupService).Assembly.GetName().Version?.ToString()
+            ?? "unknown";
+        var dbPath = _config["DB_PATH"] ?? "/data/dependably.db";
+        var storage = _config["STORAGE_BACKEND"] ?? "local";
+
+        _logger.LogInformation(
+            "dependably {Version} starting — db={DbPath} storage={Storage}",
+            version, dbPath, storage);
+
         await _schema.InitializeAsync(cancellationToken);
         await _firstBoot.RunAsync(cancellationToken);
 
@@ -69,6 +81,12 @@ public sealed class StartupService : IHostedService
         {
             _logger.LogWarning("JWT secret not found in instance settings after first-boot.");
         }
+
+        var (_, tenantCount) = await _orgs.ListOrgsAsync(1, 0, includeDeleted: false, cancellationToken);
+
+        _logger.LogInformation(
+            "dependably ready — baseUrl={BaseUrl} tenants={TenantCount}",
+            baseUrl ?? "(derived from request)", tenantCount);
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;

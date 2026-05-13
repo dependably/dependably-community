@@ -99,6 +99,9 @@ public partial class Program
             options.MinimumSameSitePolicy = SameSiteMode.Lax;
         });
 
+        // Startup: schema migration + first-boot + JWT key load (must complete before other services)
+        builder.Services.AddHostedService<StartupService>();
+
         // Leader election for background jobs in HA mode (#66)
         builder.Services.AddHostedService<LeaderElectedScheduler>();
 
@@ -209,9 +212,6 @@ public partial class Program
         }
 
         builder.Services.AddSingleton<VulnerabilityScanService>();
-
-        // Startup: schema migration + first-boot + JWT key load (must run before web host starts)
-        builder.Services.AddHostedService<StartupService>();
 
         // Background services
         builder.Services.AddHostedService<RetentionService>();
@@ -424,7 +424,7 @@ public partial class Program
                .ReadFrom.Services(services)
                .Enrich.FromLogContext()
                .Enrich.With<SensitivePropertyEnricher>()
-               .WriteTo.Console(new CompactJsonFormatter());
+               .WriteTo.Console(new RenderedCompactJsonFormatter());
         });
     }
 
@@ -645,7 +645,16 @@ public partial class Program
         app.UseMiddleware<Dependably.Infrastructure.AirGappedExceptionMiddleware>();
 
         app.UseResponseCompression();
-        app.UseSerilogRequestLogging();
+        app.UseSerilogRequestLogging(opts =>
+        {
+            opts.GetLevel = (ctx, _, ex) =>
+            {
+                if (ex is not null) return Serilog.Events.LogEventLevel.Error;
+                if (ctx.Request.Path.StartsWithSegments("/ready") || ctx.Request.Path.StartsWithSegments("/health"))
+                    return Serilog.Events.LogEventLevel.Verbose;
+                return Serilog.Events.LogEventLevel.Information;
+            };
+        });
 
         app.UseCors("ManagementApi");
         app.UseRequestLocalization();
