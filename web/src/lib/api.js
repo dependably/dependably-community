@@ -26,6 +26,41 @@ function qs(params) {
   return u.toString()
 }
 
+/**
+ * Download a CSV from `path` with the given query params. Builds a Blob and triggers
+ * a synthetic <a download> so the browser saves the file. Throws ApiError on non-OK
+ * so callers can render errors uniformly.
+ */
+async function downloadCsv(path, params, fallbackBaseName) {
+  const q = qs(params)
+  const res = await fetch(`${BASE}${path}${q ? '?' + q : ''}`, { credentials: 'include' })
+  if (!res.ok) {
+    const data = await res.json().catch(() => null)
+    throw new ApiError(data?.detail || data?.title || res.statusText, {
+      status: res.status,
+      retryAfter: res.headers.get('Retry-After'),
+      body: data,
+    })
+  }
+  const blob = await res.blob()
+  // Prefer server-provided filename when present in Content-Disposition.
+  const cd = res.headers.get('Content-Disposition') ?? ''
+  const m = /filename="?([^";]+)"?/.exec(cd)
+  const filename = m?.[1] ?? `${fallbackBaseName}-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
+
+  const url = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
 async function req(method, path, body) {
   /** @type {RequestInit} */
   const opts = {
@@ -121,6 +156,7 @@ export const api = {
     const q = qs({ limit: 50, page: 1, ...params })
     return req('GET', `/activity?${q}`)
   },
+  exportActivity: (params = {}) => downloadCsv('/activity', { ...params, format: 'csv' }, 'activity'),
 
   // Claims (#47) — admin only. State machine on the server enforces the legal transitions;
   // 4xx responses contain a structured `detail` that the UI surfaces verbatim.
@@ -163,15 +199,16 @@ export const api = {
     const q = qs({ limit: 50, page: 1, ...params })
     return req('GET', `/audit?${q}`)
   },
+  exportAudit: (params = {}) => downloadCsv('/audit', { ...params, format: 'csv' }, 'audit'),
 
   // Allowlist
   getAllowlist: () => req('GET', '/allowlist'),
-  addAllowlist: (ecosystem, purlPattern) => req('POST', '/allowlist', { ecosystem, purlPattern }),
+  addAllowlist: (purlPattern) => req('POST', '/allowlist', { purlPattern }),
   deleteAllowlist: (id) => req('DELETE', `/allowlist/${id}`),
 
   // Blocklist
   getBlocklist: () => req('GET', '/blocklist'),
-  addBlocklist: (ecosystem, pattern) => req('POST', '/blocklist', { ecosystem, pattern }),
+  addBlocklist: (pattern) => req('POST', '/blocklist', { pattern }),
   deleteBlocklist: (id) => req('DELETE', `/blocklist/${id}`),
 
   // User tokens. capabilities is an array like ["read:metadata", "publish:*"];

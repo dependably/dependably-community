@@ -1,6 +1,7 @@
 <script>
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
+  import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { currentOrg } from '../lib/store.js'
   import { formatBytes } from '../lib/format.js'
 
@@ -162,7 +163,7 @@
     {/if}
   </div>
 
-  {#if error}<div class="page-error">{error}</div>{/if}
+  <ErrorBanner message={error} />
 
   {#if loading}
     <span class="spinner"></span>

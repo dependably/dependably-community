@@ -294,13 +294,13 @@ file sealed class NullMetadataStore : IMetadataStore
                 id TEXT PRIMARY KEY,
                 scope TEXT NOT NULL DEFAULT 'tenant',
                 org_id TEXT, actor_id TEXT, action TEXT NOT NULL,
-                ecosystem TEXT, purl TEXT, detail TEXT,
+                ecosystem TEXT, purl TEXT, detail TEXT, source_ip TEXT,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
             CREATE TABLE IF NOT EXISTS activity (
                 id TEXT PRIMARY KEY,
                 org_id TEXT NOT NULL, ecosystem TEXT NOT NULL, purl TEXT NOT NULL,
-                event_type TEXT NOT NULL, actor_id TEXT, detail TEXT,
+                event_type TEXT NOT NULL, actor_id TEXT, detail TEXT, source_ip TEXT,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );
             """;

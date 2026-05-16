@@ -6,7 +6,7 @@ stages:
 
 build-web:
   stage: build
-  image: node:22-alpine
+  image: node:22-slim
   script:
     - cd web && npm ci && npm run build
   artifacts:
@@ -33,7 +33,7 @@ build:
 
 lint:
   stage: test
-  image: node:22-alpine
+  image: node:22-slim
   script:
     - cd web && npm ci && npm run lint && npm run lint:css && npm run check
 
@@ -110,7 +110,7 @@ api-contract:
 
 frontend-tests:
   stage: test
-  image: node:22-alpine
+  image: node:22-slim
   script:
     - cd web
     - npm ci
@@ -179,7 +179,7 @@ sbom-backend:
 
 sbom-frontend:
   stage: sbom
-  image: node:22-alpine
+  image: node:22-slim
   script:
     - cd web && npm ci && npm run sbom
   artifacts:

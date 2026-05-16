@@ -3,14 +3,14 @@
   import { api } from '../lib/api.js'
   import { currentOrg } from '../lib/store.js'
   import { formatDate } from '../lib/format.js'
-  import { sortIndicator } from '../lib/sortIndicator.js'
   import Pagination from '../lib/Pagination.svelte'
+  import ErrorBanner from '../lib/ErrorBanner.svelte'
+  import DataTable from '../lib/DataTable.svelte'
 
   let items = [], loading = true, error = ''
   let ecosystem = ''
   let search = ''
   let page = 1, limit = 50, total = 0
-  let sortCol = 'severity', sortDir = 'desc'
 
   $: org = $currentOrg
 
@@ -44,25 +44,25 @@
       || r.version?.toLowerCase().includes(q)
   })
 
-  $: sorted = [...filtered].sort((a, b) => {
-    let av, bv
-    if (sortCol === 'package')   { av = a.packageName?.toLowerCase() ?? ''; bv = b.packageName?.toLowerCase() ?? '' }
-    if (sortCol === 'version')   { av = a.version ?? '';                     bv = b.version ?? '' }
-    if (sortCol === 'severity')  { av = SEVERITY_RANK[a.severity?.toLowerCase()] ?? 0; bv = SEVERITY_RANK[b.severity?.toLowerCase()] ?? 0 }
-    if (sortCol === 'score')     { av = a.cvssScore ?? -1;                   bv = b.cvssScore ?? -1 }
-    if (sortCol === 'osvId')     { av = a.osvId ?? '';                       bv = b.osvId ?? '' }
-    if (sortCol === 'checkedAt') { av = a.vulnCheckedAt ?? '';               bv = b.vulnCheckedAt ?? '' }
-    if (sortCol === 'summary')   { av = a.summary?.toLowerCase() ?? '';     bv = b.summary?.toLowerCase() ?? '' }
-    if (av < bv) return sortDir === 'asc' ? -1 : 1
-    if (av > bv) return sortDir === 'asc' ?  1 : -1
-    return 0
-  })
+  $: columns = [
+    { key: 'package',   label: $t('vulnerabilities.columns.package'),   sortable: true,  width: '200px' },
+    { key: 'version',   label: $t('vulnerabilities.columns.version'),   sortable: true,  width: '110px' },
+    { key: 'severity',  label: $t('vulnerabilities.columns.severity'),  sortable: true,  width: '90px',  defaultDir: 'desc' },
+    { key: 'score',     label: $t('vulnerabilities.columns.score'),     sortable: true,  width: '70px',  defaultDir: 'desc' },
+    { key: 'osvId',     label: $t('vulnerabilities.columns.osvId'),     sortable: true,  width: '170px' },
+    { key: 'summary',   label: $t('vulnerabilities.columns.summary'),   sortable: true },
+    { key: 'checkedAt', label: $t('vulnerabilities.columns.checkedAt'), sortable: true,  width: '135px' },
+  ]
 
-  function toggleSort(col) {
-    if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc'
-    else { sortCol = col; sortDir = (col === 'severity' || col === 'score') ? 'desc' : 'asc' }
+  const comparators = {
+    package:   (a, b) => (a.packageName ?? '').localeCompare(b.packageName ?? ''),
+    version:   (a, b) => (a.version ?? '').localeCompare(b.version ?? ''),
+    severity:  (a, b) => (SEVERITY_RANK[a.severity?.toLowerCase()] ?? 0) - (SEVERITY_RANK[b.severity?.toLowerCase()] ?? 0),
+    score:     (a, b) => (a.cvssScore ?? -1) - (b.cvssScore ?? -1),
+    osvId:     (a, b) => (a.osvId ?? '').localeCompare(b.osvId ?? ''),
+    summary:   (a, b) => (a.summary ?? '').localeCompare(b.summary ?? ''),
+    checkedAt: (a, b) => (a.vulnCheckedAt ?? '').localeCompare(b.vulnCheckedAt ?? ''),
   }
-
 </script>
 
 <div class="page page-wide">
@@ -80,79 +80,53 @@
     </select>
   </div>
 
-  {#if error}<div class="page-error">{error}</div>{/if}
+  <ErrorBanner message={error} />
 
-    <table class="table-auto vulns-table">
-      <colgroup>
-        <col class="col-pkg"><!-- package badge + name -->
-        <col class="col-version"><!-- version -->
-        <col class="col-sev"><!-- severity chip -->
-        <col class="col-score"><!-- CVSS score -->
-        <col class="col-osv"><!-- OSV ID -->
-        <col><!-- summary: takes leftover -->
-        <col class="col-checked"><!-- checked date -->
-      </colgroup>
-      <thead>
-        <tr>
-          <th class="sortable" on:click={() => toggleSort('package')}>{$t('vulnerabilities.columns.package')}{sortIndicator('package', sortCol, sortDir)}</th>
-          <th class="sortable" on:click={() => toggleSort('version')}>{$t('vulnerabilities.columns.version')}{sortIndicator('version', sortCol, sortDir)}</th>
-          <th class="sortable" on:click={() => toggleSort('severity')}>{$t('vulnerabilities.columns.severity')}{sortIndicator('severity', sortCol, sortDir)}</th>
-          <th class="sortable" on:click={() => toggleSort('score')}>{$t('vulnerabilities.columns.score')}{sortIndicator('score', sortCol, sortDir)}</th>
-          <th class="sortable" on:click={() => toggleSort('osvId')}>{$t('vulnerabilities.columns.osvId')}{sortIndicator('osvId', sortCol, sortDir)}</th>
-          <th class="sortable" on:click={() => toggleSort('summary')}>{$t('vulnerabilities.columns.summary')}{sortIndicator('summary', sortCol, sortDir)}</th>
-          <th class="sortable" on:click={() => toggleSort('checkedAt')}>{$t('vulnerabilities.columns.checkedAt')}{sortIndicator('checkedAt', sortCol, sortDir)}</th>
-        </tr>
-      </thead>
-      {#if loading}
-        <tbody>
-          {#each [0,1,2,3,4] as i (i)}
-            <tr><td colspan="7"><span class="skeleton"></span></td></tr>
-          {/each}
-        </tbody>
-      {:else}
-      <tbody>
-        {#each sorted as r, i (i)}
-          <tr>
-            <td>
-              <div class="pkg-cell">
-                <span class="badge {r.ecosystem}">{r.ecosystem}</span>
-                <span class="mono pkg-name" title={r.packageName}>{r.packageName}</span>
-              </div>
-            </td>
-            <td class="mono nowrap" title={r.purl}>{r.version}</td>
-            <td class="nowrap">
-              {#if r.severity}
-                <span class="sev sev-{r.severity.toLowerCase()}">{r.severity}</span>
-              {:else}
-                <span class="text-muted">—</span>
-              {/if}
-            </td>
-            <td class="mono nowrap text-muted">
-              {r.cvssScore !== null && r.cvssScore !== undefined ? r.cvssScore.toFixed(1) : '—'}
-            </td>
-            <td class="mono nowrap">
-              <a href="https://osv.dev/vulnerability/{r.osvId}" target="_blank" rel="noreferrer">{r.osvId}</a>
-            </td>
-            <td class="summary-cell text-muted">
-              <div class="summary-clamp" title={r.summary ?? ''}>{r.summary ?? '—'}</div>
-            </td>
-            <td class="nowrap text-muted t-sm">
-              {r.vulnCheckedAt ? $formatDate(r.vulnCheckedAt) : '—'}
-            </td>
-          </tr>
-        {/each}
-        {#if sorted.length === 0}
-          <tr><td colspan="7" class="text-center text-muted">{$t('vulnerabilities.empty')}</td></tr>
+  <DataTable
+    {columns}
+    rows={filtered}
+    {comparators}
+    {loading}
+    initialSort={{ key: 'severity', dir: 'desc' }}
+    emptyText={$t('vulnerabilities.empty')}
+    tableClass="table-auto vulns-table"
+    let:row={r}
+  >
+    <tr>
+      <td>
+        <div class="pkg-cell">
+          <span class="badge {r.ecosystem}">{r.ecosystem}</span>
+          <span class="mono pkg-name" title={r.packageName}>{r.packageName}</span>
+        </div>
+      </td>
+      <td class="mono nowrap" title={r.purl}>{r.version}</td>
+      <td class="nowrap">
+        {#if r.severity}
+          <span class="sev sev-{r.severity.toLowerCase()}">{r.severity}</span>
+        {:else}
+          <span class="text-muted">—</span>
         {/if}
-      </tbody>
-      {/if}
-    </table>
+      </td>
+      <td class="mono nowrap text-muted">
+        {r.cvssScore !== null && r.cvssScore !== undefined ? r.cvssScore.toFixed(1) : '—'}
+      </td>
+      <td class="mono nowrap">
+        <a href="https://osv.dev/vulnerability/{r.osvId}" target="_blank" rel="noreferrer">{r.osvId}</a>
+      </td>
+      <td class="summary-cell text-muted">
+        <div class="summary-clamp" title={r.summary ?? ''}>{r.summary ?? '—'}</div>
+      </td>
+      <td class="nowrap text-muted t-sm">
+        {r.vulnCheckedAt ? $formatDate(r.vulnCheckedAt) : '—'}
+      </td>
+    </tr>
+  </DataTable>
 
-    {#if !loading}
-      <Pagination {total} {page} {limit}
-        on:pagechange={onPageChange}
-        on:limitchange={onLimitChange} />
-    {/if}
+  {#if !loading}
+    <Pagination {total} {page} {limit}
+      on:pagechange={onPageChange}
+      on:limitchange={onLimitChange} />
+  {/if}
 </div>
 
 <style>
@@ -175,11 +149,5 @@
   }
   .header-search { width: 260px; }
   .eco-select { width: auto; }
-  .vulns-table .col-pkg     { width: 200px; }
-  .vulns-table .col-version { width: 110px; }
-  .vulns-table .col-sev     { width: 90px; }
-  .vulns-table .col-score   { width: 70px; }
-  .vulns-table .col-osv     { width: 170px; }
-  .vulns-table .col-checked { width: 135px; }
   .summary-cell { font-size: 13px; }
 </style>

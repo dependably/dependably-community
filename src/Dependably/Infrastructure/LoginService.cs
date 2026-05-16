@@ -44,7 +44,7 @@ public sealed class LoginService
     /// the request hit. Returns a tenant-scoped JWT (<c>scope=tenant</c>) on success.
     /// </summary>
     public async Task<(string? Token, string? Error, int? RetryAfterSeconds)> LoginTenantAsync(
-        string email, string password, string tenantId, CancellationToken ct = default)
+        string email, string password, string tenantId, string? sourceIp = null, CancellationToken ct = default)
     {
         var emailHash = HashEmail(email);
 
@@ -54,8 +54,9 @@ public sealed class LoginService
             var retryAfter = (int)(lockedUntil.Value - DateTimeOffset.UtcNow).TotalSeconds + 1;
             await _audit.LogAsync("lockout.triggered",
                 detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "tenant" }),
-                ct: ct);
-            await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.locked", ct: ct);
+                sourceIp: sourceIp, ct: ct);
+            await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.locked",
+                sourceIp: sourceIp, ct: ct);
             await _auditEmitter.EmitAsync(
                 Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLockout,
                 tenantId, "system", null, "rejected",
@@ -80,14 +81,15 @@ public sealed class LoginService
 
         if (!valid)
         {
-            await RecordFailureAsync(emailHash, failedCount, "tenant", tenantId, ct);
+            await RecordFailureAsync(emailHash, failedCount, "tenant", tenantId, sourceIp, ct);
             return (null, "Invalid credentials.", null);
         }
 
         await _lockout.ClearAsync(emailHash, ct);
-        await _audit.LogAsync("login.success", actorId: user.Id, ct: ct);
+        await _audit.LogAsync("login.success", actorId: user.Id, sourceIp: sourceIp, ct: ct);
         await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: user.Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { method = "forms" }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { method = "forms" }),
+            sourceIp: sourceIp, ct: ct);
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginSuccess,
             tenantId, "user", user.Id, "accepted",
@@ -112,7 +114,7 @@ public sealed class LoginService
     /// <c>system_admins</c> is empty there.
     /// </summary>
     public async Task<(string? Token, string? Error, int? RetryAfterSeconds)> LoginSystemAsync(
-        string email, string password, CancellationToken ct = default)
+        string email, string password, string? sourceIp = null, CancellationToken ct = default)
     {
         var emailHash = HashEmail(email);
 
@@ -122,7 +124,7 @@ public sealed class LoginService
             var retryAfter = (int)(lockedUntil.Value - DateTimeOffset.UtcNow).TotalSeconds + 1;
             await _audit.LogAsync("lockout.triggered",
                 detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "system" }),
-                ct: ct);
+                sourceIp: sourceIp, ct: ct);
             await _auditEmitter.EmitAsync(
                 Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLockout,
                 null, "system", null, "rejected",
@@ -136,13 +138,14 @@ public sealed class LoginService
 
         if (!valid)
         {
-            await RecordFailureAsync(emailHash, failedCount, "system", orgIdForActivity: null, ct);
+            await RecordFailureAsync(emailHash, failedCount, "system", orgIdForActivity: null, sourceIp, ct);
             return (null, "Invalid credentials.", null);
         }
 
         await _lockout.ClearAsync(emailHash, ct);
         await _audit.LogAsync("login.success", actorId: creds!.Value.Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { realm = "system" }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { realm = "system" }),
+            sourceIp: sourceIp, ct: ct);
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginSuccess,
             null, "user", creds.Value.Id, "accepted",
@@ -179,6 +182,7 @@ public sealed class LoginService
         string idpEntityId,
         string nameId,
         string? assertionEmail,
+        string? sourceIp = null,
         CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
@@ -198,7 +202,7 @@ public sealed class LoginService
                 await _audit.LogAsync("auth.saml.login.failure",
                     orgId: tenantId, actorId: user.Id,
                     detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = user.AccountStatus }),
-                    ct: ct);
+                    sourceIp: sourceIp, ct: ct);
                 await EmitSamlFailureAsync(tenantId, user.Id, "account_status_" + user.AccountStatus, idpEntityId, nameId, ct);
                 return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
             }
@@ -206,7 +210,7 @@ public sealed class LoginService
             await _externalIdentities.UpdateLastLoginAsync(existing.Id, assertionEmail, ct);
             await StampUserLoginAsync(conn, user.Id, assertionEmail, user.Email);
 
-            await LogSamlSuccessAsync(tenantId, user.Id, idpEntityId, nameId, "external_identity", ct);
+            await LogSamlSuccessAsync(tenantId, user.Id, idpEntityId, nameId, "external_identity", sourceIp, ct);
             return new SamlLoginResult(IssueJwt(user.Id, tenantId, user.Role, await JwtSecretAsync(ct)),
                 null, user.Id, user.Role, false, false);
         }
@@ -229,7 +233,7 @@ public sealed class LoginService
                     await _audit.LogAsync("auth.saml.login.failure",
                         orgId: tenantId, actorId: existingByEmail.Id,
                         detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = existingByEmail.AccountStatus }),
-                        ct: ct);
+                        sourceIp: sourceIp, ct: ct);
                     await EmitSamlFailureAsync(tenantId, existingByEmail.Id,
                         "account_status_" + existingByEmail.AccountStatus, idpEntityId, nameId, ct);
                     return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
@@ -241,8 +245,8 @@ public sealed class LoginService
                 await _audit.LogAsync("auth.saml.user_linked",
                     orgId: tenantId, actorId: existingByEmail.Id,
                     detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid = nameId, email = assertionEmail }),
-                    ct: ct);
-                await LogSamlSuccessAsync(tenantId, existingByEmail.Id, idpEntityId, nameId, "email_link", ct);
+                    sourceIp: sourceIp, ct: ct);
+                await LogSamlSuccessAsync(tenantId, existingByEmail.Id, idpEntityId, nameId, "email_link", sourceIp, ct);
 
                 return new SamlLoginResult(IssueJwt(existingByEmail.Id, tenantId, existingByEmail.Role, await JwtSecretAsync(ct)),
                     null, existingByEmail.Id, existingByEmail.Role, false, true);
@@ -256,7 +260,7 @@ public sealed class LoginService
             await _audit.LogAsync("auth.saml.login.failure",
                 orgId: tenantId,
                 detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "no_email_in_assertion", idp_entity_id = idpEntityId, nameid = nameId }),
-                ct: ct);
+                sourceIp: sourceIp, ct: ct);
             await EmitSamlFailureAsync(tenantId, null, "no_email_in_assertion", idpEntityId, nameId, ct);
             return new SamlLoginResult(null, "Assertion did not include an email and no existing user matches.", null, null, false, false);
         }
@@ -274,8 +278,8 @@ public sealed class LoginService
         await _audit.LogAsync("auth.saml.user_provisioned",
             orgId: tenantId, actorId: newUserId,
             detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid = nameId, email = assertionEmail }),
-            ct: ct);
-        await LogSamlSuccessAsync(tenantId, newUserId, idpEntityId, nameId, "jit_provisioned", ct);
+            sourceIp: sourceIp, ct: ct);
+        await LogSamlSuccessAsync(tenantId, newUserId, idpEntityId, nameId, "jit_provisioned", sourceIp, ct);
 
         return new SamlLoginResult(IssueJwt(newUserId, tenantId, "member", await JwtSecretAsync(ct)),
             null, newUserId, "member", true, false);
@@ -311,14 +315,15 @@ public sealed class LoginService
     }
 
     private async Task LogSamlSuccessAsync(
-        string tenantId, string userId, string idpEntityId, string nameId, string path, CancellationToken ct)
+        string tenantId, string userId, string idpEntityId, string nameId, string path, string? sourceIp, CancellationToken ct)
     {
         await _audit.LogAsync("auth.saml.login.success",
             orgId: tenantId, actorId: userId,
             detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid = nameId, path }),
-            ct: ct);
+            sourceIp: sourceIp, ct: ct);
         await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: userId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { method = "saml" }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { method = "saml" }),
+            sourceIp: sourceIp, ct: ct);
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeSamlSuccess,
             tenantId, "user", userId, "accepted",
@@ -350,7 +355,7 @@ public sealed class LoginService
         IssueTenantJwt(userId, tenantId, role, secret);
 
     private async Task RecordFailureAsync(
-        string emailHash, int currentFailedCount, string realm, string? orgIdForActivity, CancellationToken ct)
+        string emailHash, int currentFailedCount, string realm, string? orgIdForActivity, string? sourceIp, CancellationToken ct)
     {
         var newCount = currentFailedCount + 1;
         DateTimeOffset? lockExpiry = newCount >= MaxFailedAttempts
@@ -359,14 +364,15 @@ public sealed class LoginService
         await _lockout.RecordFailureAsync(emailHash, newCount, lockExpiry, ct);
         await _audit.LogAsync("login.failure",
             detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "invalid_credentials", realm }),
-            ct: ct);
+            sourceIp: sourceIp, ct: ct);
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginFailure,
             orgIdForActivity, "system", null, "rejected",
             new Dependably.Infrastructure.Audit.Events.AuthEvents.LoginFailure(realm, emailHash).ToJson(), ct);
 
         if (orgIdForActivity is not null)
-            await _audit.LogActivityAsync(orgIdForActivity, "auth", purl: null, "login.failure", ct: ct);
+            await _audit.LogActivityAsync(orgIdForActivity, "auth", purl: null, "login.failure",
+                sourceIp: sourceIp, ct: ct);
     }
 
     private static string IssueTenantJwt(string userId, string tenantId, string role, string secret)

@@ -2,6 +2,7 @@
   import { t, locale } from 'svelte-i18n'
   import { user, theme, navigate, takePendingRoute } from '../lib/store.js'
   import { api } from '../lib/api.js'
+  import { submitForm } from '../lib/form.js'
   import { locales, switchLocale } from '../lib/locale.js'
   import Licenses from './Licenses.svelte'
 
@@ -36,28 +37,24 @@
     if (newPassword.length < 12) { modalError = $t('profile.errorMinLength'); return }
     if (newPassword !== confirm) { modalError = $t('profile.errorMismatch'); return }
     if (newPassword === currentPassword) { modalError = $t('profile.errorSame'); return }
-    loading = true
-    try {
-      await api.changePassword(currentPassword, newPassword)
-      // Refresh user info so the must-rotate guard releases.
-      try { user.set(await api.me()) } catch { /* keep stale; user can still log out */ }
-      passwordSavedAt = new Date()
-      currentPassword = ''; newPassword = ''; confirm = ''
-      if (forced) {
+    await submitForm(() => api.changePassword(currentPassword, newPassword), {
+      setSaving: v => loading    = v,
+      setError:  v => modalError = v,
+      onSuccess: async () => {
+        // Refresh user info so the must-rotate guard releases.
+        try { user.set(await api.me()) } catch { /* keep stale; user can still log out */ }
+        passwordSavedAt = new Date()
+        currentPassword = ''; newPassword = ''; confirm = ''
+        showModal = false
         // Forced flow: bounce out of /profile once rotation completes. Replace so back doesn't
         // return to the forced /profile entry. Consume any pending deep link the user was
         // originally trying to reach, falling back to the dashboard.
-        showModal = false
-        const pending = takePendingRoute()
-        navigate(pending?.page ?? 'dashboard', pending?.params ?? {}, { replace: true })
-      } else {
-        showModal = false
-      }
-    } catch (e) {
-      modalError = e.message
-    } finally {
-      loading = false
-    }
+        if (forced) {
+          const pending = takePendingRoute()
+          navigate(pending?.page ?? 'dashboard', pending?.params ?? {}, { replace: true })
+        }
+      },
+    })
   }
 </script>
 

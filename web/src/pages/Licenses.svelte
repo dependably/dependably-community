@@ -1,6 +1,7 @@
 <script>
   import { createEventDispatcher, onMount } from 'svelte'
   import { api } from '../lib/api.js'
+  import ErrorBanner from '../lib/ErrorBanner.svelte'
 
   const dispatch = createEventDispatcher()
 
@@ -46,7 +47,7 @@
 
     <div class="body">
       {#if error}
-        <div class="page-error">{error}</div>
+        <ErrorBanner message={error} />
       {:else if loading}
         <span class="spinner"></span>
       {:else if devModeStub}

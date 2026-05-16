@@ -14,7 +14,10 @@ public sealed class AuditRepository
         DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
 
     // Convenience overload for tenant-scope events. Most call sites use this; the action plus
-    // a handful of optional named arguments (orgId, actorId, ecosystem, purl, detail) read clearly.
+    // a handful of optional named arguments (orgId, actorId, ecosystem, purl, detail, sourceIp)
+    // read clearly. sourceIp expects the canonical form produced by HttpContext.GetNormalizedRemoteIp().
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Optional named-arg surface for the audit log; bundling into a context type would force ~70 call sites to allocate just to skip a single field.")]
     public Task LogAsync(
         string action,
         string? orgId = null,
@@ -22,8 +25,9 @@ public sealed class AuditRepository
         string? ecosystem = null,
         string? purl = null,
         string? detail = null,
+        string? sourceIp = null,
         CancellationToken ct = default)
-        => WriteAsync(new AuditWrite(action, "tenant", orgId, actorId, ecosystem, purl, detail), ct);
+        => WriteAsync(new AuditWrite(action, "tenant", orgId, actorId, ecosystem, purl, detail, sourceIp), ct);
 
     // System-scope events (operator dashboard) — keeps tenant-business events filtered out of
     // the system audit list and vice versa.
@@ -32,16 +36,17 @@ public sealed class AuditRepository
         string? actorId = null,
         string? orgId = null,
         string? detail = null,
+        string? sourceIp = null,
         CancellationToken ct = default)
-        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, null, null, detail), ct);
+        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, null, null, detail, sourceIp), ct);
 
     private async Task WriteAsync(AuditWrite entry, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO audit_log (id, scope, org_id, actor_id, action, ecosystem, purl, detail, created_at)
-            VALUES (@id, @scope, @orgId, @actorId, @action, @ecosystem, @purl, @detail, @createdAt)
+            INSERT INTO audit_log (id, scope, org_id, actor_id, action, ecosystem, purl, detail, source_ip, created_at)
+            VALUES (@id, @scope, @orgId, @actorId, @action, @ecosystem, @purl, @detail, @sourceIp, @createdAt)
             """,
             new
             {
@@ -53,6 +58,7 @@ public sealed class AuditRepository
                 ecosystem = entry.Ecosystem,
                 purl = entry.Purl,
                 detail = entry.Detail,
+                sourceIp = entry.SourceIp,
                 createdAt = NowMs(),
             });
     }
@@ -60,8 +66,11 @@ public sealed class AuditRepository
     private sealed record AuditWrite(
         string Action, string Scope,
         string? OrgId, string? ActorId,
-        string? Ecosystem, string? Purl, string? Detail);
+        string? Ecosystem, string? Purl, string? Detail,
+        string? SourceIp);
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Optional named-arg surface for per-version activity events; bundling would churn dozens of call sites for no readability gain.")]
     public async Task LogActivityAsync(
         string orgId,
         string ecosystem,
@@ -69,13 +78,14 @@ public sealed class AuditRepository
         string eventType,
         string? actorId = null,
         string? detail = null,
+        string? sourceIp = null,
         CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO activity (id, org_id, ecosystem, purl, event_type, actor_id, detail, created_at)
-            VALUES (@id, @orgId, @ecosystem, @purl, @eventType, @actorId, @detail, @createdAt)
+            INSERT INTO activity (id, org_id, ecosystem, purl, event_type, actor_id, detail, source_ip, created_at)
+            VALUES (@id, @orgId, @ecosystem, @purl, @eventType, @actorId, @detail, @sourceIp, @createdAt)
             """,
             new
             {
@@ -86,6 +96,7 @@ public sealed class AuditRepository
                 eventType,
                 actorId,
                 detail,
+                sourceIp,
                 createdAt = NowMs()
             });
     }
@@ -95,12 +106,16 @@ public sealed class AuditRepository
     /// can never surface operator events to a tenant user.
     /// </summary>
     public async Task<(IReadOnlyList<AuditEntry> Items, int Total)> ListAuditAsync(
-        string orgId, int limit, int offset, CancellationToken ct = default)
+        string orgId, int limit, int offset, string? action = null, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         var total = await conn.ExecuteScalarAsync<int>(
-            "SELECT COUNT(*) FROM audit_log WHERE org_id = @orgId AND scope = 'tenant'",
-            new { orgId });
+            """
+            SELECT COUNT(*) FROM audit_log
+            WHERE org_id = @orgId AND scope = 'tenant'
+              AND (@action IS NULL OR action = @action)
+            """,
+            new { orgId, action });
         var rows = await conn.QueryAsync<AuditEntry>(
             """
             SELECT a.id, a.scope as Scope, a.org_id as OrgId, a.actor_id as ActorId,
@@ -109,9 +124,10 @@ public sealed class AuditRepository
                    a.created_at as CreatedAt
             FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id
             WHERE a.org_id = @orgId AND a.scope = 'tenant'
+              AND (@action IS NULL OR a.action = @action)
             ORDER BY a.created_at DESC, a.id DESC LIMIT @limit OFFSET @offset
             """,
-            new { orgId, limit, offset });
+            new { orgId, limit, offset, action });
         return (rows.ToList(), total);
     }
 
@@ -230,7 +246,7 @@ public sealed class AuditRepository
             """
             SELECT a.id, a.org_id as OrgId, a.ecosystem as Ecosystem, a.purl as Purl,
                    a.event_type as EventType, a.actor_id as ActorId, u.email as ActorEmail,
-                   a.detail as Detail, a.created_at as CreatedAt
+                   a.detail as Detail, a.source_ip as SourceIp, a.created_at as CreatedAt
             FROM activity a LEFT JOIN users u ON u.id = a.actor_id
             WHERE a.org_id = @orgId
               AND (@eventType IS NULL OR a.event_type = @eventType)

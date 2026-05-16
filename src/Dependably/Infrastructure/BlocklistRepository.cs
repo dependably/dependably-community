@@ -25,9 +25,9 @@ public sealed class BlocklistRepository
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<BlocklistEntry>(
             """
-            SELECT id, org_id as OrgId, ecosystem, pattern, created_at as CreatedAt
+            SELECT id, org_id as OrgId, pattern, created_at as CreatedAt
             FROM blocklist WHERE org_id = @orgId
-            ORDER BY ecosystem, pattern
+            ORDER BY pattern
             """,
             new { orgId });
         var list = (IReadOnlyList<BlocklistEntry>)rows.ToList();
@@ -36,31 +36,29 @@ public sealed class BlocklistRepository
     }
 
     public async Task<BlocklistEntry> AddAsync(
-        string orgId, string ecosystem, string pattern, CancellationToken ct = default)
+        string orgId, string pattern, CancellationToken ct = default)
     {
         var id = Guid.NewGuid().ToString("N");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO blocklist (id, org_id, ecosystem, pattern)
-            VALUES (@id, @orgId, @ecosystem, @pattern)
+            INSERT INTO blocklist (id, org_id, pattern)
+            VALUES (@id, @orgId, @pattern)
             ON CONFLICT DO NOTHING
             """,
-            new { id, orgId, ecosystem, pattern });
+            new { id, orgId, pattern });
         _cache.Remove(CacheKey(orgId));
-        return new BlocklistEntry { Id = id, OrgId = orgId, Ecosystem = ecosystem, Pattern = pattern, CreatedAt = DateTimeOffset.UtcNow };
+        return new BlocklistEntry { Id = id, OrgId = orgId, Pattern = pattern, CreatedAt = DateTimeOffset.UtcNow };
     }
 
-    public async Task<bool> IsBlockedAsync(string orgId, string ecosystem, string purl, CancellationToken ct = default)
+    public async Task<bool> IsBlockedAsync(string orgId, string purl, CancellationToken ct = default)
     {
         var entries = await ListAsync(orgId, ct);
-        return entries
-            .Where(e => e.Ecosystem == ecosystem)
-            .Any(e =>
-            {
-                try { return System.Text.RegularExpressions.Regex.IsMatch(purl, e.Pattern, System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(2)); }
-                catch { return false; }
-            });
+        return entries.Any(e =>
+        {
+            try { return System.Text.RegularExpressions.Regex.IsMatch(purl, e.Pattern, System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(2)); }
+            catch { return false; }
+        });
     }
 
     public async Task DeleteAsync(string entryId, CancellationToken ct = default)

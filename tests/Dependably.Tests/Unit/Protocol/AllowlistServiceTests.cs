@@ -23,9 +23,9 @@ public sealed class AllowlistServiceTests : IClassFixture<InMemoryDbFixture>
     public async Task IsAllowedAsync_ExactPurlMatch_ReturnsTrue()
     {
         var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
-        await AllowlistSeeder.InsertAsync(_fixture.Store, orgId, "npm", "pkg:npm/acme@1.0.0");
+        await AllowlistSeeder.InsertAsync(_fixture.Store, orgId, "pkg:npm/acme@1.0.0");
 
-        Assert.True(await _sut.IsAllowedAsync(orgId, "npm", "pkg:npm/acme@1.0.0"));
+        Assert.True(await _sut.IsAllowedAsync(orgId, "pkg:npm/acme@1.0.0"));
     }
 
     [Fact]
@@ -33,10 +33,10 @@ public sealed class AllowlistServiceTests : IClassFixture<InMemoryDbFixture>
     {
         // A wildcard entry (no @version) allows every version.
         var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
-        await AllowlistSeeder.InsertAsync(_fixture.Store, orgId, "npm", "pkg:npm/lodash");
+        await AllowlistSeeder.InsertAsync(_fixture.Store, orgId, "pkg:npm/lodash");
 
-        Assert.True(await _sut.IsAllowedAsync(orgId, "npm", "pkg:npm/lodash@4.0.0"));
-        Assert.True(await _sut.IsAllowedAsync(orgId, "npm", "pkg:npm/lodash@5.1.2"));
+        Assert.True(await _sut.IsAllowedAsync(orgId, "pkg:npm/lodash@4.0.0"));
+        Assert.True(await _sut.IsAllowedAsync(orgId, "pkg:npm/lodash@5.1.2"));
     }
 
     [Fact]
@@ -44,7 +44,7 @@ public sealed class AllowlistServiceTests : IClassFixture<InMemoryDbFixture>
     {
         var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
 
-        Assert.False(await _sut.IsAllowedAsync(orgId, "npm", "pkg:npm/unknown@1.0.0"));
+        Assert.False(await _sut.IsAllowedAsync(orgId, "pkg:npm/unknown@1.0.0"));
 
         await using var conn = await _fixture.Store.OpenAsync();
         var auditCount = await conn.ExecuteScalarAsync<long>(
@@ -58,9 +58,9 @@ public sealed class AllowlistServiceTests : IClassFixture<InMemoryDbFixture>
     {
         var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"a-{Guid.NewGuid():N}");
         var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
-        await AllowlistSeeder.InsertAsync(_fixture.Store, orgA, "npm", "pkg:npm/private@1.0.0");
+        await AllowlistSeeder.InsertAsync(_fixture.Store, orgA, "pkg:npm/private@1.0.0");
 
-        Assert.False(await _sut.IsAllowedAsync(orgB, "npm", "pkg:npm/private@1.0.0"));
+        Assert.False(await _sut.IsAllowedAsync(orgB, "pkg:npm/private@1.0.0"));
     }
 
     [Fact]

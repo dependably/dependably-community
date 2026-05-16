@@ -37,13 +37,13 @@ public partial class PyPiController : ControllerBase
     private readonly AllowlistService _allowlist;
     private readonly BlocklistRepository _blocklist;
     private readonly IConfiguration _config;
-    private readonly Dependably.Infrastructure.VulnerabilityScanService _scanner;
-    private readonly VulnerabilityRepository _vulns;
+    private readonly BlockGateService _blockGate;
     private readonly LicenseRepository _licenses;
     private readonly PublishGate _publishGate;
     private readonly Dependably.Infrastructure.Publish.IPackagePublishService _publish;
     private readonly CacheAccessRecorder _cacheRecorder;
     private readonly ClaimResolver _claimResolver;
+    private readonly Dependably.Storage.ProxyFetchService _proxyFetch;
 
     public PyPiController(PyPiControllerServices svc)
     {
@@ -56,13 +56,13 @@ public partial class PyPiController : ControllerBase
         _allowlist = svc.Allowlist;
         _blocklist = svc.Blocklist;
         _config = svc.Config;
-        _scanner = svc.Scanner;
-        _vulns = svc.Vulns;
+        _blockGate = svc.BlockGate;
         _licenses = svc.Licenses;
         _publishGate = svc.PublishGate;
         _publish = svc.Publish;
         _cacheRecorder = svc.CacheRecorder;
         _claimResolver = svc.ClaimResolver;
+        _proxyFetch = svc.ProxyFetch;
     }
 
     // ── Read endpoints (#8) ─────────────────────────────────────────────────
@@ -109,26 +109,34 @@ public partial class PyPiController : ControllerBase
         var purlName = NormalizePyPiName(package);
         var pkg = await _packages.GetByPurlNameAsync(orgId, "pypi", purlName, ct);
 
-        if (pkg is null || pkg.IsProxy)
-        {
-            // For proxy packages (known or not yet seen), always proxy the upstream simple index
-            // so pip can discover all available versions, not just locally-cached ones.
-            return await ProxyUpstreamSimpleIndex(purlName, settings!, token, ct);
-        }
+        // Always merge upstream + local versions when passthrough + claims allow. Routing must
+        // not gate on packages.is_proxy — a name with privately uploaded versions is still a
+        // namespace that holds proxy-fetched versions; clients need to discover both.
+        var passthroughAllowed = settings!.ProxyPassthroughEnabled
+            && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "pypi", purlName, ct);
 
-        if (token is null)
+        if (passthroughAllowed)
+            return await ProxyUpstreamSimpleIndex(purlName, pkg, settings, token, ct);
+
+        // Passthrough disabled or name is claim-local — return only local versions.
+        if (pkg is null) return NotFound();
+
+        if (!settings.AnonymousPull && token is null)
         {
             Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
             return Unauthorized();
         }
 
         var versions = await _packages.GetVersionsAsync(pkg.Id, ct);
+        return RenderLocalSimpleIndex(pkg.PurlName, versions);
+    }
 
+    private ContentResult RenderLocalSimpleIndex(string purlName, IReadOnlyList<PackageVersion> versions)
+    {
         var sb = new StringBuilder();
         sb.AppendLine("<!DOCTYPE html>");
-        sb.AppendLine($"<html><head><title>Links for {pkg.PurlName}</title></head><body>");
-        sb.AppendLine($"<h1>Links for {pkg.PurlName}</h1>");
-
+        sb.AppendLine($"<html><head><title>Links for {purlName}</title></head><body>");
+        sb.AppendLine($"<h1>Links for {purlName}</h1>");
         foreach (var v in versions)
         {
             var filename = v.BlobKey.Split('/').Last();
@@ -140,13 +148,12 @@ public partial class PyPiController : ControllerBase
 
             sb.AppendLine($"<a href=\"{href}\"{yankAttr}>{filename}</a><br/>");
         }
-
         sb.AppendLine("</body></html>");
         return Content(sb.ToString(), "text/html; charset=utf-8");
     }
 
     private async Task<IActionResult> ProxyUpstreamSimpleIndex(
-        string purlName, OrgSettings settings,
+        string purlName, Package? localPkg, OrgSettings settings,
         TokenRecord? token, CancellationToken ct)
     {
         if (!settings.AnonymousPull && token is null)
@@ -155,50 +162,89 @@ public partial class PyPiController : ControllerBase
             return Unauthorized();
         }
 
+        // Collect local versions up-front so a missing upstream still serves what we have.
+        var localVersions = localPkg is null
+            ? Array.Empty<PackageVersion>() as IReadOnlyList<PackageVersion>
+            : await _packages.GetVersionsAsync(localPkg.Id, ct);
+
         var upstreamBase = _config["PyPI:Upstream"] ?? "https://pypi.org";
+        string? upstreamHtml = null;
         try
         {
             using var response = await _upstream.GetMetadataAsync($"{upstreamBase}/simple/{purlName}/", ct);
-            if (!response.IsSuccessStatusCode)
-                return NotFound();
-
-            var html = await response.Content.ReadAsStringAsync(ct);
-
-            // Strip PEP 658/714 metadata attributes: we don't proxy .metadata files,
-            // so removing these makes pip fall back to downloading the wheel/sdist directly.
-            html = Regex.Replace(html, @"\s*data-(?:dist-info-metadata|core-metadata)=""[^""]*""", "", RegexOptions.None, RegexTimeout);
-
-            // Rewrite upstream download URLs to route through our proxy.
-            // PyPI CDN URLs are content-addressed (filename is in link text, not URL path).
-            // The attribute pattern (?:[^>"']*(?:"[^"]*"|'[^']*')?)* handles quoted values
-            // that contain ">" (e.g. data-requires-python=">=3.6") without stopping early.
-            html = Regex.Replace(
-                html,
-                @"<a\b((?:[^>""']*(?:""[^""]*""|'[^']*')?)*)>([^<]+)</a>",
-                m =>
-                {
-                    var attrs = m.Groups[1].Value;
-                    var filename = m.Groups[2].Value.Trim();
-                    var hrefMatch = Regex.Match(attrs, @"href=""(https?://[^""#]+)(#[^""]*)?""", RegexOptions.None, RegexTimeout);
-                    if (!hrefMatch.Success) return m.Value; // not an upstream link, leave alone
-                    var fragment = hrefMatch.Groups[2].Value; // "#sha256=..." or ""
-                    return $"<a href=\"{OrgPath($"packages/{filename}{fragment}")}\">{filename}</a>";
-                },
-                RegexOptions.None,
-                RegexTimeout);
-
-            return Content(html, "text/html; charset=utf-8");
+            if (response.IsSuccessStatusCode)
+            {
+                var html = await response.Content.ReadAsStringAsync(ct);
+                html = Regex.Replace(html, @"\s*data-(?:dist-info-metadata|core-metadata)=""[^""]*""", "", RegexOptions.None, RegexTimeout);
+                html = Regex.Replace(
+                    html,
+                    @"<a\b((?:[^>""']*(?:""[^""]*""|'[^']*')?)*)>([^<]+)</a>",
+                    m =>
+                    {
+                        var attrs = m.Groups[1].Value;
+                        var filename = m.Groups[2].Value.Trim();
+                        var hrefMatch = Regex.Match(attrs, @"href=""(https?://[^""#]+)(#[^""]*)?""", RegexOptions.None, RegexTimeout);
+                        if (!hrefMatch.Success) return m.Value;
+                        var fragment = hrefMatch.Groups[2].Value;
+                        return $"<a href=\"{OrgPath($"packages/{filename}{fragment}")}\">{filename}</a>";
+                    },
+                    RegexOptions.None,
+                    RegexTimeout);
+                upstreamHtml = html;
+            }
         }
         catch
         {
-            return StatusCode(502);
+            // Upstream unreachable — fall back to local-only when we have versions to serve.
         }
+
+        if (upstreamHtml is null)
+        {
+            if (localVersions.Count == 0) return NotFound();
+            return RenderLocalSimpleIndex(purlName, localVersions);
+        }
+
+        // Splice local-only filenames into the upstream index so mixed-origin namespaces
+        // expose private versions alongside upstream. Filenames already present in the
+        // upstream HTML are skipped to avoid duplicates.
+        var merged = MergeLocalVersionsIntoUpstreamIndex(upstreamHtml, localVersions);
+        return Content(merged, "text/html; charset=utf-8");
+    }
+
+    private static string MergeLocalVersionsIntoUpstreamIndex(string upstreamHtml, IReadOnlyList<PackageVersion> localVersions)
+    {
+        if (localVersions.Count == 0) return upstreamHtml;
+
+        var sb = new StringBuilder();
+        foreach (var v in localVersions)
+        {
+            var filename = v.BlobKey.Split('/').Last();
+            if (upstreamHtml.Contains($">{filename}<", StringComparison.Ordinal)) continue;
+            var href = OrgPath($"packages/{filename}");
+            if (v.ChecksumSha256 is not null) href += $"#sha256={v.ChecksumSha256}";
+            var yankAttr = v.Yanked
+                ? $" data-yanked=\"{System.Web.HttpUtility.HtmlAttributeEncode(v.YankReason ?? "")}\""
+                : "";
+            sb.Append($"<a href=\"{href}\"{yankAttr}>{filename}</a><br/>");
+        }
+        if (sb.Length == 0) return upstreamHtml;
+
+        var bodyClose = upstreamHtml.LastIndexOf("</body>", StringComparison.OrdinalIgnoreCase);
+        return bodyClose < 0
+            ? upstreamHtml + sb
+            : upstreamHtml[..bodyClose] + sb + upstreamHtml[bodyClose..];
     }
 
     /// <summary>GET /packages/{file} — blob download with proxy cache (tenant-implicit from host)</summary>
     [HttpGet("/packages/{file}")]
     public async Task<IActionResult> DownloadPackage(string file, CancellationToken ct)
     {
+        // Parse name + version up front. PEP 503/440-aware; rejects mis-shaped requests
+        // before any DB / upstream work so corrupt filenames can't reach the recorders.
+        if (!PyPiArtifactValidator.TryParseFilename(file, out var parsedPurlName, out var parsedVersion))
+            return NotFound();
+        var parsed = new PyPiFilename(parsedPurlName!, parsedVersion!);
+
         var orgId = CurrentTenantId();
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         var token = await Request.ResolveTokenAsync(_tokens, ct);
@@ -207,46 +253,48 @@ public partial class PyPiController : ControllerBase
         var authError = CheckDownloadAuth(pkgVersions, token, settings!);
         if (authError is not null) return authError;
 
+        var sourceIp = HttpContext.GetNormalizedRemoteIp();
         if (pkgVersions is not null)
         {
             var v = pkgVersions.Value.Version;
-            var blockResult = await CheckPyPiBlockGateAsync(
-                new BlockProbe(v.Purl, v.Id, v.ManualBlockState, v.VulnCheckedAt),
-                new BlockGateContext(orgId, token?.UserId, settings!), ct);
-            if (blockResult is not null) return blockResult;
+            if (await _blockGate.EvaluateAsync(
+                    new BlockGateRequest(orgId, "pypi", v.Purl, v.Id,
+                        v.ManualBlockState, v.VulnCheckedAt,
+                        token?.UserId, settings!.MaxOsvScoreTolerance, sourceIp), ct)
+                == BlockDecision.Blocked) return StatusCode(403);
 
-            var cached = await TryServeCachedBlobAsync(pkgVersions.Value, file, orgId, token, ct);
+            var cached = await TryServeCachedBlobAsync(pkgVersions.Value, file, orgId, token, sourceIp, ct);
             if (cached is not null) return cached;
         }
 
         // Cache miss — proxy from upstream
         Response.Headers["X-Cache"] = "MISS";
-        var upstreamUrl = await ResolveProxyUpstreamUrlAsync(file, pkgVersions, ct);
+        var upstreamUrl = await ResolveProxyUpstreamUrlAsync(file, parsed, pkgVersions, ct);
         if (upstreamUrl is null) return NotFound();
 
-        var gateError = await CheckProxyAllowlistBlocklistAsync(orgId, file, token, settings!, ct);
+        var gateError = await CheckProxyAllowlistBlocklistAsync(orgId, parsed, token, settings!, sourceIp, ct);
         if (gateError is not null) return gateError;
 
         if (!settings!.ProxyPassthroughEnabled) return NotFound();
 
         // #47: claim state gates the proxy fetch. local_only (including air-gap implicit
         // local_only) disables proxy serving for that name.
-        var purlNameForClaim = pkgVersions is not null
-            ? pkgVersions.Value.Package.PurlName
-            : NormalizePyPiName(file.Split('-')[0]);
+        var purlNameForClaim = pkgVersions?.Package.PurlName ?? parsed.PurlName;
         if (!await _claimResolver.IsProxyFetchAllowedAsync(orgId, "pypi", purlNameForClaim, ct))
             return NotFound();
 
-        return await FetchAndCacheUpstreamAsync(file, upstreamUrl, pkgVersions,
-            new BlockGateContext(orgId, token?.UserId, settings!),
+        return await FetchAndCacheUpstreamAsync(file, upstreamUrl, parsed, pkgVersions,
+            new ProxyContext(orgId, token?.UserId, settings!, sourceIp),
             token, ct);
     }
 
     private IActionResult? CheckDownloadAuth((Package Package, PackageVersion Version)? pkgVersions, TokenRecord? token, OrgSettings settings)
     {
-        if (pkgVersions is not null && !pkgVersions.Value.Package.IsProxy)
+        // Route by per-version origin, not the package-level is_proxy flag. A package name
+        // can host mixed-origin versions; an uploaded version requires auth even if other
+        // versions on the same name are proxy-cached.
+        if (pkgVersions is not null && pkgVersions.Value.Version.Origin == "uploaded")
         {
-            // Hosted package — always require auth
             if (token is null)
             {
                 Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
@@ -263,73 +311,60 @@ public partial class PyPiController : ControllerBase
         return null;
     }
 
-    // Returns 403 IActionResult if the version is blocked (manual or OSV score over tolerance), else null.
-    private async Task<IActionResult?> CheckPyPiBlockGateAsync(
-        BlockProbe probe, BlockGateContext gate, CancellationToken ct)
-    {
-        if (probe.ManualState == "blocked")
-        {
-            await _audit.LogActivityAsync(gate.OrgId, "pypi", probe.Purl, "blocked_manual", gate.UserId, ct: ct);
-            return StatusCode(403);
-        }
-        if (probe.ManualState == "allowed" || probe.VulnCheckedAt is null) return null;
-
-        var maxScore = await _vulns.GetMaxScoreForVersionAsync(probe.VersionId, ct);
-        if (!maxScore.HasValue || maxScore.Value <= gate.Settings.MaxOsvScoreTolerance) return null;
-
-        await _audit.LogActivityAsync(gate.OrgId, "pypi", probe.Purl, "blocked_vuln_score", gate.UserId,
-            detail: $"{{\"max_score\":{maxScore.Value},\"tolerance\":{gate.Settings.MaxOsvScoreTolerance}}}",
-            ct: ct);
-        return StatusCode(403);
-    }
-
-    private sealed record BlockProbe(string Purl, string VersionId, string? ManualState, DateTimeOffset? VulnCheckedAt);
-    private sealed record BlockGateContext(string OrgId, string? UserId, OrgSettings Settings);
-    private sealed record ProxyPayload(string Sha256, string File, byte[] Bytes);
+    // Threading-only record for the PyPi proxy flow — carries the tenant + caller + settings tuple
+    // through FetchAndCacheUpstreamAsync → RecordAndScanFirstFetchAsync so block-gate evaluation
+    // at the tail of first-fetch can fire without re-reading settings.
+    private sealed record ProxyContext(string OrgId, string? UserId, OrgSettings Settings, string? SourceIp = null);
     private sealed record ProxyTenantContext(string OrgId, TokenRecord? Token);
+    private sealed record PyPiFilename(string PurlName, string Version);
 
     private async Task<IActionResult?> TryServeCachedBlobAsync(
-        (Package Package, PackageVersion Version) pkgVer, string file, string orgId, TokenRecord? token, CancellationToken ct)
+        (Package Package, PackageVersion Version) pkgVer, string file, string orgId, TokenRecord? token,
+        string? sourceIp, CancellationToken ct)
     {
         var blob = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVer.Version.BlobKey), ct);
         if (blob is null) return null;
 
         Response.Headers["X-Cache"] = "HIT";
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVer.Version.Purl);
-        await _audit.LogActivityAsync(orgId, "pypi", pkgVer.Version.Purl, "download", token?.UserId, ct: ct);
+        await _audit.LogActivityAsync(orgId, "pypi", pkgVer.Version.Purl, "download", token?.UserId,
+            sourceIp: sourceIp, ct: ct);
         return File(blob, "application/octet-stream", file);
     }
 
     // If we have a known sha256, files.pythonhosted.org uses the sha256 as a path prefix.
     // Otherwise, look it up in the upstream simple index. Returns null on lookup failure.
-    private async Task<string?> ResolveProxyUpstreamUrlAsync(string file, (Package Package, PackageVersion Version)? pkgVersions, CancellationToken ct)
+    private async Task<string?> ResolveProxyUpstreamUrlAsync(string file, PyPiFilename parsed,
+        (Package Package, PackageVersion Version)? pkgVersions, CancellationToken ct)
     {
         var sha256 = pkgVersions?.Version.ChecksumSha256;
         if (sha256 is not null)
             return $"https://files.pythonhosted.org/packages/{sha256[..2]}/{sha256[2..4]}/{sha256}/{file}";
 
         var upstreamBase = _config["PyPI:Upstream"] ?? "https://pypi.org";
-        var pkgName = NormalizePyPiName(file.Split('-')[0]);
-        var url = await ResolveUpstreamPyPiUrlAsync(upstreamBase, pkgName, file, ct);
+        var url = await ResolveUpstreamPyPiUrlAsync(upstreamBase, parsed.PurlName, file, ct);
         return string.IsNullOrEmpty(url) ? null : url;
     }
 
-    private async Task<IActionResult?> CheckProxyAllowlistBlocklistAsync(string orgId, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
+    private async Task<IActionResult?> CheckProxyAllowlistBlocklistAsync(string orgId, PyPiFilename parsed,
+        TokenRecord? token, OrgSettings settings, string? sourceIp, CancellationToken ct)
     {
-        var purlCheck = $"pkg:pypi/{NormalizePyPiName(file.Split('-')[0])}";
-        if (settings.AllowlistMode && !await _allowlist.IsAllowedAsync(orgId, "pypi", purlCheck, ct))
+        var purlCheck = $"pkg:pypi/{parsed.PurlName}";
+        if (settings.AllowlistMode && !await _allowlist.IsAllowedAsync(orgId, purlCheck, ct))
             return StatusCode(403);
-        if (await _blocklist.IsBlockedAsync(orgId, "pypi", purlCheck, ct))
+        if (await _blocklist.IsBlockedAsync(orgId, purlCheck, ct))
         {
-            await _audit.LogActivityAsync(orgId, "pypi", purlCheck, "blocked", token?.UserId, ct: ct);
+            await _audit.LogActivityAsync(orgId, "pypi", purlCheck, "blocked", token?.UserId,
+                sourceIp: sourceIp, ct: ct);
             return StatusCode(403);
         }
         return null;
     }
 
     private async Task<IActionResult> FetchAndCacheUpstreamAsync(
-        string file, string upstreamUrl, (Package Package, PackageVersion Version)? pkgVersions,
-        BlockGateContext gate, TokenRecord? token, CancellationToken ct)
+        string file, string upstreamUrl, PyPiFilename parsed,
+        (Package Package, PackageVersion Version)? pkgVersions,
+        ProxyContext gate, TokenRecord? token, CancellationToken ct)
     {
         try
         {
@@ -342,17 +377,15 @@ public partial class PyPiController : ControllerBase
 
             // #48: record into cache_artifact + tenant_artifact_access on every fetch path
             // (hit and miss). Best-effort — recorder swallows failures.
-            var purlName = pkgVersions is not null
-                ? pkgVersions.Value.Package.PurlName
-                : NormalizePyPiName(file.Split('-')[0]);
-            var version = pkgVersions?.Version.Version ?? ExtractPyPiVersion(file);
+            var purlName = pkgVersions?.Package.PurlName ?? parsed.PurlName;
+            var version = pkgVersions?.Version.Version ?? parsed.Version;
             await _cacheRecorder.RecordAccessAsync(new Dependably.Infrastructure.CacheAccess(
                 gate.OrgId, "pypi", purlName, version, file,
                 computedSha256, bytes.Length, BlobKeys.Proxy(computedSha256), upstreamUrl), ct);
 
             if (!isHit && pkgVersions is null)
             {
-                var firstFetchBlock = await RecordAndScanFirstFetchAsync(file, bytes, computedSha256, gate, token, ct);
+                var firstFetchBlock = await RecordAndScanFirstFetchAsync(file, parsed, bytes, computedSha256, gate, token, ct);
                 if (firstFetchBlock is not null) return firstFetchBlock;
             }
 
@@ -393,68 +426,23 @@ public partial class PyPiController : ControllerBase
     }
 
     private async Task<IActionResult?> RecordAndScanFirstFetchAsync(
-        string file, byte[] bytes, string computedSha256,
-        BlockGateContext gate, TokenRecord? token, CancellationToken ct)
+        string file, PyPiFilename parsed, byte[] bytes, string computedSha256,
+        ProxyContext gate, TokenRecord? token, CancellationToken ct)
     {
-        var purlName = NormalizePyPiName(file.Split('-')[0]);
-        var version = ExtractPyPiVersion(file);
-        var purl = PurlNormalizer.PyPi(purlName, version);
-        var scanVersionId = await RecordOrLookupPyPiVersionAsync(
-            purlName, version, purl,
-            new ProxyPayload(computedSha256, file, bytes),
-            new ProxyTenantContext(gate.OrgId, token), ct);
-        if (scanVersionId is null) return null;
-
-        // Synchronous scan so the OSV gate can fire on the very first fetch.
-        await _scanner.ScanVersionAsync(purl, scanVersionId, "pypi", purlName, gate.OrgId, ct: ct);
-        var existing = await _packages.GetVersionByIdAsync(scanVersionId, ct);
-        return await CheckPyPiBlockGateAsync(
-            new BlockProbe(purl, scanVersionId, existing?.ManualBlockState, DateTimeOffset.UtcNow),
-            gate, ct);
-    }
-
-    private async Task<string?> RecordOrLookupPyPiVersionAsync(
-        string purlName, string version, string purl,
-        ProxyPayload payload, ProxyTenantContext tenant, CancellationToken ct)
-    {
-        try
-        {
-            var pkg = await _packages.GetOrCreateAsync(tenant.OrgId, "pypi", purlName, purlName, isProxy: true, ct);
-            // Store filename in blob key suffix so the simple index can recover it.
-            // Actual blob storage uses BlobKeys.Proxy(sha256); the /filename suffix is metadata-only.
-            var dbBlobKey = $"{BlobKeys.Proxy(payload.Sha256)}/{payload.File}";
-            var newVer = await _packages.CreateVersionAsync(
-                new NewPackageVersion(pkg.Id, version, purl, dbBlobKey, payload.Bytes.Length, payload.Sha256, FirstFetch: true), ct);
-            await _audit.LogActivityAsync(tenant.OrgId, "pypi", purl, "first_fetch", tenant.Token?.UserId, ct: ct);
-
-            var extracted = LicenseExtractor.FromPyPiPackageBytes(payload.Bytes, payload.File);
-            if (extracted.Spdx.Count > 0)
-                await _licenses.SetLicensesAsync(newVer.Id, extracted.Spdx, "upstream", ct);
-
-            return newVer.Id;
-        }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 19)
-        {
-            // Concurrent first fetch already recorded this version — look it up so we can still gate.
-            var pkg = await _packages.GetByPurlNameAsync(tenant.OrgId, "pypi", purlName, ct);
-            if (pkg is null) return null;
-            var existing = await _packages.GetVersionAsync(pkg.Id, version, ct);
-            return existing?.Id;
-        }
-    }
-
-    /// <summary>
-    /// Proxy DB blob keys embed the filename as a suffix: "proxy/{sha256}/{filename}".
-    /// Blob store keys are content-addressed: "proxy/{sha256}".
-    private static string ExtractPyPiVersion(string filename)
-    {
-        var name = filename;
-        if (name.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase)) name = name[..^7];
-        else if (name.EndsWith(".tar.bz2", StringComparison.OrdinalIgnoreCase)) name = name[..^8];
-        else if (name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
-        else if (name.EndsWith(".whl", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
-        var parts = name.Split('-');
-        return parts.Length >= 2 ? parts[1] : "unknown";
+        _ = computedSha256; // ProxyFetchService recomputes inside the trust boundary.
+        var purl = PurlNormalizer.PyPi(parsed.PurlName, parsed.Version);
+        var result = await _proxyFetch.RecordAndScanAsync(new Dependably.Storage.ProxyFetchRequest(
+            OrgId: gate.OrgId, Ecosystem: "pypi",
+            PackageName: parsed.PurlName, PurlName: parsed.PurlName,
+            Version: parsed.Version, Purl: purl, File: file, Bytes: bytes,
+            ExtractLicenses: bytes2 => LicenseExtractor.FromPyPiPackageBytes(bytes2, file),
+            UserId: token?.UserId,
+            SourceIp: gate.SourceIp,
+            MaxOsvScoreTolerance: gate.Settings.MaxOsvScoreTolerance,
+            // PyPI records cache_access separately in FetchAndCacheUpstreamAsync (covers
+            // both hit and miss paths); skip here to avoid the double-write.
+            CacheAccess: null), ct);
+        return result.Decision == BlockDecision.Blocked ? StatusCode(403) : null;
     }
 
     /// <summary>
@@ -640,6 +628,7 @@ public partial class PyPiController : ControllerBase
             AuditAction = "push",
             AllowOverwrite = orgSettings?.AllowVersionOverwrite ?? false,
             ClaimState = claim.State,
+            SourceIp = HttpContext.GetNormalizedRemoteIp(),
         }, ct);
 
         if (result is Dependably.Infrastructure.Publish.PublishResult.Rejected rej)
@@ -724,10 +713,10 @@ public sealed record PyPiControllerServices(
     AllowlistService Allowlist,
     BlocklistRepository Blocklist,
     IConfiguration Config,
-    Dependably.Infrastructure.VulnerabilityScanService Scanner,
-    VulnerabilityRepository Vulns,
+    BlockGateService BlockGate,
     LicenseRepository Licenses,
     PublishGate PublishGate,
     Dependably.Infrastructure.Publish.IPackagePublishService Publish,
     CacheAccessRecorder CacheRecorder,
-    ClaimResolver ClaimResolver);
+    ClaimResolver ClaimResolver,
+    Dependably.Storage.ProxyFetchService ProxyFetch);

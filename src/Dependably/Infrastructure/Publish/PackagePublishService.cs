@@ -138,7 +138,8 @@ public sealed class PackagePublishService : IPackagePublishService
                 request.Ecosystem, request.Purl, detail: request.AuditDetail, ct: ct);
         }
         await _audit.LogActivityAsync(request.OrgId, request.Ecosystem, request.Purl,
-            request.AuditAction, request.ActorUserId, detail: request.AuditDetail, ct: ct);
+            request.AuditAction, request.ActorUserId, detail: request.AuditDetail,
+            sourceIp: request.SourceIp, ct: ct);
 
         // Typed event into audit_event. Action mapping: 'push' → package.publish,
         // 'import' → package.import (carries batch_id + import_mode in the detail).

@@ -83,6 +83,13 @@ public sealed record PublishRequest
     /// reconstruction. Default <c>unclaimed</c> when the caller doesn't pass one.
     /// </summary>
     public string ClaimState { get; init; } = "unclaimed";
+
+    /// <summary>
+    /// Client IP at the time of publish (HTTP-originated calls). Null for background or
+    /// non-HTTP callers (e.g. admin import driven from a job). Recorded on the activity
+    /// row so the lifecycle feed shows where a push originated.
+    /// </summary>
+    public string? SourceIp { get; init; }
 }
 
 /// <summary>Outcome of a <see cref="IPackagePublishService.StoreAndRecordAsync"/> call.</summary>

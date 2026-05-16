@@ -1,5 +1,6 @@
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+using Dependably.Security;
 
 namespace Dependably.Infrastructure.Redis;
 
@@ -30,7 +31,7 @@ public sealed class RedisRateLimitPolicy : IRateLimiterPolicy<string>
             ?.Metadata.GetMetadata<EnableRateLimitingAttribute>()
             ?.PolicyName ?? "unknown";
 
-        var ip = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var ip = httpContext.GetNormalizedRemoteIp() ?? "unknown";
         var bucket = $"{ip}:{policyName}";
 
         if (!PolicyConfig.TryGetValue(policyName, out var cfg))

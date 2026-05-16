@@ -31,13 +31,12 @@ public partial class NpmController : ControllerBase
     private readonly AllowlistService _allowlist;
     private readonly BlocklistRepository _blocklist;
     private readonly IConfiguration _config;
-    private readonly Dependably.Infrastructure.VulnerabilityScanService _scanner;
-    private readonly VulnerabilityRepository _vulns;
+    private readonly BlockGateService _blockGate;
     private readonly LicenseRepository _licenses;
     private readonly IPublicUrlBuilder _urls;
     private readonly IPackagePublishService _publish;
-    private readonly CacheAccessRecorder _cacheRecorder;
     private readonly ClaimResolver _claimResolver;
+    private readonly Dependably.Storage.ProxyFetchService _proxyFetch;
 
     public NpmController(NpmControllerServices svc)
     {
@@ -50,13 +49,12 @@ public partial class NpmController : ControllerBase
         _allowlist = svc.Allowlist;
         _blocklist = svc.Blocklist;
         _config = svc.Config;
-        _scanner = svc.Scanner;
-        _vulns = svc.Vulns;
+        _blockGate = svc.BlockGate;
         _licenses = svc.Licenses;
         _urls = svc.Urls;
         _publish = svc.Publish;
-        _cacheRecorder = svc.CacheRecorder;
         _claimResolver = svc.ClaimResolver;
+        _proxyFetch = svc.ProxyFetch;
     }
 
     // ── Read endpoints (#10) ─────────────────────────────────────────────────
@@ -98,59 +96,95 @@ public partial class NpmController : ControllerBase
 
         var pkg = await _packages.GetByPurlNameAsync(orgId, "npm", purlName, ct);
 
-        if (pkg is not null && !pkg.IsProxy)
+        // Route by passthrough + claims, not packages.is_proxy. A name with uploaded versions
+        // is still a namespace that can hold proxy-fetched versions.
+        var passthroughAllowed = settings!.ProxyPassthroughEnabled
+            && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "npm", purlName, ct);
+
+        if (passthroughAllowed)
         {
-            // Hosted package — require auth
-            if (token is null)
+            if (!settings.AnonymousPull && token is null)
             {
                 Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
                 return Unauthorized();
             }
+            return await ProxyNpmMetadata(fullName, pkg, ct);
         }
-        else if (!settings!.AnonymousPull && token is null)
+
+        // Passthrough disabled or claim-local — serve local-only metadata.
+        if (pkg is null) return NotFound();
+        if (token is null)
         {
             Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
             return Unauthorized();
         }
-
-        // Serve hosted metadata from DB
-        if (pkg is not null && !pkg.IsProxy)
-        {
-            var versions = await _packages.GetVersionsAsync(pkg.Id, ct);
-            return new JsonResult(BuildNpmMetadata(pkg, versions));
-        }
-
-        // Proxy from upstream
-        return await ProxyNpmMetadata(fullName, settings!, token, ct);
+        var versions = await _packages.GetVersionsAsync(pkg.Id, ct);
+        return new JsonResult(BuildNpmMetadata(pkg, versions));
     }
 
     private async Task<IActionResult> ProxyNpmMetadata(
-        string fullName, OrgSettings settings, TokenRecord? token, CancellationToken ct)
+        string fullName, Package? localPkg, CancellationToken ct)
     {
-        if (!settings.AnonymousPull && token is null)
-        {
-            Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
-            return Unauthorized();
-        }
+        var localVersions = localPkg is null
+            ? Array.Empty<PackageVersion>() as IReadOnlyList<PackageVersion>
+            : await _packages.GetVersionsAsync(localPkg.Id, ct);
 
         var upstreamBase = _config["Npm:Upstream"] ?? "https://registry.npmjs.org";
+        JsonNode? metadata = null;
         try
         {
             using var response = await _upstream.GetMetadataAsync($"{upstreamBase}/{fullName}", ct);
-            if (!response.IsSuccessStatusCode) return NotFound();
-
-            var json = await response.Content.ReadAsStringAsync(ct);
-            var metadata = JsonNode.Parse(json);
-            if (metadata is null) return NotFound();
-
-            var tarballBase = NpmTarballBase();
-            RewriteTarballUrls(metadata, fullName, tarballBase);
-
-            return new JsonResult(metadata);
+            if (response.IsSuccessStatusCode)
+            {
+                var json = await response.Content.ReadAsStringAsync(ct);
+                metadata = JsonNode.Parse(json);
+                if (metadata is not null)
+                    RewriteTarballUrls(metadata, fullName, NpmTarballBase());
+            }
         }
         catch
         {
-            return StatusCode(502);
+            // Upstream unreachable — fall back to local versions only when we have them.
+        }
+
+        if (metadata is null)
+        {
+            if (localPkg is null || localVersions.Count == 0) return NotFound();
+            return new JsonResult(BuildNpmMetadata(localPkg, localVersions));
+        }
+
+        // Splice uploaded local versions into the upstream packument so npm install can
+        // discover both private and public versions of the same name.
+        if (localPkg is not null && localVersions.Count > 0)
+            MergeLocalVersionsIntoPackument(metadata, localPkg, localVersions);
+
+        return new JsonResult(metadata);
+    }
+
+    private void MergeLocalVersionsIntoPackument(JsonNode packument, Package localPkg, IReadOnlyList<PackageVersion> localVersions)
+    {
+        var versionsObj = packument["versions"]?.AsObject();
+        if (versionsObj is null)
+        {
+            versionsObj = new JsonObject();
+            packument["versions"] = versionsObj;
+        }
+
+        var tarballBase = NpmTarballBase();
+        foreach (var v in localVersions)
+        {
+            if (versionsObj.ContainsKey(v.Version)) continue;
+            var filename = v.BlobKey.Split('/').Last();
+            versionsObj[v.Version] = new JsonObject
+            {
+                ["name"] = localPkg.Name,
+                ["version"] = v.Version,
+                ["dist"] = new JsonObject
+                {
+                    ["tarball"] = $"{tarballBase}/{localPkg.Name}/{filename}",
+                    ["shasum"] = v.ChecksumSha256 ?? ""
+                }
+            };
         }
     }
 
@@ -234,8 +268,22 @@ public partial class NpmController : ControllerBase
         var token = await Request.ResolveTokenAsync(_tokens, ct);
         var pkgRecord = await _packages.GetByPurlNameAsync(orgId, "npm", fullName, ct);
 
-        if (pkgRecord is not null && !pkgRecord.IsProxy)
-            return await ServeHostedTarballAsync(orgId, pkgRecord, file, token, settings!, ct);
+        // Route by per-version origin, not packages.is_proxy. Extract version from the tarball
+        // filename ({shortName}-{version}.tgz) and branch on that row's origin.
+        var versionFromFilename = ExtractVersionFromTarballFilename(shortName, file);
+        PackageVersion? pkgVersion = null;
+        if (pkgRecord is not null && versionFromFilename is not null)
+            pkgVersion = await _packages.GetVersionAsync(pkgRecord.Id, versionFromFilename, ct);
+
+        if (pkgVersion is not null && pkgVersion.Origin == "uploaded")
+            return await ServeHostedTarballVersionAsync(orgId, pkgVersion, file, token, settings!, ct);
+
+        if (pkgVersion is not null && pkgVersion.Origin == "proxy")
+        {
+            var cached = await ServeCachedProxyTarballAsync(orgId, pkgVersion, file, token, settings!, ct);
+            if (cached is not null) return cached;
+            // Same version row exists but the cached blob doesn't match the requested file — fall through.
+        }
 
         if (!settings!.AnonymousPull && token is null)
         {
@@ -243,35 +291,36 @@ public partial class NpmController : ControllerBase
             return Unauthorized();
         }
 
-        // Allowlist / blocklist check before fetching
         var purlCheck = PurlNormalizer.Npm(fullName, "0.0.0").Split('@')[0]; // name-only PURL
-        if (settings?.AllowlistMode == true && !await _allowlist.IsAllowedAsync(orgId, "npm", purlCheck, ct))
+        if (settings?.AllowlistMode == true && !await _allowlist.IsAllowedAsync(orgId, purlCheck, ct))
             return StatusCode(403);
-        if (await _blocklist.IsBlockedAsync(orgId, "npm", purlCheck, ct))
+        if (await _blocklist.IsBlockedAsync(orgId, purlCheck, ct))
         {
-            await _audit.LogActivityAsync(orgId, "npm", purlCheck, "blocked", token?.UserId, ct: ct);
+            await _audit.LogActivityAsync(orgId, "npm", purlCheck, "blocked", token?.UserId,
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
             return StatusCode(403);
-        }
-
-        if (pkgRecord is { IsProxy: true })
-        {
-            var blockResult = await CheckExistingProxyVersionBlockAsync(pkgRecord, shortName, file, orgId, token, settings!, ct);
-            if (blockResult is not null) return blockResult;
         }
 
         if (!settings!.ProxyPassthroughEnabled)
             return NotFound();
 
-        // #47: claim state gates the proxy fetch. local_only (or air-gap implicit local_only)
-        // disables proxy serving — the operator has reserved this name for local versions only.
+        // #47: claim state gates the proxy fetch.
         if (!await _claimResolver.IsProxyFetchAllowedAsync(orgId, "npm", fullName, ct))
             return NotFound();
 
         return await ProxyFetchAndCacheAsync(orgId, fullName, shortName, file, token, settings!, ct);
     }
 
-    private async Task<IActionResult> ServeHostedTarballAsync(
-        string orgId, Package pkgRecord, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
+    private static string? ExtractVersionFromTarballFilename(string shortName, string file)
+    {
+        var baseName = file.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase) ? file[..^4] : file;
+        return baseName.Length > shortName.Length + 1 && baseName.StartsWith(shortName + "-", StringComparison.Ordinal)
+            ? baseName[(shortName.Length + 1)..]
+            : null;
+    }
+
+    private async Task<IActionResult> ServeHostedTarballVersionAsync(
+        string orgId, PackageVersion pkgVersion, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
         if (token is null)
         {
@@ -280,103 +329,77 @@ public partial class NpmController : ControllerBase
         }
         if (!token.HasCapability(Capabilities.ReadArtifact)) return Forbid();
 
-        var versions = await _packages.GetVersionsAsync(pkgRecord.Id, ct);
-        var match = versions.FirstOrDefault(v => v.BlobKey.EndsWith("/" + file));
-        if (match is null) return NotFound();
+        if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase)) return NotFound();
 
-        var blockResult = await CheckBlockGateAsync(
-            new BlockProbe(match.Purl, match.Id, match.ManualBlockState, match.VulnCheckedAt),
-            new BlockGateContext(orgId, token.UserId, settings), ct);
-        if (blockResult is not null) return blockResult;
+        var sourceIp = HttpContext.GetNormalizedRemoteIp();
+        if (await _blockGate.EvaluateAsync(
+                new BlockGateRequest(orgId, "npm", pkgVersion.Purl, pkgVersion.Id,
+                    pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
+                    token.UserId, settings.MaxOsvScoreTolerance, sourceIp), ct)
+            == BlockDecision.Blocked) return StatusCode(403);
 
-        var stream = await _blobs.GetAsync(BlobKeys.StoreKey(match.BlobKey), ct);
+        var stream = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
         if (stream is null) return NotFound();
 
         Response.Headers["X-Cache"] = "HIT";
-        Response.Headers["X-Dependably-PURL"] = SanitizeHeader(match.Purl);
-        await _audit.LogActivityAsync(orgId, "npm", match.Purl, "download", token.UserId, ct: ct);
+        Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
+        await _audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token.UserId,
+            sourceIp: sourceIp, ct: ct);
         return File(stream, "application/octet-stream", file);
     }
 
-    private async Task<IActionResult?> CheckExistingProxyVersionBlockAsync(
-        Package pkgRecord, string shortName, string file, string orgId, TokenRecord? token, OrgSettings settings, CancellationToken ct)
+    private async Task<IActionResult?> ServeCachedProxyTarballAsync(
+        string orgId, PackageVersion pkgVersion, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
-        var baseName = file.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase) ? file[..^4] : file;
-        var proxyVersion = baseName.Length > shortName.Length + 1 ? baseName[(shortName.Length + 1)..] : null;
-        if (proxyVersion is null) return null;
+        var sourceIp = HttpContext.GetNormalizedRemoteIp();
+        if (await _blockGate.EvaluateAsync(
+                new BlockGateRequest(orgId, "npm", pkgVersion.Purl, pkgVersion.Id,
+                    pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
+                    token?.UserId, settings.MaxOsvScoreTolerance, sourceIp), ct)
+            == BlockDecision.Blocked) return StatusCode(403);
 
-        var proxyVer = await _packages.GetVersionAsync(pkgRecord.Id, proxyVersion, ct);
-        if (proxyVer is null) return null;
+        if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase)) return null;
 
-        return await CheckBlockGateAsync(
-            new BlockProbe(proxyVer.Purl, proxyVer.Id, proxyVer.ManualBlockState, proxyVer.VulnCheckedAt),
-            new BlockGateContext(orgId, token?.UserId, settings), ct);
+        var stream = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
+        if (stream is null) return null;
+
+        Response.Headers["X-Cache"] = "HIT";
+        Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
+        await _audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token?.UserId,
+            sourceIp: sourceIp, ct: ct);
+        return File(stream, "application/octet-stream", file);
     }
-
-    // Returns 403 IActionResult if the version is blocked (manual or OSV score over tolerance), else null.
-    private async Task<IActionResult?> CheckBlockGateAsync(
-        BlockProbe probe, BlockGateContext gate, CancellationToken ct)
-    {
-        if (probe.ManualState == "blocked")
-        {
-            await _audit.LogActivityAsync(gate.OrgId, "npm", probe.Purl, "blocked_manual", gate.UserId, ct: ct);
-            return StatusCode(403);
-        }
-        if (probe.ManualState == "allowed" || probe.VulnCheckedAt is null) return null;
-
-        var maxScore = await _vulns.GetMaxScoreForVersionAsync(probe.VersionId, ct);
-        if (!maxScore.HasValue || maxScore.Value <= gate.Settings.MaxOsvScoreTolerance) return null;
-
-        await _audit.LogActivityAsync(gate.OrgId, "npm", probe.Purl, "blocked_vuln_score", gate.UserId,
-            detail: $"{{\"max_score\":{maxScore.Value},\"tolerance\":{gate.Settings.MaxOsvScoreTolerance}}}",
-            ct: ct);
-        return StatusCode(403);
-    }
-
-    private sealed record BlockProbe(string Purl, string VersionId, string? ManualState, DateTimeOffset? VulnCheckedAt);
-    private sealed record BlockGateContext(string OrgId, string? UserId, OrgSettings Settings);
 
     private async Task<IActionResult> ProxyFetchAndCacheAsync(
         string orgId, string fullName, string shortName, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
         var upstreamBase = _config["Npm:Upstream"] ?? "https://registry.npmjs.org";
+        var upstreamUrl = $"{upstreamBase}/{fullName}/-/{file}";
         Response.Headers["X-Cache"] = "MISS";
 
         try
         {
-            using var resp = await _upstream.GetMetadataAsync($"{upstreamBase}/{fullName}/-/{file}", ct);
+            using var resp = await _upstream.GetMetadataAsync(upstreamUrl, ct);
             if (!resp.IsSuccessStatusCode) return NotFound();
             var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
-
-            var sha256 = ChecksumVerifier.ComputeSha256Hex(bytes);
-            var blobKey = BlobKeys.Proxy(sha256);
-            if (!await _blobs.ExistsAsync(blobKey, ct))
-                await _blobs.PutAsync(blobKey, new MemoryStream(bytes), ct);
 
             var baseName = file.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase) ? file[..^4] : file;
             var version = baseName.Length > shortName.Length + 1 ? baseName[(shortName.Length + 1)..] : "unknown";
             var purl = PurlNormalizer.Npm(fullName, version);
 
-            // #48: record into cache_artifact + tenant_artifact_access. Best-effort.
-            await _cacheRecorder.RecordAccessAsync(new CacheAccess(
-                orgId, "npm", fullName, version, file, sha256, bytes.Length,
-                blobKey, $"{upstreamBase}/{fullName}/-/{file}"), ct);
+            var result = await _proxyFetch.RecordAndScanAsync(new Dependably.Storage.ProxyFetchRequest(
+                OrgId: orgId, Ecosystem: "npm",
+                PackageName: fullName, PurlName: fullName,
+                Version: version, Purl: purl, File: file, Bytes: bytes,
+                ExtractLicenses: LicenseExtractor.FromNpmTarballPackageJson,
+                UserId: token?.UserId,
+                SourceIp: HttpContext.GetNormalizedRemoteIp(),
+                MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
+                CacheAccess: new CacheAccess(orgId, "npm", fullName, version, file,
+                    Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: upstreamUrl)
+            ), ct);
 
-            var scanVersionId = await RecordOrLookupProxyVersionAsync(
-                fullName, version, purl,
-                new ProxyPayload(sha256, file, bytes),
-                new ProxyTenantContext(orgId, token), ct);
-
-            if (scanVersionId is not null)
-            {
-                await _scanner.ScanVersionAsync(purl, scanVersionId, "npm", fullName, orgId, ct: ct);
-                var existing = await _packages.GetVersionByIdAsync(scanVersionId, ct);
-                var postScanBlock = await CheckBlockGateAsync(
-                    new BlockProbe(purl, scanVersionId, existing?.ManualBlockState, DateTimeOffset.UtcNow),
-                    new BlockGateContext(orgId, token?.UserId, settings), ct);
-                if (postScanBlock is not null) return postScanBlock;
-            }
-
+            if (result.Decision == BlockDecision.Blocked) return StatusCode(403);
             return File(bytes, "application/octet-stream", file);
         }
         catch (Microsoft.Data.Sqlite.SqliteException) { throw; }
@@ -385,38 +408,6 @@ public partial class NpmController : ControllerBase
             return NotFound();
         }
     }
-
-    private async Task<string?> RecordOrLookupProxyVersionAsync(
-        string fullName, string version, string purl,
-        ProxyPayload payload, ProxyTenantContext tenant, CancellationToken ct)
-    {
-        try
-        {
-            var record = await _packages.GetOrCreateAsync(tenant.OrgId, "npm", fullName, fullName, isProxy: true, ct);
-            var dbBlobKey = $"{BlobKeys.Proxy(payload.Sha256)}/{payload.File}";
-            var newVer = await _packages.CreateVersionAsync(
-                new NewPackageVersion(record.Id, version, purl, dbBlobKey, payload.Bytes.Length, payload.Sha256, FirstFetch: true), ct);
-            await _audit.LogActivityAsync(tenant.OrgId, "npm", purl, "first_fetch", tenant.Token?.UserId, ct: ct);
-
-            // License from the tarball's package.json. Deprecation only lives in the
-            // packument (separate fetch), so it's intentionally not populated here.
-            var extracted = LicenseExtractor.FromNpmTarballPackageJson(payload.Bytes);
-            if (extracted.Spdx.Count > 0)
-                await _licenses.SetLicensesAsync(newVer.Id, extracted.Spdx, "upstream", ct);
-
-            return newVer.Id;
-        }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 19)
-        {
-            var pkg = await _packages.GetByPurlNameAsync(tenant.OrgId, "npm", fullName, ct);
-            if (pkg is null) return null;
-            var existing = await _packages.GetVersionAsync(pkg.Id, version, ct);
-            return existing?.Id;
-        }
-    }
-
-    private sealed record ProxyPayload(string Sha256, string File, byte[] Bytes);
-    private sealed record ProxyTenantContext(string OrgId, TokenRecord? Token);
 
 
     // ── Publish endpoint (#11) ───────────────────────────────────────────────
@@ -484,42 +475,62 @@ public partial class NpmController : ControllerBase
         // ── Shared tail (path safety, claim gate, dedup, blob put, version, audit) ──
         var orgSettings = await _orgs.GetSettingsAsync(orgId, ct);
         var claim = await _claimResolver.ResolveAsync(orgId, "npm", fullName, ct);
-        var result = await _publish.StoreAndRecordAsync(new PublishRequest
-        {
-            OrgId = orgId,
-            Ecosystem = "npm",
-            Name = fullName,
-            PurlName = fullName,
-            Version = versionKey!,
-            Filename = filename,
-            Purl = PurlNormalizer.Npm(fullName, versionKey!),
-            ArtifactBytes = tarball!,
-            Origin = "uploaded",
-            SizeCap = long.MaxValue,           // already enforced above; service is defence-in-depth
-            ActorUserId = token.UserId,
-            AuditAction = "push",
-            AllowOverwrite = orgSettings?.AllowVersionOverwrite ?? false,
-            ClaimState = claim.State,
-        }, ct);
+        var request = BuildNpmPublishRequest(new NpmPublishContext(
+            orgId, fullName, versionKey!, filename, tarball!,
+            token.UserId, orgSettings?.AllowVersionOverwrite ?? false, claim.State));
+        var result = await _publish.StoreAndRecordAsync(request, ct);
 
         if (result is PublishResult.Rejected rej) return MapPublishRejection(rej, versionKey!);
 
-        // License: read the tarball's package.json (canonical, and matches the proxy
-        // first-fetch path at RecordOrLookupProxyVersionAsync). Fall back to the
-        // packument when the tarball lacks a parseable package/package.json — many
-        // publish clients don't include license in the packument's version object.
-        // Deprecation only ever lives in the packument (npm deprecate writes there),
-        // so it must always come from the packument extractor.
-        var fromTarball = LicenseExtractor.FromNpmTarballPackageJson(tarball!);
-        var fromPackument = LicenseExtractor.FromNpmPackumentVersion(versions?[versionKey!]);
-        var spdx = fromTarball.Spdx.Count > 0 ? fromTarball.Spdx : fromPackument.Spdx;
         var versionId = ((PublishResult.Accepted)result).VersionId;
+        await EmitNpmLicensesAndDeprecationAsync(versionId, tarball!, versions?[versionKey!], ct);
+        return Ok();
+    }
+
+    // Bundles BuildNpmPublishRequest's tail-end coordinates into a single param to keep the
+    // builder's signature within S107's threshold while preserving the ergonomic call shape.
+    private sealed record NpmPublishContext(
+        string OrgId, string FullName, string VersionKey, string Filename, byte[] Tarball,
+        string? ActorUserId, bool AllowOverwrite, string ClaimState);
+
+    private PublishRequest BuildNpmPublishRequest(NpmPublishContext ctx)
+        => new()
+        {
+            OrgId = ctx.OrgId,
+            Ecosystem = "npm",
+            Name = ctx.FullName,
+            PurlName = ctx.FullName,
+            Version = ctx.VersionKey,
+            Filename = ctx.Filename,
+            Purl = PurlNormalizer.Npm(ctx.FullName, ctx.VersionKey),
+            ArtifactBytes = ctx.Tarball,
+            // Already enforced by CheckUploadSizeAsync; service-side cap is defence in depth.
+            SizeCap = long.MaxValue,
+            Origin = "uploaded",
+            ActorUserId = ctx.ActorUserId,
+            AuditAction = "push",
+            AllowOverwrite = ctx.AllowOverwrite,
+            ClaimState = ctx.ClaimState,
+            SourceIp = HttpContext.GetNormalizedRemoteIp(),
+        };
+
+    /// <summary>
+    /// License: read the tarball's package.json (canonical, matches the proxy first-fetch
+    /// path). Fall back to the packument when the tarball lacks a parseable
+    /// package/package.json — many publish clients don't include license in the
+    /// packument's version object. Deprecation only ever lives in the packument (npm
+    /// deprecate writes there), so it must always come from the packument extractor.
+    /// </summary>
+    private async Task EmitNpmLicensesAndDeprecationAsync(
+        string versionId, byte[] tarball, JsonNode? packumentVersion, CancellationToken ct)
+    {
+        var fromTarball = LicenseExtractor.FromNpmTarballPackageJson(tarball);
+        var fromPackument = LicenseExtractor.FromNpmPackumentVersion(packumentVersion);
+        var spdx = fromTarball.Spdx.Count > 0 ? fromTarball.Spdx : fromPackument.Spdx;
         if (spdx.Count > 0)
             await _licenses.SetLicensesAsync(versionId, spdx, "upstream", ct);
         if (fromPackument.Deprecated is not null)
             await _packages.UpdateDeprecatedAsync(versionId, fromPackument.Deprecated, ct);
-
-        return Ok();
     }
 
     private ObjectResult MapPublishRejection(PublishResult.Rejected rej, string versionKey) => rej.Code switch
@@ -624,11 +635,9 @@ public sealed record NpmControllerServices(
     AllowlistService Allowlist,
     BlocklistRepository Blocklist,
     IConfiguration Config,
-    Dependably.Infrastructure.VulnerabilityScanService Scanner,
-    VulnerabilityRepository Vulns,
+    BlockGateService BlockGate,
     LicenseRepository Licenses,
     IPublicUrlBuilder Urls,
-    PublishGate PublishGate,
     IPackagePublishService Publish,
-    CacheAccessRecorder CacheRecorder,
-    ClaimResolver ClaimResolver);
+    ClaimResolver ClaimResolver,
+    Dependably.Storage.ProxyFetchService ProxyFetch);

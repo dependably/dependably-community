@@ -42,6 +42,8 @@ public sealed class MetricsAccessMiddleware
     private bool IsAllowed(IPAddress ip)
     {
         var mapped = ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip;
+        // Range-check stays on the IPAddress object (not the string form) because
+        // IPNetwork.Contains needs the parsed address.
         return _allowedRanges.Any(r => r.Contains(mapped));
     }
 }

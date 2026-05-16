@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
+  import ErrorBanner from '../lib/ErrorBanner.svelte'
 
   let mode = 'off'
   let allowEntries = []
@@ -55,7 +56,7 @@
   <p class="intro">{$t(`licensePolicy.intro.${mode}`)}</p>
 
   {#if error}
-    <div class="page-error">{error}</div>
+    <ErrorBanner message={error} />
   {:else if loading}
     <span class="spinner"></span>
   {:else}

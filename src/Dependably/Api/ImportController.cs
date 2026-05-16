@@ -413,6 +413,7 @@ public sealed class ImportController : ControllerBase
             AuditAction = "import",
             AuditDetail = AuditDetailFor(ctx.BatchId, detection.Ecosystem),
             ClaimState = claim.State,
+            SourceIp = HttpContext.GetNormalizedRemoteIp(),
         };
         var result = dryRun
             ? await _publish.ValidateAsync(request, ct)

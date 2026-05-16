@@ -1,6 +1,7 @@
 <script>
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
+  import { extractErrorMessage } from '../lib/form.js'
 
   let files = []
   let dragOver = false
@@ -55,7 +56,7 @@
       lastResult = await api.upload(files)
       if ((lastResult?.rejected ?? 0) === 0) files = []
     } catch (e) {
-      error = e.body?.detail || e.message
+      error = extractErrorMessage(e)
     } finally {
       uploading = false
     }
@@ -110,7 +111,7 @@
       }
       closeClaimModal()
     } catch (e) {
-      claimError = e.body?.detail || e.message
+      claimError = extractErrorMessage(e)
     } finally {
       claimSubmitting = false
     }

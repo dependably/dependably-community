@@ -1,10 +1,11 @@
 <script>
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
+  import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { currentOrg } from '../lib/store.js'
   import { formatDateShort } from '../lib/format.js'
   import { copyToClipboard } from '../lib/clipboard.js'
-  import { sortIndicator } from '../lib/sortIndicator.js'
+  import DataTable from '../lib/DataTable.svelte'
   import { presetToCapabilities, capabilitiesToLabel } from '../lib/tokenCapabilities.js'
 
   let tokens = [], loading = true, error = ''
@@ -46,19 +47,17 @@
 
   function expired(t) { return t.expiresAt && new Date(t.expiresAt) < new Date() }
 
-  let sortCol = 'createdAt', sortDir = 'desc'
   // The "scope" column displays a label derived from capabilities, so sort by that
-  // same label when the user clicks the header. Other columns sort by raw field.
-  $: sorted = [...tokens].sort((a, b) => {
-    const key = (row) => sortCol === 'scope' ? capabilitiesToLabel(row.capabilities) : row[sortCol] ?? ''
-    const av = key(a), bv = key(b)
-    if (av < bv) return sortDir === 'asc' ? -1 : 1
-    if (av > bv) return sortDir === 'asc' ? 1 : -1
-    return 0
-  })
-  function toggleSort(col) {
-    if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc'
-    else { sortCol = col; sortDir = 'asc' }
+  // derived label when the user clicks the header. Other columns sort by the raw field.
+  $: columns = [
+    { key: 'id',        label: $t('tokens.columns.id'),      sortable: false, width: '100px' },
+    { key: 'scope',     label: $t('tokens.columns.scope'),   sortable: true,  width: '80px' },
+    { key: 'createdAt', label: $t('tokens.columns.created'), sortable: true,  width: '110px', defaultDir: 'desc' },
+    { key: 'expiresAt', label: $t('tokens.columns.expires'), sortable: true,  width: '130px' },
+    { key: 'actions',   label: '',                           sortable: false, width: '90px' },
+  ]
+  const comparators = {
+    scope: (a, b) => capabilitiesToLabel(a.capabilities).localeCompare(capabilitiesToLabel(b.capabilities)),
   }
 </script>
 
@@ -81,50 +80,30 @@
     </div>
   {/if}
 
-  {#if error}<div class="page-error">{error}</div>{/if}
-  {#if loading}<span class="spinner"></span>
-  {:else}
-    <table class="tokens-table">
-      <colgroup>
-        <col class="col-id"><!-- id truncated -->
-        <col class="col-scope"><!-- scope badge -->
-        <col class="col-created"><!-- created date -->
-        <col class="col-expires"><!-- expires date/badge -->
-        <col class="col-actions"><!-- actions -->
-      </colgroup>
-      <thead><tr>
-        <th>{$t('tokens.columns.id')}</th>
-        <th class="sortable" on:click={() => toggleSort('scope')}>{$t('tokens.columns.scope')}{sortIndicator('scope', sortCol, sortDir)}</th>
-        <th class="sortable" on:click={() => toggleSort('createdAt')}>{$t('tokens.columns.created')}{sortIndicator('createdAt', sortCol, sortDir)}</th>
-        <th class="sortable" on:click={() => toggleSort('expiresAt')}>{$t('tokens.columns.expires')}{sortIndicator('expiresAt', sortCol, sortDir)}</th>
-        <th></th>
-      </tr></thead>
-      <tbody>
-        {#each sorted as tok (tok.id)}
-          <tr>
-            <td class="t-mono t-sm">{tok.id.slice(0,8)}…</td>
-            <td><span class="badge">{capabilitiesToLabel(tok.capabilities)}</span></td>
-            <td class="text-muted">{$formatDateShort(tok.createdAt)}</td>
-            <td>
-              {#if expired(tok)}<span class="badge expired">{$t('tokens.expired')}</span>
-              {:else}{tok.expiresAt ? $formatDateShort(tok.expiresAt) : '—'}{/if}
-            </td>
-            <td><button class="danger btn-sm" on:click={() => revoke(tok.id)}>{$t('common.actions.revoke')}</button></td>
-          </tr>
-        {/each}
-        {#if tokens.length === 0}<tr><td colspan="5" class="text-center text-muted">{$t('tokens.empty')}</td></tr>{/if}
-      </tbody>
-    </table>
-  {/if}
+  <ErrorBanner message={error} />
+  <DataTable
+    {columns}
+    rows={tokens}
+    {comparators}
+    {loading}
+    initialSort={{ key: 'createdAt', dir: 'desc' }}
+    emptyText={$t('tokens.empty')}
+    tableClass="tokens-table"
+    let:row={tok}
+  >
+    <tr>
+      <td class="t-mono t-sm">{tok.id.slice(0,8)}…</td>
+      <td><span class="badge">{capabilitiesToLabel(tok.capabilities)}</span></td>
+      <td class="text-muted">{$formatDateShort(tok.createdAt)}</td>
+      <td>
+        {#if expired(tok)}<span class="badge expired">{$t('tokens.expired')}</span>
+        {:else}{tok.expiresAt ? $formatDateShort(tok.expiresAt) : '—'}{/if}
+      </td>
+      <td><button class="danger btn-sm" on:click={() => revoke(tok.id)}>{$t('common.actions.revoke')}</button></td>
+    </tr>
+  </DataTable>
 </div>
 
-<style>
-  .tokens-table .col-id      { width: 100px; }
-  .tokens-table .col-scope   { width: 80px; }
-  .tokens-table .col-created { width: 110px; }
-  .tokens-table .col-expires { width: 130px; }
-  .tokens-table .col-actions { width: 90px; }
-</style>
 
 {#if showCreate}
   <div class="modal-backdrop">

@@ -526,3 +526,302 @@ table td, .copy-block { font-variant-numeric: tabular-nums; }
 
 /* Card variant */
 .card.success { border-color: var(--success); }
+
+/* ── Authentication tab — SAML grouped card with numbered steps ────────
+   New visual surface introduced in the SAML redesign. All selectors are
+   scoped to .auth-tab so the patterns are local to this page until/unless
+   we generalise them. Once another page wants "grouped card with stepped
+   rows", lift the .saml-group + .step rules out of this scope. */
+.auth-tab .saml-group {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  overflow: hidden;
+}
+.auth-tab .saml-group-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.auth-tab .saml-group-header .ico {
+  width: 36px; height: 36px; flex: 0 0 auto;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.auth-tab .saml-group-title {
+  font-size: 14px; font-weight: 600;
+  margin: 0;
+  letter-spacing: -0.005em;
+}
+.auth-tab .saml-group-sub {
+  font-size: 12px; color: var(--text2);
+  margin: 2px 0 0;
+}
+.auth-tab .saml-group-status { margin-left: auto; }
+
+/* Status pill — shown in the SAML group header. */
+.auth-tab .status-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 99px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text2);
+}
+.auth-tab .status-pill .dot {
+  width: 8px; height: 8px; border-radius: 99px;
+  background: var(--text2);
+}
+.auth-tab .status-pill.ready {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  color: var(--accent);
+}
+.auth-tab .status-pill.ready .dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.auth-tab .status-pill.enabled {
+  background: var(--success-soft);
+  border-color: var(--success-border);
+  color: var(--success);
+}
+.auth-tab .status-pill.enabled .dot {
+  background: var(--success);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 20%, transparent);
+}
+.auth-tab .status-pill.draft {
+  background: var(--warning-soft);
+  border-color: var(--warning-border);
+  color: var(--warning-text, var(--warning));
+}
+.auth-tab .status-pill.draft .dot { background: var(--warning); }
+
+/* Numbered step row — used inside .saml-group. */
+.auth-tab .step {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  gap: 14px;
+  padding: 18px;
+  border-top: 1px solid var(--border);
+}
+.auth-tab .step:first-of-type { border-top: 0; }
+.auth-tab .step .num {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: var(--bg3);
+  color: var(--text2);
+  border: 1px solid var(--border);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 600;
+  font-family: var(--mono, 'JetBrains Mono', ui-monospace, monospace);
+  margin-top: 2px;
+}
+.auth-tab .step.done .num {
+  background: var(--accent-soft);
+  border-color: var(--accent-soft);
+  color: var(--accent);
+}
+.auth-tab .step.current .num {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.auth-tab .step h4 {
+  margin: 0 0 6px;
+  font-size: 14px; font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+}
+.auth-tab .step .step-hint {
+  font-size: 12px; color: var(--text2);
+  margin: 0 0 12px;
+  max-width: 64ch;
+}
+
+/* Pill-style toggle — replaces the bare <input type="checkbox"> in the
+   methods card for the two sign-in toggles. The native checkbox is still
+   the input element; the .track is a styled label sibling. */
+.auth-tab .toggle {
+  --w: 38px; --h: 22px;
+  position: relative; display: inline-block;
+  width: var(--w); height: var(--h);
+  flex-shrink: 0;
+}
+.auth-tab .toggle input {
+  opacity: 0; width: 0; height: 0; position: absolute;
+}
+.auth-tab .toggle .track {
+  position: absolute; inset: 0;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  cursor: pointer;
+  transition: .15s;
+}
+.auth-tab .toggle .track::after {
+  content: "";
+  position: absolute; top: 2px; left: 2px;
+  width: 16px; height: 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  transition: .15s;
+}
+.auth-tab .toggle input:checked + .track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.auth-tab .toggle input:checked + .track::after {
+  left: calc(100% - 18px);
+  background: var(--on-accent);
+  border-color: var(--on-accent);
+}
+.auth-tab .toggle input:focus-visible + .track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.auth-tab .toggle input:disabled + .track {
+  opacity: .45; cursor: not-allowed;
+}
+
+/* Methods row — Forms login / SAML SSO rows in the top card. */
+.auth-tab .method {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.auth-tab .method:last-child { border-bottom: 0; }
+.auth-tab .method .label { flex: 1; }
+.auth-tab .method .name {
+  font-size: 13px; font-weight: 600;
+  color: var(--text);
+  margin: 0 0 2px;
+  display: flex; align-items: center; gap: 8px;
+}
+.auth-tab .method .desc {
+  font-size: 12px; color: var(--text2);
+  margin: 0;
+}
+
+/* Test card — accent-soft surface, becomes neutral when no recent test. */
+.auth-tab .test-card {
+  display: flex; align-items: flex-start; gap: 14px;
+  border: 1px solid var(--accent-soft);
+  background: var(--accent-soft);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.auth-tab .test-card.idle {
+  background: var(--bg);
+  border-color: var(--border);
+}
+.auth-tab .test-card .ico {
+  flex: 0 0 auto;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: var(--accent); color: var(--on-accent);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.auth-tab .test-card.idle .ico {
+  background: var(--bg3); color: var(--text2);
+}
+.auth-tab .test-card .body { flex: 1; }
+.auth-tab .test-card .title {
+  font-size: 13px; font-weight: 600;
+  margin: 0 0 2px;
+}
+.auth-tab .test-card .meta {
+  font-size: 12px; color: var(--text2);
+  margin: 0;
+}
+.auth-tab .test-card .actions {
+  display: flex; gap: 8px; align-items: center;
+}
+
+/* File input — dashed-border drop zone for IdP metadata XML. */
+.auth-tab .file-input {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.auth-tab .file-input .ico {
+  color: var(--text2);
+  flex: 0 0 auto;
+}
+.auth-tab .file-input .copy {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text2);
+}
+.auth-tab .file-input .copy b {
+  color: var(--text); font-weight: 600;
+  display: block; margin-bottom: 2px;
+}
+
+/* Disclosure for "Advanced SAML settings" — replaces the bare card pattern
+   so connection-field overrides only surface when the operator opens them. */
+.auth-tab .disclosure {
+  border-top: 1px solid var(--border);
+  background: var(--bg2);
+}
+.auth-tab .disclosure-summary {
+  list-style: none; cursor: pointer;
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 18px;
+  font-size: 13px; font-weight: 600;
+  color: var(--text);
+}
+.auth-tab .disclosure-summary::-webkit-details-marker { display: none; }
+.auth-tab .disclosure-summary .chev {
+  display: inline-flex;
+  width: 16px; height: 16px;
+  color: var(--text2);
+  transition: transform .15s;
+}
+.auth-tab details[open] > .disclosure-summary .chev { transform: rotate(90deg); }
+.auth-tab .disclosure-summary .sub {
+  font-weight: 400; color: var(--text2);
+  font-size: 12px; margin-left: 6px;
+}
+.auth-tab .disclosure-body { padding: 6px 18px 18px; }
+/* Inside the disclosure, the save row carries a hint span next to the button
+   — vertically centre them. Other .save-row usages have a single button so
+   align-items has no visual effect. */
+.auth-tab .save-row { align-items: center; }
+
+/* Sticky save bar — dirty-only. Surfaces when a form-field block needs an
+   explicit Save. Currently used by the Authentication tab's Advanced
+   disclosure; reuse if another page picks up the same pattern. */
+.auth-tab .save-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+  margin-top: 18px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg2) 92%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.04);
+}
+.auth-tab .save-bar .changed {
+  font-size: 12px;
+  color: var(--text2);
+  flex: 1;
+}
+.auth-tab .save-bar .changed b {
+  color: var(--text);
+  font-weight: 600;
+}

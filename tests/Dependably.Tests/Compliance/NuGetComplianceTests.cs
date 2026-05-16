@@ -37,7 +37,7 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
     }
 
     [Fact]
-    public async Task ServiceIndex_HasFiveRequiredResourceTypes()
+    public async Task ServiceIndex_HasRequiredResourceTypes()
     {
         var token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
@@ -53,9 +53,54 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
 
         Assert.Contains("SearchQueryService", types);
         Assert.Contains("RegistrationsBaseUrl", types);
+        // SemVer 2-aware clients pick this entry over the unversioned RegistrationsBaseUrl.
+        Assert.Contains("RegistrationsBaseUrl/3.6.0", types);
         Assert.Contains("PackageBaseAddress/3.0.0", types);
         Assert.Contains("PackagePublish/2.0.0", types);
         Assert.Contains("SymbolPackagePublish/4.9.0", types);
+    }
+
+    /// <summary>
+    /// Tooling like xunit.runner.visualstudio probes the registration5-* URL shapes
+    /// directly rather than reading the service index. Every variant must dispatch to
+    /// the same handler so a hardcoded path doesn't 404. Single push + five probes —
+    /// theory'd inline data would 409 on every iteration after the first because the
+    /// factory's tenant DB is shared across theory rows.
+    /// </summary>
+    [Fact]
+    public async Task Registration_RouteAliases_AllDispatchToHandler()
+    {
+        await _factory.PushNuGetPackage("AliasPkg", "1.2.3");
+
+        var token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        var aliases = new[]
+        {
+            "/nuget/registration/aliaspkg/",
+            "/nuget/registration5-semver1/aliaspkg/",
+            "/nuget/registration5-gz-semver1/aliaspkg/",
+            "/nuget/registration5-semver2/aliaspkg/",
+            "/nuget/registration5-gz-semver2/aliaspkg/",
+        };
+
+        foreach (var path in aliases)
+        {
+            // Upstream WireMock returns 404 for unstubbed paths, which exercises the
+            // fall-back-to-local branch — perfect for proving the route reached the handler.
+            var resp = await client.GetAsync(path);
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+            var json = await resp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            var versions = doc.RootElement
+                .GetProperty("items").EnumerateArray()
+                .SelectMany(p => p.GetProperty("items").EnumerateArray())
+                .Select(e => e.GetProperty("catalogEntry").GetProperty("version").GetString())
+                .ToList();
+            Assert.True(versions.Contains("1.2.3"),
+                $"Alias {path} did not return the pushed version; got: [{string.Join(",", versions)}]");
+        }
     }
 
     // ── Nuspec namespace validation ───────────────────────────────────────────

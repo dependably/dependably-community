@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { t, locale } from 'svelte-i18n'
   import { systemApi } from '../lib/api.js'
+  import { submitForm, extractErrorMessage } from '../lib/form.js'
   import { user, theme, navigate, takePendingRoute } from '../lib/store.js'
   import { locales, switchLocale } from '../lib/locale.js'
 
@@ -19,7 +20,7 @@
 
   onMount(async () => {
     try { me = await systemApi.me() }
-    catch (e) { loadError = e.message }
+    catch (e) { loadError = extractErrorMessage(e) }
     finally { loading = false }
   })
 
@@ -40,27 +41,24 @@
     if (newPassword.length < 12) { modalError = $t('profile.errorMinLength'); return }
     if (newPassword !== confirm) { modalError = $t('profile.errorMismatch'); return }
     if (newPassword === currentPassword) { modalError = $t('profile.errorSame'); return }
-    saving = true
     const wasForced = forced
-    try {
-      await systemApi.changePassword(currentPassword, newPassword)
-      const refreshed = await systemApi.me()
-      me = refreshed
-      user.set({ ...$user, mustChangePassword: false })
-      passwordSavedAt = new Date()
-      currentPassword = ''; newPassword = ''; confirm = ''
-      showModal = false
-      if (wasForced) {
-        // Forced flow: bounce out of /profile once rotation completes. Consume any pending
-        // deep link, falling back to the tenants list.
-        const pending = takePendingRoute()
-        navigate(pending?.page ?? 'system-tenants', pending?.params ?? {}, { replace: true })
-      }
-    } catch (e) {
-      modalError = e.message
-    } finally {
-      saving = false
-    }
+    await submitForm(() => systemApi.changePassword(currentPassword, newPassword), {
+      setSaving: v => saving     = v,
+      setError:  v => modalError = v,
+      onSuccess: async () => {
+        me = await systemApi.me()
+        user.set({ ...$user, mustChangePassword: false })
+        passwordSavedAt = new Date()
+        currentPassword = ''; newPassword = ''; confirm = ''
+        showModal = false
+        if (wasForced) {
+          // Forced flow: bounce out of /profile once rotation completes. Consume any pending
+          // deep link, falling back to the tenants list.
+          const pending = takePendingRoute()
+          navigate(pending?.page ?? 'system-tenants', pending?.params ?? {}, { replace: true })
+        }
+      },
+    })
   }
 </script>
 

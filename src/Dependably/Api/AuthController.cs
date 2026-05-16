@@ -1,9 +1,9 @@
 using System.IdentityModel.Tokens.Jwt;
-using Dapper;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Dependably.Infrastructure;
+using Dependably.Security;
 
 namespace Dependably.Api;
 
@@ -12,26 +12,26 @@ namespace Dependably.Api;
 public sealed class AuthController : ControllerBase
 {
     private readonly LoginService _login;
+    private readonly UserService _users;
     private readonly InviteRepository _invites;
     private readonly JwtRevocationRepository _revocations;
-    private readonly IMetadataStore _db;
     private readonly AuditRepository _audit;
     private readonly SamlConfigRepository _samlConfig;
     private readonly IPublicUrlBuilder _urls;
 
     public AuthController(
         LoginService login,
+        UserService users,
         InviteRepository invites,
         JwtRevocationRepository revocations,
-        IMetadataStore db,
         AuditRepository audit,
         SamlConfigRepository samlConfig,
         IPublicUrlBuilder urls)
     {
         _login = login;
+        _users = users;
         _invites = invites;
         _revocations = revocations;
-        _db = db;
         _audit = audit;
         _samlConfig = samlConfig;
         _urls = urls;
@@ -79,15 +79,16 @@ public sealed class AuthController : ControllerBase
         // Fork on resolved TenantContext rather than route shape — login is the same endpoint
         // for both tenant users (subdomain or single-mode) and system_admins (multi-mode apex).
         var ctx = HttpContext.Items[TenantContext.HttpItemsKey] as TenantContext;
+        var sourceIp = HttpContext.GetNormalizedRemoteIp();
 
         (string? token, string? error, int? retryAfter) result;
         if (ctx is not null && ctx.IsApex)
         {
-            result = await _login.LoginSystemAsync(req.Email, req.Password, ct);
+            result = await _login.LoginSystemAsync(req.Email, req.Password, sourceIp, ct);
         }
         else if (ctx is not null && ctx.IsTenant && ctx.TenantId is not null)
         {
-            result = await _login.LoginTenantAsync(req.Email, req.Password, ctx.TenantId, ct);
+            result = await _login.LoginTenantAsync(req.Email, req.Password, ctx.TenantId, sourceIp, ct);
         }
         else
         {
@@ -126,28 +127,13 @@ public sealed class AuthController : ControllerBase
         if (invite is null)
             return StatusCode(410, new { detail = "Invite token is invalid, expired, or already used." });
 
-        var passwordHash = BCrypt.Net.BCrypt.HashPassword(req.Password, workFactor: 12);
-        var userId = Guid.NewGuid().ToString("N");
-
-        await using var conn = await _db.OpenAsync(ct);
-        // 1:1 user:tenant — invite carries the tenant (org_id) the user is joining; insert
-        // directly with that tenant_id and the invite's stored role (defaults to 'member').
-        await conn.ExecuteAsync(
-            """
-            INSERT INTO users (id, tenant_id, email, password_hash, role)
-            VALUES (@id, @tenantId, @email, @hash, @role)
-            """,
-            new
-            {
-                id = userId,
-                tenantId = invite.OrgId,
-                email = invite.Email,
-                hash = passwordHash,
-                role = invite.Role ?? "member",
-            });
+        // 1:1 user:tenant — invite carries the tenant the user is joining; UserService inserts
+        // directly with that tenant_id and the invite's stored role.
+        await _users.CreateFromInviteAsync(invite, req.Password, ct);
 
         // Auto-login. Invite is tenant-scoped, so we know which tenant to authenticate against.
-        var (token, _, _) = await _login.LoginTenantAsync(invite.Email, req.Password, invite.OrgId, ct);
+        var (token, _, _) = await _login.LoginTenantAsync(invite.Email, req.Password, invite.OrgId,
+            HttpContext.GetNormalizedRemoteIp(), ct);
         if (token is null)
         {
             // Account was created successfully but auto-login failed — this is unexpected.
@@ -174,26 +160,19 @@ public sealed class AuthController : ControllerBase
             ?? User.FindFirst("sub")?.Value;
         if (sub is null) return Unauthorized();
 
-        await using var conn = await _db.OpenAsync(ct);
-        var current = await conn.QueryFirstOrDefaultAsync<(string Email, string Hash)>(
-            "SELECT email AS Email, password_hash AS Hash FROM users WHERE id = @id",
-            new { id = sub });
-        if (current.Hash is null) return Unauthorized();
+        var outcome = await _users.ChangePasswordAsync(sub, req.CurrentPassword, req.NewPassword, ct);
+        switch (outcome)
+        {
+            case PasswordChangeOutcome.UserNotFound:
+                return Unauthorized();
+            case PasswordChangeOutcome.CurrentPasswordIncorrect:
+                return Unauthorized(new { detail = "Current password is incorrect." });
+            case PasswordChangeOutcome.NewPasswordSameAsOld:
+                return BadRequest(new { detail = "New password must differ from current password." });
+        }
 
-        if (!BCrypt.Net.BCrypt.Verify(req.CurrentPassword, current.Hash))
-            return Unauthorized(new { detail = "Current password is incorrect." });
-
-        // Reject reusing the same password — users hitting forced rotation must actually rotate.
-        if (BCrypt.Net.BCrypt.Verify(req.NewPassword, current.Hash))
-            return BadRequest(new { detail = "New password must differ from current password." });
-
-        var newHash = BCrypt.Net.BCrypt.HashPassword(req.NewPassword, workFactor: 12);
-        await conn.ExecuteAsync(
-            "UPDATE users SET password_hash = @hash, must_change_password = 0 WHERE id = @id",
-            new { hash = newHash, id = sub });
-
-        await _audit.LogAsync(action: "user.password_changed", actorId: sub, ct: ct);
-
+        await _audit.LogAsync(action: "user.password_changed", actorId: sub,
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return Ok(new { message = "Password changed." });
     }
 
@@ -233,36 +212,17 @@ public sealed class AuthController : ControllerBase
         var orgId = User.FindFirst("org_id")?.Value;
         var role = User.FindFirst("role")?.Value;
 
-        bool mustChangePassword = false;
-        string? userLanguage = null;
-        string? tenantDefaultLanguage = null;
-        if (sub is not null)
-        {
-            await using var conn = await _db.OpenAsync(ct);
-            var row = await conn.QuerySingleOrDefaultAsync<(int MustChangePassword, string? Language)>(
-                "SELECT must_change_password AS MustChangePassword, language AS Language FROM users WHERE id = @id",
-                new { id = sub });
-            mustChangePassword = row.MustChangePassword == 1;
-            userLanguage = string.IsNullOrEmpty(row.Language) ? null : row.Language;
-
-            if (orgId is not null)
-            {
-                tenantDefaultLanguage = await conn.ExecuteScalarAsync<string?>(
-                    "SELECT default_language FROM org_settings WHERE org_id = @orgId",
-                    new { orgId });
-            }
-        }
-
-        var resolvedLanguage = userLanguage
-            ?? (string.IsNullOrEmpty(tenantDefaultLanguage) ? LanguageCodes.Default : tenantDefaultLanguage);
-        var tenantDefault = string.IsNullOrEmpty(tenantDefaultLanguage) ? LanguageCodes.Default : tenantDefaultLanguage;
+        var ctx = sub is not null ? await _users.GetUserContextAsync(sub, orgId, ct) : null;
+        var tenantDefault = string.IsNullOrEmpty(ctx?.TenantDefaultLanguage)
+            ? LanguageCodes.Default : ctx.TenantDefaultLanguage;
+        var resolvedLanguage = ctx?.Language ?? tenantDefault;
 
         return Ok(new
         {
             userId = sub,
             orgId,
             role,
-            mustChangePassword,
+            mustChangePassword = ctx?.MustChangePassword ?? false,
             language = resolvedLanguage,
             tenantDefaultLanguage = tenantDefault,
         });
@@ -281,10 +241,7 @@ public sealed class AuthController : ControllerBase
         if (sub is null) return Unauthorized();
         var orgId = User.FindFirst("org_id")?.Value;
 
-        await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
-            "UPDATE users SET language = @lang WHERE id = @id",
-            new { lang = req.Language, id = sub });
+        await _users.UpdateLanguageAsync(sub, req.Language, ct);
 
         await _audit.LogAsync(
             action: "user.language_changed",

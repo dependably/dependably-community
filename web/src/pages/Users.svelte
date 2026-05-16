@@ -1,10 +1,12 @@
 <script>
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
+  import { submitForm, extractErrorMessage } from '../lib/form.js'
+  import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { currentOrg, user } from '../lib/store.js'
   import { formatDateShort } from '../lib/format.js'
   import { copyToClipboard } from '../lib/clipboard.js'
-  import { sortIndicator } from '../lib/sortIndicator.js'
+  import DataTable from '../lib/DataTable.svelte'
 
   let users = [], invites = [], tab = 'members', loading = true, error = ''
   let showInvite = false, inviteEmail = '', inviteRole = 'member', inviting = false, inviteLink = null
@@ -35,30 +37,25 @@
     setTimeout(() => inviteCopyState = '', 2000)
   }
 
-  let memberSortCol = 'email', memberSortDir = 'asc'
-  $: sortedUsers = [...users].sort((a, b) => {
-    let av = a[memberSortCol] ?? '', bv = b[memberSortCol] ?? ''
-    if (av < bv) return memberSortDir === 'asc' ? -1 : 1
-    if (av > bv) return memberSortDir === 'asc' ? 1 : -1
-    return 0
-  })
-  function toggleMemberSort(col) {
-    if (memberSortCol === col) memberSortDir = memberSortDir === 'asc' ? 'desc' : 'asc'
-    else { memberSortCol = col; memberSortDir = 'asc' }
-  }
-
-  let inviteSortCol = 'createdAt', inviteSortDir = 'desc'
   function inviteStatus(inv) { return inv.acceptedAt ? 'accepted' : inviteExpired(inv) ? 'expired' : 'pending' }
-  $: sortedInvites = [...invites].sort((a, b) => {
-    let av = inviteSortCol === 'status' ? inviteStatus(a) : (a[inviteSortCol] ?? '')
-    let bv = inviteSortCol === 'status' ? inviteStatus(b) : (b[inviteSortCol] ?? '')
-    if (av < bv) return inviteSortDir === 'asc' ? -1 : 1
-    if (av > bv) return inviteSortDir === 'asc' ? 1 : -1
-    return 0
-  })
-  function toggleInviteSort(col) {
-    if (inviteSortCol === col) inviteSortDir = inviteSortDir === 'asc' ? 'desc' : 'asc'
-    else { inviteSortCol = col; inviteSortDir = 'asc' }
+
+  $: memberColumns = [
+    { key: 'email',       label: $t('users.members.columns.email'),  sortable: true },
+    { key: 'role',        label: $t('users.members.columns.role'),   sortable: true, width: '110px' },
+    { key: 'accountType', label: $t('users.members.columns.type'),   sortable: true, width: '80px' },
+    { key: 'joinedAt',    label: $t('users.members.columns.joined'), sortable: true, width: '110px' },
+    { key: 'actions',     label: '',                                 sortable: false, width: '180px' },
+  ]
+
+  $: inviteColumns = [
+    { key: 'email',     label: $t('users.invites.columns.email'),   sortable: true },
+    { key: 'createdAt', label: $t('users.invites.columns.invited'), sortable: true, width: '110px', defaultDir: 'desc' },
+    { key: 'expiresAt', label: $t('users.invites.columns.expires'), sortable: true, width: '110px' },
+    { key: 'status',    label: $t('users.invites.columns.status'),  sortable: true, width: '90px' },
+    { key: 'actions',   label: '',                                  sortable: false, width: '90px' },
+  ]
+  const inviteComparators = {
+    status: (a, b) => inviteStatus(a).localeCompare(inviteStatus(b)),
   }
 
   $: org = $currentOrg
@@ -79,7 +76,7 @@
     try {
       const [u, inv] = await Promise.all([api.listUsers(), api.listInvites()])
       users = u; invites = inv
-    } catch (e) { error = e.message }
+    } catch (e) { error = extractErrorMessage(e) }
     finally { loading = false }
   }
 
@@ -99,27 +96,26 @@
   }
   async function saveRole(u) {
     if (editingRole === u.role) { cancelEditRole(); return }
-    savingRole = true
-    try {
-      await api.updateUserRole(u.userId, editingRole)
-      users = users.map(row => row.userId === u.userId ? { ...row, role: editingRole } : row)
-      cancelEditRole()
-    } catch (e) {
-      error = e.message
-    } finally {
-      savingRole = false
-    }
+    await submitForm(() => api.updateUserRole(u.userId, editingRole), {
+      setSaving: v => savingRole = v,
+      setError:  v => error      = v,
+      onSuccess: () => {
+        users = users.map(row => row.userId === u.userId ? { ...row, role: editingRole } : row)
+        cancelEditRole()
+      },
+    })
   }
 
   async function invite() {
-    inviting = true
-    try {
-      const data = await api.createInvite(inviteEmail, inviteRole)
-      inviteLink = data.invite_link
-      invites = [...invites, data.record]
-      showInvite = false; inviteEmail = ''; inviteRole = 'member'
-    } catch (e) { error = e.message }
-    finally { inviting = false }
+    await submitForm(() => api.createInvite(inviteEmail, inviteRole), {
+      setSaving: v => inviting = v,
+      setError:  v => error    = v,
+      onSuccess: (data) => {
+        inviteLink = data.invite_link
+        invites = [...invites, data.record]
+        showInvite = false; inviteEmail = ''; inviteRole = 'member'
+      },
+    })
   }
 
   async function cancelInvite(id) {
@@ -151,116 +147,86 @@
     </div>
   {/if}
 
-  {#if error}<div class="page-error">{error}</div>{/if}
+  <ErrorBanner message={error} />
 
   <div class="tabs">
     <button class="tab" class:active={tab==='members'} on:click={() => tab='members'}>{$t('users.tabs.members', { values: { count: users.length } })}</button>
     <button class="tab" class:active={tab==='invites'} on:click={() => tab='invites'}>{$t('users.tabs.pendingInvites', { values: { count: pendingCount } })}</button>
   </div>
 
-  {#if loading}<span class="spinner"></span>
-  {:else if tab === 'members'}
-    <table class="table-auto members-table">
-      <colgroup>
-        <col><!-- email: flexible -->
-        <col class="col-role"><!-- role -->
-        <col class="col-type"><!-- type -->
-        <col class="col-joined"><!-- joined date -->
-        <col class="col-actions"><!-- actions -->
-      </colgroup>
-      <thead><tr>
-        <th class="sortable" on:click={() => toggleMemberSort('email')}>{$t('users.members.columns.email')}{sortIndicator('email', memberSortCol, memberSortDir)}</th>
-        <th class="sortable" on:click={() => toggleMemberSort('role')}>{$t('users.members.columns.role')}{sortIndicator('role', memberSortCol, memberSortDir)}</th>
-        <th class="sortable" on:click={() => toggleMemberSort('accountType')}>{$t('users.members.columns.type')}{sortIndicator('accountType', memberSortCol, memberSortDir)}</th>
-        <th class="sortable" on:click={() => toggleMemberSort('joinedAt')}>{$t('users.members.columns.joined')}{sortIndicator('joinedAt', memberSortCol, memberSortDir)}</th>
-        <th></th>
-      </tr></thead>
-      <tbody>
-        {#each sortedUsers as u (u.userId)}
-          <tr>
-            <td>{u.email}</td>
-            <td>
-              {#if editingUserId === u.userId}
-                <select bind:value={editingRole} class="role-select">
-                  {#each rolesAvailableTo(viewerRole) as r (r)}
-                    <option value={r}>{roleLabel(r)}</option>
-                  {/each}
-                </select>
-              {:else}
-                {roleLabel(u.role)}
+  {#if tab === 'members'}
+    <DataTable
+      columns={memberColumns}
+      rows={users}
+      {loading}
+      initialSort={{ key: 'email', dir: 'asc' }}
+      emptyText={$t('users.members.empty')}
+      tableClass="table-auto members-table"
+      let:row={u}
+    >
+      <tr>
+        <td>{u.email}</td>
+        <td>
+          {#if editingUserId === u.userId}
+            <select bind:value={editingRole} class="role-select">
+              {#each rolesAvailableTo(viewerRole) as r (r)}
+                <option value={r}>{roleLabel(r)}</option>
+              {/each}
+            </select>
+          {:else}
+            {roleLabel(u.role)}
+          {/if}
+        </td>
+        <td>{accountTypeLabel(u.accountType)}</td>
+        <td class="text-muted">{$formatDateShort(u.joinedAt)}</td>
+        <td>
+          <div class="row-actions">
+            {#if editingUserId === u.userId}
+              <button class="primary btn-sm" disabled={savingRole} on:click={() => saveRole(u)}>{$t('users.members.saveRole')}</button>
+              <button class="btn-sm" disabled={savingRole} on:click={cancelEditRole}>{$t('users.members.cancelRole')}</button>
+            {:else}
+              {#if canEditRow(u)}
+                <button class="btn-sm" on:click={() => startEditRole(u)}>{$t('users.members.changeRole')}</button>
+              {:else if u.role === 'owner' && viewerCanManageRoles}
+                <span class="text-muted btn-sm" title={$t('users.members.ownerLocked')}>—</span>
               {/if}
-            </td>
-            <td>{accountTypeLabel(u.accountType)}</td>
-            <td class="text-muted">{$formatDateShort(u.joinedAt)}</td>
-            <td>
-              <div class="row-actions">
-                {#if editingUserId === u.userId}
-                  <button class="primary btn-sm" disabled={savingRole} on:click={() => saveRole(u)}>{$t('users.members.saveRole')}</button>
-                  <button class="btn-sm" disabled={savingRole} on:click={cancelEditRole}>{$t('users.members.cancelRole')}</button>
-                {:else}
-                  {#if canEditRow(u)}
-                    <button class="btn-sm" on:click={() => startEditRole(u)}>{$t('users.members.changeRole')}</button>
-                  {:else if u.role === 'owner' && viewerCanManageRoles}
-                    <span class="text-muted btn-sm" title={$t('users.members.ownerLocked')}>—</span>
-                  {/if}
-                  <button class="danger btn-sm" on:click={() => removeUser(u.userId)}>{$t('common.actions.remove')}</button>
-                {/if}
-              </div>
-            </td>
-          </tr>
-        {/each}
-        {#if users.length === 0}<tr><td colspan="5" class="text-center text-muted">{$t('users.members.empty')}</td></tr>{/if}
-      </tbody>
-    </table>
+              <button class="danger btn-sm" on:click={() => removeUser(u.userId)}>{$t('common.actions.remove')}</button>
+            {/if}
+          </div>
+        </td>
+      </tr>
+    </DataTable>
   {:else}
-    <table class="table-auto invites-table">
-      <colgroup>
-        <col><!-- email: flexible -->
-        <col class="col-invited"><!-- invited date -->
-        <col class="col-expires"><!-- expires date -->
-        <col class="col-status"><!-- status badge -->
-        <col class="col-actions"><!-- actions -->
-      </colgroup>
-      <thead><tr>
-        <th class="sortable" on:click={() => toggleInviteSort('email')}>{$t('users.invites.columns.email')}{sortIndicator('email', inviteSortCol, inviteSortDir)}</th>
-        <th class="sortable" on:click={() => toggleInviteSort('createdAt')}>{$t('users.invites.columns.invited')}{sortIndicator('createdAt', inviteSortCol, inviteSortDir)}</th>
-        <th class="sortable" on:click={() => toggleInviteSort('expiresAt')}>{$t('users.invites.columns.expires')}{sortIndicator('expiresAt', inviteSortCol, inviteSortDir)}</th>
-        <th class="sortable" on:click={() => toggleInviteSort('status')}>{$t('users.invites.columns.status')}{sortIndicator('status', inviteSortCol, inviteSortDir)}</th>
-        <th></th>
-      </tr></thead>
-      <tbody>
-        {#each sortedInvites as inv (inv.id)}
-          <tr>
-            <td>{inv.email}</td>
-            <td class="text-muted">{$formatDateShort(inv.createdAt)}</td>
-            <td>{$formatDateShort(inv.expiresAt)}</td>
-            <td>
-              {#if inv.acceptedAt}<span class="badge success">{$t('users.invites.status.accepted')}</span>
-              {:else if inviteExpired(inv)}<span class="badge expired">{$t('users.invites.status.expired')}</span>
-              {:else}<span class="badge">{$t('users.invites.status.pending')}</span>{/if}
-            </td>
-            <td>
-              {#if !inv.acceptedAt}<button class="danger btn-sm" on:click={() => cancelInvite(inv.id)}>{$t('users.invites.cancel')}</button>{/if}
-            </td>
-          </tr>
-        {/each}
-        {#if invites.length === 0}<tr><td colspan="5" class="text-center text-muted">{$t('users.invites.empty')}</td></tr>{/if}
-      </tbody>
-    </table>
+    <DataTable
+      columns={inviteColumns}
+      rows={invites}
+      comparators={inviteComparators}
+      {loading}
+      initialSort={{ key: 'createdAt', dir: 'desc' }}
+      emptyText={$t('users.invites.empty')}
+      tableClass="table-auto invites-table"
+      let:row={inv}
+    >
+      <tr>
+        <td>{inv.email}</td>
+        <td class="text-muted">{$formatDateShort(inv.createdAt)}</td>
+        <td>{$formatDateShort(inv.expiresAt)}</td>
+        <td>
+          {#if inv.acceptedAt}<span class="badge success">{$t('users.invites.status.accepted')}</span>
+          {:else if inviteExpired(inv)}<span class="badge expired">{$t('users.invites.status.expired')}</span>
+          {:else}<span class="badge">{$t('users.invites.status.pending')}</span>{/if}
+        </td>
+        <td>
+          {#if !inv.acceptedAt}<button class="danger btn-sm" on:click={() => cancelInvite(inv.id)}>{$t('users.invites.cancel')}</button>{/if}
+        </td>
+      </tr>
+    </DataTable>
   {/if}
 </div>
 
 <style>
   .row-actions { display: flex; gap: 6px; align-items: center; }
   .role-select { padding: 2px 6px; }
-  .members-table .col-role    { width: 110px; }
-  .members-table .col-type    { width: 80px; }
-  .members-table .col-joined  { width: 110px; }
-  .members-table .col-actions { width: 180px; }
-  .invites-table .col-invited { width: 110px; }
-  .invites-table .col-expires { width: 110px; }
-  .invites-table .col-status  { width: 90px; }
-  .invites-table .col-actions { width: 90px; }
 </style>
 
 {#if showInvite}

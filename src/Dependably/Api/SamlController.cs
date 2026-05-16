@@ -222,7 +222,7 @@ public sealed class SamlController : ControllerBase
         if (string.IsNullOrWhiteSpace(nameId))
             return SamlFailure(isTest, "missing_nameid", "Assertion did not include a NameID.", 400);
 
-        var email = ExtractEmail(authnResponse, cfg!);
+        var email = Dependably.Infrastructure.Saml.EmailAttributeResolver.Resolve(authnResponse, cfg!);
 
         if (isTest)
         {
@@ -231,7 +231,8 @@ public sealed class SamlController : ControllerBase
             return RedirectToTestResult(email: email, nameId: nameId);
         }
 
-        var result = await _login.LoginSamlAsync(tenant.TenantId!, cfg!.IdpEntityId!, nameId, email, ct);
+        var result = await _login.LoginSamlAsync(tenant.TenantId!, cfg!.IdpEntityId!, nameId, email,
+            HttpContext.GetNormalizedRemoteIp(), ct);
         if (result.Token is null)
             return Problem(statusCode: 401, detail: result.Error ?? "SAML login failed.");
 
@@ -398,43 +399,6 @@ public sealed class SamlController : ControllerBase
         return saml2;
     }
 
-    private static string? ExtractEmail(Saml2AuthnResponse response, TenantSamlConfig cfg)
-    {
-        // Attribute override wins. Look for the configured attribute by name (case-insensitive).
-        if (!string.IsNullOrWhiteSpace(cfg.EmailAttribute))
-        {
-            var match = response.ClaimsIdentity.Claims
-                .FirstOrDefault(c => string.Equals(c.Type, cfg.EmailAttribute, StringComparison.OrdinalIgnoreCase));
-            if (match is not null && !string.IsNullOrWhiteSpace(match.Value)) return match.Value;
-        }
-
-        // Common email claim types issued by Okta/AzureAD/ADFS (in priority order).
-        foreach (var name in new[] {
-            "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
-            "urn:oid:0.9.2342.19200300.100.1.3",
-            "email",
-            "mail",
-            "EmailAddress",
-        })
-        {
-            var match = response.ClaimsIdentity.Claims
-                .FirstOrDefault(c => string.Equals(c.Type, name, StringComparison.OrdinalIgnoreCase));
-            if (match is not null && !string.IsNullOrWhiteSpace(match.Value)) return match.Value;
-        }
-
-        // Fall back to NameID when its format is the email format.
-        var nameIdFormat = response.NameId?.Format?.OriginalString;
-        var nameIdValue = response.NameId?.Value;
-        if (!string.IsNullOrWhiteSpace(nameIdValue) &&
-            (nameIdFormat is null
-             || nameIdFormat.Equals(NameIdentifierFormats.Email.OriginalString, StringComparison.OrdinalIgnoreCase)
-             || nameIdValue.Contains('@')))
-        {
-            return nameIdValue;
-        }
-
-        return null;
-    }
 
     // ── Test cookie (Data Protection-signed) ──────────────────────────────────
 

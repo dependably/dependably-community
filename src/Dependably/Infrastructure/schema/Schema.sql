@@ -142,19 +142,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_unique_pending
 CREATE TABLE IF NOT EXISTS allowlist (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,
     purl_pattern TEXT NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    UNIQUE (org_id, ecosystem, purl_pattern)
+    UNIQUE (org_id, purl_pattern)
 );
 
 CREATE TABLE IF NOT EXISTS blocklist (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,
-    pattern     TEXT NOT NULL,  -- regex pattern matched against package PURL
+    pattern     TEXT NOT NULL,  -- regex matched against the full package PURL
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    UNIQUE (org_id, ecosystem, pattern)
+    UNIQUE (org_id, pattern)
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -170,6 +168,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     ecosystem   TEXT,
     purl        TEXT,
     detail      TEXT,           -- JSON
+    source_ip   TEXT,           -- canonical remote IP (IPv4-mapped IPv6 collapsed); null for background paths
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_scope ON audit_log(scope, created_at DESC);
@@ -182,6 +181,7 @@ CREATE TABLE IF NOT EXISTS activity (
     event_type  TEXT NOT NULL,  -- 'push' | 'pull' | 'first_fetch' | 'delete' | 'vuln_scan' | 'login.success' | 'login.failure' | 'login.locked'
     actor_id    TEXT,
     detail      TEXT,
+    source_ip   TEXT,           -- captured for HTTP-originated events (downloads, push, delete, blocked_*); null for background paths
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 

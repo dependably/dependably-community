@@ -12,6 +12,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.IdentityModel.Tokens;
 using Dependably.Infrastructure;
+using Dependably.Security;
 using Dependably.Storage;
 using WireMock.Server;
 
@@ -50,6 +51,12 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         // Remove the SqliteMetadataStore singleton registered inside ConfigureBuilder
         builder.Services.RemoveAll<IMetadataStore>();
         builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+
+        // Tests point Upstream URLs at the WireMock server on localhost; the production
+        // SSRF validator (UpstreamUrlValidator) blocks 127.0.0.0/8. Substitute a permissive
+        // validator so MockUpstream is reachable. Production wiring is unaffected.
+        builder.Services.RemoveAll<IUpstreamUrlValidator>();
+        builder.Services.AddSingleton<IUpstreamUrlValidator, PermissiveUpstreamUrlValidator>();
 
         builder.WebHost.UseTestServer();
 

@@ -1,9 +1,10 @@
 <script>
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
+  import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { currentOrg } from '../lib/store.js'
   import { formatDate } from '../lib/format.js'
-  import { sortIndicator } from '../lib/sortIndicator.js'
+  import DataTable from '../lib/DataTable.svelte'
   import Pagination from '../lib/Pagination.svelte'
 
   // Tab state — Lifecycle (activity feed) is the default; Admin actions (audit_log) loads when its tab is selected.
@@ -13,16 +14,14 @@
   let lcItems = [], lcLoading = true, lcError = ''
   let lcFilterType = ''
   let lcPage = 1, lcLimit = 50, lcTotal = 0
-  let lcSortCol = 'createdAt', lcSortDir = 'desc'
 
-  $: lcSorted = [...lcItems].sort((a, b) => {
-    let av = a[lcSortCol] ?? '', bv = b[lcSortCol] ?? ''
-    if (typeof av === 'string') av = av.toLowerCase()
-    if (typeof bv === 'string') bv = bv.toLowerCase()
-    if (av < bv) return lcSortDir === 'asc' ? -1 : 1
-    if (av > bv) return lcSortDir === 'asc' ? 1 : -1
-    return 0
-  })
+  $: lcColumns = [
+    { key: 'createdAt',  label: $t('activity.columns.time'),   sortable: true, defaultDir: 'desc', width: '150px' },
+    { key: 'eventType',  label: $t('activity.columns.event'),  sortable: true, width: '110px' },
+    { key: 'purl',       label: $t('activity.columns.purl'),   sortable: true },
+    { key: 'detail',     label: $t('activity.columns.detail'), sortable: true, width: '200px' },
+    { key: 'actorEmail', label: $t('activity.columns.actor'),  sortable: true, width: '180px' },
+  ]
 
   async function loadLifecycle() {
     lcLoading = true
@@ -40,9 +39,20 @@
   function lcOnPageChange(e) { lcPage = e.detail.page; loadLifecycle() }
   function lcOnLimitChange(e) { lcLimit = e.detail.limit; lcPage = 1; loadLifecycle() }
   function lcOnFilterChange() { lcPage = 1; loadLifecycle() }
-  function lcToggleSort(col) {
-    if (lcSortCol === col) lcSortDir = lcSortDir === 'asc' ? 'desc' : 'asc'
-    else { lcSortCol = col; lcSortDir = col === 'createdAt' ? 'desc' : 'asc' }
+
+  async function lcExport() {
+    try {
+      const p = {}
+      if (lcFilterType) p.event_type = lcFilterType
+      await api.exportActivity(p)
+    } catch (e) { lcError = e.message }
+  }
+  async function adExport() {
+    try {
+      const p = {}
+      if (adFilterAction) p.action = adFilterAction
+      await api.exportAudit(p)
+    } catch (e) { adError = e.message }
   }
 
   const EVENT_COLORS = {
@@ -64,13 +74,41 @@
 
   // ── Admin actions tab (audit_log scope='tenant') ─────────────────────────
   let adItems = [], adLoading = false, adError = ''
+  let adFilterAction = ''
   let adPage = 1, adLimit = 50, adTotal = 0
+
+  // Tenant audit actions, grouped for the filter dropdown. Backend uses exact-match
+  // filtering on the action column at scope='tenant'; system-scope actions
+  // (tenant.created, system_admin.*, instance_settings_updated) are deliberately
+  // excluded because ListAuditAsync filters them out and they'd be dead options.
+  // Mirrors the catalogue tracked in en.json#audit.actions / en.json#audit.groups.
+  const TENANT_AUDIT_ACTION_GROUPS = [
+    { labelKey: 'audit.groups.tenantConfig', actions: ['org_settings_updated', 'retention_updated', 'proxy_settings_updated', 'tenant.setting.change'] },
+    { labelKey: 'audit.groups.auth',         actions: ['login.success', 'login.failure', 'lockout.triggered', 'user.password_changed', 'user.language_changed'] },
+    { labelKey: 'audit.groups.saml',         actions: ['saml.config_updated', 'saml.metadata_uploaded', 'saml.config_deleted', 'auth.saml.login.success', 'auth.saml.login.failure', 'auth.saml.user_linked', 'auth.saml.user_provisioned', 'auth.saml.test.success'] },
+    { labelKey: 'audit.groups.tokens',       actions: ['token_created', 'token_revoked', 'cicd_token_created', 'cicd_token_revoked'] },
+    { labelKey: 'audit.groups.usersInvites', actions: ['member_role_changed', 'member_removed', 'invite_created', 'invite_deleted'] },
+    { labelKey: 'audit.groups.lists',        actions: ['allowlist_added', 'allowlist_removed', 'blocklist_added', 'blocklist_removed'] },
+    { labelKey: 'audit.groups.licenses',     actions: ['license_policy_mode_changed', 'license_allowlist_added', 'license_allowlist_removed', 'license_blocklist_added', 'license_blocklist_removed'] },
+    { labelKey: 'audit.groups.claims',       actions: ['claim.create', 'claim.transition', 'claim.release'] },
+    { labelKey: 'audit.groups.supplyChain',  actions: ['package.replace', 'allowlist_blocked', 'conflict_resolved'] },
+    { labelKey: 'audit.groups.upstream',     actions: ['upstream_response_too_large', 'ssrf_blocked', 'checksum_failure'] },
+  ]
+
+  $: adColumns = [
+    { key: 'createdAt',  label: $t('audit.columns.time'),   sortable: true, defaultDir: 'desc', width: '150px' },
+    { key: 'action',     label: $t('audit.columns.action'), sortable: true, width: '220px' },
+    { key: 'actorEmail', label: $t('audit.columns.actor'),  sortable: true, width: '200px' },
+    { key: 'detail',     label: $t('audit.columns.detail'), sortable: true },
+  ]
 
   async function loadAdmin() {
     adLoading = true
     adError = ''
     try {
-      const data = await api.getAudit({ page: adPage, limit: adLimit })
+      const p = { page: adPage, limit: adLimit }
+      if (adFilterAction) p.action = adFilterAction
+      const data = await api.getAudit(p)
       adItems = data.items
       adTotal = data.total
     } catch (e) { adError = e.message }
@@ -79,6 +117,7 @@
 
   function adOnPageChange(e) { adPage = e.detail.page; loadAdmin() }
   function adOnLimitChange(e) { adLimit = e.detail.limit; adPage = 1; loadAdmin() }
+  function adOnFilterChange() { adPage = 1; loadAdmin() }
 
   function selectTab(tab) {
     activeTab = tab
@@ -114,88 +153,87 @@
         <option value="">{$t('activity.allEvents')}</option>
         <option value="first_fetch">{$t('activity.events.firstFetch')}</option>
         <option value="push">{$t('activity.events.push')}</option>
-        <option value="pull">{$t('activity.events.pull')}</option>
+        <option value="import">{$t('activity.events.import')}</option>
+        <option value="download">{$t('activity.events.download')}</option>
         <option value="vuln_scan">{$t('activity.events.vulnScan')}</option>
         <option value="vuln_scan_pass">{$t('activity.events.vulnScanPass')}</option>
         <option value="vuln_rescan_pass">{$t('activity.events.vulnRescanPass')}</option>
         <option value="delete">{$t('activity.events.delete')}</option>
+        <option value="manual_block">{$t('activity.events.manualBlock')}</option>
+        <option value="manual_unblock">{$t('activity.events.manualUnblock')}</option>
+        <option value="blocked">{$t('activity.events.blocked')}</option>
+        <option value="blocked_manual">{$t('activity.events.blockedManual')}</option>
+        <option value="blocked_vuln_score">{$t('activity.events.blockedVulnScore')}</option>
+        <option value="login.success">{$t('activity.events.loginSuccess')}</option>
+        <option value="login.failure">{$t('activity.events.loginFailure')}</option>
+        <option value="login.locked">{$t('activity.events.loginLocked')}</option>
       </select>
+      <button type="button" class="btn btn-secondary" on:click={lcExport}>{$t('activity.export')}</button>
     </div>
 
-    {#if lcError}<div class="page-error">{lcError}</div>{/if}
-    {#if lcLoading}<span class="spinner"></span>
-    {:else}
-      <table class="table-auto activity-table">
-        <colgroup>
-          <col class="col-time">
-          <col class="col-event">
-          <col>
-          <col class="col-detail">
-          <col class="col-actor">
-        </colgroup>
-        <thead>
-          <tr>
-            <th class="sortable" on:click={() => lcToggleSort('createdAt')}>{$t('activity.columns.time')}{sortIndicator('createdAt', lcSortCol, lcSortDir)}</th>
-            <th class="sortable" on:click={() => lcToggleSort('eventType')}>{$t('activity.columns.event')}{sortIndicator('eventType', lcSortCol, lcSortDir)}</th>
-            <th class="sortable" on:click={() => lcToggleSort('purl')}>{$t('activity.columns.purl')}{sortIndicator('purl', lcSortCol, lcSortDir)}</th>
-            <th class="sortable" on:click={() => lcToggleSort('detail')}>{$t('activity.columns.detail')}{sortIndicator('detail', lcSortCol, lcSortDir)}</th>
-            <th class="sortable" on:click={() => lcToggleSort('actorEmail')}>{$t('activity.columns.actor')}{sortIndicator('actorEmail', lcSortCol, lcSortDir)}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each lcSorted as ev, i (i)}
-            <tr class:first-fetch-row={ev.eventType === 'first_fetch'}>
-              <td class="nowrap text-muted">{$formatDate(ev.createdAt)}</td>
-              <td class="nowrap"><span class="badge {EVENT_COLORS[ev.eventType] || ''}">{ev.eventType}</span></td>
-              <td class="mono purl-cell" title={ev.purl ?? ''}>{ev.purl ?? '—'}</td>
-              <td class="detail-cell text-muted t-sm" title={ev.detail ?? ''}>{ev.detail ?? ''}</td>
-              <td class="actor-cell text-muted">{ev.actorEmail ?? (SYSTEM_EVENTS.has(ev.eventType) ? $t('activity.system') : $t('activity.anonymous'))}</td>
-            </tr>
-          {/each}
-          {#if lcItems.length === 0}
-            <tr><td colspan="5" class="text-center text-muted">{$t('activity.empty')}</td></tr>
+    <ErrorBanner message={lcError} />
+    <DataTable
+      columns={lcColumns}
+      rows={lcItems}
+      loading={lcLoading}
+      initialSort={{ key: 'createdAt', dir: 'desc' }}
+      emptyText={$t('activity.empty')}
+      tableClass="table-auto activity-table"
+      let:row={ev}
+    >
+      <tr class:first-fetch-row={ev.eventType === 'first_fetch'}>
+        <td class="nowrap text-muted">{$formatDate(ev.createdAt)}</td>
+        <td class="nowrap"><span class="badge {EVENT_COLORS[ev.eventType] || ''}">{ev.eventType}</span></td>
+        <td class="mono purl-cell" title={ev.purl ?? ''}>{ev.purl ?? '—'}</td>
+        <td class="detail-cell text-muted t-sm" title={ev.detail ?? ''}>
+          {#if ev.detail && ev.sourceIp}{ev.detail} · {ev.sourceIp}
+          {:else if ev.detail}{ev.detail}
+          {:else if ev.sourceIp}{ev.sourceIp}
           {/if}
-        </tbody>
-      </table>
+        </td>
+        <td class="actor-cell text-muted">{ev.actorEmail ?? (SYSTEM_EVENTS.has(ev.eventType) ? $t('activity.system') : $t('activity.anonymous'))}</td>
+      </tr>
+    </DataTable>
 
+    {#if !lcLoading}
       <Pagination total={lcTotal} page={lcPage} limit={lcLimit}
         on:pagechange={lcOnPageChange}
         on:limitchange={lcOnLimitChange} />
     {/if}
   {:else}
-    {#if adError}<div class="page-error">{adError}</div>{/if}
-    {#if adLoading}<span class="spinner"></span>
-    {:else}
-      <table class="table-auto audit-table">
-        <colgroup>
-          <col class="col-time">
-          <col class="col-action">
-          <col class="col-actor">
-          <col>
-        </colgroup>
-        <thead>
-          <tr>
-            <th>{$t('audit.columns.time')}</th>
-            <th>{$t('audit.columns.action')}</th>
-            <th>{$t('audit.columns.actor')}</th>
-            <th>{$t('audit.columns.detail')}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each adItems as e (e.id)}
-            <tr>
-              <td class="nowrap text-muted">{$formatDate(e.createdAt)}</td>
-              <td><code>{e.action}</code></td>
-              <td class="text-muted">{e.actorEmail ?? e.actorId ?? '—'}</td>
-              <td class="audit-detail-cell">{e.detail ?? ''}</td>
-            </tr>
-          {/each}
-          {#if adItems.length === 0}
-            <tr><td colspan="4" class="text-center text-muted">{$t('audit.empty')}</td></tr>
-          {/if}
-        </tbody>
-      </table>
+    <div class="tab-toolbar">
+      <select bind:value={adFilterAction} on:change={adOnFilterChange} class="event-select">
+        <option value="">{$t('audit.allActions')}</option>
+        {#each TENANT_AUDIT_ACTION_GROUPS as g (g.labelKey)}
+          <optgroup label={$t(g.labelKey)}>
+            {#each g.actions as a (a)}
+              <option value={a}>{$t(`audit.actions.${a}`)}</option>
+            {/each}
+          </optgroup>
+        {/each}
+      </select>
+      <button type="button" class="btn btn-secondary" on:click={adExport}>{$t('audit.export')}</button>
+    </div>
 
+    <ErrorBanner message={adError} />
+    <DataTable
+      columns={adColumns}
+      rows={adItems}
+      loading={adLoading}
+      initialSort={{ key: 'createdAt', dir: 'desc' }}
+      emptyText={$t('audit.empty')}
+      tableClass="table-auto audit-table"
+      let:row={e}
+    >
+      <tr>
+        <td class="nowrap text-muted">{$formatDate(e.createdAt)}</td>
+        <td><code>{e.action}</code></td>
+        <td class="text-muted">{e.actorEmail ?? e.actorId ?? '—'}</td>
+        <td class="audit-detail-cell">{e.detail ?? ''}</td>
+      </tr>
+    </DataTable>
+
+    {#if !adLoading}
       <Pagination total={adTotal} page={adPage} limit={adLimit}
         on:pagechange={adOnPageChange}
         on:limitchange={adOnLimitChange} />
@@ -218,7 +256,7 @@
   .tab:hover { color: var(--text); }
   .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-  .tab-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+  .tab-toolbar { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px; }
 
   .first-fetch-row td { background: var(--badge-warning-bg) !important; color: var(--badge-warning-text); }
   .nowrap { white-space: nowrap; }
@@ -226,15 +264,8 @@
   .detail-cell { overflow-wrap: anywhere; }
   .actor-cell { overflow-wrap: anywhere; }
   .event-select { width: auto; }
-  .activity-table .col-time   { width: 150px; }
-  .activity-table .col-event  { width: 110px; }
-  .activity-table .col-detail { width: 200px; }
-  .activity-table .col-actor  { width: 180px; }
   :global(.badge.vuln-scan) { background: var(--badge-sky-bg); color: var(--badge-sky-text); }
 
   code { background: var(--bg); padding: 2px 6px; border-radius: 3px; font-size: 12px; }
   .audit-detail-cell { font-family: var(--font-mono, monospace); font-size: 12px; color: var(--text2); white-space: pre-wrap; word-break: break-word; }
-  .audit-table .col-time   { width: 150px; }
-  .audit-table .col-action { width: 220px; }
-  .audit-table .col-actor  { width: 200px; }
 </style>

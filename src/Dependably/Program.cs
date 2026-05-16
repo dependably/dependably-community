@@ -111,30 +111,14 @@ public partial class Program
 
         builder.Services.AddMemoryCache();
 
-        // Repositories
-        builder.Services.AddSingleton<JwtRevocationRepository>();
-        builder.Services.AddSingleton<OrgRepository>();
-        builder.Services.AddSingleton<SystemAdminRepository>();
-        builder.Services.AddSingleton<PackageRepository>();
-        builder.Services.AddSingleton<TokenRepository>();
-        builder.Services.AddSingleton<AuditRepository>();
-        builder.Services.AddSingleton<Dependably.Infrastructure.Audit.AuditEventRepository>();
         builder.Services.AddHttpContextAccessor();
-        builder.Services.AddSingleton<Dependably.Infrastructure.Audit.IAuditEmitter,
-                                      Dependably.Infrastructure.Audit.AuditEmitter>();
+        builder.Services.AddDependablyRepositories();
 
-        // M2.1 — two-tier storage formalisation
-        builder.Services.AddSingleton<CacheArtifactRepository>();
-        builder.Services.AddSingleton<TenantArtifactAccessRepository>();
-        builder.Services.AddSingleton<MetadataCacheRepository>();
-        builder.Services.AddSingleton<CacheAccessRecorder>();
+        // M2.1 — two-tier storage glue that isn't a repository. The repositories themselves
+        // are registered by AddDependablyRepositories.
         builder.Services.AddSingleton<Dependably.Storage.UpstreamFetchCoordinator>();
         builder.Services.AddSingleton<IAirGapMode, AirGapMode>();
         builder.Services.AddHostedService<CacheEvictionService>();
-
-        // M2.2 — name-claim mechanism
-        builder.Services.AddSingleton<ClaimRepository>();
-        builder.Services.AddSingleton<ClaimResolver>();
 
         // M2.3 — feature-flagged claim gate for publish/import paths. Default off; operators
         // flip CLAIM_ENFORCEMENT=on once their initial claim set is in place.
@@ -154,72 +138,26 @@ public partial class Program
         // above; the controller services record bundles the deps.
         builder.Services.AddScoped<Dependably.Api.ClaimsControllerServices>();
 
-        // M4.1 — SIEM push (opt-in via env vars). Webhook (HTTP NDJSON) and syslog (UDP/TCP/TLS,
-        // CEF or RFC 5424) are both supported behind the same ISiemForwarder interface. The
-        // queue is registered only when a forwarder is configured; producers always go through
-        // SiemForwarderQueue.TryEnqueue when present, so no call site changes are needed when
-        // the feature is later wired in to the audit emit path. Webhook takes precedence if both
-        // are set — only one forwarder is registered per deployment.
-        var siemWebhookUrl = builder.Configuration["SIEM_WEBHOOK_URL"];
-        var siemSyslogHost = builder.Configuration["SIEM_SYSLOG_HOST"];
-        if (!string.IsNullOrWhiteSpace(siemWebhookUrl))
-        {
-            builder.Services.AddHttpClient<Dependably.Infrastructure.Siem.WebhookSiemForwarder>();
-            builder.Services.AddSingleton<Dependably.Infrastructure.Siem.ISiemForwarder>(
-                sp => sp.GetRequiredService<Dependably.Infrastructure.Siem.WebhookSiemForwarder>());
-            builder.Services.AddSingleton<Dependably.Infrastructure.Siem.SiemForwarderQueue>();
-            builder.Services.AddHostedService(
-                sp => sp.GetRequiredService<Dependably.Infrastructure.Siem.SiemForwarderQueue>());
-        }
-        else if (!string.IsNullOrWhiteSpace(siemSyslogHost))
-        {
-            builder.Services.AddSingleton<Dependably.Infrastructure.Siem.SyslogSiemForwarder>();
-            builder.Services.AddSingleton<Dependably.Infrastructure.Siem.ISiemForwarder>(
-                sp => sp.GetRequiredService<Dependably.Infrastructure.Siem.SyslogSiemForwarder>());
-            builder.Services.AddSingleton<Dependably.Infrastructure.Siem.SiemForwarderQueue>();
-            builder.Services.AddHostedService(
-                sp => sp.GetRequiredService<Dependably.Infrastructure.Siem.SiemForwarderQueue>());
-        }
-        builder.Services.AddSingleton<InviteRepository>();
-        builder.Services.AddSingleton<AllowlistRepository>();
-        builder.Services.AddSingleton<BlocklistRepository>();
-        builder.Services.AddSingleton<LicenseRepository>();
-        builder.Services.AddSingleton<SpdxLicenseRepository>();
-        builder.Services.AddSingleton<SpdxLicenseSeeder>();
-        builder.Services.AddSingleton<SamlConfigRepository>();
-        builder.Services.AddSingleton<ExternalIdentityRepository>();
+        // M4.1 — SIEM push (opt-in via env vars). Webhook and syslog both sit behind
+        // ISiemForwarder; webhook wins when both are set. No-op when neither is configured.
+        builder.Services.AddDependablySiemForwarding(builder.Configuration);
 
         // Protocol services
         builder.Services.AddSingleton<UpstreamClient>();
         builder.Services.AddSingleton<IUpstreamUrlValidator, UpstreamUrlValidator>();
         builder.Services.AddSingleton<AllowlistService>();
+        builder.Services.AddSingleton<BlockGateService>();
 
-        // Vulnerability scanning
-        builder.Services.AddSingleton<VulnerabilityRepository>();
+        // Vulnerability scanning — OSV source branches (remote vs local) live inside the helper.
+        // VulnerabilityScanService is registered as a singleton AND a hosted service so on-demand
+        // scans (controller-injected) share one instance with the background scheduler.
+        builder.Services.AddDependablyVulnerabilityScanning(
+            builder.Configuration,
+            builder.Configuration["OSV_BASE_URL"] ?? DefaultOsvBaseUrl);
 
-        // OSV source: remote (api.osv.dev) by default, local (sideloaded dumps) for air-gap (#41).
-        var osvMode = (builder.Configuration["OSV_MODE"] ?? "remote").Trim().ToLowerInvariant();
-        if (osvMode == "local")
-        {
-            builder.Services.AddSingleton<LocalOsvSource>();
-            builder.Services.AddSingleton<IOsvSource>(sp => sp.GetRequiredService<LocalOsvSource>());
-        }
-        else
-        {
-            builder.Services.AddSingleton<OsvClient>();
-            builder.Services.AddSingleton<IOsvSource>(sp => sp.GetRequiredService<OsvClient>());
-            ConfigureOsvHttpClient(builder);
-        }
-
-        builder.Services.AddSingleton<VulnerabilityScanService>();
-
-        // Background services
+        // Other background services
         builder.Services.AddHostedService<RetentionService>();
         builder.Services.AddHostedService<Dependably.Background.TenantHardDeleteService>();
-        // VulnerabilityScanService is registered as a singleton above so controllers can inject it
-        // directly for on-demand scanning. AddHostedService<T>() would create a second transient
-        // instance, so we use the factory overload to re-use the already-registered singleton.
-        builder.Services.AddHostedService(sp => sp.GetRequiredService<VulnerabilityScanService>());
 
         // Auth services
         builder.Services.AddSingleton<LoginService>();
@@ -339,6 +277,13 @@ public partial class Program
             MaxAutomaticRedirections = 3,
             AllowAutoRedirect = true,
             ResponseDrainTimeout = TimeSpan.FromSeconds(30),
+            // api.nuget.org's registration5-gz-* variants force Content-Encoding: gzip
+            // regardless of Accept-Encoding. Other upstream metadata endpoints (PyPI's
+            // simple index, npm's registry) negotiate normally. Package blob downloads are
+            // already compressed at the file level (.tar.gz, .tgz, .nupkg=zip) and upstream
+            // CDNs serve them with Content-Encoding: identity, so checksum bytes are
+            // unaffected.
+            AutomaticDecompression = System.Net.DecompressionMethods.All,
         });
 
         // Fallback generic client (used by non-upstream code)
@@ -496,19 +441,6 @@ public partial class Program
         || !string.IsNullOrWhiteSpace(cfg[$"LOCAL_STORAGE_PATH_{tier}"])
         || !string.IsNullOrWhiteSpace(cfg[$"S3_BUCKET_{tier}"])
         || !string.IsNullOrWhiteSpace(cfg[$"AZURE_CONNECTION_STRING_{tier}"]);
-
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S1075:URIs should not be hardcoded",
-        Justification = "The trailing slash is a URL convention required by HttpClient.BaseAddress for relative URI resolution; not a hardcoded path.")]
-    private static void ConfigureOsvHttpClient(WebApplicationBuilder builder)
-    {
-        var rawOsvUrl = builder.Configuration["OSV_BASE_URL"] ?? DefaultOsvBaseUrl;
-        var osvBaseUrl = rawOsvUrl.EndsWith('/') ? rawOsvUrl : rawOsvUrl + "/";
-        builder.Services.AddHttpClient("osv", client =>
-        {
-            client.BaseAddress = new Uri(osvBaseUrl);
-            client.Timeout = TimeSpan.FromSeconds(30);
-        });
-    }
 
     // Redis — optional in standalone mode, required in HA mode. When configured, also
     // shares Data Protection keys across replicas via Redis (#70).

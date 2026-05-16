@@ -1,10 +1,11 @@
 <script>
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
+  import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { currentOrg } from '../lib/store.js'
   import { formatDateShort } from '../lib/format.js'
   import { copyToClipboard } from '../lib/clipboard.js'
-  import { sortIndicator } from '../lib/sortIndicator.js'
+  import DataTable from '../lib/DataTable.svelte'
   import { presetToCapabilities, capabilitiesToLabel } from '../lib/tokenCapabilities.js'
 
   let tokens = [], loading = true, error = ''
@@ -47,17 +48,15 @@
 
   function expired(t) { return t.expiresAt && new Date(t.expiresAt) < new Date() }
 
-  let sortCol = 'name', sortDir = 'asc'
-  $: sorted = [...tokens].sort((a, b) => {
-    const key = (row) => sortCol === 'scope' ? capabilitiesToLabel(row.capabilities) : row[sortCol] ?? ''
-    const av = key(a), bv = key(b)
-    if (av < bv) return sortDir === 'asc' ? -1 : 1
-    if (av > bv) return sortDir === 'asc' ? 1 : -1
-    return 0
-  })
-  function toggleSort(col) {
-    if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc'
-    else { sortCol = col; sortDir = 'asc' }
+  $: columns = [
+    { key: 'name',      label: $t('cicdTokens.columns.name'),    sortable: true },
+    { key: 'scope',     label: $t('cicdTokens.columns.scope'),   sortable: true, width: '80px' },
+    { key: 'createdAt', label: $t('cicdTokens.columns.created'), sortable: true, width: '110px' },
+    { key: 'expiresAt', label: $t('cicdTokens.columns.expires'), sortable: true, width: '130px' },
+    { key: 'actions',   label: '',                               sortable: false, width: '90px' },
+  ]
+  const comparators = {
+    scope: (a, b) => capabilitiesToLabel(a.capabilities).localeCompare(capabilitiesToLabel(b.capabilities)),
   }
 </script>
 
@@ -80,51 +79,31 @@
     </div>
   {/if}
 
-  {#if error}<div class="page-error">{error}</div>{/if}
-  {#if loading}<span class="spinner"></span>
-  {:else}
-    <table class="cicd-table">
-      <colgroup>
-        <col><!-- name: flexible -->
-        <col class="col-scope"><!-- scope badge -->
-        <col class="col-created"><!-- created date -->
-        <col class="col-expires"><!-- expires date/badge -->
-        <col class="col-actions"><!-- actions -->
-      </colgroup>
-      <thead><tr>
-        <th class="sortable" on:click={() => toggleSort('name')}>{$t('cicdTokens.columns.name')}{sortIndicator('name', sortCol, sortDir)}</th>
-        <th class="sortable" on:click={() => toggleSort('scope')}>{$t('cicdTokens.columns.scope')}{sortIndicator('scope', sortCol, sortDir)}</th>
-        <th class="sortable" on:click={() => toggleSort('createdAt')}>{$t('cicdTokens.columns.created')}{sortIndicator('createdAt', sortCol, sortDir)}</th>
-        <th class="sortable" on:click={() => toggleSort('expiresAt')}>{$t('cicdTokens.columns.expires')}{sortIndicator('expiresAt', sortCol, sortDir)}</th>
-        <th></th>
-      </tr></thead>
-      <tbody>
-        {#each sorted as tok (tok.id)}
-          {@const label = capabilitiesToLabel(tok.capabilities)}
-          <tr>
-            <td>{tok.name}</td>
-            <td><span class="badge {label}">{label}</span></td>
-            <td class="text-muted">{$formatDateShort(tok.createdAt)}</td>
-            <td>
-              {#if expired(tok)}<span class="badge expired">{$t('cicdTokens.expired')}</span>
-              {:else if tok.expiresAt}{$formatDateShort(tok.expiresAt)}
-              {:else}{$t('common.never')}{/if}
-            </td>
-            <td><button class="danger btn-sm" on:click={() => revoke(tok.id)}>{$t('common.actions.revoke')}</button></td>
-          </tr>
-        {/each}
-        {#if tokens.length === 0}<tr><td colspan="5" class="text-center text-muted">{$t('cicdTokens.empty')}</td></tr>{/if}
-      </tbody>
-    </table>
-  {/if}
+  <ErrorBanner message={error} />
+  <DataTable
+    {columns}
+    rows={tokens}
+    {comparators}
+    {loading}
+    initialSort={{ key: 'name', dir: 'asc' }}
+    emptyText={$t('cicdTokens.empty')}
+    tableClass="cicd-table"
+    let:row={tok}
+  >
+    {@const label = capabilitiesToLabel(tok.capabilities)}
+    <tr>
+      <td>{tok.name}</td>
+      <td><span class="badge {label}">{label}</span></td>
+      <td class="text-muted">{$formatDateShort(tok.createdAt)}</td>
+      <td>
+        {#if expired(tok)}<span class="badge expired">{$t('cicdTokens.expired')}</span>
+        {:else if tok.expiresAt}{$formatDateShort(tok.expiresAt)}
+        {:else}{$t('common.never')}{/if}
+      </td>
+      <td><button class="danger btn-sm" on:click={() => revoke(tok.id)}>{$t('common.actions.revoke')}</button></td>
+    </tr>
+  </DataTable>
 </div>
-
-<style>
-  .cicd-table .col-scope   { width: 80px; }
-  .cicd-table .col-created { width: 110px; }
-  .cicd-table .col-expires { width: 130px; }
-  .cicd-table .col-actions { width: 90px; }
-</style>
 
 {#if showCreate}
   <div class="modal-backdrop">

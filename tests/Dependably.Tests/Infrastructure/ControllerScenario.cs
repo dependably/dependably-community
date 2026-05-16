@@ -280,14 +280,32 @@ public sealed class ControllerScenario : IAsyncDisposable
         var system = new SystemController(orgs, systemAdmins, db, audit, problems,
             new ConfigurationBuilder().Build()) { ControllerContext = ctx };
 
+        var packageAnalytics = new PackageAnalyticsRepository(db);
         var orgSvc = new OrgControllerServices(
-            Orgs: orgs, Packages: packages, Tokens: tokens, Invites: invites,
+            Orgs: orgs, Packages: packages, PackageAnalytics: packageAnalytics,
+            Tokens: tokens, Invites: invites,
             Allowlist: allowlist, Blocklist: blocklist, Audit: audit, Guard: guard,
             Blobs: blobs, Config: new ConfigurationBuilder().Build(),
             Logger: NullLogger<OrgController>.Instance, Problems: problems,
-            Licenses: licenses, SamlConfig: samlConfig, Vulns: vulns, Urls: publicUrl,
+            Licenses: licenses, Vulns: vulns, Urls: publicUrl,
             AuditEmitter: orgAuditEmitter);
         var org = new OrgController(orgSvc) { ControllerContext = ctx };
+        var orgSettingsRepo = new OrgSettingsRepository(db);
+        var orgSettings = new OrgSettingsController(
+            orgSettingsRepo, guard, audit, orgAuditEmitter,
+            new ConfigurationBuilder().Build(), problems) { ControllerContext = ctx };
+        var orgTokens = new OrgTokensController(
+            tokens, guard, audit, orgAuditEmitter, problems) { ControllerContext = ctx };
+        var orgInvites = new OrgInvitesController(
+            invites, guard, audit, new ConfigurationBuilder().Build(),
+            NullLogger<OrgInvitesController>.Instance, publicUrl, problems) { ControllerContext = ctx };
+        var orgUsers = new OrgUsersController(
+            orgs, guard, audit, problems) { ControllerContext = ctx };
+        var orgLists = new OrgListsController(
+            allowlist, blocklist, guard, audit, problems) { ControllerContext = ctx };
+        var orgAudit = new OrgAuditController(audit, guard) { ControllerContext = ctx };
+        var orgAuthConfig = new OrgAuthConfigController(
+            guard, samlConfig, audit, publicUrl, problems) { ControllerContext = ctx };
 
         var claimRepo = new ClaimRepository(db);
         var airGap = Substitute.For<IAirGapMode>();
@@ -330,6 +348,13 @@ public sealed class ControllerScenario : IAsyncDisposable
             vuln,
             system,
             org,
+            orgSettings,
+            orgTokens,
+            orgInvites,
+            orgUsers,
+            orgLists,
+            orgAudit,
+            orgAuthConfig,
             claims,
             siem,
             import);
@@ -364,6 +389,13 @@ public sealed record ControllerScenarioResult(
     VulnerabilityController VulnerabilityController,
     SystemController SystemController,
     OrgController OrgController,
+    OrgSettingsController OrgSettingsController,
+    OrgTokensController OrgTokensController,
+    OrgInvitesController OrgInvitesController,
+    OrgUsersController OrgUsersController,
+    OrgListsController OrgListsController,
+    OrgAuditController OrgAuditController,
+    OrgAuthConfigController OrgAuthConfigController,
     ClaimsController ClaimsController,
     SiemController SiemController,
     ImportController ImportController) : IAsyncDisposable

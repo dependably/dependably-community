@@ -40,14 +40,14 @@ public partial class NuGetController : ControllerBase
     private readonly BlocklistRepository _blocklist;
     private readonly IConfiguration _config;
     private readonly IMetadataStore _db;
-    private readonly Dependably.Infrastructure.VulnerabilityScanService _scanner;
-    private readonly VulnerabilityRepository _vulns;
+    private readonly BlockGateService _blockGate;
     private readonly LicenseRepository _licenses;
     private readonly IPublicUrlBuilder _urls;
     private readonly PublishGate _publishGate;
     private readonly Dependably.Infrastructure.Publish.IPackagePublishService _publish;
-    private readonly CacheAccessRecorder _cacheRecorder;
     private readonly ClaimResolver _claimResolver;
+    private readonly Dependably.Storage.ProxyFetchService _proxyFetch;
+    private readonly ILogger<NuGetController> _logger;
 
     public NuGetController(NuGetControllerServices svc)
     {
@@ -61,14 +61,14 @@ public partial class NuGetController : ControllerBase
         _blocklist = svc.Blocklist;
         _config = svc.Config;
         _db = svc.Db;
-        _scanner = svc.Scanner;
-        _vulns = svc.Vulns;
+        _blockGate = svc.BlockGate;
         _licenses = svc.Licenses;
         _urls = svc.Urls;
         _publishGate = svc.PublishGate;
         _publish = svc.Publish;
-        _cacheRecorder = svc.CacheRecorder;
         _claimResolver = svc.ClaimResolver;
+        _proxyFetch = svc.ProxyFetch;
+        _logger = svc.Logger;
     }
 
     // ── Service index ────────────────────────────────────────────────────────
@@ -83,16 +83,20 @@ public partial class NuGetController : ControllerBase
         static Dictionary<string, string> R(string id, string type) =>
             new() { ["@id"] = id, ["@type"] = type };
 
+        // Advertise both registration resource types so SemVer 2-aware clients pick the
+        // semver2 base URL (which we serve from the registration5-{,gz-}semver2 alias),
+        // while older clients keep using the unversioned RegistrationsBaseUrl.
         return new JsonResult(new
         {
             version = "3.0.0",
             resources = new[]
             {
-                R($"{baseUrl}/query",        "SearchQueryService"),
-                R($"{baseUrl}/registration", "RegistrationsBaseUrl"),
-                R($"{baseUrl}/flatcontainer","PackageBaseAddress/3.0.0"),
-                R($"{baseUrl}/publish",      "PackagePublish/2.0.0"),
-                R($"{baseUrl}/symbols",      "SymbolPackagePublish/4.9.0")
+                R($"{baseUrl}/query",                       "SearchQueryService"),
+                R($"{baseUrl}/registration",                "RegistrationsBaseUrl"),
+                R($"{baseUrl}/registration5-gz-semver2",    "RegistrationsBaseUrl/3.6.0"),
+                R($"{baseUrl}/flatcontainer",               "PackageBaseAddress/3.0.0"),
+                R($"{baseUrl}/publish",                     "PackagePublish/2.0.0"),
+                R($"{baseUrl}/symbols",                     "SymbolPackagePublish/4.9.0")
             }
         });
     }
@@ -141,9 +145,25 @@ public partial class NuGetController : ControllerBase
 
     // ── Registration ─────────────────────────────────────────────────────────
 
-    /// <summary>GET /o/{org}/nuget/registration/{id}/ — registration index</summary>
+    /// <summary>GET /o/{org}/nuget/registration/{id}/ — registration index (SemVer 1, unversioned alias)</summary>
+    // SemVer 1 routes — the unversioned path is the canonical one we advertise in the service
+    // index. The "5-semver1" / "5-gz-semver1" aliases exist for tooling that hardcodes the
+    // upstream URL shape (xunit.runner.visualstudio probes these directly regardless of the
+    // service index). The "-gz-" variant is by convention only; HttpClient handles
+    // Content-Encoding transparently, so the wire format is identical to the uncompressed one.
     [HttpGet("/nuget/registration/{id}/")]
-    public async Task<IActionResult> RegistrationIndex(string id, CancellationToken ct)
+    [HttpGet("/nuget/registration5-semver1/{id}/")]
+    [HttpGet("/nuget/registration5-gz-semver1/{id}/")]
+    public Task<IActionResult> RegistrationIndex(string id, CancellationToken ct)
+        => RegistrationIndexCoreAsync(id, semVer2: false, ct);
+
+    /// <summary>GET /o/{org}/nuget/registration5-{,gz-}semver2/{id}/ — SemVer 2 registration</summary>
+    [HttpGet("/nuget/registration5-semver2/{id}/")]
+    [HttpGet("/nuget/registration5-gz-semver2/{id}/")]
+    public Task<IActionResult> RegistrationIndexSemVer2(string id, CancellationToken ct)
+        => RegistrationIndexCoreAsync(id, semVer2: true, ct);
+
+    private async Task<IActionResult> RegistrationIndexCoreAsync(string id, bool semVer2, CancellationToken ct)
     {
         var orgId = CurrentTenantId();
 
@@ -155,55 +175,196 @@ public partial class NuGetController : ControllerBase
             return Unauthorized();
         }
 
-        var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", id.ToLowerInvariant(), ct);
+        var normalizedId = id.ToLowerInvariant();
+        var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
 
-        if (pkg is null) return await ProxyNuGetRegistration(id, settings, token, ct);
+        // Always merge upstream + local versions when passthrough + claims allow. An existing
+        // local pkg is just a namespace marker, not a signal to suppress upstream — uploading
+        // a private prerelease must not delete the public version line from the listing, or
+        // downstream packages pinning ">= <stable>" of the same name fail NU1103. Mirrors
+        // FlatcontainerVersions and PyPi's PackageIndex.
+        var passthroughAllowed = settings.ProxyPassthroughEnabled
+            && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct);
 
+        if (passthroughAllowed)
+            return await ProxyMergedRegistrationAsync(id, pkg, semVer2, ct);
+
+        // Passthrough disabled or claim-local — local-only.
+        if (pkg is null) return NotFound();
         var versions = await _packages.GetVersionsAsync(pkg.Id, ct);
-        var baseUrl = BaseUrl();
+        return BuildLocalRegistration(id, pkg, versions);
+    }
 
+    private JsonResult BuildLocalRegistration(string id, Package pkg, IReadOnlyList<PackageVersion> versions)
+    {
+        var normalizedId = id.ToLowerInvariant();
+        var baseUrl = BaseUrl();
         var leaves = versions.Where(v => !v.Yanked).Select(v => new
         {
-            @id = $"{baseUrl}/registration/{id.ToLowerInvariant()}/{v.Version}.json",
+            @id = $"{baseUrl}/registration/{normalizedId}/{v.Version}.json",
             catalogEntry = new
             {
                 id = pkg.Name,
                 version = v.Version,
                 listed = true,
-                packageContent = $"{baseUrl}/flatcontainer/{id.ToLowerInvariant()}/{v.Version}/{id.ToLowerInvariant()}.{v.Version}.nupkg"
+                packageContent = $"{baseUrl}/flatcontainer/{normalizedId}/{v.Version}/{normalizedId}.{v.Version}.nupkg"
             }
         }).ToList();
 
         return new JsonResult(new
         {
-            @id = $"{baseUrl}/registration/{id.ToLowerInvariant()}/",
+            @id = $"{baseUrl}/registration/{normalizedId}/",
             items = new[]
             {
                 new
                 {
-                    @id = $"{baseUrl}/registration/{id.ToLowerInvariant()}/index.json",
+                    @id = $"{baseUrl}/registration/{normalizedId}/index.json",
                     items = leaves
                 }
             }
         });
     }
 
-    private async Task<IActionResult> ProxyNuGetRegistration(string id, OrgSettings settings, TokenRecord? token, CancellationToken ct)
+    private async Task<IActionResult> ProxyMergedRegistrationAsync(string id, Package? pkg, bool semVer2, CancellationToken ct)
     {
-        if (!settings.AnonymousPull && token is null) return Unauthorized();
-
+        var normalizedId = id.ToLowerInvariant();
         var upstreamBase = _config["NuGet:Upstream"] ?? "https://api.nuget.org/v3";
+        // semver1 excludes SemVer-2 build metadata (+suffix); semver2 is the superset. Pick the
+        // upstream variant that matches what the client asked for. api.nuget.org publishes
+        // -semver1 uncompressed but only -gz-semver2 for the SemVer 2 superset (the
+        // registration5-semver2 path returns 404); HttpClient's AutomaticDecompression handles
+        // the gzip transparently.
+        var variant = semVer2 ? "registration5-gz-semver2" : "registration5-semver1";
+        var upstreamUrl = $"{upstreamBase}/{variant}/{normalizedId}/index.json";
+
+        string? upstreamJson = null;
         try
         {
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            // Use registration3 (uncompressed JSON) to avoid gzip decompression issues
-            using var resp = await _upstream.GetMetadataAsync($"{upstreamBase}/registration3/{id.ToLowerInvariant()}/index.json", linkedCts.Token);
-            if (!resp.IsSuccessStatusCode) return NotFound();
-            var content = await resp.Content.ReadAsStringAsync(linkedCts.Token);
-            return Content(content, "application/json");
+            using var resp = await _upstream.GetMetadataAsync(upstreamUrl, linkedCts.Token);
+            if (resp.IsSuccessStatusCode)
+                upstreamJson = await resp.Content.ReadAsStringAsync(linkedCts.Token);
+            else
+                _logger.LogWarning("NuGet upstream registration fetch failed: {Status} for {Url}", (int)resp.StatusCode, upstreamUrl);
         }
-        catch { return StatusCode(502); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "NuGet upstream registration fetch threw for {Url}", upstreamUrl);
+        }
+
+        var localVersions = pkg is null
+            ? Array.Empty<PackageVersion>() as IReadOnlyList<PackageVersion>
+            : await _packages.GetVersionsAsync(pkg.Id, ct);
+
+        if (upstreamJson is null)
+        {
+            if (pkg is null || localVersions.Count == 0) return NotFound();
+            return BuildLocalRegistration(id, pkg, localVersions);
+        }
+
+        if (pkg is null || localVersions.Count == 0)
+            return Content(upstreamJson, "application/json");
+
+        var merged = MergeLocalIntoUpstreamRegistration(upstreamJson, localVersions, pkg, id);
+        return Content(merged, "application/json");
+    }
+
+    // Splice local-only versions into upstream registration JSON as an extra CatalogPage.
+    // Dedupes by version against the upstream catalog entries already present so a name with
+    // a privately uploaded build of an upstream version doesn't appear twice. Public so unit
+    // tests can verify the splice without spinning up the controller.
+    internal static string MergeLocalIntoUpstreamRegistration(
+        string upstreamJson, IReadOnlyList<PackageVersion> localVersions, Package pkg, string id)
+    {
+        var normalizedId = id.ToLowerInvariant();
+        JsonObject? root;
+        try { root = JsonNode.Parse(upstreamJson) as JsonObject; }
+        catch (JsonException) { return upstreamJson; }
+        if (root is null) return upstreamJson;
+
+        var upstreamVersionSet = CollectUpstreamVersions(root);
+        var localOnly = localVersions
+            .Where(v => !v.Yanked && !upstreamVersionSet.Contains(v.Version))
+            .ToList();
+        if (localOnly.Count == 0) return upstreamJson;
+
+        var localPage = BuildLocalPage(localOnly, normalizedId, pkg.Name);
+        AppendPage(root, localPage);
+        return root.ToJsonString();
+    }
+
+    private static HashSet<string> CollectUpstreamVersions(JsonObject root)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (root["items"] is not JsonArray pages) return set;
+        var entries = pages
+            .OfType<JsonObject>()
+            .SelectMany(p => (p["items"] as JsonArray)?.OfType<JsonObject>() ?? []);
+        foreach (var entry in entries)
+        {
+            var v = entry["catalogEntry"]?["version"]?.GetValue<string>();
+            if (v is not null) set.Add(v);
+        }
+        return set;
+    }
+
+    // BaseUrl isn't available in a static context — leaves reference our own registration/
+    // flatcontainer at relative paths. NuGet clients combine these with the service-index
+    // base, so relative URLs resolve correctly.
+    private static JsonObject BuildLocalLeaf(PackageVersion v, string normalizedId, string pkgName) => new()
+    {
+        ["@id"] = $"/nuget/registration/{normalizedId}/{v.Version}.json",
+        ["@type"] = "Package",
+        ["catalogEntry"] = new JsonObject
+        {
+            ["id"] = pkgName,
+            ["version"] = v.Version,
+            ["listed"] = true,
+            ["packageContent"] = $"/nuget/flatcontainer/{normalizedId}/{v.Version}/{normalizedId}.{v.Version}.nupkg"
+        }
+    };
+
+    private static JsonObject BuildLocalPage(IReadOnlyList<PackageVersion> localOnly, string normalizedId, string pkgName)
+    {
+        var localItems = new JsonArray(localOnly
+            .Select(v => (JsonNode)BuildLocalLeaf(v, normalizedId, pkgName))
+            .ToArray());
+        var (lower, upper) = ComputeRange(localOnly);
+        return new JsonObject
+        {
+            ["@id"] = $"/nuget/registration/{normalizedId}/index.json#page/local",
+            ["@type"] = "catalog:CatalogPage",
+            ["count"] = localItems.Count,
+            ["items"] = localItems,
+            ["lower"] = lower,
+            ["upper"] = upper,
+            ["parent"] = $"/nuget/registration/{normalizedId}/index.json"
+        };
+    }
+
+    private static (string Lower, string Upper) ComputeRange(IReadOnlyList<PackageVersion> localOnly)
+    {
+        var sorted = localOnly
+            .Select(v => (Parsed: NuGetVersion.TryParse(v.Version, out var nv) ? nv : null, Raw: v.Version))
+            .Where(t => t.Parsed is not null)
+            .OrderBy(t => t.Parsed)
+            .Select(t => t.Raw)
+            .ToList();
+        return sorted.Count > 0
+            ? (sorted[0], sorted[^1])
+            : (localOnly[0].Version, localOnly[^1].Version);
+    }
+
+    private static void AppendPage(JsonObject root, JsonObject page)
+    {
+        if (root["items"] is not JsonArray pages)
+        {
+            pages = new JsonArray();
+            root["items"] = pages;
+        }
+        pages.Add(page);
+        if (root["count"] is not null) root["count"] = pages.Count;
     }
 
     // ── Flatcontainer / download ─────────────────────────────────────────────
@@ -221,12 +382,24 @@ public partial class NuGetController : ControllerBase
             return Unauthorized();
         }
 
-        var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", id.ToLowerInvariant(), ct);
+        var normalizedId = id.ToLowerInvariant();
+        var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
 
         var versionSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         await CollectLocalVersionsAsync(pkg, versionSet, ct);
-        if (pkg is null || pkg.IsProxy)
+
+        // Merge upstream regardless of pkg.IsProxy — a name with uploaded versions is still a
+        // namespace that can hold proxy-fetched versions. Gate on passthrough + claims, not on
+        // whether anyone has ever published into this name.
+        if (settings.ProxyPassthroughEnabled
+            && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
+        {
             await MergeUpstreamVersionsAsync(id, versionSet, ct);
+        }
+        else
+        {
+            Response.Headers["X-Upstream-Status"] = "skipped";
+        }
 
         if (versionSet.Count == 0) return NotFound();
         return new JsonResult(new { versions = versionSet.Order() });
@@ -239,30 +412,50 @@ public partial class NuGetController : ControllerBase
         foreach (var v in local.Where(v => !v.Yanked)) versionSet.Add(v.Version);
     }
 
-    // For proxy packages (or unknown packages), fetch the upstream version list and merge.
-    // Short timeout so slow upstream responses don't hang clients after they have what they need.
-    // Upstream unreachable / slow → fall back to local set.
+    // Fetch the upstream version list and merge. Short timeout so slow upstream responses don't
+    // hang clients after they have what they need. Sets X-Upstream-Status header (ok|error|timeout)
+    // and logs at warning level when the merge fails so operators can see silent fallbacks.
     private async Task MergeUpstreamVersionsAsync(string id, HashSet<string> versionSet, CancellationToken ct)
     {
         var upstreamBase = _config["NuGet:Upstream"] ?? "https://api.nuget.org/v3";
+        var url = $"{upstreamBase}/flatcontainer/{id.ToLowerInvariant()}/index.json";
         try
         {
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            using var resp = await _upstream.GetMetadataAsync(
-                $"{upstreamBase}/flatcontainer/{id.ToLowerInvariant()}/index.json", linkedCts.Token);
-            if (!resp.IsSuccessStatusCode) return;
+            using var resp = await _upstream.GetMetadataAsync(url, linkedCts.Token);
+            if (!resp.IsSuccessStatusCode)
+            {
+                Response.Headers["X-Upstream-Status"] = "error";
+                _logger.LogWarning("NuGet upstream version-list fetch failed: {Status} for {Url}", (int)resp.StatusCode, url);
+                return;
+            }
 
             var content = await resp.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(content);
-            if (!doc.RootElement.TryGetProperty("versions", out var versionsElem)) return;
+            if (!doc.RootElement.TryGetProperty("versions", out var versionsElem))
+            {
+                Response.Headers["X-Upstream-Status"] = "error";
+                _logger.LogWarning("NuGet upstream version-list response missing 'versions' property for {Url}", url);
+                return;
+            }
             foreach (var v in versionsElem.EnumerateArray())
             {
                 var ver = v.GetString();
                 if (ver is not null) versionSet.Add(ver);
             }
+            Response.Headers["X-Upstream-Status"] = "ok";
         }
-        catch { /* upstream unreachable — fall back to local versions */ }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            Response.Headers["X-Upstream-Status"] = "timeout";
+            _logger.LogWarning("NuGet upstream version-list fetch timed out for {Url}", url);
+        }
+        catch (Exception ex)
+        {
+            Response.Headers["X-Upstream-Status"] = "error";
+            _logger.LogWarning(ex, "NuGet upstream version-list fetch threw for {Url}", url);
+        }
     }
 
     /// <summary>GET /o/{org}/nuget/flatcontainer/{id}/{version}/{file} — package download</summary>
@@ -272,15 +465,16 @@ public partial class NuGetController : ControllerBase
         var orgId = CurrentTenantId();
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         var token = await Request.ResolveTokenAsync(_tokens, ct);
-        var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", id.ToLowerInvariant(), ct);
+        var normalizedId = id.ToLowerInvariant();
+        var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
 
-        if (pkg is { IsProxy: false })
-            return await ServeHostedNupkgAsync(orgId, pkg, version, file, token, settings!, ct);
-
-        if (pkg is { IsProxy: true })
+        // Route by the specific version's origin (per-version state), not by the package-level
+        // is_proxy flag. A package name is a namespace that can hold mixed-origin versions:
+        // some uploaded private builds and some proxy-fetched public versions can coexist.
+        if (pkg is not null)
         {
-            var proxyResult = await TryServeProxyCachedNupkgAsync(orgId, pkg, version, file, token, settings!, ct);
-            if (proxyResult is not null) return proxyResult;
+            var routed = await TryRouteToKnownVersionAsync(pkg, version, file, orgId, token, settings!, ct);
+            if (routed is not null) return routed;
         }
 
         if (!settings!.AnonymousPull && token is null)
@@ -289,69 +483,87 @@ public partial class NuGetController : ControllerBase
             return Unauthorized();
         }
 
-        var purlCheck = $"pkg:nuget/{id.ToLowerInvariant()}";
-        if (settings?.AllowlistMode == true && !await _allowlist.IsAllowedAsync(orgId, "nuget", purlCheck, ct))
+        var purlCheck = $"pkg:nuget/{normalizedId}";
+        if (settings.AllowlistMode && !await _allowlist.IsAllowedAsync(orgId, purlCheck, ct))
             return StatusCode(403);
-        if (await _blocklist.IsBlockedAsync(orgId, "nuget", purlCheck, ct))
+        if (await _blocklist.IsBlockedAsync(orgId, purlCheck, ct))
         {
-            await _audit.LogActivityAsync(orgId, "nuget", purlCheck, "blocked", token?.UserId, ct: ct);
+            await _audit.LogActivityAsync(orgId, "nuget", purlCheck, "blocked", token?.UserId,
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
             return StatusCode(403);
         }
 
-        if (!settings!.ProxyPassthroughEnabled) return NotFound();
+        if (!settings.ProxyPassthroughEnabled) return NotFound();
 
         // #47: claim state gates the proxy fetch. local_only (or air-gap implicit local_only)
         // disables proxy serving for that name.
-        if (!await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", id.ToLowerInvariant(), ct))
+        if (!await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
             return NotFound();
 
-        return await ProxyFetchNupkgAsync(orgId, id, version, file, token, settings!, ct);
+        return await ProxyFetchNupkgAsync(orgId, id, version, file, token, settings, ct);
     }
 
-    private async Task<IActionResult> ServeHostedNupkgAsync(
-        string orgId, Package pkg, string version, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
+    // Per-version origin routing: returns a hosted version, a cached proxy version, or null
+    // when the caller should fall through to the proxy-fetch path (no matching version row,
+    // or cached proxy blob is for a different file type than requested).
+    private async Task<IActionResult?> TryRouteToKnownVersionAsync(
+        Package pkg, string version, string file, string orgId, TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
+        var normalizedVersion = NormalizeNuGetVersion(version);
+        var pkgVersion = await _packages.GetVersionAsync(pkg.Id, normalizedVersion, ct);
+        if (pkgVersion is null) return null;
+
+        if (pkgVersion.Origin == "uploaded")
+            return await ServeHostedVersionAsync(orgId, pkgVersion, file, token, settings, ct);
+
+        if (pkgVersion.Origin == "proxy")
+            return await TryServeCachedProxyVersionAsync(orgId, pkgVersion, file, token, settings, ct);
+
+        return null;
+    }
+
+    private async Task<IActionResult> ServeHostedVersionAsync(
+        string orgId, PackageVersion pkgVersion, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
+    {
+        // Version exists and is privately hosted — token is required to download.
         if (token is null)
         {
             Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
             return Unauthorized();
         }
-        var pkgVersion = await _packages.GetVersionAsync(pkg.Id, version, ct);
-        if (pkgVersion is null) return NotFound();
 
-        var blockResult = await CheckNuGetBlockGateAsync(
-            new BlockProbe(pkgVersion.Purl, pkgVersion.Id, pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt),
-            new BlockGateContext(orgId, token.UserId, settings), ct);
-        if (blockResult is not null) return blockResult;
+        var sourceIp = HttpContext.GetNormalizedRemoteIp();
+        if (await _blockGate.EvaluateAsync(
+                new BlockGateRequest(orgId, "nuget", pkgVersion.Purl, pkgVersion.Id,
+                    pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
+                    token.UserId, settings.MaxOsvScoreTolerance, sourceIp), ct)
+            == BlockDecision.Blocked) return StatusCode(403);
 
         var stream = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
         if (stream is null) return NotFound();
 
         Response.Headers["X-Cache"] = "HIT";
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
-        await _audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token.UserId, ct: ct);
+        await _audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token.UserId,
+            sourceIp: sourceIp, ct: ct);
         return File(stream, "application/octet-stream", file);
     }
 
-    // For proxy packages: serve from cache only when the cached blob is for the exact requested file.
+    // For proxy versions: serve from cache only when the cached blob is for the exact requested file.
     // Each file type (nupkg, nuspec, sha512) has a distinct sha256 and blob. Serving the wrong blob
     // (e.g., nupkg bytes when the client requests the .sha512 hash) causes integrity verification to fail.
     // Returns 403 if blocked, the file IActionResult if cached, or null if cache miss → caller proxies.
-    private async Task<IActionResult?> TryServeProxyCachedNupkgAsync(
-        string orgId, Package pkg, string version, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
+    private async Task<IActionResult?> TryServeCachedProxyVersionAsync(
+        string orgId, PackageVersion pkgVersion, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
-        var normalizedVersion = NormalizeNuGetVersion(version);
-        var pkgVersion = await _packages.GetVersionAsync(pkg.Id, normalizedVersion, ct);
+        var sourceIp = HttpContext.GetNormalizedRemoteIp();
+        if (await _blockGate.EvaluateAsync(
+                new BlockGateRequest(orgId, "nuget", pkgVersion.Purl, pkgVersion.Id,
+                    pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
+                    token?.UserId, settings.MaxOsvScoreTolerance, sourceIp), ct)
+            == BlockDecision.Blocked) return StatusCode(403);
 
-        if (pkgVersion is not null)
-        {
-            var blockResult = await CheckNuGetBlockGateAsync(
-                new BlockProbe(pkgVersion.Purl, pkgVersion.Id, pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt),
-                new BlockGateContext(orgId, token?.UserId, settings), ct);
-            if (blockResult is not null) return blockResult;
-        }
-
-        if (pkgVersion is null || !pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase))
+        if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase))
             return null;
 
         var stream = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
@@ -359,7 +571,8 @@ public partial class NuGetController : ControllerBase
 
         Response.Headers["X-Cache"] = "HIT";
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
-        await _audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token?.UserId, ct: ct);
+        await _audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token?.UserId,
+            sourceIp: sourceIp, ct: ct);
         return File(stream, "application/octet-stream", file);
     }
 
@@ -368,71 +581,38 @@ public partial class NuGetController : ControllerBase
             ? nv.ToNormalizedString().ToLowerInvariant()
             : version.ToLowerInvariant();
 
-    // Returns 403 IActionResult if blocked (manual or OSV score over tolerance), else null.
-    private async Task<IActionResult?> CheckNuGetBlockGateAsync(
-        BlockProbe probe, BlockGateContext gate, CancellationToken ct)
-    {
-        if (probe.ManualState == "blocked")
-        {
-            await _audit.LogActivityAsync(gate.OrgId, "nuget", probe.Purl, "blocked_manual", gate.UserId, ct: ct);
-            return StatusCode(403);
-        }
-        if (probe.ManualState == "allowed" || probe.VulnCheckedAt is null) return null;
-
-        var maxScore = await _vulns.GetMaxScoreForVersionAsync(probe.VersionId, ct);
-        if (!maxScore.HasValue || maxScore.Value <= gate.Settings.MaxOsvScoreTolerance) return null;
-
-        await _audit.LogActivityAsync(gate.OrgId, "nuget", probe.Purl, "blocked_vuln_score", gate.UserId,
-            detail: $"{{\"max_score\":{maxScore.Value},\"tolerance\":{gate.Settings.MaxOsvScoreTolerance}}}",
-            ct: ct);
-        return StatusCode(403);
-    }
-
-    private sealed record BlockProbe(string Purl, string VersionId, string? ManualState, DateTimeOffset? VulnCheckedAt);
-    private sealed record BlockGateContext(string OrgId, string? UserId, OrgSettings Settings);
-
     private async Task<IActionResult> ProxyFetchNupkgAsync(
         string orgId, string id, string version, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
         var upstreamBase = _config["NuGet:Upstream"] ?? "https://api.nuget.org/v3";
+        var upstreamUrl = $"{upstreamBase}/flatcontainer/{id.ToLowerInvariant()}/{version}/{file}";
         Response.Headers["X-Cache"] = "MISS";
         try
         {
-            using var resp = await _upstream.GetMetadataAsync(
-                $"{upstreamBase}/flatcontainer/{id.ToLowerInvariant()}/{version}/{file}", ct);
+            using var resp = await _upstream.GetMetadataAsync(upstreamUrl, ct);
             if (!resp.IsSuccessStatusCode) return NotFound();
             var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
-
-            var sha256 = ChecksumVerifier.ComputeSha256Hex(bytes);
-            var blobKey = BlobKeys.Proxy(sha256);
-            if (!await _blobs.ExistsAsync(blobKey, ct))
-                await _blobs.PutAsync(blobKey, new MemoryStream(bytes), ct);
 
             var normalizedId = id.ToLowerInvariant();
             var normalizedVersion = NormalizeNuGetVersion(version);
             var canonicalId = ResolveCanonicalNuGetId(file, bytes, normalizedId);
             var purl = PurlNormalizer.NuGet(canonicalId, normalizedVersion);
 
-            // #48: record into cache_artifact + tenant_artifact_access. Best-effort.
-            await _cacheRecorder.RecordAccessAsync(new CacheAccess(
-                orgId, "nuget", normalizedId, normalizedVersion, file, sha256, bytes.Length,
-                blobKey, $"{upstreamBase}/flatcontainer/{normalizedId}/{normalizedVersion}/{file}"), ct);
+            var result = await _proxyFetch.RecordAndScanAsync(new ProxyFetchRequest(
+                OrgId: orgId, Ecosystem: "nuget",
+                PackageName: normalizedId, PurlName: normalizedId,
+                Version: normalizedVersion, Purl: purl, File: file, Bytes: bytes,
+                ExtractLicenses: bytes2 => file.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase)
+                    ? LicenseExtractor.FromNuspec(bytes2)
+                    : LicenseExtractor.ExtractedMetadata.Empty,
+                UserId: token?.UserId,
+                SourceIp: HttpContext.GetNormalizedRemoteIp(),
+                MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
+                CacheAccess: new CacheAccess(orgId, "nuget", normalizedId, normalizedVersion, file,
+                    Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: $"{upstreamBase}/flatcontainer/{normalizedId}/{normalizedVersion}/{file}")
+            ), ct);
 
-            var scanVersionId = await RecordOrLookupNuGetVersionAsync(
-                normalizedId, normalizedVersion, purl,
-                new ProxyPayload(sha256, file, bytes),
-                new ProxyTenantContext(orgId, token), ct);
-
-            if (scanVersionId is not null)
-            {
-                await _scanner.ScanVersionAsync(purl, scanVersionId, "nuget", normalizedId, orgId, ct: ct);
-                var existing = await _packages.GetVersionByIdAsync(scanVersionId, ct);
-                var blockResult = await CheckNuGetBlockGateAsync(
-                    new BlockProbe(purl, scanVersionId, existing?.ManualBlockState, DateTimeOffset.UtcNow),
-                    new BlockGateContext(orgId, token?.UserId, settings), ct);
-                if (blockResult is not null) return blockResult;
-            }
-
+            if (result.Decision == BlockDecision.Blocked) return StatusCode(403);
             return File(bytes, "application/octet-stream", file);
         }
         catch (Microsoft.Data.Sqlite.SqliteException) { throw; }
@@ -463,39 +643,6 @@ public partial class NuGetController : ControllerBase
         return normalizedId;
     }
 
-    private async Task<string?> RecordOrLookupNuGetVersionAsync(
-        string normalizedId, string normalizedVersion, string purl,
-        ProxyPayload payload, ProxyTenantContext tenant, CancellationToken ct)
-    {
-        try
-        {
-            var record = await _packages.GetOrCreateAsync(tenant.OrgId, "nuget", normalizedId, normalizedId, isProxy: true, ct);
-            var dbBlobKey = $"{BlobKeys.Proxy(payload.Sha256)}/{payload.File}";
-            var newVer = await _packages.CreateVersionAsync(
-                new NewPackageVersion(record.Id, normalizedVersion, purl, dbBlobKey, payload.Bytes.Length, payload.Sha256, FirstFetch: true), ct);
-            await _audit.LogActivityAsync(tenant.OrgId, "nuget", purl, "first_fetch", tenant.Token?.UserId, ct: ct);
-
-            // License from the .nuspec inside the cached .nupkg. Other file types (.nuspec sidecar / .sha512)
-            // don't carry the package archive, so skip those.
-            if (payload.File.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase))
-            {
-                var extracted = LicenseExtractor.FromNuspec(payload.Bytes);
-                if (extracted.Spdx.Count > 0)
-                    await _licenses.SetLicensesAsync(newVer.Id, extracted.Spdx, "upstream", ct);
-            }
-            return newVer.Id;
-        }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 19)
-        {
-            var existingPkg = await _packages.GetByPurlNameAsync(tenant.OrgId, "nuget", normalizedId, ct);
-            if (existingPkg is null) return null;
-            var existingVer = await _packages.GetVersionAsync(existingPkg.Id, normalizedVersion, ct);
-            return existingVer?.Id;
-        }
-    }
-
-    private sealed record ProxyPayload(string Sha256, string File, byte[] Bytes);
-    private sealed record ProxyTenantContext(string OrgId, TokenRecord? Token);
 
     // ── Push ─────────────────────────────────────────────────────────────────
 
@@ -596,29 +743,51 @@ public partial class NuGetController : ControllerBase
         NuGetPushContext ctx, string nuspecId, string nuspecVersion,
         bool isSymbol, byte[] bytes, CancellationToken ct)
     {
-        var idCheck = PathSafeValidator.Validate(nuspecId, "id");
-        if (!idCheck.IsValid) return UnprocessableEntity(new ProblemDetails { Detail = idCheck.Message, Status = 422 });
+        var normalizedVersion = PurlNormalizer.NormalizeNuGetVersionString(nuspecVersion);
+        var purlName = nuspecId.ToLowerInvariant();
+        var filename = $"{purlName}.{normalizedVersion.ToLowerInvariant()}.{(isSymbol ? "snupkg" : "nupkg")}";
 
-        var verCheck = PathSafeValidator.Validate(nuspecVersion, "version");
-        if (!verCheck.IsValid) return UnprocessableEntity(new ProblemDetails { Detail = verCheck.Message, Status = 422 });
-
-        var claimReject = await _publishGate.CheckAsync(ctx.OrgId, "nuget", nuspecId.ToLowerInvariant(), ct);
-        if (claimReject is not null) return claimReject;
-
+        if (ValidateNuspecCoordinates(nuspecId, nuspecVersion, filename) is { } pathError) return pathError;
+        if (await _publishGate.CheckAsync(ctx.OrgId, "nuget", purlName, ct) is { } claimReject) return claimReject;
         if (bytes.Length > ctx.Limit)
             return StatusCode(413, new ProblemDetails { Detail = "Upload exceeds NuGet size limit.", Status = 413 });
 
-        var normalizedVersion = PurlNormalizer.NormalizeNuGetVersionString(nuspecVersion);
-        var purlName = nuspecId.ToLowerInvariant();
-        var ext = isSymbol ? "snupkg" : "nupkg";
-        var filename = $"{purlName}.{normalizedVersion.ToLowerInvariant()}.{ext}";
-
-        var filenameCheck = PathSafeValidator.Validate(filename, "filename");
-        if (!filenameCheck.IsValid)
-            return UnprocessableEntity(new ProblemDetails { Detail = filenameCheck.Message, Status = 422 });
-
         var claim = await _claimResolver.ResolveAsync(ctx.OrgId, "nuget", purlName, ct);
-        var publishResult = await _publish.StoreAndRecordAsync(new Dependably.Infrastructure.Publish.PublishRequest
+        var publishResult = await _publish.StoreAndRecordAsync(
+            BuildNuspecPublishRequest(ctx, nuspecId, purlName, normalizedVersion, filename, bytes, claim.State), ct);
+
+        if (publishResult is Dependably.Infrastructure.Publish.PublishResult.Rejected rej)
+        {
+            return rej.Code == "version_exists"
+                ? Conflict(new ProblemDetails { Detail = $"Version {normalizedVersion} already exists.", Status = 409 })
+                : StatusCode(rej.HttpStatus, new ProblemDetails { Detail = rej.Message, Status = rej.HttpStatus });
+        }
+
+        var versionId = ((Dependably.Infrastructure.Publish.PublishResult.Accepted)publishResult).VersionId;
+        await EmitNuspecLicensesAsync(versionId, bytes, ct);
+        return StatusCode(201);
+    }
+
+    /// <summary>
+    /// Three path-safety guards in one place. Returns the 422 result on the first failure
+    /// or null when all three checks pass. Filename is rebuilt from the normalised id +
+    /// version + extension so the safety check covers the actual stored path.
+    /// </summary>
+    private UnprocessableEntityObjectResult? ValidateNuspecCoordinates(string nuspecId, string nuspecVersion, string filename)
+    {
+        foreach (var (value, kind) in new[] { (nuspecId, "id"), (nuspecVersion, "version"), (filename, "filename") })
+        {
+            var check = PathSafeValidator.Validate(value, kind);
+            if (!check.IsValid)
+                return UnprocessableEntity(new ProblemDetails { Detail = check.Message, Status = 422 });
+        }
+        return null;
+    }
+
+    private Dependably.Infrastructure.Publish.PublishRequest BuildNuspecPublishRequest(
+        NuGetPushContext ctx, string nuspecId, string purlName, string normalizedVersion,
+        string filename, byte[] bytes, string claimState)
+        => new()
         {
             OrgId = ctx.OrgId,
             Ecosystem = "nuget",
@@ -633,25 +802,20 @@ public partial class NuGetController : ControllerBase
             ActorUserId = ctx.Token.UserId,
             AuditAction = "push",
             AllowOverwrite = ctx.Settings?.AllowVersionOverwrite ?? false,
-            ClaimState = claim.State,
-        }, ct);
+            ClaimState = claimState,
+            SourceIp = HttpContext.GetNormalizedRemoteIp(),
+        };
 
-        if (publishResult is Dependably.Infrastructure.Publish.PublishResult.Rejected rej)
-        {
-            return rej.Code == "version_exists"
-                ? Conflict(new ProblemDetails { Detail = $"Version {normalizedVersion} already exists.", Status = 409 })
-                : StatusCode(rej.HttpStatus, new ProblemDetails { Detail = rej.Message, Status = rej.HttpStatus });
-        }
-
-        // License from the .nuspec inside the .nupkg. Deprecation lives in registration
-        // metadata, not the nuspec — never available at push time, only on proxy fetches
-        // with a registration leaf.
-        var versionId = ((Dependably.Infrastructure.Publish.PublishResult.Accepted)publishResult).VersionId;
+    /// <summary>
+    /// License rows from the .nuspec inside the .nupkg. Deprecation lives in registration
+    /// metadata, not the nuspec — never available at push time, only on proxy fetches with
+    /// a registration leaf.
+    /// </summary>
+    private async Task EmitNuspecLicensesAsync(string versionId, byte[] bytes, CancellationToken ct)
+    {
         var extracted = LicenseExtractor.FromNuspec(bytes);
         if (extracted.Spdx.Count > 0)
             await _licenses.SetLicensesAsync(versionId, extracted.Spdx, "upstream", ct);
-
-        return StatusCode(201);
     }
 
     // ── Unlist ───────────────────────────────────────────────────────────────
@@ -806,11 +970,11 @@ public sealed record NuGetControllerServices(
     BlocklistRepository Blocklist,
     IConfiguration Config,
     IMetadataStore Db,
-    Dependably.Infrastructure.VulnerabilityScanService Scanner,
-    VulnerabilityRepository Vulns,
+    BlockGateService BlockGate,
     LicenseRepository Licenses,
     IPublicUrlBuilder Urls,
     PublishGate PublishGate,
     Dependably.Infrastructure.Publish.IPackagePublishService Publish,
-    CacheAccessRecorder CacheRecorder,
-    ClaimResolver ClaimResolver);
+    ClaimResolver ClaimResolver,
+    Dependably.Storage.ProxyFetchService ProxyFetch,
+    ILogger<NuGetController> Logger);

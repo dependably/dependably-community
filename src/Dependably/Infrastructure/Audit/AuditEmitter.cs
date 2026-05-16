@@ -1,4 +1,5 @@
 using Dependably.Infrastructure.Siem;
+using Dependably.Security;
 using Prometheus;
 
 namespace Dependably.Infrastructure.Audit;
@@ -67,7 +68,7 @@ public sealed class AuditEmitter : IAuditEmitter
             ActorType = actorType,
             ActorId = actorId,
             RequestId = ctx?.TraceIdentifier,
-            SourceIp = ctx?.Connection?.RemoteIpAddress?.ToString(),
+            SourceIp = ctx.GetNormalizedRemoteIp(),
             UserAgent = Truncate(ctx?.Request?.Headers.UserAgent.FirstOrDefault(), 512),
             Outcome = outcome,
             Payload = payloadJson,

@@ -55,6 +55,83 @@ public sealed class SchemaInitializer
         await RunOnceAsync(conn, "collapse_origin_to_uploaded", CollapseOriginToUploadedAsync);
         await RunOnceAsync(conn, "drop_legacy_token_scope_column", DropLegacyTokenScopeColumnAsync);
         await RunOnceAsync(conn, "drop_package_versions_sbom_column", DropPackageVersionsSbomColumnAsync);
+        await RunOnceAsync(conn, "drop_allowlist_blocklist_ecosystem", DropAllowlistBlocklistEcosystemAsync);
+    }
+
+    // Drops the `ecosystem` column from `allowlist` and `blocklist`. The ecosystem is already
+    // encoded in every valid PURL (per the PURL spec), so the column was structurally
+    // redundant — allowlist entries match against the PURL string directly, and blocklist
+    // regexes match against the full PURL. The UNIQUE constraint contracts to (org_id, pattern).
+    //
+    // Rows that previously differed only by ecosystem collapse on the new UNIQUE; we keep the
+    // earliest id/created_at so any audit references to the surviving id remain valid.
+    //
+    // Behaviour change for blocklist: a loose pattern such as `evil-.*` (no `pkg:` anchor) is
+    // no longer scoped to a single ecosystem. Operators relying on the implicit scoping must
+    // re-anchor manually (e.g. `^pkg:npm/evil-.*`). Flagged in the release notes.
+    private Task DropAllowlistBlocklistEcosystemAsync(DbConnection conn)
+    {
+        // SQLite's ALTER TABLE DROP COLUMN refuses when the column participates in a UNIQUE
+        // index, so for both providers we use the recreate-table pattern. The CREATE TABLE
+        // text below intentionally omits the DEFAULT clause for created_at — copied rows
+        // carry their original timestamps, and fresh inserts always provide their own value.
+        const string sqliteSql = """
+            CREATE TABLE allowlist_new (
+                id           TEXT PRIMARY KEY,
+                org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+                purl_pattern TEXT NOT NULL,
+                created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                UNIQUE (org_id, purl_pattern)
+            );
+            INSERT INTO allowlist_new (id, org_id, purl_pattern, created_at)
+            SELECT MIN(id), org_id, purl_pattern, MIN(created_at)
+            FROM allowlist GROUP BY org_id, purl_pattern;
+            DROP TABLE allowlist;
+            ALTER TABLE allowlist_new RENAME TO allowlist;
+
+            CREATE TABLE blocklist_new (
+                id         TEXT PRIMARY KEY,
+                org_id     TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+                pattern    TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                UNIQUE (org_id, pattern)
+            );
+            INSERT INTO blocklist_new (id, org_id, pattern, created_at)
+            SELECT MIN(id), org_id, pattern, MIN(created_at)
+            FROM blocklist GROUP BY org_id, pattern;
+            DROP TABLE blocklist;
+            ALTER TABLE blocklist_new RENAME TO blocklist;
+            """;
+
+        const string pgSql = """
+            CREATE TABLE allowlist_new (
+                id           TEXT PRIMARY KEY,
+                org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+                purl_pattern TEXT NOT NULL,
+                created_at   TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+                UNIQUE (org_id, purl_pattern)
+            );
+            INSERT INTO allowlist_new (id, org_id, purl_pattern, created_at)
+            SELECT MIN(id), org_id, purl_pattern, MIN(created_at)
+            FROM allowlist GROUP BY org_id, purl_pattern;
+            DROP TABLE allowlist;
+            ALTER TABLE allowlist_new RENAME TO allowlist;
+
+            CREATE TABLE blocklist_new (
+                id         TEXT PRIMARY KEY,
+                org_id     TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+                pattern    TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+                UNIQUE (org_id, pattern)
+            );
+            INSERT INTO blocklist_new (id, org_id, pattern, created_at)
+            SELECT MIN(id), org_id, pattern, MIN(created_at)
+            FROM blocklist GROUP BY org_id, pattern;
+            DROP TABLE blocklist;
+            ALTER TABLE blocklist_new RENAME TO blocklist;
+            """;
+
+        return conn.ExecuteAsync(_db.Provider == DbProvider.Postgres ? pgSql : sqliteSql);
     }
 
     // Drops the legacy `scope` column from `tokens` and `cicd_tokens`. Capabilities is the
@@ -117,6 +194,7 @@ public sealed class SchemaInitializer
         {
             "ALTER TABLE package_versions ADD COLUMN vuln_checked_at TEXT",
             "ALTER TABLE activity ADD COLUMN detail TEXT",
+            "ALTER TABLE activity ADD COLUMN source_ip TEXT",
             "ALTER TABLE org_settings ADD COLUMN license_enforcement_mode TEXT NOT NULL DEFAULT 'off'",
             "ALTER TABLE org_settings ADD COLUMN proxy_passthrough_enabled INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE org_settings ADD COLUMN max_osv_score_tolerance REAL NOT NULL DEFAULT 10.0",
@@ -139,6 +217,10 @@ public sealed class SchemaInitializer
             // rows pre-dating this column get NULL on backfill and are denied at auth time.
             "ALTER TABLE tokens ADD COLUMN capabilities TEXT",
             "ALTER TABLE cicd_tokens ADD COLUMN capabilities TEXT",
+            // Remote IP for tenant- and system-scope audit events (logins, config changes,
+            // tenant lifecycle). activity already has its own source_ip; audit_log was the
+            // one operator-visible sink without it.
+            "ALTER TABLE audit_log ADD COLUMN source_ip TEXT",
         };
 
         foreach (var ddl in migrations)

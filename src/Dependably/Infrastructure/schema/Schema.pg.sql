@@ -130,10 +130,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_unique_pending
 CREATE TABLE IF NOT EXISTS allowlist (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,
     purl_pattern TEXT NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
-    UNIQUE (org_id, ecosystem, purl_pattern)
+    UNIQUE (org_id, purl_pattern)
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -145,6 +144,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     ecosystem   TEXT,
     purl        TEXT,
     detail      TEXT,
+    source_ip   TEXT,
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_scope ON audit_log(scope, created_at DESC);
@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS activity (
     event_type  TEXT NOT NULL,
     actor_id    TEXT,
     detail      TEXT,
+    source_ip   TEXT,
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
 );
 
@@ -202,10 +203,9 @@ CREATE INDEX IF NOT EXISTS idx_cicd_tokens_hash ON cicd_tokens(token_hash);
 CREATE TABLE IF NOT EXISTS blocklist (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,
-    pattern     TEXT NOT NULL,  -- regex pattern matched against package PURL
+    pattern     TEXT NOT NULL,  -- regex matched against the full package PURL
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
-    UNIQUE (org_id, ecosystem, pattern)
+    UNIQUE (org_id, pattern)
 );
 
 -- License governance

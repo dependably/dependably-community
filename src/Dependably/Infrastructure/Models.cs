@@ -185,7 +185,6 @@ public class AllowlistEntry
 {
     public string Id { get; set; } = "";
     public string OrgId { get; set; } = "";
-    public string Ecosystem { get; set; } = "";
     public string PurlPattern { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
 }
@@ -194,7 +193,6 @@ public class BlocklistEntry
 {
     public string Id { get; set; } = "";
     public string OrgId { get; set; } = "";
-    public string Ecosystem { get; set; } = "";
     public string Pattern { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
 }
@@ -307,6 +305,7 @@ public class ActivityEntry
     public string? ActorId { get; set; }
     public string? ActorEmail { get; set; }
     public string? Detail { get; set; }
+    public string? SourceIp { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
 

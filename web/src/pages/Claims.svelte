@@ -2,6 +2,8 @@
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
+  import { submitForm, extractErrorMessage } from '../lib/form.js'
+  import ErrorBanner from '../lib/ErrorBanner.svelte'
 
   let claims = []
   let loading = true
@@ -27,7 +29,7 @@
       const data = await api.listClaims(params)
       claims = data.items ?? []
     } catch (e) {
-      error = $t('claims.loadFailed', { values: { message: e.message } })
+      error = $t('claims.loadFailed', { values: { message: extractErrorMessage(e) } })
     } finally {
       loading = false
     }
@@ -69,8 +71,7 @@
     if ((mState === 'mixed' || (modal === 'transition' && mState === 'mixed')) && !mAck) {
       mError = $t('claims.modal.mixedWarning'); return
     }
-    mSubmitting = true
-    try {
+    await submitForm(async () => {
       if (modal === 'create') {
         await api.createClaim({ ecosystem: mEco, name: mName.trim(), state: mState, reason: mReason.trim() })
       } else if (modal === 'transition') {
@@ -79,13 +80,11 @@
       } else if (modal === 'release') {
         await api.releaseClaim(currentClaim.ecosystem, currentClaim.name, mReason.trim())
       }
-      closeModal()
-      await load()
-    } catch (e) {
-      mError = e.message
-    } finally {
-      mSubmitting = false
-    }
+    }, {
+      setSaving: v => mSubmitting = v,
+      setError:  v => mError      = v,
+      onSuccess: async () => { closeModal(); await load() },
+    })
   }
 </script>
 
@@ -117,7 +116,7 @@
     />
   </div>
 
-  {#if error}<div class="page-error">{error}</div>{/if}
+  <ErrorBanner message={error} />
 
   {#if loading}
     <span class="spinner"></span>

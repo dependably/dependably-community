@@ -204,4 +204,59 @@ public static partial class PyPiArtifactValidator
 
     [GeneratedRegex(@"[-_.]+")]
     private static partial Regex Pep503Replace();
+
+    /// <summary>
+    /// Filename-only parser used by the proxy <c>/packages/{file}</c> path, where the
+    /// archive bytes aren't in hand yet. Wheels follow PEP 427 strictly; sdists need a
+    /// right-to-left PEP 440 scan because the distribution segment can contain hyphens
+    /// (e.g. <c>psycopg2-binary-2.9.10.tar.gz</c> → <c>psycopg2-binary</c> + <c>2.9.10</c>).
+    /// Returned <paramref name="purlName"/> is PEP 503 normalised.
+    /// </summary>
+    public static bool TryParseFilename(string filename, out string? purlName, out string? version)
+    {
+        purlName = null;
+        version = null;
+        if (string.IsNullOrEmpty(filename)) return false;
+
+        var lowered = filename.ToLowerInvariant();
+        string stem;
+        bool isWheel;
+        if (lowered.EndsWith(".whl", StringComparison.Ordinal))
+        {
+            stem = filename[..^4];
+            isWheel = true;
+        }
+        else if (lowered.EndsWith(".tar.gz", StringComparison.Ordinal)) { stem = filename[..^7]; isWheel = false; }
+        else if (lowered.EndsWith(".tar.bz2", StringComparison.Ordinal)) { stem = filename[..^8]; isWheel = false; }
+        // .zip is legacy PEP 314 sdist; PyPI still serves them. Same 4-char strip as .tgz.
+        else if (lowered.EndsWith(".tgz", StringComparison.Ordinal)
+            || lowered.EndsWith(".zip", StringComparison.Ordinal)) { stem = filename[..^4]; isWheel = false; }
+        else return false;
+
+        if (isWheel)
+        {
+            // PEP 427: {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.
+            // Distribution is mandated to use underscores, so split-on-dash is safe here.
+            var parts = stem.Split('-');
+            if (parts.Length < 5) return false;
+            if (!Pep440VersionRegex().IsMatch(parts[1])) return false;
+            purlName = Normalize(parts[0]);
+            version = parts[1];
+            return true;
+        }
+
+        // Sdist: scan right-to-left for the first split where the right side is PEP 440-shaped.
+        // This is how pip disambiguates names like "psycopg2-binary" from version suffixes.
+        for (var i = stem.LastIndexOf('-'); i > 0; i = stem.LastIndexOf('-', i - 1))
+        {
+            var candidate = stem[(i + 1)..];
+            if (Pep440VersionRegex().IsMatch(candidate))
+            {
+                purlName = Normalize(stem[..i]);
+                version = candidate;
+                return true;
+            }
+        }
+        return false;
+    }
 }

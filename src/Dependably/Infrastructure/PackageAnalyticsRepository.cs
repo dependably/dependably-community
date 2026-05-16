@@ -1,0 +1,106 @@
+using Dapper;
+
+namespace Dependably.Infrastructure;
+
+/// <summary>
+/// Dashboard aggregation queries. Split out of <see cref="PackageRepository"/> so the
+/// publish/proxy hot path doesn't carry the org-stats SQL surface, and so callers can
+/// depend on <see cref="PackageRepository"/> alone for CRUD without dragging analytics.
+/// </summary>
+public sealed class PackageAnalyticsRepository
+{
+    private readonly IMetadataStore _db;
+
+    public PackageAnalyticsRepository(IMetadataStore db) => _db = db;
+
+    public async Task<OrgStats> GetOrgStatsAsync(string orgId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+
+        var packagesByEco = (await conn.QueryAsync<EcoCount>(
+            """
+            SELECT ecosystem as Ecosystem, COUNT(*) as Count
+            FROM packages WHERE org_id = @orgId
+            GROUP BY ecosystem
+            """,
+            new { orgId })).ToList();
+
+        var downloadsByHour = (await conn.QueryAsync<HourCount>(
+            """
+            SELECT strftime('%Y-%m-%dT%H:00:00Z', created_at) as Hour, COUNT(*) as Count
+            FROM activity
+            WHERE org_id = @orgId
+              AND event_type IN ('pull', 'first_fetch')
+              AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-24 hours'))
+            GROUP BY strftime('%Y-%m-%dT%H', created_at)
+            ORDER BY Hour ASC
+            """,
+            new { orgId })).ToList();
+
+        var vulnsByEcoSeverity = (await conn.QueryAsync<EcoSeverityCount>(
+            """
+            SELECT p.ecosystem as Ecosystem, COALESCE(v.severity, 'UNKNOWN') as Severity,
+                   COUNT(DISTINCT pvv.vuln_id) as Count
+            FROM package_version_vulns pvv
+            JOIN vulnerabilities v ON v.id = pvv.vuln_id
+            JOIN package_versions pv ON pv.id = pvv.package_version_id
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.org_id = @orgId
+            GROUP BY p.ecosystem, v.severity
+            """,
+            new { orgId })).ToList();
+
+        var diskByEco = (await conn.QueryAsync<EcoDiskBytes>(
+            """
+            SELECT p.ecosystem as Ecosystem, COALESCE(SUM(pv.size_bytes), 0) as TotalBytes
+            FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.org_id = @orgId
+            GROUP BY p.ecosystem
+            """,
+            new { orgId })).ToList();
+
+        var vulnPeriods = await conn.QuerySingleOrDefaultAsync<VulnPeriodCounts>(
+            """
+            SELECT
+              COUNT(DISTINCT CASE WHEN pvv.checked_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-1 days'))  THEN pvv.vuln_id END) as Day,
+              COUNT(DISTINCT CASE WHEN pvv.checked_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-7 days'))  THEN pvv.vuln_id END) as Week,
+              COUNT(DISTINCT CASE WHEN pvv.checked_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-30 days')) THEN pvv.vuln_id END) as Month
+            FROM package_version_vulns pvv
+            JOIN package_versions pv ON pv.id = pvv.package_version_id
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.org_id = @orgId
+            """,
+            new { orgId }) ?? new VulnPeriodCounts();
+
+        var activeUsers = await conn.ExecuteScalarAsync<int>(
+            """
+            SELECT COUNT(DISTINCT actor_id)
+            FROM activity
+            WHERE org_id = @orgId
+              AND actor_id IS NOT NULL
+              AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-7 days'))
+            """,
+            new { orgId });
+
+        var blockedPulls = await conn.ExecuteScalarAsync<int>(
+            """
+            SELECT COUNT(*)
+            FROM activity
+            WHERE org_id = @orgId
+              AND event_type IN ('blocked', 'blocked_vuln_score', 'blocked_manual')
+              AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-30 days'))
+            """,
+            new { orgId });
+
+        return new OrgStats(
+            PackagesByEcosystem: packagesByEco,
+            DownloadsByHour: downloadsByHour,
+            VulnsByEcosystemAndSeverity: vulnsByEcoSeverity,
+            DiskByEcosystem: diskByEco,
+            TotalDiskBytes: diskByEco.Sum(d => d.TotalBytes),
+            NewVulns: vulnPeriods,
+            ActiveUsers7d: activeUsers,
+            BlockedPulls30d: blockedPulls);
+    }
+}

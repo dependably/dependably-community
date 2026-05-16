@@ -217,6 +217,50 @@ public sealed class PyPiArtifactValidatorTests
         Assert.Equal("content", result.FieldName);
     }
 
+    // ── TryParseFilename ─────────────────────────────────────────────────────
+
+    [Theory]
+    // Sdist with hyphenated name — the bug from issue: pip 404'd because the old parser
+    // returned "psycopg2" as the name, sending the lazy-fetch to /simple/psycopg2/.
+    [InlineData("psycopg2-binary-2.9.10.tar.gz", "psycopg2-binary", "2.9.10")]
+    // Wheel of the same package — PEP 427 substitutes underscores in the distribution segment.
+    [InlineData("psycopg2_binary-2.9.10-cp311-cp311-manylinux_2_17_x86_64.whl", "psycopg2-binary", "2.9.10")]
+    // Plain sdist, single-segment name.
+    [InlineData("requests-2.31.0.tar.gz", "requests", "2.31.0")]
+    // Sdist with mixed-case name → normalised.
+    [InlineData("Flask-3.0.0.tar.gz", "flask", "3.0.0")]
+    // Sdist with a dot in the name → PEP 503 collapses to a single hyphen.
+    [InlineData("zope.interface-6.1.tar.gz", "zope-interface", "6.1")]
+    // Wheel of a package with an underscore in the distribution segment.
+    [InlineData("tensorflow_gpu-2.15.0-cp311-cp311-manylinux_2_17_x86_64.whl", "tensorflow-gpu", "2.15.0")]
+    // PEP 440 pre-release.
+    [InlineData("my-pkg-1.0.0a1.tar.gz", "my-pkg", "1.0.0a1")]
+    // PEP 440 local version (contains '+').
+    [InlineData("my-pkg-1.0.0+local.tar.gz", "my-pkg", "1.0.0+local")]
+    // Alternative archive extensions.
+    [InlineData("my-pkg-1.2.3.tgz", "my-pkg", "1.2.3")]
+    [InlineData("my-pkg-1.2.3.zip", "my-pkg", "1.2.3")]
+    [InlineData("my-pkg-1.2.3.tar.bz2", "my-pkg", "1.2.3")]
+    public void TryParseFilename_HappyPath(string filename, string expectedName, string expectedVersion)
+    {
+        Assert.True(PyPiArtifactValidator.TryParseFilename(filename, out var name, out var version));
+        Assert.Equal(expectedName, name);
+        Assert.Equal(expectedVersion, version);
+    }
+
+    [Theory]
+    [InlineData("garbage.txt")]              // unknown extension
+    [InlineData("pkg-noversion.tar.gz")]     // no PEP 440-shaped suffix
+    [InlineData("nodash.tar.gz")]            // no hyphen at all
+    [InlineData("short-1.0.whl")]            // wheel with too few dash segments
+    [InlineData("")]                         // empty
+    public void TryParseFilename_Rejects(string filename)
+    {
+        Assert.False(PyPiArtifactValidator.TryParseFilename(filename, out var name, out var version));
+        Assert.Null(name);
+        Assert.Null(version);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static byte[] BuildZip(params (string Name, string Content)[] entries)

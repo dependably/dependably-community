@@ -29,7 +29,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.GetOrgSettings(CancellationToken.None);
+        var result = await b.OrgSettingsController.GetOrgSettings(CancellationToken.None);
         Assert.IsType<OkObjectResult>(result);
     }
 
@@ -40,7 +40,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); s.WithNoUser();
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.GetOrgSettings(CancellationToken.None);
+        var result = await b.OrgSettingsController.GetOrgSettings(CancellationToken.None);
         Assert.False(result is OkObjectResult);
     }
 
@@ -51,7 +51,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.UpdateOrgSettings(
+        var result = await b.OrgSettingsController.UpdateOrgSettings(
             new UpdateOrgSettingsRequest(
                 AnonymousPull: true, AllowlistMode: true,
                 MaxUploadBytes: 100_000_000,
@@ -78,7 +78,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.UpdateOrgSettings(
+        var result = await b.OrgSettingsController.UpdateOrgSettings(
             new UpdateOrgSettingsRequest(true, false, null, null, null, null),
             CancellationToken.None);
         Assert.False(result is OkObjectResult);
@@ -93,7 +93,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        Assert.IsType<OkObjectResult>(await b.OrgController.GetRetention(CancellationToken.None));
+        Assert.IsType<OkObjectResult>(await b.OrgSettingsController.GetRetention(CancellationToken.None));
     }
 
     [Fact]
@@ -103,7 +103,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.UpdateRetention(
+        var result = await b.OrgSettingsController.UpdateRetention(
             new UpdateRetentionRequest(KeepVersions: 5, KeepDays: 30, ActivityRetentionDays: 90),
             CancellationToken.None);
         Assert.IsType<NoContentResult>(result);
@@ -122,7 +122,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        Assert.IsType<OkObjectResult>(await b.OrgController.GetProxySettings(CancellationToken.None));
+        Assert.IsType<OkObjectResult>(await b.OrgSettingsController.GetProxySettings(CancellationToken.None));
     }
 
     [Fact]
@@ -132,7 +132,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.UpdateProxySettings(
+        var result = await b.OrgSettingsController.UpdateProxySettings(
             new UpdateProxySettingsRequest(ProxyPassthroughEnabled: false, MaxOsvScoreTolerance: 4.5),
             CancellationToken.None);
         Assert.IsType<NoContentResult>(result);
@@ -218,7 +218,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        Assert.IsType<OkObjectResult>(await b.OrgController.GetActivity());
+        Assert.IsType<OkObjectResult>(await b.OrgAuditController.GetActivity());
     }
 
     [Fact]
@@ -229,7 +229,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.GetActivity();
+        var result = await b.OrgAuditController.GetActivity();
         Assert.False(result is OkObjectResult);
     }
 
@@ -240,7 +240,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        Assert.IsType<OkObjectResult>(await b.OrgController.GetAudit());
+        Assert.IsType<OkObjectResult>(await b.OrgAuditController.GetAudit());
     }
 
     [Fact]
@@ -250,7 +250,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = (OkObjectResult)await b.OrgController.GetAudit(limit: 5000, page: 1);
+        var result = (OkObjectResult)await b.OrgAuditController.GetAudit(limit: 5000, page: 1);
         // Response contains items + total; just verify it didn't throw and clamped.
         Assert.NotNull(result.Value);
     }
@@ -304,7 +304,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        Assert.IsType<OkObjectResult>(await b.OrgController.ListTokens(CancellationToken.None));
+        Assert.IsType<OkObjectResult>(await b.OrgTokensController.ListTokens(CancellationToken.None));
     }
 
     [Fact]
@@ -314,7 +314,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.CreateToken(
+        var result = await b.OrgTokensController.CreateToken(
             new CreateTokenRequest(ExpiresAt: null, Capabilities: new[] { "read:metadata" }),
             CancellationToken.None);
         Assert.IsType<OkObjectResult>(result);
@@ -327,7 +327,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.CreateToken(
+        var result = await b.OrgTokensController.CreateToken(
             new CreateTokenRequest(ExpiresAt: null, Capabilities: null, Scope: "pull"),
             CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
@@ -341,7 +341,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.CreateToken(
+        var result = await b.OrgTokensController.CreateToken(
             new CreateTokenRequest(ExpiresAt: null, Capabilities: null),
             CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
@@ -356,13 +356,13 @@ public sealed class OrgControllerUnitTests
         var b = await s.BuildAsync();
 
         // Create then delete a token.
-        var created = (OkObjectResult)await b.OrgController.CreateToken(
+        var created = (OkObjectResult)await b.OrgTokensController.CreateToken(
             new CreateTokenRequest(null, Capabilities: new[] { "read:metadata" }),
             CancellationToken.None);
         var record = created.Value!.GetType().GetProperty("record")!.GetValue(created.Value)!;
         var tokenId = (string)record.GetType().GetProperty("Id")!.GetValue(record)!;
 
-        var deleteResult = await b.OrgController.DeleteToken(tokenId, CancellationToken.None);
+        var deleteResult = await b.OrgTokensController.DeleteToken(tokenId, CancellationToken.None);
         Assert.IsType<NoContentResult>(deleteResult);
     }
 
@@ -373,7 +373,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        Assert.IsType<OkObjectResult>(await b.OrgController.ListCicdTokens(CancellationToken.None));
+        Assert.IsType<OkObjectResult>(await b.OrgTokensController.ListCicdTokens(CancellationToken.None));
     }
 
     [Fact]
@@ -383,7 +383,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.CreateCicdToken(
+        var result = await b.OrgTokensController.CreateCicdToken(
             new CreateCicdTokenRequest(Name: "ci-pipeline", ExpiresAt: null,
                 Capabilities: new[] { "publish:*", "read:metadata" }),
             CancellationToken.None);
@@ -399,7 +399,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        Assert.IsType<OkObjectResult>(await b.OrgController.ListInvites(CancellationToken.None));
+        Assert.IsType<OkObjectResult>(await b.OrgInvitesController.ListInvites(CancellationToken.None));
     }
 
     [Fact]
@@ -409,7 +409,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.CreateInvite(
+        var result = await b.OrgInvitesController.CreateInvite(
             new CreateInviteRequest($"newhire-{Guid.NewGuid():N}@x.test"),
             CancellationToken.None);
         // Created response shape; tolerate both 201 and 200 styles.
@@ -423,7 +423,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.CreateInvite(
+        var result = await b.OrgInvitesController.CreateInvite(
             new CreateInviteRequest("nope@x.test"),
             CancellationToken.None);
         Assert.False(result is OkObjectResult or CreatedAtActionResult);
@@ -438,7 +438,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        Assert.IsType<OkObjectResult>(await b.OrgController.ListUsers(CancellationToken.None));
+        Assert.IsType<OkObjectResult>(await b.OrgUsersController.ListUsers(CancellationToken.None));
     }
 
     [Fact]
@@ -456,7 +456,7 @@ public sealed class OrgControllerUnitTests
             new { t = built.PrimaryOrgId, actor = built.ActorUserId });
         Assert.NotNull(targetId);
 
-        var result = await built.OrgController.PatchMemberRole(targetId!,
+        var result = await built.OrgUsersController.PatchMemberRole(targetId!,
             new PatchRoleRequest("admin"), CancellationToken.None);
         Assert.True(result is OkObjectResult or NoContentResult or ObjectResult);
     }
@@ -476,7 +476,7 @@ public sealed class OrgControllerUnitTests
         // Pass the bad URL in each upstream slot in turn — the controller rejects the
         // first bad one encountered and returns a BadRequest (not 422 — uses BadRequest
         // directly with an `error` field).
-        var result = await b.OrgController.UpdateOrgSettings(
+        var result = await b.OrgSettingsController.UpdateOrgSettings(
             new UpdateOrgSettingsRequest(
                 AnonymousPull: false, AllowlistMode: false,
                 MaxUploadBytes: null,
@@ -499,7 +499,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.UpdateProxySettings(
+        var result = await b.OrgSettingsController.UpdateProxySettings(
             new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true, MaxOsvScoreTolerance: badTolerance),
             CancellationToken.None);
 
@@ -531,7 +531,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.CreateCicdToken(
+        var result = await b.OrgTokensController.CreateCicdToken(
             new CreateCicdTokenRequest(Name: "ci-deploy", ExpiresAt: null,
                 Capabilities: null, Scope: "pull"),
             CancellationToken.None);
@@ -551,7 +551,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.CreateInvite(
+        var result = await b.OrgInvitesController.CreateInvite(
             new CreateInviteRequest(email),
             CancellationToken.None);
 
@@ -571,7 +571,7 @@ public sealed class OrgControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgController.CreateInvite(
+        var result = await b.OrgInvitesController.CreateInvite(
             new CreateInviteRequest($"user-{Guid.NewGuid():N}@x.test", Role: role),
             CancellationToken.None);
 
@@ -600,7 +600,7 @@ public sealed class OrgControllerUnitTests
             new { t = built.PrimaryOrgId, actor = built.ActorUserId });
         Assert.NotNull(targetId);
 
-        var result = await built.OrgController.PatchMemberRole(targetId!,
+        var result = await built.OrgUsersController.PatchMemberRole(targetId!,
             new PatchRoleRequest(badRole), CancellationToken.None);
 
         var obj = Assert.IsType<ObjectResult>(result);
@@ -619,7 +619,7 @@ public sealed class OrgControllerUnitTests
         var built = await s.BuildAsync();
 
         // The actor is the only owner and is trying to remove themselves.
-        var result = await built.OrgController.RemoveUser(
+        var result = await built.OrgUsersController.RemoveUser(
             built.ActorUserId!, CancellationToken.None);
 
         var obj = Assert.IsType<ObjectResult>(result);

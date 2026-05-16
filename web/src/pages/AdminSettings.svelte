@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
+  import ErrorBanner from '../lib/ErrorBanner.svelte'
 
   let settings = {}, loading = true, saving = false, error = '', success = ''
 
@@ -45,7 +46,7 @@
 
   {#if loading}<span class="spinner"></span>
   {:else}
-    {#if error}<div class="page-error">{error}</div>{/if}
+    <ErrorBanner message={error} />
     {#if success}<div class="text-success mb-3">{success}</div>{/if}
 
     <div class="card settings-card">

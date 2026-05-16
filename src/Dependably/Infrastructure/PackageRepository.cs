@@ -78,13 +78,13 @@ public sealed class PackageRepository
             string VerId, string VerPackageId, string VerVersion, string VerPurl, string VerBlobKey,
             long VerSizeBytes, string? VerChecksumSha256, bool VerYanked, string? VerYankReason,
             bool VerFirstFetch, string VerCreatedAt, string? VerVulnCheckedAt, string? VerManualBlockState,
-            string? VerDeprecated)>(
+            string? VerDeprecated, string VerOrigin)>(
             """
             SELECT p.id, p.org_id, p.ecosystem, p.name, p.purl_name, p.is_proxy, p.created_at,
                    pv.id, pv.package_id, pv.version, pv.purl, pv.blob_key,
                    pv.size_bytes, pv.checksum_sha256, pv.yanked, pv.yank_reason,
                    pv.first_fetch, pv.created_at, pv.vuln_checked_at, pv.manual_block_state,
-                   pv.deprecated
+                   pv.deprecated, pv.origin
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE p.org_id = @orgId AND p.ecosystem = @ecosystem
@@ -109,7 +109,8 @@ public sealed class PackageRepository
             FirstFetch = row.VerFirstFetch, CreatedAt = DateTimeOffset.Parse(row.VerCreatedAt),
             VulnCheckedAt = row.VerVulnCheckedAt is not null ? DateTimeOffset.Parse(row.VerVulnCheckedAt) : null,
             ManualBlockState = row.VerManualBlockState,
-            Deprecated = row.VerDeprecated
+            Deprecated = row.VerDeprecated,
+            Origin = row.VerOrigin
         };
         return (pkg, ver);
     }
@@ -386,106 +387,8 @@ public sealed class PackageRepository
             "UPDATE package_versions SET manual_block_state = @state WHERE id = @id",
             new { id = versionId, state });
     }
-
-    public async Task<OrgStats> GetOrgStatsAsync(string orgId, CancellationToken ct = default)
-    {
-        await using var conn = await _db.OpenAsync(ct);
-
-        var packagesByEco = (await conn.QueryAsync<EcoCount>(
-            """
-            SELECT ecosystem as Ecosystem, COUNT(*) as Count
-            FROM packages WHERE org_id = @orgId
-            GROUP BY ecosystem
-            """,
-            new { orgId })).ToList();
-
-        var downloadsByHour = (await conn.QueryAsync<HourCount>(
-            """
-            SELECT strftime('%Y-%m-%dT%H:00:00Z', created_at) as Hour, COUNT(*) as Count
-            FROM activity
-            WHERE org_id = @orgId
-              AND event_type IN ('pull', 'first_fetch')
-              AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-24 hours'))
-            GROUP BY strftime('%Y-%m-%dT%H', created_at)
-            ORDER BY Hour ASC
-            """,
-            new { orgId })).ToList();
-
-        var vulnsByEcoSeverity = (await conn.QueryAsync<EcoSeverityCount>(
-            """
-            SELECT p.ecosystem as Ecosystem, COALESCE(v.severity, 'UNKNOWN') as Severity,
-                   COUNT(DISTINCT pvv.vuln_id) as Count
-            FROM package_version_vulns pvv
-            JOIN vulnerabilities v ON v.id = pvv.vuln_id
-            JOIN package_versions pv ON pv.id = pvv.package_version_id
-            JOIN packages p ON p.id = pv.package_id
-            WHERE p.org_id = @orgId
-            GROUP BY p.ecosystem, v.severity
-            """,
-            new { orgId })).ToList();
-
-        var diskByEco = (await conn.QueryAsync<EcoDiskBytes>(
-            """
-            SELECT p.ecosystem as Ecosystem, COALESCE(SUM(pv.size_bytes), 0) as TotalBytes
-            FROM package_versions pv
-            JOIN packages p ON p.id = pv.package_id
-            WHERE p.org_id = @orgId
-            GROUP BY p.ecosystem
-            """,
-            new { orgId })).ToList();
-
-        var vulnPeriods = await conn.QuerySingleOrDefaultAsync<VulnPeriodCounts>(
-            """
-            SELECT
-              COUNT(DISTINCT CASE WHEN pvv.checked_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-1 days'))  THEN pvv.vuln_id END) as Day,
-              COUNT(DISTINCT CASE WHEN pvv.checked_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-7 days'))  THEN pvv.vuln_id END) as Week,
-              COUNT(DISTINCT CASE WHEN pvv.checked_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-30 days')) THEN pvv.vuln_id END) as Month
-            FROM package_version_vulns pvv
-            JOIN package_versions pv ON pv.id = pvv.package_version_id
-            JOIN packages p ON p.id = pv.package_id
-            WHERE p.org_id = @orgId
-            """,
-            new { orgId }) ?? new VulnPeriodCounts();
-
-        var activeUsers = await conn.ExecuteScalarAsync<int>(
-            """
-            SELECT COUNT(DISTINCT actor_id)
-            FROM activity
-            WHERE org_id = @orgId
-              AND actor_id IS NOT NULL
-              AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-7 days'))
-            """,
-            new { orgId });
-
-        var blockedPulls = await conn.ExecuteScalarAsync<int>(
-            """
-            SELECT COUNT(*)
-            FROM activity
-            WHERE org_id = @orgId
-              AND event_type IN ('blocked', 'blocked_vuln_score', 'blocked_manual')
-              AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-30 days'))
-            """,
-            new { orgId });
-
-        return new OrgStats(
-            PackagesByEcosystem: packagesByEco,
-            DownloadsByHour: downloadsByHour,
-            VulnsByEcosystemAndSeverity: vulnsByEcoSeverity,
-            DiskByEcosystem: diskByEco,
-            TotalDiskBytes: diskByEco.Sum(d => d.TotalBytes),
-            NewVulns: vulnPeriods,
-            ActiveUsers7d: activeUsers,
-            BlockedPulls30d: blockedPulls);
-    }
 }
 
-// Use classes with public setters (not positional records) so Dapper can coerce
-// SQLite's Int64/TEXT to C# int/long via its property-setter path.
-public class EcoCount       { public string Ecosystem { get; set; } = ""; public int Count { get; set; } }
-public class HourCount      { public string Hour { get; set; } = ""; public int Count { get; set; } }
-public class EcoSeverityCount { public string Ecosystem { get; set; } = ""; public string Severity { get; set; } = ""; public int Count { get; set; } }
-public class EcoDiskBytes   { public string Ecosystem { get; set; } = ""; public long TotalBytes { get; set; } }
-public class VulnPeriodCounts { public int Day { get; set; } public int Week { get; set; } public int Month { get; set; } }
 public sealed record PackageListQuery(
     string OrgId,
     int Limit,
@@ -504,13 +407,3 @@ public sealed record NewPackageVersion(
     string? ChecksumSha256,
     bool FirstFetch = false,
     string Origin = "proxy");  // 'proxy' (upstream cache) | 'uploaded' (user-pushed file)
-
-public sealed record OrgStats(
-    IReadOnlyList<EcoCount> PackagesByEcosystem,
-    IReadOnlyList<HourCount> DownloadsByHour,
-    IReadOnlyList<EcoSeverityCount> VulnsByEcosystemAndSeverity,
-    IReadOnlyList<EcoDiskBytes> DiskByEcosystem,
-    long TotalDiskBytes,
-    VulnPeriodCounts NewVulns,
-    int ActiveUsers7d,
-    int BlockedPulls30d);

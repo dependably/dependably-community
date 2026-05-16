@@ -88,6 +88,8 @@
     spellcheck="false"
     role="combobox"
     aria-expanded={open}
+    aria-controls="spdx-listbox"
+    aria-activedescendant={highlight >= 0 ? `spdx-opt-${highlight}` : undefined}
     aria-haspopup="listbox"
     aria-autocomplete="list"
     {placeholder}
@@ -98,7 +100,7 @@
     on:blur={() => setTimeout(() => open = false, 150)}
   />
   {#if open}
-    <div class="dropdown" role="listbox">
+    <div class="dropdown" role="listbox" id="spdx-listbox">
       {#if loading}
         <div class="hint">Searching…</div>
       {:else if error}
@@ -116,6 +118,7 @@
             on:mousedown|preventDefault={() => pick(r)}
             on:mouseenter={() => highlight = i}
             role="option"
+            id={`spdx-opt-${i}`}
             aria-selected={i === highlight}
           >
             <span class="ident">{r.identifier}</span>
