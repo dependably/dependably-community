@@ -108,6 +108,18 @@ api-contract:
     reports:
       junit: test-results/contract.xml
 
+integration-tests:
+  stage: test
+  image: mcr.microsoft.com/dotnet/sdk:10.0
+  tags: [amd64]
+  script:
+    - dotnet test --filter "Category=Integration" --logger "junit;LogFilePath=test-results/integration.xml"
+  artifacts:
+    when: always
+    expire_in: 7 days
+    reports:
+      junit: test-results/integration.xml
+
 frontend-tests:
   stage: test
   image: node:22-slim

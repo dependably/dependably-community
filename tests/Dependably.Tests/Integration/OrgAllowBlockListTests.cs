@@ -71,7 +71,7 @@ public sealed class OrgAllowBlockListTests : IClassFixture<DependablyFactory>, I
         var pattern = $"pkg:npm/awesome-{Guid.NewGuid():N}";
 
         var add = await c.PostAsJsonAsync("/api/v1/allowlist",
-            new { ecosystem = "npm", purlPattern = pattern });
+            new { purlPattern = pattern });
         Assert.Equal(HttpStatusCode.Created, add.StatusCode);
 
         var doc = await JsonDocument.ParseAsync(await add.Content.ReadAsStreamAsync());
@@ -93,7 +93,7 @@ public sealed class OrgAllowBlockListTests : IClassFixture<DependablyFactory>, I
     {
         using var c = await MemberClient();
         var resp = await c.PostAsJsonAsync("/api/v1/allowlist",
-            new { ecosystem = "npm", purlPattern = "pkg:npm/anything" });
+            new { purlPattern = "pkg:npm/anything" });
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
@@ -117,7 +117,7 @@ public sealed class OrgAllowBlockListTests : IClassFixture<DependablyFactory>, I
         var pattern = $"pkg:npm/sketchy-{Guid.NewGuid():N}";
 
         var add = await c.PostAsJsonAsync("/api/v1/blocklist",
-            new { ecosystem = "npm", pattern });
+            new { pattern });
         Assert.Equal(HttpStatusCode.Created, add.StatusCode);
         var id = (await JsonDocument.ParseAsync(await add.Content.ReadAsStreamAsync()))
             .RootElement.GetProperty("id").GetString();
@@ -137,7 +137,7 @@ public sealed class OrgAllowBlockListTests : IClassFixture<DependablyFactory>, I
     {
         using var c = await MemberClient();
         var resp = await c.PostAsJsonAsync("/api/v1/blocklist",
-            new { ecosystem = "npm", pattern = "pkg:npm/anything" });
+            new { pattern = "pkg:npm/anything" });
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
     }
 
