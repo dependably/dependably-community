@@ -66,6 +66,7 @@ stages:
 # that extend .release-required.
 .release-required-jobs: &release-required-jobs
   - { job: validate-release-tag,   artifacts: false }
+  - { job: lockfile-registry-guard, artifacts: false }
   - { job: build,                  artifacts: false }
   - { job: lint,                   artifacts: false }
   - { job: csp-inline-style-guard, artifacts: false }
@@ -218,6 +219,26 @@ release-contract-lint:
           sys.exit(1)
       print(f"release-contract-lint: {len(required)} required jobs, gate aligned.")
       PY
+
+# Fails MRs that leak the private dependably registry into web/package-lock.json.
+# Happens when a dev's ~/.npmrc points npm at the private proxy and `npm install`
+# writes those URLs as `resolved`. Catches pre-mirror — GitHub runners have no
+# auth for the private host and would fail `npm ci` after the merge.
+lockfile-registry-guard:
+  stage: validate
+  extends: [.runs-on-ci, .release-required]
+  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  script:
+    - apk add --no-cache grep
+    - |
+      bad=$(grep -nE '"resolved":[[:space:]]*"https?://[^"]+"' web/package-lock.json \
+            | grep -v 'registry.npmjs.org/' || true)
+      if [ -n "$bad" ]; then
+        echo "Non-public npm registry in web/package-lock.json:" >&2
+        echo "$bad" >&2
+        echo "Re-resolve those packages against https://registry.npmjs.org/ before committing." >&2
+        exit 1
+      fi
 
 # === build ===
 
