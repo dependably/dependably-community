@@ -37,10 +37,17 @@ public sealed class SchemaInitializer
     {
         var sql = await ReadSchemaAsync(_db.Provider, ct);
         await using var conn = await _db.OpenAsync(ct);
+
+        // Table renames must happen BEFORE the CREATE TABLE IF NOT EXISTS pass — otherwise the
+        // schema would create empty sibling tables under the new names alongside the original
+        // data. _applied_migrations is ensured up front so RunOnceAsync can record the ledger.
+        await EnsureMigrationsTableAsync(conn);
+        await RunOnceAsync(conn, "rename_tokens_to_user_tokens", RenameTokensTableAsync);
+        await RunOnceAsync(conn, "rename_cicd_tokens_to_service_tokens", RenameCicdTokensTableAsync);
+
         await conn.ExecuteAsync(sql);
 
         await RunAdditiveMigrationsAsync(conn);
-        await EnsureMigrationsTableAsync(conn);
         await _spdxSeeder.RunAsync(conn, ct);
 
         await RunOnceAsync(conn, "reset_nuget_vuln_checked_at", ResetNuGetVulnCheckedAtAsync);
@@ -134,17 +141,59 @@ public sealed class SchemaInitializer
         return conn.ExecuteAsync(_db.Provider == DbProvider.Postgres ? pgSql : sqliteSql);
     }
 
-    // Drops the legacy `scope` column from `tokens` and `cicd_tokens`. Capabilities is the
-    // single source of truth; scope was only retained while the cutover was in flight.
+    // Drops the legacy `scope` column from `user_tokens` and `service_tokens`. Capabilities
+    // is the single source of truth; scope was only retained while the cutover was in flight.
     // SQLite (≥3.35) and Postgres both support ALTER TABLE ... DROP COLUMN natively.
     // Conditional on the column being present so the migration is safe on databases
     // already at the target shape (fresh installs, partial-state restores).
     private async Task DropLegacyTokenScopeColumnAsync(DbConnection conn)
     {
-        if (await ColumnExistsAsync(conn, "tokens", "scope"))
-            await conn.ExecuteAsync("ALTER TABLE tokens DROP COLUMN scope");
-        if (await ColumnExistsAsync(conn, "cicd_tokens", "scope"))
-            await conn.ExecuteAsync("ALTER TABLE cicd_tokens DROP COLUMN scope");
+        if (await ColumnExistsAsync(conn, "user_tokens", "scope"))
+            await conn.ExecuteAsync("ALTER TABLE user_tokens DROP COLUMN scope");
+        if (await ColumnExistsAsync(conn, "service_tokens", "scope"))
+            await conn.ExecuteAsync("ALTER TABLE service_tokens DROP COLUMN scope");
+    }
+
+    // Renames the legacy `tokens` table to `user_tokens` (and its index). Runs before the
+    // CREATE TABLE IF NOT EXISTS pass so the schema doesn't spawn an empty sibling. Fresh
+    // installs hit the existence guard and no-op; the ledger then prevents re-execution.
+    private static async Task RenameTokensTableAsync(DbConnection conn)
+    {
+        if (!await TableExistsAsync(conn, "tokens")) return;
+        await conn.ExecuteAsync("ALTER TABLE tokens RENAME TO user_tokens");
+        // SQLite carries the old index name along with the renamed table; drop it so the
+        // upcoming CREATE INDEX IF NOT EXISTS creates one with the correct new name.
+        await conn.ExecuteAsync("DROP INDEX IF EXISTS idx_tokens_hash");
+    }
+
+    private static async Task RenameCicdTokensTableAsync(DbConnection conn)
+    {
+        if (!await TableExistsAsync(conn, "cicd_tokens")) return;
+        await conn.ExecuteAsync("ALTER TABLE cicd_tokens RENAME TO service_tokens");
+        await conn.ExecuteAsync("DROP INDEX IF EXISTS idx_cicd_tokens_hash");
+    }
+
+    private static async Task<bool> TableExistsAsync(DbConnection conn, string table)
+    {
+        // Works on both SQLite and Postgres: information_schema.tables is supported by both
+        // (SQLite emulates it as a view since 3.39). For older SQLite we fall back below.
+        try
+        {
+            var count = await conn.ExecuteScalarAsync<long>(
+                """
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_name = @table
+                """, new { table });
+            return count > 0;
+        }
+        catch
+        {
+            // SQLite without information_schema view — query sqlite_master directly.
+            var hits = await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = @table",
+                new { table });
+            return hits > 0;
+        }
     }
 
     // Drops `package_versions.sbom`. The "SBOM" stored there was a re-encoding of the
@@ -215,12 +264,60 @@ public sealed class SchemaInitializer
             "ALTER TABLE org_settings ADD COLUMN allow_version_overwrite INTEGER NOT NULL DEFAULT 0",
             // Capabilities JSON array on tokens. Required for new mints; existing legacy
             // rows pre-dating this column get NULL on backfill and are denied at auth time.
-            "ALTER TABLE tokens ADD COLUMN capabilities TEXT",
-            "ALTER TABLE cicd_tokens ADD COLUMN capabilities TEXT",
+            "ALTER TABLE user_tokens ADD COLUMN capabilities TEXT",
+            "ALTER TABLE service_tokens ADD COLUMN capabilities TEXT",
             // Remote IP for tenant- and system-scope audit events (logins, config changes,
             // tenant lifecycle). activity already has its own source_ip; audit_log was the
             // one operator-visible sink without it.
             "ALTER TABLE audit_log ADD COLUMN source_ip TEXT",
+            // Schema capacity reserved for a potential future enterprise hierarchy. Dormant
+            // in community — no query reads it, no FK enforces it, no model field exposes it.
+            // Lives here (rather than only in Schema.sql) so upgraded databases get the column.
+            "ALTER TABLE orgs ADD COLUMN parent_tenant_id TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_orgs_parent_tenant_id ON orgs(parent_tenant_id)",
+            // System-admin CRUD on /api/v1/system/admins requires the same active|locked|disabled
+            // triplet that users carry. CHECK constraint applies on fresh installs only — upgraded
+            // databases rely on controller validation (mirrors how users.account_status was added).
+            "ALTER TABLE system_admins ADD COLUMN account_status TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE system_admins ADD COLUMN password_reset_issued_at TEXT",
+            // Tenancy bridge-model additions. Status is the resolver gate (suspended/archived
+            // tenants are refused at write time); region is dormant capacity for future
+            // multi-region routing; features holds per-tenant entitlements as JSON (canonical
+            // schema + strict binding live in enterprise). CHECK on status applies on fresh
+            // installs only — upgraded databases rely on resolver validation, mirroring how
+            // users.account_status was added.
+            "ALTER TABLE orgs ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE orgs ADD COLUMN region TEXT",
+            "ALTER TABLE orgs ADD COLUMN features TEXT NOT NULL DEFAULT '{}'",
+            // Per-tenant aggregate storage quota (multi-tenant noisy-neighbour guard).
+            // NULL = unlimited; positive integer = byte cap on the sum of size_bytes across
+            // the tenant's package_versions. Checked in PackagePublishService.
+            "ALTER TABLE orgs ADD COLUMN storage_quota_bytes INTEGER",
+            // Operator-facing label + freshness signal for both token tables. `description`
+            // is captured at issuance so operators can identify tokens after the raw value
+            // is gone. `last_used_at` is touched on successful auth (throttled ~60s, see
+            // TokenRepository.TouchLastUsedAsync) so stale tokens can be spotted before
+            // revocation. Both nullable; existing rows backfill to NULL.
+            "ALTER TABLE user_tokens ADD COLUMN description TEXT",
+            "ALTER TABLE user_tokens ADD COLUMN last_used_at TEXT",
+            "ALTER TABLE service_tokens ADD COLUMN description TEXT",
+            "ALTER TABLE service_tokens ADD COLUMN last_used_at TEXT",
+            // Upstream first-publish timestamp captured on the proxy first-fetch path. ISO 8601
+            // UTC; NULL for legacy rows and for origin='uploaded'.
+            "ALTER TABLE package_versions ADD COLUMN published_at TEXT",
+            // Hex SHA-1 of the artefact bytes. Required for npm's packument dist.shasum (hex
+            // SHA-1 by spec). Computed at publish time for npm and captured from upstream
+            // packuments on proxy first-fetch. NULL for non-npm and legacy rows.
+            "ALTER TABLE package_versions ADD COLUMN checksum_sha1 TEXT",
+            // Upstream-published integrity hash captured at proxy first-fetch, stored in
+            // upstream's native encoding for direct copy-paste comparison with the public
+            // registry's UI. Algorithm tag describes how to interpret the value.
+            "ALTER TABLE package_versions ADD COLUMN upstream_integrity_value TEXT",
+            "ALTER TABLE package_versions ADD COLUMN upstream_integrity_algorithm TEXT",
+            // Minimum upstream-release age (hours) before a proxy-fetched version clears the
+            // block gate. NULL = policy off. Lets community detection catch malicious uploads
+            // before tenants pull them. Enforced first-fetch in BlockGateService.
+            "ALTER TABLE org_settings ADD COLUMN min_release_age_hours INTEGER",
         };
 
         foreach (var ddl in migrations)
@@ -261,6 +358,7 @@ public sealed class SchemaInitializer
 
     // Clear vuln_checked_at for NuGet proxy packages so the scan service re-queries OSV
     // with the corrected PURLs after the purl_name migration.
+    // xtenant: one-shot data migration, runs across every tenant on the instance.
     private static Task ResetNuGetVulnCheckedAtAsync(DbConnection conn) =>
         conn.ExecuteAsync("""
             UPDATE package_versions SET vuln_checked_at = NULL
@@ -436,6 +534,7 @@ public sealed class SchemaInitializer
     // Backfill account_type for users JIT-provisioned via SAML before the column existed.
     // Signal: empty password_hash AND a row in external_identities. Forms users later linked
     // to SAML retain their password and stay 'forms'.
+    // xtenant: one-shot data migration, runs across every tenant on the instance.
     private static Task BackfillUsersAccountTypeSamlAsync(DbConnection conn) =>
         conn.ExecuteAsync("""
             UPDATE users SET account_type = 'saml'

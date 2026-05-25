@@ -53,6 +53,11 @@
     "src/**/*.{js,svelte}": "eslint --no-warn-ignored"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@zxcvbn-ts/core": "^3.0.4",
+    "@zxcvbn-ts/language-common": "^3.0.4",
+    "@zxcvbn-ts/language-en": "^3.0.2",
     "svelte-i18n": "^4.0.1"
   }
 }

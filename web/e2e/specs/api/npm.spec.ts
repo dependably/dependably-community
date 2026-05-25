@@ -4,7 +4,7 @@ import fs from 'fs'
 import path from 'path'
 import {
   loginAsAdmin,
-  mintCicdToken,
+  mintServiceToken,
   mintUserToken,
   auth,
   fixturesRoot,
@@ -67,7 +67,7 @@ test.describe('API: npm push/pull', () => {
   test('PUT publish → GET metadata → GET tarball bytes match', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const pushToken = await mintCicdToken(authed, `e2e-npm-push-${Date.now()}`, 'push')
+      const pushToken = await mintServiceToken(authed, `e2e-npm-push-${Date.now()}`, 'push')
       const { bytes, sha256, integrity } = loadTarball()
 
       const push = await pushTarball(baseURL!, pushToken, buildPublishBody(bytes, integrity))
@@ -139,7 +139,7 @@ test.describe('API: npm push/pull', () => {
       const setLow = await authed.put('/api/v1/settings', { data: lowered })
       expect([200, 204]).toContain(setLow.status())
 
-      const pushToken = await mintCicdToken(authed, `e2e-npm-413-${Date.now()}`, 'push')
+      const pushToken = await mintServiceToken(authed, `e2e-npm-413-${Date.now()}`, 'push')
       const { bytes, integrity } = loadTarball()
       expect(bytes.length).toBeGreaterThan(128)
 

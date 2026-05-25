@@ -48,7 +48,7 @@ Never rename in a single release — the old slot still reads the old name durin
 
 Only drop in a release where no application code reads or writes that column/table. Ensure the previous release removed all references first.
 
-Destructive drops live in `SchemaInitializer` as a `RunOnceAsync(...)` call so the migration ledger guarantees they run exactly once per database. SQLite ≥ 3.35 and Postgres both support `ALTER TABLE ... DROP COLUMN` natively. Examples: `drop_legacy_token_scope_column` retires the `tokens.scope` / `cicd_tokens.scope` columns now that capabilities is the single source of truth; `drop_package_versions_sbom_column` retires the orphaned per-version SBOM blob (the only producer wrapped coordinate fields in CycloneDX JSON; the read endpoint was removed in the API cleanup pass). The `RunOnceAsync` helper emits an info-level log on apply and on skip so operators can confirm the migration state from startup logs.
+Destructive drops live in `SchemaInitializer` as a `RunOnceAsync(...)` call so the migration ledger guarantees they run exactly once per database. SQLite ≥ 3.35 and Postgres both support `ALTER TABLE ... DROP COLUMN` natively. Examples: `drop_legacy_token_scope_column` retires the `user_tokens.scope` / `service_tokens.scope` columns now that capabilities is the single source of truth; `drop_package_versions_sbom_column` retires the orphaned per-version SBOM blob (the only producer wrapped coordinate fields in CycloneDX JSON; the read endpoint was removed in the API cleanup pass). The `RunOnceAsync` helper emits an info-level log on apply and on skip so operators can confirm the migration state from startup logs.
 
 ### Index changes
 
@@ -79,8 +79,8 @@ The current `Schema.sql` is fully blue-green compatible:
 | `org_members` | ✓ | Role has a default (`'member'`) |
 | `packages` | ✓ | All non-null columns have defaults |
 | `package_versions` | ✓ | Optional fields nullable; booleans default to 0 |
-| `tokens` | ✓ | `expires_at` nullable |
-| `cicd_tokens` | ✓ | `expires_at` nullable |
+| `user_tokens` | ✓ | `expires_at` nullable |
+| `service_tokens` | ✓ | `expires_at` nullable |
 | `invites` | ✓ | `accepted_at` nullable |
 | `allowlist` | ✓ | Unique constraint is additive |
 | `audit_log` | ✓ | All optional columns nullable |

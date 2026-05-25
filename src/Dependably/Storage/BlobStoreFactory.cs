@@ -31,7 +31,12 @@ public static class BlobStoreFactory
                 TieredValue(config, "S3_BUCKET", tier)
                     ?? throw new InvalidOperationException("S3_BUCKET is required"),
                 TieredValue(config, "S3_REGION", tier)
-                    ?? throw new InvalidOperationException("S3_REGION is required")),
+                    ?? throw new InvalidOperationException("S3_REGION is required"),
+                // Optional: when S3_ENDPOINT is set, S3BlobStore points at an S3-compatible
+                // service (R2, MinIO, B2, Wasabi). S3_FORCE_PATH_STYLE=true is required by
+                // R2 and MinIO. Both honour the same tiered fallback as the other S3_* vars.
+                TieredValue(config, "S3_ENDPOINT", tier),
+                bool.TryParse(TieredValue(config, "S3_FORCE_PATH_STYLE", tier), out var fps) && fps),
 
             "azure" => new AzureBlobStore(
                 TieredValue(config, "AZURE_CONNECTION_STRING", tier)

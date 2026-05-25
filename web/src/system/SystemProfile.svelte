@@ -5,12 +5,16 @@
   import { submitForm, extractErrorMessage } from '../lib/form.js'
   import { user, theme, navigate, takePendingRoute } from '../lib/store.js'
   import { locales, switchLocale } from '../lib/locale.js'
+  import PasswordStrength from '../lib/PasswordStrength.svelte'
 
   let me = null, loading = true, loadError = ''
   let currentPassword = '', newPassword = '', confirm = ''
   let modalError = '', saving = false
   let passwordSavedAt = null
   let showModal = false
+  let passwordValid = false
+
+  $: passwordContext = { email: me?.email }
 
   $: forced = me?.mustChangePassword === true
   $: if (forced && !showModal) showModal = true
@@ -38,7 +42,7 @@
 
   async function submitPassword() {
     modalError = ''
-    if (newPassword.length < 12) { modalError = $t('profile.errorMinLength'); return }
+    if (!passwordValid) { modalError = $t('profile.errorMinLength'); return }
     if (newPassword !== confirm) { modalError = $t('profile.errorMismatch'); return }
     if (newPassword === currentPassword) { modalError = $t('profile.errorSame'); return }
     const wasForced = forced
@@ -135,6 +139,7 @@
         <div class="form-row">
           <label>{$t('profile.newPassword')} <span class="text-muted t-xs">{$t('profile.passwordHint')}</span></label>
           <input type="password" bind:value={newPassword} required minlength="12" autocomplete="new-password" />
+          <PasswordStrength value={newPassword} context={passwordContext} bind:valid={passwordValid} />
         </div>
         <div class="form-row">
           <label>{$t('profile.confirmPassword')}</label>
@@ -144,7 +149,7 @@
           {#if !forced}
             <button type="button" on:click={closeModal}>{$t('common.actions.cancel')}</button>
           {/if}
-          <button type="submit" class="primary" disabled={saving}>
+          <button type="submit" class="primary" disabled={saving || !passwordValid}>
             {saving ? $t('common.actions.saving') : $t('profile.submit')}
           </button>
         </div>

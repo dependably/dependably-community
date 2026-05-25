@@ -49,7 +49,18 @@ public sealed class RetentionService : BackgroundService
 
             if (stoppingToken.IsCancellationRequested) break;
 
-            await RunGcPassAsync(stoppingToken);
+            using var scope = Dependably.Infrastructure.Observability.BackgroundJobScope.Begin(
+                "retention", "retention.gc");
+            try
+            {
+                await RunGcPassAsync(stoppingToken);
+                scope.Complete();
+            }
+            catch (Exception ex)
+            {
+                scope.Fail(ex);
+                _logger.LogError(ex, "Retention GC pass failed.");
+            }
         }
     }
 

@@ -134,7 +134,10 @@ public sealed class LoginService
 
         var creds = await _systemAdmins.GetCredentialsByEmailAsync(email, ct);
         var passwordHash = creds?.PasswordHash ?? "$2a$12$invalidhashpaddingtomakebcryptrunfulltime000000000000000";
-        var valid = creds is not null && BCrypt.Net.BCrypt.Verify(password, passwordHash);
+        // Verify hash before checking account_status so the timing of "wrong password" and
+        // "locked/disabled" responses is indistinguishable to a probe.
+        var hashOk = creds is not null && BCrypt.Net.BCrypt.Verify(password, passwordHash);
+        var valid = hashOk && creds!.Value.AccountStatus == "active";
 
         if (!valid)
         {
@@ -375,7 +378,7 @@ public sealed class LoginService
                 sourceIp: sourceIp, ct: ct);
     }
 
-    private static string IssueTenantJwt(string userId, string tenantId, string role, string secret)
+    internal static string IssueTenantJwt(string userId, string tenantId, string role, string secret)
     {
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
@@ -402,7 +405,7 @@ public sealed class LoginService
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
-    private static string IssueSystemJwt(string systemAdminId, string secret)
+    internal static string IssueSystemJwt(string systemAdminId, string secret)
     {
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);

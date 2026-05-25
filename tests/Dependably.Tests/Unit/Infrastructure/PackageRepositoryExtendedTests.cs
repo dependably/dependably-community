@@ -1,0 +1,270 @@
+using Dapper;
+using Dependably.Infrastructure;
+using Dependably.Tests.Infrastructure;
+using Dependably.Tests.Infrastructure.Seeding;
+using Xunit;
+
+namespace Dependably.Tests.Unit.Infrastructure;
+
+/// <summary>
+/// Extends <see cref="PackageRepositoryTests"/> with branches the original file did not reach:
+/// FindVersionByBlobKeySuffix (hit/miss + VulnCheckedAt non-null), GetVersionAsync (hit/miss),
+/// TouchLastUsedAsync, StreamAllBlobKeysAsync (yield + cancellation), GetTotalSizeBytesAsync
+/// (zero-row COALESCE fallback + populated), DeleteVersionAsync, SetManualBlockStateAsync, and
+/// DeleteProxyVersionsForNameAsync's empty branch (no proxy rows → no DELETE issued).
+/// </summary>
+[Trait("Category", "Unit")]
+public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFixture>
+{
+    private readonly InMemoryDbFixture _fixture;
+    private readonly PackageRepository _repo;
+
+    public PackageRepositoryExtendedTests(InMemoryDbFixture fixture)
+    {
+        _fixture = fixture;
+        _repo = new PackageRepository(_fixture.Store);
+    }
+
+    // Per-test unique purl scope — package_versions.purl is UNIQUE globally and the fixture
+    // is shared across tests in the class.
+    private static string Purl(string version = "1.0.0", string name = "acme")
+        => $"pkg:npm/{Guid.NewGuid():N}/{name}@{version}";
+
+    // ── FindVersionByBlobKeySuffixAsync ──────────────────────────────────────
+
+    [Fact]
+    public async Task FindVersionByBlobKeySuffixAsync_Match_ReturnsPackageAndVersion()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "pypi", "acme");
+        var blobKey = $"pypi/acme/{Guid.NewGuid():N}/acme-1.2.3.tar.gz";
+        var verId = await PackageSeeder.InsertVersionAsync(
+            _fixture.Store, pkgId, "1.2.3", Purl("1.2.3"), blobKey: blobKey);
+
+        // Populate VulnCheckedAt so the non-null parse branch executes.
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE package_versions SET vuln_checked_at = '2026-01-02T03:04:05Z' WHERE id = @id",
+                new { id = verId });
+        }
+
+        var result = await _repo.FindVersionByBlobKeySuffixAsync(orgId, "pypi", "acme-1.2.3.tar.gz");
+
+        Assert.NotNull(result);
+        Assert.Equal(pkgId, result!.Value.Package.Id);
+        Assert.Equal("acme", result.Value.Package.Name);
+        Assert.Equal("1.2.3", result.Value.Version.Version);
+        Assert.Equal(blobKey, result.Value.Version.BlobKey);
+        Assert.NotNull(result.Value.Version.VulnCheckedAt);
+    }
+
+    [Fact]
+    public async Task FindVersionByBlobKeySuffixAsync_NoMatch_ReturnsNull()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "pypi", "acme");
+        await PackageSeeder.InsertVersionAsync(
+            _fixture.Store, pkgId, "1.0.0", Purl(), blobKey: $"pypi/acme/{Guid.NewGuid():N}/acme-1.0.0.tar.gz");
+
+        // No row whose blob_key ends with /not-a-real-file.tar.gz
+        var result = await _repo.FindVersionByBlobKeySuffixAsync(orgId, "pypi", "not-a-real-file.tar.gz");
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task FindVersionByBlobKeySuffixAsync_WrongOrg_ReturnsNull()
+    {
+        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
+        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "pypi", "acme");
+        var filename = $"acme-1.0.0-{Guid.NewGuid():N}.tar.gz";
+        await PackageSeeder.InsertVersionAsync(
+            _fixture.Store, pkgId, "1.0.0", Purl(), blobKey: $"pypi/acme/x/{filename}");
+
+        Assert.NotNull(await _repo.FindVersionByBlobKeySuffixAsync(orgA, "pypi", filename));
+        Assert.Null(await _repo.FindVersionByBlobKeySuffixAsync(orgB, "pypi", filename));
+    }
+
+    // ── GetVersionAsync(packageId, version) ──────────────────────────────────
+
+    [Fact]
+    public async Task GetVersionAsync_Found_AndMissing()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.2.3", Purl("1.2.3"),
+            blobKey: $"k-{Guid.NewGuid():N}");
+
+        var hit = await _repo.GetVersionAsync(pkgId, "1.2.3");
+        Assert.NotNull(hit);
+        Assert.Equal("1.2.3", hit!.Version);
+
+        var miss = await _repo.GetVersionAsync(pkgId, "9.9.9");
+        Assert.Null(miss);
+    }
+
+    // ── TouchLastUsedAsync ───────────────────────────────────────────────────
+
+    [Fact]
+    public async Task TouchLastUsedAsync_SetsLastUsedTimestamp()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        var verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
+            blobKey: $"k-{Guid.NewGuid():N}");
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            var before = await conn.ExecuteScalarAsync<string?>(
+                "SELECT last_used FROM package_versions WHERE id = @id", new { id = verId });
+            Assert.Null(before);
+        }
+
+        await _repo.TouchLastUsedAsync(verId);
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            var after = await conn.ExecuteScalarAsync<string?>(
+                "SELECT last_used FROM package_versions WHERE id = @id", new { id = verId });
+            Assert.False(string.IsNullOrEmpty(after));
+        }
+    }
+
+    // ── DeleteVersionAsync ───────────────────────────────────────────────────
+
+    [Fact]
+    public async Task DeleteVersionAsync_RemovesRow()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        var verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
+            blobKey: $"k-{Guid.NewGuid():N}");
+
+        Assert.NotNull(await _repo.GetVersionAsync(pkgId, "1.0.0"));
+        await _repo.DeleteVersionAsync(verId);
+        Assert.Null(await _repo.GetVersionAsync(pkgId, "1.0.0"));
+    }
+
+    // ── SetManualBlockStateAsync ─────────────────────────────────────────────
+
+    [Fact]
+    public async Task SetManualBlockStateAsync_SetsAndClears()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        var verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
+            blobKey: $"k-{Guid.NewGuid():N}");
+
+        await _repo.SetManualBlockStateAsync(verId, "blocked");
+        Assert.Equal("blocked", (await _repo.GetVersionByIdAsync(orgId, verId))!.ManualBlockState);
+
+        await _repo.SetManualBlockStateAsync(verId, null);
+        Assert.Null((await _repo.GetVersionByIdAsync(orgId, verId))!.ManualBlockState);
+    }
+
+    // ── GetTotalSizeBytesAsync ───────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetTotalSizeBytesAsync_NoRows_ReturnsZero()
+    {
+        // Org with zero packages exercises the COALESCE/?? 0L fallback.
+        var emptyOrg = await OrgSeeder.InsertAsync(_fixture.Store, $"empty-{Guid.NewGuid():N}");
+        Assert.Equal(0L, await _repo.GetTotalSizeBytesAsync(emptyOrg));
+    }
+
+    [Fact]
+    public async Task GetTotalSizeBytesAsync_SumsAcrossOrgVersionsOnly()
+    {
+        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
+        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
+        var pkgA = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "acme");
+        var pkgB = await PackageSeeder.InsertAsync(_fixture.Store, orgB, "npm", "acme");
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgA, "1.0.0", Purl("1.0.0"),
+            blobKey: $"a1-{Guid.NewGuid():N}", sizeBytes: 100);
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgA, "2.0.0", Purl("2.0.0"),
+            blobKey: $"a2-{Guid.NewGuid():N}", sizeBytes: 250);
+        // Other-org bytes must not be summed.
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgB, "1.0.0", Purl("1.0.0"),
+            blobKey: $"b1-{Guid.NewGuid():N}", sizeBytes: 9999);
+
+        Assert.Equal(350L, await _repo.GetTotalSizeBytesAsync(orgA));
+    }
+
+    // ── StreamAllBlobKeysAsync ───────────────────────────────────────────────
+
+    [Fact]
+    public async Task StreamAllBlobKeysAsync_YieldsEveryReferencedKey()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        var k1 = $"stream-{Guid.NewGuid():N}/a";
+        var k2 = $"stream-{Guid.NewGuid():N}/b";
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0"), blobKey: k1);
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0"), blobKey: k2);
+
+        var collected = new List<string>();
+        await foreach (var key in _repo.StreamAllBlobKeysAsync())
+            collected.Add(key);
+
+        Assert.Contains(k1, collected);
+        Assert.Contains(k2, collected);
+    }
+
+    [Fact]
+    public async Task StreamAllBlobKeysAsync_CancelledMidStream_StopsEarly()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        // Multiple versions so we have rows in the iterator we can short-circuit out of.
+        for (var i = 0; i < 4; i++)
+        {
+            await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, $"{i}.0.0", Purl($"{i}.0.0"),
+                blobKey: $"cancel-{Guid.NewGuid():N}/{i}");
+        }
+
+        // Cancel *after* the connection opens (during iteration) so the IsCancellationRequested
+        // branch inside the foreach yield loop is the one that exits.
+        using var cts = new CancellationTokenSource();
+        var collected = new List<string>();
+        await foreach (var key in _repo.StreamAllBlobKeysAsync(cts.Token))
+        {
+            collected.Add(key);
+            cts.Cancel();   // next iteration hits the `if (ct.IsCancellationRequested) yield break;` branch
+        }
+
+        // First key yielded, then loop exits via the cancellation branch.
+        Assert.Single(collected);
+    }
+
+    // ── DeleteProxyVersionsForNameAsync empty branch ─────────────────────────
+
+    [Fact]
+    public async Task DeleteProxyVersionsForNameAsync_NoProxyRows_SkipsDelete_ReturnsEmpty()
+    {
+        // Only an 'uploaded' version exists — the conditional DELETE inside the repo must NOT run,
+        // and the returned list must be empty.
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
+            origin: "uploaded", blobKey: $"u1-{Guid.NewGuid():N}");
+
+        var result = await _repo.DeleteProxyVersionsForNameAsync(orgId, "npm", "acme");
+
+        Assert.Empty(result);
+        // Uploaded row is still there.
+        var remaining = await _repo.GetVersionsAsync(pkgId);
+        Assert.Single(remaining);
+        Assert.Equal("uploaded", remaining[0].Origin);
+    }
+
+    [Fact]
+    public async Task DeleteProxyVersionsForNameAsync_UnknownName_ReturnsEmpty()
+    {
+        // Nothing inserted for this purl_name → first SELECT comes back empty,
+        // branch `blobKeys.Count > 0` is false, DELETE is skipped.
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var result = await _repo.DeleteProxyVersionsForNameAsync(orgId, "npm", "never-existed");
+        Assert.Empty(result);
+    }
+}

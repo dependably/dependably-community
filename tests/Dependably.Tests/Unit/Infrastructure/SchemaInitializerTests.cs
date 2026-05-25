@@ -1,0 +1,280 @@
+using Dapper;
+using Dependably.Infrastructure;
+using Dependably.Tests.Infrastructure;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Xunit;
+
+namespace Dependably.Tests.Unit.Infrastructure;
+
+/// <summary>
+/// Coverage-focused tests for <see cref="SchemaInitializer"/>. These exercise the
+/// migration branches that the fresh-schema smoke tests don't reach:
+///
+/// 1. <c>DropLegacyTokenScopeColumnAsync</c> — column-exists branch on both
+///    <c>user_tokens</c> and <c>service_tokens</c> (fresh schema lacks the column, so the
+///    fresh-init path only covers the early-skip side).
+/// 2. <c>DropPackageVersionsSbomColumnAsync</c> — column-exists branch (fresh
+///    schema also lacks <c>sbom</c>, so only the early-return is hit otherwise).
+/// 3. <c>ColumnExistsAsync</c> — the <c>true</c> return (the fresh-init path only
+///    covers the <c>false</c> side).
+/// 4. <c>DropAllowlistBlocklistEcosystemAsync</c> — exercises the recreate-table
+///    copy when rows are present, including the deduping <c>MIN(id)</c> path that
+///    collapses prior ecosystem-scoped duplicates onto the new UNIQUE.
+/// 5. <c>RunOnceAsync</c> already-applied logging branch (LogDebug skip).
+/// 6. Constructor: explicit logger and seeder paths.
+/// </summary>
+[Trait("Category", "Unit")]
+public sealed class SchemaInitializerTests : IAsyncLifetime
+{
+    private readonly TestMetadataStore _db = new();
+
+    public Task InitializeAsync() => Task.CompletedTask;
+    public async Task DisposeAsync() => await _db.DisposeAsync();
+
+    private static SchemaInitializer NewInitializer(IMetadataStore db, ILogger<SchemaInitializer>? logger = null)
+        => new(db, logger ?? NullLogger<SchemaInitializer>.Instance);
+
+    /// <summary>
+    /// Re-runs a one-time migration by deleting its tracking row, then re-invoking
+    /// the initializer. Used to land back in the "needs to apply" branch after the
+    /// first init has already marked it complete.
+    /// </summary>
+    private async Task ResetMigrationAsync(string name)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "DELETE FROM _applied_migrations WHERE name = @name", new { name });
+    }
+
+    [Fact]
+    public async Task Constructor_NullLoggerAndSeeder_UsesDefaults()
+    {
+        // Bare two-arg construction (logger only) — exercises the seeder-default path.
+        var initializer = new SchemaInitializer(_db);
+        await initializer.InitializeAsync();
+
+        await using var conn = await _db.OpenAsync();
+        var schemaApplied = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='orgs'");
+        Assert.Equal(1, schemaApplied);
+    }
+
+    [Fact]
+    public async Task DropLegacyTokenScopeColumn_RemovesColumnWhenPresent()
+    {
+        // Fresh init brings the schema to its current shape (no `scope` column).
+        await NewInitializer(_db).InitializeAsync();
+
+        // Simulate a legacy database: add the column back and rewind the migration.
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync("ALTER TABLE user_tokens ADD COLUMN scope TEXT");
+            await setup.ExecuteAsync("ALTER TABLE service_tokens ADD COLUMN scope TEXT");
+        }
+        await ResetMigrationAsync("drop_legacy_token_scope_column");
+
+        // Re-run: the column-exists branch fires for both tables.
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+        var userTokensHasScope = await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM pragma_table_info('user_tokens') WHERE name = 'scope'");
+        var serviceTokensHasScope = await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM pragma_table_info('service_tokens') WHERE name = 'scope'");
+        Assert.Equal(0, userTokensHasScope);
+        Assert.Equal(0, serviceTokensHasScope);
+    }
+
+    [Fact]
+    public async Task DropLegacyTokenScopeColumn_IsNoOpWhenAbsent()
+    {
+        // Fresh init: schema already lacks `scope` on both tables, so the column-exists
+        // checks return false on the first run. The migration completes successfully and
+        // is marked applied; reset+rerun proves the no-op stays a no-op.
+        await NewInitializer(_db).InitializeAsync();
+        await ResetMigrationAsync("drop_legacy_token_scope_column");
+
+        var ex = await Record.ExceptionAsync(() => NewInitializer(_db).InitializeAsync());
+        Assert.Null(ex);
+
+        await using var verify = await _db.OpenAsync();
+        var tokensRows = await verify.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM user_tokens");
+        Assert.Equal(0, tokensRows);
+    }
+
+    [Fact]
+    public async Task DropPackageVersionsSbomColumn_RemovesColumnWhenPresent()
+    {
+        await NewInitializer(_db).InitializeAsync();
+
+        // Add the legacy column back and rewind so the migration sees a pre-drop database.
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync("ALTER TABLE package_versions ADD COLUMN sbom TEXT");
+        }
+        await ResetMigrationAsync("drop_package_versions_sbom_column");
+
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+        var hasSbom = await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM pragma_table_info('package_versions') WHERE name = 'sbom'");
+        Assert.Equal(0, hasSbom);
+    }
+
+    [Fact]
+    public async Task DropPackageVersionsSbomColumn_EarlyReturnWhenAbsent()
+    {
+        // Fresh schema lacks `sbom`; the migration's `if (!ColumnExists) return` line fires
+        // and the migration is marked applied without touching the table.
+        await NewInitializer(_db).InitializeAsync();
+        await using var verify = await _db.OpenAsync();
+        var applied = await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM _applied_migrations WHERE name = 'drop_package_versions_sbom_column'");
+        Assert.Equal(1, applied);
+    }
+
+    [Fact]
+    public async Task DropAllowlistBlocklistEcosystem_RecreatesTablesPreservingRows()
+    {
+        // Land at the post-init shape, seed real rows in both tables, rewind the migration,
+        // and re-run. This exercises the recreate-table SQL:
+        //   - CREATE TABLE *_new
+        //   - INSERT … SELECT MIN(id), org_id, pattern, MIN(created_at) … GROUP BY
+        //   - DROP + RENAME
+        // Note: the current schema already enforces UNIQUE(org_id, pattern), so we can't
+        // seed pre-collapse duplicates — we just verify the row survives the recreate
+        // and the new UNIQUE is in force afterwards.
+        await NewInitializer(_db).InitializeAsync();
+
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");
+            await setup.ExecuteAsync("""
+                INSERT INTO allowlist (id, org_id, purl_pattern, created_at)
+                VALUES ('a-keep','o1','pkg:npm/express','2024-01-01T00:00:00Z')
+                """);
+            await setup.ExecuteAsync("""
+                INSERT INTO blocklist (id, org_id, pattern, created_at)
+                VALUES ('b-keep','o1','evil-.*','2024-01-01T00:00:00Z')
+                """);
+        }
+        await ResetMigrationAsync("drop_allowlist_blocklist_ecosystem");
+
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+        var allowIds = (await verify.QueryAsync<string>(
+            "SELECT id FROM allowlist ORDER BY id")).ToList();
+        var blockIds = (await verify.QueryAsync<string>(
+            "SELECT id FROM blocklist ORDER BY id")).ToList();
+        Assert.Equal(new[] { "a-keep" }, allowIds);
+        Assert.Equal(new[] { "b-keep" }, blockIds);
+
+        // The recreated tables retain the new UNIQUE contract.
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => verify.ExecuteAsync("""
+            INSERT INTO allowlist (id, org_id, purl_pattern)
+            VALUES ('dup','o1','pkg:npm/express')
+            """));
+        Assert.Contains("UNIQUE", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RunOnceAsync_SecondRunHitsAlreadyAppliedLogBranch()
+    {
+        // First run: all migrations execute (LogInformation x2 per migration).
+        // Second run: every migration's RunOnceAsync hits the LogDebug "already applied" path,
+        // which is the otherwise-uncovered branch in the RunOnce helper.
+        var logger = new CapturingLogger<SchemaInitializer>();
+        var initializer = new SchemaInitializer(_db, logger);
+
+        await initializer.InitializeAsync();
+        logger.Records.Clear();
+        await initializer.InitializeAsync();
+
+        Assert.Contains(logger.Records,
+            r => r.Level == LogLevel.Debug && r.Message.Contains("already applied"));
+        // And no migration should have re-run on the second pass.
+        Assert.DoesNotContain(logger.Records,
+            r => r.Level == LogLevel.Information && r.Message.EndsWith("applied."));
+    }
+
+    [Fact]
+    public async Task RunOnceAsync_FirstRunLogsApplyingAndApplied()
+    {
+        var logger = new CapturingLogger<SchemaInitializer>();
+        var initializer = new SchemaInitializer(_db, logger);
+
+        await initializer.InitializeAsync();
+
+        Assert.Contains(logger.Records,
+            r => r.Level == LogLevel.Information && r.Message.Contains("applying"));
+        Assert.Contains(logger.Records,
+            r => r.Level == LogLevel.Information && r.Message.EndsWith("applied."));
+    }
+
+    [Fact]
+    public async Task FixNuGetProxyPurlNames_IsIdempotentAndUnguarded()
+    {
+        // This migration is the only one *not* gated by RunOnceAsync — it runs on every
+        // InitializeAsync call. Insert a broken-shaped row, run init, assert rename.
+        await NewInitializer(_db).InitializeAsync();
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");
+            // is_proxy = 1, purl_name starts with 'pkg:' — the broken shape the migration fixes.
+            await setup.ExecuteAsync("""
+                INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy)
+                VALUES ('p1','o1','nuget','Newtonsoft.Json','pkg:nuget/Newtonsoft.Json@13.0.1', 1)
+                """);
+        }
+
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+        var purlName = await verify.ExecuteScalarAsync<string>(
+            "SELECT purl_name FROM packages WHERE id = 'p1'");
+        Assert.Equal("Newtonsoft.Json", purlName);
+
+        // Re-running again is a no-op (idempotency).
+        await NewInitializer(_db).InitializeAsync();
+        var stillCorrect = await verify.ExecuteScalarAsync<string>(
+            "SELECT purl_name FROM packages WHERE id = 'p1'");
+        Assert.Equal("Newtonsoft.Json", stillCorrect);
+    }
+
+    [Fact]
+    public async Task RenameTokensTables_IsNoOpOnFreshInstall()
+    {
+        // Fresh schema has user_tokens/service_tokens straight from the CREATE TABLE blocks.
+        // The rename action's existence guards return false, the migration completes, and the
+        // ledger records both rename rows so subsequent boots short-circuit.
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+        var applied = (await verify.QueryAsync<string>(
+            "SELECT name FROM _applied_migrations WHERE name LIKE 'rename_%' ORDER BY name")).ToList();
+        Assert.Equal(
+            new[] { "rename_cicd_tokens_to_service_tokens", "rename_tokens_to_user_tokens" },
+            applied);
+    }
+
+    /// <summary>
+    /// Captures log records so we can assert on the applied/skipped branches in
+    /// <c>RunOnceAsync</c>. Per project memory: "migrations log applied AND skipped".
+    /// </summary>
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message)> Records { get; } = new();
+
+        IDisposable? ILogger.BeginScope<TState>(TState state) => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            Records.Add((logLevel, formatter(state, exception)));
+        }
+    }
+}

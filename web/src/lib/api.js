@@ -86,6 +86,7 @@ async function req(method, path, body) {
     throw new ApiError(data?.detail || data?.title || res.statusText, {
       status: res.status,
       retryAfter: res.headers.get('Retry-After'),
+      body: data,
     })
   }
   return data
@@ -122,9 +123,10 @@ export const api = {
   uploadSamlMetadata: (metadataXml) => req('POST', '/auth-config/metadata', { metadataXml }),
   deleteAuthConfig: () => req('DELETE', '/auth-config'),
 
-  // Instance settings (single-mode tenant owner; multi-mode equivalent lives under /system/)
+  // Instance settings — read-only from tenant SPA (used by OrgSettings to surface the
+  // instance ceiling on the per-org upload-limits tab). Writes happen via the system_admin
+  // SPA (systemApi.updateSettings) in multi-mode.
   getInstanceSettings: () => req('GET', '/instance/settings'),
-  updateInstanceSettings: (s) => req('PUT', '/instance/settings', s),
 
   // Tenant settings (per-org config)
   getOrgSettings: () => req('GET', '/settings'),
@@ -214,14 +216,15 @@ export const api = {
   // User tokens. capabilities is an array like ["read:metadata", "publish:*"];
   // the server rejects the retired `scope` field with a 400.
   listTokens: () => req('GET', '/tokens'),
-  createToken: (capabilities, expiresAt) => req('POST', '/tokens', { capabilities, expiresAt }),
+  createToken: (capabilities, expiresAt, description) =>
+    req('POST', '/tokens', { capabilities, expiresAt, description }),
   deleteToken: (id) => req('DELETE', `/tokens/${id}`),
 
   // CI/CD tokens. Same capabilities shape as user tokens; `name` distinguishes the row.
-  listCicdTokens: () => req('GET', '/cicd-tokens'),
-  createCicdToken: (name, capabilities, expiresAt) =>
-    req('POST', '/cicd-tokens', { name, capabilities, expiresAt }),
-  deleteCicdToken: (id) => req('DELETE', `/cicd-tokens/${id}`),
+  listServiceTokens: () => req('GET', '/service-tokens'),
+  createServiceToken: (name, capabilities, expiresAt, description) =>
+    req('POST', '/service-tokens', { name, capabilities, expiresAt, description }),
+  deleteServiceToken: (id) => req('DELETE', `/service-tokens/${id}`),
 
   // Invites
   listInvites: () => req('GET', '/invites'),
@@ -272,11 +275,21 @@ export const api = {
 // System-admin surface (apex host, multi-mode only). All routes require scope=system JWT
 // and are 404'd by RouteScopeFilter from anywhere except the apex host.
 export const systemApi = {
+  // Operator landing snapshot — tenant + admin counts and last 5 background-job runs.
+  getDashboard: () => req('GET', '/system/dashboard'),
+
   // Tenant lifecycle
   listTenants: (page = 1, limit = 50) => req('GET', `/system/tenants?page=${page}&limit=${limit}`),
   createTenant: (slug, ownerEmail) => req('POST', '/system/tenants', { slug, ownerEmail }),
   softDeleteTenant: (slug) => req('DELETE', `/system/tenants/${slug}`),
   restoreTenant: (slug) => req('PATCH', `/system/tenants/${slug}/restore`),
+  // Storage quota: pass quotaBytes=null to clear (tenant becomes unlimited).
+  setTenantStorageQuota: (slug, quotaBytes) =>
+    req('PATCH', `/system/tenants/${slug}/storage-quota`, { quotaBytes }),
+  // Lifecycle gate. 'active' admits writes; 'suspended' immediately blocks pushes via
+  // ITenantStorageResolver (existing data is preserved).
+  setTenantStatus: (slug, status) =>
+    req('PATCH', `/system/tenants/${slug}/status`, { status }),
 
   // Minimal user lookup — control-plane metadata only.
   /** @param {{ email?: string, tenantSlug?: string, limit?: number }} params */
@@ -288,12 +301,40 @@ export const systemApi = {
     return req('GET', `/system/users?${q}`)
   },
 
-  // System audit log (scope='system' events).
-  listAudit: (page = 1, limit = 50) => req('GET', `/system/audit?page=${page}&limit=${limit}`),
+  // System audit log (scope='system' events). Supports search/action/sortBy/sortDir.
+  /** @param {{ page?: number, limit?: number, search?: string, action?: string, sortBy?: string, sortDir?: string }} params */
+  listAudit: ({ page = 1, limit = 50, search, action, sortBy, sortDir } = {}) => {
+    const q = new URLSearchParams({ page: String(page), limit: String(limit) })
+    if (search) q.set('search', search)
+    if (action) q.set('action', action)
+    if (sortBy) q.set('sortBy', sortBy)
+    if (sortDir) q.set('sortDir', sortDir)
+    return req('GET', `/system/audit?${q}`)
+  },
+  listSystemAuditActions: () => req('GET', '/system/audit/actions'),
+
+  // Background-job run history (replaces the in-memory last-success dictionary the old
+  // Observability page surfaced). Supports search/jobName/outcome/sortBy/sortDir.
+  /** @param {{ page?: number, limit?: number, search?: string, jobName?: string, outcome?: string, sortBy?: string, sortDir?: string }} params */
+  listBackgroundJobs: ({ page = 1, limit = 50, search, jobName, outcome, sortBy, sortDir } = {}) => {
+    const q = new URLSearchParams({ page: String(page), limit: String(limit) })
+    if (search) q.set('search', search)
+    if (jobName) q.set('jobName', jobName)
+    if (outcome) q.set('outcome', outcome)
+    if (sortBy) q.set('sortBy', sortBy)
+    if (sortDir) q.set('sortDir', sortDir)
+    return req('GET', `/system/background-jobs?${q}`)
+  },
+  getBackgroundJobFacets: () => req('GET', '/system/background-jobs/facets'),
 
   // Instance settings.
   getSettings: () => req('GET', '/system/settings'),
   updateSettings: (settings) => req('PUT', '/system/settings', settings),
+
+  // /metrics access config (PR 10). 409 from PUT means the env var locks the knob;
+  // 200 may carry a `warnings` array (e.g. allowlist contains 0.0.0.0/0).
+  getMetricsAccess: () => req('GET', '/system/metrics-access'),
+  updateMetricsAccess: (body) => req('PUT', '/system/metrics-access', body),
 
   // Support flows: lock/unlock account + force password reset.
   setAccountStatus: (email, tenantSlug, accountStatus) =>
@@ -306,4 +347,17 @@ export const systemApi = {
   changePassword: (currentPassword, newPassword) =>
     req('POST', '/system/me/password', { currentPassword, newPassword }),
   updateLanguage: (language) => req('POST', '/system/me/language', { language }),
+
+  // system_admin CRUD — operators managing other operators.
+  // Backend invariants (cannot_modify_self / last_active_admin / must_disable_first /
+  // duplicate_email) come back as 4xx ProblemDetails with a `reason` extension that the
+  // UI translates to a localized message. See SystemAdmins.svelte.
+  listAdmins: () => req('GET', '/system/admins'),
+  createAdmin: (email) => req('POST', '/system/admins', { email }),
+  getAdmin: (id) => req('GET', `/system/admins/${encodeURIComponent(id)}`),
+  setAdminAccountStatus: (id, accountStatus) =>
+    req('PATCH', `/system/admins/${encodeURIComponent(id)}/account-status`, { accountStatus }),
+  resetAdminPassword: (id) =>
+    req('POST', `/system/admins/${encodeURIComponent(id)}/password-reset`),
+  deleteAdmin: (id) => req('DELETE', `/system/admins/${encodeURIComponent(id)}`),
 }

@@ -1,49 +1,74 @@
+using System.Linq;
 using System.Net;
-using NetTools;
 
 namespace Dependably.Security;
 
 /// <summary>
-/// Restricts GET /metrics to localhost or IPs in METRICS_ALLOWED_IPS.
-/// Returns 403 for all other callers (OWASP API8:2023).
+/// Gates <c>GET /metrics</c> per the resolved <see cref="MetricsAccessConfig"/>:
+///   * effectively-disabled → 404 (endpoint vanishes)
+///   * caller IP not in allowlist → 403
+///   * otherwise → forward to the Prometheus exporter
+///
+/// Every request is recorded in <see cref="ScrapeDiagnostics"/> for the
+/// sysadmin observability page.
+///
+/// <para>The caller IP comes from <c>Connection.RemoteIpAddress</c>,
+/// which is the value <i>after</i> <c>ForwardedHeadersMiddleware</c>
+/// rewrites it from <c>X-Forwarded-For</c> per the existing
+/// <c>Program.cs</c> config. Operators behind a reverse proxy must keep
+/// the proxy in <c>KnownProxies</c> / <c>KnownNetworks</c> for the
+/// allowlist to match the original client IP. See
+/// <c>dependably-enterprise/docs/reverse-proxy.md</c>.</para>
 /// </summary>
 public sealed class MetricsAccessMiddleware
 {
     private readonly RequestDelegate _next;
-    private readonly IReadOnlyList<IPAddressRange> _allowedRanges;
+    private readonly MetricsAccessConfig _config;
+    private readonly ScrapeDiagnostics _diagnostics;
 
-    public MetricsAccessMiddleware(RequestDelegate next, IConfiguration config)
+    public MetricsAccessMiddleware(
+        RequestDelegate next,
+        MetricsAccessConfig config,
+        ScrapeDiagnostics diagnostics)
     {
         _next = next;
-
-        var configured = config["METRICS_ALLOWED_IPS"] ?? "127.0.0.1";
-        _allowedRanges = configured
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(IPAddressRange.Parse)
-            .ToList();
+        _config = config;
+        _diagnostics = diagnostics;
     }
 
     public async Task InvokeAsync(HttpContext ctx)
     {
-        if (ctx.Request.Path.StartsWithSegments("/metrics"))
+        if (!ctx.Request.Path.StartsWithSegments("/metrics"))
         {
-            var remote = ctx.Connection.RemoteIpAddress;
-            if (remote is null || !IsAllowed(remote))
-            {
-                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
-                await ctx.Response.WriteAsync("Forbidden");
-                return;
-            }
+            await _next(ctx);
+            return;
         }
 
+        var resolved = await _config.ResolveAsync(ctx.RequestAborted);
+        var remote = ctx.Connection.RemoteIpAddress;
+
+        if (!resolved.Enabled)
+        {
+            _diagnostics.Record(remote, ScrapeDiagnostics.Outcome.DeniedDisabled);
+            ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        if (remote is null || !IsAllowed(remote, resolved.Allowed))
+        {
+            _diagnostics.Record(remote, ScrapeDiagnostics.Outcome.DeniedIp);
+            ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await ctx.Response.WriteAsync("Forbidden");
+            return;
+        }
+
+        _diagnostics.Record(remote, ScrapeDiagnostics.Outcome.Allowed);
         await _next(ctx);
     }
 
-    private bool IsAllowed(IPAddress ip)
+    private static bool IsAllowed(IPAddress ip, IReadOnlyList<NetTools.IPAddressRange> allowed)
     {
         var mapped = ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip;
-        // Range-check stays on the IPAddress object (not the string form) because
-        // IPNetwork.Contains needs the parsed address.
-        return _allowedRanges.Any(r => r.Contains(mapped));
+        return allowed.Any(range => range.Contains(mapped));
     }
 }

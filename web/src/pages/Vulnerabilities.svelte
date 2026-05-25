@@ -11,6 +11,7 @@
   let ecosystem = ''
   let search = ''
   let page = 1, limit = 50, total = 0
+  let sortCol = 'severity', sortDir = 'desc'
 
   $: org = $currentOrg
 
@@ -18,7 +19,7 @@
     if (!org) { loading = false; return }
     loading = true; error = ''
     try {
-      const params = { page, limit }
+      const params = { page, limit, sort: sortCol, dir: sortDir }
       if (ecosystem) params.ecosystem = ecosystem
       const data = await api.getVulnReport( params)
       items = data.items || []
@@ -32,6 +33,7 @@
   function onPageChange(e) { page = e.detail.page; load() }
   function onLimitChange(e) { limit = e.detail.limit; page = 1; load() }
   function handleEcoChange() { page = 1; load() }
+  function onSortChange(e) { sortCol = e.detail.col; sortDir = e.detail.dir; page = 1; load() }
 
   const SEVERITY_RANK = { critical: 4, high: 3, medium: 2, low: 1 }
 
@@ -87,7 +89,8 @@
     rows={filtered}
     {comparators}
     {loading}
-    initialSort={{ key: 'severity', dir: 'desc' }}
+    initialSort={{ key: sortCol, dir: sortDir }}
+    on:sortchange={onSortChange}
     emptyText={$t('vulnerabilities.empty')}
     tableClass="table-auto vulns-table"
     let:row={r}

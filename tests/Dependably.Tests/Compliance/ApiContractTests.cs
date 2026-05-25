@@ -49,6 +49,15 @@ public sealed class ApiContractTests : IClassFixture<DependablyFactory>, IAsyncL
 
         var contractPath = LocateContract();
 
+        // Escape hatch: set UPDATE_API_CONTRACT=1 to overwrite the
+        // committed contract instead of asserting. Use sparingly — the
+        // assert path is what catches accidental surface changes in CI.
+        if (Environment.GetEnvironmentVariable("UPDATE_API_CONTRACT") == "1")
+        {
+            File.WriteAllText(contractPath, currentJson);
+            return;
+        }
+
         if (!File.Exists(contractPath))
             Assert.Fail(
                 $"tests/Contracts/openapi.contract.json not found. Create it with:\n\n{currentJson}\n");

@@ -17,8 +17,8 @@ public sealed class OrgRepository
     {
         await using var conn = await _db.OpenAsync(ct);
         var sql = includeDeleted
-            ? "SELECT id, slug, deleted_at as DeletedAt, created_at as CreatedAt FROM orgs WHERE slug = @slug"
-            : "SELECT id, slug, deleted_at as DeletedAt, created_at as CreatedAt FROM orgs WHERE slug = @slug AND deleted_at IS NULL";
+            ? "SELECT id, slug, deleted_at as DeletedAt, status as Status, storage_quota_bytes as StorageQuotaBytes, created_at as CreatedAt FROM orgs WHERE slug = @slug"
+            : "SELECT id, slug, deleted_at as DeletedAt, status as Status, storage_quota_bytes as StorageQuotaBytes, created_at as CreatedAt FROM orgs WHERE slug = @slug AND deleted_at IS NULL";
         return await conn.QuerySingleOrDefaultAsync<Org>(sql, new { slug });
     }
 
@@ -37,6 +37,7 @@ public sealed class OrgRepository
                    COALESCE(license_enforcement_mode, 'off') as LicenseEnforcementMode,
                    COALESCE(proxy_passthrough_enabled, 1) as ProxyPassthroughEnabled,
                    COALESCE(max_osv_score_tolerance, 10.0) as MaxOsvScoreTolerance,
+                   min_release_age_hours as MinReleaseAgeHours,
                    COALESCE(default_language, 'en') as DefaultLanguage,
                    COALESCE(allow_version_overwrite, 0) as AllowVersionOverwrite
             FROM org_settings WHERE org_id = @orgId
@@ -48,25 +49,104 @@ public sealed class OrgRepository
     {
         await using var conn = await _db.OpenAsync(ct);
         return await conn.QuerySingleOrDefaultAsync<Org>(
-            "SELECT id, slug, deleted_at as DeletedAt, created_at as CreatedAt FROM orgs WHERE id = @id",
+            "SELECT id, slug, deleted_at as DeletedAt, status as Status, storage_quota_bytes as StorageQuotaBytes, created_at as CreatedAt FROM orgs WHERE id = @id",
             new { id });
     }
 
     /// <summary>
-    /// List tenants. system_admin sees both active and soft-deleted (so it can render the
-    /// restore UI within the grace window); business surfaces should filter to active only.
+    /// List tenants with per-tenant aggregates (member count, storage bytes used) for the
+    /// system_admin tenants page. system_admin sees both active and soft-deleted (so it can
+    /// render the restore UI within the grace window); business surfaces should filter to
+    /// active only.
+    ///
+    /// Aggregates are computed inline using pre-aggregated subqueries so each tenant produces
+    /// exactly one outer row — a naive <c>LEFT JOIN users LEFT JOIN packages LEFT JOIN
+    /// package_versions</c> would produce N×M rows and inflate both counts. Indexes
+    /// (<c>users.tenant_id</c>, <c>idx_packages_org_ecosystem</c>,
+    /// <c>idx_package_versions_package</c>) keep this sub-100ms at the page-size cap of 200.
     /// </summary>
-    public async Task<(IReadOnlyList<Org> Items, int Total)> ListOrgsAsync(int limit, int offset, bool includeDeleted = true, CancellationToken ct = default)
+    // xtenant: system-admin tenant list — aggregates roll up across all tenants by design.
+    public async Task<(IReadOnlyList<OrgListItem> Items, int Total)> ListOrgsAsync(int limit, int offset, bool includeDeleted = true, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var (countSql, listSql) = includeDeleted
-            ? ("SELECT COUNT(*) FROM orgs",
-               "SELECT id, slug, deleted_at as DeletedAt, created_at as CreatedAt FROM orgs ORDER BY created_at ASC, id ASC LIMIT @limit OFFSET @offset")
-            : ("SELECT COUNT(*) FROM orgs WHERE deleted_at IS NULL",
-               "SELECT id, slug, deleted_at as DeletedAt, created_at as CreatedAt FROM orgs WHERE deleted_at IS NULL ORDER BY created_at ASC, id ASC LIMIT @limit OFFSET @offset");
-        var total = await conn.ExecuteScalarAsync<int>(countSql);
-        var rows = await conn.QueryAsync<Org>(listSql, new { limit, offset });
+        var includeDeletedFlag = includeDeleted ? 1 : 0;
+        const string countSql =
+            "SELECT COUNT(*) FROM orgs WHERE (@includeDeleted = 1 OR deleted_at IS NULL)";
+        const string listSql = """
+            SELECT o.id                AS Id,
+                   o.slug              AS Slug,
+                   o.deleted_at        AS DeletedAt,
+                   o.status            AS Status,
+                   o.storage_quota_bytes AS StorageQuotaBytes,
+                   o.created_at        AS CreatedAt,
+                   COALESCE(u.member_count, 0)  AS MemberCount,
+                   COALESCE(s.storage_bytes, 0) AS StorageBytes
+            FROM orgs o
+            LEFT JOIN (
+                SELECT tenant_id, COUNT(*) AS member_count
+                FROM users
+                GROUP BY tenant_id
+            ) u ON u.tenant_id = o.id
+            LEFT JOIN (
+                SELECT p.org_id, SUM(pv.size_bytes) AS storage_bytes
+                FROM packages p
+                JOIN package_versions pv ON pv.package_id = p.id
+                GROUP BY p.org_id
+            ) s ON s.org_id = o.id
+            WHERE (@includeDeleted = 1 OR o.deleted_at IS NULL)
+            ORDER BY o.created_at ASC, o.id ASC
+            LIMIT @limit OFFSET @offset
+            """;
+        var total = await conn.ExecuteScalarAsync<int>(countSql, new { includeDeleted = includeDeletedFlag });
+        var rows = await conn.QueryAsync<OrgListItem>(listSql, new { limit, offset, includeDeleted = includeDeletedFlag });
         return (rows.ToList(), total);
+    }
+
+    /// <summary>
+    /// Sets (or clears, when <paramref name="quotaBytes"/> is null) the tenant's aggregate
+    /// storage quota. Operator-only knob — there is no tenant-facing UI for this in community.
+    /// </summary>
+    public async Task SetStorageQuotaBytesAsync(string orgId, long? quotaBytes, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE orgs SET storage_quota_bytes = @quotaBytes WHERE id = @orgId",
+            new { orgId, quotaBytes });
+    }
+
+    /// <summary>
+    /// Bucketed counts of orgs for the sysadmin dashboard. One round-trip; soft-deleted overrides
+    /// status (a row with deleted_at NOT NULL counts as soft-deleted regardless of its status).
+    /// 'archived' and 'deleting' are enterprise-only states and intentionally not surfaced —
+    /// community queries collapse them into the active/suspended/soft-deleted view.
+    /// </summary>
+    // xtenant: dashboard rollup spans every tenant by design.
+    public async Task<(int Active, int Suspended, int SoftDeleted)> CountByStatusAsync(CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.QuerySingleAsync<(int Active, int Suspended, int SoftDeleted)>(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN deleted_at IS NULL AND status = 'active'    THEN 1 ELSE 0 END), 0) AS Active,
+                COALESCE(SUM(CASE WHEN deleted_at IS NULL AND status = 'suspended' THEN 1 ELSE 0 END), 0) AS Suspended,
+                COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL                       THEN 1 ELSE 0 END), 0) AS SoftDeleted
+            FROM orgs
+            """);
+    }
+
+    /// <summary>
+    /// Toggle the tenant lifecycle gate between <c>'active'</c> and <c>'suspended'</c>. Other states
+    /// (<c>'archived'</c>, <c>'deleting'</c>) are enterprise-only and rejected. Soft-deleted tenants
+    /// are not updated — use restore first. Returns true when a row was changed.
+    /// </summary>
+    public async Task<bool> UpdateOrgStatusAsync(string orgId, string status, CancellationToken ct = default)
+    {
+        if (status is not ("active" or "suspended")) return false;
+        await using var conn = await _db.OpenAsync(ct);
+        var rows = await conn.ExecuteAsync(
+            "UPDATE orgs SET status = @status WHERE id = @orgId AND deleted_at IS NULL",
+            new { orgId, status });
+        return rows > 0;
     }
 
     /// <summary>Soft-delete: set deleted_at = now. Idempotent (re-deleting just refreshes the timestamp).</summary>
@@ -193,18 +273,25 @@ public sealed class OrgRepository
 
     public async Task UpsertProxySettingsAsync(
         string orgId, bool proxyPassthroughEnabled, double maxOsvScoreTolerance,
-        CancellationToken ct = default)
+        int? minReleaseAgeHours, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO org_settings (org_id, proxy_passthrough_enabled, max_osv_score_tolerance)
-            VALUES (@orgId, @proxyEnabled, @maxScore)
+            INSERT INTO org_settings (org_id, proxy_passthrough_enabled, max_osv_score_tolerance, min_release_age_hours)
+            VALUES (@orgId, @proxyEnabled, @maxScore, @minAgeHours)
             ON CONFLICT(org_id) DO UPDATE SET
                 proxy_passthrough_enabled = @proxyEnabled,
-                max_osv_score_tolerance   = @maxScore
+                max_osv_score_tolerance   = @maxScore,
+                min_release_age_hours     = @minAgeHours
             """,
-            new { orgId, proxyEnabled = proxyPassthroughEnabled ? 1 : 0, maxScore = maxOsvScoreTolerance });
+            new
+            {
+                orgId,
+                proxyEnabled = proxyPassthroughEnabled ? 1 : 0,
+                maxScore = maxOsvScoreTolerance,
+                minAgeHours = minReleaseAgeHours,
+            });
     }
 
     public async Task UpsertLicensePolicyModeAsync(
@@ -226,6 +313,43 @@ public sealed class OrgRepository
         return await conn.ExecuteScalarAsync<string?>(
             "SELECT value FROM instance_settings WHERE key = @key",
             new { key });
+    }
+
+    /// <summary>
+    /// Resolves the effective per-upload size limit for the given ecosystem, applying the
+    /// cascade documented in <c>CLAUDE.md</c> ("Upload size limits"):
+    ///   1. org per-ecosystem limit (<c>org_settings.max_upload_bytes_{eco}</c>)
+    ///   2. org global limit         (<c>org_settings.max_upload_bytes</c>)
+    ///   3. instance per-ecosystem limit (<c>instance_settings.max_upload_bytes_{eco}</c>)
+    /// Returns <see cref="long.MaxValue"/> when nothing is configured. Callers compare the
+    /// in-flight upload size against the returned value and return 413 on overflow.
+    /// </summary>
+    /// <param name="settings">Already-fetched <see cref="OrgSettings"/> for the org; null OK.</param>
+    /// <param name="ecosystem">One of <c>pypi</c>, <c>npm</c>, <c>nuget</c> (case-insensitive).</param>
+    public async Task<long> GetUploadLimitAsync(OrgSettings? settings, string ecosystem, CancellationToken ct = default)
+    {
+        var eco = ecosystem.ToLowerInvariant();
+        var orgEco = eco switch
+        {
+            "pypi"  => settings?.MaxUploadBytesPyPi,
+            "npm"   => settings?.MaxUploadBytesNpm,
+            "nuget" => settings?.MaxUploadBytesNuGet,
+            _       => null,
+        };
+        if (orgEco is { } orgEcoLimit) return orgEcoLimit;
+        if (settings?.MaxUploadBytes is { } orgGlobal) return orgGlobal;
+
+        var instanceKey = eco switch
+        {
+            "pypi"  => "max_upload_bytes_pypi",
+            "npm"   => "max_upload_bytes_npm",
+            "nuget" => "max_upload_bytes_nuget",
+            _       => null,
+        };
+        if (instanceKey is null) return long.MaxValue;
+
+        var raw = await GetInstanceSettingAsync(instanceKey, ct);
+        return raw is not null && long.TryParse(raw, out var parsed) ? parsed : long.MaxValue;
     }
 
     public async Task<IReadOnlyDictionary<string, string>> ListInstanceSettingsAsync(CancellationToken ct = default)

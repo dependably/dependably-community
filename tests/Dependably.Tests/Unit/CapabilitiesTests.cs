@@ -109,4 +109,15 @@ public class CapabilitiesTests
         Assert.False(Capabilities.Grants(caps, Capabilities.PublishNpm));
         Assert.False(Capabilities.Grants(caps, Capabilities.TenantAdmin));
     }
+
+    [Fact]
+    public void Grants_RequestedCapabilityWithoutColon_ReturnsFalse()
+    {
+        // Hits the `colon < 0` fall-through: a malformed capability with no domain
+        // segment cannot match any family wildcard, and is not present in the granted
+        // set, so Grants returns false instead of attempting to build a family key.
+        var granted = new HashSet<string> { Capabilities.PublishAll, Capabilities.ReadMetadata };
+        Assert.False(Capabilities.Grants(granted, "malformed"));
+        Assert.False(Capabilities.Grants(granted, ""));
+    }
 }

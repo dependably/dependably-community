@@ -107,4 +107,12 @@ public class ReservedSlugsTests
     {
         Assert.Equal(expectedCount, ReservedSlugs.ParseExtra(input).Count);
     }
+
+    [Theory]
+    [InlineData(":8080")]   // port-only input -> empty slug after port strip
+    [InlineData(".:80")]    // trailing dot + port -> empty slug after strip
+    public void Normalize_EmptyAfterPortStrip_Rejected(string input)
+    {
+        Assert.Null(ReservedSlugs.Normalize(input));
+    }
 }

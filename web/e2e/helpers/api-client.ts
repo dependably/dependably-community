@@ -32,15 +32,15 @@ export async function mintUserToken(authed: APIRequestContext, scope: Scope): Pr
 }
 
 /**
- * Creates a CI/CD token. Requires admin role. Returns the raw bearer string.
+ * Creates a service token. Requires admin role. Returns the raw bearer string.
  */
-export async function mintCicdToken(
+export async function mintServiceToken(
   authed: APIRequestContext,
   name: string,
   scope: Scope,
 ): Promise<string> {
-  const res = await authed.post('/api/v1/cicd-tokens', { data: { name, scope } })
-  expect(res.status(), `mintCicdToken(${scope}) failed: ${await res.text()}`).toBe(200)
+  const res = await authed.post('/api/v1/service-tokens', { data: { name, scope } })
+  expect(res.status(), `mintServiceToken(${scope}) failed: ${await res.text()}`).toBe(200)
   const body = await res.json()
   return body.token as string
 }

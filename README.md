@@ -67,7 +67,7 @@ volumes:
 
 All registry URLs follow the pattern `/o/{org-slug}/{ecosystem}/`. The short aliases `/simple/`, `/npm/`, and `/nuget/` redirect to the default org.
 
-Generate a CI/CD token or user token from the web UI, then point your tools at Dependably.
+Generate a service token or user token from the web UI, then point your tools at Dependably.
 
 > **More setup recipes:** see [`skills/`](skills/README.md) for copy-pasteable
 > project-level *and* global config recipes for npm, PyPI (pip / Poetry / uv),

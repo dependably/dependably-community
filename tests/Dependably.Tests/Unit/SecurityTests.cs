@@ -132,4 +132,56 @@ public class UpstreamUrlValidatorTests
         var error = UpstreamUrlValidator.ValidateUrl(url);
         Assert.Null(error);
     }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\t")]
+    public void ValidateUrl_NullOrWhitespace_ReturnsEmptyError(string? url)
+    {
+        var error = UpstreamUrlValidator.ValidateUrl(url);
+        Assert.Equal("Upstream URL must not be empty.", error);
+    }
+
+    [Theory]
+    [InlineData("javascript:alert(1)")]
+    [InlineData("data:text/plain,hello")]
+    [InlineData("gopher://example.com")]
+    [InlineData("ws://example.com")]
+    public void ValidateUrl_NonHttpScheme_ReturnsSchemeError(string url)
+    {
+        var error = UpstreamUrlValidator.ValidateUrl(url);
+        Assert.Equal("Only http:// and https:// schemes are accepted.", error);
+    }
+
+    [Theory]
+    [InlineData("relative/path")]
+    [InlineData("http://")]
+    [InlineData(":::not a uri:::")]
+    public void ValidateUrl_MalformedUri_ReturnsFormatError(string url)
+    {
+        var error = UpstreamUrlValidator.ValidateUrl(url);
+        Assert.Equal("Invalid URL format.", error);
+    }
+
+    [Theory]
+    [InlineData("http://[::1]/packages")]            // IPv6 loopback
+    [InlineData("http://[fc00::1]/packages")]        // IPv6 unique-local
+    [InlineData("http://[fe80::1]/packages")]        // IPv6 link-local
+    public void ValidateUrl_BlockedIpv6_ReturnsBlockedError(string url)
+    {
+        var error = UpstreamUrlValidator.ValidateUrl(url);
+        Assert.NotNull(error);
+        Assert.StartsWith("Upstream URL resolves to a blocked IP range", error);
+    }
+
+    [Theory]
+    [InlineData("http://[2606:4700:4700::1111]/packages")]   // Cloudflare DNS — public IPv6
+    [InlineData("http://8.8.8.8/packages")]                  // Public IPv4 literal
+    public void ValidateUrl_PublicIpLiteral_ReturnsNull(string url)
+    {
+        var error = UpstreamUrlValidator.ValidateUrl(url);
+        Assert.Null(error);
+    }
 }

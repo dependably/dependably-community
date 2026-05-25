@@ -33,6 +33,7 @@ public sealed class OrgSettingsRepository
                    COALESCE(license_enforcement_mode, 'off') as LicenseEnforcementMode,
                    COALESCE(proxy_passthrough_enabled, 1) as ProxyPassthroughEnabled,
                    COALESCE(max_osv_score_tolerance, 10.0) as MaxOsvScoreTolerance,
+                   min_release_age_hours as MinReleaseAgeHours,
                    COALESCE(default_language, 'en') as DefaultLanguage,
                    COALESCE(allow_version_overwrite, 0) as AllowVersionOverwrite
             FROM org_settings WHERE org_id = @orgId
@@ -107,18 +108,25 @@ public sealed class OrgSettingsRepository
 
     public async Task UpsertProxySettingsAsync(
         string orgId, bool proxyPassthroughEnabled, double maxOsvScoreTolerance,
-        CancellationToken ct = default)
+        int? minReleaseAgeHours, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO org_settings (org_id, proxy_passthrough_enabled, max_osv_score_tolerance)
-            VALUES (@orgId, @proxyEnabled, @maxScore)
+            INSERT INTO org_settings (org_id, proxy_passthrough_enabled, max_osv_score_tolerance, min_release_age_hours)
+            VALUES (@orgId, @proxyEnabled, @maxScore, @minAgeHours)
             ON CONFLICT(org_id) DO UPDATE SET
                 proxy_passthrough_enabled = @proxyEnabled,
-                max_osv_score_tolerance   = @maxScore
+                max_osv_score_tolerance   = @maxScore,
+                min_release_age_hours     = @minAgeHours
             """,
-            new { orgId, proxyEnabled = proxyPassthroughEnabled ? 1 : 0, maxScore = maxOsvScoreTolerance });
+            new
+            {
+                orgId,
+                proxyEnabled = proxyPassthroughEnabled ? 1 : 0,
+                maxScore = maxOsvScoreTolerance,
+                minAgeHours = minReleaseAgeHours,
+            });
     }
 
     public async Task UpsertLicensePolicyModeAsync(

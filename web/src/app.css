@@ -189,7 +189,7 @@ tr:hover td { background: var(--bg2); }
 .badge.yanked  { background: var(--badge-red-bg);     color: var(--badge-red-text); }
 .badge.deprecated { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
 .badge.unlisted { background: var(--badge-purple-bg); color: var(--badge-purple-text); }
-.badge.cicd    { background: var(--badge-sky-bg);     color: var(--badge-sky-text); }
+.badge.unblock { background: var(--badge-sky-bg);     color: var(--badge-sky-text); }
 .badge.warning { background: var(--badge-warning-bg);   color: var(--badge-warning-text); }
 .badge.expired { background: var(--badge-red-bg);     color: var(--badge-red-text); }
 .badge.success { background: var(--success-soft);     color: var(--success); }

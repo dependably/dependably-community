@@ -152,7 +152,7 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
         var id = $"UnlistMismatch{Guid.NewGuid():N}"[..22];
         await _factory.PushNuGetPackage(id, "1.0.0");
 
-        // Create a second real org so the FK on cicd_tokens.org_id is satisfied.
+        // Create a second real org so the FK on service_tokens.org_id is satisfied.
         // A token whose org_id points to a different tenant than the request org
         // causes ResolveNuGetPushTokenAsync to return 401 (token.OrgId != orgId).
         var orgRepo = _factory.Services.GetRequiredService<OrgRepository>();
@@ -164,7 +164,7 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
         await conn.ExecuteAsync("""
-            INSERT INTO cicd_tokens (id, org_id, name, token_hash, capabilities)
+            INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities)
             VALUES (@id, @orgId, @name, @hash, @caps)
             """,
             new

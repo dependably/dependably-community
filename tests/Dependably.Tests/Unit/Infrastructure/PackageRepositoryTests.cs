@@ -104,6 +104,66 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal("1.0.0", v.Version);
         Assert.Equal("uploaded", v.Origin);
         Assert.True(v.FirstFetch);
+        Assert.Null(v.PublishedAt);
+    }
+
+    [Fact]
+    public async Task CreateVersionAsync_UpstreamIntegrity_RoundTripsThroughGetVersions()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+
+        var created = await _repo.CreateVersionAsync(new NewPackageVersion(
+            pkgId, "1.0.0", Purl(), "blob/key", 100, "sha256hex",
+            FirstFetch: true,
+            UpstreamIntegrityValue: "sha512-aGVsbG8=",
+            UpstreamIntegrityAlgorithm: "sha512-sri"));
+
+        Assert.Equal("sha512-aGVsbG8=", created.UpstreamIntegrityValue);
+        Assert.Equal("sha512-sri", created.UpstreamIntegrityAlgorithm);
+        var fetched = await _repo.GetVersionByIdAsync(orgId, created.Id);
+        Assert.Equal("sha512-aGVsbG8=", fetched!.UpstreamIntegrityValue);
+        Assert.Equal("sha512-sri", fetched!.UpstreamIntegrityAlgorithm);
+        var list = await _repo.GetVersionsAsync(pkgId);
+        Assert.Equal("sha512-aGVsbG8=", list[0].UpstreamIntegrityValue);
+    }
+
+    [Fact]
+    public async Task CreateVersionAsync_ChecksumSha1_RoundTripsThroughGetVersions()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+
+        var created = await _repo.CreateVersionAsync(new NewPackageVersion(
+            pkgId, "1.0.0", Purl(), "blob/key", 100, "sha256hex",
+            FirstFetch: true, ChecksumSha1: "abc123def456"));
+
+        Assert.Equal("abc123def456", created.ChecksumSha1);
+        var fetched = await _repo.GetVersionByIdAsync(orgId, created.Id);
+        Assert.Equal("abc123def456", fetched!.ChecksumSha1);
+        var list = await _repo.GetVersionsAsync(pkgId);
+        Assert.Equal("abc123def456", list[0].ChecksumSha1);
+    }
+
+    [Fact]
+    public async Task CreateVersionAsync_PublishedAt_RoundTripsThroughGetVersions()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        var publishedAt = new DateTimeOffset(2023, 9, 30, 14, 23, 31, TimeSpan.Zero);
+
+        var created = await _repo.CreateVersionAsync(new NewPackageVersion(
+            pkgId, "1.0.0", Purl(), "blob/key", 100, "sha256hex",
+            FirstFetch: true, PublishedAt: publishedAt));
+
+        Assert.Equal(publishedAt, created.PublishedAt);
+
+        var fetched = await _repo.GetVersionByIdAsync(orgId, created.Id);
+        Assert.NotNull(fetched);
+        Assert.Equal(publishedAt, fetched!.PublishedAt);
+
+        var list = await _repo.GetVersionsAsync(pkgId);
+        Assert.Equal(publishedAt, list[0].PublishedAt);
     }
 
     [Fact]
@@ -127,10 +187,37 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
         var blobKey = $"unique/path/{Guid.NewGuid():N}";
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(), blobKey: blobKey);
 
-        var v = await _repo.GetVersionByBlobKeyAsync(blobKey);
+        var v = await _repo.GetVersionByBlobKeyAsync(orgId, blobKey);
 
         Assert.NotNull(v);
         Assert.Equal("1.0.0", v!.Version);
+    }
+
+    [Fact]
+    public async Task GetVersionByBlobKeyAsync_OrgMismatch_ReturnsNull()
+    {
+        // Defence-in-depth: even though blob_key is globally unique today, the lookup must
+        // refuse to return a row whose parent package belongs to a different tenant.
+        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
+        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "acme");
+        var blobKey = $"unique/path/{Guid.NewGuid():N}";
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(), blobKey: blobKey);
+
+        Assert.NotNull(await _repo.GetVersionByBlobKeyAsync(orgA, blobKey));
+        Assert.Null(await _repo.GetVersionByBlobKeyAsync(orgB, blobKey));
+    }
+
+    [Fact]
+    public async Task GetVersionByIdAsync_OrgMismatch_ReturnsNull()
+    {
+        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
+        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "acme");
+        var verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl());
+
+        Assert.NotNull(await _repo.GetVersionByIdAsync(orgA, verId));
+        Assert.Null(await _repo.GetVersionByIdAsync(orgB, verId));
     }
 
     [Fact]
@@ -141,10 +228,10 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
         var verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl());
 
         await _repo.UpdateDeprecatedAsync(verId, "moved to @scope/acme");
-        Assert.Equal("moved to @scope/acme", (await _repo.GetVersionByIdAsync(verId))!.Deprecated);
+        Assert.Equal("moved to @scope/acme", (await _repo.GetVersionByIdAsync(orgId, verId))!.Deprecated);
 
         await _repo.UpdateDeprecatedAsync(verId, null);
-        Assert.Null((await _repo.GetVersionByIdAsync(verId))!.Deprecated);
+        Assert.Null((await _repo.GetVersionByIdAsync(orgId, verId))!.Deprecated);
     }
 
     [Fact]
@@ -162,12 +249,13 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
                 new { id = verId });
         }
 
-        await _repo.UpdateVersionForOverwriteAsync(verId, "new-blob", 200, "new-sha", "uploaded");
+        await _repo.UpdateVersionForOverwriteAsync(verId, "new-blob", 200, "new-sha", "uploaded", sha1: "new-sha1");
 
-        var v = (await _repo.GetVersionByIdAsync(verId))!;
+        var v = (await _repo.GetVersionByIdAsync(orgId, verId))!;
         Assert.Equal("new-blob", v.BlobKey);
         Assert.Equal(200, v.SizeBytes);
         Assert.Equal("new-sha", v.ChecksumSha256);
+        Assert.Equal("new-sha1", v.ChecksumSha1);
         Assert.Equal("uploaded", v.Origin);
         Assert.Null(v.VulnCheckedAt);
     }

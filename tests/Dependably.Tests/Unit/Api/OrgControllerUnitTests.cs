@@ -367,24 +367,24 @@ public sealed class OrgControllerUnitTests
     }
 
     [Fact]
-    public async Task ListCicdTokens_Empty_Returns200()
+    public async Task ListServiceTokens_Empty_Returns200()
     {
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        Assert.IsType<OkObjectResult>(await b.OrgTokensController.ListCicdTokens(CancellationToken.None));
+        Assert.IsType<OkObjectResult>(await b.OrgTokensController.ListServiceTokens(CancellationToken.None));
     }
 
     [Fact]
-    public async Task CreateCicdToken_Valid_ReturnsTokenAndRecord()
+    public async Task CreateServiceToken_Valid_ReturnsTokenAndRecord()
     {
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgTokensController.CreateCicdToken(
-            new CreateCicdTokenRequest(Name: "ci-pipeline", ExpiresAt: null,
+        var result = await b.OrgTokensController.CreateServiceToken(
+            new CreateServiceTokenRequest(Name: "ci-pipeline", ExpiresAt: null,
                 Capabilities: new[] { "publish:*", "read:metadata" }),
             CancellationToken.None);
         Assert.IsType<OkObjectResult>(result);
@@ -522,17 +522,17 @@ public sealed class OrgControllerUnitTests
         Assert.Equal(StatusCodes.Status404NotFound, status);
     }
 
-    // ── CreateCicdToken: legacy Scope field rejected ──────────────────────────
+    // ── CreateServiceToken: legacy Scope field rejected ──────────────────────────
 
     [Fact]
-    public async Task CreateCicdToken_LegacyScopeField_Returns422()
+    public async Task CreateServiceToken_LegacyScopeField_Returns422()
     {
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var result = await b.OrgTokensController.CreateCicdToken(
-            new CreateCicdTokenRequest(Name: "ci-deploy", ExpiresAt: null,
+        var result = await b.OrgTokensController.CreateServiceToken(
+            new CreateServiceTokenRequest(Name: "ci-deploy", ExpiresAt: null,
                 Capabilities: null, Scope: "pull"),
             CancellationToken.None);
 

@@ -282,20 +282,21 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         var underscored = name.Replace('-', '_');
         var publicFilename = $"{underscored}-1.0.0-py3-none-any.whl";
 
+        var (wheelBytes, wheelSha) = PyPiFixtures.BuildWheel(name, "1.0.0");
         // The simple-index href must point at a URL the test environment can reach. Use the
         // MockUpstream's own base so DownloadAndCacheAsync's GET resolves to a mocked response.
+        // The #sha256= fragment is now verified on first-fetch — supply the real hash so the
+        // proxy fetch doesn't 502 on the integrity check.
         var mockBase = _factory.MockUpstream.Urls[0];
         var simpleHtml = $"""
             <!DOCTYPE html><html><body>
-            <a href="{mockBase}/files/{publicFilename}#sha256=cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe">{publicFilename}</a><br/>
+            <a href="{mockBase}/files/{publicFilename}#sha256={wheelSha}">{publicFilename}</a><br/>
             </body></html>
             """;
         _factory.MockUpstream.Given(
                 Request.Create().WithPath($"/simple/{name}/").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "text/html").WithBody(simpleHtml));
-
-        var (wheelBytes, _) = PyPiFixtures.BuildWheel(name, "1.0.0");
         _factory.MockUpstream.Given(
                 Request.Create().WithPath($"/files/{publicFilename}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
@@ -336,6 +337,11 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         // Mock the upstream packument so the proxy-fetch path can resolve version 1.0.0,
         // and the tarball blob itself.
         var publicTarball = $"{name}-1.0.0.tgz";
+        var (tarballBytes, _, _) = NpmFixtures.BuildTarball(name, "1.0.0");
+        // dist.shasum is now verified against tarball bytes on first-fetch; emit the real
+        // SHA-1 so the proxy fetch doesn't 502 on the integrity check.
+        var tarballSha1 = Convert.ToHexString(
+            System.Security.Cryptography.SHA1.HashData(tarballBytes)).ToLowerInvariant();
         var packumentJson = $$"""
         {
           "_id": "{{name}}",
@@ -345,7 +351,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
             "1.0.0": {
               "name": "{{name}}",
               "version": "1.0.0",
-              "dist": {"tarball":"http://upstream/{{name}}/-/{{publicTarball}}","shasum":"deadbeef"}
+              "dist": {"tarball":"http://upstream/{{name}}/-/{{publicTarball}}","shasum":"{{tarballSha1}}"}
             }
           }
         }
@@ -353,8 +359,6 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(packumentJson));
-
-        var (tarballBytes, _, _) = NpmFixtures.BuildTarball(name, "1.0.0");
         _factory.MockUpstream.Given(
                 Request.Create().WithPath($"/{name}/-/{publicTarball}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)

@@ -29,8 +29,8 @@ export const user = writable(null)
 // ── Navigation ─────────────────────────────────────────────────────────────────
 // route: { page, params }
 // pages: 'login' | 'packages' | 'version-detail' | 'activity' | 'audit' |
-//        'tokens' | 'cicd-tokens' | 'settings' | 'allowlist' | 'users' |
-//        'setup' | 'admin-orgs' | 'admin-settings' | 'join'
+//        'tokens' | 'settings' | 'allowlist' | 'users' |
+//        'setup' | 'join'
 /** @type {import('svelte/store').Writable<Route>} */
 export const route = writable({ page: 'login', params: {} })
 

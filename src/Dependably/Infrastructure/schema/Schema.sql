@@ -10,6 +10,28 @@ CREATE TABLE IF NOT EXISTS orgs (
     -- Soft-delete: set on DELETE /api/v1/system/tenants/{slug}; cleared on restore.
     -- TenantHardDeleteService cascade-deletes rows where deleted_at < now() - 30 days.
     deleted_at  TEXT,
+    -- Tenant lifecycle gate consulted by ITenantStorageResolver before every registry write.
+    -- 'active' is the only state that admits writes; 'suspended'/'archived'/'deleting' raise
+    -- TenantNotReadyException. Community has no UI to change this beyond 'active' today, but
+    -- the resolver checks it defensively so hand-modified rows or future enterprise imports
+    -- can't slip through.
+    status      TEXT NOT NULL DEFAULT 'active'
+                CHECK (status IN ('active','suspended','archived','deleting')),
+    -- Reserved for future multi-region routing. Fully dormant in community.
+    region      TEXT,
+    -- Per-tenant entitlement document (audit_retention, sso_enforced, sbom_signing,
+    -- private_packages_enabled, …). One column rather than a per-feature flood. Canonical
+    -- schema + strict binding (reject unknown/retired keys, log skipped) live in enterprise;
+    -- community ignores the column.
+    features    TEXT NOT NULL DEFAULT '{}',
+    -- Reserved for future enterprise hierarchy; not interpreted by any query in community.
+    -- Schema capacity only — no FK, no model field, no API surface. See community/enterprise boundary rule.
+    parent_tenant_id TEXT,
+    -- Aggregate storage quota for the tenant's hosted artefacts (sum of package_versions.size_bytes
+    -- under this org's packages). NULL = unlimited; positive integer = byte cap. Checked in
+    -- PackagePublishService before the blob put — exceeding the cap returns 413. Noisy-neighbour
+    -- guard for multi-tenant pool deployments; trivially satisfied in single-tenant installs.
+    storage_quota_bytes INTEGER,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 
@@ -27,6 +49,12 @@ CREATE TABLE IF NOT EXISTS org_settings (
     license_enforcement_mode  TEXT    NOT NULL DEFAULT 'off',
     proxy_passthrough_enabled INTEGER NOT NULL DEFAULT 1,
     max_osv_score_tolerance   REAL    NOT NULL DEFAULT 10.0,
+    -- Minimum upstream-release age (hours) before a proxy-fetched version is allowed past the
+    -- block gate. NULL = policy off. Supply-chain hold: lets community detection (npm/PyPI/NuGet
+    -- removals, advisories) catch up before a fresh upstream version reaches tenant builds.
+    -- First-fetch only; already-cached versions are unaffected, and unblock requires an operator
+    -- action once the threshold passes (no automatic rescan).
+    min_release_age_hours     INTEGER,
     default_language          TEXT    NOT NULL DEFAULT 'en',  -- new tenant users start with this locale
     allow_version_overwrite   INTEGER NOT NULL DEFAULT 0    -- #45 replacement policy; off by default
 );
@@ -65,6 +93,11 @@ CREATE TABLE IF NOT EXISTS system_admins (
     password_hash TEXT NOT NULL,
     must_change_password INTEGER NOT NULL DEFAULT 0,
     last_login_at TEXT,
+    -- Mirrors users.account_status: 'active' (can log in), 'locked' (auto-lockout from
+    -- throttling), 'disabled' (operator-set). Required for /api/v1/system/admins CRUD so
+    -- operators can disable peers without hard-deleting and losing the audit-trail identity.
+    account_status TEXT NOT NULL DEFAULT 'active' CHECK (account_status IN ('active','locked','disabled')),
+    password_reset_issued_at TEXT,
     language    TEXT,  -- NULL = fall back to 'en'
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
@@ -100,28 +133,50 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- via an additive ALTER TABLE in SchemaInitializer, and legacy 'imported'/'private'
     -- rows are collapsed to 'uploaded' by the collapse_origin_to_uploaded one-shot migration.
     origin      TEXT NOT NULL DEFAULT 'proxy',
+    -- ISO 8601 UTC; timestamp the version was first published to the public upstream registry
+    -- (PyPI upload_time_iso_8601, npm time[version], NuGet catalogEntry.published). Captured on
+    -- first proxy fetch, fail-soft (null if upstream metadata can't be parsed). Always NULL for
+    -- origin='uploaded' rows — uploaded versions have no upstream publish date.
+    published_at TEXT,
+    -- Hex SHA-1 of the artefact bytes. Captured on every npm publish (the packument
+    -- dist.shasum field uses SHA-1 by spec) and from upstream packuments on proxy first-fetch.
+    -- NULL for PyPI / NuGet versions and for legacy rows pre-dating the column.
+    checksum_sha1 TEXT,
+    -- Upstream-published integrity hash, stored VERBATIM in upstream's native encoding so
+    -- operators can copy-paste against the public registry's UI without re-encoding:
+    --   npm   → 'sha512-{base64}' (the SRI form printed on npmjs.com)
+    --   NuGet → '{base64}'        (packageHash as written in the registration leaf)
+    --   PyPI  → '{hex}'           (sha256 from the #sha256= simple-index fragment)
+    -- Algorithm column tags how to interpret the value. NULL for uploaded versions (no
+    -- upstream claim to compare against) and for legacy rows pre-dating the column.
+    upstream_integrity_value TEXT,
+    upstream_integrity_algorithm TEXT,  -- 'sha256' | 'sha512-sri' | 'sha512-b64'
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     UNIQUE (package_id, version)
 );
 
-CREATE TABLE IF NOT EXISTS tokens (
+CREATE TABLE IF NOT EXISTS user_tokens (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     token_hash  TEXT NOT NULL UNIQUE,
     capabilities TEXT,           -- JSON array of capability strings, e.g. ["publish:npm"].
+    description TEXT,            -- optional free-text label set at creation time.
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    expires_at  TEXT
+    expires_at  TEXT,
+    last_used_at TEXT            -- updated (throttled ~60s) when the token authenticates a request.
 );
 
-CREATE TABLE IF NOT EXISTS cicd_tokens (
+CREATE TABLE IF NOT EXISTS service_tokens (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     name        TEXT NOT NULL,
     token_hash  TEXT NOT NULL UNIQUE,
     capabilities TEXT,           -- JSON array of capability strings.
+    description TEXT,            -- optional free-text label set at creation time.
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    expires_at  TEXT
+    expires_at  TEXT,
+    last_used_at TEXT            -- updated (throttled ~60s) when the token authenticates a request.
 );
 
 CREATE TABLE IF NOT EXISTS invites (
@@ -221,8 +276,8 @@ CREATE INDEX IF NOT EXISTS idx_pkg_version_vulns_version ON package_version_vuln
 CREATE INDEX IF NOT EXISTS idx_package_versions_package ON package_versions(package_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_org ON audit_log(org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_org ON activity(org_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(token_hash);
-CREATE INDEX IF NOT EXISTS idx_cicd_tokens_hash ON cicd_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_user_tokens_hash ON user_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_service_tokens_hash ON service_tokens(token_hash);
 
 -- License governance (#21)
 CREATE TABLE IF NOT EXISTS package_version_licenses (
@@ -437,6 +492,65 @@ CREATE TABLE IF NOT EXISTS audit_event (
 CREATE INDEX IF NOT EXISTS idx_audit_event_org_time ON audit_event (org_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_event_org_type ON audit_event (org_id, event_type, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_event_actor ON audit_event (org_id, actor_id, occurred_at DESC);
+
+-- Per-tenant registry bucket binding. Dormant in community: a NULL/absent row means "use
+-- the global STORAGE_BACKEND_REGISTRY env vars" — which is how community's LocalBlobStore
+-- and the small-tenant SaaS fallback path both work. Enterprise reads bucket/endpoint here
+-- per request to route silo-registry writes to the tenant's own R2 bucket. See
+-- ITenantStorageResolver for the resolution semantics.
+CREATE TABLE IF NOT EXISTS tenant_storage (
+    org_id                      TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    registry_bucket             TEXT,
+    registry_region             TEXT,
+    registry_endpoint           TEXT,
+    registry_force_path_style   INTEGER NOT NULL DEFAULT 0,
+    created_at                  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
+-- Async provisioning state machine for cloud-resource creation (R2 buckets, KMS keys,
+-- SAML metadata exchanges, etc). HTTP create-tenant returns fast; a worker drains the row,
+-- making the actual cloud-API call off the request path. Resolver gates registry calls on
+-- state='ready' for kind='registry_bucket_create'. Absent rows are treated as ready in
+-- community since LocalBlobStore needs no provisioning. UNIQUE(org_id, kind) forces retries
+-- to UPDATE the existing row, never INSERT — workers must reset state, not duplicate.
+-- idempotency_key is for HTTP-layer caller-supplied idempotency (Idempotency-Key header);
+-- orthogonal to per-tenant uniqueness, not redundant with it.
+CREATE TABLE IF NOT EXISTS tenant_provisioning_jobs (
+    id              TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    kind            TEXT NOT NULL,
+    state           TEXT NOT NULL DEFAULT 'creating'
+                    CHECK (state IN ('creating','ready','failed')),
+    idempotency_key TEXT,
+    last_error      TEXT,
+    started_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    completed_at    TEXT,
+    UNIQUE (org_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_provisioning_jobs_org ON tenant_provisioning_jobs(org_id, kind);
+
+-- Per-run history for IHostedService background workers. Replaces the in-memory
+-- last-success dictionary on DependablyMeter with a persistent record. Written by
+-- BackgroundJobScope.Dispose() fire-and-forget; surfaced in the sysadmin Audit page
+-- "Background Jobs" tab. id is a GUID-N; run_id matches the OTel trace correlation id
+-- attached to the activity. outcome is the same vocabulary BackgroundJobScope already
+-- emits to the histogram ('success' | 'server_error' | 'cancelled'). No GC yet — see
+-- the follow-up tracked alongside this PR for the retention pass.
+CREATE TABLE IF NOT EXISTS background_job_runs (
+    id              TEXT PRIMARY KEY,
+    job_name        TEXT NOT NULL,
+    operation       TEXT NOT NULL,
+    run_id          TEXT NOT NULL,
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT NOT NULL,
+    duration_ms     INTEGER NOT NULL,
+    outcome         TEXT NOT NULL,
+    error_message   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_background_job_runs_started_at
+    ON background_job_runs(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_background_job_runs_job_started
+    ON background_job_runs(job_name, started_at DESC);
 
 -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
 -- Those are no-ops on fresh installs (duplicate column error is swallowed / IF NOT EXISTS).

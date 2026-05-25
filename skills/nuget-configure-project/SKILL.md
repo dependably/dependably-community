@@ -22,7 +22,7 @@ Ask the user for:
 1. **DEPENDABLY_BASE_URL** — e.g. `https://repo.example.com`.
 2. **ORG_SLUG** — e.g. `default`.
 3. **DEPENDABLY_TOKEN** — created in dependably under **Tokens** or
-   **CI/CD tokens**. NuGet uses HTTP Basic with `user` as the username.
+   **Service tokens**. NuGet uses HTTP Basic with `user` as the username.
 
 ## File to write
 

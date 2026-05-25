@@ -21,6 +21,8 @@ public class SchemaAdditionsTests : IAsyncLifetime
     [InlineData("tenant_artifact_access")]
     [InlineData("metadata_cache")]
     [InlineData("audit_event")]
+    [InlineData("tenant_storage")]
+    [InlineData("tenant_provisioning_jobs")]
     public async Task MultitenantTables_Exist(string table)
     {
         await using var conn = await _db.OpenAsync();
@@ -117,5 +119,124 @@ public class SchemaAdditionsTests : IAsyncLifetime
         await initializer.InitializeAsync();
         var ex = await Record.ExceptionAsync(() => initializer.InitializeAsync());
         Assert.Null(ex);
+    }
+
+    [Fact]
+    public async Task Orgs_HasStatusColumn_DefaultsToActive()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-status', 'status-default')");
+        var status = await conn.QuerySingleAsync<string>(
+            "SELECT status FROM orgs WHERE id = 'o-status'");
+        Assert.Equal("active", status);
+    }
+
+    [Fact]
+    public async Task Orgs_StatusCheckConstraint_RejectsUnknownState()
+    {
+        await using var conn = await _db.OpenAsync();
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => conn.ExecuteAsync(
+            "INSERT INTO orgs (id, slug, status) VALUES ('o-bad', 'status-bad', 'bogus')"));
+        Assert.Contains("CHECK", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("suspended")]
+    [InlineData("archived")]
+    [InlineData("deleting")]
+    public async Task Orgs_StatusCheckConstraint_AcceptsKnownStates(string state)
+    {
+        await using var conn = await _db.OpenAsync();
+        var id = $"o-{state}";
+        await conn.ExecuteAsync(
+            "INSERT INTO orgs (id, slug, status) VALUES (@id, @slug, @state)",
+            new { id, slug = $"slug-{state}", state });
+        var stored = await conn.QuerySingleAsync<string>(
+            "SELECT status FROM orgs WHERE id = @id", new { id });
+        Assert.Equal(state, stored);
+    }
+
+    [Fact]
+    public async Task Orgs_FeaturesColumn_DefaultsToEmptyJsonObject()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-feat', 'features-default')");
+        var features = await conn.QuerySingleAsync<string>(
+            "SELECT features FROM orgs WHERE id = 'o-feat'");
+        Assert.Equal("{}", features);
+    }
+
+    [Fact]
+    public async Task Orgs_RegionColumn_DefaultsToNull()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-region', 'region-default')");
+        var region = await conn.QuerySingleAsync<string?>(
+            "SELECT region FROM orgs WHERE id = 'o-region'");
+        Assert.Null(region);
+    }
+
+    [Fact]
+    public async Task TenantProvisioningJobs_StateCheckConstraint_RejectsUnknown()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-prov', 'prov')");
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => conn.ExecuteAsync(
+            "INSERT INTO tenant_provisioning_jobs (id, org_id, kind, state) " +
+            "VALUES ('j1','o-prov','registry_bucket_create','bogus')"));
+        Assert.Contains("CHECK", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task TenantProvisioningJobs_UniqueOnOrgKind_BlocksDuplicateInsert()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-prov2', 'prov2')");
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_provisioning_jobs (id, org_id, kind) " +
+            "VALUES ('j1','o-prov2','registry_bucket_create')");
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => conn.ExecuteAsync(
+            "INSERT INTO tenant_provisioning_jobs (id, org_id, kind) " +
+            "VALUES ('j2','o-prov2','registry_bucket_create')"));
+        Assert.Contains("UNIQUE", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task TenantStorage_NullableFields_AcceptEmptyRegistryConfig()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-store', 'store')");
+        await conn.ExecuteAsync("INSERT INTO tenant_storage (org_id) VALUES ('o-store')");
+        var row = await conn.QuerySingleAsync<(string? bucket, string? region, string? endpoint, int forcePathStyle)>(
+            "SELECT registry_bucket, registry_region, registry_endpoint, registry_force_path_style " +
+            "FROM tenant_storage WHERE org_id = 'o-store'");
+        Assert.Null(row.bucket);
+        Assert.Null(row.region);
+        Assert.Null(row.endpoint);
+        Assert.Equal(0, row.forcePathStyle);
+    }
+
+    [Fact]
+    public async Task Orgs_HasParentTenantIdColumn_Nullable_NoForeignKey_WithIndex()
+    {
+        await using var conn = await _db.OpenAsync();
+
+        var column = await conn.QuerySingleOrDefaultAsync<(string name, int notnull)>(
+            "SELECT name, \"notnull\" FROM pragma_table_info('orgs') WHERE name = 'parent_tenant_id'");
+        Assert.Equal("parent_tenant_id", column.name);
+        Assert.Equal(0, column.notnull);
+
+        var fkCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('orgs') WHERE \"from\" = 'parent_tenant_id'");
+        Assert.Equal(0, fkCount);
+
+        var indexName = await conn.QuerySingleOrDefaultAsync<string>(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_orgs_parent_tenant_id'");
+        Assert.Equal("idx_orgs_parent_tenant_id", indexName);
+
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-null', 'parent-null')");
+        var stored = await conn.QuerySingleAsync<string?>(
+            "SELECT parent_tenant_id FROM orgs WHERE id = 'o-null'");
+        Assert.Null(stored);
     }
 }

@@ -126,6 +126,38 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// HEALTHCHECK_PING_PAYLOAD=status (with method left as default GET) forces a
+    /// POST request carrying the JSON status body — exercises the `_sendPayload`
+    /// half of the `_usePost || _sendPayload` short-circuit.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_PayloadStatusWithDefaultMethod_SendsPostWithJsonBody()
+    {
+        var config = BuildConfig(
+            ("HEALTHCHECK_PING_URL", "http://example.com/ping"),
+            ("HEALTHCHECK_PING_INTERVAL_SECONDS", "0"),
+            ("HEALTHCHECK_PING_PAYLOAD", "status"));
+
+        var handler = new CapturingHttpHandler();
+        var factory = new SingleClientFactory(handler);
+        var pinger = BuildPinger(config, factory);
+
+        using var cts = new CancellationTokenSource();
+        var task = pinger.StartAsync(cts.Token);
+        await Task.Delay(200);
+        cts.Cancel();
+        await pinger.StopAsync(default);
+        try { await task; } catch (OperationCanceledException) { }
+
+        Assert.NotNull(handler.LastRequest);
+        Assert.Equal(HttpMethod.Post, handler.LastRequest!.Method);
+        Assert.NotNull(handler.LastRequest.Content);
+        var body = await handler.LastRequest.Content!.ReadAsStringAsync();
+        Assert.Contains("\"status\":", body);
+        Assert.Contains("\"instance_id\":", body);
+    }
+
+    /// <summary>
     /// A non-2xx response from the upstream must not surface as an exception —
     /// the pinger swallows transport/HTTP errors and continues looping.
     /// </summary>

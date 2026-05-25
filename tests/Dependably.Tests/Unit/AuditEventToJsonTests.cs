@@ -118,12 +118,12 @@ public sealed class AuditEventToJsonTests
     [Fact]
     public void TenantEvents_TokenRevoke_MinimalShape()
     {
-        var ev = new TenantEvents.TokenRevoke("tok-9", "cicd");
+        var ev = new TenantEvents.TokenRevoke("tok-9", "service");
 
         var root = Parse(ev.ToJson());
 
         Assert.Equal("tok-9", root.GetProperty("token_id").GetString());
-        Assert.Equal("cicd", root.GetProperty("token_kind").GetString());
+        Assert.Equal("service", root.GetProperty("token_kind").GetString());
     }
 
     [Theory]

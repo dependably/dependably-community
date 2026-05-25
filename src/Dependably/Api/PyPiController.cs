@@ -73,7 +73,8 @@ public partial class PyPiController : ControllerBase
     {
         var orgId = CurrentTenantId();
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var token = await Request.ResolveTokenAsync(_tokens, ct);
+        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
 
         if (!settings!.AnonymousPull && token is null)
         {
@@ -104,7 +105,7 @@ public partial class PyPiController : ControllerBase
         var orgId = CurrentTenantId();
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var token = await Request.ResolveTokenAsync(_tokens, ct);
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
 
         var purlName = NormalizePyPiName(package);
         var pkg = await _packages.GetByPurlNameAsync(orgId, "pypi", purlName, ct);
@@ -247,7 +248,7 @@ public partial class PyPiController : ControllerBase
 
         var orgId = CurrentTenantId();
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var token = await Request.ResolveTokenAsync(_tokens, ct);
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
         var pkgVersions = await FindVersionByFilename(orgId, file, ct);
 
         var authError = CheckDownloadAuth(pkgVersions, token, settings!);
@@ -260,7 +261,9 @@ public partial class PyPiController : ControllerBase
             if (await _blockGate.EvaluateAsync(
                     new BlockGateRequest(orgId, "pypi", v.Purl, v.Id,
                         v.ManualBlockState, v.VulnCheckedAt,
-                        token?.UserId, settings!.MaxOsvScoreTolerance, sourceIp), ct)
+                        token?.UserId, settings!.MaxOsvScoreTolerance, sourceIp,
+                        MinReleaseAgeHours: settings.MinReleaseAgeHours,
+                        PublishedAt: v.PublishedAt), ct)
                 == BlockDecision.Blocked) return StatusCode(403);
 
             var cached = await TryServeCachedBlobAsync(pkgVersions.Value, file, orgId, token, sourceIp, ct);
@@ -269,8 +272,8 @@ public partial class PyPiController : ControllerBase
 
         // Cache miss — proxy from upstream
         Response.Headers["X-Cache"] = "MISS";
-        var upstreamUrl = await ResolveProxyUpstreamUrlAsync(file, parsed, pkgVersions, ct);
-        if (upstreamUrl is null) return NotFound();
+        var resolved = await ResolveProxyUpstreamUrlAsync(file, parsed, pkgVersions, ct);
+        if (resolved is null) return NotFound();
 
         var gateError = await CheckProxyAllowlistBlocklistAsync(orgId, parsed, token, settings!, sourceIp, ct);
         if (gateError is not null) return gateError;
@@ -283,9 +286,10 @@ public partial class PyPiController : ControllerBase
         if (!await _claimResolver.IsProxyFetchAllowedAsync(orgId, "pypi", purlNameForClaim, ct))
             return NotFound();
 
-        return await FetchAndCacheUpstreamAsync(file, upstreamUrl, parsed, pkgVersions,
+        return await FetchAndCacheUpstreamAsync(file, resolved.Value.Url, resolved.Value.Sha256Hex,
+            parsed, pkgVersions,
             new ProxyContext(orgId, token?.UserId, settings!, sourceIp),
-            token, ct);
+            ct);
     }
 
     private IActionResult? CheckDownloadAuth((Package Package, PackageVersion Version)? pkgVersions, TokenRecord? token, OrgSettings settings)
@@ -334,16 +338,22 @@ public partial class PyPiController : ControllerBase
 
     // If we have a known sha256, files.pythonhosted.org uses the sha256 as a path prefix.
     // Otherwise, look it up in the upstream simple index. Returns null on lookup failure.
-    private async Task<string?> ResolveProxyUpstreamUrlAsync(string file, PyPiFilename parsed,
+    // The second tuple element is the upstream-supplied SHA-256 (hex) for fail-fast
+    // verification before caching: either the previously-stored hash on the cache-hit path,
+    // or the #sha256= fragment from PEP 503's <a href> on first fetch. Null when no
+    // upstream-supplied hash is available.
+    private async Task<(string Url, string? Sha256Hex)?> ResolveProxyUpstreamUrlAsync(
+        string file, PyPiFilename parsed,
         (Package Package, PackageVersion Version)? pkgVersions, CancellationToken ct)
     {
         var sha256 = pkgVersions?.Version.ChecksumSha256;
         if (sha256 is not null)
-            return $"https://files.pythonhosted.org/packages/{sha256[..2]}/{sha256[2..4]}/{sha256}/{file}";
+            return ($"https://files.pythonhosted.org/packages/{sha256[..2]}/{sha256[2..4]}/{sha256}/{file}", sha256);
 
         var upstreamBase = _config["PyPI:Upstream"] ?? "https://pypi.org";
-        var url = await ResolveUpstreamPyPiUrlAsync(upstreamBase, parsed.PurlName, file, ct);
-        return string.IsNullOrEmpty(url) ? null : url;
+        var resolved = await ResolveUpstreamPyPiUrlAsync(upstreamBase, parsed.PurlName, file, ct);
+        if (resolved is null) return null;
+        return (resolved.Value.Url, resolved.Value.Sha256Hex);
     }
 
     private async Task<IActionResult?> CheckProxyAllowlistBlocklistAsync(string orgId, PyPiFilename parsed,
@@ -362,13 +372,17 @@ public partial class PyPiController : ControllerBase
     }
 
     private async Task<IActionResult> FetchAndCacheUpstreamAsync(
-        string file, string upstreamUrl, PyPiFilename parsed,
+        string file, string upstreamUrl, string? upstreamSha256, PyPiFilename parsed,
         (Package Package, PackageVersion Version)? pkgVersions,
-        ProxyContext gate, TokenRecord? token, CancellationToken ct)
+        ProxyContext gate, CancellationToken ct)
     {
         try
         {
-            var (bytes, computedSha256, isHit) = await DownloadAndCacheAsync(upstreamUrl, pkgVersions?.Version.ChecksumSha256, gate.OrgId, ct);
+            // Verification preference: previously-stored hash > upstream-supplied (#sha256=).
+            // Both are SHA-256; we pass whichever we have into UpstreamClient so it can verify
+            // before caching and throw ChecksumException → 502 on mismatch.
+            var knownSha = pkgVersions?.Version.ChecksumSha256 ?? upstreamSha256;
+            var (bytes, computedSha256, isHit) = await DownloadAndCacheAsync(upstreamUrl, knownSha, gate.OrgId, ct);
             if (bytes is null) return NotFound();
 
             Response.Headers["X-Cache"] = isHit ? "HIT" : "MISS";
@@ -385,7 +399,7 @@ public partial class PyPiController : ControllerBase
 
             if (!isHit && pkgVersions is null)
             {
-                var firstFetchBlock = await RecordAndScanFirstFetchAsync(file, parsed, bytes, computedSha256, gate, token, ct);
+                var firstFetchBlock = await RecordAndScanFirstFetchAsync(file, parsed, bytes, upstreamSha256, gate, ct);
                 if (firstFetchBlock is not null) return firstFetchBlock;
             }
 
@@ -426,39 +440,117 @@ public partial class PyPiController : ControllerBase
     }
 
     private async Task<IActionResult?> RecordAndScanFirstFetchAsync(
-        string file, PyPiFilename parsed, byte[] bytes, string computedSha256,
-        ProxyContext gate, TokenRecord? token, CancellationToken ct)
+        string file, PyPiFilename parsed, byte[] bytes, string? upstreamSha256,
+        ProxyContext gate, CancellationToken ct)
     {
-        _ = computedSha256; // ProxyFetchService recomputes inside the trust boundary.
         var purl = PurlNormalizer.PyPi(parsed.PurlName, parsed.Version);
+        var upstreamBase = _config["PyPI:Upstream"] ?? "https://pypi.org";
+        var jsonMeta = await TryFetchPyPiJsonMetadataAsync(upstreamBase, parsed.PurlName, parsed.Version, file, ct);
+
+        // Prefer the simple-index #sha256= fragment (it's already verified against the bytes
+        // by UpstreamClient on the way in). Fall back to the JSON API's digests.sha256 when
+        // upstream's simple page didn't carry a fragment.
+        var integrityValue = upstreamSha256 ?? jsonMeta.Sha256Hex;
+        var integrityAlgo = integrityValue is not null ? "sha256" : null;
+
         var result = await _proxyFetch.RecordAndScanAsync(new Dependably.Storage.ProxyFetchRequest(
             OrgId: gate.OrgId, Ecosystem: "pypi",
             PackageName: parsed.PurlName, PurlName: parsed.PurlName,
             Version: parsed.Version, Purl: purl, File: file, Bytes: bytes,
             ExtractLicenses: bytes2 => LicenseExtractor.FromPyPiPackageBytes(bytes2, file),
-            UserId: token?.UserId,
+            UserId: gate.UserId,
             SourceIp: gate.SourceIp,
             MaxOsvScoreTolerance: gate.Settings.MaxOsvScoreTolerance,
+            MinReleaseAgeHours: gate.Settings.MinReleaseAgeHours,
             // PyPI records cache_access separately in FetchAndCacheUpstreamAsync (covers
             // both hit and miss paths); skip here to avoid the double-write.
-            CacheAccess: null), ct);
+            CacheAccess: null,
+            PublishedAt: jsonMeta.PublishedAt,
+            UpstreamIntegrityValue: integrityValue,
+            UpstreamIntegrityAlgorithm: integrityAlgo), ct);
         return result.Decision == BlockDecision.Blocked ? StatusCode(403) : null;
     }
 
     /// <summary>
-    /// Fetches the upstream simple index for a package and extracts the actual download URL for a specific file.
-    /// Returns null if the file is not found in the upstream index.
+    /// Calls PyPI's per-version JSON API and picks the <c>urls[]</c> entry matching the file
+    /// we're about to record: returns its <c>upload_time_iso_8601</c> for <c>published_at</c>
+    /// and its <c>digests.sha256</c> as a fallback upstream integrity value. The Simple API
+    /// is HTML-only and carries no timestamps, so the JSON API is an extra request — fail-soft,
+    /// never blocks the underlying artefact fetch.
     /// </summary>
-    private async Task<string?> ResolveUpstreamPyPiUrlAsync(string upstreamBase, string pkgName, string filename, CancellationToken ct)
+    private async Task<PyPiJsonMetadata> TryFetchPyPiJsonMetadataAsync(
+        string upstreamBase, string purlName, string version, string file, CancellationToken ct)
+    {
+        try
+        {
+            var url = $"{upstreamBase}/pypi/{purlName}/{version}/json";
+            using var resp = await _upstream.GetMetadataAsync(url, ct);
+            if (!resp.IsSuccessStatusCode) return PyPiJsonMetadata.Empty;
+            using var stream = await resp.Content.ReadAsStreamAsync(ct);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+            if (!doc.RootElement.TryGetProperty("urls", out var urls) || urls.ValueKind != JsonValueKind.Array)
+                return PyPiJsonMetadata.Empty;
+            var match = urls.EnumerateArray().FirstOrDefault(entry => EntryMatchesFilename(entry, file));
+            return match.ValueKind == JsonValueKind.Undefined ? PyPiJsonMetadata.Empty : ParsePyPiUrlEntry(match);
+        }
+        catch { return PyPiJsonMetadata.Empty; }
+    }
+
+    private static bool EntryMatchesFilename(JsonElement entry, string file) =>
+        entry.TryGetProperty("filename", out var fn) &&
+        fn.ValueKind == JsonValueKind.String &&
+        string.Equals(fn.GetString(), file, StringComparison.OrdinalIgnoreCase);
+
+    private static PyPiJsonMetadata ParsePyPiUrlEntry(JsonElement entry)
+    {
+        DateTimeOffset? publishedAt = null;
+        var iso = entry.TryGetProperty("upload_time_iso_8601", out var t) ? t.GetString() : null;
+        if (DateTimeOffset.TryParse(iso, null,
+                System.Globalization.DateTimeStyles.RoundtripKind, out var ts))
+            publishedAt = ts;
+
+        string? sha256 = null;
+        if (entry.TryGetProperty("digests", out var digests)
+            && digests.ValueKind == JsonValueKind.Object
+            && digests.TryGetProperty("sha256", out var d)
+            && d.ValueKind == JsonValueKind.String)
+            sha256 = d.GetString()?.ToLowerInvariant();
+
+        return new PyPiJsonMetadata(publishedAt, sha256);
+    }
+
+    private readonly record struct PyPiJsonMetadata(DateTimeOffset? PublishedAt, string? Sha256Hex)
+    {
+        public static PyPiJsonMetadata Empty => new(null, null);
+    }
+
+    /// <summary>
+    /// Fetches the upstream simple index for a package and extracts the actual download URL for a
+    /// specific file, plus the <c>#sha256=</c> fragment if PEP 503 supplied one. The fragment
+    /// drives fail-fast verification on first fetch — passed through as <c>knownSha256</c> to
+    /// <see cref="UpstreamClient.GetOrFetchAsync"/> which throws <see cref="ChecksumException"/>
+    /// on mismatch before any blob is cached. Returns null when the file isn't in the index.
+    /// </summary>
+    private async Task<(string Url, string? Sha256Hex)?> ResolveUpstreamPyPiUrlAsync(
+        string upstreamBase, string pkgName, string filename, CancellationToken ct)
     {
         try
         {
             using var resp = await _upstream.GetMetadataAsync($"{upstreamBase}/simple/{pkgName}/", ct);
             if (!resp.IsSuccessStatusCode) return null;
             var html = await resp.Content.ReadAsStringAsync(ct);
-            // Find href containing this filename (strip fragment for comparison)
-            var match = Regex.Match(html, $@"href=""(https?://[^""#]*/{Regex.Escape(filename)})(#[^""]*)?""", RegexOptions.None, RegexTimeout);
-            return match.Success ? match.Groups[1].Value : null;
+            // Group 1 = URL up to but not including the fragment; group 3 = the hex SHA-256
+            // when a #sha256=... fragment is present. Older mirrors / non-PEP-503 indices
+            // may omit the fragment; in that case group 3 is empty and we fall through with
+            // a null hash (the request still succeeds, just without first-fetch verification).
+            var match = Regex.Match(
+                html,
+                $@"href=""(https?://[^""#]*/{Regex.Escape(filename)})(#sha256=([0-9a-fA-F]{{64}}))?""",
+                RegexOptions.None, RegexTimeout);
+            if (!match.Success) return null;
+            var url = match.Groups[1].Value;
+            var sha = match.Groups[3].Success ? match.Groups[3].Value.ToLowerInvariant() : null;
+            return (url, sha);
         }
         catch
         {
@@ -571,10 +663,7 @@ public partial class PyPiController : ControllerBase
     private async Task<IActionResult?> CheckPyPiUploadSizeAsync(string orgId, long size, CancellationToken ct)
     {
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var instanceLimitStr = await _orgs.GetInstanceSettingAsync("max_upload_bytes_pypi", ct);
-        var instanceLimit = instanceLimitStr is not null && long.TryParse(instanceLimitStr, out var parsedInstanceLimit)
-            ? parsedInstanceLimit : long.MaxValue;
-        var limit = settings?.MaxUploadBytesPyPi ?? settings?.MaxUploadBytes ?? instanceLimit;
+        var limit = await _orgs.GetUploadLimitAsync(settings, "pypi", ct);
         return size > limit
             ? StatusCode(413, new ProblemDetails { Detail = "Upload exceeds size limit.", Status = 413 })
             : null;

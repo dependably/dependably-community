@@ -10,6 +10,7 @@ namespace Dependably.Tests.Unit;
 /// is tested with both the positive case (override applies) and the negative case (override
 /// is silent, caller keeps the embedded value).
 /// </summary>
+[Trait("Category", "Unit")]
 public sealed class OuterVersionLabelTests
 {
     // ── npm wrapper-dir override ─────────────────────────────────────────────
@@ -79,9 +80,19 @@ public sealed class OuterVersionLabelTests
     [InlineData("pkg-1.0.0.whl")]                            // only 2 segments — not PEP 427
     [InlineData("pkg-1.0.0-py3-none.whl")]                   // only 4 segments
     [InlineData("")]
+    [InlineData("pkg--py3-none-any.whl")]                    // empty version segment (candidate.Length == 0)
+    [InlineData("pkg-alpha-py3-none-any.whl")]               // non-digit-leading candidate
     public void WheelFilename_Does_Not_Match_NonPep427(string filename)
     {
         Assert.False(OuterVersionLabel.TryFromWheelFilename(filename, out _));
+    }
+
+    [Theory]
+    [InlineData("acme-1.0.0-py3-none-any.WHL", "1.0.0")]     // uppercase extension — OrdinalIgnoreCase branch
+    public void WheelFilename_Matches_Case_Insensitively(string filename, string expected)
+    {
+        Assert.True(OuterVersionLabel.TryFromWheelFilename(filename, out var v));
+        Assert.Equal(expected, v);
     }
 
     // ── NuGet nupkg filename ─────────────────────────────────────────────────
@@ -102,8 +113,19 @@ public sealed class OuterVersionLabelTests
     [InlineData("notapackage.zip")]
     [InlineData("NoVersionHere.nupkg")]
     [InlineData("")]
+    [InlineData("Pkg..nupkg")]                               // empty candidate after dot (Length == 0)
+    [InlineData("Pkg.1..nupkg")]                             // candidate starts with digit but TryParse rejects
     public void NupkgFilename_Does_Not_Match_NonNupkg(string filename)
     {
         Assert.False(OuterVersionLabel.TryFromNupkgFilename(filename, out _));
+    }
+
+    [Theory]
+    [InlineData("Simple.1.0.0.NUPKG", "1.0.0")]              // uppercase extension — OrdinalIgnoreCase branch
+    [InlineData("Pkg.1.0.0.SNUPKG", "1.0.0")]                // uppercase symbols extension
+    public void NupkgFilename_Matches_Case_Insensitively(string filename, string expected)
+    {
+        Assert.True(OuterVersionLabel.TryFromNupkgFilename(filename, out var v));
+        Assert.Equal(expected, v);
     }
 }

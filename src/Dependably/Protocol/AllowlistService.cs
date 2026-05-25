@@ -1,6 +1,6 @@
 using Dapper;
-using Prometheus;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Observability;
 
 namespace Dependably.Protocol;
 
@@ -13,11 +13,6 @@ public sealed class AllowlistService
 {
     private readonly IMetadataStore _db;
     private readonly AuditRepository _audit;
-
-    private static readonly Counter AllowlistBlocks = Metrics.CreateCounter(
-        "dependably_allowlist_blocks_total",
-        "PURLs blocked by allowlist mode",
-        new CounterConfiguration { LabelNames = ["org", "ecosystem"] });
 
     public AllowlistService(IMetadataStore db, AuditRepository audit)
     {
@@ -55,7 +50,7 @@ public sealed class AllowlistService
         // "" if the input isn't a valid PURL — the upstream caller has already routed by
         // ecosystem so this is purely a labelling concern.
         var ecosystem = ExtractEcosystem(purl);
-        AllowlistBlocks.WithLabels(orgId, ecosystem).Inc();
+        DependablyMeter.AllowlistBlocks.Add(1, new KeyValuePair<string, object?>("ecosystem", ecosystem));
         await _audit.LogAsync("allowlist_blocked", orgId: orgId, ecosystem: ecosystem, purl: purl, ct: ct);
         return false;
     }

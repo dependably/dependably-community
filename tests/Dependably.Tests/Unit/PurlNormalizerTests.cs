@@ -3,6 +3,7 @@ using Xunit;
 
 namespace Dependably.Tests.Unit;
 
+[Trait("Category", "Unit")]
 public class PurlNormalizerTests
 {
     // PyPI normalization (PEP 503)
@@ -15,6 +16,24 @@ public class PurlNormalizerTests
     [InlineData("Flask", "2.3.0", "pkg:pypi/flask@2.3.0")]
     public void PyPi_NormalizesCorrectly(string name, string version, string expected)
         => Assert.Equal(expected, PurlNormalizer.PyPi(name, version));
+
+    // NuGet — unparseable version falls through the false branch of TryParse and returns original
+    [Fact]
+    public void NuGet_UnparseableVersion_ReturnsOriginalString()
+    {
+        var purl = PurlNormalizer.NuGet("SomeLib", "not-a-version!!");
+        Assert.Equal("pkg:nuget/SomeLib@not-a-version!!", purl);
+    }
+
+    // NormalizeNuGetVersionString — exercises the standalone entry point on both branches
+    [Theory]
+    [InlineData("1.0.0.0", "1.0.0")]        // 4-part zero revision collapses
+    [InlineData("1.0.0.4", "1.0.0.4")]      // non-zero revision preserved
+    [InlineData("2.1.0-beta.1", "2.1.0-beta.1")] // prerelease preserved
+    [InlineData("garbage", "garbage")]      // unparseable returns original
+    [InlineData("", "")]                    // empty unparseable returns original
+    public void NormalizeNuGetVersionString_HandlesParseableAndUnparseable(string input, string expected)
+        => Assert.Equal(expected, PurlNormalizer.NormalizeNuGetVersionString(input));
 
     // npm — unscoped
     [Theory]
@@ -47,6 +66,7 @@ public class PurlNormalizerTests
     }
 }
 
+[Trait("Category", "Unit")]
 public class NpmRouteHelperTests
 {
     [Theory]
@@ -70,6 +90,7 @@ public class NpmRouteHelperTests
     }
 }
 
+[Trait("Category", "Unit")]
 public class PurlParserTests
 {
     [Theory]
@@ -92,6 +113,9 @@ public class PurlParserTests
     [InlineData("notapurl")]
     [InlineData("pkg:pypi/requests")]         // missing version
     [InlineData("pkg:/requests@1.0")]         // missing ecosystem
+    [InlineData("pkg:npmlodash@4.17.21")]     // no slash after scheme — covers slashIdx < 0
+    [InlineData("pkg:")]                       // scheme only, no body — slashIdx < 0
+    [InlineData("pkg:pypi")]                   // scheme + ecosystem but no slash — slashIdx < 0
     public void TryParse_InvalidPurl_ReturnsNull(string purl)
         => Assert.Null(PurlParser.TryParse(purl));
 

@@ -7,11 +7,13 @@
   import { useRouter, routeFor } from '../lib/routes.js'
   import { applyLocale } from '../lib/locale.js'
   import SystemLogin from './SystemLogin.svelte'
+  import SystemDashboard from './SystemDashboard.svelte'
   import SystemTenants from './SystemTenants.svelte'
   import SystemUserLookup from './SystemUserLookup.svelte'
   import SystemAudit from './SystemAudit.svelte'
   import SystemSettings from './SystemSettings.svelte'
   import SystemProfile from './SystemProfile.svelte'
+  import SystemAdmins from './SystemAdmins.svelte'
 
   useRouter('system')
 
@@ -22,7 +24,7 @@
       window.history.scrollRestoration = 'auto'
     }
 
-    const intended = routeFor(window.location.pathname) || { page: 'system-tenants', params: {} }
+    const intended = routeFor(window.location.pathname) || { page: 'system-dashboard', params: {} }
 
     let me = null
     try { me = await systemApi.me() } catch { /* unauthenticated */ }
@@ -38,7 +40,7 @@
       finalPage = 'system-login'
     }
     else if (me.mustChangePassword) finalPage = 'system-profile'
-    else if (intended.page === 'system-login') finalPage = 'system-tenants'
+    else if (intended.page === 'system-login') finalPage = 'system-dashboard'
     else finalPage = intended.page
 
     navigate(finalPage, {}, { replace: true })
@@ -74,12 +76,14 @@
 {:else}
   <div class="layout">
     <nav class="navbar">
-      <div class="nav-brand">
+      <button type="button" class="nav-brand" on:click={() => navigate('system-dashboard')}
+              aria-label={$t('system.nav.home')}>
         <span class="brand-text">{$t('nav.brand')}</span>
         <span class="apex-badge">{$t('system.badge')}</span>
-      </div>
+      </button>
       <div class="nav-links">
         <button class="nav-link" class:active={$route.page === 'system-tenants'} on:click={() => navigate('system-tenants')}>{$t('system.nav.tenants')}</button>
+        <button class="nav-link" class:active={$route.page === 'system-admins'} on:click={() => navigate('system-admins')}>{$t('system.nav.admins')}</button>
         <button class="nav-link" class:active={$route.page === 'system-users'} on:click={() => navigate('system-users')}>{$t('system.nav.users')}</button>
         <button class="nav-link" class:active={$route.page === 'system-audit'} on:click={() => navigate('system-audit')}>{$t('system.nav.audit')}</button>
         <button class="nav-link" class:active={$route.page === 'system-settings'} on:click={() => navigate('system-settings')}>{$t('system.nav.settings')}</button>
@@ -91,8 +95,12 @@
     </nav>
 
     <main class="main-content">
-      {#if $route.page === 'system-tenants'}
+      {#if $route.page === 'system-dashboard'}
+        <SystemDashboard />
+      {:else if $route.page === 'system-tenants'}
         <SystemTenants />
+      {:else if $route.page === 'system-admins'}
+        <SystemAdmins />
       {:else if $route.page === 'system-users'}
         <SystemUserLookup />
       {:else if $route.page === 'system-audit'}
@@ -119,7 +127,13 @@
     border-bottom: 1px solid var(--border);
     position: sticky; top: 0; z-index: 50;
   }
-  .nav-brand { display: flex; align-items: center; gap: 8px; }
+  /* Brand block doubles as a home link — button reset to keep it looking like text/badges. */
+  .nav-brand {
+    display: flex; align-items: center; gap: 8px;
+    background: none; border: none; padding: 0; margin: 0;
+    color: inherit; font: inherit; cursor: pointer;
+  }
+  .nav-brand:hover .brand-text { color: var(--accent); }
   .brand-text { font-weight: 600; }
   .apex-badge {
     font-size: 11px;

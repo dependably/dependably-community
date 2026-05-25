@@ -1,11 +1,11 @@
 import { test, expect, request } from '@playwright/test'
-import { loginAsAdmin, mintCicdToken, auth } from '../../helpers/api-client.js'
+import { loginAsAdmin, mintServiceToken, auth } from '../../helpers/api-client.js'
 
 test.describe('API: SIEM', () => {
   test('Bearer siem:read token can read auth events as JSON', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const token = await mintCicdToken(authed, `e2e-siem-${Date.now()}`, 'siem:read')
+      const token = await mintServiceToken(authed, `e2e-siem-${Date.now()}`, 'siem:read')
       const ctx = await request.newContext({
         baseURL,
         extraHTTPHeaders: { Authorization: auth.bearer(token) },
@@ -27,7 +27,7 @@ test.describe('API: SIEM', () => {
   test('Accept: application/x-ndjson returns NDJSON', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const token = await mintCicdToken(authed, `e2e-siem-ndjson-${Date.now()}`, 'siem:read')
+      const token = await mintServiceToken(authed, `e2e-siem-ndjson-${Date.now()}`, 'siem:read')
       const ctx = await request.newContext({
         baseURL,
         extraHTTPHeaders: {
@@ -55,7 +55,7 @@ test.describe('API: SIEM', () => {
   test('Accept: application/x-cef returns CEF lines', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const token = await mintCicdToken(authed, `e2e-siem-cef-${Date.now()}`, 'siem:read')
+      const token = await mintServiceToken(authed, `e2e-siem-cef-${Date.now()}`, 'siem:read')
       const ctx = await request.newContext({
         baseURL,
         extraHTTPHeaders: {
@@ -94,7 +94,7 @@ test.describe('API: SIEM', () => {
   test('pull-scoped Bearer token cannot read SIEM', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const pull = await mintCicdToken(authed, `e2e-siem-wrong-${Date.now()}`, 'pull')
+      const pull = await mintServiceToken(authed, `e2e-siem-wrong-${Date.now()}`, 'pull')
       const ctx = await request.newContext({
         baseURL,
         extraHTTPHeaders: { Authorization: auth.bearer(pull) },

@@ -99,7 +99,7 @@ public sealed class ProblemResults
         return new ObjectResult(problem) { StatusCode = 422 };
     }
 
-    public IActionResult ConflictAction(string detail)
+    public IActionResult ConflictAction(string detail, string? reason = null)
     {
         var problem = new ProblemDetails
         {
@@ -107,6 +107,19 @@ public sealed class ProblemResults
             Title = _localizer["error.conflict.title"],
             Detail = detail,
         };
+        if (reason is not null) problem.Extensions["reason"] = reason;
         return new ObjectResult(problem) { StatusCode = 409 };
+    }
+
+    public IActionResult ForbiddenAction(string detail, string? reason = null)
+    {
+        var problem = new ProblemDetails
+        {
+            Status = StatusCodes.Status403Forbidden,
+            Title = _localizer["error.forbidden.title"],
+            Detail = detail,
+        };
+        if (reason is not null) problem.Extensions["reason"] = reason;
+        return new ObjectResult(problem) { StatusCode = 403 };
     }
 }

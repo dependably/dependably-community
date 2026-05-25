@@ -68,7 +68,7 @@
     blocked_vuln_score: 'yanked',
     blocked_manual: 'yanked',
     manual_block: 'warning',
-    manual_unblock: 'cicd',
+    manual_unblock: 'unblock',
   }
   const SYSTEM_EVENTS = new Set(['vuln_scan', 'vuln_scan_pass', 'vuln_rescan_pass'])
 
@@ -86,7 +86,7 @@
     { labelKey: 'audit.groups.tenantConfig', actions: ['org_settings_updated', 'retention_updated', 'proxy_settings_updated', 'tenant.setting.change'] },
     { labelKey: 'audit.groups.auth',         actions: ['login.success', 'login.failure', 'lockout.triggered', 'user.password_changed', 'user.language_changed'] },
     { labelKey: 'audit.groups.saml',         actions: ['saml.config_updated', 'saml.metadata_uploaded', 'saml.config_deleted', 'auth.saml.login.success', 'auth.saml.login.failure', 'auth.saml.user_linked', 'auth.saml.user_provisioned', 'auth.saml.test.success'] },
-    { labelKey: 'audit.groups.tokens',       actions: ['token_created', 'token_revoked', 'cicd_token_created', 'cicd_token_revoked'] },
+    { labelKey: 'audit.groups.tokens',       actions: ['token_created', 'token_revoked', 'service_token_created', 'service_token_revoked'] },
     { labelKey: 'audit.groups.usersInvites', actions: ['member_role_changed', 'member_removed', 'invite_created', 'invite_deleted'] },
     { labelKey: 'audit.groups.lists',        actions: ['allowlist_added', 'allowlist_removed', 'blocklist_added', 'blocklist_removed'] },
     { labelKey: 'audit.groups.licenses',     actions: ['license_policy_mode_changed', 'license_allowlist_added', 'license_allowlist_removed', 'license_blocklist_added', 'license_blocklist_removed'] },

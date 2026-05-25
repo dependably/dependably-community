@@ -40,6 +40,8 @@ public sealed class FirstBootService
         await conn.ExecuteAsync("BEGIN IMMEDIATE");
         try
         {
+            // xtenant: instance-wide first-boot check; the whole point is to find whether
+            // any tenant or admin exists at all before seeding the default org.
             var totalRows = await conn.ExecuteScalarAsync<int>(
                 """
                 SELECT
@@ -141,25 +143,27 @@ public sealed class FirstBootService
 
     private async Task SeedInstanceSettingsAsync(DbConnection conn)
     {
-        var settings = new Dictionary<string, string?>
+        // Env var overrides take precedence; otherwise seed the InstanceSettingDefaults
+        // baseline so the operator UI never loads blank and the DB matches the runtime
+        // fallbacks in RetentionService / SiemController / upload-limit checks.
+        var settings = new Dictionary<string, string>
         {
-            ["max_upload_bytes"] = _config["MAX_UPLOAD_BYTES"],
-            ["max_upload_bytes_pypi"] = _config["MAX_UPLOAD_BYTES_PYPI"],
-            ["max_upload_bytes_npm"] = _config["MAX_UPLOAD_BYTES_NPM"],
-            ["max_upload_bytes_nuget"] = _config["MAX_UPLOAD_BYTES_NUGET"],
+            ["max_upload_bytes"] = _config["MAX_UPLOAD_BYTES"] ?? InstanceSettingDefaults.MaxUploadBytes,
+            ["max_upload_bytes_pypi"] = _config["MAX_UPLOAD_BYTES_PYPI"] ?? InstanceSettingDefaults.MaxUploadBytesPyPi,
+            ["max_upload_bytes_npm"] = _config["MAX_UPLOAD_BYTES_NPM"] ?? InstanceSettingDefaults.MaxUploadBytesNpm,
+            ["max_upload_bytes_nuget"] = _config["MAX_UPLOAD_BYTES_NUGET"] ?? InstanceSettingDefaults.MaxUploadBytesNuGet,
+            ["gc_schedule"] = _config["GC_SCHEDULE"] ?? InstanceSettingDefaults.GcSchedule,
+            ["siem_max_lookback_days"] = _config["SIEM_MAX_LOOKBACK_DAYS"] ?? InstanceSettingDefaults.SiemMaxLookbackDays,
         };
 
         foreach (var (key, value) in settings)
         {
-            if (value is not null)
-            {
-                await conn.ExecuteAsync(
-                    """
-                    INSERT INTO instance_settings (key, value) VALUES (@key, @value)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                    """,
-                    new { key, value });
-            }
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO instance_settings (key, value) VALUES (@key, @value)
+                ON CONFLICT(key) DO NOTHING
+                """,
+                new { key, value });
         }
     }
 

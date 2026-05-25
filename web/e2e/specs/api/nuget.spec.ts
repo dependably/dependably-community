@@ -4,7 +4,7 @@ import fs from 'fs'
 import path from 'path'
 import {
   loginAsAdmin,
-  mintCicdToken,
+  mintServiceToken,
   mintUserToken,
   auth,
   fixturesRoot,
@@ -45,7 +45,7 @@ test.describe('API: NuGet push/pull/unlist', () => {
   }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const pushToken = await mintCicdToken(authed, `e2e-nuget-push-${Date.now()}`, 'push')
+      const pushToken = await mintServiceToken(authed, `e2e-nuget-push-${Date.now()}`, 'push')
       const { bytes, sha256 } = loadNupkg()
 
       const push = await pushNupkg(baseURL!, pushToken, bytes)
@@ -85,7 +85,7 @@ test.describe('API: NuGet push/pull/unlist', () => {
   test('unlist requires push scope', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const pullToken = await mintCicdToken(authed, `e2e-nuget-pull-${Date.now()}`, 'pull')
+      const pullToken = await mintServiceToken(authed, `e2e-nuget-pull-${Date.now()}`, 'pull')
       const ctx = await request.newContext({
         baseURL,
         extraHTTPHeaders: { 'X-NuGet-ApiKey': pullToken },
@@ -137,7 +137,7 @@ test.describe('API: NuGet push/pull/unlist', () => {
       const setLow = await authed.put('/api/v1/settings', { data: lowered })
       expect([200, 204]).toContain(setLow.status())
 
-      const pushToken = await mintCicdToken(authed, `e2e-nuget-413-${Date.now()}`, 'push')
+      const pushToken = await mintServiceToken(authed, `e2e-nuget-413-${Date.now()}`, 'push')
       const { bytes } = loadNupkg()
       expect(bytes.length).toBeGreaterThan(128)
 

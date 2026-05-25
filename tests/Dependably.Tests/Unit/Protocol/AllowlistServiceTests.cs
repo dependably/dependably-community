@@ -64,6 +64,36 @@ public sealed class AllowlistServiceTests : IClassFixture<InMemoryDbFixture>
     }
 
     [Fact]
+    public async Task IsAllowedAsync_NonPurlInput_BlocksWithEmptyEcosystemLabel()
+    {
+        // Covers ExtractEcosystem branch: input doesn't start with "pkg:" → ecosystem = "".
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+
+        Assert.False(await _sut.IsAllowedAsync(orgId, "not-a-purl"));
+
+        await using var conn = await _fixture.Store.OpenAsync();
+        var ecosystem = await conn.ExecuteScalarAsync<string>(
+            "SELECT ecosystem FROM audit_log WHERE action = 'allowlist_blocked' AND org_id = @orgId ORDER BY id DESC LIMIT 1",
+            new { orgId });
+        Assert.Equal("", ecosystem);
+    }
+
+    [Fact]
+    public async Task IsAllowedAsync_PkgPrefixWithoutSlash_BlocksWithEmptyEcosystemLabel()
+    {
+        // Covers ExtractEcosystem branch: starts with "pkg:" but no '/' after position 4 → ecosystem = "".
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+
+        Assert.False(await _sut.IsAllowedAsync(orgId, "pkg:malformed"));
+
+        await using var conn = await _fixture.Store.OpenAsync();
+        var ecosystem = await conn.ExecuteScalarAsync<string>(
+            "SELECT ecosystem FROM audit_log WHERE action = 'allowlist_blocked' AND org_id = @orgId ORDER BY id DESC LIMIT 1",
+            new { orgId });
+        Assert.Equal("", ecosystem);
+    }
+
+    [Fact]
     public async Task RecordConflictIfNeededAsync_AlwaysAudits()
     {
         var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");

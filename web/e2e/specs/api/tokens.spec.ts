@@ -1,7 +1,7 @@
 import { test, expect, request } from '@playwright/test'
 import {
   loginAsAdmin,
-  mintCicdToken,
+  mintServiceToken,
   mintUserToken,
   auth,
 } from '../../helpers/api-client.js'
@@ -30,11 +30,11 @@ test.describe('API: token CRUD + scope enforcement', () => {
     }
   })
 
-  test('cicd token: create → list → revoke', async ({ baseURL }) => {
+  test('service token: create → list → revoke', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const name = `e2e-cicd-${Date.now()}`
-      const create = await authed.post('/api/v1/cicd-tokens', {
+      const name = `e2e-svc-${Date.now()}`
+      const create = await authed.post('/api/v1/service-tokens', {
         data: { name, scope: 'push' },
       })
       expect(create.status()).toBe(200)
@@ -43,12 +43,12 @@ test.describe('API: token CRUD + scope enforcement', () => {
       expect(record.name).toBe(name)
       expect(record.scope).toBe('push')
 
-      const list = await authed.get('/api/v1/cicd-tokens')
+      const list = await authed.get('/api/v1/service-tokens')
       expect(list.status()).toBe(200)
       const tokens = await list.json()
       expect(tokens.find((t: { id: string }) => t.id === record.id)).toBeTruthy()
 
-      const del = await authed.delete(`/api/v1/cicd-tokens/${record.id}`)
+      const del = await authed.delete(`/api/v1/service-tokens/${record.id}`)
       expect([200, 204]).toContain(del.status())
     } finally {
       await authed.dispose()
@@ -69,7 +69,7 @@ test.describe('API: token CRUD + scope enforcement', () => {
   test('pull token cannot push (npm publish denied)', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const pullToken = await mintCicdToken(authed, `e2e-pull-${Date.now()}`, 'pull')
+      const pullToken = await mintServiceToken(authed, `e2e-pull-${Date.now()}`, 'pull')
       const ctx = await request.newContext({
         baseURL,
         extraHTTPHeaders: { Authorization: auth.bearer(pullToken) },

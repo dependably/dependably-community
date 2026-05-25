@@ -14,7 +14,7 @@ Each skill prompts for three inputs, in order:
 1. **Dependably base URL** — e.g. `https://repo.example.com` or `http://192.168.1.50:8080`
 2. **Org slug** — e.g. `default`, `acme`
 3. **Token** — created in the dependably web UI under **Tokens** (user token) or
-   **Settings → CI/CD tokens** (long-lived non-personal token).
+   **Settings → Service tokens** (long-lived non-personal token).
 
 > **Plain HTTP gotcha.** Self-hosted dependably is commonly served over plain
 > HTTP on a LAN. Most package managers refuse plaintext registries by default.

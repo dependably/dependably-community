@@ -78,13 +78,15 @@ public sealed class PackageRepository
             string VerId, string VerPackageId, string VerVersion, string VerPurl, string VerBlobKey,
             long VerSizeBytes, string? VerChecksumSha256, bool VerYanked, string? VerYankReason,
             bool VerFirstFetch, string VerCreatedAt, string? VerVulnCheckedAt, string? VerManualBlockState,
-            string? VerDeprecated, string VerOrigin)>(
+            string? VerDeprecated, string VerOrigin, string? VerPublishedAt, string? VerChecksumSha1,
+            string? VerUpstreamIntegrityValue, string? VerUpstreamIntegrityAlgorithm)>(
             """
             SELECT p.id, p.org_id, p.ecosystem, p.name, p.purl_name, p.is_proxy, p.created_at,
                    pv.id, pv.package_id, pv.version, pv.purl, pv.blob_key,
                    pv.size_bytes, pv.checksum_sha256, pv.yanked, pv.yank_reason,
                    pv.first_fetch, pv.created_at, pv.vuln_checked_at, pv.manual_block_state,
-                   pv.deprecated, pv.origin
+                   pv.deprecated, pv.origin, pv.published_at, pv.checksum_sha1,
+                   pv.upstream_integrity_value, pv.upstream_integrity_algorithm
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE p.org_id = @orgId AND p.ecosystem = @ecosystem
@@ -110,7 +112,11 @@ public sealed class PackageRepository
             VulnCheckedAt = row.VerVulnCheckedAt is not null ? DateTimeOffset.Parse(row.VerVulnCheckedAt) : null,
             ManualBlockState = row.VerManualBlockState,
             Deprecated = row.VerDeprecated,
-            Origin = row.VerOrigin
+            Origin = row.VerOrigin,
+            PublishedAt = row.VerPublishedAt is not null ? DateTimeOffset.Parse(row.VerPublishedAt) : null,
+            ChecksumSha1 = row.VerChecksumSha1,
+            UpstreamIntegrityValue = row.VerUpstreamIntegrityValue,
+            UpstreamIntegrityAlgorithm = row.VerUpstreamIntegrityAlgorithm
         };
         return (pkg, ver);
     }
@@ -118,13 +124,15 @@ public sealed class PackageRepository
     public async Task<IReadOnlyList<PackageVersion>> GetVersionsAsync(string packageId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by package_id which the caller obtained via an org-scoped lookup.
+        // package_versions FKs into packages(id), so org isolation rides on the parent.
         var rows = await conn.QueryAsync<PackageVersion>(
             """
             SELECT id, package_id as PackageId, version, purl, blob_key as BlobKey,
                    size_bytes as SizeBytes, checksum_sha256 as ChecksumSha256,
                    yanked, yank_reason as YankReason, first_fetch as FirstFetch, created_at as CreatedAt,
                    vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState,
-                   deprecated as Deprecated, origin as Origin
+                   deprecated as Deprecated, origin as Origin, published_at as PublishedAt, checksum_sha1 as ChecksumSha1, upstream_integrity_value as UpstreamIntegrityValue, upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
             FROM package_versions
             WHERE package_id = @packageId
             ORDER BY created_at DESC
@@ -136,32 +144,41 @@ public sealed class PackageRepository
     public async Task<PackageVersion?> GetVersionAsync(string packageId, string version, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by package_id (caller-org-scoped); inherited via FK to packages(id).
         return await conn.QuerySingleOrDefaultAsync<PackageVersion>(
             """
             SELECT id, package_id as PackageId, version, purl, blob_key as BlobKey,
                    size_bytes as SizeBytes, checksum_sha256 as ChecksumSha256,
                    yanked, yank_reason as YankReason, first_fetch as FirstFetch, created_at as CreatedAt,
                    vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState,
-                   deprecated as Deprecated, origin as Origin
+                   deprecated as Deprecated, origin as Origin, published_at as PublishedAt, checksum_sha1 as ChecksumSha1, upstream_integrity_value as UpstreamIntegrityValue, upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
             FROM package_versions
             WHERE package_id = @packageId AND version = @version
             """,
             new { packageId, version });
     }
 
-    public async Task<PackageVersion?> GetVersionByBlobKeyAsync(string blobKey, CancellationToken ct = default)
+    /// <summary>
+    /// Lookup by blob_key, scoped to <paramref name="orgId"/> via the parent package's org_id.
+    /// The org filter is defence-in-depth: blob_key is globally unique today, but joining
+    /// through packages.org_id makes the tenancy invariant load-bearing in SQL rather than
+    /// relying on every caller having org-scoped the lookup beforehand.
+    /// </summary>
+    public async Task<PackageVersion?> GetVersionByBlobKeyAsync(string orgId, string blobKey, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         return await conn.QuerySingleOrDefaultAsync<PackageVersion>(
             """
-            SELECT id, package_id as PackageId, version, purl, blob_key as BlobKey,
-                   size_bytes as SizeBytes, checksum_sha256 as ChecksumSha256,
-                   yanked, yank_reason as YankReason, first_fetch as FirstFetch, created_at as CreatedAt,
-                   vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState,
-                   deprecated as Deprecated, origin as Origin
-            FROM package_versions WHERE blob_key = @blobKey
+            SELECT pv.id, pv.package_id as PackageId, pv.version, pv.purl, pv.blob_key as BlobKey,
+                   pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
+                   pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.created_at as CreatedAt,
+                   pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
+                   pv.deprecated as Deprecated, pv.origin as Origin, pv.published_at as PublishedAt, pv.checksum_sha1 as ChecksumSha1, pv.upstream_integrity_value as UpstreamIntegrityValue, pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
+            FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE pv.blob_key = @blobKey AND p.org_id = @orgId
             """,
-            new { blobKey });
+            new { orgId, blobKey });
     }
 
     public async Task<PackageVersion> CreateVersionAsync(
@@ -169,10 +186,11 @@ public sealed class PackageRepository
     {
         await using var conn = await _db.OpenAsync(ct);
         var id = Guid.NewGuid().ToString("N");
+        // xtenant: INSERT pinned to a caller-supplied package_id (org-scoped via FK).
         await conn.ExecuteAsync(
             """
-            INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, checksum_sha256, first_fetch, origin)
-            VALUES (@id, @packageId, @version, @purl, @blobKey, @sizeBytes, @checksumSha256, @firstFetch, @origin)
+            INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, checksum_sha256, first_fetch, origin, published_at, checksum_sha1, upstream_integrity_value, upstream_integrity_algorithm)
+            VALUES (@id, @packageId, @version, @purl, @blobKey, @sizeBytes, @checksumSha256, @firstFetch, @origin, @publishedAt, @checksumSha1, @upstreamIntegrityValue, @upstreamIntegrityAlgorithm)
             """,
             new
             {
@@ -185,10 +203,14 @@ public sealed class PackageRepository
                 checksumSha256 = data.ChecksumSha256,
                 firstFetch = data.FirstFetch ? 1 : 0,
                 origin = data.Origin,
+                publishedAt = data.PublishedAt?.ToUniversalTime().ToString("o"),
+                checksumSha1 = data.ChecksumSha1,
+                upstreamIntegrityValue = data.UpstreamIntegrityValue,
+                upstreamIntegrityAlgorithm = data.UpstreamIntegrityAlgorithm,
             });
 
         return (await conn.QuerySingleOrDefaultAsync<PackageVersion>(
-            "SELECT id, package_id as PackageId, version, purl, blob_key as BlobKey, size_bytes as SizeBytes, checksum_sha256 as ChecksumSha256, yanked, yank_reason as YankReason, first_fetch as FirstFetch, created_at as CreatedAt, vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState, deprecated as Deprecated, origin as Origin FROM package_versions WHERE id = @id",
+            "SELECT id, package_id as PackageId, version, purl, blob_key as BlobKey, size_bytes as SizeBytes, checksum_sha256 as ChecksumSha256, yanked, yank_reason as YankReason, first_fetch as FirstFetch, created_at as CreatedAt, vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState, deprecated as Deprecated, origin as Origin, published_at as PublishedAt, checksum_sha1 as ChecksumSha1, upstream_integrity_value as UpstreamIntegrityValue, upstream_integrity_algorithm as UpstreamIntegrityAlgorithm FROM package_versions WHERE id = @id",
             new { id }))!;
     }
 
@@ -216,20 +238,22 @@ public sealed class PackageRepository
     /// </summary>
     public async Task UpdateVersionForOverwriteAsync(
         string versionId, string blobKey, long sizeBytes, string sha256, string origin,
-        CancellationToken ct = default)
+        string? sha1, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: UPDATE by version_id; caller obtained the id from an org-scoped lookup.
         await conn.ExecuteAsync(
             """
             UPDATE package_versions
                SET blob_key = @blobKey,
                    size_bytes = @sizeBytes,
                    checksum_sha256 = @sha256,
+                   checksum_sha1 = @sha1,
                    origin = @origin,
                    vuln_checked_at = NULL
              WHERE id = @id
             """,
-            new { id = versionId, blobKey, sizeBytes, sha256, origin });
+            new { id = versionId, blobKey, sizeBytes, sha256, sha1, origin });
     }
 
     public async Task<(IReadOnlyList<Package> Items, int Total)> ListPaginatedAsync(
@@ -299,19 +323,26 @@ public sealed class PackageRepository
         };
     }
 
-    public async Task<PackageVersion?> GetVersionByIdAsync(string versionId, CancellationToken ct = default)
+    /// <summary>
+    /// Lookup a version by its primary key, scoped to <paramref name="orgId"/> via the parent
+    /// package. version id is a Guid so collisions are not the concern — the org filter is the
+    /// defence-in-depth tenancy invariant. Returns null when the id exists in a different org.
+    /// </summary>
+    public async Task<PackageVersion?> GetVersionByIdAsync(string orgId, string versionId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         return await conn.QuerySingleOrDefaultAsync<PackageVersion>(
             """
-            SELECT id, package_id as PackageId, version, purl, blob_key as BlobKey,
-                   size_bytes as SizeBytes, checksum_sha256 as ChecksumSha256,
-                   yanked, yank_reason as YankReason, first_fetch as FirstFetch, created_at as CreatedAt,
-                   vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState,
-                   deprecated as Deprecated, origin as Origin
-            FROM package_versions WHERE id = @versionId
+            SELECT pv.id, pv.package_id as PackageId, pv.version, pv.purl, pv.blob_key as BlobKey,
+                   pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
+                   pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.created_at as CreatedAt,
+                   pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
+                   pv.deprecated as Deprecated, pv.origin as Origin, pv.published_at as PublishedAt, pv.checksum_sha1 as ChecksumSha1, pv.upstream_integrity_value as UpstreamIntegrityValue, pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
+            FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE pv.id = @versionId AND p.org_id = @orgId
             """,
-            new { versionId });
+            new { orgId, versionId });
     }
 
     /// <summary>
@@ -326,6 +357,8 @@ public sealed class PackageRepository
     public async Task<bool> DeletePackageIfEmptyAsync(string packageId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: DELETE keyed by packages.id (a Guid issued by GetOrCreate under an
+        // org-scoped lookup); the NOT EXISTS sub-select stays bound to that same id.
         var affected = await conn.ExecuteAsync(
             """
             DELETE FROM packages
@@ -380,6 +413,45 @@ public sealed class PackageRepository
         return blobKeys;
     }
 
+    /// <summary>
+    /// Streams every blob_key currently referenced from <c>package_versions</c>. Backs the
+    /// orphan-blob reconciler — caller materializes the set, then walks the registry tier
+    /// asking "is this key in the set?". Streaming (rather than returning a list) keeps memory
+    /// bounded on stores with millions of versions.
+    /// </summary>
+    public async IAsyncEnumerable<string> StreamAllBlobKeysAsync(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var rows = await conn.QueryAsync<string>(
+            "SELECT blob_key FROM package_versions",
+            commandTimeout: 0);
+        foreach (var key in rows)
+        {
+            if (ct.IsCancellationRequested) yield break;
+            yield return key;
+        }
+    }
+
+    /// <summary>
+    /// Sum of <c>size_bytes</c> across every <c>package_versions</c> row whose parent package
+    /// belongs to the given org. The number underlying the per-tenant quota check in
+    /// <see cref="Publish.PackagePublishService"/>. Origin-agnostic on purpose — proxy bytes
+    /// also count against the tenant's storage budget on the data plane.
+    /// </summary>
+    public async Task<long> GetTotalSizeBytesAsync(string orgId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteScalarAsync<long?>(
+            """
+            SELECT COALESCE(SUM(pv.size_bytes), 0)
+            FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.org_id = @orgId
+            """,
+            new { orgId }) ?? 0L;
+    }
+
     public async Task SetManualBlockStateAsync(string versionId, string? state, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
@@ -406,4 +478,8 @@ public sealed record NewPackageVersion(
     long SizeBytes,
     string? ChecksumSha256,
     bool FirstFetch = false,
-    string Origin = "proxy");  // 'proxy' (upstream cache) | 'uploaded' (user-pushed file)
+    string Origin = "proxy",  // 'proxy' (upstream cache) | 'uploaded' (user-pushed file)
+    DateTimeOffset? PublishedAt = null,  // upstream first-publish timestamp; null on capture failure or for uploaded versions
+    string? ChecksumSha1 = null,         // hex SHA-1 (npm only — for packument dist.shasum); null elsewhere
+    string? UpstreamIntegrityValue = null,      // upstream's published hash, verbatim in its native encoding
+    string? UpstreamIntegrityAlgorithm = null); // 'sha256' | 'sha512-sri' | 'sha512-b64'

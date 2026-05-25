@@ -1,7 +1,8 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Cryptography;
-using Prometheus;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Observability;
 using Dependably.Security;
 using Dependably.Storage;
 
@@ -11,7 +12,7 @@ namespace Dependably.Protocol;
 /// Fetches blobs from upstream registries with:
 ///   - Thundering herd prevention (ConcurrentDictionary + Lazy deduplication)
 ///   - Per-ecosystem checksum verification before caching
-///   - Prometheus counters and inflight gauge
+///   - OpenTelemetry counters and inflight gauge (see DependablyMeter)
 /// </summary>
 public sealed class UpstreamClient
 {
@@ -24,16 +25,6 @@ public sealed class UpstreamClient
 
     // Dedup in-flight fetches: only one upstream request per blob key at a time
     private readonly ConcurrentDictionary<string, Lazy<Task<byte[]>>> _inflight = new();
-
-    private static readonly Counter ChecksumFailures = Metrics.CreateCounter(
-        "dependably_checksum_failures_total",
-        "Upstream checksum verification failures",
-        new CounterConfiguration { LabelNames = ["org", "ecosystem"] });
-
-    private static readonly Gauge InflightFetches = Metrics.CreateGauge(
-        "dependably_inflight_fetches",
-        "Current number of in-flight upstream fetches",
-        new GaugeConfiguration { LabelNames = ["ecosystem"] });
 
     public UpstreamClient(
         IHttpClientFactory httpClientFactory,
@@ -72,10 +63,20 @@ public sealed class UpstreamClient
         var cached = await _blobs.GetAsync(blobKey, ct);
         if (cached is not null)
         {
+            DependablyMeter.CacheLookups.Add(1,
+                new KeyValuePair<string, object?>("ecosystem", ecosystem),
+                new KeyValuePair<string, object?>("outcome", "hit"));
+            SnapshotCounters.IncrementCacheHit();
             using var ms = new MemoryStream();
             await cached.CopyToAsync(ms, ct);
             return (ms.ToArray(), true);
         }
+
+        DependablyMeter.CacheLookups.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", ecosystem),
+            new KeyValuePair<string, object?>("outcome", "miss"));
+        SnapshotCounters.IncrementCacheMiss();
+        SnapshotCounters.IncrementProxyFetch();
 
         // Air-gapped deployments must never reach upstream on a cache miss (#48). Cached
         // artefacts above still serve normally; only the fetch path is blocked. The
@@ -90,16 +91,59 @@ public sealed class UpstreamClient
         var lazy = _inflight.GetOrAdd(blobKey, _ => new Lazy<Task<byte[]>>(
             () => FetchAndVerifyAsync(upstreamUrl, checksumSpec, blobKey, ecosystem, orgId, purl, CancellationToken.None)));
 
-        InflightFetches.WithLabels(ecosystem).Inc();
+        using var activity = DependablyActivitySource.Source.StartActivity(
+            "proxy.fetch", ActivityKind.Client);
+        activity?.SetTag("dependably.ecosystem", ecosystem);
+        activity?.SetTag("dependably.operation", "proxy.fetch");
+        activity?.SetTag("dependably.tier", "cache");
+        if (purl is not null) activity?.SetTag("dependably.purl", purl);
+        if (checksumSpec is { Algorithm: ChecksumAlgorithm.Sha256, ExpectedValue: { } sha })
+            activity?.SetTag("dependably.sha256", sha);
+
+        var stopwatch = Stopwatch.StartNew();
+        var outcome = "success";
+
+        DependablyMeter.UpstreamInflightFetches.Add(1, new KeyValuePair<string, object?>("ecosystem", ecosystem));
         try
         {
             var bytes = await lazy.Value;
             return (bytes, false);
         }
+        catch (ChecksumException)
+        {
+            outcome = "upstream_error";
+            activity?.SetStatus(ActivityStatusCode.Error, "checksum mismatch");
+            throw;
+        }
+        catch (UpstreamResponseTooLargeException)
+        {
+            outcome = "upstream_error";
+            activity?.SetStatus(ActivityStatusCode.Error, "upstream response too large");
+            throw;
+        }
+        catch (AirGappedException)
+        {
+            outcome = "blocked";
+            activity?.SetStatus(ActivityStatusCode.Error, "air-gapped");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            outcome = "server_error";
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            throw;
+        }
         finally
         {
-            InflightFetches.WithLabels(ecosystem).Dec();
+            DependablyMeter.UpstreamInflightFetches.Add(-1, new KeyValuePair<string, object?>("ecosystem", ecosystem));
             _inflight.TryRemove(blobKey, out _);
+
+            DependablyMeter.UpstreamFetchDuration.Record(
+                stopwatch.Elapsed.TotalSeconds,
+                new KeyValuePair<string, object?>("ecosystem", ecosystem),
+                new KeyValuePair<string, object?>("outcome", outcome));
+
+            activity?.SetTag("dependably.outcome", outcome);
         }
     }
 
@@ -152,7 +196,7 @@ public sealed class UpstreamClient
             _logger.LogWarning("Checksum mismatch for {Url}: expected {Expected}, got {Actual}",
                 url, spec.ExpectedValue, actual);
 
-            ChecksumFailures.WithLabels(orgId ?? "unknown", ecosystem).Inc();
+            DependablyMeter.UpstreamChecksumFailures.Add(1, new KeyValuePair<string, object?>("ecosystem", ecosystem));
             await _audit.LogAsync(
                 "checksum_failure",
                 orgId: orgId,

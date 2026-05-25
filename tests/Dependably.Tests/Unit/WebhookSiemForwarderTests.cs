@@ -90,6 +90,62 @@ public sealed class WebhookSiemForwarderTests
         await Assert.ThrowsAsync<HttpRequestException>(() => sut.SendAsync(SampleEvent()));
     }
 
+    [Fact]
+    public async Task SendAsync_EmptyBearer_OmitsAuthorizationHeader()
+    {
+        // Empty string must hit the IsNullOrEmpty short-circuit and skip Authorization,
+        // distinct from the null-key path covered above.
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+        using var http = new HttpClient(handler);
+        var sut = new WebhookSiemForwarder(http, Cfg(
+            ("SIEM_WEBHOOK_URL", "https://siem.test/ingest"),
+            ("SIEM_WEBHOOK_BEARER", "")));
+
+        await sut.SendAsync(SampleEvent());
+
+        Assert.Null(handler.LastRequest?.Headers.Authorization);
+    }
+
+    [Fact]
+    public void Name_Returns_Webhook()
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+        using var http = new HttpClient(handler);
+        var sut = new WebhookSiemForwarder(http, Cfg(("SIEM_WEBHOOK_URL", "https://siem.test/ingest")));
+
+        Assert.Equal("webhook", sut.Name);
+    }
+
+    [Fact]
+    public async Task SendAsync_SerializesEventAsSnakeCaseJson()
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+        using var http = new HttpClient(handler);
+        var sut = new WebhookSiemForwarder(http, Cfg(("SIEM_WEBHOOK_URL", "https://siem.test/ingest")));
+
+        await sut.SendAsync(SampleEvent());
+
+        Assert.NotNull(handler.LastBody);
+        Assert.Contains("\"action\":\"login.success\"", handler.LastBody);
+        Assert.Contains("\"org_id\":\"tenant-1\"", handler.LastBody);
+        Assert.Contains("\"actor_id\":\"user-7\"", handler.LastBody);
+        Assert.Contains("\"created_at\":", handler.LastBody);
+    }
+
+    [Fact]
+    public async Task SendAsync_PropagatesCancellation()
+    {
+        var handler = new RecordingHandler(HttpStatusCode.NoContent);
+        using var http = new HttpClient(handler);
+        var sut = new WebhookSiemForwarder(http, Cfg(("SIEM_WEBHOOK_URL", "https://siem.test/ingest")));
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => sut.SendAsync(SampleEvent(), cts.Token));
+    }
+
     private sealed class RecordingHandler : HttpMessageHandler
     {
         private readonly HttpStatusCode _status;

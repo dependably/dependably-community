@@ -226,34 +226,6 @@
         }
       }
     },
-    "/api/v1/cicd-tokens": {
-      "operations": {
-        "get": {
-          "requiredParams": [],
-          "responseCodes": [
-            "200"
-          ]
-        },
-        "post": {
-          "requiredParams": [],
-          "responseCodes": [
-            "200"
-          ]
-        }
-      }
-    },
-    "/api/v1/cicd-tokens/{id}": {
-      "operations": {
-        "delete": {
-          "requiredParams": [
-            "id"
-          ],
-          "responseCodes": [
-            "200"
-          ]
-        }
-      }
-    },
     "/api/v1/instance/settings": {
       "operations": {
         "get": {
@@ -515,6 +487,34 @@
         }
       }
     },
+    "/api/v1/service-tokens": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/service-tokens/{id}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/settings": {
       "operations": {
         "get": {
@@ -595,7 +595,107 @@
         }
       }
     },
+    "/api/v1/system/admins": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/admins/{id}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "get": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/admins/{id}/account-status": {
+      "operations": {
+        "patch": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/admins/{id}/password-reset": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/system/audit": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/audit/actions": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/background-jobs": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/background-jobs/facets": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/dashboard": {
       "operations": {
         "get": {
           "requiredParams": [],
@@ -628,6 +728,32 @@
     "/api/v1/system/me/password": {
       "operations": {
         "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/metrics-access": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/observability": {
+      "operations": {
+        "get": {
           "requiredParams": [],
           "responseCodes": [
             "200"
@@ -680,6 +806,30 @@
       }
     },
     "/api/v1/system/tenants/{slug}/restore": {
+      "operations": {
+        "patch": {
+          "requiredParams": [
+            "slug"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/tenants/{slug}/status": {
+      "operations": {
+        "patch": {
+          "requiredParams": [
+            "slug"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/tenants/{slug}/storage-quota": {
       "operations": {
         "patch": {
           "requiredParams": [

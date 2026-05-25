@@ -47,7 +47,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var cacheRecorder = new CacheAccessRecorder(cacheArtifact, tenantAccess,
             NullLogger<CacheAccessRecorder>.Instance);
-        return new ProxyFetchService(_blobs, cacheRecorder, proxyVersions, scanner, blockGate, packages);
+        return new ProxyFetchService(_blobs, cacheRecorder, proxyVersions, scanner, blockGate, packages, audit);
     }
 
     [Fact]

@@ -52,6 +52,16 @@
     "notAvailable": "Not available.",
     "allEcosystems": "All ecosystems"
   },
+  "password": {
+    "tooShort": "Use at least {min} characters.",
+    "tooLong": "Password is too long (over 72 bytes; long passphrases above this limit are truncated by the hashing algorithm).",
+    "lowEntropy": "Too easy to guess. {warning}",
+    "lowEntropyGeneric": "Too easy to guess. Try a longer passphrase or mix in unrelated words.",
+    "containsContext": "Don't include \"{term}\" in your password.",
+    "strength": {
+      "ok": "Strong password."
+    }
+  },
   "auth": {
     "login": {
       "title": "Dependably",
@@ -171,7 +181,7 @@
       "size": "Size",
       "pushed": "Pushed",
       "license": "License",
-      "purl": "PURL",
+      "published": "Published",
       "vulnScan": "Vuln Scan",
       "origin": "Origin",
       "status": "Status",
@@ -200,6 +210,8 @@
     "rescanning": "…",
     "rescanCooldown": "Cooldown: {minutes}m remaining",
     "rescanTitle": "Scan for vulnerabilities",
+    "blockDisabledTitle": "Already blocked",
+    "unblockDisabledTitle": "Not currently blocked",
     "deleteTitle": "Delete version {version}? This cannot be undone.",
     "del": "Del",
     "actionsMenu": {
@@ -212,9 +224,16 @@
     "detail": {
       "purl": "PURL",
       "checksum": "SHA-256",
+      "vulnScan": "Last scan",
       "vulns": "Vulnerabilities",
       "noVulns": "No known vulnerabilities",
-      "copy": "Copy"
+      "copy": "Copy",
+      "upstreamIntegrity": {
+        "sha256": "Upstream SHA-256",
+        "sha512-sri": "Upstream SHA-512 (SRI)",
+        "sha512-b64": "Upstream SHA-512 (base64)",
+        "shasum": "Upstream SHA-1 (shasum)"
+      }
     }
   },
   "activity": {
@@ -296,8 +315,8 @@
       "auth.saml.test.success": "SAML test run (success)",
       "token_created": "Token created",
       "token_revoked": "Token revoked",
-      "cicd_token_created": "CI/CD token created",
-      "cicd_token_revoked": "CI/CD token revoked",
+      "service_token_created": "Service token created",
+      "service_token_revoked": "Service token revoked",
       "allowlist_added": "Allowlist entry added",
       "allowlist_removed": "Allowlist entry removed",
       "blocklist_added": "Blocklist entry added",
@@ -332,36 +351,46 @@
     "tokenCreated": "Token created — copy it now, it will not be shown again.",
     "columns": {
       "id": "ID",
+      "description": "Description",
       "scope": "Scope",
       "created": "Created",
-      "expires": "Expires"
+      "expires": "Expires",
+      "lastUsed": "Last used"
     },
     "expired": "expired",
+    "never": "never",
     "empty": "No tokens",
     "modal": {
       "title": "New Access Token",
+      "description": "Description (optional)",
+      "descriptionPlaceholder": "e.g. Local dev laptop",
       "scope": "Scope",
       "expiresAt": "Expires at (optional)"
     }
   },
-  "cicdTokens": {
-    "title": "CI/CD Tokens",
+  "serviceTokens": {
+    "title": "Service Tokens",
     "newToken": "New token",
     "tokenCreated": "Token created — copy it now, it will not be shown again.",
     "columns": {
       "name": "Name",
+      "description": "Description",
       "scope": "Scope",
       "created": "Created",
-      "expires": "Expires"
+      "expires": "Expires",
+      "lastUsed": "Last used"
     },
     "expired": "expired",
-    "empty": "No CI/CD tokens",
-    "revokeConfirm": "Revoke this CI/CD token?",
+    "never": "never",
+    "empty": "No service tokens",
+    "revokeConfirm": "Revoke this service token?",
     "modal": {
-      "title": "New CI/CD Token",
+      "title": "New Service Token",
       "name": "Name",
       "namePlaceholder": "e.g. GitHub Actions",
       "nameRequired": "Name is required.",
+      "description": "Description (optional)",
+      "descriptionPlaceholder": "e.g. Build server in us-east-1",
       "scope": "Scope",
       "expiresAt": "Expires at (optional)"
     }
@@ -375,7 +404,8 @@
       "retention": "Retention",
       "licenses": "Licenses",
       "proxy": "Proxy",
-      "claims": "Claims"
+      "claims": "Claims",
+      "serviceTokens": "Service tokens"
     },
     "auth": {
       "methodsTitle": "Sign-in methods",
@@ -491,6 +521,10 @@
       "allowlistMode": "Proxy: allowlist & blocklist only",
       "osvTolerance": "Max OSV score tolerance",
       "osvToleranceHint": "Packages with a vulnerability score above this threshold are blocked (0 – 10). Default 10 allows all.",
+      "minReleaseAge": "Minimum release age",
+      "minReleaseAgeHint": "Block proxy fetches of upstream versions younger than this. Leave empty to disable. The age is measured against the upstream registry's published timestamp; versions with no upstream timestamp are allowed through.",
+      "minReleaseAgeUnitHours": "Hours",
+      "minReleaseAgeUnitDays": "Days",
       "allowlistSection": "Allowlist",
       "blocklistSection": "Blocklist",
       "saved": "Proxy settings saved."
@@ -651,20 +685,6 @@
         "slug": "Slug",
         "slugPlaceholder": "my-org"
       }
-    },
-    "settings": {
-      "title": "Instance Settings",
-      "saved": "Settings saved.",
-      "notSet": "not set",
-      "fields": {
-        "MAX_UPLOAD_BYTES": "Max upload bytes (all ecosystems)",
-        "MAX_UPLOAD_BYTES_PYPI": "Max upload bytes — PyPI",
-        "MAX_UPLOAD_BYTES_NPM": "Max upload bytes — npm",
-        "MAX_UPLOAD_BYTES_NUGET": "Max upload bytes — NuGet",
-        "METRICS_ALLOWED_IPS": "Metrics allowed IPs (comma-separated)",
-        "GC_SCHEDULE": "GC cron schedule",
-        "DEFAULT_ORG_SLUG": "Default org slug"
-      }
     }
   },
   "dashboard": {
@@ -767,15 +787,82 @@
     "badge": "system",
     "nav": {
       "tenants": "Tenants",
+      "admins": "Admins",
       "users": "Users",
       "audit": "Audit",
+      "observability": "Observability",
       "settings": "Settings",
       "profile": "Profile",
-      "signOut": "Sign out"
+      "signOut": "Sign out",
+      "home": "Dashboard"
+    },
+    "dashboard": {
+      "title": "Operator dashboard",
+      "subtitle": "Snapshot of tenant lifecycle, operator accounts, and recent background-job health.",
+      "tenants": {
+        "title": "Tenants",
+        "active": "Active",
+        "suspended": "Suspended",
+        "softDeleted": "Soft-deleted",
+        "total": "{count} total"
+      },
+      "admins": {
+        "title": "Operators",
+        "active": "Active",
+        "locked": "Locked",
+        "disabled": "Disabled",
+        "total": "{count} total"
+      },
+      "recentJobs": {
+        "title": "Recent background jobs",
+        "empty": "No background-job runs recorded yet.",
+        "viewAll": "View all →"
+      }
+    },
+    "observability": {
+      "title": "Instance observability",
+      "subtitle": "Live operator snapshot — numbers since startup, /metrics access config, scrape diagnostics. For rates and time series, point Grafana at /metrics.",
+      "sinceStartup": "since startup",
+      "seeGrafana": "rates and percentiles live in Grafana",
+      "tier": "Tier",
+      "size": "Size",
+      "jobName": "Job",
+      "lastSuccess": "Last success",
+      "age": "Age",
+      "numbers": {
+        "title": "Numbers",
+        "lifetimeNote": "Counters reset every process restart — no rolling windows here.",
+        "activeTenants": "Active tenants",
+        "publishes": "Publishes",
+        "proxyFetches": "Proxy fetches",
+        "cacheHits": "Cache hits",
+        "cacheMisses": "Cache misses",
+        "blobStore": "Blob storage by tier",
+        "jobs": "Background-job last-success",
+        "capturedAt": "Captured"
+      },
+      "access": {
+        "title": "/metrics endpoint",
+        "subtitle": "Effective config that the /metrics middleware is using right now. Env vars (when set) win over instance_settings; instance_settings winners over hard-coded defaults.",
+        "enabled": "Enabled",
+        "allowedIps": "Allowed IPs",
+        "yes": "Yes",
+        "no": "No"
+      },
+      "scrape": {
+        "title": "Scrape diagnostics",
+        "subtitle": "Last 50 /metrics requests + lifetime allow/deny counts. Ring buffer (capacity 500); no DB hit.",
+        "allowed": "Allowed",
+        "deniedIp": "Denied (IP)",
+        "deniedDisabled": "Denied (disabled)",
+        "when": "When",
+        "remoteIp": "Remote IP",
+        "outcome": "Outcome",
+        "empty": "No scrape attempts recorded yet."
+      }
     },
     "login": {
       "title": "Dependably",
-      "subtitle": "System administration",
       "email": "Email",
       "password": "Password",
       "submit": "Sign in",
@@ -785,20 +872,40 @@
     "tenants": {
       "title": "Tenants",
       "newTenant": "+ New tenant",
+      "searchPlaceholder": "Search by tenant",
       "columns": {
-        "slug": "Slug",
+        "slug": "Tenant",
         "status": "Status",
+        "users": "Users",
+        "storage": "Storage",
+        "quota": "Storage quota",
         "created": "Created",
-        "deleted": "Deleted"
+        "deleted": "Deleted",
+        "actions": "Actions"
       },
       "status": {
         "active": "Active",
+        "suspended": "Suspended",
         "softDeleted": "Soft-deleted"
+      },
+      "actionsMenu": {
+        "open": "Open actions menu",
+        "editQuota": "Edit quota",
+        "disable": "Disable",
+        "enable": "Enable",
+        "delete": "Delete",
+        "restore": "Restore"
       },
       "empty": "No tenants yet. Create one to get started.",
       "delete": "Delete",
       "restore": "Restore",
-      "deleteConfirm": "Soft-delete tenant '{slug}'? It will be inaccessible immediately and hard-deleted after the grace period (default 30 days).",
+      "deleteModalTitle": "Soft-delete tenant",
+      "deleteConfirm": "Soft-delete tenant {slug}? It will be inaccessible immediately and hard-deleted after the grace period (default 30 days).",
+      "disableModalTitle": "Disable tenant",
+      "disableConfirm": "Disable {slug}? Pushes and uploads will be refused until re-enabled. Existing data is preserved.",
+      "enableModalTitle": "Re-enable tenant",
+      "enableConfirm": "Re-enable {slug}? Writes will resume immediately.",
+      "statusUpdating": "Updating…",
       "modal": {
         "title": "Create tenant",
         "slug": "Slug",
@@ -815,13 +922,80 @@
         "ownerEmail": "Owner email",
         "ownerPassword": "Owner password",
         "done": "Done"
+      },
+      "quota": {
+        "unlimited": "Unlimited",
+        "edit": "Edit",
+        "editAria": "Edit storage quota for {slug}",
+        "modalTitle": "Storage quota — {slug}",
+        "modalHint": "Cap the total bytes this tenant can store across all hosted artefacts. Leave the field empty (or click Clear) to remove the cap.",
+        "label": "Quota",
+        "placeholder": "e.g. 5",
+        "save": "Save",
+        "saving": "Saving…",
+        "clear": "Clear",
+        "invalid": "Quota must be a positive whole number, or empty to clear."
+      }
+    },
+    "admins": {
+      "title": "Admins",
+      "description": "Operators who can manage tenants, instance settings, and other admins.",
+      "searchPlaceholder": "Search by email",
+      "you": "You",
+      "selfHint": "Manage your own password from Profile.",
+      "empty": "No admins yet.",
+      "columns": {
+        "email": "Email",
+        "status": "Status",
+        "lastLogin": "Last login",
+        "passwordReset": "Password reset",
+        "created": "Created",
+        "actions": "Actions"
+      },
+      "status": {
+        "active": "Active",
+        "locked": "Locked",
+        "disabled": "Disabled"
+      },
+      "create": {
+        "button": "+ New admin",
+        "title": "Create admin",
+        "email": "Email",
+        "submit": "Create"
+      },
+      "statusConfirm": {
+        "title": "Change status?",
+        "body": "Change {email} to {status}?",
+        "apply": "Apply"
+      },
+      "reset": {
+        "button": "Reset password",
+        "title": "Reset password?",
+        "body": "Reset password for {email}? Their current password will stop working immediately."
+      },
+      "delete": {
+        "button": "Delete",
+        "title": "Delete admin?",
+        "body": "Permanently delete {email}? This cannot be undone."
+      },
+      "tempPassword": {
+        "title": "Temporary password",
+        "notice": "Copy this password now — it will not be shown again.",
+        "copy": "Copy",
+        "copied": "Copied",
+        "done": "Done"
+      },
+      "errors": {
+        "cannot_modify_self": "You cannot modify your own account here. Use Profile → Change Password.",
+        "last_active_admin": "Cannot disable or lock the last active admin.",
+        "must_disable_first": "Disable the admin before deleting.",
+        "duplicate_email": "An admin with that email already exists."
       }
     },
     "userLookup": {
       "title": "User lookup",
-      "subtitle": "Control-plane metadata only — no tenant business data is shown.",
       "email": "Email",
-      "tenantSlug": "Tenant slug",
+      "tenantSlug": "Tenant",
       "search": "Search",
       "searching": "Searching…",
       "needFilter": "Enter an email or tenant slug.",
@@ -840,14 +1014,21 @@
       "lock": "Lock",
       "unlock": "Unlock",
       "resetPassword": "Reset pwd",
-      "resetConfirm": "Issue a temporary password for {email} on tenant '{slug}'? They will be forced to rotate on next login.",
-      "resetBannerLine1": "Temporary password issued for {email} on '{slug}':",
+      "resetModalTitle": "Reset user password",
+      "resetConfirm": "Issue a temporary password for {email} on tenant {slug}? They will be forced to rotate on next login.",
+      "resetBannerLine1": "Temporary password issued for {email} on {slug}:",
       "resetBannerLine2": "Hand this to the user out-of-band. They will be forced to rotate on next login. This is shown once.",
       "dismiss": "Dismiss"
     },
     "audit": {
       "title": "System audit log",
       "subtitle": "Operator events only (tenant lifecycle, system_admin actions). Tenant business events are not surfaced here.",
+      "tabs": {
+        "events": "Audit events",
+        "backgroundJobs": "Background jobs"
+      },
+      "searchPlaceholder": "Search action, actor, tenant, detail…",
+      "filterAction": "All actions",
       "columns": {
         "when": "When",
         "event": "Event",
@@ -860,9 +1041,35 @@
       "prev": "← Prev",
       "next": "Next →"
     },
+    "backgroundJobs": {
+      "searchPlaceholder": "Search job, operation, error…",
+      "filterJob": "All jobs",
+      "filterOutcome": "All outcomes",
+      "columns": {
+        "jobName": "Job",
+        "startedAt": "Started",
+        "duration": "Duration",
+        "outcome": "Outcome",
+        "error": "Details"
+      },
+      "outcome": {
+        "success": "Success",
+        "server_error": "Error",
+        "cancelled": "Cancelled"
+      },
+      "viewError": {
+        "show": "Show details",
+        "hide": "Hide details"
+      },
+      "empty": "No background-job runs recorded yet."
+    },
     "settings": {
       "title": "Instance settings",
       "subtitle": "Global limits and schedules — applied across every tenant.",
+      "tabs": {
+        "instance": "Instance settings",
+        "metrics": "Metrics access"
+      },
       "labels": {
         "maxUploadBytes": "Max upload size — global",
         "maxUploadBytesPyPi": "Max upload size — PyPI",
@@ -875,9 +1082,29 @@
         "string": "unset",
         "number": "—"
       },
+      "defaultHint": "Default: {value}",
+      "defaults": {
+        "maxUploadBytes": "500 MB",
+        "maxUploadBytesPyPi": "100 MB — matches pypi.org",
+        "maxUploadBytesNpm": "50 MB",
+        "maxUploadBytesNuGet": "250 MB — matches nuget.org",
+        "gcSchedule": "0 3 * * * (03:00 UTC daily)",
+        "siemMaxLookbackDays": "90 days"
+      },
       "save": "Save",
       "saving": "Saving…",
-      "savedAt": "Saved {time}."
+      "savedAt": "Saved {time}.",
+      "metrics": {
+        "title": "/metrics endpoint access",
+        "subtitle": "Toggle /metrics availability and configure the IP allowlist. Env vars override these values when set.",
+        "envLocked": "One or more knobs are locked by env vars (METRICS_ENABLED / METRICS_ALLOWED_IPS). Unset the env var to manage via UI.",
+        "enabled": "Endpoint enabled",
+        "enabledHint": "When off, /metrics returns 404 (endpoint vanishes). When on, the IP allowlist still applies.",
+        "allowedIps": "Allowed IPs / CIDRs",
+        "allowedIpsHint": "One entry per line. Examples: 127.0.0.1, ::1, 10.0.0.0/8.",
+        "broadCidrWarn": "⚠ 0.0.0.0/0 or ::/0 disables the IP gate entirely. Use only if /metrics is otherwise protected (e.g. private network, reverse-proxy auth).",
+        "save": "Save metrics access"
+      }
     },
     "profile": {
       "title": "Profile"

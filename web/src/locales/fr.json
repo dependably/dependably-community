@@ -6,7 +6,7 @@
     "airGapped": "Hors ligne",
     "airGappedHint": "AIR_GAPPED=true. Le téléchargement depuis les registres en amont est désactivé ; l'analyse OSV ne s'exécute que sur le miroir local.",
     "insecureHttp": "http",
-    "insecureHttpHint": "Les cookies de session ne sont pas sécurisés. Pour les déploiements accessibles depuis Internet, configurez un proxy inverse avec TLS et définissez BASE_URL=https://...",
+    "insecureHttpHint": "Les témoins de session ne sont pas sécurisés. Pour les déploiements accessibles depuis Internet, configurez un proxy inverse avec TLS et définissez BASE_URL=https://...",
     "tokens": "Jetons",
     "users": "Utilisateurs",
     "audit": "Audit",
@@ -51,6 +51,16 @@
     "notSet": "non défini",
     "notAvailable": "Non disponible.",
     "allEcosystems": "Tous les écosystèmes"
+  },
+  "password": {
+    "tooShort": "Utilisez au moins {min} caractères.",
+    "tooLong": "Mot de passe trop long (plus de 72 octets ; au-delà, l'algorithme de hachage tronque silencieusement la fin).",
+    "lowEntropy": "Trop facile à deviner. {warning}",
+    "lowEntropyGeneric": "Trop facile à deviner. Essayez une phrase de passe plus longue ou mélangez des mots sans rapport.",
+    "containsContext": "N'incluez pas « {term} » dans votre mot de passe.",
+    "strength": {
+      "ok": "Mot de passe robuste."
+    }
   },
   "auth": {
     "login": {
@@ -126,7 +136,7 @@
       "newState": "Nouvel état",
       "reason": "Raison (obligatoire)",
       "reasonPlaceholder": "Pourquoi cette revendication est-elle créée/modifiée ?",
-      "mixedWarning": "L'état 'mixed' permet aux versions locales de prendre le pas sur l'amont. Confirmez avant de continuer.",
+      "mixedWarning": "L'état 'mixed' permet aux versions locales d'avoir préséance sur l'amont. Confirmez avant de continuer.",
       "mixedAck": "Je comprends l'implication pour la chaîne d'approvisionnement.",
       "purgeWarning": "La transition vers 'local_only' purgera les versions proxy en cache pour ce nom.",
       "create": "Créer",
@@ -139,7 +149,7 @@
   },
   "upload": {
     "title": "Téléverser des paquets",
-    "description": "Select package for upload",
+    "description": "Sélectionnez le paquet à téléverser",
     "drop": "Déposez les fichiers ici, ou cliquez pour choisir",
     "selected": "{count, plural, =0 {Aucun fichier sélectionné} =1 {1 fichier sélectionné} other {# fichiers sélectionnés}}",
     "submit": "Téléverser",
@@ -161,7 +171,7 @@
       "title": "Résumé pré-téléversement",
       "fileCount": "Fichiers",
       "totalSize": "Taille totale",
-      "serverValidationNote": "Les résultats par fichier (détection d'écosystème, gate de revendication, déduplication, empreinte) sont évalués côté serveur après téléversement."
+      "serverValidationNote": "Les résultats par fichier (détection d'écosystème, contrôle de revendication, déduplication, empreinte) sont évalués côté serveur après téléversement."
     }
   },
   "versionDetail": {
@@ -169,8 +179,10 @@
       "version": "Version",
       "checksum": "Somme de contrôle",
       "size": "Taille",
-      "pushed": "Publié le",
+      "pushed": "Reçu le",
       "flags": "Indicateurs",
+      "license": "Licence",
+      "published": "Publié le",
       "vulnScan": "Scan vuln.",
       "origin": "Origine",
       "status": "Statut",
@@ -199,6 +211,8 @@
     "rescanning": "…",
     "rescanCooldown": "Délai : {minutes} min restantes",
     "rescanTitle": "Rechercher des vulnérabilités",
+    "blockDisabledTitle": "Déjà bloqué",
+    "unblockDisabledTitle": "Non bloqué actuellement",
     "sbom": "SBOM",
     "sbomTitle": "Télécharger le SBOM",
     "deleteTitle": "Supprimer la version {version} ? Cette action est irréversible.",
@@ -214,9 +228,16 @@
       "purl": "PURL",
       "checksum": "SHA-256",
       "downloads": "Téléchargements",
+      "vulnScan": "Dernier scan",
       "vulns": "Vulnérabilités",
       "noVulns": "Aucune vulnérabilité connue",
-      "copy": "Copier"
+      "copy": "Copier",
+      "upstreamIntegrity": {
+        "sha256": "SHA-256 amont",
+        "sha512-sri": "SHA-512 amont (SRI)",
+        "sha512-b64": "SHA-512 amont (base64)",
+        "shasum": "SHA-1 amont (shasum)"
+      }
     }
   },
   "activity": {
@@ -298,8 +319,8 @@
       "auth.saml.test.success": "Test SAML (réussi)",
       "token_created": "Jeton créé",
       "token_revoked": "Jeton révoqué",
-      "cicd_token_created": "Jeton CI/CD créé",
-      "cicd_token_revoked": "Jeton CI/CD révoqué",
+      "service_token_created": "Jeton de service créé",
+      "service_token_revoked": "Jeton de service révoqué",
       "allowlist_added": "Entrée de liste blanche ajoutée",
       "allowlist_removed": "Entrée de liste blanche supprimée",
       "blocklist_added": "Entrée de liste noire ajoutée",
@@ -334,36 +355,46 @@
     "tokenCreated": "Jeton créé — copiez-le maintenant, il ne sera plus affiché.",
     "columns": {
       "id": "ID",
+      "description": "Description",
       "scope": "Portée",
       "created": "Créé le",
-      "expires": "Expire le"
+      "expires": "Expire le",
+      "lastUsed": "Dernière utilisation"
     },
     "expired": "expiré",
+    "never": "jamais",
     "empty": "Aucun jeton",
     "modal": {
       "title": "Nouveau jeton d'accès",
+      "description": "Description (optionnel)",
+      "descriptionPlaceholder": "p. ex. : ordinateur portable de développement",
       "scope": "Portée",
       "expiresAt": "Expire le (optionnel)"
     }
   },
-  "cicdTokens": {
-    "title": "Jetons CI/CD",
+  "serviceTokens": {
+    "title": "Jetons de service",
     "newToken": "Nouveau jeton",
     "tokenCreated": "Jeton créé — copiez-le maintenant, il ne sera plus affiché.",
     "columns": {
       "name": "Nom",
+      "description": "Description",
       "scope": "Portée",
       "created": "Créé le",
-      "expires": "Expire le"
+      "expires": "Expire le",
+      "lastUsed": "Dernière utilisation"
     },
     "expired": "expiré",
-    "empty": "Aucun jeton CI/CD",
-    "revokeConfirm": "Révoquer ce jeton CI/CD ?",
+    "never": "jamais",
+    "empty": "Aucun jeton de service",
+    "revokeConfirm": "Révoquer ce jeton de service ?",
     "modal": {
-      "title": "Nouveau jeton CI/CD",
+      "title": "Nouveau jeton de service",
       "name": "Nom",
-      "namePlaceholder": "ex. : GitHub Actions",
+      "namePlaceholder": "p. ex. : GitHub Actions",
       "nameRequired": "Le nom est obligatoire.",
+      "description": "Description (optionnel)",
+      "descriptionPlaceholder": "p. ex. : serveur de build en us-east-1",
       "scope": "Portée",
       "expiresAt": "Expire le (optionnel)"
     }
@@ -377,11 +408,12 @@
       "retention": "Rétention",
       "licenses": "Licences",
       "proxy": "Proxy",
-      "claims": "Revendications"
+      "claims": "Revendications",
+      "serviceTokens": "Jetons de service"
     },
     "auth": {
       "methodsTitle": "Méthodes de connexion",
-      "methodsIntro": "Choisissez les méthodes proposées sur la page de connexion de ce tenant. Les changements sont enregistrés immédiatement.",
+      "methodsIntro": "Choisissez les méthodes proposées sur la page de connexion de ce locataire. Les changements sont enregistrés immédiatement.",
       "formsLogin": "Connexion par formulaire (courriel + mot de passe)",
       "formsLoginHint": "Courriel et mot de passe. Toujours disponible comme solution de repli.",
       "samlLogin": "SSO SAML",
@@ -415,7 +447,7 @@
       "replaceFile": "Remplacer le fichier",
       "resetButton": "Effacer la configuration SAML",
       "resetHint": "Supprime les métadonnées de l'IdP, les surcharges SP et l'historique des tests. La connexion par formulaire est réactivée. Cette action est auditée.",
-      "resetConfirm": "Effacer toute la configuration SAML pour ce tenant ? Les métadonnées de l'IdP, les paramètres de connexion et l'historique des tests seront supprimés, et la connexion par formulaire sera réactivée.",
+      "resetConfirm": "Effacer toute la configuration SAML pour ce locataire ? Les métadonnées de l'IdP, les paramètres de connexion et l'historique des tests seront supprimés, et la connexion par formulaire sera réactivée.",
       "resetSuccess": "Configuration SAML effacée.",
       "idpEntityId": "ID d'entité IdP",
       "idpSsoUrl": "URL SSO IdP",
@@ -427,7 +459,7 @@
       "buttonLabel": "Libellé du bouton de connexion",
       "buttonLabelPlaceholder": "Se connecter avec Acme SSO",
       "emailAttribute": "Attribut courriel (remplacement)",
-      "emailAttributePlaceholder": "ex. mail, email, http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+      "emailAttributePlaceholder": "p. ex. mail, email, http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
       "emailAttributeHint": "Laissez vide pour utiliser le NameID. Définissez ceci si votre IdP fournit le courriel dans un attribut séparé.",
       "nameIdFormat": "Format NameID",
       "spEntityIdOverride": "Remplacement de l'ID d'entité SP",
@@ -469,7 +501,7 @@
     "general": {
       "anonymousPull": "Téléchargement anonyme",
       "defaultLanguage": "Langue par défaut",
-      "defaultLanguageHint": "Les nouveaux utilisateurs de ce tenant démarrent dans cette langue. Chacun peut la remplacer dans son profil.",
+      "defaultLanguageHint": "Les nouveaux utilisateurs de ce locataire démarrent dans cette langue. Chacun peut la remplacer dans son profil.",
       "allowVersionOverwrite": "Autoriser l'écrasement de version",
       "allowVersionOverwriteHint": "Lorsque désactivé, publier un (nom, version) en doublon est rejeté. Les opérateurs doivent d'abord supprimer la version existante.",
       "allowVersionOverwriteWarning": "Activer cette option permet à une publication de remplacer le contenu d'une version existante. Le changement est audité (package.replace enregistre les deux empreintes) mais les implications pour la chaîne d'approvisionnement sont réelles — les paquets déjà téléchargés par vos développeurs peuvent avoir un contenu différent au prochain téléchargement. Le basculement de ce paramètre est lui-même audité."
@@ -488,17 +520,21 @@
       "unlimited": "illimité"
     },
     "proxy": {
-      "passthroughEnabled": "Proxy passthrough activé",
+      "passthroughEnabled": "Relais proxy activé",
       "passthroughHint": "Lorsque désactivé, seuls les paquets déjà mis en cache dans ce registre sont servis.",
       "allowlistMode": "Proxy : liste d'autorisation et de blocage uniquement",
       "osvTolerance": "Score OSV maximal toléré",
       "osvToleranceHint": "Les paquets dont le score de vulnérabilité dépasse ce seuil sont bloqués (0 – 10). La valeur par défaut 10 autorise tout.",
+      "minReleaseAge": "Âge minimal de la version",
+      "minReleaseAgeHint": "Bloque les téléchargements via le proxy pour les versions amont plus récentes que ce délai. Laisser vide pour désactiver. L'âge est mesuré à partir de l'horodatage de publication du registre amont ; les versions sans horodatage sont autorisées.",
+      "minReleaseAgeUnitHours": "Heures",
+      "minReleaseAgeUnitDays": "Jours",
       "allowlistSection": "Liste d'autorisation",
       "blocklistSection": "Liste de blocage",
       "saved": "Paramètres proxy enregistrés."
     },
     "licenses": {
-      "intro": "Définissez les licences SPDX autorisées pour les paquets de ce tenant. Les métadonnées de licence sont extraites à la publication et lors du remplissage du cache proxy.",
+      "intro": "Définissez les licences SPDX autorisées pour les paquets de ce locataire. Les métadonnées de licence sont extraites à la publication et lors du remplissage du cache proxy.",
       "blockEmptyWarn": "L'application est définie sur Bloquer mais aucune licence n'est autorisée. Toutes les publications et tous les téléchargements proxy seront rejetés tant que vous n'aurez pas approuvé au moins une licence ci-dessous.",
       "mode": {
         "title": "Mode d'application",
@@ -515,7 +551,7 @@
         "block": "Bloquer",
         "compound": "composée",
         "deprecated": "dépréciée",
-        "compoundTooltip": "Les expressions composées (par ex. \"MIT OR Apache-2.0\") ne peuvent pas être ajoutées directement à la politique — elles ne correspondraient pas à une recherche ultérieure pour une licence unique. Séparez-les en amont.",
+        "compoundTooltip": "Les expressions composées (p. ex. « MIT OR Apache-2.0 ») ne peuvent pas être ajoutées directement à la politique — elles ne correspondraient pas à une recherche ultérieure pour une licence unique. Séparez-les en amont.",
         "columns": {
           "packages": "Paquets",
           "firstSeen": "Vue pour la 1ère fois",
@@ -573,7 +609,7 @@
     "modal": {
       "title": "Ajouter une entrée",
       "pattern": "Modèle regex",
-      "patternPlaceholder": "ex. ^pkg:npm/evil-.*",
+      "patternPlaceholder": "p. ex. ^pkg:npm/evil-.*",
       "patternHint": "Regex appliquée sur le PURL complet — ancrez avec ^pkg:npm/ (ou pypi, nuget) pour cibler un seul écosystème."
     }
   },
@@ -653,20 +689,6 @@
         "slug": "Identifiant",
         "slugPlaceholder": "mon-org"
       }
-    },
-    "settings": {
-      "title": "Paramètres de l'instance",
-      "saved": "Paramètres enregistrés.",
-      "notSet": "non défini",
-      "fields": {
-        "MAX_UPLOAD_BYTES": "Taille maximale de téléversement (tous écosystèmes)",
-        "MAX_UPLOAD_BYTES_PYPI": "Taille maximale de téléversement — PyPI",
-        "MAX_UPLOAD_BYTES_NPM": "Taille maximale de téléversement — npm",
-        "MAX_UPLOAD_BYTES_NUGET": "Taille maximale de téléversement — NuGet",
-        "METRICS_ALLOWED_IPS": "IP autorisées pour les métriques (séparées par des virgules)",
-        "GC_SCHEDULE": "Planification du nettoyage (cron)",
-        "DEFAULT_ORG_SLUG": "Identifiant de l'organisation par défaut"
-      }
     }
   },
   "dashboard": {
@@ -714,9 +736,9 @@
       "block": "Bloquer"
     },
     "intro": {
-      "off":   "Votre tenant enregistre la licence SPDX de chaque paquet sans appliquer de politique. Les listes ci-dessous montrent ce qui serait autorisé ou bloqué si l'application était activée.",
-      "warn":  "Votre tenant journalise les violations de la politique dans l'audit mais sert toujours les paquets. Utilisez les listes ci-dessous pour comprendre quelles licences un administrateur a autorisées ou bloquées.",
-      "block": "Votre tenant bloque la publication et la récupération proxy des paquets dont la licence ne figure pas dans la liste d'autorisation ou se trouve sur la liste de blocage."
+      "off":   "Votre locataire enregistre la licence SPDX de chaque paquet sans appliquer de politique. Les listes ci-dessous montrent ce qui serait autorisé ou bloqué si l'application était activée.",
+      "warn":  "Votre locataire journalise les violations de la politique dans l'audit mais sert toujours les paquets. Utilisez les listes ci-dessous pour comprendre quelles licences un administrateur a autorisées ou bloquées.",
+      "block": "Votre locataire bloque la publication et la récupération proxy des paquets dont la licence ne figure pas dans la liste d'autorisation ou se trouve sur la liste de blocage."
     },
     "allow": {
       "title": "Licences autorisées",
@@ -752,7 +774,7 @@
       "themeTitle": "Thème",
       "themeHelp": "Choisissez l'apparence de Dependably.",
       "languageTitle": "Langue",
-      "languageHelpTenantDefault": "Langue par défaut du tenant : {language}.",
+      "languageHelpTenantDefault": "Langue par défaut du locataire : {language}.",
       "languageHelpSystemFallback": "Bascule sur {language} par défaut.",
       "aboutTitle": "À propos",
       "aboutHelp": "Logiciels open-source utilisés dans Dependably."
@@ -769,15 +791,39 @@
     "badge": "système",
     "nav": {
       "tenants": "Locataires",
+      "admins": "Administrateurs",
       "users": "Utilisateurs",
       "audit": "Audit",
       "settings": "Paramètres",
       "profile": "Profil",
-      "signOut": "Se déconnecter"
+      "signOut": "Se déconnecter",
+      "home": "Tableau de bord"
+    },
+    "dashboard": {
+      "title": "Tableau de bord opérateur",
+      "subtitle": "Aperçu du cycle de vie des locataires, des comptes opérateurs et de la santé récente des tâches en arrière-plan.",
+      "tenants": {
+        "title": "Locataires",
+        "active": "Actifs",
+        "suspended": "Suspendus",
+        "softDeleted": "Suppr. douce",
+        "total": "{count} au total"
+      },
+      "admins": {
+        "title": "Opérateurs",
+        "active": "Actifs",
+        "locked": "Verrouillés",
+        "disabled": "Désactivés",
+        "total": "{count} au total"
+      },
+      "recentJobs": {
+        "title": "Tâches en arrière-plan récentes",
+        "empty": "Aucune exécution de tâche enregistrée.",
+        "viewAll": "Tout voir →"
+      }
     },
     "login": {
       "title": "Dependably",
-      "subtitle": "Administration système",
       "email": "Courriel",
       "password": "Mot de passe",
       "submit": "Se connecter",
@@ -787,20 +833,40 @@
     "tenants": {
       "title": "Locataires",
       "newTenant": "+ Nouveau locataire",
+      "searchPlaceholder": "Rechercher par locataire",
       "columns": {
-        "slug": "Identifiant",
+        "slug": "Locataire",
         "status": "Statut",
+        "users": "Utilisateurs",
+        "storage": "Stockage",
+        "quota": "Quota de stockage",
         "created": "Créé",
-        "deleted": "Supprimé"
+        "deleted": "Supprimé",
+        "actions": "Actions"
       },
       "status": {
         "active": "Actif",
+        "suspended": "Suspendu",
         "softDeleted": "Suppression douce"
+      },
+      "actionsMenu": {
+        "open": "Ouvrir le menu d'actions",
+        "editQuota": "Modifier le quota",
+        "disable": "Désactiver",
+        "enable": "Activer",
+        "delete": "Supprimer",
+        "restore": "Restaurer"
       },
       "empty": "Aucun locataire. Créez-en un pour commencer.",
       "delete": "Supprimer",
       "restore": "Restaurer",
-      "deleteConfirm": "Supprimer (suppression douce) le locataire '{slug}' ? Il sera inaccessible immédiatement et supprimé définitivement après le délai de grâce (30 jours par défaut).",
+      "deleteModalTitle": "Suppression douce du locataire",
+      "deleteConfirm": "Supprimer (suppression douce) le locataire {slug} ? Il sera inaccessible immédiatement et supprimé définitivement après le délai de grâce (30 jours par défaut).",
+      "disableModalTitle": "Désactiver le locataire",
+      "disableConfirm": "Désactiver {slug} ? Les publications et téléversements seront refusés jusqu'à la réactivation. Les données existantes sont préservées.",
+      "enableModalTitle": "Réactiver le locataire",
+      "enableConfirm": "Réactiver {slug} ? Les écritures reprendront immédiatement.",
+      "statusUpdating": "Mise à jour…",
       "modal": {
         "title": "Créer un locataire",
         "slug": "Identifiant",
@@ -817,13 +883,80 @@
         "ownerEmail": "Courriel du propriétaire",
         "ownerPassword": "Mot de passe du propriétaire",
         "done": "Terminé"
+      },
+      "quota": {
+        "unlimited": "Illimité",
+        "edit": "Modifier",
+        "editAria": "Modifier le quota de stockage pour {slug}",
+        "modalTitle": "Quota de stockage — {slug}",
+        "modalHint": "Limite le total d'octets que ce locataire peut stocker dans ses artéfacts hébergés. Laissez le champ vide (ou cliquez sur Effacer) pour retirer la limite.",
+        "label": "Quota",
+        "placeholder": "p. ex. 5",
+        "save": "Enregistrer",
+        "saving": "Enregistrement…",
+        "clear": "Effacer",
+        "invalid": "Le quota doit être un entier positif, ou vide pour effacer."
+      }
+    },
+    "admins": {
+      "title": "Administrateurs",
+      "description": "Opérateurs pouvant gérer les locataires, les paramètres d'instance et les autres administrateurs.",
+      "searchPlaceholder": "Rechercher par courriel",
+      "you": "Vous",
+      "selfHint": "Gérez votre propre mot de passe depuis Profil.",
+      "empty": "Aucun administrateur.",
+      "columns": {
+        "email": "Courriel",
+        "status": "Statut",
+        "lastLogin": "Dernière connexion",
+        "passwordReset": "Réinit. mot de passe",
+        "created": "Créé",
+        "actions": "Actions"
+      },
+      "status": {
+        "active": "Actif",
+        "locked": "Verrouillé",
+        "disabled": "Désactivé"
+      },
+      "create": {
+        "button": "+ Nouvel administrateur",
+        "title": "Créer un administrateur",
+        "email": "Courriel",
+        "submit": "Créer"
+      },
+      "statusConfirm": {
+        "title": "Modifier le statut ?",
+        "body": "Passer {email} à {status} ?",
+        "apply": "Appliquer"
+      },
+      "reset": {
+        "button": "Réinitialiser le mot de passe",
+        "title": "Réinitialiser le mot de passe ?",
+        "body": "Réinitialiser le mot de passe de {email} ? Son mot de passe actuel cessera de fonctionner immédiatement."
+      },
+      "delete": {
+        "button": "Supprimer",
+        "title": "Supprimer l'administrateur ?",
+        "body": "Supprimer définitivement {email} ? Cette action est irréversible."
+      },
+      "tempPassword": {
+        "title": "Mot de passe temporaire",
+        "notice": "Copiez ce mot de passe maintenant — il ne sera plus affiché.",
+        "copy": "Copier",
+        "copied": "Copié",
+        "done": "Terminé"
+      },
+      "errors": {
+        "cannot_modify_self": "Vous ne pouvez pas modifier votre propre compte ici. Utilisez Profil → Changer le mot de passe.",
+        "last_active_admin": "Impossible de désactiver ou verrouiller le dernier administrateur actif.",
+        "must_disable_first": "Désactivez l'administrateur avant de le supprimer.",
+        "duplicate_email": "Un administrateur avec ce courriel existe déjà."
       }
     },
     "userLookup": {
       "title": "Recherche d'utilisateur",
-      "subtitle": "Métadonnées du plan de contrôle uniquement — aucune donnée métier de locataire n'est affichée.",
       "email": "Courriel",
-      "tenantSlug": "Identifiant du locataire",
+      "tenantSlug": "Locataire",
       "search": "Rechercher",
       "searching": "Recherche…",
       "needFilter": "Saisissez un courriel ou un identifiant de locataire.",
@@ -842,14 +975,21 @@
       "lock": "Verrouiller",
       "unlock": "Déverrouiller",
       "resetPassword": "Réinit. mdp",
-      "resetConfirm": "Émettre un mot de passe temporaire pour {email} sur le locataire '{slug}' ? Il devra être changé à la prochaine connexion.",
-      "resetBannerLine1": "Mot de passe temporaire émis pour {email} sur '{slug}' :",
+      "resetModalTitle": "Réinitialiser le mot de passe",
+      "resetConfirm": "Émettre un mot de passe temporaire pour {email} sur le locataire {slug} ? Il devra être changé à la prochaine connexion.",
+      "resetBannerLine1": "Mot de passe temporaire émis pour {email} sur {slug} :",
       "resetBannerLine2": "Transmettez-le à l'utilisateur hors bande. Il devra le changer à la prochaine connexion. Affiché une seule fois.",
       "dismiss": "Fermer"
     },
     "audit": {
       "title": "Journal d'audit système",
       "subtitle": "Événements opérateur uniquement (cycle de vie des locataires, actions system_admin). Les événements métier des locataires ne sont pas affichés ici.",
+      "tabs": {
+        "events": "Événements d'audit",
+        "backgroundJobs": "Tâches en arrière-plan"
+      },
+      "searchPlaceholder": "Rechercher action, acteur, locataire, détail…",
+      "filterAction": "Toutes les actions",
       "columns": {
         "when": "Quand",
         "event": "Événement",
@@ -862,9 +1002,35 @@
       "prev": "← Précédent",
       "next": "Suivant →"
     },
+    "backgroundJobs": {
+      "searchPlaceholder": "Rechercher tâche, opération, erreur…",
+      "filterJob": "Toutes les tâches",
+      "filterOutcome": "Tous les résultats",
+      "columns": {
+        "jobName": "Tâche",
+        "startedAt": "Démarrée",
+        "duration": "Durée",
+        "outcome": "Résultat",
+        "error": "Détails"
+      },
+      "outcome": {
+        "success": "Succès",
+        "server_error": "Erreur",
+        "cancelled": "Annulée"
+      },
+      "viewError": {
+        "show": "Afficher les détails",
+        "hide": "Masquer les détails"
+      },
+      "empty": "Aucune exécution de tâche enregistrée."
+    },
     "settings": {
       "title": "Paramètres de l'instance",
       "subtitle": "Limites et planifications globales — appliquées à chaque locataire.",
+      "tabs": {
+        "instance": "Paramètres d'instance",
+        "metrics": "Accès aux métriques"
+      },
       "labels": {
         "maxUploadBytes": "Taille max. d'envoi — global",
         "maxUploadBytesPyPi": "Taille max. d'envoi — PyPI",
@@ -876,6 +1042,15 @@
       "placeholders": {
         "string": "non défini",
         "number": "—"
+      },
+      "defaultHint": "Défaut : {value}",
+      "defaults": {
+        "maxUploadBytes": "500 Mo",
+        "maxUploadBytesPyPi": "100 Mo — équivalent à pypi.org",
+        "maxUploadBytesNpm": "50 Mo",
+        "maxUploadBytesNuGet": "250 Mo — équivalent à nuget.org",
+        "gcSchedule": "0 3 * * * (03:00 UTC, quotidien)",
+        "siemMaxLookbackDays": "90 jours"
       },
       "save": "Enregistrer",
       "saving": "Enregistrement…",

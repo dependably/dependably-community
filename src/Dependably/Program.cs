@@ -11,7 +11,9 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
-using Prometheus;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using Dependably.Api;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Health;
@@ -41,6 +43,9 @@ try
     var builder = WebApplication.CreateBuilder(args);
     Program.ConfigureBuilder(builder);
     var app = builder.Build();
+    // BackgroundJobScope persists per-run rows fire-and-forget via this provider; the static
+    // hook avoids threading IServiceProvider through every per-service Begin() call site.
+    Dependably.Infrastructure.Observability.BackgroundJobScope.Services = app.Services;
     Program.ConfigureApp(app);
     await app.RunAsync();
     return 0;
@@ -75,6 +80,7 @@ public partial class Program
         builder.WebHost.ConfigureKestrel(opts => opts.AddServerHeader = false);
 
         ConfigureLogging(builder);
+        ConfigureOpenTelemetry(builder);
         ConfigureGracefulShutdown(builder);
         ConfigureMetadataStore(builder);
         ConfigureBlobStore(builder);
@@ -120,6 +126,24 @@ public partial class Program
         builder.Services.AddSingleton<IAirGapMode, AirGapMode>();
         builder.Services.AddHostedService<CacheEvictionService>();
 
+        // Hosted-tier orphan reconciliation: closes the SIGKILL window in PackagePublishService
+        // by sweeping the registry tier for blobs that no package_versions row references.
+        // Schedule + grace are configurable; defaults to daily at 04:00 UTC with a 30-minute
+        // grace window to skip in-flight publishes.
+        builder.Services.AddHostedService<OrphanBlobReconcilerService>();
+        builder.Services.AddHostedService<Dependably.Infrastructure.Observability.BlobStoreSizePoller>();
+        builder.Services.AddHostedService<Dependably.Infrastructure.Observability.TenantCountPoller>();
+
+        builder.Services.AddSingleton<Dependably.Security.MetricsAccessConfig>(sp =>
+        {
+            var orgs = sp.GetRequiredService<OrgRepository>();
+            var configuration = sp.GetRequiredService<IConfiguration>();
+            return new Dependably.Security.MetricsAccessConfig(
+                orgs.GetInstanceSettingAsync, configuration);
+        });
+        builder.Services.AddSingleton<Dependably.Security.ScrapeDiagnostics>();
+        builder.Services.AddSingleton<Dependably.Infrastructure.Observability.MetricsSnapshotProvider>();
+
         // M2.3 — feature-flagged claim gate for publish/import paths. Default off; operators
         // flip CLAIM_ENFORCEMENT=on once their initial claim set is in place.
         builder.Services.AddSingleton<Dependably.Security.PublishGate>();
@@ -131,6 +155,7 @@ public partial class Program
         // Shared publish-flow tail (path safety, claim gate, dedup, blob put, version create,
         // audit). Used by NpmController/PyPiController/NuGetController publish handlers and
         // by ImportController bulk endpoints — replaces six near-identical inlined flows.
+        builder.Services.AddSingleton<Dependably.Infrastructure.Publish.PublishAuditor>();
         builder.Services.AddSingleton<Dependably.Infrastructure.Publish.IPackagePublishService,
                                       Dependably.Infrastructure.Publish.PackagePublishService>();
 
@@ -162,6 +187,7 @@ public partial class Program
         // Auth services
         builder.Services.AddSingleton<LoginService>();
         builder.Services.AddSingleton<OrgAccessGuard>();
+        builder.Services.AddSingleton<Dependably.Security.PasswordPolicy>();
 
         // Tenant resolution (Phase 1 of strict-multi-tenancy rollout)
         // DEPLOYMENT_MODE=single (default) → SingleTenantResolver (ignores Host, returns the one tenant)
@@ -360,7 +386,10 @@ public partial class Program
         });
     }
 
-    // Serilog — structured JSON logging with sensitive field redaction (#18)
+    // Serilog — structured JSON logging with sensitive field redaction (#18).
+    // Optional OTel logs bridge (Serilog.Sinks.OpenTelemetry) ships log records via
+    // OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set. Air-gap deployments leave it unset
+    // and keep the console sink only. See docs/observability/logs.md.
     private static void ConfigureLogging(WebApplicationBuilder builder)
     {
         builder.Host.UseSerilog((ctx, services, cfg) =>
@@ -370,7 +399,89 @@ public partial class Program
                .Enrich.FromLogContext()
                .Enrich.With<SensitivePropertyEnricher>()
                .WriteTo.Console(new RenderedCompactJsonFormatter());
+
+            var otlpEndpoint = ctx.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
+            if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+            {
+                cfg.WriteTo.OpenTelemetry(o =>
+                {
+                    o.Endpoint = otlpEndpoint;
+                    o.ResourceAttributes = new Dictionary<string, object>
+                    {
+                        ["service.name"] = ctx.Configuration["OTEL_SERVICE_NAME"] ?? "dependably",
+                        ["service.namespace"] = "dependably-community",
+                        ["service.version"] = typeof(Program).Assembly.GetName().Version?.ToString() ?? "0.0.0",
+                        ["deployment.environment"] = ctx.Configuration["DEPLOYMENT_ENVIRONMENT"] ?? "unknown",
+                        ["dependably.instance.role"] = ctx.Configuration["DEPENDABLY_INSTANCE_ROLE"] ?? "single",
+                    };
+                });
+            }
         });
+    }
+
+    // OpenTelemetry SDK — metrics + traces. Exports metrics via the built-in
+    // Prometheus scraping endpoint (registered later as /metrics) and, when
+    // OTEL_EXPORTER_OTLP_ENDPOINT is set, also via OTLP push (metrics + traces).
+    // See docs/observability/metrics.md and docs/observability/traces.md.
+    private static void ConfigureOpenTelemetry(WebApplicationBuilder builder)
+    {
+        var otlpEndpoint = builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
+        var sampleRatio = double.TryParse(
+            builder.Configuration["OTEL_TRACES_SAMPLER_ARG"],
+            out var ratio) ? ratio : 0.1;
+
+        builder.Services.AddSingleton<Dependably.Infrastructure.Observability.TenantSpanEnricher>();
+
+        builder.Services.AddOpenTelemetry()
+            .ConfigureResource(rb => rb
+                .AddService(
+                    serviceName: builder.Configuration["OTEL_SERVICE_NAME"] ?? "dependably",
+                    serviceNamespace: "dependably-community",
+                    serviceVersion: typeof(Program).Assembly.GetName().Version?.ToString() ?? "0.0.0")
+                .AddAttributes(new Dictionary<string, object>
+                {
+                    ["deployment.environment"] = builder.Configuration["DEPLOYMENT_ENVIRONMENT"] ?? "unknown",
+                    ["dependably.instance.role"] = builder.Configuration["DEPENDABLY_INSTANCE_ROLE"] ?? "single",
+                    // OTel .NET's default resource detector doesn't add these; set explicitly
+                    // so taxonomy.md's commitment to host.name / process.runtime.name holds.
+                    ["host.name"] = Environment.MachineName,
+                    ["process.runtime.name"] = "dotnet",
+                    ["process.runtime.version"] = Environment.Version.ToString(),
+                }))
+            .WithMetrics(mb =>
+            {
+                mb.AddAspNetCoreInstrumentation()
+                  .AddHttpClientInstrumentation()
+                  .AddMeter(Dependably.Infrastructure.Observability.DependablyMeter.MeterName)
+                  .AddPrometheusExporter();
+
+                if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+                    mb.AddOtlpExporter();
+            })
+            .WithTracing(tb =>
+            {
+                tb.AddAspNetCoreInstrumentation(opts =>
+                {
+                    // Stamp dependably.operation on framework-emitted server spans
+                    // using the route→operation map. EnrichWithHttpResponse runs
+                    // after routing, so http.route is already set on the activity.
+                    opts.EnrichWithHttpResponse = (activity, _) =>
+                    {
+                        var route = activity.GetTagItem("http.route") as string;
+                        var method = activity.GetTagItem("http.request.method") as string;
+                        var op = Dependably.Infrastructure.Observability.OperationTagger.Map(route, method);
+                        if (op is not null)
+                            activity.SetTag("dependably.operation", op);
+                    };
+                })
+                  .AddHttpClientInstrumentation()
+                  .AddSource(Dependably.Infrastructure.Observability.DependablyActivitySource.SourceName)
+                  .AddProcessor<Dependably.Infrastructure.Observability.TenantSpanEnricher>()
+                  .SetSampler(new ParentBasedSampler(new TraceIdRatioBasedSampler(sampleRatio)));
+
+                if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+                    tb.AddOtlpExporter();
+            });
     }
 
     // Graceful shutdown — configurable pre-stop delay + drain period (#67)
@@ -428,6 +539,12 @@ public partial class Program
         });
         builder.Services.AddSingleton<IBlobStore>(sp =>
             sp.GetRequiredService<TieredBlobStorage>().Registry);
+        // Tenant-aware registry resolver. Singleton lifetime is non-negotiable: the
+        // enterprise impl memoizes per-tenant S3BlobStore instances and per-request
+        // scoping would defeat the cache and leak S3 clients. Community impl returns
+        // the singleton registry regardless of tenant, but still applies status +
+        // provisioning-state gates defensively.
+        builder.Services.AddSingleton<ITenantStorageResolver, GlobalTenantStorageResolver>();
     }
 
     /// <summary>
@@ -556,6 +673,14 @@ public partial class Program
         // All controllers read tenant identity from this context; URLs are tenant-implicit.
         app.UseMiddleware<Dependably.Infrastructure.SubdomainTenantMiddleware>();
 
+        // Push canonical taxonomy properties (TenantId, OrgId, RequestId, TraceId, SpanId)
+        // into Serilog's LogContext so every log emitted downstream — including
+        // UseSerilogRequestLogging's completion summary — carries them. Must sit after
+        // SubdomainTenantMiddleware (which populates TenantContext) and before
+        // UseSerilogRequestLogging (which is registered below).
+        // See dependably-enterprise/docs/observability/taxonomy.md for property names.
+        app.UseMiddleware<Dependably.Infrastructure.Observability.TenantEnrichmentMiddleware>();
+
         // M3.2 — transparent intercept (#43). When ROUTING_MODE=transparent and the inbound Host
         // matches a configured ecosystem hostname (HOST_ROUTING), prepends the ecosystem prefix
         // so the existing prefix-routed controllers handle the request unchanged. Always-on
@@ -575,6 +700,12 @@ public partial class Program
         // a clear problem-JSON body. Sits high in the pipeline so it catches exceptions
         // from any controller / protocol path that hits the upstream client.
         app.UseMiddleware<Dependably.Infrastructure.AirGappedExceptionMiddleware>();
+
+        // Translate TenantNotReadyException raised by ITenantStorageResolver.GetRegistryAsync
+        // into 404 / 423 / 503 problem-JSON responses instead of letting it bubble to a 500.
+        // Sits adjacent to the air-gap handler so all storage-layer exception mappings live
+        // together in the pipeline.
+        app.UseMiddleware<Dependably.Infrastructure.TenantNotReadyExceptionMiddleware>();
 
         app.UseResponseCompression();
         app.UseSerilogRequestLogging(opts =>
@@ -625,8 +756,12 @@ public partial class Program
         }
         app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
 
-        app.UseHttpMetrics();
-        app.MapMetrics("/metrics");
+        // Prometheus exposition served by OpenTelemetry's Prometheus exporter.
+        // RED metrics (rate/errors/duration) come automatically from
+        // AddAspNetCoreInstrumentation in ConfigureOpenTelemetry. The IP
+        // allowlist on /metrics is preserved by MetricsAccessMiddleware
+        // earlier in the pipeline. See docs/observability/metrics.md.
+        app.MapPrometheusScrapingEndpoint("/metrics");
 
         // OpenAPI + Scalar docs
         app.MapOpenApi("/api/v1/openapi.json");

@@ -260,4 +260,49 @@ public sealed class RouteScopeFilterTests
 
         Assert.Null(context.Result);
     }
+
+    // ── Edge-condition coverage ───────────────────────────────────────────────
+
+    [Fact]
+    public void OnAuthorization_EndpointWithoutAllowAnonymousMetadata_ContinuesFilter()
+    {
+        // Endpoint is present but carries NO IAllowAnonymous metadata: the
+        // `endpoint?.Metadata.GetMetadata<IAllowAnonymous>() is not null` check evaluates
+        // its non-null-endpoint+null-metadata branch and falls through to the rest of the
+        // filter. With an authenticated user + missing scope, this should yield 401.
+        var filter = new RouteScopeFilter();
+        var httpContext = new DefaultHttpContext();
+        httpContext.Request.Path = "/api/v1/settings";
+        httpContext.User = AuthenticatedUser(new Claim("sub", "user-1"));
+        httpContext.SetEndpoint(new Endpoint(
+            null,
+            new EndpointMetadataCollection(),  // empty metadata — no IAllowAnonymous
+            "test"));
+
+        var actionContext = new ActionContext(httpContext, new RouteData(), new ActionDescriptor());
+        var context = new AuthorizationFilterContext(actionContext, new List<IFilterMetadata>());
+
+        filter.OnAuthorization(context);
+
+        Assert.IsType<UnauthorizedResult>(context.Result);
+    }
+
+    [Fact]
+    public void OnAuthorization_EmptyRequestPath_SkipsFilter()
+    {
+        // Default DefaultHttpContext has Path = "" (PathString.Empty), Path.Value = null.
+        // Exercises the `?? ""` null-coalesce branch of the path read. Empty path does not
+        // start with /api/v1/ so the filter should pass through cleanly.
+        var filter = new RouteScopeFilter();
+        var httpContext = new DefaultHttpContext();
+        // Do NOT set Path — leave as the default empty PathString whose .Value is null.
+        httpContext.User = AuthenticatedUser(new Claim("scope", "tenant"));
+
+        var actionContext = new ActionContext(httpContext, new RouteData(), new ActionDescriptor());
+        var context = new AuthorizationFilterContext(actionContext, new List<IFilterMetadata>());
+
+        filter.OnAuthorization(context);
+
+        Assert.Null(context.Result);
+    }
 }

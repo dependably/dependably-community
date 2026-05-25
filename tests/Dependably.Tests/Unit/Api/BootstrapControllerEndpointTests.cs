@@ -121,4 +121,21 @@ public sealed class BootstrapControllerEndpointTests
         ctrl.Get();
         Assert.Equal("no-store", ctrl.Response.Headers.CacheControl.ToString());
     }
+
+    [Fact]
+    public void MultiMode_NoTenantContext_TreatedAsTenantSubdomainBranch()
+    {
+        // Covers the `ctx is null` short-circuit in `if (ctx is not null && ctx.IsApex)`
+        // within multi-mode: with no resolved tenant context, the controller falls through
+        // to the tenant-subdomain response shape (isApex=false, no tenantSlug echoed).
+        var result = NewCtrl(Cfg(
+            ("DEPLOYMENT_MODE", "multi"),
+            ("APEX_HOST", "dependably.example.com"))).Get();
+
+        var body = Body(result);
+        Assert.Equal("multi", Prop<string>(body, "mode"));
+        Assert.False(Prop<bool>(body, "isApex"));
+        Assert.Equal("dependably.example.com", Prop<string?>(body, "apexHost"));
+        Assert.Null(body.GetType().GetProperty("tenantSlug"));
+    }
 }

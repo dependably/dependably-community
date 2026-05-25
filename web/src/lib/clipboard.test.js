@@ -48,4 +48,38 @@ describe('copyToClipboard', () => {
 
     expect(writeText).toHaveBeenCalledWith('42')
   })
+
+  it('falls back to the legacy textarea path when navigator.clipboard.writeText rejects', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('permission denied'))
+    Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true })
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    document.execCommand = vi.fn().mockReturnValue(true)
+
+    const ok = await copyToClipboard('rejected payload')
+
+    expect(writeText).toHaveBeenCalledWith('rejected payload')
+    expect(ok).toBe(true)
+    expect(document.execCommand).toHaveBeenCalledWith('copy')
+    expect(document.querySelectorAll('textarea').length).toBe(0)
+  })
+
+  it('returns false when document.execCommand throws in the legacy path', async () => {
+    document.execCommand = vi.fn(() => {
+      throw new Error('execCommand not supported')
+    })
+
+    const ok = await copyToClipboard('boom')
+
+    expect(ok).toBe(false)
+    expect(document.execCommand).toHaveBeenCalledWith('copy')
+    expect(document.querySelectorAll('textarea').length).toBe(0)
+  })
+
+  it('returns false when document.execCommand reports failure', async () => {
+    document.execCommand = vi.fn().mockReturnValue(false)
+
+    const ok = await copyToClipboard('not copied')
+
+    expect(ok).toBe(false)
+  })
 })

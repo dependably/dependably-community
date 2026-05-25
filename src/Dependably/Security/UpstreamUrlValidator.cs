@@ -1,7 +1,7 @@
 using System.Net;
 using NetTools;
-using Prometheus;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Observability;
 
 namespace Dependably.Security;
 
@@ -25,11 +25,6 @@ public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
         IPAddressRange.Parse("fc00::/7"),
         IPAddressRange.Parse("fe80::/10"),
     ];
-
-    private static readonly Counter SsrfBlocksTotal = Metrics.CreateCounter(
-        "dependably_ssrf_blocks_total",
-        "Total number of SSRF-blocked upstream requests",
-        new CounterConfiguration { LabelNames = ["org"] });
 
     private readonly AuditRepository _audit;
 
@@ -72,7 +67,7 @@ public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
             var blocked = addresses.FirstOrDefault(IsBlocked);
             if (blocked is null) return true;
 
-            SsrfBlocksTotal.WithLabels(orgId ?? "unknown").Inc();
+            DependablyMeter.UpstreamUrlBlocks.Add(1);
             await _audit.LogAsync(
                 "ssrf_blocked",
                 orgId: orgId,

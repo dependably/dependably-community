@@ -96,4 +96,28 @@ public sealed class RequestPublicUrlBuilderExtendedTests
             .SessionCookieOptions(Ctx("https", "acme"), SameSiteMode.Lax);
         Assert.Equal(SameSiteMode.Lax, opts.SameSite);
     }
+
+    // Invoked through the interface type so the interface-declared default value
+    // (SameSiteMode.Strict on IPublicUrlBuilder.SessionCookieOptions) is the one the
+    // compiler bakes into the call site — covers the lone uncovered line in
+    // IPublicUrlBuilder.cs (the default-parameter on the interface declaration).
+#pragma warning disable CA1859 // interface typing is intentional — see comment above
+    [Fact]
+    public void SessionCookieOptions_ViaInterface_DefaultIsStrict()
+    {
+        IPublicUrlBuilder b = new RequestPublicUrlBuilder(Config());
+        var opts = b.SessionCookieOptions(Ctx("https", "acme.example.com"));
+        Assert.Equal(SameSiteMode.Strict, opts.SameSite);
+        Assert.True(opts.HttpOnly);
+        Assert.True(opts.IsEssential);
+    }
+
+    [Fact]
+    public void SessionCookieOptions_ViaInterface_AcceptsExplicitSameSite()
+    {
+        IPublicUrlBuilder b = new RequestPublicUrlBuilder(Config());
+        var opts = b.SessionCookieOptions(Ctx("https", "acme.example.com"), SameSiteMode.Lax);
+        Assert.Equal(SameSiteMode.Lax, opts.SameSite);
+    }
+#pragma warning restore CA1859
 }

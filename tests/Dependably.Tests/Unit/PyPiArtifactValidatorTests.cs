@@ -261,6 +261,48 @@ public sealed class PyPiArtifactValidatorTests
         Assert.Null(version);
     }
 
+    [Fact]
+    public void TryParseFilename_WheelWithNonPep440SecondSegment_Rejects()
+    {
+        // Five+ dash segments so we get past the length check, but parts[1] ("notaversion")
+        // is not PEP 440-shaped — exercises the Pep440VersionRegex().IsMatch(parts[1])
+        // false branch on line 242 of the SUT.
+        Assert.False(PyPiArtifactValidator.TryParseFilename(
+            "pkg-notaversion-py3-none-any.whl", out var name, out var version));
+        Assert.Null(name);
+        Assert.Null(version);
+    }
+
+    // ── Additional branch coverage ────────────────────────────────────────────
+
+    [Fact]
+    public void Validate_Sdist_Tgz_Succeeds()
+    {
+        // Existing tests only cover .tar.gz; .tgz hits the second branch of the
+        // extension check in Validate (line 45).
+        var (bytes, _) = PyPiFixtures.BuildSdist("acme", "1.2.3");
+        var result = PyPiArtifactValidator.Validate("acme-1.2.3.tgz", bytes, out var name, out var version);
+        Assert.True(result.IsValid);
+        Assert.Equal("acme", name);
+        Assert.Equal("1.2.3", version);
+    }
+
+    [Fact]
+    public void ValidateSdist_PkgInfoWithInvalidVersion_FailsAtNameVersionCheck()
+    {
+        // Build an sdist whose PKG-INFO has a bad version header. This exercises
+        // line 147 (ValidationResult.Fail("content", error) inside ValidateSdist)
+        // and the false branch of ValidateNameVersion on line 146.
+        var pkgInfo = "Metadata-Version: 2.1\nName: pkg\nVersion: not-a-version\n";
+        var bytes = BuildSdistWithEntries(("pkg-0.0.0/PKG-INFO", pkgInfo));
+        var result = PyPiArtifactValidator.ValidateSdist(bytes, out var name, out var version);
+        Assert.False(result.IsValid);
+        Assert.Equal("content", result.FieldName);
+        Assert.Contains("Invalid PEP 440 version", result.Message);
+        Assert.Null(name);
+        Assert.Null(version);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static byte[] BuildZip(params (string Name, string Content)[] entries)

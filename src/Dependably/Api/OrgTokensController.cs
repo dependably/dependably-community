@@ -9,8 +9,8 @@ using Dependably.Security;
 namespace Dependably.Api;
 
 /// <summary>
-/// User and CI/CD access tokens. Split out of <see cref="OrgController"/> (#61): tokens are
-/// a single REST resource with member-scoped CRUD (user) and admin-scoped CRUD (CI/CD).
+/// User and service access tokens. Split out of <see cref="OrgController"/> (#61): tokens are
+/// a single REST resource with member-scoped CRUD (user) and admin-scoped CRUD (service).
 /// Capability validation uses the caller's role grants as the ceiling — admins can mint
 /// tokens with capabilities they themselves hold, never above.
 /// </summary>
@@ -78,8 +78,11 @@ public sealed class OrgTokensController : OrgScopedControllerBase
                 out var canonicalJson, out var caps, out var error, out var field))
             return _problems.ValidationErrorAction(field ?? "capabilities", error!);
 
+        if (!TryNormalizeDescription(req.Description, out var description, out var descError))
+            return _problems.ValidationErrorAction("description", descError!);
+
         var (raw, record) = await _tokens.CreateUserTokenAsync(
-            orgId, userId, canonicalJson, req.ExpiresAt, ct);
+            orgId, userId, canonicalJson, req.ExpiresAt, description, ct);
 
         await _audit.LogAsync("token_created", orgId, userId,
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -88,6 +91,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
                 capabilities_json = canonicalJson,
                 capabilities = caps,
                 expires_at = record.ExpiresAt,
+                description,
             }), ct: ct);
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenCreate,
@@ -129,22 +133,22 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         return NoContent();
     }
 
-    /// <summary>GET /api/v1/orgs/{org}/cicd-tokens</summary>
-    [HttpGet("api/v1/cicd-tokens")]
-    public async Task<IActionResult> ListCicdTokens(CancellationToken ct)
+    /// <summary>GET /api/v1/orgs/{org}/service-tokens</summary>
+    [HttpGet("api/v1/service-tokens")]
+    public async Task<IActionResult> ListServiceTokens(CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (result is not null) return result;
 
         var orgId = CurrentTenantId();
-        var list = await _tokens.ListCicdTokensAsync(orgId, ct);
+        var list = await _tokens.ListServiceTokensAsync(orgId, ct);
         return Ok(list);
     }
 
-    /// <summary>POST /api/v1/orgs/{org}/cicd-tokens</summary>
-    [HttpPost("api/v1/cicd-tokens")]
+    /// <summary>POST /api/v1/orgs/{org}/service-tokens</summary>
+    [HttpPost("api/v1/service-tokens")]
     [EnableRateLimiting("token-create")]
-    public async Task<IActionResult> CreateCicdToken([FromBody] CreateCicdTokenRequest req, CancellationToken ct)
+    public async Task<IActionResult> CreateServiceToken([FromBody] CreateServiceTokenRequest req, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (result is not null) return result;
@@ -156,7 +160,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
             return _problems.ValidationErrorAction("scope",
                 "The 'scope' field is no longer accepted. Send 'capabilities' instead.");
 
-        // CI/CD tokens are minted under tenant:configure; the caller's role grants form the
+        // Service tokens are minted under tenant:configure; the caller's role grants form the
         // ceiling. The minted token still gets its own narrowed cap set.
         var role = User.FindFirst("role")?.Value ?? "member";
         var callerGrants = Capabilities.ForRole(role);
@@ -166,10 +170,13 @@ public sealed class OrgTokensController : OrgScopedControllerBase
                 out var canonicalJson, out var caps, out var error, out var field))
             return _problems.ValidationErrorAction(field ?? "capabilities", error!);
 
-        var orgId = CurrentTenantId();
-        var (raw, record) = await _tokens.CreateCicdTokenAsync(orgId, req.Name, canonicalJson, req.ExpiresAt, ct);
+        if (!TryNormalizeDescription(req.Description, out var description, out var descError))
+            return _problems.ValidationErrorAction("description", descError!);
 
-        await _audit.LogAsync("cicd_token_created", orgId, GetUserId(),
+        var orgId = CurrentTenantId();
+        var (raw, record) = await _tokens.CreateServiceTokenAsync(orgId, req.Name, canonicalJson, req.ExpiresAt, description, ct);
+
+        await _audit.LogAsync("service_token_created", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 token_id = record.Id,
@@ -177,31 +184,58 @@ public sealed class OrgTokensController : OrgScopedControllerBase
                 capabilities_json = canonicalJson,
                 capabilities = caps,
                 expires_at = record.ExpiresAt,
+                description,
             }), ct: ct);
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenCreate,
             orgId, "user", GetUserId(), "accepted",
-            new TenantEvents.TokenCreate(record.Id, canonicalJson, caps, "cicd", record.ExpiresAt).ToJson(), ct);
+            new TenantEvents.TokenCreate(record.Id, canonicalJson, caps, "service", record.ExpiresAt).ToJson(), ct);
 
         return Ok(new { token = raw, record });
     }
 
-    /// <summary>DELETE /api/v1/orgs/{org}/cicd-tokens/{id}</summary>
-    [HttpDelete("api/v1/cicd-tokens/{id}")]
-    public async Task<IActionResult> DeleteCicdToken(string id, CancellationToken ct)
+    /// <summary>DELETE /api/v1/orgs/{org}/service-tokens/{id}</summary>
+    [HttpDelete("api/v1/service-tokens/{id}")]
+    public async Task<IActionResult> DeleteServiceToken(string id, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (result is not null) return result;
 
-        await _tokens.DeleteCicdTokenAsync(id, ct);
+        await _tokens.DeleteServiceTokenAsync(id, ct);
 
-        await _audit.LogAsync("cicd_token_revoked", CurrentTenantId(), GetUserId(),
+        await _audit.LogAsync("service_token_revoked", CurrentTenantId(), GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }), ct: ct);
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenRevoke,
             CurrentTenantId(), "user", GetUserId(), "accepted",
-            new TenantEvents.TokenRevoke(id, "cicd").ToJson(), ct);
+            new TenantEvents.TokenRevoke(id, "service").ToJson(), ct);
 
         return NoContent();
+    }
+
+    private const int MaxDescriptionLength = 200;
+
+    // Normalize the optional description: trim, treat empty as null, reject control chars
+    // (operators see this string in the UI; \r\n in a table cell breaks the row layout) and
+    // bound the length so a malicious caller can't pad rows with megabytes of text.
+    private static bool TryNormalizeDescription(string? raw, out string? normalized, out string? error)
+    {
+        normalized = null;
+        error = null;
+        if (raw is null) return true;
+        var trimmed = raw.Trim();
+        if (trimmed.Length == 0) return true;
+        if (trimmed.Length > MaxDescriptionLength)
+        {
+            error = $"Description must be {MaxDescriptionLength} characters or fewer.";
+            return false;
+        }
+        if (trimmed.Any(char.IsControl))
+        {
+            error = "Description must not contain control characters.";
+            return false;
+        }
+        normalized = trimmed;
+        return true;
     }
 }

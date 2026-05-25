@@ -97,4 +97,44 @@ public class TransparentInterceptMiddlewareTests
         Assert.Equal("/pypi/simple/lodash/", seen[0]);
         Assert.Equal("/pypi/packages/abc/lodash-1.0.0.tgz", seen[1]);
     }
+
+    [Fact]
+    public async Task ExactPrefixMatch_NoDoubleRewrite()
+    {
+        // Covers the StartsWithSegment branch where path.Length == prefix.Length (e.g. "/npm").
+        // Without this short-circuit the middleware would rewrite "/npm" to "/npm/npm".
+        var (mw, _, seen) = Build(new Dictionary<string, string>
+        {
+            ["registry.npmjs.org"] = "npm"
+        });
+        await mw.InvokeAsync(Request("registry.npmjs.org", "/npm"));
+        Assert.Equal("/npm", seen[0]);
+    }
+
+    [Fact]
+    public async Task MappedHost_EmptyPath_FallsBackToRootAndPrefixes()
+    {
+        // Covers the `context.Request.Path.Value ?? "/"` fallback: when no Path is set on the
+        // request, the middleware treats it as "/" and rewrites to the bare ecosystem prefix.
+        var seen = new List<string>();
+        Task Next(HttpContext ctx)
+        {
+            seen.Add(ctx.Request.Path.Value ?? string.Empty);
+            return Task.CompletedTask;
+        }
+        var map = new HostEcosystemMap(new Dictionary<string, string>
+        {
+            ["registry.npmjs.org"] = "npm"
+        });
+        var mw = new TransparentInterceptMiddleware(Next, map);
+
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Host = new HostString("registry.npmjs.org");
+        // Path intentionally left at its default (empty PathString, Value == null).
+
+        await mw.InvokeAsync(ctx);
+
+        // PathString normalises trailing "/" away, so "/npm/" surfaces as "/npm" on the next hop.
+        Assert.Equal("/npm", seen[0]);
+    }
 }

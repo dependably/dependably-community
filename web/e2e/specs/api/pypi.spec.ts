@@ -4,7 +4,7 @@ import fs from 'fs'
 import path from 'path'
 import {
   loginAsAdmin,
-  mintCicdToken,
+  mintServiceToken,
   mintUserToken,
   auth,
   fixturesRoot,
@@ -49,7 +49,7 @@ test.describe('API: PyPI push/pull', () => {
   test('push wheel → /simple/ index lists it → /packages/ pull bytes match', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const pushToken = await mintCicdToken(authed, `e2e-pypi-push-${Date.now()}`, 'push')
+      const pushToken = await mintServiceToken(authed, `e2e-pypi-push-${Date.now()}`, 'push')
       const { bytes, sha256 } = loadWheel()
 
       const push = await pushWheel(baseURL!, pushToken, bytes, sha256)
@@ -120,7 +120,7 @@ test.describe('API: PyPI push/pull', () => {
       })
       expect([200, 204]).toContain(setLow.status())
 
-      const pushToken = await mintCicdToken(authed, `e2e-pypi-413-${Date.now()}`, 'push')
+      const pushToken = await mintServiceToken(authed, `e2e-pypi-413-${Date.now()}`, 'push')
       const { bytes, sha256 } = loadWheel()
       // Wheel is ~5KB, well above 128B.
       expect(bytes.length).toBeGreaterThan(128)

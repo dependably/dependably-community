@@ -183,7 +183,7 @@ public sealed class NpmControllerTests : IClassFixture<DependablyFactory>, IAsyn
             new { orgId = otherOrgId });
 
         // Token issued for the OTHER org.
-        var (rawToken, _) = await tokens.CreateCicdTokenAsync(
+        var (rawToken, _) = await tokens.CreateServiceTokenAsync(
             otherOrgId,
             $"cross-org-token-{otherOrgId[..8]}",
             """["publish:*","read:artifact","read:metadata","yank:*"]""",

@@ -2,13 +2,15 @@
   import { t } from 'svelte-i18n'
   import { navigate, user } from '../lib/store.js'
   import { api } from '../lib/api.js'
+  import PasswordStrength from '../lib/PasswordStrength.svelte'
 
   // Extract token from URL search params
   const token = new URLSearchParams(window.location.search).get('token') || ''
   let password = '', confirm = '', error = '', done = false, loading = false
+  let passwordValid = false
 
   async function submit() {
-    if (password.length < 12) { error = $t('auth.join.errorMinLength'); return }
+    if (!passwordValid) { error = $t('auth.join.errorMinLength'); return }
     if (password !== confirm) { error = $t('auth.join.errorMismatch'); return }
     error = ''
     loading = true
@@ -51,13 +53,14 @@
       <form on:submit|preventDefault={submit}>
         <div class="form-row">
           <label>{$t('auth.join.newPassword')} <span class="text-muted t-xs">{$t('auth.join.passwordHint')}</span></label>
-          <input type="password" bind:value={password} required minlength="12" />
+          <input type="password" bind:value={password} required minlength="12" autocomplete="new-password" />
+          <PasswordStrength value={password} bind:valid={passwordValid} />
         </div>
         <div class="form-row">
           <label>{$t('auth.join.confirmPassword')}</label>
-          <input type="password" bind:value={confirm} required />
+          <input type="password" bind:value={confirm} required autocomplete="new-password" />
         </div>
-        <button type="submit" class="primary submit-wide" disabled={loading}>
+        <button type="submit" class="primary submit-wide" disabled={loading || !passwordValid}>
           {loading ? $t('auth.join.submitting') : $t('auth.join.submit')}
         </button>
       </form>

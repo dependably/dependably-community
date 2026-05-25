@@ -1,5 +1,5 @@
 import { test, expect, request } from '@playwright/test'
-import { loginAsAdmin, mintCicdToken, auth } from '../../helpers/api-client.js'
+import { loginAsAdmin, mintServiceToken, auth } from '../../helpers/api-client.js'
 
 // These specs assert that auth boundaries fire correctly at the deployed pipeline
 // across endpoint families. Per-ecosystem push/pull specs cover the happy paths;
@@ -19,8 +19,8 @@ const ANON_REJECTED_ROUTES: Array<{ name: string; req: (ctx: import('@playwright
     req: async ctx => ({ status: (await ctx.get('/api/v1/tokens')).status() }),
   },
   {
-    name: 'GET /api/v1/cicd-tokens',
-    req: async ctx => ({ status: (await ctx.get('/api/v1/cicd-tokens')).status() }),
+    name: 'GET /api/v1/service-tokens',
+    req: async ctx => ({ status: (await ctx.get('/api/v1/service-tokens')).status() }),
   },
   {
     name: 'GET /api/v1/instance/settings',
@@ -84,7 +84,7 @@ test.describe('API: auth-matrix wrong-scope rejection', () => {
   test('siem:read token cannot push npm → 403', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const token = await mintCicdToken(authed, `e2e-mat-siem-${Date.now()}`, 'siem:read')
+      const token = await mintServiceToken(authed, `e2e-mat-siem-${Date.now()}`, 'siem:read')
       const ctx = await request.newContext({
         baseURL,
         extraHTTPHeaders: { Authorization: auth.bearer(token) },
@@ -106,7 +106,7 @@ test.describe('API: auth-matrix wrong-scope rejection', () => {
   test('pull token cannot unlist NuGet (DELETE) → 403', async ({ baseURL }) => {
     const authed = await loginAsAdmin(baseURL!)
     try {
-      const token = await mintCicdToken(authed, `e2e-mat-pull-${Date.now()}`, 'pull')
+      const token = await mintServiceToken(authed, `e2e-mat-pull-${Date.now()}`, 'pull')
       const ctx = await request.newContext({
         baseURL,
         extraHTTPHeaders: { 'X-NuGet-ApiKey': token },

@@ -60,9 +60,16 @@ public sealed class CacheEvictionService : BackgroundService
 
             if (stoppingToken.IsCancellationRequested) break;
 
-            try { await RunOnceAsync(stoppingToken); }
+            using var scope = Dependably.Infrastructure.Observability.BackgroundJobScope.Begin(
+                "cache-eviction", "cache.evict");
+            try
+            {
+                await RunOnceAsync(stoppingToken);
+                scope.Complete();
+            }
             catch (Exception ex)
             {
+                scope.Fail(ex);
                 _logger.LogError(ex, "Cache eviction pass failed.");
             }
         }

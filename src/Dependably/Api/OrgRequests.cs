@@ -30,20 +30,25 @@ public sealed record UpdateRetentionRequest(
     int? KeepDays,
     int? ActivityRetentionDays);
 
-public sealed record UpdateProxySettingsRequest(bool ProxyPassthroughEnabled, double MaxOsvScoreTolerance);
+public sealed record UpdateProxySettingsRequest(
+    bool ProxyPassthroughEnabled,
+    double MaxOsvScoreTolerance,
+    int? MinReleaseAgeHours = null);
 
 // Scope is retained as a nullable field purely so the controller can detect callers still
 // sending the retired field and return a clear 400. The repository never sees it.
 public sealed record CreateTokenRequest(
     DateTimeOffset? ExpiresAt,
     IReadOnlyList<string>? Capabilities = null,
-    string? Scope = null);
+    string? Scope = null,
+    string? Description = null);
 
-public sealed record CreateCicdTokenRequest(
+public sealed record CreateServiceTokenRequest(
     string Name,
     DateTimeOffset? ExpiresAt,
     IReadOnlyList<string>? Capabilities = null,
-    string? Scope = null);
+    string? Scope = null,
+    string? Description = null);
 
 public sealed record CreateInviteRequest(string Email, string? Role = "member");
 

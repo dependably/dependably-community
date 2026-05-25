@@ -287,6 +287,52 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
         await _factory.SetInstanceLimit("pypi", long.MaxValue);
     }
 
+    // Regression: NpmController used to skip the instance-wide ceiling entirely — it only
+    // honoured per-org settings, so a tenant with no org-level limit could push past the
+    // global cap. The OrgRepository.GetUploadLimitAsync helper now folds in the instance
+    // tier; this test guards that path.
+    [Fact]
+    public async Task NpmUpload_ExceedsInstanceLimit_Returns413()
+    {
+        await _factory.SetInstanceLimit("npm", 10);
+
+        var token = await _factory.CreateToken("push");
+        var body = NpmFixtures.BuildPublishBody("bigsizepkg", "1.0.0");
+
+        using var client = _factory.CreateClientWithBearer(token);
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        var resp = await client.PutAsync("/npm/bigsizepkg", content);
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, resp.StatusCode);
+
+        await _factory.SetInstanceLimit("npm", long.MaxValue);
+    }
+
+    // Same regression for NuGet — see the npm test above.
+    [Fact]
+    public async Task NuGetUpload_ExceedsInstanceLimit_Returns413()
+    {
+        await _factory.SetInstanceLimit("nuget", 10);
+
+        var token = await _factory.CreateToken("push");
+        var (bytes, _) = NuGetFixtures.BuildNupkg("BigSizePkg", "1.0.0");
+
+        using var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
+
+        using var content = new MultipartFormDataContent();
+        var fileContent = new ByteArrayContent(bytes);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        content.Add(fileContent, "package", "BigSizePkg.1.0.0.nupkg");
+
+        var resp = await client.PutAsync("/nuget/publish", content);
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, resp.StatusCode);
+
+        await _factory.SetInstanceLimit("nuget", long.MaxValue);
+    }
+
     // ── SSRF via upstream URL setting ─────────────────────────────────────────
 
     [Theory]

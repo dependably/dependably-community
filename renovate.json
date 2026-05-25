@@ -8,8 +8,8 @@
       "schedule": ["before 9am on Monday"]
     },
     {
-      "matchManagers": ["dockerfile"],
-      "groupName": "Docker base images",
+      "matchManagers": ["dockerfile", "gitlabci"],
+      "groupName": "Container base images",
       "pinDigests": true
     },
     {

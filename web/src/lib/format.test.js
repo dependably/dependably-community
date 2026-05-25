@@ -82,4 +82,36 @@ describe('format — store-pattern proof', () => {
     expect(result).not.toBe('—')
     expect(result.length).toBeGreaterThan(3)
   })
+
+  describe('locale fallback branch — $locale is falsy → uses "en"', () => {
+    beforeEach(() => locale.set(null))
+
+    it('formatDate falls back to "en" when locale store is null', () => {
+      const dt = get(formatDate)
+      const result = dt('2024-06-15T12:00:00Z')
+      expect(typeof result).toBe('string')
+      expect(result).not.toBe('—')
+      expect(result.length).toBeGreaterThan(3)
+    })
+
+    it('formatDateShort falls back to "en" when locale store is null', () => {
+      const dts = get(formatDateShort)
+      const result = dts('2024-06-15T12:00:00Z')
+      expect(typeof result).toBe('string')
+      expect(result).not.toBe('—')
+      expect(result.length).toBeGreaterThan(3)
+    })
+
+    it('formatRelativeTime falls back to "en" when locale store is null', () => {
+      const rel = get(formatRelativeTime)
+      const result = rel(new Date(Date.now() - 5_000).toISOString())
+      expect(typeof result).toBe('string')
+      expect(result.length).toBeGreaterThan(1)
+    })
+
+    it('formatBytes falls back to "en" when locale store is null', () => {
+      const fmt = get(formatBytes)
+      expect(fmt(1536)).toBe('1.5 KB')
+    })
+  })
 })

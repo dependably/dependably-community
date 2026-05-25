@@ -278,7 +278,8 @@ public sealed class ControllerScenario : IAsyncDisposable
         var instance = new InstanceController(orgs, audit, guard) { ControllerContext = ctx };
         var vuln = new VulnerabilityController(vulns, packages, scanner, audit, guard) { ControllerContext = ctx };
         var system = new SystemController(orgs, systemAdmins, db, audit, problems,
-            new ConfigurationBuilder().Build()) { ControllerContext = ctx };
+            new ConfigurationBuilder().Build(),
+            new Dependably.Security.PasswordPolicy()) { ControllerContext = ctx };
 
         var packageAnalytics = new PackageAnalyticsRepository(db);
         var orgSvc = new OrgControllerServices(

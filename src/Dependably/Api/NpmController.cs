@@ -89,7 +89,10 @@ public partial class NpmController : ControllerBase
         var orgId = CurrentTenantId();
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var token = await Request.ResolveTokenAsync(_tokens, ct);
+        // Read paths use the org-scoped overload: a token bound to a different tenant is
+        // coerced to null so the existing token-null branches respect AnonymousPull
+        // consistently for both anonymous and cross-org callers.
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
 
         var fullName = scope is not null ? $"{scope}/{package}" : package;
         var purlName = fullName;
@@ -175,15 +178,20 @@ public partial class NpmController : ControllerBase
         {
             if (versionsObj.ContainsKey(v.Version)) continue;
             var filename = v.BlobKey.Split('/').Last();
+            var dist = new JsonObject
+            {
+                ["tarball"] = $"{tarballBase}/{localPkg.Name}/{filename}"
+            };
+            // dist.shasum is hex SHA-1 by spec — emit only when we have a real SHA-1
+            // (populated at publish time / captured from upstream packuments on first-fetch).
+            // Omit rather than fall back to SHA-256: clients that verify shasum would reject
+            // the tarball, and clients that trust it would write the wrong hash to lockfiles.
+            if (v.ChecksumSha1 is not null) dist["shasum"] = v.ChecksumSha1;
             versionsObj[v.Version] = new JsonObject
             {
                 ["name"] = localPkg.Name,
                 ["version"] = v.Version,
-                ["dist"] = new JsonObject
-                {
-                    ["tarball"] = $"{tarballBase}/{localPkg.Name}/{filename}",
-                    ["shasum"] = v.ChecksumSha256 ?? ""
-                }
+                ["dist"] = dist
             };
         }
     }
@@ -225,15 +233,18 @@ public partial class NpmController : ControllerBase
         {
             latest ??= v.Version;
             var filename = v.BlobKey.Split('/').Last();
+            var dist = new JsonObject
+            {
+                ["tarball"] = $"{tarballBase}/{pkg.Name}/{filename}"
+            };
+            // dist.shasum is hex SHA-1 by spec — see MergeLocalVersionsIntoPackument for why
+            // we omit the field when no SHA-1 is recorded instead of substituting SHA-256.
+            if (v.ChecksumSha1 is not null) dist["shasum"] = v.ChecksumSha1;
             versionsObj[v.Version] = new JsonObject
             {
                 ["name"] = pkg.Name,
                 ["version"] = v.Version,
-                ["dist"] = new JsonObject
-                {
-                    ["tarball"] = $"{tarballBase}/{pkg.Name}/{filename}",
-                    ["shasum"] = v.ChecksumSha256 ?? ""
-                }
+                ["dist"] = dist
             };
         }
 
@@ -265,7 +276,8 @@ public partial class NpmController : ControllerBase
     {
         var orgId = CurrentTenantId();
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var token = await Request.ResolveTokenAsync(_tokens, ct);
+        // Org-scoped resolve: cross-org tokens behave as anonymous (respecting AnonymousPull).
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
         var pkgRecord = await _packages.GetByPurlNameAsync(orgId, "npm", fullName, ct);
 
         // Route by per-version origin, not packages.is_proxy. Extract version from the tarball
@@ -335,7 +347,9 @@ public partial class NpmController : ControllerBase
         if (await _blockGate.EvaluateAsync(
                 new BlockGateRequest(orgId, "npm", pkgVersion.Purl, pkgVersion.Id,
                     pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
-                    token.UserId, settings.MaxOsvScoreTolerance, sourceIp), ct)
+                    token.UserId, settings.MaxOsvScoreTolerance, sourceIp,
+                    MinReleaseAgeHours: settings.MinReleaseAgeHours,
+                    PublishedAt: pkgVersion.PublishedAt), ct)
             == BlockDecision.Blocked) return StatusCode(403);
 
         var stream = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
@@ -355,7 +369,9 @@ public partial class NpmController : ControllerBase
         if (await _blockGate.EvaluateAsync(
                 new BlockGateRequest(orgId, "npm", pkgVersion.Purl, pkgVersion.Id,
                     pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
-                    token?.UserId, settings.MaxOsvScoreTolerance, sourceIp), ct)
+                    token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
+                    MinReleaseAgeHours: settings.MinReleaseAgeHours,
+                    PublishedAt: pkgVersion.PublishedAt), ct)
             == BlockDecision.Blocked) return StatusCode(403);
 
         if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase)) return null;
@@ -387,6 +403,16 @@ public partial class NpmController : ControllerBase
             var version = baseName.Length > shortName.Length + 1 ? baseName[(shortName.Length + 1)..] : "unknown";
             var purl = PurlNormalizer.Npm(fullName, version);
 
+            var meta = await TryFetchNpmFirstFetchMetadataAsync(upstreamBase, fullName, version, ct);
+
+            // npm publishes integrity as an SRI string (e.g. "sha512-{b64}") — store verbatim
+            // so operators copying out of the version detail page can paste against npmjs.com
+            // without re-encoding. NULL when upstream only sent shasum (already captured to
+            // checksum_sha1) or no integrity at all.
+            var (integrityValue, integrityAlgo) = meta.IntegritySri is not null
+                ? (meta.IntegritySri, "sha512-sri")
+                : ((string?)null, (string?)null);
+
             var result = await _proxyFetch.RecordAndScanAsync(new Dependably.Storage.ProxyFetchRequest(
                 OrgId: orgId, Ecosystem: "npm",
                 PackageName: fullName, PurlName: fullName,
@@ -395,18 +421,81 @@ public partial class NpmController : ControllerBase
                 UserId: token?.UserId,
                 SourceIp: HttpContext.GetNormalizedRemoteIp(),
                 MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
+                MinReleaseAgeHours: settings.MinReleaseAgeHours,
                 CacheAccess: new CacheAccess(orgId, "npm", fullName, version, file,
-                    Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: upstreamUrl)
+                    Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: upstreamUrl),
+                PublishedAt: meta.PublishedAt,
+                UpstreamChecksum: meta.Checksum,
+                Sha1Hex: meta.Sha1Hex,
+                UpstreamIntegrityValue: integrityValue,
+                UpstreamIntegrityAlgorithm: integrityAlgo
             ), ct);
 
             if (result.Decision == BlockDecision.Blocked) return StatusCode(403);
             return File(bytes, "application/octet-stream", file);
         }
         catch (Microsoft.Data.Sqlite.SqliteException) { throw; }
+        catch (ChecksumException)
+        {
+            // Upstream bytes didn't match upstream-supplied integrity — refuse the response
+            // rather than serve poison. ProxyFetchService already audited + emitted the metric.
+            return StatusCode(502);
+        }
         catch
         {
             return NotFound();
         }
+    }
+
+    /// <summary>
+    /// Fetches the npm packument once on proxy first-fetch and extracts everything we care
+    /// about: the per-version published timestamp, an upstream integrity spec for fail-fast
+    /// verification (<c>dist.integrity</c> SRI sha512 preferred, <c>dist.shasum</c> SHA-1
+    /// fallback), the raw <c>dist.shasum</c> hex so the packument we re-emit later can carry
+    /// the correct SHA-1, and the verbatim SRI string for the version detail UI. Fail-soft:
+    /// any error returns a record full of nulls and the caller proceeds without verification
+    /// or capture.
+    /// </summary>
+    private async Task<NpmFirstFetchMetadata> TryFetchNpmFirstFetchMetadataAsync(
+        string upstreamBase, string fullName, string version, CancellationToken ct)
+    {
+        try
+        {
+            using var resp = await _upstream.GetMetadataAsync($"{upstreamBase}/{fullName}", ct);
+            if (!resp.IsSuccessStatusCode) return NpmFirstFetchMetadata.Empty;
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            var node = JsonNode.Parse(json);
+
+            DateTimeOffset? publishedAt = null;
+            var time = node?["time"]?[version]?.GetValue<string>();
+            if (DateTimeOffset.TryParse(time, null,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out var ts))
+                publishedAt = ts;
+
+            var dist = node?["versions"]?[version]?["dist"];
+            var integrity = dist?["integrity"]?.GetValue<string>();
+            var shasum = dist?["shasum"]?.GetValue<string>();
+            var checksum = ChecksumVerifier.ParseNpmIntegrity(integrity, shasum);
+
+            // Only surface the integrity string when it's actually the SHA-512 SRI form; older
+            // packages might carry a non-SRI value in this field, in which case the UI label
+            // ("SHA-512 SRI") would lie. Anything else stays NULL.
+            var integritySri = integrity is not null
+                && integrity.StartsWith("sha512-", StringComparison.OrdinalIgnoreCase)
+                ? integrity : null;
+
+            return new NpmFirstFetchMetadata(publishedAt, checksum, shasum, integritySri);
+        }
+        catch { return NpmFirstFetchMetadata.Empty; }
+    }
+
+    private readonly record struct NpmFirstFetchMetadata(
+        DateTimeOffset? PublishedAt,
+        ChecksumSpec? Checksum,
+        string? Sha1Hex,
+        string? IntegritySri)
+    {
+        public static NpmFirstFetchMetadata Empty => new(null, null, null, null);
     }
 
 
@@ -588,7 +677,7 @@ public partial class NpmController : ControllerBase
     private async Task<IActionResult?> CheckUploadSizeAsync(string orgId, byte[] tarball, CancellationToken ct)
     {
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var limit = settings?.MaxUploadBytesNpm ?? settings?.MaxUploadBytes ?? long.MaxValue;
+        var limit = await _orgs.GetUploadLimitAsync(settings, "npm", ct);
         return tarball.Length > limit
             ? StatusCode(413, new ProblemDetails { Detail = "Upload exceeds npm size limit.", Status = 413 })
             : null;

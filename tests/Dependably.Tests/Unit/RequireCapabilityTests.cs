@@ -101,4 +101,26 @@ public sealed class RequireCapabilityTests
         await handler.HandleAsync(ctx);
         Assert.False(ctx.HasSucceeded);
     }
+
+    [Fact]
+    public async Task Handler_ExplicitCapClaims_GrantOnlyNarrowedCaps()
+    {
+        // Token-narrowed principal carries explicit "cap" claims. Only those caps grant;
+        // the role claim must NOT be consulted, otherwise narrowing wouldn't actually narrow.
+        var handler = new CapabilityHandler();
+
+        var grants = ContextFor(
+            Capabilities.ReadMetadata,
+            new Claim("role", "owner"),                       // owner would normally grant everything
+            new Claim("cap", Capabilities.ReadMetadata));
+        await handler.HandleAsync(grants);
+        Assert.True(grants.HasSucceeded);
+
+        var denies = ContextFor(
+            Capabilities.PublishNpm,
+            new Claim("role", "owner"),                       // owner role would grant — but narrowed
+            new Claim("cap", Capabilities.ReadMetadata));
+        await handler.HandleAsync(denies);
+        Assert.False(denies.HasSucceeded);
+    }
 }

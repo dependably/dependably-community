@@ -25,7 +25,7 @@ public sealed class TokenAuthenticationHandlerTests : IClassFixture<DependablyFa
     public Task InitializeAsync() => Task.CompletedTask;
     public Task DisposeAsync() => Task.CompletedTask;
 
-    private async Task<string> SeedCicdTokenAsync(string? capabilitiesJson)
+    private async Task<string> SeedServiceTokenAsync(string? capabilitiesJson)
     {
         var raw = Dependably.Security.TokenGenerator.Generate();
         var hash = TokenRepository.HashToken(raw);
@@ -35,7 +35,7 @@ public sealed class TokenAuthenticationHandlerTests : IClassFixture<DependablyFa
         var orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1");
         await conn.ExecuteAsync("""
-            INSERT INTO cicd_tokens (id, org_id, name, token_hash, capabilities)
+            INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities)
             VALUES (@id, @orgId, @name, @hash, @capabilities)
             """, new
             {
@@ -69,7 +69,7 @@ public sealed class TokenAuthenticationHandlerTests : IClassFixture<DependablyFa
         // column at insert time, so this shape is only reachable by bypassing the repo
         // (direct INSERT). The auth path returns an empty cap claim set, so
         // [RequireCapability(PublishNpm)] rejects.
-        var token = await SeedCicdTokenAsync(capabilitiesJson: null);
+        var token = await SeedServiceTokenAsync(capabilitiesJson: null);
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -118,7 +118,7 @@ public sealed class TokenAuthenticationHandlerTests : IClassFixture<DependablyFa
     public async Task PublishEndpoint_NarrowedTokenForOtherEcosystem_403s()
     {
         // capabilities=["publish:nuget"] — token can publish nuget, must NOT publish npm.
-        var token = await SeedCicdTokenAsync(capabilitiesJson: """["publish:nuget"]""");
+        var token = await SeedServiceTokenAsync(capabilitiesJson: """["publish:nuget"]""");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 

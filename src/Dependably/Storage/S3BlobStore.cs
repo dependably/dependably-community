@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Amazon.S3;
 using Amazon.S3.Model;
 
@@ -21,13 +22,29 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
     }
 
     /// <summary>
-    /// Production constructor: builds an <see cref="AmazonS3Client"/> from a region name.
+    /// Production constructor. When <paramref name="endpoint"/> is null the client binds to a
+    /// standard AWS region; when set it points at an S3-compatible service (Cloudflare R2,
+    /// MinIO, Backblaze B2, Wasabi). R2 and MinIO require <paramref name="forcePathStyle"/>=true.
+    /// <paramref name="region"/> is still passed in both modes — it flows into SigV4 signing
+    /// (<c>AuthenticationRegion</c>) on the custom-endpoint path; R2 accepts "auto" there.
     /// The wrapper owns the client and disposes it on shutdown.
     /// </summary>
-    public S3BlobStore(string bucket, string region)
+    public S3BlobStore(string bucket, string region, string? endpoint = null, bool forcePathStyle = false)
     {
         _bucket = bucket;
-        _client = new AmazonS3Client(Amazon.RegionEndpoint.GetBySystemName(region));
+        if (string.IsNullOrWhiteSpace(endpoint))
+        {
+            _client = new AmazonS3Client(Amazon.RegionEndpoint.GetBySystemName(region));
+        }
+        else
+        {
+            _client = new AmazonS3Client(new AmazonS3Config
+            {
+                ServiceURL = endpoint,
+                ForcePathStyle = forcePathStyle,
+                AuthenticationRegion = region,
+            });
+        }
         _ownsClient = true;
     }
 
@@ -84,6 +101,33 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
             request.ContinuationToken = response.NextContinuationToken;
         } while (response.IsTruncated ?? false);
         return total;
+    }
+
+    public async IAsyncEnumerable<BlobInfo> ListAsync(
+        string prefix, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var request = new ListObjectsV2Request
+        {
+            BucketName = _bucket,
+            Prefix = prefix,
+        };
+        ListObjectsV2Response response;
+        do
+        {
+            response = await _client.ListObjectsV2Async(request, ct);
+            foreach (var obj in response.S3Objects)
+            {
+                if (ct.IsCancellationRequested) yield break;
+                // LastModified on S3 objects is server-side time; trust it for the orphan
+                // grace window. Size missing on truncated metadata defaults to 0 — the
+                // reconciler treats it as a candidate either way.
+                yield return new BlobInfo(
+                    obj.Key,
+                    obj.Size ?? 0L,
+                    obj.LastModified is { } lm ? new DateTimeOffset(lm, TimeSpan.Zero) : DateTimeOffset.MinValue);
+            }
+            request.ContinuationToken = response.NextContinuationToken;
+        } while (response.IsTruncated ?? false);
     }
 
     public ValueTask DisposeAsync()

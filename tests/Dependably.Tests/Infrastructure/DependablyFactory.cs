@@ -109,7 +109,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     };
 
     /// <summary>
-    /// Creates a CI/CD token with capabilities derived from the given test-shorthand kind
+    /// Creates a service token with capabilities derived from the given test-shorthand kind
     /// (<c>pull</c>, <c>push</c>, or <c>siem:read</c>). Returns the raw token string.
     /// </summary>
     public async Task<string> CreateToken(string kind = "push", string org = "default")
@@ -120,7 +120,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         var orgRecord = await orgs.GetBySlugAsync(org)
             ?? throw new InvalidOperationException($"Org '{org}' not found. Was the server started?");
 
-        var (raw, _) = await tokens.CreateCicdTokenAsync(
+        var (raw, _) = await tokens.CreateServiceTokenAsync(
             orgRecord.Id, $"test-{kind}-{Guid.NewGuid():N}", CapabilitiesFor(kind), expiresAt: null);
         return raw;
     }

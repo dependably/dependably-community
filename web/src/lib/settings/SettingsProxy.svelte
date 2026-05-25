@@ -52,6 +52,23 @@
     />
     <div class="form-hint">{$t('settings.proxy.osvToleranceHint')}</div>
   </div>
+  <div class="form-row">
+    <label for="min-release-age">{$t('settings.proxy.minReleaseAge')}</label>
+    <div class="value-unit-row">
+      <input
+        id="min-release-age"
+        type="text"
+        inputmode="numeric"
+        pattern="[0-9]*"
+        class="value-input"
+        bind:value={proxySettings.min_release_age_value} />
+      <select bind:value={proxySettings.min_release_age_unit} class="unit-select">
+        <option value="hours">{$t('settings.proxy.minReleaseAgeUnitHours')}</option>
+        <option value="days">{$t('settings.proxy.minReleaseAgeUnitDays')}</option>
+      </select>
+    </div>
+    <div class="form-hint">{$t('settings.proxy.minReleaseAgeHint')}</div>
+  </div>
   <button class="primary" on:click={onSave} disabled={saving}>
     {saving ? $t('common.actions.saving') : $t('common.actions.save')}
   </button>
@@ -83,4 +100,9 @@
   .card-narrow { max-width: 480px; }
   .form-row-inline { flex-direction: row; align-items: center; gap: 12px; }
   .nudge-up { margin-top: -8px; }
+  /* Value + unit pair (e.g. "48 Hours") — number input on the left, unit picker on the right.
+     Width-constrained so a 4-digit value never pushes the select off the card edge. */
+  .value-unit-row { display: flex; gap: 8px; align-items: center; }
+  .value-unit-row .value-input { flex: 0 0 110px; }
+  .value-unit-row .unit-select { flex: 0 0 110px; }
 </style>

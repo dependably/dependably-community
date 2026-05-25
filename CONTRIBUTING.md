@@ -223,7 +223,7 @@ AZURE_CONTAINER=dependably-blobs
 Two token types are available per org:
 
 - **User tokens** — tied to a user account, appear in audit logs with the user's identity
-- **CI/CD tokens** — named machine tokens with no user association, ideal for pipelines
+- **Service tokens** — named machine tokens with no user association, ideal for pipelines
 
 Both support `pull` and `push` scopes. `push` implies `pull`. Tokens are stored as SHA-256 hashes; the raw value is shown only once on creation.
 

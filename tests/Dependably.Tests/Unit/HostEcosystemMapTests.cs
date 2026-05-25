@@ -68,4 +68,26 @@ public class HostEcosystemMapTests
         Assert.Equal("/pypi", m.PrefixForHost("pypi.org"));
         Assert.Equal("/pypi", m.PrefixForHost("files.pythonhosted.org"));
     }
+
+    [Fact]
+    public void MalformedEntry_TrailingEquals_Throws()
+    {
+        // Covers the `eq == pair.Length - 1` branch of the malformed-entry guard.
+        Assert.Throws<InvalidOperationException>(() => Build("registry.npmjs.org="));
+    }
+
+    [Fact]
+    public void MalformedEntry_LeadingEquals_Throws()
+    {
+        // Covers the `eq == 0` (empty host) side of `eq <= 0`.
+        Assert.Throws<InvalidOperationException>(() => Build("=npm"));
+    }
+
+    [Fact]
+    public void EmptyHost_ReturnsNullPrefix()
+    {
+        // Covers the IsNullOrEmpty short-circuit for an empty (non-null) host string.
+        var m = Build("registry.npmjs.org=npm");
+        Assert.Null(m.PrefixForHost(""));
+    }
 }

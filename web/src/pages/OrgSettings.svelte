@@ -3,6 +3,7 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import { submitForm, extractErrorMessage } from '../lib/form.js'
+  import { user } from '../lib/store.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { formatDateShort } from '../lib/format.js'
   import Claims from './Claims.svelte'
@@ -12,6 +13,7 @@
   import SettingsUpload from '../lib/settings/SettingsUpload.svelte'
   import SettingsRetention from '../lib/settings/SettingsRetention.svelte'
   import SettingsProxy from '../lib/settings/SettingsProxy.svelte'
+  import SettingsServiceTokens from '../lib/settings/SettingsServiceTokens.svelte'
 
   let tab = 'general'
   let settings = null, retention = null, instanceMax = null, proxySettings = null
@@ -56,7 +58,20 @@
       settings = { ...s }
       retention = { ...r }
       instanceMax = inst.MAX_UPLOAD_BYTES ? parseInt(inst.MAX_UPLOAD_BYTES) : null
-      proxySettings = { ...ps, max_osv_score_tolerance: Number(ps.max_osv_score_tolerance ?? 10).toFixed(1) }
+      // Hours is the canonical wire format; the UI splits it into a value + unit (Hours/Days)
+      // so 48 lands as "2 Days" and 36 stays as "36 Hours". A null/0 wire value collapses
+      // to an empty input — the form treats that as "policy off" on save.
+      const ageHours = ps.min_release_age_hours
+      const ageUnit = ageHours !== null && ageHours !== undefined && ageHours > 0 && ageHours % 24 === 0 ? 'days' : 'hours'
+      const ageValue = ageHours === null || ageHours === undefined || ageHours === 0
+        ? ''
+        : String(ageUnit === 'days' ? ageHours / 24 : ageHours)
+      proxySettings = {
+        ...ps,
+        max_osv_score_tolerance: Number(ps.max_osv_score_tolerance ?? 10).toFixed(1),
+        min_release_age_value: ageValue,
+        min_release_age_unit: ageUnit,
+      }
     } catch (e) { error = extractErrorMessage(e) }
     finally { loading = false }
   })
@@ -180,10 +195,19 @@
   // payload, so we fire both endpoints in parallel.
   async function saveProxySettings() {
     success = ''
+    // Convert the value+unit pair back to canonical hours. Empty value = null (policy off);
+    // a positive value in days multiplies to hours. Math.floor guards against the user
+    // pasting decimals into a numeric input on browsers that don't enforce the pattern.
+    const raw = String(proxySettings.min_release_age_value ?? '').trim()
+    const num = raw === '' ? null : Math.floor(Number(raw))
+    const minReleaseAgeHours = num === null || isNaN(num) || num <= 0
+      ? null
+      : (proxySettings.min_release_age_unit === 'days' ? num * 24 : num)
     await submitForm(() => Promise.all([
       api.updateProxySettings({
         proxyPassthroughEnabled: proxySettings.proxy_passthrough_enabled,
         maxOsvScoreTolerance:    Number(proxySettings.max_osv_score_tolerance),
+        minReleaseAgeHours,
       }),
       api.updateOrgSettings(settings),
     ]), {
@@ -250,7 +274,13 @@
     blocklistEntries = blocklistEntries.filter(e => e.id !== id)
   }
 
-  const tabKeys = [
+  // Service-tokens tab is admin-only — service tokens are an org-level resource that
+  // only admins/owners can mint (controller enforces tenant:configure). Filtering here
+  // is cosmetic; the backend is the authority.
+  $: viewerRole = $user?.role ?? ''
+  $: viewerIsAdmin = viewerRole === 'admin' || viewerRole === 'owner'
+
+  $: tabKeys = [
     { key: 'general',        label: 'settings.tabs.general' },
     { key: 'authentication', label: 'settings.tabs.authentication' },
     { key: 'upload-limits',  label: 'settings.tabs.uploadLimits' },
@@ -258,6 +288,7 @@
     { key: 'proxy',          label: 'settings.tabs.proxy' },
     { key: 'licenses',       label: 'settings.tabs.licenses' },
     { key: 'claims',         label: 'settings.tabs.claims' },
+    ...(viewerIsAdmin ? [{ key: 'service-tokens', label: 'settings.tabs.serviceTokens' }] : []),
   ]
 
 </script>
@@ -441,6 +472,9 @@
 
     {:else if tab === 'claims'}
       <Claims />
+
+    {:else if tab === 'service-tokens' && viewerIsAdmin}
+      <SettingsServiceTokens />
     {/if}
   {/if}
 </div>

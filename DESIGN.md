@@ -530,7 +530,7 @@ When a component has two independent tables (e.g. Users.svelte members and invit
 **Client-side vs. server-side sort**
 
 - **Server-side sort** (API params, paginated across all pages): Packages.
-- **Client-side sort** (in-memory, all rows loaded at once): Vulnerabilities, VersionDetail, Users, Tokens, CicdTokens, OrgSettings allowlist/blocklist.
+- **Client-side sort** (in-memory, all rows loaded at once): Vulnerabilities, VersionDetail, Users, Tokens, SettingsServiceTokens, OrgSettings allowlist/blocklist.
 - **Client-side sort on current page only** (acceptable for admin/audit tables): AdminOrgs, Activity.
 
 **Skip list**

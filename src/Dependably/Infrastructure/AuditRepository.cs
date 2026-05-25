@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Dapper;
 
 namespace Dependably.Infrastructure;
@@ -133,25 +134,93 @@ public sealed class AuditRepository
 
     /// <summary>
     /// system_admin-facing audit list: filters strictly to <c>scope='system'</c> events
-    /// (tenant.created, tenant.deleted, tenant.restored, tenant.hard_deleted, system_admin.*).
-    /// Never returns tenant-business events.
+    /// (tenant.created, tenant.deleted, tenant.restored, tenant.hard_deleted, tenant.status_changed,
+    /// system_admin.*). Never returns tenant-business events.
     /// </summary>
+    /// <param name="search">Optional case-insensitive substring match across action, actor_id, org_id, detail.</param>
+    /// <param name="action">Optional exact-match filter on the action column.</param>
+    /// <param name="sortBy">'createdAt' (default) or 'action'. Unknown values fall back to 'createdAt'.</param>
+    /// <param name="sortDir">'asc' or 'desc' (default). Unknown values fall back to 'desc'.</param>
+    [SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "The interpolated WHERE fragments are const strings containing only @param placeholders. " +
+                        "ORDER BY column and direction are whitelisted via switch expressions that return " +
+                        "compile-time-constant literals (\"action\"/\"created_at\") and the literal strings " +
+                        "\"ASC\"/\"DESC\"; caller input only selects which constant to use.")]
     public async Task<(IReadOnlyList<AuditEntry> Items, int Total)> ListSystemAuditAsync(
-        int limit, int offset, CancellationToken ct = default)
+        int limit, int offset,
+        string? search = null, string? action = null,
+        string? sortBy = null, string? sortDir = null,
+        CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+
+        // ORDER BY is interpolated into the SQL — whitelist before use. Never trust raw input here.
+        var orderColumn = sortBy switch
+        {
+            "action" => "action",
+            _ => "created_at",
+        };
+        var orderDirection = string.Equals(sortDir, "asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
+
+        var searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
+        var actionFilter = string.IsNullOrWhiteSpace(action) ? null : action;
+
+        // Two where clauses because the count query doesn't need the system_admins join — but
+        // the list query does, so search can match on operator email and the result projection
+        // can return ActorEmail without a second round-trip.
+        const string countWhereClause = """
+            scope = 'system'
+              AND (@action IS NULL OR action = @action)
+              AND (@searchPattern IS NULL
+                   OR lower(action) LIKE @searchPattern
+                   OR lower(COALESCE(actor_id, '')) LIKE @searchPattern
+                   OR lower(COALESCE(org_id, '')) LIKE @searchPattern
+                   OR lower(COALESCE(detail, '')) LIKE @searchPattern)
+            """;
+
+        const string listWhereClause = """
+            a.scope = 'system'
+              AND (@action IS NULL OR a.action = @action)
+              AND (@searchPattern IS NULL
+                   OR lower(a.action) LIKE @searchPattern
+                   OR lower(COALESCE(a.actor_id, '')) LIKE @searchPattern
+                   OR lower(COALESCE(sa.email, '')) LIKE @searchPattern
+                   OR lower(COALESCE(a.org_id, '')) LIKE @searchPattern
+                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern)
+            """;
+
         var total = await conn.ExecuteScalarAsync<int>(
-            "SELECT COUNT(*) FROM audit_log WHERE scope = 'system'");
+            $"SELECT COUNT(*) FROM audit_log WHERE {countWhereClause}",
+            new { action = actionFilter, searchPattern });
+
+        // LEFT JOIN system_admins (not users) — every scope='system' actor is a system_admin.
+        // Unmatched actor_ids surface as NULL ActorEmail; the UI falls back to actor_id.
+        var listSql = $"""
+            SELECT a.id, a.scope as Scope, a.org_id as OrgId, a.actor_id as ActorId,
+                   sa.email as ActorEmail, a.action as Action,
+                   a.ecosystem as Ecosystem, a.purl as Purl, a.detail as Detail,
+                   a.created_at as CreatedAt
+            FROM audit_log a LEFT JOIN system_admins sa ON sa.id = a.actor_id
+            WHERE {listWhereClause}
+            ORDER BY a.{orderColumn} {orderDirection}, a.id DESC LIMIT @limit OFFSET @offset
+            """;
+
         var rows = await conn.QueryAsync<AuditEntry>(
-            """
-            SELECT id, scope as Scope, org_id as OrgId, actor_id as ActorId, action as Action,
-                   ecosystem as Ecosystem, purl as Purl, detail as Detail,
-                   created_at as CreatedAt
-            FROM audit_log WHERE scope = 'system'
-            ORDER BY created_at DESC, id DESC LIMIT @limit OFFSET @offset
-            """,
-            new { limit, offset });
+            listSql,
+            new { limit, offset, action = actionFilter, searchPattern });
         return (rows.ToList(), total);
+    }
+
+    /// <summary>
+    /// Returns the distinct set of <c>action</c> values for <c>scope='system'</c> audit rows,
+    /// for populating the operator audit-page filter dropdown. Sorted alphabetically.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ListDistinctSystemActionsAsync(CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var rows = await conn.QueryAsync<string>(
+            "SELECT DISTINCT action FROM audit_log WHERE scope = 'system' ORDER BY action ASC");
+        return rows.ToList();
     }
 
     /// <summary>

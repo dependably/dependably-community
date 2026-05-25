@@ -44,4 +44,7 @@ public sealed class AzureBlobStore : IBlobStore
             total += size;
         return total;
     }
+
+    public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default)
+        => _container.EnumerateBlobsAsync(prefix, ct);
 }

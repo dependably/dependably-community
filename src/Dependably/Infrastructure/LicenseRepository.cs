@@ -17,6 +17,7 @@ public sealed class LicenseRepository
         string packageVersionId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by package_version_id (caller-org-scoped); FK chains to packages.org_id.
         var rows = await conn.QueryAsync<PackageVersionLicense>(
             """
             SELECT id as Id, package_version_id as PackageVersionId,
@@ -40,6 +41,7 @@ public sealed class LicenseRepository
         // Upsert each SPDX identifier; ignore duplicates from same source
         foreach (var spdx in spdxIds)
         {
+            // xtenant: INSERT pinned to caller-supplied package_version_id (org-scoped via FK).
             await conn.ExecuteAsync(
                 """
                 INSERT INTO package_version_licenses (id, package_version_id, license_spdx, source)
@@ -56,6 +58,7 @@ public sealed class LicenseRepository
         var ids = versionIds.ToList();
         if (ids.Count == 0) return Enumerable.Empty<VersionLicenseRow>().ToLookup(r => r.VersionId, r => r.Spdx);
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by an IN list of package_version_ids (each caller-org-scoped).
         var rows = await conn.QueryAsync<VersionLicenseRow>(
             """
             SELECT package_version_id as VersionId, license_spdx as Spdx

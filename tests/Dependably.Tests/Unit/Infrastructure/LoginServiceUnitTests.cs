@@ -265,6 +265,122 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         Assert.NotNull(result.Error);
     }
 
+    // ── LoginSamlAsync — remaining branches ─────────────────────────────────
+
+    /// <summary>
+    /// Orphan external_identity row referencing a user_id that no longer exists. The
+    /// repo's FK isn't enforced in our in-memory store, so this models the post-delete
+    /// race that the "Linked user not found" guard exists to handle.
+    /// </summary>
+    [Fact]
+    public async Task LoginSamlAsync_ExternalIdentity_PointsToMissingUser_ReturnsLinkedUserNotFound()
+    {
+        await EnsureJwtSecretAsync();
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+
+        // Create then delete the user so the external identity becomes orphaned. We
+        // CASCADE-delete the external identity along with the user, so we insert the
+        // external_identity row again after the user is gone — with FKs off so the
+        // orphan reference is accepted (mirrors a real post-delete race).
+        var transientUserId = await UserSeeder.InsertAsync(_fixture.Store, orgId, $"transient-{Guid.NewGuid():N}@x.test");
+        var externalId = Guid.NewGuid().ToString("N");
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync("DELETE FROM users WHERE id = @id", new { id = transientUserId });
+            await conn.ExecuteAsync("PRAGMA foreign_keys = OFF");
+            await conn.ExecuteAsync("""
+                INSERT INTO external_identities (id, org_id, user_id, idp_entity_id, nameid)
+                VALUES (@id, @orgId, @userId, 'https://idp', 'orphan-nameid')
+                """, new { id = externalId, orgId, userId = transientUserId });
+            await conn.ExecuteAsync("PRAGMA foreign_keys = ON");
+        }
+
+        var result = await NewSut().LoginSamlAsync(orgId, "https://idp", "orphan-nameid", "noone@x.test");
+
+        Assert.Null(result.Token);
+        Assert.Equal("Linked user not found.", result.Error);
+        Assert.False(result.Provisioned);
+        Assert.False(result.Linked);
+    }
+
+    /// <summary>
+    /// Email-link path (no external identity yet) where the email-matched user is locked.
+    /// Distinct from the previously covered branch where the external identity already exists.
+    /// </summary>
+    [Fact]
+    public async Task LoginSamlAsync_EmailLinkPath_LockedUser_Rejected()
+    {
+        await EnsureJwtSecretAsync();
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        var email = $"locked-link-{Guid.NewGuid():N}@x.test";
+        await UserSeeder.InsertAsync(_fixture.Store, orgId, email, accountStatus: "locked");
+
+        var result = await NewSut().LoginSamlAsync(orgId, "https://idp", "new-nameid-locked", email);
+
+        Assert.Null(result.Token);
+        Assert.Equal("Account is not active.", result.Error);
+        Assert.False(result.Provisioned);
+        Assert.False(result.Linked);
+    }
+
+    /// <summary>
+    /// IdP rotated the user's email between logins: external identity exists, but the
+    /// assertion's email no longer matches the stored email. Hits the emailChanged branch
+    /// in <c>StampUserLoginAsync</c> which writes both last_login_at and the new email.
+    /// </summary>
+    [Fact]
+    public async Task LoginSamlAsync_AssertionEmailRotated_UpdatesUserEmail()
+    {
+        await EnsureJwtSecretAsync();
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        var oldEmail = $"old-{Guid.NewGuid():N}@x.test";
+        var userId = await UserSeeder.InsertAsync(_fixture.Store, orgId, oldEmail);
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync("""
+                INSERT INTO external_identities (id, org_id, user_id, idp_entity_id, nameid)
+                VALUES (@id, @orgId, @userId, 'https://idp', 'rotated-nameid')
+                """, new { id = Guid.NewGuid().ToString("N"), orgId, userId });
+        }
+
+        var newEmail = $"new-{Guid.NewGuid():N}@x.test";
+        var result = await NewSut().LoginSamlAsync(orgId, "https://idp", "rotated-nameid", newEmail);
+
+        Assert.NotNull(result.Token);
+        Assert.Null(result.Error);
+
+        await using var verify = await _fixture.Store.OpenAsync();
+        var storedEmail = await verify.ExecuteScalarAsync<string>(
+            "SELECT email FROM users WHERE id = @id", new { id = userId });
+        Assert.Equal(newEmail, storedEmail);
+    }
+
+    /// <summary>RecordSamlTestAsync writes a single audit row and does not provision.</summary>
+    [Fact]
+    public async Task RecordSamlTestAsync_WritesAuditRow()
+    {
+        await EnsureJwtSecretAsync();
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+
+        await NewSut().RecordSamlTestAsync(orgId, "https://idp-test", "test-nameid", "test@x.test", actorId: null);
+
+        await using var conn = await _fixture.Store.OpenAsync();
+        var count = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'auth.saml.test.success' AND org_id = @orgId",
+            new { orgId });
+        Assert.Equal(1, count);
+    }
+
+    /// <summary>IssueTenantJwtForUser is the public re-entry point used by SamlController.</summary>
+    [Fact]
+    public void IssueTenantJwtForUser_ReturnsParseableJwt()
+    {
+        var token = NewSut().IssueTenantJwtForUser("user-1", "tenant-1", "owner", "unit-test-secret-min-32-chars-xxxxxx");
+        Assert.False(string.IsNullOrEmpty(token));
+        // Three base64url-encoded segments separated by dots.
+        Assert.Equal(2, token.Count(c => c == '.'));
+    }
+
     private static string HashEmail(string email)
     {
         var bytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(email.ToLowerInvariant()));

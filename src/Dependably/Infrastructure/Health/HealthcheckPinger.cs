@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using Prometheus;
+using Dependably.Infrastructure.Observability;
 using Dependably.Infrastructure.Redis;
 
 namespace Dependably.Infrastructure.Health;
@@ -23,14 +23,6 @@ namespace Dependably.Infrastructure.Health;
 /// </summary>
 public sealed class HealthcheckPinger : BackgroundService
 {
-    private static readonly Counter PingTotal = Metrics.CreateCounter(
-        "healthcheck_ping_total",
-        "Outbound healthcheck pings.",
-        new CounterConfiguration { LabelNames = ["result"] });
-
-    private static readonly Histogram PingDuration = Metrics
-        .CreateHistogram("healthcheck_ping_duration_seconds", "Outbound healthcheck ping duration.");
-
     private readonly IHttpClientFactory _http;
     private readonly IDistributedLock _locks;
     private readonly ReadinessAggregator _readiness;
@@ -100,7 +92,7 @@ public sealed class HealthcheckPinger : BackgroundService
         var ready = checks.Values.All(v => v is null);
 
         var targetUrl = ready ? _pingUrl! : (_failUrl ?? _pingUrl!);
-        using var timer = PingDuration.NewTimer();
+        var stopwatch = Stopwatch.StartNew();
 
         try
         {
@@ -130,12 +122,12 @@ public sealed class HealthcheckPinger : BackgroundService
 
             if (resp.IsSuccessStatusCode)
             {
-                PingTotal.WithLabels("success").Inc();
+                DependablyMeter.HealthcheckPings.Add(1, new KeyValuePair<string, object?>("outcome", "success"));
                 _logger.LogDebug("HealthcheckPinger: ping succeeded ({StatusCode}).", (int)resp.StatusCode);
             }
             else
             {
-                PingTotal.WithLabels("failure").Inc();
+                DependablyMeter.HealthcheckPings.Add(1, new KeyValuePair<string, object?>("outcome", "server_error"));
                 _logger.LogWarning(
                     "HealthcheckPinger: ping returned non-2xx ({StatusCode}) from {Url}.",
                     (int)resp.StatusCode, targetUrl);
@@ -143,8 +135,12 @@ public sealed class HealthcheckPinger : BackgroundService
         }
         catch (Exception ex)
         {
-            PingTotal.WithLabels("failure").Inc();
+            DependablyMeter.HealthcheckPings.Add(1, new KeyValuePair<string, object?>("outcome", "server_error"));
             _logger.LogWarning(ex, "HealthcheckPinger: transport failure pinging {Url}.", targetUrl);
+        }
+        finally
+        {
+            DependablyMeter.HealthcheckPingDuration.Record(stopwatch.Elapsed.TotalSeconds);
         }
     }
 }

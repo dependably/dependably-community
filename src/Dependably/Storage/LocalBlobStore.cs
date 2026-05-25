@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace Dependably.Storage;
 
 public sealed class LocalBlobStore : IBlobStore
@@ -47,5 +49,37 @@ public sealed class LocalBlobStore : IBlobStore
             .EnumerateFiles("*", SearchOption.AllDirectories)
             .Sum(f => f.Length);
         return Task.FromResult(total);
+    }
+
+    public async IAsyncEnumerable<BlobInfo> ListAsync(
+        string prefix, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        // Resolve the prefix to its on-disk equivalent so a `hosted/` prefix scans only
+        // the hosted subtree rather than walking the whole root and filtering after.
+        var prefixPath = Path.Combine(_root, prefix.Replace('/', Path.DirectorySeparatorChar));
+        if (!Directory.Exists(prefixPath))
+            yield break;
+
+        // Use enumerate-options to avoid materializing the full list before the first yield —
+        // a hosted tier with millions of files would otherwise hold the whole listing in RAM.
+        var options = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            IgnoreInaccessible = true,
+        };
+        foreach (var path in Directory.EnumerateFiles(prefixPath, "*", options))
+        {
+            if (ct.IsCancellationRequested) yield break;
+            FileInfo info;
+            try { info = new FileInfo(path); }
+            catch { continue; }  // race: file deleted between enumerate and stat
+            if (!info.Exists) continue;
+
+            // Reconstruct the logical key (forward slashes, relative to root).
+            var rel = Path.GetRelativePath(_root, path)
+                .Replace(Path.DirectorySeparatorChar, '/');
+            yield return new BlobInfo(rel, info.Length, new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero));
+            await Task.Yield();
+        }
     }
 }

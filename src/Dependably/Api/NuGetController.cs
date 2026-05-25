@@ -110,7 +110,8 @@ public partial class NuGetController : ControllerBase
         var orgId = CurrentTenantId();
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var token = await Request.ResolveTokenAsync(_tokens, ct);
+        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
         if (!settings!.AnonymousPull && token is null)
         {
             Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
@@ -168,7 +169,8 @@ public partial class NuGetController : ControllerBase
         var orgId = CurrentTenantId();
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var token = await Request.ResolveTokenAsync(_tokens, ct);
+        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
         if (!settings!.AnonymousPull && token is null)
         {
             Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
@@ -375,7 +377,8 @@ public partial class NuGetController : ControllerBase
     {
         var orgId = CurrentTenantId();
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var token = await Request.ResolveTokenAsync(_tokens, ct);
+        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
         if (!settings!.AnonymousPull && token is null)
         {
             Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
@@ -464,7 +467,8 @@ public partial class NuGetController : ControllerBase
     {
         var orgId = CurrentTenantId();
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var token = await Request.ResolveTokenAsync(_tokens, ct);
+        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
         var normalizedId = id.ToLowerInvariant();
         var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
 
@@ -536,7 +540,9 @@ public partial class NuGetController : ControllerBase
         if (await _blockGate.EvaluateAsync(
                 new BlockGateRequest(orgId, "nuget", pkgVersion.Purl, pkgVersion.Id,
                     pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
-                    token.UserId, settings.MaxOsvScoreTolerance, sourceIp), ct)
+                    token.UserId, settings.MaxOsvScoreTolerance, sourceIp,
+                    MinReleaseAgeHours: settings.MinReleaseAgeHours,
+                    PublishedAt: pkgVersion.PublishedAt), ct)
             == BlockDecision.Blocked) return StatusCode(403);
 
         var stream = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
@@ -560,7 +566,9 @@ public partial class NuGetController : ControllerBase
         if (await _blockGate.EvaluateAsync(
                 new BlockGateRequest(orgId, "nuget", pkgVersion.Purl, pkgVersion.Id,
                     pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
-                    token?.UserId, settings.MaxOsvScoreTolerance, sourceIp), ct)
+                    token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
+                    MinReleaseAgeHours: settings.MinReleaseAgeHours,
+                    PublishedAt: pkgVersion.PublishedAt), ct)
             == BlockDecision.Blocked) return StatusCode(403);
 
         if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase))
@@ -598,6 +606,8 @@ public partial class NuGetController : ControllerBase
             var canonicalId = ResolveCanonicalNuGetId(file, bytes, normalizedId);
             var purl = PurlNormalizer.NuGet(canonicalId, normalizedVersion);
 
+            var meta = await TryFetchNuGetFirstFetchMetadataAsync(upstreamBase, normalizedId, normalizedVersion, ct);
+
             var result = await _proxyFetch.RecordAndScanAsync(new ProxyFetchRequest(
                 OrgId: orgId, Ecosystem: "nuget",
                 PackageName: normalizedId, PurlName: normalizedId,
@@ -608,15 +618,76 @@ public partial class NuGetController : ControllerBase
                 UserId: token?.UserId,
                 SourceIp: HttpContext.GetNormalizedRemoteIp(),
                 MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
+                MinReleaseAgeHours: settings.MinReleaseAgeHours,
                 CacheAccess: new CacheAccess(orgId, "nuget", normalizedId, normalizedVersion, file,
-                    Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: $"{upstreamBase}/flatcontainer/{normalizedId}/{normalizedVersion}/{file}")
+                    Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: $"{upstreamBase}/flatcontainer/{normalizedId}/{normalizedVersion}/{file}"),
+                PublishedAt: meta.PublishedAt,
+                UpstreamChecksum: meta.Checksum,
+                UpstreamIntegrityValue: meta.IntegrityBase64,
+                UpstreamIntegrityAlgorithm: meta.IntegrityBase64 is not null ? "sha512-b64" : null
             ), ct);
 
             if (result.Decision == BlockDecision.Blocked) return StatusCode(403);
             return File(bytes, "application/octet-stream", file);
         }
         catch (Microsoft.Data.Sqlite.SqliteException) { throw; }
+        catch (ChecksumException) { return StatusCode(502); }
         catch { return NotFound(); }
+    }
+
+    /// <summary>
+    /// Fetches a single NuGet registration leaf and pulls out everything we capture at
+    /// first-fetch: the <c>published</c> timestamp, a SHA-512 verification spec from
+    /// <c>packageHash</c> + <c>packageHashAlgorithm</c>, and the raw base64 hash so the UI
+    /// can surface what upstream claims. Fail-soft on any error. The unlisted sentinel
+    /// (<c>1900-01-01</c>) is coerced to null so callers see "unknown" rather than a
+    /// misleading timestamp.
+    /// </summary>
+    private async Task<NuGetFirstFetchMetadata> TryFetchNuGetFirstFetchMetadataAsync(
+        string upstreamBase, string normalizedId, string normalizedVersion, CancellationToken ct)
+    {
+        try
+        {
+            var leafUrl = $"{upstreamBase}/registration5-semver1/{normalizedId}/{normalizedVersion}.json";
+            using var resp = await _upstream.GetMetadataAsync(leafUrl, ct);
+            if (!resp.IsSuccessStatusCode) return NuGetFirstFetchMetadata.Empty;
+            var json = await resp.Content.ReadAsStringAsync(ct);
+            var node = JsonNode.Parse(json);
+
+            DateTimeOffset? publishedAt = null;
+            var published = node?["published"]?.GetValue<string>()
+                ?? node?["catalogEntry"]?["published"]?.GetValue<string>();
+            if (DateTimeOffset.TryParse(published, null,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out var ts)
+                && ts.Year >= 1901)
+                publishedAt = ts;
+
+            // packageHash + packageHashAlgorithm live at the leaf root on most NuGet
+            // sources; fall back to catalogEntry.* for older feeds that nest them there.
+            var hash = node?["packageHash"]?.GetValue<string>()
+                ?? node?["catalogEntry"]?["packageHash"]?.GetValue<string>();
+            var algorithm = node?["packageHashAlgorithm"]?.GetValue<string>()
+                ?? node?["catalogEntry"]?["packageHashAlgorithm"]?.GetValue<string>();
+            var checksum = ChecksumVerifier.ParseNuGetHash(hash, algorithm);
+
+            // Only surface the raw value when it's the SHA-512-base64 form we recognise —
+            // otherwise the UI label would lie about the algorithm. The verification spec
+            // above is gated the same way (ParseNuGetHash returns null for non-SHA512).
+            var integrityB64 = !string.IsNullOrEmpty(hash)
+                && string.Equals(algorithm, "SHA512", StringComparison.OrdinalIgnoreCase)
+                ? hash : null;
+
+            return new NuGetFirstFetchMetadata(publishedAt, checksum, integrityB64);
+        }
+        catch { return NuGetFirstFetchMetadata.Empty; }
+    }
+
+    private readonly record struct NuGetFirstFetchMetadata(
+        DateTimeOffset? PublishedAt,
+        ChecksumSpec? Checksum,
+        string? IntegrityBase64)
+    {
+        public static NuGetFirstFetchMetadata Empty => new(null, null, null);
     }
 
     // NuGet client URLs use lowercase IDs, but OSV PURL lookups are case-sensitive.
@@ -677,7 +748,7 @@ public partial class NuGetController : ControllerBase
             return UnprocessableEntity(new ProblemDetails { Detail = parseResult.Message, Status = 422 });
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var limit = settings?.MaxUploadBytesNuGet ?? settings?.MaxUploadBytes ?? long.MaxValue;
+        var limit = await _orgs.GetUploadLimitAsync(settings, "nuget", ct);
         var pushCtx = new NuGetPushContext(orgId, token!, settings, limit);
         var publishResult = await PublishNuspecAsync(
             pushCtx, nuspecId!, nuspecVersion!, isSymbol, bytes!, ct);
@@ -863,7 +934,8 @@ public partial class NuGetController : ControllerBase
         var orgId = CurrentTenantId();
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var token = await Request.ResolveTokenAsync(_tokens, ct);
+        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
         if (!settings!.AnonymousPull && token is null)
         {
             Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";

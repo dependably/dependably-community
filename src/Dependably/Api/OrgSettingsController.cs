@@ -178,8 +178,13 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         {
             proxy_passthrough_enabled = settings?.ProxyPassthroughEnabled ?? true,
             max_osv_score_tolerance   = settings?.MaxOsvScoreTolerance   ?? 10.0,
+            min_release_age_hours     = settings?.MinReleaseAgeHours,
         });
     }
+
+    // 8760 = 365*24; sanity cap to keep the UI from accepting decade-scale values that would
+    // never be useful (and would mask an accidental day↔hour confusion at the call site).
+    private const int MaxReleaseAgeHours = 8760;
 
     /// <summary>PUT /api/v1/orgs/{org}/proxy-settings</summary>
     [HttpPut("api/v1/proxy-settings")]
@@ -191,14 +196,21 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         if (req.MaxOsvScoreTolerance is < 0.0 or > 10.0)
             return _problems.ValidationErrorAction("max_osv_score_tolerance", "Must be between 0.0 and 10.0.");
 
+        if (req.MinReleaseAgeHours is { } age && (age < 0 || age > MaxReleaseAgeHours))
+            return _problems.ValidationErrorAction(
+                "min_release_age_hours",
+                $"Must be between 0 and {MaxReleaseAgeHours} hours (1 year), or null to disable.");
+
         var orgId = CurrentTenantId();
-        await _settings.UpsertProxySettingsAsync(orgId, req.ProxyPassthroughEnabled, req.MaxOsvScoreTolerance, ct);
+        await _settings.UpsertProxySettingsAsync(
+            orgId, req.ProxyPassthroughEnabled, req.MaxOsvScoreTolerance, req.MinReleaseAgeHours, ct);
 
         await _audit.LogAsync("proxy_settings_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 proxy_passthrough_enabled = req.ProxyPassthroughEnabled,
                 max_osv_score_tolerance = req.MaxOsvScoreTolerance,
+                min_release_age_hours = req.MinReleaseAgeHours,
             }), ct: ct);
 
         return NoContent();

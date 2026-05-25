@@ -17,11 +17,9 @@ const TENANT_STATIC = [
   ['packages',          '/packages'],
   ['audit',             '/audit'],
   ['tokens',            '/tokens'],
-  ['cicd-tokens',       '/cicd-tokens'],
   ['settings',          '/settings'],
   ['users',             '/users'],
   ['setup',             '/setup'],
-  ['admin-settings',    '/admin-settings'],
   ['upload',            '/upload'],
   ['vulnerabilities',   '/vulnerabilities'],
   ['license-policy',    '/license-policy'],
@@ -32,13 +30,14 @@ const TENANT_STATIC = [
 ]
 
 const SYSTEM_STATIC = [
-  ['system-tenants',  '/'],
-  ['system-login',    '/login'],
-  ['system-users',    '/users'],
-  ['system-audit',    '/audit'],
-  ['system-settings', '/settings'],
-  ['system-profile',  '/profile'],
-  ['system-tenants',  '/tenants'], // alias — canonical is '/'
+  ['system-dashboard',     '/'],
+  ['system-login',         '/login'],
+  ['system-users',         '/users'],
+  ['system-audit',         '/audit'],
+  ['system-settings',      '/settings'],
+  ['system-profile',       '/profile'],
+  ['system-admins',        '/admins'],
+  ['system-tenants',       '/tenants'],
 ]
 
 function staticTable() {

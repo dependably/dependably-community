@@ -13,6 +13,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 describe('currentOrg (derived)', () => {
@@ -122,5 +123,67 @@ describe('navigate + takePendingRoute', () => {
   it('takePendingRoute returns null when nothing stashed', async () => {
     const { takePendingRoute } = await import('./store.js')
     expect(takePendingRoute()).toBeNull()
+  })
+
+  it('preserveSearch: true appends window.location.search to the URL', async () => {
+    // jsdom's history.replaceState doesn't propagate to window.location.search reliably,
+    // so stub the location object directly.
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { hostname: 'localhost', search: '?foo=bar' },
+    })
+    const { navigate } = await import('./store.js')
+    const spy = vi.spyOn(window.history, 'pushState')
+    navigate('packages', {}, { preserveSearch: true })
+    expect(spy).toHaveBeenCalled()
+    const url = spy.mock.calls[spy.mock.calls.length - 1][2]
+    expect(url).toContain('?foo=bar')
+  })
+
+  it('navigate is a no-op on history when window.history is unavailable', async () => {
+    const originalHistory = window.history
+    // Force `window.history` to be falsy so the history branch is skipped.
+    Object.defineProperty(window, 'history', { configurable: true, value: undefined })
+    try {
+      const { navigate, route } = await import('./store.js')
+      navigate('audit', {})
+      // Store still updates even though history is unavailable.
+      expect(get(route).page).toBe('audit')
+    } finally {
+      Object.defineProperty(window, 'history', { configurable: true, value: originalHistory })
+    }
+  })
+})
+
+describe('SSR-safe module load (no window/localStorage/document)', () => {
+  it('module load tolerates missing localStorage (theme falls back to "light")', async () => {
+    // Strip both localStorage (covers the module-init guard on line 17) and document
+    // (so the subscribe-time write-back bails out cleanly — line 20).
+    vi.stubGlobal('localStorage', undefined)
+    vi.stubGlobal('document', undefined)
+    const { theme } = await import('./store.js')
+    expect(get(theme)).toBe('light')
+  })
+
+  it('theme subscriber bails out when document is undefined', async () => {
+    vi.stubGlobal('document', undefined)
+    const { theme } = await import('./store.js')
+    // Setting a new theme must not throw despite document being undefined.
+    expect(() => theme.set('dark')).not.toThrow()
+    // And the write to localStorage on line 22 is skipped by the early return.
+    expect(localStorage.getItem('theme')).toBeNull()
+  })
+})
+
+describe('currentOrg multi-mode edge cases', () => {
+  it('returns null when apexHost is missing (apex branch false)', async () => {
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { hostname: 'acme.dependably.example.com' },
+    })
+    const { currentOrg, bootstrapInfo } = await import('./store.js')
+    // No apexHost → apex is '' → the endsWith check short-circuits to null.
+    bootstrapInfo.set({ mode: 'multi', isApex: false })
+    expect(get(currentOrg)).toBeNull()
   })
 })

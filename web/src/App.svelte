@@ -14,11 +14,9 @@
   import VersionDetail from './pages/VersionDetail.svelte'
   import Audit from './pages/Audit.svelte'
   import Tokens from './pages/Tokens.svelte'
-  import CicdTokens from './pages/CicdTokens.svelte'
   import OrgSettings from './pages/OrgSettings.svelte'
   import Users from './pages/Users.svelte'
   import Setup from './pages/Setup.svelte'
-  import AdminSettings from './pages/AdminSettings.svelte'
   import Upload from './pages/Upload.svelte'
   import Vulnerabilities from './pages/Vulnerabilities.svelte'
   import LicensePolicy from './pages/LicensePolicy.svelte'
@@ -205,16 +203,12 @@
         <Audit />
       {:else if $route.page === 'tokens'}
         <Tokens />
-      {:else if $route.page === 'cicd-tokens'}
-        <CicdTokens />
       {:else if $route.page === 'settings'}
         <OrgSettings />
       {:else if $route.page === 'users'}
         <Users />
       {:else if $route.page === 'setup'}
         <Setup />
-      {:else if $route.page === 'admin-settings'}
-        <AdminSettings />
       {:else if $route.page === 'upload'}
         <Upload />
       {:else if $route.page === 'vulnerabilities'}

@@ -44,4 +44,21 @@ public sealed class AzureBlobContainerAdapter : IAzureBlobContainer
         await foreach (var item in _container.GetBlobsAsync(cancellationToken: ct))
             yield return item.Properties.ContentLength ?? 0;
     }
+
+    public async IAsyncEnumerable<BlobInfo> EnumerateBlobsAsync(
+        string prefix, [EnumeratorCancellation] CancellationToken ct)
+    {
+        await foreach (var item in _container.GetBlobsAsync(
+            Azure.Storage.Blobs.Models.BlobTraits.None,
+            Azure.Storage.Blobs.Models.BlobStates.None,
+            prefix,
+            ct))
+        {
+            var lastModified = item.Properties.LastModified ?? DateTimeOffset.MinValue;
+            yield return new BlobInfo(
+                item.Name,
+                item.Properties.ContentLength ?? 0,
+                lastModified);
+        }
+    }
 }

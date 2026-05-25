@@ -78,7 +78,99 @@ public sealed class AzureBlobStoreTests
         Assert.False(await Sut.ExistsAsync("missing"));
     }
 
+    [Fact]
+    public async Task ListAsync_DelegatesToContainerWithPrefixAndPagesResults()
+    {
+        var entries = new[]
+        {
+            new BlobInfo("prefix/a", 11, DateTimeOffset.UnixEpoch),
+            new BlobInfo("prefix/b", 22, DateTimeOffset.UnixEpoch.AddMinutes(1)),
+            new BlobInfo("prefix/c", 33, DateTimeOffset.UnixEpoch.AddMinutes(2)),
+        };
+        _container.EnumerateBlobsAsync("prefix/", Arg.Any<CancellationToken>())
+            .Returns(AsyncBlobs(entries));
+
+        var collected = new List<BlobInfo>();
+        await foreach (var b in Sut.ListAsync("prefix/"))
+            collected.Add(b);
+
+        Assert.Equal(entries, collected);
+        _container.Received(1).EnumerateBlobsAsync("prefix/", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task ListAsync_EmptyPrefix_YieldsNothing()
+    {
+        _container.EnumerateBlobsAsync("empty/", Arg.Any<CancellationToken>())
+            .Returns(AsyncBlobs());
+
+        var any = false;
+        await foreach (var _ in Sut.ListAsync("empty/")) any = true;
+        Assert.False(any);
+    }
+
+    [Fact]
+    public async Task PutAsync_PropagatesCancellationToken()
+    {
+        using var stream = new MemoryStream([1]);
+        using var cts = new CancellationTokenSource();
+        await Sut.PutAsync("k", stream, cts.Token);
+        await _container.Received(1).UploadAsync("k", stream, cts.Token);
+    }
+
+    [Fact]
+    public async Task GetAsync_PropagatesCancellationToken()
+    {
+        using var cts = new CancellationTokenSource();
+        _container.DownloadOrNullAsync("k", cts.Token).Returns((Stream?)null);
+        await Sut.GetAsync("k", cts.Token);
+        await _container.Received(1).DownloadOrNullAsync("k", cts.Token);
+    }
+
+    [Fact]
+    public async Task ExistsAsync_PropagatesCancellationToken()
+    {
+        using var cts = new CancellationTokenSource();
+        _container.ExistsAsync("k", cts.Token).Returns(true);
+        await Sut.ExistsAsync("k", cts.Token);
+        await _container.Received(1).ExistsAsync("k", cts.Token);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_PropagatesCancellationToken()
+    {
+        using var cts = new CancellationTokenSource();
+        await Sut.DeleteAsync("k", cts.Token);
+        await _container.Received(1).DeleteIfExistsAsync("k", cts.Token);
+    }
+
+    [Fact]
+    public async Task PutAsync_ContainerThrows_ExceptionPassesThrough()
+    {
+        using var stream = new MemoryStream([1]);
+        _container.UploadAsync(Arg.Any<string>(), Arg.Any<Stream>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new InvalidOperationException("boom")));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => Sut.PutAsync("k", stream));
+        Assert.Equal("boom", ex.Message);
+    }
+
+    [Fact]
+    public async Task GetTotalSizeAsync_PropagatesCancellationToken()
+    {
+        using var cts = new CancellationTokenSource();
+        _container.EnumerateSizesAsync(cts.Token).Returns(AsyncEnum(5, 7));
+        Assert.Equal(12, await Sut.GetTotalSizeAsync(cts.Token));
+        _container.Received(1).EnumerateSizesAsync(cts.Token);
+    }
+
     private static async IAsyncEnumerable<long> AsyncEnum(params long[] values)
+    {
+        foreach (var v in values) { await Task.Yield(); yield return v; }
+    }
+
+    private static async IAsyncEnumerable<BlobInfo> AsyncBlobs(params BlobInfo[] values)
     {
         foreach (var v in values) { await Task.Yield(); yield return v; }
     }

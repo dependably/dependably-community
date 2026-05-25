@@ -16,9 +16,11 @@
           <Exclude>[Dependably.Tests]*,[xunit.*]*,[Microsoft.*]*</Exclude>
 
           <!-- File-level exclusions for code that can't be meaningfully unit-tested:
-               the embedded SQL migration script, generated regex partials, and the
-               Program top-level statements (the host-bootstrap path). -->
-          <ExcludeByFile>**/Schema*.sql,**/*.g.cs,**/Program.cs</ExcludeByFile>
+               the embedded SQL migration script, generated regex partials, the
+               Program top-level statements (the host-bootstrap path), and thin
+               adapters over live infra (Redis SDK, Npgsql, Azure Blob SDK) that
+               require real services to exercise. -->
+          <ExcludeByFile>**/Schema*.sql,**/*.g.cs,**/Program.cs,**/Infrastructure/Redis/**/*.cs,**/Infrastructure/RedisLockoutStore.cs,**/Infrastructure/NpgsqlMetadataStore.cs,**/Storage/AzureBlobContainerAdapter.cs,**/Infrastructure/SpdxLicenseRepository.cs</ExcludeByFile>
 
           <!-- Skip auto-generated and test-only attribute targets. -->
           <ExcludeByAttribute>Obsolete,GeneratedCodeAttribute,CompilerGeneratedAttribute,ExcludeFromCodeCoverageAttribute</ExcludeByAttribute>

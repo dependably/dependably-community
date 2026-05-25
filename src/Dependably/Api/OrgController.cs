@@ -94,10 +94,11 @@ public sealed class OrgController : OrgScopedControllerBase
             var status = ComputeVersionStatus(v, hasMax ? maxScore : (double?)null, tolerance);
             return new {
                 v.Id, v.PackageId, v.Version, v.Purl, v.BlobKey,
-                v.SizeBytes, v.ChecksumSha256, v.Yanked, v.YankReason,
-                v.FirstFetch, v.CreatedAt, v.VulnCheckedAt,
+                v.SizeBytes, v.ChecksumSha256, v.ChecksumSha1, v.Yanked, v.YankReason,
+                v.FirstFetch, v.CreatedAt, v.VulnCheckedAt, v.PublishedAt,
                 v.ManualBlockState,
-                v.Deprecated,
+                v.Deprecated, v.Origin,
+                v.UpstreamIntegrityValue, v.UpstreamIntegrityAlgorithm,
                 MaxOsvScore = hasMax ? maxScore : (double?)null,
                 Status = status,
                 Licenses = licenseMap[v.Id].ToArray()

@@ -12,8 +12,14 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'lcov'],
       reportsDirectory: 'coverage',
-      include: ['src/lib/**/*.js'],
-      exclude: ['src/lib/**/*.test.js'],
+      include: ['src/lib/**/*.js', 'src/i18n/**/*.js'],
+      exclude: [
+        'src/lib/**/*.test.js',
+        '.stylelintrc.cjs',
+        'svelte.config.js',
+        '../build/extract-notices.mjs',
+        '../i18n/scripts/i18n-validate.js',
+      ],
     },
   },
 })

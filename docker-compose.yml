@@ -2,6 +2,9 @@ services:
   dependably:
     build:
       context: .
+      args:
+        REGISTRY_URL: ${REGISTRY_URL:-}
+        REGISTRY_KEY: ${REGISTRY_KEY:-}
     ports:
       - "8080:8080"
     volumes:
@@ -9,6 +12,7 @@ services:
     environment:
       BASE_URL: ${BASE_URL:-http://localhost:8080}
       DEFAULT_ORG_SLUG: ${DEFAULT_ORG_SLUG:-default}
+      DEPLOYMENT_MODE: multi
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/ready"]
       interval: 10s

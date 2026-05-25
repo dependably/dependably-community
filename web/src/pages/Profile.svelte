@@ -4,6 +4,7 @@
   import { api } from '../lib/api.js'
   import { submitForm } from '../lib/form.js'
   import { locales, switchLocale } from '../lib/locale.js'
+  import PasswordStrength from '../lib/PasswordStrength.svelte'
   import Licenses from './Licenses.svelte'
 
   let currentPassword = '', newPassword = '', confirm = ''
@@ -11,6 +12,9 @@
   let passwordSavedAt = null
   let showModal = false
   let noticesOpen = false
+  let passwordValid = false
+
+  $: passwordContext = { email: $user?.email }
 
   $: forced = $user?.mustChangePassword === true
   // Auto-open the password modal when the user is mid-rotation. Modal cancel is hidden in
@@ -34,7 +38,7 @@
 
   async function submitPassword() {
     modalError = ''
-    if (newPassword.length < 12) { modalError = $t('profile.errorMinLength'); return }
+    if (!passwordValid) { modalError = $t('profile.errorMinLength'); return }
     if (newPassword !== confirm) { modalError = $t('profile.errorMismatch'); return }
     if (newPassword === currentPassword) { modalError = $t('profile.errorSame'); return }
     await submitForm(() => api.changePassword(currentPassword, newPassword), {
@@ -143,6 +147,7 @@
         <div class="form-row">
           <label>{$t('profile.newPassword')} <span class="text-muted t-xs">{$t('profile.passwordHint')}</span></label>
           <input type="password" bind:value={newPassword} required minlength="12" autocomplete="new-password" />
+          <PasswordStrength value={newPassword} context={passwordContext} bind:valid={passwordValid} />
         </div>
         <div class="form-row">
           <label>{$t('profile.confirmPassword')}</label>
@@ -152,7 +157,7 @@
           {#if !forced}
             <button type="button" on:click={closeModal}>{$t('common.actions.cancel')}</button>
           {/if}
-          <button type="submit" class="primary" disabled={loading}>
+          <button type="submit" class="primary" disabled={loading || !passwordValid}>
             {loading ? $t('common.actions.saving') : $t('profile.submit')}
           </button>
         </div>

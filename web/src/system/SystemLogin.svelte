@@ -1,6 +1,6 @@
 <script>
   import { t } from 'svelte-i18n'
-  import { api } from '../lib/api.js'
+  import { api, systemApi } from '../lib/api.js'
   import { user, navigate, takePendingRoute } from '../lib/store.js'
 
   let email = '', password = '', error = '', loading = false
@@ -10,7 +10,7 @@
     loading = true
     try {
       await api.login(email, password)
-      const me = await api.me()
+      const me = await systemApi.me()
       user.set(me)
       // mustChangePassword users go to system-profile; the pending route (if any) is consumed
       // by SystemProfile.svelte once rotation completes. Other users consume it now.
@@ -31,7 +31,6 @@
 <div class="login-page">
   <form on:submit|preventDefault={submit}>
     <h1>{$t('system.login.title')}</h1>
-    <p class="subtitle">{$t('system.login.subtitle')}</p>
 
     <label>{$t('system.login.email')}</label>
     <input type="email" bind:value={email} required autocomplete="username" />
@@ -65,8 +64,7 @@
     flex-direction: column;
     gap: 12px;
   }
-  h1 { margin: 0; font-size: 22px; }
-  .subtitle { margin: 0 0 8px; color: var(--text2); font-size: 13px; }
+  h1 { margin: 0 0 8px; font-size: 22px; }
   label { font-size: 13px; color: var(--text2); }
   input {
     padding: 6px 8px;

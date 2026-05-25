@@ -141,10 +141,35 @@ public sealed class FirstBootServiceTests
             "SELECT value FROM instance_settings WHERE key = 'max_upload_bytes_pypi'"));
         Assert.Equal("262144", await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'max_upload_bytes_npm'"));
-        // Unspecified key remains unset.
-        var nuget = await conn.ExecuteScalarAsync<string?>(
-            "SELECT value FROM instance_settings WHERE key = 'max_upload_bytes_nuget'");
-        Assert.Null(nuget);
+        // Unspecified key falls back to the InstanceSettingDefaults baseline so the
+        // operator UI never loads blank.
+        Assert.Equal(InstanceSettingDefaults.MaxUploadBytesNuGet, await conn.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = 'max_upload_bytes_nuget'"));
+    }
+
+    [Fact]
+    public async Task RunAsync_SeedsAllSixInstanceSettings_WithDefaults_WhenNoEnvVarsSet()
+    {
+        // Fresh boot with no env-var overrides — every key the operator sees on
+        // /system/settings must be present in instance_settings, with the value
+        // from InstanceSettingDefaults. Guards against the UI loading blank.
+        await using var fx = await NewFixtureAsync();
+        await NewSut(fx, Cfg()).RunAsync();
+
+        await using var conn = await fx.Store.OpenAsync();
+
+        Assert.Equal(InstanceSettingDefaults.MaxUploadBytes, await conn.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = 'max_upload_bytes'"));
+        Assert.Equal(InstanceSettingDefaults.MaxUploadBytesPyPi, await conn.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = 'max_upload_bytes_pypi'"));
+        Assert.Equal(InstanceSettingDefaults.MaxUploadBytesNpm, await conn.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = 'max_upload_bytes_npm'"));
+        Assert.Equal(InstanceSettingDefaults.MaxUploadBytesNuGet, await conn.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = 'max_upload_bytes_nuget'"));
+        Assert.Equal(InstanceSettingDefaults.GcSchedule, await conn.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = 'gc_schedule'"));
+        Assert.Equal(InstanceSettingDefaults.SiemMaxLookbackDays, await conn.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = 'siem_max_lookback_days'"));
     }
 
     [Fact]
@@ -163,5 +188,40 @@ public sealed class FirstBootServiceTests
             "SELECT password_hash FROM system_admins LIMIT 1");
         Assert.True(BCrypt.Net.BCrypt.Verify("CorrectPass12345", hash));
         Assert.False(BCrypt.Net.BCrypt.Verify("WrongPassword12345", hash));
+    }
+
+    [Fact]
+    public async Task RunAsync_MultiMode_FallsBackToGenericAdminPassword_WhenSystemAdminPasswordOmitted()
+    {
+        // Covers the second arm of the ?? chain in BootstrapMulti:
+        // FIRST_BOOT_SYSTEM_ADMIN_PASSWORD is null → fall through to FIRST_BOOT_ADMIN_PASSWORD.
+        await using var fx = await NewFixtureAsync();
+        await NewSut(fx, Cfg(
+            ("DEPLOYMENT_MODE", "multi"),
+            ("FIRST_BOOT_ADMIN_PASSWORD", "FallbackPass12345"))).RunAsync();
+
+        await using var conn = await fx.Store.OpenAsync();
+        var hash = await conn.ExecuteScalarAsync<string>(
+            "SELECT password_hash FROM system_admins LIMIT 1");
+        Assert.True(BCrypt.Net.BCrypt.Verify("FallbackPass12345", hash));
+    }
+
+    [Fact]
+    public async Task RunAsync_MultiMode_DefaultsSystemAdminEmail_WhenConfigOmitted()
+    {
+        // Covers the null-arm of `config["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] ?? "system@dependably.local"`
+        // and the random-password arm when no password env var is set at all.
+        await using var fx = await NewFixtureAsync();
+        await NewSut(fx, Cfg(("DEPLOYMENT_MODE", "multi"))).RunAsync();
+
+        await using var conn = await fx.Store.OpenAsync();
+        var email = await conn.ExecuteScalarAsync<string>(
+            "SELECT email FROM system_admins LIMIT 1");
+        Assert.Equal("system@dependably.local", email);
+
+        // password_hash is populated even with no env override (random fallback path).
+        var hash = await conn.ExecuteScalarAsync<string>(
+            "SELECT password_hash FROM system_admins LIMIT 1");
+        Assert.False(string.IsNullOrEmpty(hash));
     }
 }

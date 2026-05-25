@@ -45,13 +45,12 @@
   $: sortedVersions = [...versions].sort((a, b) => {
     let cmp = 0
     if (sortCol === 'version')  cmp = a.version.localeCompare(b.version, undefined, { numeric: true, sensitivity: 'base' })
-    else if (sortCol === 'size')     cmp = a.sizeBytes - b.sizeBytes
-    else if (sortCol === 'pushed')   cmp = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-    else if (sortCol === 'checksum') cmp = (a.checksumSha256 ?? '').localeCompare(b.checksumSha256 ?? '')
-    else if (sortCol === 'license')  cmp = (a.licenses?.join(', ') ?? '').localeCompare(b.licenses?.join(', ') ?? '')
-    else if (sortCol === 'purl')     cmp = (a.purl ?? '').localeCompare(b.purl ?? '')
-    else if (sortCol === 'vulnScan') cmp = (a.vulnCheckedAt ?? '').localeCompare(b.vulnCheckedAt ?? '')
-    else if (sortCol === 'status')   cmp = (a.status ?? '').localeCompare(b.status ?? '')
+    else if (sortCol === 'size')      cmp = a.sizeBytes - b.sizeBytes
+    else if (sortCol === 'pushed')    cmp = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    else if (sortCol === 'checksum')  cmp = (a.checksumSha256 ?? '').localeCompare(b.checksumSha256 ?? '')
+    else if (sortCol === 'license')   cmp = (a.licenses?.join(', ') ?? '').localeCompare(b.licenses?.join(', ') ?? '')
+    else if (sortCol === 'published') cmp = (a.publishedAt ?? '').localeCompare(b.publishedAt ?? '')
+    else if (sortCol === 'status')    cmp = (a.status ?? '').localeCompare(b.status ?? '')
     return sortDir === 'asc' ? cmp : -cmp
   })
 
@@ -108,8 +107,7 @@
     <col class="col-size">
     <col class="col-pushed">
     <col class="col-license">
-    <col>
-    <col class="col-vulnscan">
+    <col class="col-published">
     <col class="col-status">
     <col class="col-actions">
   </colgroup>
@@ -121,8 +119,7 @@
       <th class="sortable" on:click={() => toggleSort('size')}>{$t('versionDetail.columns.size')}{sortIndicator('size', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('pushed')}>{$t('versionDetail.columns.pushed')}{sortIndicator('pushed', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('license')}>{$t('versionDetail.columns.license')}{sortIndicator('license', sortCol, sortDir)}</th>
-      <th class="sortable" on:click={() => toggleSort('purl')}>{$t('versionDetail.columns.purl')}{sortIndicator('purl', sortCol, sortDir)}</th>
-      <th class="sortable" on:click={() => toggleSort('vulnScan')}>{$t('versionDetail.columns.vulnScan')}{sortIndicator('vulnScan', sortCol, sortDir)}</th>
+      <th class="sortable" on:click={() => toggleSort('published')}>{$t('versionDetail.columns.published')}{sortIndicator('published', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('status')}>{$t('versionDetail.columns.status')}{sortIndicator('status', sortCol, sortDir)}</th>
       <th>{$t('versionDetail.columns.actions')}</th>
     </tr>
@@ -130,7 +127,7 @@
   {#if loading}
     <tbody>
       {#each [0,1,2,3,4] as i (i)}
-        <tr><td colspan="10"><span class="skeleton"></span></td></tr>
+        <tr><td colspan="9"><span class="skeleton"></span></td></tr>
       {/each}
     </tbody>
   {:else}
@@ -178,12 +175,11 @@
             <span class="text-muted">—</span>
           {/if}
         </td>
-        <td class="mono purl-cell" title={ver.purl}>{ver.purl}</td>
         <td class="nowrap">
-          {#if ver.vulnCheckedAt}
-            <span class="text-muted t-xs">{$formatDate(ver.vulnCheckedAt)}</span>
+          {#if ver.publishedAt}
+            <span class="text-muted t-xs">{$formatDate(ver.publishedAt)}</span>
           {:else}
-            <span class="text-muted t-xs">{$t('versionDetail.vulnNever')}</span>
+            <span class="text-muted">—</span>
           {/if}
         </td>
         <td>
@@ -206,7 +202,7 @@
 
       {#if isExpanded}
         <tr class="detail-row">
-          <td colspan="10">
+          <td colspan="9">
             <div class="detail-panel">
               <div class="detail-section">
                 <span class="detail-label">{$t('versionDetail.detail.purl')}</span>
@@ -221,6 +217,31 @@
                   <button class="copy-btn" on:click={() => copy(ver.checksumSha256)}>{$t('versionDetail.detail.copy')}</button>
                 </div>
               {/if}
+
+              {#if ver.upstreamIntegrityValue || (pkg?.ecosystem === 'npm' && ver.origin === 'proxy' && ver.checksumSha1)}
+                {@const showNpmShasum = pkg?.ecosystem === 'npm' && ver.origin === 'proxy' && ver.checksumSha1}
+                {#if ver.upstreamIntegrityValue}
+                  <div class="detail-section">
+                    <span class="detail-label">{$t(`versionDetail.detail.upstreamIntegrity.${ver.upstreamIntegrityAlgorithm}`)}</span>
+                    <code class="detail-value mono">{ver.upstreamIntegrityValue}</code>
+                    <button class="copy-btn" on:click={() => copy(ver.upstreamIntegrityValue)}>{$t('versionDetail.detail.copy')}</button>
+                  </div>
+                {/if}
+                {#if showNpmShasum}
+                  <div class="detail-section">
+                    <span class="detail-label">{$t('versionDetail.detail.upstreamIntegrity.shasum')}</span>
+                    <code class="detail-value mono">{ver.checksumSha1}</code>
+                    <button class="copy-btn" on:click={() => copy(ver.checksumSha1)}>{$t('versionDetail.detail.copy')}</button>
+                  </div>
+                {/if}
+              {/if}
+
+              <div class="detail-section">
+                <span class="detail-label">{$t('versionDetail.detail.vulnScan')}</span>
+                <span class="detail-value text-muted">
+                  {ver.vulnCheckedAt ? $formatDate(ver.vulnCheckedAt) : $t('versionDetail.vulnNever')}
+                </span>
+              </div>
 
               <div class="detail-section">
                 <span class="detail-label">{$t('versionDetail.detail.vulns')}</span>
@@ -253,12 +274,18 @@
         disabled={scanningId === ver.id || scanCooldownRemaining(ver) > 0}
         title={scanCooldownRemaining(ver) > 0 ? $t('versionDetail.rescanCooldown', { values: { minutes: Math.ceil(scanCooldownRemaining(ver)/60000) } }) : $t('versionDetail.rescanTitle')}
       >{scanningId === ver.id ? $t('versionDetail.rescanning') : $t('versionDetail.actionsMenu.rescan')}</button>
-      {#if ver.manualBlockState !== 'blocked'}
-        <button class="popover-item" on:click|stopPropagation={() => fire('block', ver)}>{$t('versionDetail.actionsMenu.block')}</button>
-      {/if}
-      {#if ver.manualBlockState !== 'allowed'}
-        <button class="popover-item" on:click|stopPropagation={() => fire('unblock', ver)}>{$t('versionDetail.actionsMenu.unblock')}</button>
-      {/if}
+      <button
+        class="popover-item"
+        on:click|stopPropagation={() => fire('block', ver)}
+        disabled={ver.status === 'blocked'}
+        title={ver.status === 'blocked' ? $t('versionDetail.blockDisabledTitle') : ''}
+      >{$t('versionDetail.actionsMenu.block')}</button>
+      <button
+        class="popover-item"
+        on:click|stopPropagation={() => fire('unblock', ver)}
+        disabled={ver.status !== 'blocked'}
+        title={ver.status !== 'blocked' ? $t('versionDetail.unblockDisabledTitle') : ''}
+      >{$t('versionDetail.actionsMenu.unblock')}</button>
       <div class="popover-divider"></div>
       <button class="popover-item danger" on:click|stopPropagation={() => fire('delete', ver)}>{$t('versionDetail.actionsMenu.delete')}</button>
     </div>
@@ -279,17 +306,16 @@
 
   .nowrap { white-space: nowrap; }
   .checksum-cell { font-size: 11px; color: var(--text2); }
-  .purl-cell { font-size: 11px; color: var(--text2); overflow-wrap: anywhere; }
   .license-cell { font-size: 12px; overflow-wrap: anywhere; }
-  .versions-table .col-version  { width: 180px; }
-  .versions-table .col-origin   { width: 90px; }
-  .versions-table .col-checksum { width: 100px; }
-  .versions-table .col-size     { width: 80px; }
-  .versions-table .col-pushed   { width: 150px; }
-  .versions-table .col-license  { width: 120px; }
-  .versions-table .col-vulnscan { width: 140px; }
-  .versions-table .col-status   { width: 100px; }
-  .versions-table .col-actions  { width: 60px; }
+  .versions-table .col-version   { width: 180px; }
+  .versions-table .col-origin    { width: 90px; }
+  .versions-table .col-checksum  { width: 100px; }
+  .versions-table .col-size      { width: 80px; }
+  .versions-table .col-pushed    { width: 150px; }
+  .versions-table .col-license   { width: 120px; }
+  .versions-table .col-published { width: 150px; }
+  .versions-table .col-status    { width: 100px; }
+  .versions-table .col-actions   { width: 60px; }
 
   .detail-row td { padding: 0; border-top: none; }
   .copy-btn { padding: 1px 6px; font-size: 11px; flex-shrink: 0; }

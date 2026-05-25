@@ -30,6 +30,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<TokenRepository>();
         services.AddSingleton<AuditRepository>();
         services.AddSingleton<AuditEventRepository>();
+        services.AddSingleton<BackgroundJobRunRepository>();
         services.AddSingleton<IAuditEmitter, AuditEmitter>();
         services.AddSingleton<InviteRepository>();
         services.AddSingleton<AllowlistRepository>();

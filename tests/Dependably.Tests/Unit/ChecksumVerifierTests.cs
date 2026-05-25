@@ -152,6 +152,14 @@ public sealed class ChecksumVerifierTests
         Assert.False(ChecksumVerifier.Verify(Payload, new ChecksumSpec(ChecksumAlgorithm.Sha512, bogus)));
     }
 
+    [Fact]
+    public void Verify_UnknownAlgorithm_ReturnsFalse()
+    {
+        // Cast an out-of-range int to the enum to hit the switch's default arm (`_ => false`).
+        var bogusAlgorithm = (ChecksumAlgorithm)999;
+        Assert.False(ChecksumVerifier.Verify(Payload, new ChecksumSpec(bogusAlgorithm, Sha256Hex)));
+    }
+
     // ── ComputeSha256Hex ──────────────────────────────────────────────────────
 
     [Fact]

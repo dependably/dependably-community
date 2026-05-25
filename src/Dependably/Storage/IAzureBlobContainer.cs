@@ -20,4 +20,10 @@ public interface IAzureBlobContainer
     /// blob-store plan's "GetTotalSizeAsync iterates pagination cursors" requirement.
     /// </summary>
     IAsyncEnumerable<long> EnumerateSizesAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Enumerates (key, size, last-modified) for every blob whose name starts with
+    /// <paramref name="prefix"/>. Backs <see cref="AzureBlobStore.ListAsync"/>.
+    /// </summary>
+    IAsyncEnumerable<BlobInfo> EnumerateBlobsAsync(string prefix, CancellationToken ct);
 }

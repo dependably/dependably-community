@@ -25,11 +25,11 @@ public sealed class ProtocolCapabilityNarrowingTests : IClassFixture<DependablyF
     public Task DisposeAsync() => Task.CompletedTask;
 
     /// <summary>
-    /// Inserts a CI/CD token directly with the given <paramref name="capabilities"/>
+    /// Inserts a service token directly with the given <paramref name="capabilities"/>
     /// JSON. Bypasses the issuance API so the test can construct exactly the token
     /// shape it needs without depending on issuance logic that's covered separately.
     /// </summary>
-    private async Task<string> SeedCicdTokenAsync(string capabilities)
+    private async Task<string> SeedServiceTokenAsync(string capabilities)
     {
         var raw = Dependably.Security.TokenGenerator.Generate();
         var hash = TokenRepository.HashToken(raw);
@@ -39,7 +39,7 @@ public sealed class ProtocolCapabilityNarrowingTests : IClassFixture<DependablyF
         var orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1");
         await conn.ExecuteAsync("""
-            INSERT INTO cicd_tokens (id, org_id, name, token_hash, capabilities)
+            INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities)
             VALUES (@id, @orgId, @name, @hash, @capabilities)
             """, new
             {
@@ -55,7 +55,7 @@ public sealed class ProtocolCapabilityNarrowingTests : IClassFixture<DependablyF
     [Fact]
     public async Task NpmOnlyToken_PublishesNpm_RejectedByPyPi()
     {
-        var token = await SeedCicdTokenAsync("""["publish:npm","read:metadata","read:artifact"]""");
+        var token = await SeedServiceTokenAsync("""["publish:npm","read:metadata","read:artifact"]""");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -86,7 +86,7 @@ public sealed class ProtocolCapabilityNarrowingTests : IClassFixture<DependablyF
     [Fact]
     public async Task NugetOnlyToken_PublishesNuget_RejectedByNpm()
     {
-        var token = await SeedCicdTokenAsync("""["publish:nuget","read:metadata","read:artifact"]""");
+        var token = await SeedServiceTokenAsync("""["publish:nuget","read:metadata","read:artifact"]""");
 
         // NuGet publish: capability matches → expect success.
         using var nugetClient = _factory.CreateClient();
@@ -127,7 +127,7 @@ public sealed class ProtocolCapabilityNarrowingTests : IClassFixture<DependablyF
             var orgId = await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1");
             await conn.ExecuteAsync("""
-                INSERT INTO cicd_tokens (id, org_id, name, token_hash, capabilities)
+                INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities)
                 VALUES (@id, @orgId, @name, @hash, NULL)
                 """, new
                 {

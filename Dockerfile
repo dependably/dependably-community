@@ -2,6 +2,13 @@
 FROM node:22-alpine AS frontend
 WORKDIR /web
 COPY web/package*.json ./
+ARG REGISTRY_URL=
+ARG REGISTRY_KEY=
+RUN if [ -n "$REGISTRY_URL" ] && [ -n "$REGISTRY_KEY" ]; then \
+      HOST=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^https?://||; s|/.*||'); \
+      printf 'registry=%s/npm/\n//%s/npm/:_authToken=%s\nfund=false\n' \
+        "$REGISTRY_URL" "$HOST" "$REGISTRY_KEY" > /root/.npmrc; \
+    fi
 RUN npm ci
 COPY web/ ./
 RUN npm run sbom
@@ -16,6 +23,25 @@ COPY Directory.Build.props .
 COPY src/Dependably/Dependably.csproj src/Dependably/
 ARG TARGETARCH
 ARG VERSION=0.1.0
+ARG REGISTRY_URL=
+ARG REGISTRY_KEY=
+RUN if [ -n "$REGISTRY_URL" ] && [ -n "$REGISTRY_KEY" ]; then \
+      { \
+        echo '<?xml version="1.0" encoding="utf-8"?>'; \
+        echo '<configuration>'; \
+        echo '  <packageSources>'; \
+        echo '    <clear />'; \
+        echo "    <add key=\"dependably\" value=\"${REGISTRY_URL}/nuget/v3/index.json\" />"; \
+        echo '  </packageSources>'; \
+        echo '  <packageSourceCredentials>'; \
+        echo '    <dependably>'; \
+        echo '      <add key="Username" value="ci" />'; \
+        echo "      <add key=\"ClearTextPassword\" value=\"${REGISTRY_KEY}\" />"; \
+        echo '    </dependably>'; \
+        echo '  </packageSourceCredentials>'; \
+        echo '</configuration>'; \
+      } > /src/NuGet.Config; \
+    fi
 RUN case "$TARGETARCH" in \
       amd64) echo linux-musl-x64 ;; \
       *) echo linux-musl-arm64 ;; \

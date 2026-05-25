@@ -76,7 +76,7 @@ src/Dependably/
     Models.cs             — Org, OrgSettings, Package, PackageVersion, TokenRecord records
     OrgRepository.cs      — org + settings + instance_settings queries
     PackageRepository.cs  — package/version CRUD; GetOrCreate pattern
-    TokenRepository.cs    — resolves user + CI/CD tokens by SHA-256 hash
+    TokenRepository.cs    — resolves user + service tokens by SHA-256 hash
     AuditRepository.cs    — append-only audit_log + activity inserts
   Api/
     PyPiController.cs     — GET /o/{org}/simple/, GET /o/{org}/packages/{file}, POST /o/{org}/pypi/legacy/
@@ -94,6 +94,7 @@ tests/Dependably.Tests/
 
 - **BlobKeys is the only place blob keys are constructed.** Callers never build key strings inline.
 - **All Dapper queries must use parameterized form.** No string interpolation inside SQL calls — enforced by CI Roslyn analyzer.
+- **SQL touching tenant-scoped tables must filter on `org_id`/`tenant_id`** — enforced by the `OrgIdFilteringComplianceTests` test. Legitimately cross-tenant queries (one-shot migrations, system-admin views, queries keyed by an FK-bound id that's already org-scoped) opt out with a `// xtenant: <reason>` comment in the 5 lines above the SQL literal.
 - **`IBlobStore` never makes naming decisions** — keys always come from `BlobKeys`.
 - **`IMetadataStore` returns raw connections.** Callers use Dapper extension methods and are responsible for `await using`.
 - **PURLs are the canonical package identity.** `PurlNormalizer` is the single source of truth — used by push handlers, proxy handlers, simple index generator, and npm metadata rewriter.

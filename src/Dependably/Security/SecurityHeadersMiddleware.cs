@@ -15,8 +15,8 @@ public sealed class SecurityHeadersMiddleware
     private const string FrontendCsp =
         "default-src 'self'; " +
         "script-src 'self' 'sha256-xF8s42kh/0+SuaBY4Q15LZGGKtszNqP3TLZJtgGeG0g='; " +
-        "style-src 'self' https://fonts.googleapis.com; " +
-        "font-src https://fonts.gstatic.com; " +
+        "style-src 'self'; " +
+        "font-src 'self'; " +
         "img-src 'self' data:; " +
         "connect-src 'self'; " +
         "form-action 'self'; " +

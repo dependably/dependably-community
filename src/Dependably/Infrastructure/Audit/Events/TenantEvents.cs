@@ -22,7 +22,7 @@ public static class TenantEvents
         string TokenId,
         string CapabilitiesJson,             // canonical JSON, byte-equal to the DB row
         IReadOnlyList<string> Capabilities,  // structured array for SIEM/JSON-path queries
-        string TokenKind,                    // "user" | "cicd"
+        string TokenKind,                    // "user" | "service"
         DateTimeOffset? ExpiresAt)
     {
         public string ToJson() => JsonSerializer.Serialize(this, EventJsonOptions.Snake);

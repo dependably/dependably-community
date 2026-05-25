@@ -5,6 +5,19 @@ CREATE TABLE IF NOT EXISTS orgs (
     id          TEXT PRIMARY KEY,
     slug        TEXT NOT NULL UNIQUE,
     deleted_at  TEXT,
+    -- Tenant lifecycle gate consulted by ITenantStorageResolver before every registry write.
+    status      TEXT NOT NULL DEFAULT 'active'
+                CHECK (status IN ('active','suspended','archived','deleting')),
+    -- Reserved for future multi-region routing. Fully dormant in community.
+    region      TEXT,
+    -- Per-tenant entitlement document; canonical schema + strict binding live in enterprise.
+    features    TEXT NOT NULL DEFAULT '{}',
+    -- Reserved for future enterprise hierarchy; not interpreted by any query in community.
+    -- Schema capacity only — no FK, no model field, no API surface.
+    parent_tenant_id TEXT,
+    -- Aggregate storage quota for the tenant's hosted artefacts. NULL = unlimited.
+    -- Checked in PackagePublishService before the blob put; exceeding returns 413.
+    storage_quota_bytes BIGINT,
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
 );
 
@@ -22,6 +35,9 @@ CREATE TABLE IF NOT EXISTS org_settings (
     license_enforcement_mode  TEXT    NOT NULL DEFAULT 'off',
     proxy_passthrough_enabled INTEGER NOT NULL DEFAULT 1,
     max_osv_score_tolerance   REAL    NOT NULL DEFAULT 10.0,
+    -- Supply-chain hold: minimum upstream-release age (hours) before a proxy-fetched version
+    -- clears the block gate. NULL = policy off. See Schema.sql for the full rationale.
+    min_release_age_hours     INTEGER,
     default_language          TEXT    NOT NULL DEFAULT 'en',
     allow_version_overwrite   INTEGER NOT NULL DEFAULT 0
 );
@@ -54,6 +70,8 @@ CREATE TABLE IF NOT EXISTS system_admins (
     password_hash TEXT NOT NULL,
     must_change_password INTEGER NOT NULL DEFAULT 0,
     last_login_at TEXT,
+    account_status TEXT NOT NULL DEFAULT 'active' CHECK (account_status IN ('active','locked','disabled')),
+    password_reset_issued_at TEXT,
     language    TEXT,
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
 );
@@ -89,28 +107,39 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- via an additive ALTER TABLE in SchemaInitializer, and legacy 'imported'/'private'
     -- rows are collapsed to 'uploaded' by the collapse_origin_to_uploaded one-shot migration.
     origin      TEXT NOT NULL DEFAULT 'proxy',
+    -- ISO 8601 UTC; first-publish timestamp from the public upstream registry. See Schema.sql.
+    published_at TEXT,
+    -- Hex SHA-1 of the artefact bytes (npm packument shasum). See Schema.sql.
+    checksum_sha1 TEXT,
+    -- Upstream-published integrity hash + algorithm tag. See Schema.sql.
+    upstream_integrity_value TEXT,
+    upstream_integrity_algorithm TEXT,
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
     UNIQUE (package_id, version)
 );
 
-CREATE TABLE IF NOT EXISTS tokens (
+CREATE TABLE IF NOT EXISTS user_tokens (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     token_hash  TEXT NOT NULL UNIQUE,
     capabilities TEXT,           -- JSON array of capability strings.
+    description TEXT,            -- optional free-text label set at creation time.
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
-    expires_at  TEXT
+    expires_at  TEXT,
+    last_used_at TEXT            -- updated (throttled ~60s) when the token authenticates a request.
 );
 
-CREATE TABLE IF NOT EXISTS cicd_tokens (
+CREATE TABLE IF NOT EXISTS service_tokens (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     name        TEXT NOT NULL,
     token_hash  TEXT NOT NULL UNIQUE,
     capabilities TEXT,
+    description TEXT,            -- optional free-text label set at creation time.
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
-    expires_at  TEXT
+    expires_at  TEXT,
+    last_used_at TEXT            -- updated (throttled ~60s) when the token authenticates a request.
 );
 
 CREATE TABLE IF NOT EXISTS invites (
@@ -197,8 +226,8 @@ CREATE INDEX IF NOT EXISTS idx_pkg_version_vulns_version ON package_version_vuln
 CREATE INDEX IF NOT EXISTS idx_package_versions_package ON package_versions(package_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_org ON audit_log(org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_org ON activity(org_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(token_hash);
-CREATE INDEX IF NOT EXISTS idx_cicd_tokens_hash ON cicd_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_user_tokens_hash ON user_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_service_tokens_hash ON service_tokens(token_hash);
 
 CREATE TABLE IF NOT EXISTS blocklist (
     id          TEXT PRIMARY KEY,
@@ -398,6 +427,48 @@ CREATE TABLE IF NOT EXISTS audit_event (
 CREATE INDEX IF NOT EXISTS idx_audit_event_org_time ON audit_event (org_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_event_org_type ON audit_event (org_id, event_type, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_event_actor ON audit_event (org_id, actor_id, occurred_at DESC);
+
+-- Per-tenant registry bucket binding. See Schema.sql for the full semantics.
+CREATE TABLE IF NOT EXISTS tenant_storage (
+    org_id                      TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    registry_bucket             TEXT,
+    registry_region             TEXT,
+    registry_endpoint           TEXT,
+    registry_force_path_style   INTEGER NOT NULL DEFAULT 0,
+    created_at                  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+);
+
+-- Async provisioning state machine. See Schema.sql for the full semantics.
+CREATE TABLE IF NOT EXISTS tenant_provisioning_jobs (
+    id              TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    kind            TEXT NOT NULL,
+    state           TEXT NOT NULL DEFAULT 'creating'
+                    CHECK (state IN ('creating','ready','failed')),
+    idempotency_key TEXT,
+    last_error      TEXT,
+    started_at      TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    completed_at    TEXT,
+    UNIQUE (org_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_provisioning_jobs_org ON tenant_provisioning_jobs(org_id, kind);
+
+-- Per-run history for IHostedService background workers. See Schema.sql for full semantics.
+CREATE TABLE IF NOT EXISTS background_job_runs (
+    id              TEXT PRIMARY KEY,
+    job_name        TEXT NOT NULL,
+    operation       TEXT NOT NULL,
+    run_id          TEXT NOT NULL,
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT NOT NULL,
+    duration_ms     BIGINT NOT NULL,
+    outcome         TEXT NOT NULL,
+    error_message   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_background_job_runs_started_at
+    ON background_job_runs(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_background_job_runs_job_started
+    ON background_job_runs(job_name, started_at DESC);
 
 -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
 -- Those are no-ops on fresh installs (IF NOT EXISTS). They exist solely to add the

@@ -46,7 +46,10 @@ public sealed class ProxyVersionRecorder
             // is metadata-only so the simple index / flatcontainer responses can recover it.
             var dbBlobKey = $"{BlobKeys.Proxy(req.Sha256)}/{req.File}";
             var newVer = await _packages.CreateVersionAsync(
-                new NewPackageVersion(pkg.Id, req.Version, req.Purl, dbBlobKey, req.Bytes.Length, req.Sha256, FirstFetch: true),
+                new NewPackageVersion(pkg.Id, req.Version, req.Purl, dbBlobKey, req.Bytes.Length, req.Sha256,
+                    FirstFetch: true, PublishedAt: req.PublishedAt, ChecksumSha1: req.Sha1Hex,
+                    UpstreamIntegrityValue: req.UpstreamIntegrityValue,
+                    UpstreamIntegrityAlgorithm: req.UpstreamIntegrityAlgorithm),
                 ct);
             await _audit.LogActivityAsync(req.OrgId, req.Ecosystem, req.Purl, "first_fetch", req.UserId, sourceIp: req.SourceIp, ct: ct);
 
@@ -87,4 +90,22 @@ public sealed record ProxyVersionRequest(
     string File,
     byte[] Bytes,
     string? UserId,
-    string? SourceIp = null);
+    string? SourceIp = null,
+    /// <summary>
+    /// Upstream first-publish timestamp extracted on the cache-miss path (PyPI upload_time,
+    /// npm time[version], NuGet catalogEntry.published). Null if the metadata couldn't be
+    /// fetched or parsed — capture is fail-soft, never blocks the artefact write.
+    /// </summary>
+    DateTimeOffset? PublishedAt = null,
+    /// <summary>
+    /// Hex SHA-1 of the artefact bytes — captured from the upstream npm packument's
+    /// <c>dist.shasum</c> so the merged/local-only packument we re-emit later carries the
+    /// correct SHA-1. Null outside npm and when upstream didn't supply it.
+    /// </summary>
+    string? Sha1Hex = null,
+    /// <summary>
+    /// Upstream-published integrity hash captured verbatim in upstream's native encoding,
+    /// surfaced in the UI so operators can cross-check against the public registry's listing.
+    /// </summary>
+    string? UpstreamIntegrityValue = null,
+    string? UpstreamIntegrityAlgorithm = null);

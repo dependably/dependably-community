@@ -13,7 +13,58 @@ public class Org
     /// (default 30 days); after that, <see cref="Background.TenantHardDeleteService"/> cascades.
     /// </summary>
     public DateTimeOffset? DeletedAt { get; set; }
+    /// <summary>
+    /// Tenant lifecycle gate. 'active' admits writes; 'suspended'/'archived'/'deleting' cause
+    /// <see cref="Storage.ITenantStorageResolver"/> to raise <see cref="Storage.TenantNotReadyException"/>.
+    /// system_admin can toggle between 'active' and 'suspended' from the Tenants page;
+    /// 'archived' and 'deleting' are enterprise-only.
+    /// </summary>
+    public string Status { get; set; } = "active";
+    /// <summary>
+    /// Aggregate storage quota in bytes across the tenant's hosted artefacts (sum of
+    /// <c>package_versions.size_bytes</c>). NULL = unlimited. Enforced in
+    /// <see cref="Publish.PackagePublishService"/> ahead of the blob put — exceeding the
+    /// cap returns 413. Noisy-neighbour guard for pooled multi-tenant deployments.
+    /// </summary>
+    public long? StorageQuotaBytes { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+}
+
+/// <summary>
+/// List-projection of <see cref="Org"/> that carries the per-tenant aggregates needed by the
+/// system_admin tenants page (member count, storage bytes used). Kept separate from
+/// <see cref="Org"/> so single-tenant callers don't pay for the join.
+/// </summary>
+public class OrgListItem
+{
+    public string Id { get; set; } = "";
+    public string Slug { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? DeletedAt { get; set; }
+    /// <summary>See <see cref="Org.Status"/>.</summary>
+    public string Status { get; set; } = "active";
+    public long? StorageQuotaBytes { get; set; }
+    public int MemberCount { get; set; }
+    public long StorageBytes { get; set; }
+}
+
+/// <summary>
+/// Per-run record for an IHostedService background worker. Persisted by
+/// <see cref="Observability.BackgroundJobScope"/> on dispose; listed in the sysadmin
+/// Audit page "Background Jobs" tab.
+/// </summary>
+public class BackgroundJobRun
+{
+    public string Id { get; set; } = "";
+    public string JobName { get; set; } = "";
+    public string Operation { get; set; } = "";
+    public string RunId { get; set; } = "";
+    public DateTimeOffset StartedAt { get; set; }
+    public DateTimeOffset FinishedAt { get; set; }
+    public long DurationMs { get; set; }
+    /// <summary>Same vocabulary as the <c>dependably.background_job.duration</c> histogram outcome label.</summary>
+    public string Outcome { get; set; } = "";
+    public string? ErrorMessage { get; set; }
 }
 
 public class OrgSettings
@@ -32,6 +83,13 @@ public class OrgSettings
     public string LicenseEnforcementMode { get; set; } = "off";
     public bool ProxyPassthroughEnabled { get; set; } = true;
     public double MaxOsvScoreTolerance { get; set; } = 10.0;
+    /// <summary>
+    /// Supply-chain hold: a proxy-fetched version is blocked at first-fetch when
+    /// (now − upstream published_at) is below this many hours. NULL = policy off.
+    /// Evaluated in <see cref="Protocol.BlockGateService"/>; fail-open when the upstream
+    /// publish timestamp is missing.
+    /// </summary>
+    public int? MinReleaseAgeHours { get; set; }
     /// <summary>BCP-47 short code (e.g. "en", "fr"). New users in this tenant inherit this value.</summary>
     public string DefaultLanguage { get; set; } = "en";
     /// <summary>
@@ -77,6 +135,31 @@ public class PackageVersion
     public string? Deprecated { get; set; }
     /// <summary>Provenance: 'proxy' (upstream cache) or 'uploaded' (user-pushed via protocol or /admin/upload).</summary>
     public string Origin { get; set; } = "proxy";
+    /// <summary>
+    /// Upstream first-publish timestamp captured on proxy first-fetch (PyPI upload_time,
+    /// npm time[version], NuGet catalogEntry.published). NULL for uploaded versions and for
+    /// legacy rows pre-dating the column.
+    /// </summary>
+    public DateTimeOffset? PublishedAt { get; set; }
+    /// <summary>
+    /// Hex SHA-1 of the artefact bytes. Captured at npm publish time and from upstream npm
+    /// packuments on proxy first-fetch. NULL for non-npm rows and for legacy rows. Required
+    /// so the packument's <c>dist.shasum</c> can carry the correct hash (SHA-1 by spec).
+    /// </summary>
+    public string? ChecksumSha1 { get; set; }
+    /// <summary>
+    /// Upstream-published integrity hash captured at proxy first-fetch, stored verbatim in
+    /// upstream's native encoding (npm <c>sha512-{b64}</c> SRI, NuGet base64, PyPI hex) so
+    /// operators can copy-paste against the public registry's UI without re-encoding.
+    /// Paired with <see cref="UpstreamIntegrityAlgorithm"/>. NULL for uploaded versions and
+    /// legacy rows.
+    /// </summary>
+    public string? UpstreamIntegrityValue { get; set; }
+    /// <summary>
+    /// Tag describing how to interpret <see cref="UpstreamIntegrityValue"/>:
+    /// <c>'sha256'</c> (hex), <c>'sha512-sri'</c>, or <c>'sha512-b64'</c>.
+    /// </summary>
+    public string? UpstreamIntegrityAlgorithm { get; set; }
 }
 
 public class User
@@ -109,6 +192,8 @@ public class SystemAdmin
     public string Email { get; set; } = "";
     public bool MustChangePassword { get; set; }
     public DateTimeOffset? LastLoginAt { get; set; }
+    public string AccountStatus { get; set; } = "active";
+    public DateTimeOffset? PasswordResetIssuedAt { get; set; }
     public string? Language { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
@@ -142,6 +227,13 @@ public class OrgMemberView
     public DateTimeOffset JoinedAt { get; set; }
 }
 
+/// <summary>
+/// Discriminator for which token table a <see cref="TokenRecord"/> was resolved from.
+/// Set by <c>TokenRepository.ResolveAsync</c>; used by <c>TouchLastUsedAsync</c> to
+/// dispatch the throttled <c>last_used_at</c> update to the correct table.
+/// </summary>
+public enum TokenSource { User, Service }
+
 public class TokenRecord
 {
     public string Id { get; set; } = "";
@@ -153,19 +245,28 @@ public class TokenRecord
     /// auth time by <c>HasCapability</c>. NULL/malformed values deny everything.
     /// </summary>
     public string? Capabilities { get; set; }
+    /// <summary>Optional free-text label captured at creation.</summary>
+    public string? Description { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? ExpiresAt { get; set; }
+    /// <summary>Last successful auth timestamp; updated throttled (~60s) by the auth path.</summary>
+    public DateTimeOffset? LastUsedAt { get; set; }
+    public TokenSource Source { get; set; }
 }
 
-public class CicdTokenRecord
+public class ServiceTokenRecord
 {
     public string Id { get; set; } = "";
     public string OrgId { get; set; } = "";
     public string Name { get; set; } = "";
     /// <summary>See <see cref="TokenRecord.Capabilities"/>.</summary>
     public string? Capabilities { get; set; }
+    /// <summary>Optional free-text label captured at creation.</summary>
+    public string? Description { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? ExpiresAt { get; set; }
+    /// <summary>Last successful auth timestamp; updated throttled (~60s) by the auth path.</summary>
+    public DateTimeOffset? LastUsedAt { get; set; }
 }
 
 public class InviteRecord

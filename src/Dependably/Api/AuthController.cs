@@ -116,12 +116,14 @@ public sealed class AuthController : ControllerBase
     [HttpPost("/api/v1/invites/accept")]
     [AllowAnonymous]
     [EnableRateLimiting("login")]
-    public async Task<IActionResult> AcceptInvite([FromBody] AcceptInviteRequest req, CancellationToken ct)
+    public async Task<IActionResult> AcceptInvite([FromBody] AcceptInviteRequest req,
+        [FromServices] PasswordPolicy passwordPolicy, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.Token))
             return BadRequest(new { detail = "Invite token is required." });
-        if (string.IsNullOrWhiteSpace(req.Password) || req.Password.Length < 12)
-            return BadRequest(new { detail = "Password must be at least 12 characters." });
+        var verdict = passwordPolicy.Evaluate(req.Password, new PasswordContext());
+        if (!verdict.IsOk)
+            return BadRequest(new { detail = verdict.ToReason(), field = "password" });
 
         var invite = await _invites.AcceptAsync(req.Token, ct);
         if (invite is null)
@@ -149,12 +151,14 @@ public sealed class AuthController : ControllerBase
     [HttpPost("/api/v1/users/me/password")]
     [Authorize]
     [EnableRateLimiting("login")]
-    public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest req, CancellationToken ct)
+    public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest req,
+        [FromServices] PasswordPolicy passwordPolicy, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.CurrentPassword))
             return BadRequest(new { detail = "Current password is required." });
-        if (string.IsNullOrWhiteSpace(req.NewPassword) || req.NewPassword.Length < 12)
-            return BadRequest(new { detail = "New password must be at least 12 characters." });
+        var verdict = passwordPolicy.Evaluate(req.NewPassword, new PasswordContext());
+        if (!verdict.IsOk)
+            return BadRequest(new { detail = verdict.ToReason(), field = "newPassword" });
 
         var sub = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;

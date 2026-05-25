@@ -6,6 +6,8 @@
   let results = [], loading = false, error = ''
   let searched = false
   let resetResult = null  // { email, temporaryPassword }
+  let resetTarget = null  // pending confirmation: the row whose password is about to be reset
+  let resetBusy = false
   let actionBusyKey = ''
 
   async function search() {
@@ -42,22 +44,29 @@
     finally { actionBusyKey = '' }
   }
 
-  async function issueReset(row) {
-    if (!confirm($t('system.userLookup.resetConfirm', { values: { email: row.email, slug: row.tenantSlug } }))) return
-    const key = `${row.email}|${row.tenantSlug}|reset`
-    actionBusyKey = key
+  function openReset(row) {
+    resetTarget = row
+    error = ''
+  }
+
+  async function confirmReset() {
+    if (!resetTarget) return
+    const row = resetTarget
+    resetBusy = true
     error = ''
     try {
-      resetResult = await systemApi.issuePasswordReset(row.email, row.tenantSlug)
+      const result = await systemApi.issuePasswordReset(row.email, row.tenantSlug)
+      resetTarget = null
+      // search() resets resetResult; set the banner AFTER refresh so it survives.
       await search()
+      resetResult = result
     } catch (e) { error = e.message }
-    finally { actionBusyKey = '' }
+    finally { resetBusy = false }
   }
 </script>
 
 <div class="page">
   <h1>{$t('system.userLookup.title')}</h1>
-  <p class="subtitle">{$t('system.userLookup.subtitle')}</p>
 
   <form class="search-form" on:submit|preventDefault={search}>
     <div class="form-row">
@@ -101,7 +110,6 @@
       <tbody>
         {#each results as r (r.email + '|' + r.tenantSlug)}
           {@const statusKey = `${r.email}|${r.tenantSlug}|status`}
-          {@const resetKey = `${r.email}|${r.tenantSlug}|reset`}
           <tr>
             <td>{r.email}</td>
             <td>{r.tenantSlug}</td>
@@ -122,7 +130,7 @@
               {:else}
                 <button on:click={() => setStatus(r, 'active')} disabled={actionBusyKey === statusKey}>{$t('system.userLookup.unlock')}</button>
               {/if}
-              <button on:click={() => issueReset(r)} disabled={actionBusyKey === resetKey}>{$t('system.userLookup.resetPassword')}</button>
+              <button on:click={() => openReset(r)}>{$t('system.userLookup.resetPassword')}</button>
             </td>
           </tr>
         {/each}
@@ -134,19 +142,42 @@
   {/if}
 </div>
 
+{#if resetTarget}
+  <div class="modal-backdrop">
+    <div class="modal">
+      <h3>{$t('system.userLookup.resetModalTitle')}</h3>
+      <p>{$t('system.userLookup.resetConfirm', { values: { email: resetTarget.email, slug: resetTarget.tenantSlug } })}</p>
+      <div class="modal-actions">
+        <button on:click={() => resetTarget = null} disabled={resetBusy}>{$t('common.actions.cancel')}</button>
+        <button class="primary" on:click={confirmReset} disabled={resetBusy}>
+          {resetBusy ? $t('common.actions.saving') : $t('system.userLookup.resetPassword')}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
-  .subtitle { color: var(--text2); font-size: 13px; margin: 0 0 16px; }
   .search-form { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 16px; }
+  /* Override the global .form-row margin-bottom — with align-items: flex-end,
+     that margin shifts the row's bottom edge below the submit button's. */
+  .search-form .form-row { margin-bottom: 0; }
   .form-row { display: flex; flex-direction: column; gap: 4px; }
   .form-row label { font-size: 12px; color: var(--text2); }
+  /* Match the global button's min-height (36px) so inputs and the submit button
+     share a baseline when the form row uses align-items: flex-end. */
   .form-row input {
     padding: 6px 8px;
+    min-height: 36px;
+    box-sizing: border-box;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--bg);
     color: var(--text);
   }
-  table { width: 100%; border-collapse: collapse; }
+  /* Override the global table-layout: fixed so the email column can size to its
+     content instead of being clipped under an 8-way equal split. */
+  table { width: 100%; border-collapse: collapse; table-layout: auto; }
   th, td { padding: 8px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; }
   .actions { display: flex; gap: 4px; }
   .actions button { font-size: 12px; padding: 3px 8px; }

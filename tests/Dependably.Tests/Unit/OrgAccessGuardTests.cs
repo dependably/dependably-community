@@ -216,4 +216,19 @@ public sealed class OrgAccessGuardTests : IAsyncLifetime
             Principal("u-admin"), http, Capabilities.TenantAdmin);
         Assert.IsType<ForbidResult>(result);
     }
+
+    [Fact]
+    public async Task AuthorizeCapAsync_NameIdentifierClaim_UsedWhenSubAbsent()
+    {
+        // The principal carries ClaimTypes.NameIdentifier but no "sub" claim. The guard's
+        // user-id resolution uses NameIdentifier first (?? falls back to "sub"), so this
+        // exercises the left-hand side of that null-coalesce — the branch the existing
+        // tests don't cover because they all carry a "sub" claim.
+        var http = HttpContextFor("o1");
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(
+            new[] { new Claim(ClaimTypes.NameIdentifier, "u-admin") }, "test"));
+        var result = await _guard.AuthorizeCapAsync(
+            principal, http, Capabilities.TenantConfigure);
+        Assert.Null(result);
+    }
 }
