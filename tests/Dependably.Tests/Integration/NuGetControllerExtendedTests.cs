@@ -160,6 +160,34 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         Assert.Contains("2.0.0-beta+meta", body);
     }
 
+    // Regression (#nuget-registration-index-route): NuGet V3 clients request the registration
+    // index at `{base}/{lowerId}/index.json` — not the bare `{base}/{lowerId}/`. The routes
+    // originally matched only `{id}/`, so `dotnet restore` / `dotnet tool restore` 404'd on every
+    // registration lookup (e.g. "Version X of package cyclonedx is not found"). These assert the
+    // `/index.json` form reaches the handler (returns the upstream payload, not a routing 404).
+    [Theory]
+    [InlineData("registration", "registration5-semver1")]                 // unversioned base → semver1 upstream
+    [InlineData("registration5-gz-semver2", "registration5-gz-semver2")]  // SemVer2 base advertised in service index
+    public async Task RegistrationIndex_IndexJsonSuffix_RoutesToHandler(string clientBase, string upstreamVariant)
+    {
+        var id = $"regidx{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        var upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
+            + "{\"@id\":\"x\",\"catalogEntry\":{\"id\":\"X\",\"version\":\"6.2.0\",\"listed\":true}}]}]}";
+        _factory.MockUpstream.Given(
+                Request.Create()
+                    .WithPath($"/{upstreamVariant}/{id}/index.json")
+                    .UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/json").WithBody(upstreamJson));
+
+        var token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        var resp = await client.GetAsync($"/nuget/{clientBase}/{id}/index.json");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Contains("\"6.2.0\"", await resp.Content.ReadAsStringAsync());
+    }
+
     // ── Registration: upstream non-success + no local row → 404 ───────────────
 
     [Fact]

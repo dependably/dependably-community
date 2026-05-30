@@ -1,3 +1,4 @@
+using System.Reflection;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
@@ -258,6 +259,61 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         Assert.Equal(
             new[] { "rename_cicd_tokens_to_service_tokens", "rename_tokens_to_user_tokens" },
             applied);
+    }
+
+    // The next two tests cover defensive branches that InitializeAsync can't reach on its own:
+    // Schema.sql (re)creates oci_tags on every boot before the backfill runs, so the
+    // "table absent" / "real ALTER error" states are unreachable through the public surface.
+    // We invoke the private members directly to prove the hardening behaves as intended —
+    // these guard against the prod incident where a partial schema made startup hosting-fatal
+    // with "no such table: oci_tags".
+
+    [Theory]
+    [InlineData("oci_tags")]
+    [InlineData("oci_blobs")]
+    public async Task BackfillOciCatalog_SkipsWithWarningWhenEitherTableAbsent(string missingTable)
+    {
+        var logger = new CapturingLogger<SchemaInitializer>();
+        var initializer = new SchemaInitializer(_db, logger);
+        await initializer.InitializeAsync();
+
+        // Simulate the anomalous state the guard exists for: one of the OCI tables the backfill
+        // query reads is missing. Both are guarded, so dropping either must trigger the skip.
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync($"DROP TABLE {missingTable}");
+        logger.Records.Clear();
+
+        var backfill = typeof(SchemaInitializer).GetMethod(
+            "BackfillOciCatalogAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var ex = await Record.ExceptionAsync(
+            () => (Task)backfill.Invoke(initializer, new object[] { conn })!);
+
+        Assert.Null(ex);  // degrades gracefully instead of crashing hosting
+        Assert.Contains(logger.Records,
+            r => r.Level == LogLevel.Warning && r.Message.Contains("backfill_oci_catalog"));
+    }
+
+    [Fact]
+    public async Task MigrateSqlite_SwallowsDuplicateColumnButSurfacesOtherErrors()
+    {
+        // Error code 1 is SQLite's generic catch-all. The helper must ignore only
+        // "duplicate column" (idempotent re-run) and let real schema errors propagate —
+        // the masking bug previously hid a "no such table" behind the same code.
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("CREATE TABLE migrate_probe (a TEXT)");
+
+        var migrate = typeof(SchemaInitializer).GetMethod(
+            "MigrateSqliteAsync", BindingFlags.Static | BindingFlags.NonPublic)!;
+        Task Invoke(string ddl) => (Task)migrate.Invoke(null, new object[] { conn, ddl })!;
+
+        await Invoke("ALTER TABLE migrate_probe ADD COLUMN b TEXT");
+        var duplicate = await Record.ExceptionAsync(
+            () => Invoke("ALTER TABLE migrate_probe ADD COLUMN b TEXT"));
+        Assert.Null(duplicate);  // duplicate-column re-run stays a no-op
+
+        var realError = await Record.ExceptionAsync(
+            () => Invoke("ALTER TABLE no_such_table ADD COLUMN c TEXT"));
+        Assert.NotNull(realError);  // no-such-table now surfaces rather than being swallowed
     }
 
     /// <summary>

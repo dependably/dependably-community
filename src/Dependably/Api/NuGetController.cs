@@ -153,15 +153,25 @@ public partial class NuGetController : ControllerBase
     // upstream URL shape (xunit.runner.visualstudio probes these directly regardless of the
     // service index). The "-gz-" variant is by convention only; HttpClient handles
     // Content-Encoding transparently, so the wire format is identical to the uncompressed one.
+    // NuGet V3 clients build the registration index URL as `{RegistrationsBaseUrl}/{lowerId}/index.json`
+    // (the service index advertises only the base). The `index.json` literal MUST be a routed segment
+    // — `{id}/` alone matches `.../{id}/` but not `.../{id}/index.json`, so every real client (incl.
+    // `dotnet restore` / `dotnet tool restore`) 404s on the registration lookup. Both forms are kept:
+    // `index.json` for clients, the bare `{id}/` for direct/manual probes.
     [HttpGet("/nuget/registration/{id}/")]
+    [HttpGet("/nuget/registration/{id}/index.json")]
     [HttpGet("/nuget/registration5-semver1/{id}/")]
+    [HttpGet("/nuget/registration5-semver1/{id}/index.json")]
     [HttpGet("/nuget/registration5-gz-semver1/{id}/")]
+    [HttpGet("/nuget/registration5-gz-semver1/{id}/index.json")]
     public Task<IActionResult> RegistrationIndex(string id, CancellationToken ct)
         => RegistrationIndexCoreAsync(id, semVer2: false, ct);
 
-    /// <summary>GET /o/{org}/nuget/registration5-{,gz-}semver2/{id}/ — SemVer 2 registration</summary>
+    /// <summary>GET /o/{org}/nuget/registration5-{,gz-}semver2/{id}/index.json — SemVer 2 registration</summary>
     [HttpGet("/nuget/registration5-semver2/{id}/")]
+    [HttpGet("/nuget/registration5-semver2/{id}/index.json")]
     [HttpGet("/nuget/registration5-gz-semver2/{id}/")]
+    [HttpGet("/nuget/registration5-gz-semver2/{id}/index.json")]
     public Task<IActionResult> RegistrationIndexSemVer2(string id, CancellationToken ct)
         => RegistrationIndexCoreAsync(id, semVer2: true, ct);
 

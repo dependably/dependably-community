@@ -94,8 +94,21 @@ public sealed class SchemaInitializer
     // the content-addressed version identity, the resolving tag is captured in the PURL. Idempotent
     // — the version insert is skipped on any unique hit (re-run, many-tags-to-one-digest, or the
     // globally-unique purl already held by another org that pulled the same image first).
-    private static async Task BackfillOciCatalogAsync(DbConnection conn)
+    private async Task BackfillOciCatalogAsync(DbConnection conn)
     {
+        // Schema.sql creates oci_tags/oci_blobs earlier this same boot, so they should always
+        // exist here. The query below reads both, so guard both — keeping a partial/corrupt
+        // schema from being hosting-fatal. The backfill is best-effort catalogue data, not a
+        // structural prerequisite. (A genuinely-absent table still surfaces loudly at the
+        // additive ALTER step; this only stops the crash we saw.)
+        if (!await TableExistsAsync(conn, "oci_tags") || !await TableExistsAsync(conn, "oci_blobs"))
+        {
+            _logger.LogWarning(
+                "Skipping backfill_oci_catalog: oci_tags/oci_blobs not both present. Schema.sql " +
+                "should have created them earlier this boot — this indicates a partial or corrupt schema.");
+            return;
+        }
+
         var rows = (await conn.QueryAsync<(string OrgId, string Repository, string Tag, string Digest, long SizeBytes, string BlobKey)>(
             """
             SELECT t.org_id AS OrgId, t.repository AS Repository, t.tag AS Tag, t.digest AS Digest,
@@ -663,7 +676,14 @@ public sealed class SchemaInitializer
     private static async Task MigrateSqliteAsync(DbConnection conn, string ddl)
     {
         try { await conn.ExecuteAsync(ddl); }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 1) { /* duplicate column — additive migration already applied, ignore */ }
+        // SQLite returns the generic code 1 (SQLITE_ERROR) for many failures — no such table,
+        // no such column, syntax errors. Only "duplicate column" means the additive migration
+        // already applied and is safely ignorable; anything else is a real schema problem that
+        // must surface rather than be silently swallowed.
+        catch (Microsoft.Data.Sqlite.SqliteException ex)
+            when (ex.SqliteErrorCode == 1
+                  && ex.Message.Contains("duplicate column", StringComparison.OrdinalIgnoreCase))
+        { /* column already present — idempotent re-run, ignore */ }
     }
 
     private static async Task<string> ReadSchemaAsync(DbProvider provider, CancellationToken ct)
