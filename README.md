@@ -100,6 +100,13 @@ registry=https://dependably.example.com/o/my-org/npm/
 npm publish --registry https://dependably.example.com/o/my-org/npm/
 ```
 
+Verify connectivity and credentials before installing anything:
+
+```bash
+npm ping     # exits 0 when Dependably is reachable
+npm whoami   # prints the token owner's email (or `service:<name>` for service tokens)
+```
+
 ### NuGet / nuget.config
 
 ```xml

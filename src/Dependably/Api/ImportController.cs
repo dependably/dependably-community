@@ -410,6 +410,7 @@ public sealed class ImportController : ControllerBase
             Origin = "uploaded",
             SizeCap = sizeCap,
             ActorUserId = ctx.ActorId,
+            ActorKind = ActorKinds.User,
             AuditAction = "import",
             AuditDetail = AuditDetailFor(ctx.BatchId, detection.Ecosystem),
             ClaimState = claim.State,
@@ -432,9 +433,12 @@ public sealed class ImportController : ControllerBase
     private static LicenseExtractor.ExtractedMetadata ExtractLicense(
         string ecosystem, byte[] bytes, string filename) => ecosystem switch
     {
-        "nuget" => LicenseExtractor.FromNuspec(bytes),
-        "pypi"  => LicenseExtractor.FromPyPiPackageBytes(bytes, filename),
-        "npm"   => LicenseExtractor.FromNpmTarballPackageJson(bytes),
+        // Push/import path holds the artefact bytes in memory (an upload validation
+        // concern, out of scope for #105's proxy-fetch refactor). Wrap in a
+        // MemoryStream so we use the unified Stream-shaped LicenseExtractor surface.
+        "nuget" => LicenseExtractor.FromNuspec(new MemoryStream(bytes, writable: false)),
+        "pypi"  => LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes, writable: false), filename),
+        "npm"   => LicenseExtractor.FromNpmTarballPackageJson(new MemoryStream(bytes, writable: false)),
         _       => LicenseExtractor.ExtractedMetadata.Empty,
     };
 

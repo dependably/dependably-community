@@ -522,7 +522,7 @@
       "osvTolerance": "Max OSV score tolerance",
       "osvToleranceHint": "Packages with a vulnerability score above this threshold are blocked (0 – 10). Default 10 allows all.",
       "minReleaseAge": "Minimum release age",
-      "minReleaseAgeHint": "Block proxy fetches of upstream versions younger than this. Leave empty to disable. The age is measured against the upstream registry's published timestamp; versions with no upstream timestamp are allowed through.",
+      "minReleaseAgeHint": "Block proxy fetches of upstream versions younger than this. Default 0 allows all. The age is measured against the upstream registry's published timestamp; versions with no upstream timestamp are allowed through.",
       "minReleaseAgeUnitHours": "Hours",
       "minReleaseAgeUnitDays": "Days",
       "allowlistSection": "Allowlist",
@@ -1075,6 +1075,9 @@
         "maxUploadBytesPyPi": "Max upload size — PyPI",
         "maxUploadBytesNpm": "Max upload size — npm",
         "maxUploadBytesNuGet": "Max upload size — NuGet",
+        "maxUploadBytesMaven": "Max upload size — Maven",
+        "maxUploadBytesRpm": "Max upload size — RPM",
+        "maxUploadBytesOci": "Max upload size — Docker",
         "gcSchedule": "GC schedule (cron)",
         "siemMaxLookbackDays": "SIEM max lookback (days)"
       },
@@ -1088,6 +1091,9 @@
         "maxUploadBytesPyPi": "100 MB — matches pypi.org",
         "maxUploadBytesNpm": "50 MB",
         "maxUploadBytesNuGet": "250 MB — matches nuget.org",
+        "maxUploadBytesMaven": "100 MB",
+        "maxUploadBytesRpm": "250 MB",
+        "maxUploadBytesOci": "2048 MB — fits multi-layer container images",
         "gcSchedule": "0 3 * * * (03:00 UTC daily)",
         "siemMaxLookbackDays": "90 days"
       },

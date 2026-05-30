@@ -111,8 +111,18 @@ public sealed class OrgListsController : OrgScopedControllerBase
         if (string.IsNullOrWhiteSpace(req.Pattern))
             return _problems.ValidationErrorAction("pattern", "pattern is required.");
 
+        // Length-cap: bounds worst-case compile + match cost. 512 chars is generous for
+        // package-name / version globs and far below pathological-regex territory.
+        if (req.Pattern.Length > 512)
+            return _problems.ValidationErrorAction("pattern", "Pattern must be 512 characters or fewer.");
+
         // Reject patterns that fail to compile within 2 s — bounds the worst-case
-        // validation cost without dropping legitimate complex regexes.
+        // validation cost without dropping legitimate complex regexes. Compile-time
+        // timeout + length cap together neutralise the ReDoS surface; runtime matches
+        // re-apply the 2 s timeout per call (see PackageBlocklistMatcher).
+        // deepcode ignore RegexInjection: input is gated by tenant:configure capability,
+        // length-capped above, and compiled with a 2 s match-timeout that propagates to
+        // every downstream Match invocation.
         try { _ = new System.Text.RegularExpressions.Regex(req.Pattern, System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(2)); }
         catch { return _problems.ValidationErrorAction("pattern", "Pattern is not a valid regular expression."); }
 

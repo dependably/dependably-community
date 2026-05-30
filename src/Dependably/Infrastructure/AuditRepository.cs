@@ -6,8 +6,13 @@ namespace Dependably.Infrastructure;
 public sealed class AuditRepository
 {
     private readonly IMetadataStore _db;
+    private readonly ActivityWriter? _activityWriter;
 
-    public AuditRepository(IMetadataStore db) => _db = db;
+    public AuditRepository(IMetadataStore db, ActivityWriter? activityWriter = null)
+    {
+        _db = db;
+        _activityWriter = activityWriter;
+    }
 
     // Millisecond-precision UTC ISO-8601, so multiple events emitted in the same wall-clock
     // second still order deterministically (e.g. first_fetch → vuln_scan → blocked_vuln_score).
@@ -15,23 +20,28 @@ public sealed class AuditRepository
         DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
 
     // Convenience overload for tenant-scope events. Most call sites use this; the action plus
-    // a handful of optional named arguments (orgId, actorId, ecosystem, purl, detail, sourceIp)
-    // read clearly. sourceIp expects the canonical form produced by HttpContext.GetNormalizedRemoteIp().
+    // a handful of optional named arguments (orgId, actorId, actorKind, ecosystem, purl, detail,
+    // sourceIp) read clearly. sourceIp expects the canonical form produced by
+    // HttpContext.GetNormalizedRemoteIp(). actorKind is one of <see cref="ActorKinds"/> (or NULL
+    // for legacy/anonymous); pass <c>token.ActorKind</c> when the event was attributed to a
+    // resolved <see cref="TokenRecord"/>, or <see cref="ActorKinds.User"/> for JWT-session events.
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification = "Optional named-arg surface for the audit log; bundling into a context type would force ~70 call sites to allocate just to skip a single field.")]
     public Task LogAsync(
         string action,
         string? orgId = null,
         string? actorId = null,
+        string? actorKind = null,
         string? ecosystem = null,
         string? purl = null,
         string? detail = null,
         string? sourceIp = null,
         CancellationToken ct = default)
-        => WriteAsync(new AuditWrite(action, "tenant", orgId, actorId, ecosystem, purl, detail, sourceIp), ct);
+        => WriteAsync(new AuditWrite(action, "tenant", orgId, actorId, actorKind, ecosystem, purl, detail, sourceIp), ct);
 
     // System-scope events (operator dashboard) — keeps tenant-business events filtered out of
-    // the system audit list and vice versa.
+    // the system audit list and vice versa. system_admin actors aren't users or service tokens,
+    // so actorKind stays NULL — the system audit list joins to system_admins, not users.
     public Task LogSystemAsync(
         string action,
         string? actorId = null,
@@ -39,15 +49,15 @@ public sealed class AuditRepository
         string? detail = null,
         string? sourceIp = null,
         CancellationToken ct = default)
-        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, null, null, detail, sourceIp), ct);
+        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, null, null, null, detail, sourceIp), ct);
 
     private async Task WriteAsync(AuditWrite entry, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO audit_log (id, scope, org_id, actor_id, action, ecosystem, purl, detail, source_ip, created_at)
-            VALUES (@id, @scope, @orgId, @actorId, @action, @ecosystem, @purl, @detail, @sourceIp, @createdAt)
+            INSERT INTO audit_log (id, scope, org_id, actor_id, actor_kind, action, ecosystem, purl, detail, source_ip, created_at)
+            VALUES (@id, @scope, @orgId, @actorId, @actorKind, @action, @ecosystem, @purl, @detail, @sourceIp, @createdAt)
             """,
             new
             {
@@ -55,6 +65,7 @@ public sealed class AuditRepository
                 scope = entry.Scope,
                 orgId = entry.OrgId,
                 actorId = entry.ActorId,
+                actorKind = entry.ActorKind,
                 action = entry.Action,
                 ecosystem = entry.Ecosystem,
                 purl = entry.Purl,
@@ -66,7 +77,7 @@ public sealed class AuditRepository
 
     private sealed record AuditWrite(
         string Action, string Scope,
-        string? OrgId, string? ActorId,
+        string? OrgId, string? ActorId, string? ActorKind,
         string? Ecosystem, string? Purl, string? Detail,
         string? SourceIp);
 
@@ -78,28 +89,41 @@ public sealed class AuditRepository
         string? purl,
         string eventType,
         string? actorId = null,
+        string? actorKind = null,
         string? detail = null,
         string? sourceIp = null,
         CancellationToken ct = default)
     {
+        var record = new ActivityRecord(
+            Id: Guid.NewGuid().ToString("N"),
+            OrgId: orgId,
+            Ecosystem: ecosystem,
+            Purl: purl,
+            EventType: eventType,
+            ActorId: actorId,
+            ActorKind: actorKind,
+            Detail: detail,
+            SourceIp: sourceIp,
+            CreatedAt: NowMs());
+
+        // #90: fast path — when the async writer is wired (production DI), enqueue and
+        // return without touching the DB on the request thread. The hosted-service
+        // drainer batches inserts. The synchronous fallback below preserves test
+        // behaviour (tests that introspect the `activity` table after a call still see
+        // their row) and is also the path used when the writer is intentionally absent.
+        if (_activityWriter is not null)
+        {
+            _activityWriter.TryEnqueue(record);
+            return;
+        }
+
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO activity (id, org_id, ecosystem, purl, event_type, actor_id, detail, source_ip, created_at)
-            VALUES (@id, @orgId, @ecosystem, @purl, @eventType, @actorId, @detail, @sourceIp, @createdAt)
+            INSERT INTO activity (id, org_id, ecosystem, purl, event_type, actor_id, actor_kind, detail, source_ip, created_at)
+            VALUES (@Id, @OrgId, @Ecosystem, @Purl, @EventType, @ActorId, @ActorKind, @Detail, @SourceIp, @CreatedAt)
             """,
-            new
-            {
-                id = Guid.NewGuid().ToString("N"),
-                orgId,
-                ecosystem,
-                purl,
-                eventType,
-                actorId,
-                detail,
-                sourceIp,
-                createdAt = NowMs()
-            });
+            record);
     }
 
     /// <summary>
@@ -117,13 +141,27 @@ public sealed class AuditRepository
               AND (@action IS NULL OR action = @action)
             """,
             new { orgId, action });
+        // Service-token actors live in a different table than users; resolve both and pick
+        // by actor_kind. NULL actor_kind = legacy row (pre-migration) — fall back to the
+        // users join for back-compat. The 'service:<name>' prefix matches the npm whoami
+        // identifier shape (TokenRepository.GetWhoAmIIdentifierAsync) so operators see the
+        // same string in audit rows and in package metadata.
         var rows = await conn.QueryAsync<AuditEntry>(
             """
             SELECT a.id, a.scope as Scope, a.org_id as OrgId, a.actor_id as ActorId,
-                   u.email as ActorEmail, a.action as Action,
+                   CASE WHEN a.actor_kind = 'service' THEN 'service:' || st.name
+                        ELSE u.email
+                   END as ActorEmail,
+                   a.action as Action,
                    a.ecosystem as Ecosystem, a.purl as Purl, a.detail as Detail,
                    a.created_at as CreatedAt
-            FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id
+            FROM audit_log a
+            LEFT JOIN users u
+                ON u.id = a.actor_id
+                AND (a.actor_kind IS NULL OR a.actor_kind = 'user')
+            LEFT JOIN service_tokens st
+                ON st.id = a.actor_id
+                AND a.actor_kind = 'service'
             WHERE a.org_id = @orgId AND a.scope = 'tenant'
               AND (@action IS NULL OR a.action = @action)
             ORDER BY a.created_at DESC, a.id DESC LIMIT @limit OFFSET @offset
@@ -311,12 +349,22 @@ public sealed class AuditRepository
               AND (@eventType IS NULL OR event_type = @eventType)
             """,
             new { orgId, eventType });
+        // See ListAuditAsync for the actor_kind branching rationale.
         var rows = await conn.QueryAsync<ActivityEntry>(
             """
             SELECT a.id, a.org_id as OrgId, a.ecosystem as Ecosystem, a.purl as Purl,
-                   a.event_type as EventType, a.actor_id as ActorId, u.email as ActorEmail,
+                   a.event_type as EventType, a.actor_id as ActorId,
+                   CASE WHEN a.actor_kind = 'service' THEN 'service:' || st.name
+                        ELSE u.email
+                   END as ActorEmail,
                    a.detail as Detail, a.source_ip as SourceIp, a.created_at as CreatedAt
-            FROM activity a LEFT JOIN users u ON u.id = a.actor_id
+            FROM activity a
+            LEFT JOIN users u
+                ON u.id = a.actor_id
+                AND (a.actor_kind IS NULL OR a.actor_kind = 'user')
+            LEFT JOIN service_tokens st
+                ON st.id = a.actor_id
+                AND a.actor_kind = 'service'
             WHERE a.org_id = @orgId
               AND (@eventType IS NULL OR a.event_type = @eventType)
             ORDER BY a.created_at DESC, a.id DESC

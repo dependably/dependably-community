@@ -977,6 +977,54 @@
         }
       }
     },
+    "/maven/{path}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "head": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/npm/-/ping": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/npm/-/whoami": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/npm/@{scope}/{package}": {
       "operations": {
         "get": {
@@ -991,6 +1039,20 @@
         "put": {
           "requiredParams": [
             "package",
+            "scope"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/npm/@{scope}/{pkg}/-/{file}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "file",
+            "pkg",
             "scope"
           ],
           "responseCodes": [
@@ -1052,6 +1114,19 @@
           "requiredParams": [
             "package",
             "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/npm/{pkg}/-/{file}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "file",
+            "pkg"
           ],
           "responseCodes": [
             "200"
@@ -1254,6 +1329,107 @@
         }
       }
     },
+    "/rpm/Packages/{bucket}/{file}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "bucket",
+            "file"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/rpm/packages/{file}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "file"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "head": {
+          "requiredParams": [
+            "file"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/rpm/repodata/RPM-GPG-KEY": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "head": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/rpm/repodata/repomd.xml.key": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "head": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/rpm/repodata/{file}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "file"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "head": {
+          "requiredParams": [
+            "file"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/rpm/upload": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/saml/acs": {
       "operations": {
         "get": {
@@ -1305,6 +1481,26 @@
         "get": {
           "requiredParams": [
             "package"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/v2/{path}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "head": {
+          "requiredParams": [
+            "path"
           ],
           "responseCodes": [
             "200"

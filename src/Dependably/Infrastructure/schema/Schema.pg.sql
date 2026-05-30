@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS org_settings (
     max_upload_bytes_pypi   INTEGER,
     max_upload_bytes_npm    INTEGER,
     max_upload_bytes_nuget  INTEGER,
+    max_upload_bytes_maven  INTEGER,        -- #99 per-ecosystem Maven cap; falls back to max_upload_bytes
+    max_upload_bytes_rpm    INTEGER,        -- #100 per-ecosystem RPM cap; falls back to max_upload_bytes
     keep_versions       INTEGER,            -- GC: max versions to retain per package per ecosystem
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
     activity_retention_days INTEGER,        -- GC: delete activity rows older than this
@@ -114,6 +116,8 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- Upstream-published integrity hash + algorithm tag. See Schema.sql.
     upstream_integrity_value TEXT,
     upstream_integrity_algorithm TEXT,
+    -- Trailing path segment of blob_key. See Schema.sql for rationale (#91).
+    filename    TEXT,
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
     UNIQUE (package_id, version)
 );
@@ -169,6 +173,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     scope       TEXT NOT NULL DEFAULT 'tenant' CHECK (scope IN ('tenant','system')),
     org_id      TEXT,
     actor_id    TEXT,
+    actor_kind  TEXT,
     action      TEXT NOT NULL,
     ecosystem   TEXT,
     purl        TEXT,
@@ -185,6 +190,7 @@ CREATE TABLE IF NOT EXISTS activity (
     purl        TEXT,
     event_type  TEXT NOT NULL,
     actor_id    TEXT,
+    actor_kind  TEXT,
     detail      TEXT,
     source_ip   TEXT,
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
@@ -224,6 +230,7 @@ CREATE INDEX IF NOT EXISTS idx_packages_org_ecosystem ON packages(org_id, ecosys
 CREATE INDEX IF NOT EXISTS idx_vulns_ecosystem_pkg ON vulnerabilities(ecosystem, package_name);
 CREATE INDEX IF NOT EXISTS idx_pkg_version_vulns_version ON package_version_vulns(package_version_id);
 CREATE INDEX IF NOT EXISTS idx_package_versions_package ON package_versions(package_id);
+CREATE INDEX IF NOT EXISTS idx_package_versions_filename ON package_versions(filename);
 CREATE INDEX IF NOT EXISTS idx_audit_log_org ON audit_log(org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_org ON activity(org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_tokens_hash ON user_tokens(token_hash);
@@ -264,6 +271,89 @@ CREATE TABLE IF NOT EXISTS license_blocklist (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pkg_version_licenses ON package_version_licenses(package_version_id);
+
+-- #100 RPM metadata. See Schema.sql for full rationale.
+CREATE TABLE IF NOT EXISTS rpm_metadata (
+    package_version_id  TEXT PRIMARY KEY REFERENCES package_versions(id) ON DELETE CASCADE,
+    rpm_name            TEXT NOT NULL,
+    epoch               INTEGER NOT NULL DEFAULT 0,
+    rpm_version         TEXT NOT NULL,
+    rpm_release         TEXT NOT NULL,
+    arch                TEXT NOT NULL,
+    summary             TEXT,
+    description         TEXT,
+    build_host          TEXT,
+    build_time          INTEGER,
+    packager            TEXT,
+    vendor              TEXT,
+    rpm_group           TEXT,
+    source_rpm          TEXT,
+    url                 TEXT,
+    installed_size      INTEGER NOT NULL DEFAULT 0,
+    archive_size        INTEGER NOT NULL DEFAULT 0,
+    header_start        INTEGER NOT NULL DEFAULT 0,
+    header_end          INTEGER NOT NULL DEFAULT 0,
+    requires_json       TEXT NOT NULL DEFAULT '[]',
+    provides_json       TEXT NOT NULL DEFAULT '[]',
+    conflicts_json      TEXT NOT NULL DEFAULT '[]',
+    obsoletes_json      TEXT NOT NULL DEFAULT '[]',
+    files_json          TEXT NOT NULL DEFAULT '[]',
+    changelogs_json     TEXT NOT NULL DEFAULT '[]',
+    rpm_license         TEXT,
+    created_at          TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+);
+CREATE INDEX IF NOT EXISTS idx_rpm_metadata_arch ON rpm_metadata(arch);
+
+CREATE TABLE IF NOT EXISTS rpm_repodata_state (
+    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    arch          TEXT NOT NULL,
+    last_built_at TEXT,
+    dirty         INTEGER NOT NULL DEFAULT 1,
+    generation    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (org_id, arch)
+);
+
+-- #99 Maven multi-file per-version tracker. See Schema.sql for full rationale.
+CREATE TABLE IF NOT EXISTS maven_version_files (
+    id                  TEXT PRIMARY KEY,
+    package_version_id  TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    filename            TEXT NOT NULL,
+    classifier          TEXT,
+    extension           TEXT NOT NULL,
+    blob_key            TEXT NOT NULL,
+    size_bytes          INTEGER NOT NULL DEFAULT 0,
+    checksum_sha256     TEXT,
+    checksum_sha1       TEXT,
+    checksum_md5        TEXT,
+    origin              TEXT NOT NULL DEFAULT 'uploaded',
+    created_at          TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    UNIQUE (package_version_id, filename)
+);
+CREATE INDEX IF NOT EXISTS idx_maven_version_files_version ON maven_version_files(package_version_id);
+CREATE INDEX IF NOT EXISTS idx_maven_version_files_filename ON maven_version_files(filename);
+
+-- #98 OCI / Docker registry storage. See Schema.sql for full rationale.
+CREATE TABLE IF NOT EXISTS oci_blobs (
+    digest        TEXT NOT NULL,
+    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    media_type    TEXT NOT NULL,
+    size_bytes    INTEGER NOT NULL DEFAULT 0,
+    blob_key      TEXT NOT NULL,
+    cached_at     TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    upstream_checked_at TEXT,
+    PRIMARY KEY (digest, org_id)
+);
+CREATE INDEX IF NOT EXISTS idx_oci_blobs_org ON oci_blobs(org_id);
+
+CREATE TABLE IF NOT EXISTS oci_tags (
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    repository  TEXT NOT NULL,
+    tag         TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    PRIMARY KEY (org_id, repository, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_oci_tags_repository ON oci_tags(org_id, repository);
 
 -- SPDX license reference data. Seeded from an embedded JSON list (license-list-data) by
 -- SpdxLicenseSeeder on every boot when instance_settings.spdx_list_version differs from the
@@ -469,6 +559,16 @@ CREATE INDEX IF NOT EXISTS idx_background_job_runs_started_at
     ON background_job_runs(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_background_job_runs_job_started
     ON background_job_runs(job_name, started_at DESC);
+
+-- Content-addressed negative cache for upstream 404 responses (#101, #102, #103).
+-- Shared across tenants — the key is SHA-256(url)[..32] which is content-addressed.
+-- TTL enforced at query time.
+CREATE TABLE IF NOT EXISTS upstream_negative_cache (
+    url_key     TEXT NOT NULL,
+    ecosystem   TEXT NOT NULL,
+    fetched_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (url_key, ecosystem)
+);
 
 -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
 -- Those are no-ops on fresh installs (IF NOT EXISTS). They exist solely to add the

@@ -15,6 +15,9 @@
     ['maxUploadBytesPyPi', 'PyPI'],
     ['maxUploadBytesNpm',  'npm'],
     ['maxUploadBytesNuGet','NuGet'],
+    ['maxUploadBytesMaven','Maven'],
+    ['maxUploadBytesRpm',  'RPM'],
+    ['maxUploadBytesOci',  'Docker'],
   ]
 
   function exceedsInstance(val) {
@@ -22,11 +25,9 @@
     return parseInt(val) > instanceMax
   }
 
-  $: anyExceeds =
-    exceedsInstance(settings?.maxUploadBytes) ||
-    exceedsInstance(settings?.maxUploadBytesPyPi) ||
-    exceedsInstance(settings?.maxUploadBytesNpm) ||
-    exceedsInstance(settings?.maxUploadBytesNuGet)
+  // Iterate the field array so adding an ecosystem above flows through automatically — the
+  // previous hand-rolled boolean fell out of sync with the array the first time we extended it.
+  $: anyExceeds = uploadFields.some(([k]) => exceedsInstance(settings?.[k]))
 </script>
 
 <div class="card card-narrow">

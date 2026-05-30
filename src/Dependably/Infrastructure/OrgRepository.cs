@@ -1,12 +1,36 @@
 using Dapper;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace Dependably.Infrastructure;
 
 public sealed class OrgRepository
 {
-    private readonly IMetadataStore _db;
+    // #93: 1-second sliding TTL on org-settings reads. The settings record is fetched 3-6
+    // times per controller action on the hot paths (upload-limit resolver, allowlist
+    // service, license enforcement, block gate, OSV tolerance, release-age gate). At
+    // 200+ RPS that becomes 600-1200 DB opens/sec just for settings; cache amortises
+    // them into a single read per second while staying short enough that policy
+    // changes via the admin UI take effect within a CI run.
+    private static readonly TimeSpan SettingsCacheTtl = TimeSpan.FromSeconds(1);
 
-    public OrgRepository(IMetadataStore db) => _db = db;
+    private readonly IMetadataStore _db;
+    private readonly IMemoryCache? _cache;
+
+    public OrgRepository(IMetadataStore db, IMemoryCache? cache = null)
+    {
+        _db = db;
+        _cache = cache;
+    }
+
+    private static string SettingsCacheKey(string orgId) => "org-settings:" + orgId;
+
+    /// <summary>
+    /// Invalidates the in-memory cache for <paramref name="orgId"/>'s settings. Called by
+    /// settings-update endpoints so policy changes take effect immediately for the next
+    /// request rather than waiting for the TTL.
+    /// </summary>
+    public void InvalidateSettingsCache(string orgId)
+        => _cache?.Remove(SettingsCacheKey(orgId));
 
     /// <summary>
     /// Look up a tenant by slug. By default returns active tenants only; set
@@ -24,14 +48,21 @@ public sealed class OrgRepository
 
     public async Task<OrgSettings?> GetSettingsAsync(string orgId, CancellationToken ct = default)
     {
+        var key = SettingsCacheKey(orgId);
+        if (_cache is not null && _cache.TryGetValue(key, out OrgSettings? cached))
+            return cached;
+
         await using var conn = await _db.OpenAsync(ct);
-        return await conn.QuerySingleOrDefaultAsync<OrgSettings>(
+        var result = await conn.QuerySingleOrDefaultAsync<OrgSettings>(
             """
             SELECT org_id as OrgId, anonymous_pull as AnonymousPull, allowlist_mode as AllowlistMode,
                    max_upload_bytes as MaxUploadBytes,
                    max_upload_bytes_pypi as MaxUploadBytesPyPi,
                    max_upload_bytes_npm as MaxUploadBytesNpm,
                    max_upload_bytes_nuget as MaxUploadBytesNuGet,
+                   max_upload_bytes_maven as MaxUploadBytesMaven,
+                   max_upload_bytes_rpm as MaxUploadBytesRpm,
+                   max_upload_bytes_oci as MaxUploadBytesOci,
                    keep_versions as KeepVersions, keep_days as KeepDays,
                    activity_retention_days as ActivityRetentionDays,
                    COALESCE(license_enforcement_mode, 'off') as LicenseEnforcementMode,
@@ -43,6 +74,14 @@ public sealed class OrgRepository
             FROM org_settings WHERE org_id = @orgId
             """,
             new { orgId });
+
+        // Cache both hit and miss so a non-existent org_id doesn't repeatedly hit the DB.
+        _cache?.Set(key, result, new MemoryCacheEntryOptions
+        {
+            SlidingExpiration = SettingsCacheTtl,
+            AbsoluteExpirationRelativeToNow = SettingsCacheTtl,
+        });
+        return result;
     }
 
     public async Task<Org?> GetByIdAsync(string id, CancellationToken ct = default)
@@ -216,8 +255,10 @@ public sealed class OrgRepository
             """
             INSERT INTO org_settings (org_id, anonymous_pull, allowlist_mode,
                 max_upload_bytes, max_upload_bytes_pypi, max_upload_bytes_npm, max_upload_bytes_nuget,
+                max_upload_bytes_maven, max_upload_bytes_rpm, max_upload_bytes_oci,
                 default_language, allow_version_overwrite)
             VALUES (@orgId, @anonPull, @allowlist, @maxBytes, @maxBytesPyPi, @maxBytesNpm, @maxBytesNuGet,
+                @maxBytesMaven, @maxBytesRpm, @maxBytesOci,
                 COALESCE(@lang, 'en'), COALESCE(@overwrite, 0))
             ON CONFLICT(org_id) DO UPDATE SET
                 anonymous_pull      = @anonPull,
@@ -226,6 +267,9 @@ public sealed class OrgRepository
                 max_upload_bytes_pypi  = @maxBytesPyPi,
                 max_upload_bytes_npm   = @maxBytesNpm,
                 max_upload_bytes_nuget = @maxBytesNuGet,
+                max_upload_bytes_maven = @maxBytesMaven,
+                max_upload_bytes_rpm   = @maxBytesRpm,
+                max_upload_bytes_oci   = @maxBytesOci,
                 default_language    = COALESCE(@lang, default_language),
                 allow_version_overwrite = COALESCE(@overwrite, allow_version_overwrite)
             """,
@@ -238,6 +282,9 @@ public sealed class OrgRepository
                 maxBytesPyPi  = Clamp(update.MaxUploadBytesPyPi,  update.InstanceMaxUploadBytes),
                 maxBytesNpm   = Clamp(update.MaxUploadBytesNpm,   update.InstanceMaxUploadBytes),
                 maxBytesNuGet = Clamp(update.MaxUploadBytesNuGet, update.InstanceMaxUploadBytes),
+                maxBytesMaven = Clamp(update.MaxUploadBytesMaven, update.InstanceMaxUploadBytes),
+                maxBytesRpm   = Clamp(update.MaxUploadBytesRpm,   update.InstanceMaxUploadBytes),
+                maxBytesOci   = Clamp(update.MaxUploadBytesOci,   update.InstanceMaxUploadBytes),
                 lang,
                 overwrite     = ToOverwriteFlag(update.AllowVersionOverwrite),
             });
@@ -305,6 +352,7 @@ public sealed class OrgRepository
             ON CONFLICT(org_id) DO UPDATE SET license_enforcement_mode = @mode
             """,
             new { orgId, mode });
+        InvalidateSettingsCache(orgId);
     }
 
     public async Task<string?> GetInstanceSettingAsync(string key, CancellationToken ct = default)
@@ -325,7 +373,7 @@ public sealed class OrgRepository
     /// in-flight upload size against the returned value and return 413 on overflow.
     /// </summary>
     /// <param name="settings">Already-fetched <see cref="OrgSettings"/> for the org; null OK.</param>
-    /// <param name="ecosystem">One of <c>pypi</c>, <c>npm</c>, <c>nuget</c> (case-insensitive).</param>
+    /// <param name="ecosystem">One of <c>pypi</c>, <c>npm</c>, <c>nuget</c>, <c>maven</c>, <c>rpm</c>, <c>oci</c> (case-insensitive).</param>
     public async Task<long> GetUploadLimitAsync(OrgSettings? settings, string ecosystem, CancellationToken ct = default)
     {
         var eco = ecosystem.ToLowerInvariant();
@@ -334,6 +382,9 @@ public sealed class OrgRepository
             "pypi"  => settings?.MaxUploadBytesPyPi,
             "npm"   => settings?.MaxUploadBytesNpm,
             "nuget" => settings?.MaxUploadBytesNuGet,
+            "maven" => settings?.MaxUploadBytesMaven,
+            "rpm"   => settings?.MaxUploadBytesRpm,
+            "oci"   => settings?.MaxUploadBytesOci,
             _       => null,
         };
         if (orgEco is { } orgEcoLimit) return orgEcoLimit;
@@ -344,6 +395,9 @@ public sealed class OrgRepository
             "pypi"  => "max_upload_bytes_pypi",
             "npm"   => "max_upload_bytes_npm",
             "nuget" => "max_upload_bytes_nuget",
+            "maven" => "max_upload_bytes_maven",
+            "rpm"   => "max_upload_bytes_rpm",
+            "oci"   => "max_upload_bytes_oci",
             _       => null,
         };
         if (instanceKey is null) return long.MaxValue;
@@ -514,4 +568,10 @@ public sealed record OrgSettingsUpdate(
     long? MaxUploadBytesNuGet,
     long? InstanceMaxUploadBytes,
     string? DefaultLanguage,
-    bool? AllowVersionOverwrite = null);
+    bool? AllowVersionOverwrite = null,
+    // #101 — new fields land at the end with defaults so the positional call sites
+    // (incl. unit tests in tests/Dependably.Tests/Unit/Infrastructure) keep compiling
+    // without a sweep. Callers that need the new caps pass them by name.
+    long? MaxUploadBytesMaven = null,
+    long? MaxUploadBytesRpm = null,
+    long? MaxUploadBytesOci = null);

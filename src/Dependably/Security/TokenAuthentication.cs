@@ -2,7 +2,6 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Encodings.Web;
-using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
 using Microsoft.AspNetCore.Authentication;
@@ -151,22 +150,12 @@ public sealed class TokenAuthenticationHandler : AuthenticationHandler<TokenAuth
     }
 
     /// <summary>
-    /// Reads the token's explicit capability set from the JSON
-    /// <see cref="TokenRecord.Capabilities"/> column — the only source of truth.
-    /// Issuance always populates it via <see cref="Capabilities.TryNormalizeAndAuthorize"/>,
-    /// so NULL/empty/malformed values deny everything.
+    /// Reads the token's explicit capability set from the cached
+    /// <see cref="TokenRecord.CapabilitySet"/> — single source of truth.
+    /// Issuance always populates the underlying JSON via
+    /// <see cref="Capabilities.TryNormalizeAndAuthorize"/>; NULL/empty/malformed values
+    /// surface here as the empty set, denying everything.
     /// </summary>
-    private static IEnumerable<string> ResolveTokenCapabilities(TokenRecord token)
-    {
-        if (string.IsNullOrWhiteSpace(token.Capabilities))
-            return Enumerable.Empty<string>();
-        try
-        {
-            var caps = JsonSerializer.Deserialize<string[]>(token.Capabilities);
-            return caps is null
-                ? Enumerable.Empty<string>()
-                : caps.Where(c => !string.IsNullOrWhiteSpace(c));
-        }
-        catch (JsonException) { return Enumerable.Empty<string>(); }
-    }
+    private static IEnumerable<string> ResolveTokenCapabilities(TokenRecord token) =>
+        token.CapabilitySet;
 }

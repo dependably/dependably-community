@@ -95,6 +95,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         await conn.ExecuteAsync(
             "UPDATE org_settings SET proxy_passthrough_enabled = 0 WHERE org_id = @orgId",
             new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
         try
         {
             var token = await _factory.CreateToken("pull");
@@ -107,6 +108,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
             await conn.ExecuteAsync(
                 "UPDATE org_settings SET proxy_passthrough_enabled = 1 WHERE org_id = @orgId",
                 new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
         }
     }
 
@@ -330,6 +332,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         await conn.ExecuteAsync(
             "UPDATE org_settings SET proxy_passthrough_enabled = 0 WHERE org_id = @orgId",
             new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
         try
         {
             var token = await _factory.CreateToken("pull");
@@ -342,6 +345,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
             await conn.ExecuteAsync(
                 "UPDATE org_settings SET proxy_passthrough_enabled = 1 WHERE org_id = @orgId",
                 new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
         }
     }
 

@@ -76,6 +76,9 @@ public class OrgSettings
     public long? MaxUploadBytesPyPi { get; set; }
     public long? MaxUploadBytesNpm { get; set; }
     public long? MaxUploadBytesNuGet { get; set; }
+    public long? MaxUploadBytesMaven { get; set; }
+    public long? MaxUploadBytesRpm { get; set; }
+    public long? MaxUploadBytesOci { get; set; }
     public int? KeepVersions { get; set; }
     public int? KeepDays { get; set; }
     public int? ActivityRetentionDays { get; set; }
@@ -236,6 +239,9 @@ public enum TokenSource { User, Service }
 
 public class TokenRecord
 {
+    private string? _capabilitiesJson;
+    private IReadOnlySet<string>? _parsedCapabilities;
+
     public string Id { get; set; } = "";
     public string OrgId { get; set; } = "";
     public string? UserId { get; set; }
@@ -243,8 +249,56 @@ public class TokenRecord
     /// Canonical JSON array of capability strings (e.g. <c>["publish:npm","read:metadata"]</c>).
     /// Populated at issuance via <c>Capabilities.TryNormalizeAndAuthorize</c> and read at
     /// auth time by <c>HasCapability</c>. NULL/malformed values deny everything.
+    ///
+    /// Use <see cref="CapabilitySet"/> in hot paths — it parses the JSON exactly once per
+    /// resolved token and reuses the materialized set across capability checks. Mutating
+    /// <see cref="Capabilities"/> after construction invalidates the cached parse.
     /// </summary>
-    public string? Capabilities { get; set; }
+    public string? Capabilities
+    {
+        get => _capabilitiesJson;
+        set
+        {
+            _capabilitiesJson = value;
+            _parsedCapabilities = null;
+        }
+    }
+    /// <summary>
+    /// Cached parse of <see cref="Capabilities"/> as an O(1) lookup set. Built on first
+    /// access (auth check) and reused for every subsequent <c>HasCapability</c> /
+    /// <c>ResolveTokenCapabilities</c> call against the same <see cref="TokenRecord"/>,
+    /// so a request that fans out into multiple capability checks pays one Deserialize.
+    /// Returns an empty set for NULL/whitespace/malformed JSON — same deny-all semantics
+    /// the previous inline parsers used.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlySet<string> CapabilitySet
+    {
+        get
+        {
+            if (_parsedCapabilities is not null) return _parsedCapabilities;
+            if (string.IsNullOrWhiteSpace(_capabilitiesJson))
+                return _parsedCapabilities = EmptyCapabilitySet;
+            try
+            {
+                var list = System.Text.Json.JsonSerializer.Deserialize<string[]>(_capabilitiesJson);
+                if (list is null || list.Length == 0)
+                    return _parsedCapabilities = EmptyCapabilitySet;
+                var set = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var c in list)
+                    if (!string.IsNullOrWhiteSpace(c)) set.Add(c);
+                return _parsedCapabilities = set;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Malformed JSON: deny-all (matches the previous inline behaviour).
+                return _parsedCapabilities = EmptyCapabilitySet;
+            }
+        }
+    }
+
+    private static readonly IReadOnlySet<string> EmptyCapabilitySet = new HashSet<string>(StringComparer.Ordinal);
+
     /// <summary>Optional free-text label captured at creation.</summary>
     public string? Description { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
@@ -252,6 +306,32 @@ public class TokenRecord
     /// <summary>Last successful auth timestamp; updated throttled (~60s) by the auth path.</summary>
     public DateTimeOffset? LastUsedAt { get; set; }
     public TokenSource Source { get; set; }
+
+    /// <summary>
+    /// Value to persist in <c>activity.actor_kind</c> / <c>audit_log.actor_kind</c> for events
+    /// attributable to this token. <see cref="TokenSource.User"/> → <c>"user"</c> (actor_id is
+    /// a users.id, resolved via the users LEFT JOIN); <see cref="TokenSource.Service"/> →
+    /// <c>"service"</c> (actor_id is a service_tokens.id, resolved as <c>service:&lt;name&gt;</c>).
+    /// Get-only — Dapper's setter-path mapper ignores it on hydration.
+    /// </summary>
+    public string ActorKind => Source switch
+    {
+        TokenSource.User => ActorKinds.User,
+        TokenSource.Service => ActorKinds.Service,
+        _ => ActorKinds.User,
+    };
+}
+
+/// <summary>
+/// String constants for <c>activity.actor_kind</c> / <c>audit_log.actor_kind</c>. NULL is also
+/// valid — it means "anonymous" (truly unauthenticated; only reachable on pull paths when
+/// <see cref="OrgSettings.AnonymousPull"/> is true) OR a legacy row written before the column
+/// existed. <see cref="TokenRecord.ActorKind"/> derives one of these from a resolved token.
+/// </summary>
+public static class ActorKinds
+{
+    public const string User = "user";
+    public const string Service = "service";
 }
 
 public class ServiceTokenRecord

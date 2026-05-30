@@ -128,6 +128,7 @@
         <select bind:value={newScope} class="w-auto">
           <option value="pull">pull</option>
           <option value="push">push</option>
+          <option value="both">both</option>
         </select>
       </div>
       <div class="form-row">

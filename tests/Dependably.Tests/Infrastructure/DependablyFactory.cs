@@ -285,6 +285,10 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         await conn.ExecuteAsync(
             $"UPDATE org_settings SET {col} = @bytes WHERE org_id = @orgId",
             new { bytes, orgId });
+        // Raw SQL bypass: evict the OrgRepository settings cache so the controller's next
+        // read sees the new limit. Production paths go through OrgSettingsRepository which
+        // already invalidates; the test helper does direct UPDATE for terseness.
+        Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
     }
 
     // ── Package push helpers ──────────────────────────────────────────────────

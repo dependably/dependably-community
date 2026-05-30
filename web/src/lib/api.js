@@ -44,9 +44,17 @@ async function downloadCsv(path, params, fallbackBaseName) {
   }
   const blob = await res.blob()
   // Prefer server-provided filename when present in Content-Disposition.
+  // Sanitize to a safe charset before assigning to a.download — even though a.download
+  // never executes script, a hostile Content-Disposition could produce surprising path
+  // segments or trick the user into saving an executable-looking name. Strip everything
+  // that isn't word-class / dot / dash / underscore; fall back if nothing survives.
   const cd = res.headers.get('Content-Disposition') ?? ''
   const m = /filename="?([^";]+)"?/.exec(cd)
-  const filename = m?.[1] ?? `${fallbackBaseName}-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
+  const rawName = m?.[1] ?? ''
+  const sanitized = rawName.replace(/[^\w.-]/g, '').replace(/^\.+/, '')
+  const filename = sanitized.length > 0
+    ? sanitized
+    : `${fallbackBaseName}-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
 
   const url = URL.createObjectURL(blob)
   try {
@@ -137,6 +145,9 @@ export const api = {
     maxUploadBytesPyPi: s.maxUploadBytesPyPi,
     maxUploadBytesNpm: s.maxUploadBytesNpm,
     maxUploadBytesNuGet: s.maxUploadBytesNuGet,
+    maxUploadBytesMaven: s.maxUploadBytesMaven,
+    maxUploadBytesRpm: s.maxUploadBytesRpm,
+    maxUploadBytesOci: s.maxUploadBytesOci,
     defaultLanguage: s.defaultLanguage,
     allowVersionOverwrite: s.allowVersionOverwrite,
   }),

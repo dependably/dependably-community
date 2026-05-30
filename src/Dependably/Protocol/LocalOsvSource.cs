@@ -189,6 +189,12 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         "pypi" => "pypi",
         "npm" => "npm",
         "nuget" => "nuget",
+        // OSV uses capitalised "Maven"; case-insensitive matching in MatchesEcosystemAndName.
+        "maven" => "Maven",
+        // RPM and OCI are intentionally not normalised here: OSV has no single "RPM" ecosystem
+        // (vulnerabilities live under distro-specific names like "Rocky Linux", "AlmaLinux",
+        // "Red Hat"), and OCI image vulns are image-scan territory (Trivy), not OSV. Falling
+        // through with the lower-cased key yields no matches, which is the safe outcome.
         var other => other
     };
 

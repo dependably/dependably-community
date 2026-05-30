@@ -15,6 +15,10 @@
     { key: 'max_upload_bytes_pypi',  labelKey: 'system.settings.labels.maxUploadBytesPyPi',  kind: 'mb',     default: '100', defaultHumanKey: 'system.settings.defaults.maxUploadBytesPyPi' },
     { key: 'max_upload_bytes_npm',   labelKey: 'system.settings.labels.maxUploadBytesNpm',   kind: 'mb',     default: '50',  defaultHumanKey: 'system.settings.defaults.maxUploadBytesNpm' },
     { key: 'max_upload_bytes_nuget', labelKey: 'system.settings.labels.maxUploadBytesNuGet', kind: 'mb',     default: '250', defaultHumanKey: 'system.settings.defaults.maxUploadBytesNuGet' },
+    { key: 'max_upload_bytes_maven', labelKey: 'system.settings.labels.maxUploadBytesMaven', kind: 'mb',     default: '100', defaultHumanKey: 'system.settings.defaults.maxUploadBytesMaven' },
+    { key: 'max_upload_bytes_rpm',   labelKey: 'system.settings.labels.maxUploadBytesRpm',   kind: 'mb',     default: '250', defaultHumanKey: 'system.settings.defaults.maxUploadBytesRpm' },
+    // OCI images routinely run multi-GB (ML/CUDA bases); 500 MB triggers opaque push failures.
+    { key: 'max_upload_bytes_oci',   labelKey: 'system.settings.labels.maxUploadBytesOci',   kind: 'mb',     default: '2048', defaultHumanKey: 'system.settings.defaults.maxUploadBytesOci' },
     { key: 'gc_schedule',            labelKey: 'system.settings.labels.gcSchedule',          kind: 'string', default: '0 3 * * *', defaultHumanKey: 'system.settings.defaults.gcSchedule' },
     { key: 'siem_max_lookback_days', labelKey: 'system.settings.labels.siemMaxLookbackDays', kind: 'number', default: '90', defaultHumanKey: 'system.settings.defaults.siemMaxLookbackDays' },
   ]

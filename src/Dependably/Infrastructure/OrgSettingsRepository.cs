@@ -15,8 +15,18 @@ namespace Dependably.Infrastructure;
 public sealed class OrgSettingsRepository
 {
     private readonly IMetadataStore _db;
+    // #93: OrgRepository holds the hot-path memory cache for OrgSettings. When this
+    // repository writes new settings we have to evict the cached entry too — otherwise
+    // controllers reading via OrgRepository.GetSettingsAsync would serve a stale value
+    // until the TTL elapses, which is exactly what an admin updating the policy doesn't
+    // want.
+    private readonly OrgRepository? _orgs;
 
-    public OrgSettingsRepository(IMetadataStore db) => _db = db;
+    public OrgSettingsRepository(IMetadataStore db, OrgRepository? orgs = null)
+    {
+        _db = db;
+        _orgs = orgs;
+    }
 
     public async Task<OrgSettings?> GetSettingsAsync(string orgId, CancellationToken ct = default)
     {
@@ -28,6 +38,9 @@ public sealed class OrgSettingsRepository
                    max_upload_bytes_pypi as MaxUploadBytesPyPi,
                    max_upload_bytes_npm as MaxUploadBytesNpm,
                    max_upload_bytes_nuget as MaxUploadBytesNuGet,
+                   max_upload_bytes_maven as MaxUploadBytesMaven,
+                   max_upload_bytes_rpm as MaxUploadBytesRpm,
+                   max_upload_bytes_oci as MaxUploadBytesOci,
                    keep_versions as KeepVersions, keep_days as KeepDays,
                    activity_retention_days as ActivityRetentionDays,
                    COALESCE(license_enforcement_mode, 'off') as LicenseEnforcementMode,
@@ -56,8 +69,10 @@ public sealed class OrgSettingsRepository
             """
             INSERT INTO org_settings (org_id, anonymous_pull, allowlist_mode,
                 max_upload_bytes, max_upload_bytes_pypi, max_upload_bytes_npm, max_upload_bytes_nuget,
+                max_upload_bytes_maven, max_upload_bytes_rpm, max_upload_bytes_oci,
                 default_language, allow_version_overwrite)
             VALUES (@orgId, @anonPull, @allowlist, @maxBytes, @maxBytesPyPi, @maxBytesNpm, @maxBytesNuGet,
+                @maxBytesMaven, @maxBytesRpm, @maxBytesOci,
                 COALESCE(@lang, 'en'), COALESCE(@overwrite, 0))
             ON CONFLICT(org_id) DO UPDATE SET
                 anonymous_pull      = @anonPull,
@@ -66,6 +81,9 @@ public sealed class OrgSettingsRepository
                 max_upload_bytes_pypi  = @maxBytesPyPi,
                 max_upload_bytes_npm   = @maxBytesNpm,
                 max_upload_bytes_nuget = @maxBytesNuGet,
+                max_upload_bytes_maven = @maxBytesMaven,
+                max_upload_bytes_rpm   = @maxBytesRpm,
+                max_upload_bytes_oci   = @maxBytesOci,
                 default_language    = COALESCE(@lang, default_language),
                 allow_version_overwrite = COALESCE(@overwrite, allow_version_overwrite)
             """,
@@ -78,9 +96,14 @@ public sealed class OrgSettingsRepository
                 maxBytesPyPi  = Clamp(update.MaxUploadBytesPyPi,  update.InstanceMaxUploadBytes),
                 maxBytesNpm   = Clamp(update.MaxUploadBytesNpm,   update.InstanceMaxUploadBytes),
                 maxBytesNuGet = Clamp(update.MaxUploadBytesNuGet, update.InstanceMaxUploadBytes),
+                maxBytesMaven = Clamp(update.MaxUploadBytesMaven, update.InstanceMaxUploadBytes),
+                maxBytesRpm   = Clamp(update.MaxUploadBytesRpm,   update.InstanceMaxUploadBytes),
+                maxBytesOci   = Clamp(update.MaxUploadBytesOci,   update.InstanceMaxUploadBytes),
                 lang,
                 overwrite     = ToOverwriteFlag(update.AllowVersionOverwrite),
             });
+
+        _orgs?.InvalidateSettingsCache(update.OrgId);
     }
 
     private static int? ToOverwriteFlag(bool? value)
@@ -104,6 +127,7 @@ public sealed class OrgSettingsRepository
                 activity_retention_days = @activityDays
             """,
             new { orgId, keepVersions, keepDays, activityDays = activityRetentionDays });
+        _orgs?.InvalidateSettingsCache(orgId);
     }
 
     public async Task UpsertProxySettingsAsync(
@@ -127,6 +151,7 @@ public sealed class OrgSettingsRepository
                 maxScore = maxOsvScoreTolerance,
                 minAgeHours = minReleaseAgeHours,
             });
+        _orgs?.InvalidateSettingsCache(orgId);
     }
 
     public async Task UpsertLicensePolicyModeAsync(
@@ -140,6 +165,7 @@ public sealed class OrgSettingsRepository
             ON CONFLICT(org_id) DO UPDATE SET license_enforcement_mode = @mode
             """,
             new { orgId, mode });
+        _orgs?.InvalidateSettingsCache(orgId);
     }
 
     public async Task<string?> GetInstanceSettingAsync(string key, CancellationToken ct = default)

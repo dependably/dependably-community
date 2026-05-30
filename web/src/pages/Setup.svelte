@@ -3,9 +3,9 @@
   import { api } from '../lib/api.js'
   import { currentOrg } from '../lib/store.js'
   import { copyToClipboard } from '../lib/clipboard.js'
+  import { ECOSYSTEMS as ecosystems, ECO_LABEL } from '../lib/ecosystems.js'
 
   let snippets = {}, loading = {}, copyState = {}
-  const ecosystems = ['pypi', 'npm', 'nuget']
 
   $: org = $currentOrg
   $: if (org) loadAll()
@@ -33,7 +33,7 @@
   <p class="subtitle text-muted">{$t('setup.subtitle')}</p>
 
   {#each ecosystems as eco (eco)}
-    <h3 class="eco-heading">{eco}</h3>
+    <h3 class="eco-heading">{ECO_LABEL[eco]}</h3>
     {#if loading[eco]}
       <span class="spinner"></span>
     {:else if snippets[eco]}
@@ -57,7 +57,7 @@
 
 <style>
   .subtitle { margin-bottom: 24px; }
-  .eco-heading { margin-bottom: 8px; text-transform: capitalize; }
+  .eco-heading { margin-bottom: 8px; }
   .snippet-block { margin-bottom: 20px; }
   .footer-link { margin-top: 24px; }
 </style>

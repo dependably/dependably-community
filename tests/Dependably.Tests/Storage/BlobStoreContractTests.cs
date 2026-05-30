@@ -126,7 +126,8 @@ public abstract class BlobStoreContractTests
     public async Task ProxyKeys_AreSharedAcrossOrgs()
     {
         var store = CreateStore();
-        var sha256 = Convert.ToHexString(new byte[32]);  // all-zero hash for test
+        // BlobKeys.Proxy (hardened in #106) requires 64-char lowercase hex.
+        var sha256 = Convert.ToHexString(new byte[32]).ToLowerInvariant();  // all-zero hash for test
         var proxyKey = BlobKeys.Proxy(sha256);
 
         await store.PutAsync(proxyKey, new MemoryStream(new byte[] { 1, 2, 3 }));

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.RateLimiting;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc;
 using Dependably.Infrastructure;
@@ -172,10 +173,12 @@ public partial class PyPiController : ControllerBase
         string? upstreamHtml = null;
         try
         {
-            using var response = await _upstream.GetMetadataAsync($"{upstreamBase}/simple/{purlName}/", ct);
+            // #94 single-flight simple-index fetch — collapses N concurrent pip-install
+            // requests onto a single upstream call when a coordinate first warms up.
+            var response = await _upstream.GetOrFetchMetadataAsync($"{upstreamBase}/simple/{purlName}/", ct);
             if (response.IsSuccessStatusCode)
             {
-                var html = await response.Content.ReadAsStringAsync(ct);
+                var html = response.BodyAsString();
                 html = Regex.Replace(html, @"\s*data-(?:dist-info-metadata|core-metadata)=""[^""]*""", "", RegexOptions.None, RegexTimeout);
                 html = Regex.Replace(
                     html,
@@ -238,6 +241,7 @@ public partial class PyPiController : ControllerBase
 
     /// <summary>GET /packages/{file} — blob download with proxy cache (tenant-implicit from host)</summary>
     [HttpGet("/packages/{file}")]
+    [EnableRateLimiting("download")]
     public async Task<IActionResult> DownloadPackage(string file, CancellationToken ct)
     {
         // Parse name + version up front. PEP 503/440-aware; rejects mis-shaped requests
@@ -263,7 +267,8 @@ public partial class PyPiController : ControllerBase
                         v.ManualBlockState, v.VulnCheckedAt,
                         token?.UserId, settings!.MaxOsvScoreTolerance, sourceIp,
                         MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                        PublishedAt: v.PublishedAt), ct)
+                        PublishedAt: v.PublishedAt,
+                        ActorKind: token?.ActorKind), ct)
                 == BlockDecision.Blocked) return StatusCode(403);
 
             var cached = await TryServeCachedBlobAsync(pkgVersions.Value, file, orgId, token, sourceIp, ct);
@@ -288,7 +293,7 @@ public partial class PyPiController : ControllerBase
 
         return await FetchAndCacheUpstreamAsync(file, resolved.Value.Url, resolved.Value.Sha256Hex,
             parsed, pkgVersions,
-            new ProxyContext(orgId, token?.UserId, settings!, sourceIp),
+            new ProxyContext(orgId, token?.UserId, token?.ActorKind, settings!, sourceIp),
             ct);
     }
 
@@ -317,8 +322,10 @@ public partial class PyPiController : ControllerBase
 
     // Threading-only record for the PyPi proxy flow — carries the tenant + caller + settings tuple
     // through FetchAndCacheUpstreamAsync → RecordAndScanFirstFetchAsync so block-gate evaluation
-    // at the tail of first-fetch can fire without re-reading settings.
-    private sealed record ProxyContext(string OrgId, string? UserId, OrgSettings Settings, string? SourceIp = null);
+    // at the tail of first-fetch can fire without re-reading settings. ActorKind pairs with
+    // UserId so the first_fetch activity row can distinguish service-token from user-token
+    // attribution (see ActorKinds / TokenRecord.ActorKind).
+    private sealed record ProxyContext(string OrgId, string? UserId, string? ActorKind, OrgSettings Settings, string? SourceIp = null);
     private sealed record ProxyTenantContext(string OrgId, TokenRecord? Token);
     private sealed record PyPiFilename(string PurlName, string Version);
 
@@ -332,7 +339,7 @@ public partial class PyPiController : ControllerBase
         Response.Headers["X-Cache"] = "HIT";
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVer.Version.Purl);
         await _audit.LogActivityAsync(orgId, "pypi", pkgVer.Version.Purl, "download", token?.UserId,
-            sourceIp: sourceIp, ct: ct);
+            actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         return File(blob, "application/octet-stream", file);
     }
 
@@ -365,7 +372,7 @@ public partial class PyPiController : ControllerBase
         if (await _blocklist.IsBlockedAsync(orgId, purlCheck, ct))
         {
             await _audit.LogActivityAsync(orgId, "pypi", purlCheck, "blocked", token?.UserId,
-                sourceIp: sourceIp, ct: ct);
+                actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
             return StatusCode(403);
         }
         return null;
@@ -382,10 +389,10 @@ public partial class PyPiController : ControllerBase
             // Both are SHA-256; we pass whichever we have into UpstreamClient so it can verify
             // before caching and throw ChecksumException → 502 on mismatch.
             var knownSha = pkgVersions?.Version.ChecksumSha256 ?? upstreamSha256;
-            var (bytes, computedSha256, isHit) = await DownloadAndCacheAsync(upstreamUrl, knownSha, gate.OrgId, ct);
-            if (bytes is null) return NotFound();
+            var fetched = await DownloadAndCacheAsync(upstreamUrl, knownSha, gate.OrgId, ct);
+            if (fetched is null) return NotFound();
 
-            Response.Headers["X-Cache"] = isHit ? "HIT" : "MISS";
+            Response.Headers["X-Cache"] = fetched.IsHit ? "HIT" : "MISS";
             if (pkgVersions is not null)
                 Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersions.Value.Version.Purl);
 
@@ -395,15 +402,19 @@ public partial class PyPiController : ControllerBase
             var version = pkgVersions?.Version.Version ?? parsed.Version;
             await _cacheRecorder.RecordAccessAsync(new Dependably.Infrastructure.CacheAccess(
                 gate.OrgId, "pypi", purlName, version, file,
-                computedSha256, bytes.Length, BlobKeys.Proxy(computedSha256), upstreamUrl), ct);
+                fetched.Blob.Sha256Hex, fetched.Blob.SizeBytes, fetched.Blob.BlobKey, upstreamUrl), ct);
 
-            if (!isHit && pkgVersions is null)
+            if (!fetched.IsHit && pkgVersions is null)
             {
-                var firstFetchBlock = await RecordAndScanFirstFetchAsync(file, parsed, bytes, upstreamSha256, gate, ct);
+                var firstFetchBlock = await RecordAndScanFirstFetchAsync(file, parsed, fetched.Blob, upstreamSha256, gate, ct);
                 if (firstFetchBlock is not null) return firstFetchBlock;
             }
 
-            return File(bytes, "application/octet-stream", file);
+            // The blob is already cached (either pre-existing for HIT, or freshly written
+            // by UpstreamClient / DownloadAndCacheAsync for MISS). Open a fresh stream for
+            // the response so memory stays bounded regardless of artefact size + concurrency.
+            var proxyStream = await fetched.Blob.OpenAsync(ct);
+            return File(proxyStream, "application/octet-stream", file);
         }
         catch (ChecksumException)
         {
@@ -415,32 +426,78 @@ public partial class PyPiController : ControllerBase
         }
     }
 
-    private async Task<(byte[]? Bytes, string ComputedSha, bool IsHit)> DownloadAndCacheAsync(
+    /// <summary>
+    /// Downloads <paramref name="upstreamUrl"/> into the proxy cache and returns a
+    /// <see cref="BlobHandle"/> describing the stored artefact.
+    /// <list type="bullet">
+    ///   <item><b>Known-sha path:</b> routes through
+    ///         <see cref="UpstreamClient.GetOrFetchStreamAsync"/> which hash-and-stages the
+    ///         body to disk (#104) — no full-artefact byte[] is ever materialised.</item>
+    ///   <item><b>Unknown-sha cold-start:</b> still buffers via
+    ///         <see cref="UpstreamClient.GetOrFetchMetadataAsync"/> because the cache key
+    ///         only exists after hashing. The byte[] residue is bounded to this path and
+    ///         wrapped in a <see cref="BlobHandle"/> so all downstream code is
+    ///         stream-shaped (parallel concern; tracked separately).</item>
+    /// </list>
+    /// </summary>
+    // deepcode ignore PT,LogForging: blob put uses BlobKeys.Proxy(sha) which validates
+    // 64-char lowercase hex; Serilog uses RenderedCompactJsonFormatter (CRLF-safe).
+    private async Task<PyPiFetchOutcome?> DownloadAndCacheAsync(
         string upstreamUrl, string? knownSha256, string orgId, CancellationToken ct)
     {
         if (knownSha256 is not null)
         {
-            // Known checksum — verify and use content-addressed cache
+            // Known checksum — verify and use content-addressed cache. The streaming
+            // variant returns a stream we immediately dispose: subsequent consumers
+            // (license extraction, response body) open a fresh blob-store stream via
+            // the BlobHandle. SizeBytes is read from the seekable stream's Length when
+            // available (LocalBlobStore → FileStream); remote backends that hand back
+            // a non-seekable network stream leave SizeBytes at 0, which the cache_artifact
+            // recorder tolerates (best-effort, not load-bearing for the proxy fetch).
             var blobKey = BlobKeys.Proxy(knownSha256);
-            var (bytes, isHit) = await _upstream.GetOrFetchAsync(
+            var (stream, isHit) = await _upstream.GetOrFetchStreamAsync(
                 blobKey, upstreamUrl, new ChecksumSpec(ChecksumAlgorithm.Sha256, knownSha256),
                 "pypi", orgId, ct: ct);
-            return (bytes, knownSha256, isHit);
+            long size = 0;
+            await using (stream.ConfigureAwait(false))
+            {
+                if (stream.CanSeek) size = stream.Length;
+            }
+            var blob = new BlobHandle(blobKey, knownSha256, size,
+                async openCt => await _blobs.GetAsync(blobKey, openCt)
+                    ?? throw new InvalidOperationException(
+                        $"Blob {blobKey} vanished between PutAsync and GetAsync."));
+            return new PyPiFetchOutcome(blob, isHit);
         }
 
-        // Unknown checksum — fetch, compute, and cache
-        using var resp = await _upstream.GetMetadataAsync(upstreamUrl, ct);
-        if (!resp.IsSuccessStatusCode) return (null, "", false);
-        var fetched = await resp.Content.ReadAsByteArrayAsync(ct);
-        var sha = ChecksumVerifier.ComputeSha256Hex(fetched);
+        // Unknown checksum — fetch, compute, cache, wrap in a BlobHandle. Route through
+        // single-flighted metadata fetch (#94) so a stampede of concurrent CI clients
+        // pulling an unchecked-sha coordinate triggers just one upstream call.
+        //
+        // This is the PyPi cold-start residue called out in #105's scope: the SHA isn't
+        // known up front so the content-addressed hash-and-stage pipeline (#104) can't
+        // route this request. Wrapping the byte[] in a BlobHandle keeps the residue
+        // localized — ProxyFetchService, ProxyVersionRecorder, and LicenseExtractor
+        // never see a byte[].
+        var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, ct);
+        if (!resp.IsSuccessStatusCode) return null;
+        var bytes = resp.Body;
+        var sha = ChecksumVerifier.ComputeSha256Hex(bytes);
         var proxyKey = BlobKeys.Proxy(sha);
         if (!await _blobs.ExistsAsync(proxyKey, ct))
-            await _blobs.PutAsync(proxyKey, new MemoryStream(fetched), ct);
-        return (fetched, sha, false);
+            await _blobs.PutAsync(proxyKey, new MemoryStream(bytes), ct);
+        var coldBlob = new BlobHandle(proxyKey, sha, bytes.LongLength,
+            async openCt => await _blobs.GetAsync(proxyKey, openCt)
+                ?? (Stream)new MemoryStream(bytes, writable: false));
+        return new PyPiFetchOutcome(coldBlob, IsHit: false);
     }
 
+    private sealed record PyPiFetchOutcome(BlobHandle Blob, bool IsHit);
+
+    // deepcode ignore PT,LogForging: bytes are cached under BlobKeys.Proxy(sha) which validates
+    // 64-char lowercase hex; Serilog uses RenderedCompactJsonFormatter (CRLF-safe).
     private async Task<IActionResult?> RecordAndScanFirstFetchAsync(
-        string file, PyPiFilename parsed, byte[] bytes, string? upstreamSha256,
+        string file, PyPiFilename parsed, BlobHandle blob, string? upstreamSha256,
         ProxyContext gate, CancellationToken ct)
     {
         var purl = PurlNormalizer.PyPi(parsed.PurlName, parsed.Version);
@@ -456,9 +513,10 @@ public partial class PyPiController : ControllerBase
         var result = await _proxyFetch.RecordAndScanAsync(new Dependably.Storage.ProxyFetchRequest(
             OrgId: gate.OrgId, Ecosystem: "pypi",
             PackageName: parsed.PurlName, PurlName: parsed.PurlName,
-            Version: parsed.Version, Purl: purl, File: file, Bytes: bytes,
-            ExtractLicenses: bytes2 => LicenseExtractor.FromPyPiPackageBytes(bytes2, file),
+            Version: parsed.Version, Purl: purl, File: file, Blob: blob,
+            ExtractLicenses: stream => LicenseExtractor.FromPyPiPackageBytes(stream, file),
             UserId: gate.UserId,
+            ActorKind: gate.ActorKind,
             SourceIp: gate.SourceIp,
             MaxOsvScoreTolerance: gate.Settings.MaxOsvScoreTolerance,
             MinReleaseAgeHours: gate.Settings.MinReleaseAgeHours,
@@ -467,7 +525,8 @@ public partial class PyPiController : ControllerBase
             CacheAccess: null,
             PublishedAt: jsonMeta.PublishedAt,
             UpstreamIntegrityValue: integrityValue,
-            UpstreamIntegrityAlgorithm: integrityAlgo), ct);
+            UpstreamIntegrityAlgorithm: integrityAlgo,
+            Deprecated: jsonMeta.Deprecated), ct);
         return result.Decision == BlockDecision.Blocked ? StatusCode(403) : null;
     }
 
@@ -484,10 +543,11 @@ public partial class PyPiController : ControllerBase
         try
         {
             var url = $"{upstreamBase}/pypi/{purlName}/{version}/json";
-            using var resp = await _upstream.GetMetadataAsync(url, ct);
+            // Routes through single-flighted metadata fetch (#94) so an artefact stampede
+            // doesn't also stampede this endpoint.
+            var resp = await _upstream.GetOrFetchMetadataAsync(url, ct);
             if (!resp.IsSuccessStatusCode) return PyPiJsonMetadata.Empty;
-            using var stream = await resp.Content.ReadAsStreamAsync(ct);
-            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(resp.Body);
             if (!doc.RootElement.TryGetProperty("urls", out var urls) || urls.ValueKind != JsonValueKind.Array)
                 return PyPiJsonMetadata.Empty;
             var match = urls.EnumerateArray().FirstOrDefault(entry => EntryMatchesFilename(entry, file));
@@ -516,12 +576,14 @@ public partial class PyPiController : ControllerBase
             && d.ValueKind == JsonValueKind.String)
             sha256 = d.GetString()?.ToLowerInvariant();
 
-        return new PyPiJsonMetadata(publishedAt, sha256);
+        var deprecated = LicenseExtractor.FromPyPiJsonFile(entry).Deprecated;
+
+        return new PyPiJsonMetadata(publishedAt, sha256, deprecated);
     }
 
-    private readonly record struct PyPiJsonMetadata(DateTimeOffset? PublishedAt, string? Sha256Hex)
+    private readonly record struct PyPiJsonMetadata(DateTimeOffset? PublishedAt, string? Sha256Hex, string? Deprecated)
     {
-        public static PyPiJsonMetadata Empty => new(null, null);
+        public static PyPiJsonMetadata Empty => new(null, null, null);
     }
 
     /// <summary>
@@ -536,9 +598,12 @@ public partial class PyPiController : ControllerBase
     {
         try
         {
-            using var resp = await _upstream.GetMetadataAsync($"{upstreamBase}/simple/{pkgName}/", ct);
+            // #94: this simple-index fetch fires inline with every PyPI file-download path,
+            // so concurrent CI fan-out would otherwise stampede here too. Route through
+            // single-flight.
+            var resp = await _upstream.GetOrFetchMetadataAsync($"{upstreamBase}/simple/{pkgName}/", ct);
             if (!resp.IsSuccessStatusCode) return null;
-            var html = await resp.Content.ReadAsStringAsync(ct);
+            var html = resp.BodyAsString();
             // Group 1 = URL up to but not including the fragment; group 3 = the hex SHA-256
             // when a #sha256=... fragment is present. Older mirrors / non-PEP-503 indices
             // may omit the fragment; in that case group 3 is empty and we fall through with
@@ -568,6 +633,7 @@ public partial class PyPiController : ControllerBase
     [HttpPost("/pypi/legacy/")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishPypi)]
+    [EnableRateLimiting("push")]
     [RequestSizeLimit(500 * 1024 * 1024)] // hard ceiling; per-tenant limit checked below
     public async Task<IActionResult> Upload(CancellationToken ct)
     {
@@ -714,6 +780,7 @@ public partial class PyPiController : ControllerBase
             Origin = "uploaded",
             SizeCap = long.MaxValue,        // size cap already enforced upstream by CheckPyPiUploadSizeAsync
             ActorUserId = tenant.Token?.UserId,
+            ActorKind = tenant.Token?.ActorKind,
             AuditAction = "push",
             AllowOverwrite = orgSettings?.AllowVersionOverwrite ?? false,
             ClaimState = claim.State,
@@ -724,9 +791,12 @@ public partial class PyPiController : ControllerBase
             return MapPyPiPublishRejection(rej, upload.Version);
 
         // Format-specific post-publish: license info comes from the wheel METADATA / sdist
-        // PKG-INFO. Stays here because the extractor is PyPI-only.
+        // PKG-INFO. Stays here because the extractor is PyPI-only. Push path holds the
+        // upload bytes in memory — an upload-validation concern, out of scope for #105 —
+        // so we wrap in a MemoryStream for the unified extractor.
         var versionId = ((Dependably.Infrastructure.Publish.PublishResult.Accepted)result).VersionId;
-        var extracted = LicenseExtractor.FromPyPiPackageBytes(upload.FileBytes, upload.Filename);
+        var extracted = LicenseExtractor.FromPyPiPackageBytes(
+            new MemoryStream(upload.FileBytes, writable: false), upload.Filename);
         if (extracted.Spdx.Count > 0)
             await _licenses.SetLicensesAsync(versionId, extracted.Spdx, "upstream", ct);
 

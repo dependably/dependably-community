@@ -103,6 +103,8 @@ tests/Dependably.Tests/
 - **NuGet push** uses `X-NuGet-ApiKey` header, not Authorization.
 - **Proxy cache miss** path: check `BlobKeys.Proxy(sha256)` in blob store → if absent, fetch from upstream, verify checksum, store, serve. Configured via `PyPI:Upstream`, `Npm:Upstream`, `NuGet:Upstream` settings.
 - **Upload size limits**: checked in order — org ecosystem limit → org global limit → instance ecosystem limit. Returned as 413 before any blob is written.
+- **OpenAPI is split into two named documents.** Management endpoints (`/api/v1/…`) are documented at `/api/v1/docs/` (spec: `/openapi/management.json`); protocol surfaces (`/v2/`, `/simple/`, `/npm/`, `/nuget/v3/`, …) are documented at `/docs/` (spec: `/openapi/protocol.json`). The split is route-prefix-driven (via `OpenApiOptions.ShouldInclude` against `ApiDescription.RelativePath`), not attribute-driven — new controllers land in the right document automatically based on where they route.
+- **Protocol surfaces follow upstream ecosystem specifications, not Dependably API versioning.** OCI is at `/v2/` because the Distribution Spec mandates it; PyPI is at `/simple/` because PEP 503 mandates it; npm and NuGet are at the paths their clients hardcode. Do not add internal version segments to these routes.
 
 ## Environment variables
 
@@ -122,6 +124,10 @@ tests/Dependably.Tests/
 | `PyPI:Upstream` | `https://pypi.org` | Upstream PyPI registry |
 | `Npm:Upstream` | `https://registry.npmjs.org` | Upstream npm registry |
 | `NuGet:Upstream` | `https://api.nuget.org/v3` | Upstream NuGet registry |
+| `Maven:Upstream` | `https://repo1.maven.org/maven2` | Upstream Maven registry (Maven Central). `Maven:NegativeCacheTtl`, `Maven:VerifyWithUpstreamSha256` tune the proxy. |
+| `Rpm:Upstream` | — (no default URL) | Upstream RPM repo base URL. Proxy passthrough is governed by the per-org `ProxyPassthroughEnabled` (default **on**), same as every ecosystem — RPM is **not** disabled by default. The only difference: RPM ships with **no default upstream URL** (PyPI/npm/NuGet/Maven have hardcoded defaults) because RPM repos are distro/release-specific, so set this to point RPM at a mirror. `Rpm:UpstreamMode` (`passthrough`) selects behaviour. |
+| `Oci:Upstreams` | Docker Hub (`registry-1.docker.io`) | Array of upstream OCI registries (prefix-routed, per-registry auth). Configured in `appsettings.json` under `Oci:Upstreams`, not a flat env var. |
+| `PROXY_STAGING_PATH` | `Path.GetTempPath()` | #104 hash-and-stage staging dir for proxy-fetch MISS path. Container deployments expecting large artefacts should set this to a disk-backed volume (e.g. `/data/staging`) — `/tmp` is often tmpfs (RAM-backed), which defeats the memory-bounding goal. |
 | `VULN_SCAN_SCHEDULE` | `0 4 * * *` | Cron schedule for vulnerability scan + rescan passes |
 | `VULN_SCAN_JITTER_SECONDS` | `3600` | Random offset (0..N seconds) added to each scheduled scan to avoid thundering-herd against OSV. Set `0` to disable. |
 | `VULN_RESCAN_AGE_HOURS` | `24` | Re-check already-scanned proxy versions whose `vuln_checked_at` is older than this |

@@ -21,7 +21,6 @@ using Dependably.Infrastructure.Redis;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
-using Scalar.AspNetCore;
 using Serilog;
 using Serilog.Formatting.Compact;
 using StackExchange.Redis;
@@ -46,6 +45,7 @@ try
     // BackgroundJobScope persists per-run rows fire-and-forget via this provider; the static
     // hook avoids threading IServiceProvider through every per-service Begin() call site.
     Dependably.Infrastructure.Observability.BackgroundJobScope.Services = app.Services;
+    Program.WarnOnDeprecatedConfiguration(app.Configuration);
     Program.ConfigureApp(app);
     await app.RunAsync();
     return 0;
@@ -74,6 +74,9 @@ public partial class Program
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S1075:URIs should not be hardcoded",
         Justification = "Default value for the BASE_URL env-var; only used when running locally without configuration. Override in production via BASE_URL.")]
     private const string DefaultBaseUrl = "http://localhost:8080";
+
+    // Threshold above which UseSerilogRequestLogging promotes request-completion to Warning.
+    private const double SlowRequestThresholdMs = 5000;
 
     public static void ConfigureBuilder(WebApplicationBuilder builder)
     {
@@ -173,6 +176,21 @@ public partial class Program
         builder.Services.AddSingleton<AllowlistService>();
         builder.Services.AddSingleton<BlockGateService>();
 
+        // Maven upstream proxy (#101)
+        builder.Services.AddSingleton<Dependably.Protocol.MavenUpstreamFetcher>();
+
+        // RPM upstream proxy (#102)
+        builder.Services.AddSingleton<Dependably.Protocol.RpmUpstreamProxy>();
+
+        // OCI upstream proxy (#103) — auth service is singleton (owns token cache + semaphores)
+        builder.Services.AddOptions<Dependably.Configuration.OciOptions>()
+            .BindConfiguration("Oci")
+            .ValidateOnStart();
+        builder.Services.AddSingleton<Microsoft.Extensions.Options.IValidateOptions<Dependably.Configuration.OciOptions>,
+            Dependably.Configuration.OciOptionsValidator>();
+        builder.Services.AddSingleton<Dependably.Protocol.OciUpstreamAuthService>();
+        builder.Services.AddSingleton<Dependably.Protocol.OciUpstreamResolver>();
+
         // Vulnerability scanning — OSV source branches (remote vs local) live inside the helper.
         // VulnerabilityScanService is registered as a singleton AND a hosted service so on-demand
         // scans (controller-injected) share one instance with the background scheduler.
@@ -200,6 +218,10 @@ public partial class Program
         {
             case "multi":
                 builder.Services.AddScoped<ITenantResolver, SubdomainTenantResolver>();
+                // Eviction hook for tenant-lifecycle endpoints. Resolver is scoped, but the
+                // cache it touches is IMemoryCache (singleton), so any instance can evict.
+                builder.Services.AddScoped<ITenantSlugCacheInvalidator>(
+                    sp => (SubdomainTenantResolver)sp.GetRequiredService<ITenantResolver>());
                 break;
             case "header":
                 builder.Services.AddScoped<ITenantResolver, HeaderTenantResolver>();
@@ -282,8 +304,9 @@ public partial class Program
 
         ConfigureRateLimiter(builder);
 
-        // CORS — management API only allows BASE_URL origin (#13)
-        var baseUrl = builder.Configuration["BASE_URL"] ?? DefaultBaseUrl;
+        // CORS — management API only allows BASE_URL origin (#13). PublicBaseUrl() strips any
+        // trailing slash: a CORS origin with one never matches the browser-sent Origin header.
+        var baseUrl = builder.Configuration.PublicBaseUrl() ?? DefaultBaseUrl;
         builder.Services.AddCors(o => o.AddPolicy("ManagementApi", policy =>
             policy.WithOrigins(baseUrl)
                   .AllowCredentials()
@@ -310,6 +333,27 @@ public partial class Program
             // CDNs serve them with Content-Encoding: identity, so checksum bytes are
             // unaffected.
             AutomaticDecompression = System.Net.DecompressionMethods.All,
+        });
+
+        // Named HTTP client for OCI upstream proxy (#103).
+        // Timeout is configurable via Oci:UpstreamHttpTimeout (default 30 min — large layer blobs).
+        // AutomaticDecompression is disabled: OCI layer blobs are already compressed at the file
+        // level and we need the raw bytes for SHA-256 digest verification.
+        builder.Services.AddHttpClient("OciUpstream", (sp, client) =>
+        {
+            var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<Dependably.Configuration.OciOptions>>();
+            client.Timeout = opts.Value.UpstreamHttpTimeout;
+        })
+        .ConfigurePrimaryHttpMessageHandler(() => new System.Net.Http.SocketsHttpHandler
+        {
+            ConnectTimeout          = TimeSpan.FromSeconds(30),
+            MaxConnectionsPerServer = 20,
+            MaxAutomaticRedirections = 5,
+            AllowAutoRedirect       = true,
+            ResponseDrainTimeout    = TimeSpan.FromSeconds(30),
+            // Do NOT decompress: OCI layer blobs are raw compressed tarballs.
+            // Decompressing would corrupt the digest (the digest is over the compressed bytes).
+            AutomaticDecompression  = System.Net.DecompressionMethods.None,
         });
 
         // Fallback generic client (used by non-upstream code)
@@ -355,6 +399,11 @@ public partial class Program
         builder.Services.AddScoped<NpmControllerServices>();
         builder.Services.AddScoped<NuGetControllerServices>();
         builder.Services.AddScoped<PyPiControllerServices>();
+        builder.Services.AddScoped<MavenControllerServices>(); // #99
+        builder.Services.AddSingleton<Dependably.Protocol.IRpmUpstreamProxy, Dependably.Protocol.RpmUpstreamProxy>(); // #102
+        builder.Services.AddScoped<RpmControllerServices>(); // #100 + #102
+        builder.Services.AddSingleton<Dependably.Storage.RpmRepodataService>();
+        builder.Services.AddScoped<OciControllerServices>(); // #98
         builder.Services.AddScoped<OrgControllerServices>();
 
         // Controllers + OpenAPI
@@ -375,7 +424,33 @@ public partial class Program
                 o.JsonSerializerOptions.UnmappedMemberHandling =
                     System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow;
             });
-        builder.Services.AddOpenApi();
+        // Two named OpenAPI documents — split by route prefix so the management API
+        // (versioned, /api/v1/…) and the registry protocol surfaces (canonical roots
+        // mandated by each upstream spec: /v2/ OCI, /simple/ PyPI, /npm/, /nuget/v3/, …)
+        // get separate specs and separate UI mounts. The split is route-prefix-driven,
+        // not attribute-driven, so new controllers land in the right document automatically.
+        static bool IsManagementPath(Microsoft.AspNetCore.Mvc.ApiExplorer.ApiDescription api) =>
+            api.RelativePath is { } path
+            && path.StartsWith("api/v1/", StringComparison.OrdinalIgnoreCase);
+
+        static void ConfigureCommonOpenApi(Microsoft.AspNetCore.OpenApi.OpenApiOptions options)
+        {
+            options.AddDocumentTransformer<Dependably.Infrastructure.OpenApi.SecuritySchemeDocumentTransformer>();
+            options.AddDocumentTransformer<Dependably.Infrastructure.OpenApi.DocumentMetadataTransformer>();
+            options.AddOperationTransformer<Dependably.Infrastructure.OpenApi.SecuritySchemeOperationTransformer>();
+        }
+
+        builder.Services.AddOpenApi("management", options =>
+        {
+            ConfigureCommonOpenApi(options);
+            options.ShouldInclude = IsManagementPath;
+        });
+
+        builder.Services.AddOpenApi("protocol", options =>
+        {
+            ConfigureCommonOpenApi(options);
+            options.ShouldInclude = api => !IsManagementPath(api);
+        });
 
         // Response compression — Brotli preferred, then GZip
         builder.Services.AddResponseCompression(o =>
@@ -626,6 +701,19 @@ public partial class Program
                     ctx.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter)
                         ? ((int)retryAfter.TotalSeconds).ToString()
                         : "60";
+
+                // #96 metric. Endpoint metadata carries the policy name set by
+                // [EnableRateLimiting("…")]; partition prefix lets operators identify which
+                // token (12-hex SHA prefix) or IP is being rate-locked without leaking the
+                // full hash on the cardinality budget.
+                var policy = ctx.HttpContext.GetEndpoint()
+                    ?.Metadata.GetMetadata<EnableRateLimitingAttribute>()
+                    ?.PolicyName ?? "unknown";
+                var partition = Dependably.Security.RateLimitPartitions.GetMetricLabel(ctx.HttpContext);
+                Dependably.Infrastructure.Observability.DependablyMeter.RateLimitRejected.Add(1,
+                    new KeyValuePair<string, object?>("policy", policy),
+                    new KeyValuePair<string, object?>("partition", partition));
+
                 return ValueTask.CompletedTask;
             };
 
@@ -634,11 +722,68 @@ public partial class Program
                 o.AddPolicy<string, RedisRateLimitPolicy>("login");
                 o.AddPolicy<string, RedisRateLimitPolicy>("invite");
                 o.AddPolicy<string, RedisRateLimitPolicy>("token-create");
+                // #96: download / push run in-process even with Redis configured. The
+                // limiter state is per-second sliding-window over a request-derived
+                // partition key — Redis round-trips would land on the very hot path we're
+                // trying to protect.
+                AddDownloadPushLimiters(builder.Configuration, o);
             }
             else
             {
                 AddInProcessLimiters(builder.Configuration, o);
+                AddDownloadPushLimiters(builder.Configuration, o);
             }
+        });
+    }
+
+    // #96 download / push limiters. Partition by token-hash with IP fallback so a single
+    // misbehaving client can't saturate the writer queue and DoS other tenants.
+    private static void AddDownloadPushLimiters(ConfigurationManager cfg, RateLimiterOptions o)
+    {
+        // Defaults sized for real-world enterprise CI bursts, not single-tenant lab use:
+        // a normal `npm install` of a Next.js-sized app fires ~600 tarball GETs from one
+        // partition in a few seconds, and pnpm/yarn parallelize harder. 1000 permits/sec
+        // covers a single developer's worst burst without 429s; sustained abuse still
+        // 429s once the queue fills. Operators dial DOWNLOAD_RATE_LIMIT_PERMITS up for
+        // bigger fleets.
+        //
+        // QueueLimit = 500 is the change that matters most for UX. With QueueLimit=0,
+        // a brief over-burst (npm scheduling 800 fetches in one tick) returns 429
+        // immediately and the install fails. With queueing, the same burst waits
+        // microseconds for permits to refill, which is invisible to the client.
+        // The cap + queue together still bound sustained abuse: once the queue fills,
+        // additional requests get 429 with Retry-After (emitted by OnRejected above)
+        // and a well-behaved client backs off.
+        var downloadLimit = int.TryParse(cfg["DOWNLOAD_RATE_LIMIT_PERMITS"], out var dp) ? dp : 1000;
+        var downloadQueue = int.TryParse(cfg["DOWNLOAD_RATE_LIMIT_QUEUE"],   out var dq) ? dq :  500;
+        o.AddPolicy("download", httpContext =>
+        {
+            var key = Dependably.Security.RateLimitPartitions.GetPartitionKey(httpContext);
+            return RateLimitPartition.GetSlidingWindowLimiter(key,
+                _ => new SlidingWindowRateLimiterOptions
+                {
+                    PermitLimit          = downloadLimit,
+                    Window               = TimeSpan.FromSeconds(1),
+                    SegmentsPerWindow    = 4,
+                    QueueLimit           = downloadQueue,
+                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                });
+        });
+
+        // Push is rarer; a much lower ceiling protects the writer queue from a malformed
+        // publish loop. 20 req/s burst per token.
+        var pushLimit = int.TryParse(cfg["PUSH_RATE_LIMIT_PERMITS"], out var pp) ? pp : 20;
+        o.AddPolicy("push", httpContext =>
+        {
+            var key = Dependably.Security.RateLimitPartitions.GetPartitionKey(httpContext);
+            return RateLimitPartition.GetSlidingWindowLimiter(key,
+                _ => new SlidingWindowRateLimiterOptions
+                {
+                    PermitLimit = pushLimit,
+                    Window = TimeSpan.FromSeconds(1),
+                    SegmentsPerWindow = 4,
+                    QueueLimit = 0,
+                });
         });
     }
 
@@ -662,6 +807,26 @@ public partial class Program
             opts.Window = TimeSpan.FromHours(1);
             opts.QueueLimit = 0;
         });
+    }
+
+    /// <summary>
+    /// Emits Serilog warnings for configuration keys that are no longer read. Silent
+    /// ignore is operationally dangerous: an operator who set the key expects it to
+    /// take effect. Each deprecated key gets a structured field for the configured
+    /// value so the warning is actionable.
+    /// </summary>
+    private static void WarnOnDeprecatedConfiguration(IConfiguration configuration)
+    {
+        // Maven:MetadataTtl — removed when Maven metadata caching moved into
+        // UpstreamClient.GetOrFetchMetadataAsync (single-flight, no TTL). Operators
+        // who set this in env / Helm / Terraform need to know it has no effect.
+        var mavenMetadataTtl = configuration["Maven:MetadataTtl"];
+        if (!string.IsNullOrWhiteSpace(mavenMetadataTtl))
+        {
+            Log.Warning(
+                "Configuration key Maven:MetadataTtl is deprecated and ignored (configured value: {ConfiguredValue}). Maven metadata caching is now handled by UpstreamClient (single-flight, no TTL).",
+                mavenMetadataTtl);
+        }
     }
 
     public static void ConfigureApp(WebApplication app)
@@ -710,13 +875,7 @@ public partial class Program
         app.UseResponseCompression();
         app.UseSerilogRequestLogging(opts =>
         {
-            opts.GetLevel = (ctx, _, ex) =>
-            {
-                if (ex is not null) return Serilog.Events.LogEventLevel.Error;
-                if (ctx.Request.Path.StartsWithSegments("/ready") || ctx.Request.Path.StartsWithSegments("/health"))
-                    return Serilog.Events.LogEventLevel.Verbose;
-                return Serilog.Events.LogEventLevel.Information;
-            };
+            opts.GetLevel = SerilogRequestLogLevel;
         });
 
         app.UseCors("ManagementApi");
@@ -756,6 +915,58 @@ public partial class Program
         }
         app.UseStaticFiles(new StaticFileOptions { FileProvider = embeddedProvider });
 
+        // Vendored Swagger UI mounted at two URLs — one per OpenAPI document.
+        // /api/v1/docs/ → management spec (/openapi/management.json)
+        // /docs/        → protocol  spec (/openapi/protocol.json)
+        // The shell (index.html + JS/CSS) is identical at both mounts; assets use
+        // relative paths, and swagger-initializer.js picks the spec URL based on
+        // window.location.pathname. The bare /api/v1/docs and /docs URLs redirect
+        // to their trailing-slash form so relative asset paths resolve correctly.
+        var swaggerProvider = new SubPathFileProvider(app.Environment.WebRootFileProvider, "/swagger");
+
+        // UseDefaultFiles relies on GetDirectoryContents(subpath).Exists, which the dev
+        // StaticWebAssets provider returns false for; serve the shell explicitly via a
+        // local helper reused by both mounts.
+        Func<HttpContext, Task> ServeSwaggerShell(Microsoft.Extensions.FileProviders.IFileProvider provider) =>
+            async ctx =>
+            {
+                var file = provider.GetFileInfo("/index.html");
+                if (!file.Exists)
+                {
+                    ctx.Response.StatusCode = 404;
+                    return;
+                }
+                ctx.Response.ContentType = "text/html";
+                await ctx.Response.SendFileAsync(file);
+            };
+
+        // Canonicalize bare doc URLs to their trailing-slash form so the relative asset
+        // paths in the shared swagger shell (./swagger-ui.css etc.) resolve correctly.
+        // Done via middleware rather than a second MapGet endpoint because ASP.NET Core
+        // endpoint routing treats `/foo` and `/foo/` as the same template — registering
+        // both throws AmbiguousMatchException at request time. Middleware runs before
+        // endpoint matching, so there's no ambiguity.
+        app.Use(async (ctx, next) =>
+        {
+            var path = ctx.Request.Path.Value;
+            if (path == "/api/v1/docs" || path == "/docs")
+            {
+                ctx.Response.StatusCode = StatusCodes.Status308PermanentRedirect;
+                ctx.Response.Headers.Location = path + "/" + ctx.Request.QueryString.Value;
+                return;
+            }
+            await next();
+        });
+
+        // Mount 1 — Management API (existing UI URL preserved). The doc-shell endpoint
+        // is excluded from OpenAPI so it doesn't pollute the spec or contract gate.
+        app.UseStaticFiles(new StaticFileOptions { FileProvider = swaggerProvider, RequestPath = "/api/v1/docs" });
+        app.MapGet("/api/v1/docs/", ServeSwaggerShell(swaggerProvider)).ExcludeFromDescription();
+
+        // Mount 2 — Registry Protocols
+        app.UseStaticFiles(new StaticFileOptions { FileProvider = swaggerProvider, RequestPath = "/docs" });
+        app.MapGet("/docs/", ServeSwaggerShell(swaggerProvider)).ExcludeFromDescription();
+
         // Prometheus exposition served by OpenTelemetry's Prometheus exporter.
         // RED metrics (rate/errors/duration) come automatically from
         // AddAspNetCoreInstrumentation in ConfigureOpenTelemetry. The IP
@@ -763,9 +974,9 @@ public partial class Program
         // earlier in the pipeline. See docs/observability/metrics.md.
         app.MapPrometheusScrapingEndpoint("/metrics");
 
-        // OpenAPI + Scalar docs
-        app.MapOpenApi("/api/v1/openapi.json");
-        app.MapScalarApiReference("/api/v1/docs");
+        // OpenAPI specs — named-document pattern serves both /openapi/management.json
+        // and /openapi/protocol.json. No back-compat for /api/v1/openapi.json.
+        app.MapOpenApi("/openapi/{documentName}.json");
 
         app.MapControllers();
 
@@ -784,10 +995,23 @@ public partial class Program
         app.MapFallback(BuildSpaFallback(embeddedProvider));
     }
 
-    private static readonly string[] NonSpaPathPrefixes =
-        ["/api/", "/simple/", "/npm/", "/nuget/", "/packages/", "/pypi/", "/saml/"];
+    // Serilog request-log level selector. Extracted from ConfigureApp to keep the
+    // middleware-composition method below the Sonar S3776 complexity threshold.
+    private static Serilog.Events.LogEventLevel SerilogRequestLogLevel(
+        HttpContext ctx, double elapsed, Exception? ex)
+    {
+        if (ex is not null) return Serilog.Events.LogEventLevel.Error;
+        if (ctx.Request.Path.StartsWithSegments("/ready") || ctx.Request.Path.StartsWithSegments("/health"))
+            return Serilog.Events.LogEventLevel.Verbose;
+        if (elapsed > SlowRequestThresholdMs) return Serilog.Events.LogEventLevel.Warning;
+        return Serilog.Events.LogEventLevel.Information;
+    }
 
-    private static readonly string[] NonSpaExactPaths = ["/health", "/ready", "/metrics"];
+    private static readonly string[] NonSpaPathPrefixes =
+        ["/api/", "/simple/", "/npm/", "/nuget/", "/packages/", "/pypi/", "/maven/", "/rpm/", "/v2/", "/saml/",
+         "/docs/", "/openapi/"];
+
+    private static readonly string[] NonSpaExactPaths = ["/health", "/ready", "/metrics", "/docs"];
 
     private static bool IsNonSpaPath(string path) =>
         NonSpaPathPrefixes.Any(p => path.StartsWith(p, StringComparison.Ordinal))

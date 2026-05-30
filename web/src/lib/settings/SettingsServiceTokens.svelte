@@ -129,7 +129,7 @@
       <div class="form-row"><label>{$t('serviceTokens.modal.description')}</label><input type="text" maxlength="200" bind:value={newDescription} placeholder={$t('serviceTokens.modal.descriptionPlaceholder')} /></div>
       <div class="form-row">
         <label>{$t('serviceTokens.modal.scope')}</label>
-        <select bind:value={newScope} class="w-auto"><option value="pull">pull</option><option value="push">push</option></select>
+        <select bind:value={newScope} class="w-auto"><option value="pull">pull</option><option value="push">push</option><option value="both">both</option></select>
       </div>
       <div class="form-row"><label>{$t('serviceTokens.modal.expiresAt')}</label><input type="datetime-local" bind:value={newExpiry} /></div>
       <div class="modal-actions">

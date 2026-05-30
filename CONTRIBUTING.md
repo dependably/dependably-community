@@ -182,6 +182,9 @@ docker build --build-arg VERSION=0.x.y-rc1 -t dependably:rc .
 | `PyPI__Upstream` | `https://pypi.org` | Upstream PyPI registry for proxy cache |
 | `Npm__Upstream` | `https://registry.npmjs.org` | Upstream npm registry for proxy cache |
 | `NuGet__Upstream` | `https://api.nuget.org/v3` | Upstream NuGet registry for proxy cache |
+| `Maven__Upstream` | `https://repo1.maven.org/maven2` | Upstream Maven registry (Maven Central) for proxy cache |
+| `Rpm__Upstream` | — (no default URL) | Upstream RPM repo base URL. Proxy passthrough is enabled by default per-org (`ProxyPassthroughEnabled`), like every ecosystem — RPM is not disabled by default. It just has **no built-in default upstream** (RPM repos are distro/release-specific), so set this to give RPM a fetch target. Pair with `Rpm__UpstreamMode=passthrough`. |
+| `Oci__Upstreams` | Docker Hub | Upstream OCI registries (prefix-routed). Set via `appsettings.json` `Oci:Upstreams`, not a flat env var. |
 | `DEPENDABLY_DEPLOYMENT_MODE` | `standalone` | Set to `ha` to require Redis and enable distributed locking |
 | `REDIS_CONNECTION_STRING` | — | Required when `DEPENDABLY_DEPLOYMENT_MODE=ha` |
 | `VULN_SCAN_SCHEDULE` | `0 4 * * *` | Cron for the vulnerability scan + rescan passes |

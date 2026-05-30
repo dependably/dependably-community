@@ -13,6 +13,11 @@ services:
       BASE_URL: ${BASE_URL:-http://localhost:8080}
       DEFAULT_ORG_SLUG: ${DEFAULT_ORG_SLUG:-default}
       DEPLOYMENT_MODE: multi
+      # RPM upstream proxy. There is no canonical default RPM repo (distro/release
+      # specific), so this is opt-in via env — here the demo points at Fedora 40
+      # (archived tree, matching the fedora:40 integration-test fixture).
+      Rpm__Upstream: ${RPM_UPSTREAM:-https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Everything/x86_64/os}
+      Rpm__UpstreamMode: ${RPM_UPSTREAM_MODE:-passthrough}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/ready"]
       interval: 10s

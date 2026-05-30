@@ -18,7 +18,8 @@
     "e2e:ui": "playwright test --config e2e/playwright.config.ts --ui",
     "e2e:debug": "playwright test --config e2e/playwright.config.ts --debug",
     "e2e:report": "playwright show-report e2e/playwright-report",
-    "sbom": "cyclonedx-npm --output-format json --output-file sbom-frontend.json"
+    "sbom": "cyclonedx-npm --output-format json --output-file sbom-frontend.json",
+    "sbom:prod": "cyclonedx-npm --omit dev --output-format json --output-file sbom-frontend-prod.json"
   },
   "overrides": {
     "esbuild": "^0.25.0",

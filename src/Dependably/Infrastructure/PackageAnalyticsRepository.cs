@@ -50,13 +50,21 @@ public sealed class PackageAnalyticsRepository
             """,
             new { orgId })).ToList();
 
+        // OCI disk usage lives in oci_blobs (manifest + layer blobs, content-addressed and
+        // deduped within an org), not in package_versions — an OCI version row carries only the
+        // tiny manifest size. So exclude 'oci' from the package_versions sum and add its real
+        // cached footprint from oci_blobs. Both branches are org-scoped (WHERE org_id = @orgId).
         var diskByEco = (await conn.QueryAsync<EcoDiskBytes>(
             """
             SELECT p.ecosystem as Ecosystem, COALESCE(SUM(pv.size_bytes), 0) as TotalBytes
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
-            WHERE p.org_id = @orgId
+            WHERE p.org_id = @orgId AND p.ecosystem != 'oci'
             GROUP BY p.ecosystem
+            UNION ALL
+            SELECT 'oci' as Ecosystem, COALESCE(SUM(size_bytes), 0) as TotalBytes
+            FROM oci_blobs
+            WHERE org_id = @orgId
             """,
             new { orgId })).ToList();
 

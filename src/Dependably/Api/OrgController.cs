@@ -121,14 +121,18 @@ public sealed class OrgController : OrgScopedControllerBase
     [HttpDelete("api/v1/packages/{ecosystem}/{name}/{version}")]
     public async Task<IActionResult> DeleteVersion(string ecosystem, string name, string version, CancellationToken ct)
     {
-        // Per-ecosystem yank capability — admin/owner role sets enumerate yank:npm/pypi/nuget.
+        // Per-ecosystem yank capability — admin/owner role sets enumerate yank:* leaves.
         // Unknown ecosystem names fail the lookup below, but we 404 here so an invalid path
-        // doesn't read as 403.
+        // doesn't read as 403. Authorisation outcomes for *known* ecosystems remain semantic:
+        // missing capability → 403 (via AuthorizeCapAsync), missing package/version → 404.
         var yankCap = ecosystem switch
         {
-            "npm" => Capabilities.YankNpm,
-            "pypi" => Capabilities.YankPypi,
+            "npm"   => Capabilities.YankNpm,
+            "pypi"  => Capabilities.YankPypi,
             "nuget" => Capabilities.YankNuget,
+            "maven" => Capabilities.YankMaven,
+            "rpm"   => Capabilities.YankRpm,
+            "oci"   => Capabilities.YankOci,
             _ => null
         };
         if (yankCap is null) return NotFound();
@@ -152,7 +156,7 @@ public sealed class OrgController : OrgScopedControllerBase
         // Activity is the right sink for a per-version operator action — audit_log is for
         // tenant-level config/security events. Never dual-write the same event to both.
         await _audit.LogActivityAsync(orgId, ecosystem, ver.Purl, "delete", GetUserId(),
-            sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
     }
@@ -190,9 +194,12 @@ public sealed class OrgController : OrgScopedControllerBase
 
         var snippet = ecosystem switch
         {
-            "pypi" => GeneratePyPiSnippet(baseUrl, slug, settings),
-            "npm"  => GenerateNpmSnippet(baseUrl, slug, settings),
+            "pypi"  => GeneratePyPiSnippet(baseUrl, slug, settings),
+            "npm"   => GenerateNpmSnippet(baseUrl, slug, settings),
             "nuget" => GenerateNuGetSnippet(baseUrl, slug, settings),
+            "maven" => GenerateMavenSnippet(baseUrl, slug, settings),
+            "rpm"   => GenerateRpmSnippet(baseUrl, slug, settings),
+            "oci"   => GenerateOciSnippet(baseUrl, slug, settings),
             _ => null
         };
 
@@ -241,6 +248,79 @@ public sealed class OrgController : OrgScopedControllerBase
               </packageSources>
             </configuration>
             <!-- Max upload: {s?.MaxUploadBytesNuGet ?? s?.MaxUploadBytes ?? 0} bytes -->
+            """;
+    }
+
+    // Maven snippet bundles both publish (distributionManagement, used by `mvn deploy`) and
+    // consume (repositories, used at resolution time). A registry is no use if onboarding only
+    // covers one half of the workflow.
+    private static string GenerateMavenSnippet(string baseUrl, string slug, OrgSettings? s)
+    {
+        _ = slug;
+        return $"""
+            <!-- ~/.m2/settings.xml — publish + consume -->
+            <settings>
+              <servers>
+                <server>
+                  <id>dependably</id>
+                  <username>your-username</username>
+                  <password>your-token</password>
+                </server>
+              </servers>
+              <profiles>
+                <profile>
+                  <id>dependably</id>
+                  <repositories>
+                    <repository>
+                      <id>dependably</id>
+                      <url>{baseUrl}/maven/</url>
+                    </repository>
+                  </repositories>
+                </profile>
+              </profiles>
+              <activeProfiles><activeProfile>dependably</activeProfile></activeProfiles>
+            </settings>
+
+            <!-- In your project pom.xml, for `mvn deploy`: -->
+            <distributionManagement>
+              <repository>
+                <id>dependably</id>
+                <url>{baseUrl}/maven/</url>
+              </repository>
+            </distributionManagement>
+            <!-- Max upload: {s?.MaxUploadBytesMaven ?? s?.MaxUploadBytes ?? 0} bytes -->
+            """;
+    }
+
+    // RPM .repo file pointing at the yum/dnf-compatible directory layout, plus a curl one-liner
+    // for the push side. gpgcheck=0 by default — operators turn it on once signing is wired.
+    private static string GenerateRpmSnippet(string baseUrl, string slug, OrgSettings? s)
+    {
+        _ = slug;
+        return $"""
+            # /etc/yum.repos.d/dependably.repo
+            [dependably]
+            name=dependably
+            baseurl={baseUrl}/rpm/
+            enabled=1
+            gpgcheck=0
+
+            # Push an RPM:
+            curl -u user:<token> --upload-file pkg.rpm {baseUrl}/rpm/upload
+            # Max upload: {s?.MaxUploadBytesRpm ?? s?.MaxUploadBytes ?? 0} bytes
+            """;
+    }
+
+    private static string GenerateOciSnippet(string baseUrl, string slug, OrgSettings? s)
+    {
+        _ = slug;
+        var host = new Uri(baseUrl).Host;
+        return $"""
+            # Docker / OCI — login, pull, push
+            docker login {host}
+            docker pull  {host}/<image>:<tag>
+            docker push  {host}/<image>:<tag>
+            # Max upload (per blob): {s?.MaxUploadBytesOci ?? s?.MaxUploadBytes ?? 0} bytes
             """;
     }
 

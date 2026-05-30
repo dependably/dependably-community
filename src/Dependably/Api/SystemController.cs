@@ -33,11 +33,14 @@ public sealed class SystemController : ControllerBase
     private readonly ProblemResults _problems;
     private readonly IConfiguration _config;
     private readonly Dependably.Security.PasswordPolicy _passwordPolicy;
+    private readonly ITenantSlugCacheInvalidator? _tenantCache;
 
     // Static vocabulary surfaced on the background-jobs facets endpoint. Mirrors the
     // <c>dependably.background_job.duration</c> histogram outcome label values.
     private static readonly string[] BackgroundJobOutcomes = ["success", "server_error", "cancelled"];
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Controller aggregates 8 independent DI-resolved services (3 repos, metadata store, problem-results helper, configuration, password policy, optional cache invalidator). Bundling into a wrapper record would obscure the DI graph and force every test setup to materialise the wrapper for unrelated callers.")]
     public SystemController(
         OrgRepository orgs,
         SystemAdminRepository systemAdmins,
@@ -45,7 +48,8 @@ public sealed class SystemController : ControllerBase
         AuditRepository audit,
         ProblemResults problems,
         IConfiguration config,
-        Dependably.Security.PasswordPolicy passwordPolicy)
+        Dependably.Security.PasswordPolicy passwordPolicy,
+        ITenantSlugCacheInvalidator? tenantCache = null)
     {
         _orgs = orgs;
         _systemAdmins = systemAdmins;
@@ -54,6 +58,7 @@ public sealed class SystemController : ControllerBase
         _problems = problems;
         _config = config;
         _passwordPolicy = passwordPolicy;
+        _tenantCache = tenantCache;
     }
 
     /// <summary>GET /api/v1/system/tenants — list all tenants.</summary>
@@ -185,6 +190,7 @@ public sealed class SystemController : ControllerBase
         if (org is null) return NotFound();
 
         await _orgs.SoftDeleteOrgAsync(org.Id, ct);
+        _tenantCache?.InvalidateSlug(slug);
 
         var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
@@ -262,6 +268,7 @@ public sealed class SystemController : ControllerBase
         var priorStatus = org.Status;
         var ok = await _orgs.UpdateOrgStatusAsync(org.Id, req.Status, ct);
         if (!ok) return NotFound();
+        _tenantCache?.InvalidateSlug(slug);
 
         var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
@@ -289,6 +296,7 @@ public sealed class SystemController : ControllerBase
 
         var restored = await _orgs.RestoreOrgAsync(org.Id, ct);
         if (!restored) return NotFound();
+        _tenantCache?.InvalidateSlug(slug);
 
         var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;

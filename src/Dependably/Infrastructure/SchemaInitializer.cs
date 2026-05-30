@@ -2,6 +2,7 @@ using System.Data;
 using System.Data.Common;
 using System.Globalization;
 using Dapper;
+using Dependably.Protocol;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -63,6 +64,90 @@ public sealed class SchemaInitializer
         await RunOnceAsync(conn, "drop_legacy_token_scope_column", DropLegacyTokenScopeColumnAsync);
         await RunOnceAsync(conn, "drop_package_versions_sbom_column", DropPackageVersionsSbomColumnAsync);
         await RunOnceAsync(conn, "drop_allowlist_blocklist_ecosystem", DropAllowlistBlocklistEcosystemAsync);
+        await RunOnceAsync(conn, "backfill_package_versions_filename", BackfillPackageVersionsFilenameAsync);
+        await RunOnceAsync(conn, "backfill_oci_catalog", BackfillOciCatalogAsync);
+    }
+
+    // #91: Populate package_versions.filename for rows that pre-date the column. The new
+    // download lookup path (FindVersionByBlobKeySuffixAsync) hits an equality index instead
+    // of a leading-wildcard LIKE, but it can only do so when filename is set. We derive
+    // the value from blob_key's trailing path segment — the same suffix the old query
+    // matched on — for backwards-compatible behaviour. xtenant: one-shot, cross-tenant.
+    private static async Task BackfillPackageVersionsFilenameAsync(DbConnection conn)
+    {
+        var rows = (await conn.QueryAsync<(string Id, string BlobKey)>(
+            "SELECT id, blob_key FROM package_versions WHERE filename IS NULL"))
+            .ToList();
+        foreach (var row in rows)
+        {
+            var lastSlash = row.BlobKey.LastIndexOf('/');
+            var filename = lastSlash >= 0 ? row.BlobKey[(lastSlash + 1)..] : row.BlobKey;
+            await conn.ExecuteAsync(
+                "UPDATE package_versions SET filename = @filename WHERE id = @id",
+                new { id = row.Id, filename });
+        }
+    }
+
+    // Backfills the package catalogue for OCI/Docker images pulled before they were recorded in
+    // packages/package_versions (#98/#103 stored them only in oci_blobs/oci_tags, so every
+    // dashboard counted Docker as zero). One catalogue version per tagged manifest: the digest is
+    // the content-addressed version identity, the resolving tag is captured in the PURL. Idempotent
+    // — the version insert is skipped on any unique hit (re-run, many-tags-to-one-digest, or the
+    // globally-unique purl already held by another org that pulled the same image first).
+    private static async Task BackfillOciCatalogAsync(DbConnection conn)
+    {
+        var rows = (await conn.QueryAsync<(string OrgId, string Repository, string Tag, string Digest, long SizeBytes, string BlobKey)>(
+            """
+            SELECT t.org_id AS OrgId, t.repository AS Repository, t.tag AS Tag, t.digest AS Digest,
+                   b.size_bytes AS SizeBytes, b.blob_key AS BlobKey
+            FROM oci_tags t
+            JOIN oci_blobs b ON b.digest = t.digest AND b.org_id = t.org_id
+            """)).ToList();
+
+        foreach (var row in rows)
+        {
+            // get-or-create the parent package (one per org+repository); single-threaded migration,
+            // so SELECT-then-INSERT needs no conflict guard.
+            var pkgId = await conn.ExecuteScalarAsync<string?>(
+                "SELECT id FROM packages WHERE org_id = @orgId AND ecosystem = 'oci' AND purl_name = @repo",
+                new { orgId = row.OrgId, repo = row.Repository });
+            if (pkgId is null)
+            {
+                pkgId = Guid.NewGuid().ToString("N");
+                await conn.ExecuteAsync(
+                    """
+                    INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy)
+                    VALUES (@id, @orgId, 'oci', @name, @purlName, 1)
+                    """,
+                    new { id = pkgId, orgId = row.OrgId, name = row.Repository, purlName = row.Repository });
+            }
+
+            var lastSlash = row.BlobKey.LastIndexOf('/');
+            var filename  = lastSlash >= 0 ? row.BlobKey[(lastSlash + 1)..] : row.BlobKey;
+            var sha256Hex = row.Digest.StartsWith("sha256:", StringComparison.Ordinal)
+                ? row.Digest["sha256:".Length..]
+                : null;
+            // xtenant: one-shot backfill across every tenant; package_id was just resolved/created
+            // for this row's own org (packages.org_id), so the version inherits that org scope.
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO package_versions
+                    (id, package_id, version, purl, blob_key, filename, size_bytes, checksum_sha256, first_fetch, origin)
+                VALUES (@id, @pkgId, @version, @purl, @blobKey, @filename, @sizeBytes, @sha256, 1, 'proxy')
+                ON CONFLICT DO NOTHING
+                """,
+                new
+                {
+                    id = Guid.NewGuid().ToString("N"),
+                    pkgId,
+                    version = row.Digest,
+                    purl = PurlNormalizer.Oci(row.Repository, row.Digest, row.Tag),
+                    blobKey = row.BlobKey,
+                    filename,
+                    sizeBytes = row.SizeBytes,
+                    sha256 = sha256Hex,
+                });
+        }
     }
 
     // Drops the `ecosystem` column from `allowlist` and `blocklist`. The ecosystem is already
@@ -318,6 +403,39 @@ public sealed class SchemaInitializer
             // block gate. NULL = policy off. Lets community detection catch malicious uploads
             // before tenants pull them. Enforced first-fetch in BlockGateService.
             "ALTER TABLE org_settings ADD COLUMN min_release_age_hours INTEGER",
+            // #99: Maven per-ecosystem upload cap.
+            "ALTER TABLE org_settings ADD COLUMN max_upload_bytes_maven INTEGER",
+            // #100: RPM per-ecosystem upload cap.
+            "ALTER TABLE org_settings ADD COLUMN max_upload_bytes_rpm INTEGER",
+            // #101: OCI (Docker) per-ecosystem upload cap. OCI artefacts are routinely multi-GB
+            // (multi-layer ML / CUDA bases); the column is INTEGER so SQLite stores a 64-bit
+            // value transparently, and every consumer carries long? end-to-end.
+            "ALTER TABLE org_settings ADD COLUMN max_upload_bytes_oci INTEGER",
+            // #91: trailing path segment of blob_key, populated at insert time so the
+            // PyPI/npm/NuGet download lookups can equality-probe an index instead of
+            // running a leading-wildcard LIKE. Backfilled by
+            // backfill_package_versions_filename for rows that pre-date the column.
+            "ALTER TABLE package_versions ADD COLUMN filename TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_package_versions_filename ON package_versions(filename)",
+            // Discriminator for actor_id: 'user' (users.id) or 'service' (service_tokens.id).
+            // NULL on legacy rows + truly-anonymous pulls. Without this, service-token-attributed
+            // events were stored with actor_id=NULL (TokenRepository.ResolveAsync sets UserId=null
+            // for service tokens) and rendered as "anonymous" in the audit UI, indistinguishable
+            // from real anonymous pulls.
+            "ALTER TABLE activity ADD COLUMN actor_kind TEXT",
+            "ALTER TABLE audit_log ADD COLUMN actor_kind TEXT",
+            // #101: Maven reserved-prefix list (JSON array of groupId prefix strings).
+            // Coordinates matching these prefixes are NEVER forwarded to upstream — dep confusion
+            // protection. Empty array by default (no restrictions). Stored as JSON so per-org
+            // lists can grow without schema changes.
+            "ALTER TABLE org_settings ADD COLUMN maven_reserved_prefixes TEXT NOT NULL DEFAULT '[]'",
+            // #103: OCI origin tracking — 'uploaded' (local push) or 'proxy' (upstream cache).
+            // Additive on oci_blobs; existing rows default to 'uploaded' to preserve the
+            // existing semantics (all rows before this column were locally stored).
+            "ALTER TABLE oci_blobs ADD COLUMN origin TEXT NOT NULL DEFAULT 'uploaded'",
+            // #103: Per-tag TTL revalidation timestamp. NULL on existing rows (forces a
+            // re-check on first access, which is the correct conservative default).
+            "ALTER TABLE oci_tags ADD COLUMN last_revalidated TEXT",
         };
 
         foreach (var ddl in migrations)

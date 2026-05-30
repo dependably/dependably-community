@@ -23,53 +23,42 @@ public sealed class TokenRepository
 
         var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-        // Use indexed lookup by full hash — token_hash is SHA-256 of the raw token,
-        // so a direct equality check is safe and avoids a full table scan.
-        var userToken = await conn.QuerySingleOrDefaultAsync<(string Id, string OrgId, string UserId, string? Capabilities, string? Description, string CreatedAt, string? ExpiresAt, string? LastUsedAt)>(
+        // #93: single UNION ALL query collapses the previous two-round-trip lookup
+        // (user_tokens THEN service_tokens) into one. token_hash is SHA-256 of a
+        // securely-generated token, so the same hash cannot appear in both tables — at
+        // most one branch matches. The `source` literal column lets us route the result
+        // back to the right TokenSource without a second query. Both branches stay
+        // indexed via idx_user_tokens_hash / idx_service_tokens_hash.
+        var row = await conn.QuerySingleOrDefaultAsync<(
+            string Id, string OrgId, string? UserId, string? Capabilities,
+            string? Description, string CreatedAt, string? ExpiresAt, string? LastUsedAt,
+            string Source)>(
             """
-            SELECT id, org_id, user_id, capabilities, description, created_at, expires_at, last_used_at
+            SELECT id, org_id, user_id, capabilities, description, created_at, expires_at, last_used_at, 'user' AS source
             FROM user_tokens
             WHERE token_hash = @hash AND (expires_at IS NULL OR expires_at > @now)
-            """,
-            new { hash = incomingHex, now });
-
-        if (userToken.Id is not null)
-        {
-            return new TokenRecord
-            {
-                Id = userToken.Id, OrgId = userToken.OrgId, UserId = userToken.UserId,
-                Capabilities = userToken.Capabilities,
-                Description = userToken.Description,
-                CreatedAt = DateTimeOffset.Parse(userToken.CreatedAt),
-                ExpiresAt = userToken.ExpiresAt is not null ? DateTimeOffset.Parse(userToken.ExpiresAt) : null,
-                LastUsedAt = userToken.LastUsedAt is not null ? DateTimeOffset.Parse(userToken.LastUsedAt) : null,
-                Source = TokenSource.User
-            };
-        }
-
-        var serviceToken = await conn.QuerySingleOrDefaultAsync<(string Id, string OrgId, string? Capabilities, string? Description, string CreatedAt, string? ExpiresAt, string? LastUsedAt)>(
-            """
-            SELECT id, org_id, capabilities, description, created_at, expires_at, last_used_at
+            UNION ALL
+            SELECT id, org_id, NULL AS user_id, capabilities, description, created_at, expires_at, last_used_at, 'service' AS source
             FROM service_tokens
             WHERE token_hash = @hash AND (expires_at IS NULL OR expires_at > @now)
+            LIMIT 1
             """,
             new { hash = incomingHex, now });
 
-        if (serviceToken.Id is not null)
-        {
-            return new TokenRecord
-            {
-                Id = serviceToken.Id, OrgId = serviceToken.OrgId, UserId = null,
-                Capabilities = serviceToken.Capabilities,
-                Description = serviceToken.Description,
-                CreatedAt = DateTimeOffset.Parse(serviceToken.CreatedAt),
-                ExpiresAt = serviceToken.ExpiresAt is not null ? DateTimeOffset.Parse(serviceToken.ExpiresAt) : null,
-                LastUsedAt = serviceToken.LastUsedAt is not null ? DateTimeOffset.Parse(serviceToken.LastUsedAt) : null,
-                Source = TokenSource.Service
-            };
-        }
+        if (row.Id is null) return null;
 
-        return null;
+        return new TokenRecord
+        {
+            Id = row.Id,
+            OrgId = row.OrgId,
+            UserId = row.UserId,
+            Capabilities = row.Capabilities,
+            Description = row.Description,
+            CreatedAt = DateTimeOffset.Parse(row.CreatedAt),
+            ExpiresAt = row.ExpiresAt is not null ? DateTimeOffset.Parse(row.ExpiresAt) : null,
+            LastUsedAt = row.LastUsedAt is not null ? DateTimeOffset.Parse(row.LastUsedAt) : null,
+            Source = row.Source == "service" ? TokenSource.Service : TokenSource.User,
+        };
     }
 
     public static string HashToken(string rawToken)
@@ -195,6 +184,33 @@ public sealed class TokenRepository
                 LastUsedAt = t.LastUsedAt is not null ? DateTimeOffset.Parse(t.LastUsedAt) : null,
             })
             .ToList();
+    }
+
+    /// <summary>
+    /// Resolves a presented <see cref="TokenRecord"/> to the identifier returned by
+    /// <c>GET /npm/-/whoami</c>. User tokens return the owner's <c>users.email</c>; service
+    /// tokens return <c>service:&lt;service_tokens.name&gt;</c> so npm callers see a stable
+    /// human-readable identifier instead of an empty string. Both lookups are parameterized
+    /// and filtered on <c>org_id</c> to stay consistent with the rest of the tenant-scoped
+    /// SQL surface (the token row's <c>org_id</c> is the source of truth — cross-tenant
+    /// presentation is already rejected upstream by <see cref="TokenAuthExtensions.ResolveTokenAsync(HttpRequest, TokenRepository, string, CancellationToken)"/>).
+    /// Returns null when the row is gone between auth and lookup.
+    /// </summary>
+    public async Task<string?> GetWhoAmIIdentifierAsync(TokenRecord token, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        if (token.Source == TokenSource.User)
+        {
+            if (token.UserId is null) return null;
+            return await conn.ExecuteScalarAsync<string?>(
+                "SELECT email FROM users WHERE id = @userId AND tenant_id = @orgId",
+                new { userId = token.UserId, orgId = token.OrgId });
+        }
+
+        var name = await conn.ExecuteScalarAsync<string?>(
+            "SELECT name FROM service_tokens WHERE id = @id AND org_id = @orgId",
+            new { id = token.Id, orgId = token.OrgId });
+        return name is null ? null : $"service:{name}";
     }
 
     /// <summary>

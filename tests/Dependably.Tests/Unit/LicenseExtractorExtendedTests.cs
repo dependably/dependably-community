@@ -28,7 +28,7 @@ public sealed class LicenseExtractorExtendedTests
             ["foo-1.0.dist-info/RECORD"] = "garbage",
             ["foo/__init__.py"] = "",
         });
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0-py3-none-any.whl");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0-py3-none-any.whl");
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -45,7 +45,7 @@ public sealed class LicenseExtractorExtendedTests
 
             body
             """);
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0.tar.gz");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0.tar.gz");
         Assert.Equal(new[] { "Apache-2.0" }, result.Spdx);
     }
 
@@ -55,7 +55,7 @@ public sealed class LicenseExtractorExtendedTests
         // Valid tar.gz, but no */PKG-INFO entry — tar walk exhausts, zip-fallback
         // sees the same bytes as not-a-zip, and ReadSdistPkgInfo returns null.
         var bytes = BuildTarGz("foo-1.0/setup.py", "x = 1");
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0.tar.gz");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0.tar.gz");
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -75,7 +75,7 @@ public sealed class LicenseExtractorExtendedTests
                 body
                 """,
         });
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0.zip");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0.zip");
         Assert.Equal(new[] { "BSD-2-Clause" }, result.Spdx);
     }
 
@@ -87,7 +87,7 @@ public sealed class LicenseExtractorExtendedTests
         {
             ["foo-1.0/setup.py"] = "x = 1",
         });
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0.zip");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0.zip");
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -96,7 +96,7 @@ public sealed class LicenseExtractorExtendedTests
     {
         // Neither gzip nor zip — both branches throw and the outer catch returns Empty.
         var bytes = Encoding.UTF8.GetBytes("absolutely not a package");
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0.tar.gz");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0.tar.gz");
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -116,7 +116,7 @@ public sealed class LicenseExtractorExtendedTests
 
             body
             """);
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0-py3-none-any.whl");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0-py3-none-any.whl");
         Assert.Empty(result.Spdx);
     }
 
@@ -134,7 +134,7 @@ public sealed class LicenseExtractorExtendedTests
 
             body
             """);
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0-py3-none-any.whl");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0-py3-none-any.whl");
         Assert.Equal(new[] { "MIT" }, result.Spdx);
     }
 
@@ -151,7 +151,7 @@ public sealed class LicenseExtractorExtendedTests
 
             body
             """);
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0-py3-none-any.whl");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0-py3-none-any.whl");
         Assert.Equal(new[] { "MIT" }, result.Spdx);
     }
 
@@ -256,7 +256,7 @@ public sealed class LicenseExtractorExtendedTests
     public void NpmTarball_NoPackageJson_ReturnsEmpty()
     {
         var bytes = BuildTarGz("package/index.js", "module.exports = {};");
-        var result = LicenseExtractor.FromNpmTarballPackageJson(bytes);
+        var result = LicenseExtractor.FromNpmTarballPackageJson(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -265,7 +265,7 @@ public sealed class LicenseExtractorExtendedTests
     {
         // Tar.gz reads fine, but JsonNode.Parse throws — outer catch returns Empty.
         var bytes = BuildTarGz("package/package.json", "{ not valid json");
-        var result = LicenseExtractor.FromNpmTarballPackageJson(bytes);
+        var result = LicenseExtractor.FromNpmTarballPackageJson(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -273,7 +273,7 @@ public sealed class LicenseExtractorExtendedTests
     public void NpmTarball_MalformedGzip_ReturnsEmpty()
     {
         var bytes = Encoding.UTF8.GetBytes("not a gzipped tarball");
-        var result = LicenseExtractor.FromNpmTarballPackageJson(bytes);
+        var result = LicenseExtractor.FromNpmTarballPackageJson(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -296,7 +296,7 @@ public sealed class LicenseExtractorExtendedTests
                 </package>
                 """,
         });
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -316,7 +316,7 @@ public sealed class LicenseExtractorExtendedTests
                 </package>
                 """,
         });
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(new[] { "MIT OR Apache-2.0" }, result.Spdx);
         Assert.Null(result.Deprecated);
     }
@@ -338,7 +338,7 @@ public sealed class LicenseExtractorExtendedTests
                 </package>
                 """,
         });
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -358,7 +358,7 @@ public sealed class LicenseExtractorExtendedTests
                 </package>
                 """,
         });
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -379,7 +379,7 @@ public sealed class LicenseExtractorExtendedTests
                 </package>
                 """,
         });
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -390,7 +390,7 @@ public sealed class LicenseExtractorExtendedTests
         {
             ["lib/netstandard2.0/_._"] = "",
         });
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -398,7 +398,7 @@ public sealed class LicenseExtractorExtendedTests
     public void NuGet_MalformedZipBytes_ReturnsEmpty()
     {
         var bytes = Encoding.UTF8.GetBytes("not a zip at all");
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -415,7 +415,7 @@ public sealed class LicenseExtractorExtendedTests
                 </package>
                 """,
         });
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -439,7 +439,7 @@ public sealed class LicenseExtractorExtendedTests
             </package>
             """;
         var bytes = BuildZip(new Dictionary<string, string> { ["foo.nuspec"] = xml });
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -459,7 +459,7 @@ public sealed class LicenseExtractorExtendedTests
             </package>
             """;
         var bytes = BuildZip(new Dictionary<string, string> { ["foo.nuspec"] = xml });
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
@@ -478,7 +478,7 @@ public sealed class LicenseExtractorExtendedTests
             </package>
             """;
         var bytes = BuildZip(new Dictionary<string, string> { ["foo.nuspec"] = xml });
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(new[] { "(MIT OR GPL-2.0+)" }, result.Spdx);
     }
 

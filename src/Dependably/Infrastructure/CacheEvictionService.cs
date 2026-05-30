@@ -176,9 +176,12 @@ public sealed class CacheEvictionService : BackgroundService
         await _cache.DeleteAsync(a.Id, ct);
     }
 
+    // deepcode ignore NoHardcodedCredentials: reads numeric tuning knobs (limits, ages) from
+    // IConfiguration; values are integers, not credentials. `key` is a config name constant.
     private int? ParseInt(string key) =>
         int.TryParse(_config[key], out var v) && v > 0 ? v : null;
 
+    // deepcode ignore NoHardcodedCredentials: see ParseInt above.
     private long? ParseLong(string key) =>
         long.TryParse(_config[key], out var v) && v > 0 ? v : null;
 }

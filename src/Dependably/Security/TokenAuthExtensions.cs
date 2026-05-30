@@ -106,22 +106,10 @@ public static class TokenAuthExtensions
     /// </summary>
     public static bool HasCapability(this TokenRecord token, string required)
     {
-        if (string.IsNullOrWhiteSpace(token.Capabilities))
-            return false;
-
-        IReadOnlySet<string> granted;
-        try
-        {
-            var list = System.Text.Json.JsonSerializer.Deserialize<string[]>(token.Capabilities);
-            granted = list is null ? new HashSet<string>() : new HashSet<string>(list);
-        }
-        catch (System.Text.Json.JsonException)
-        {
-            // Malformed JSON: treat the row as having no capabilities. Better than throwing
-            // mid-auth — the caller will deny, which is the safe default.
-            return false;
-        }
-
-        return Capabilities.Grants(granted, required);
+        // Reads the per-token cached capability set — parses the underlying JSON exactly
+        // once per resolved TokenRecord regardless of how many capability checks a
+        // controller action fans out into. Deny-all on NULL/malformed JSON is enforced by
+        // TokenRecord.CapabilitySet returning an empty set.
+        return Capabilities.Grants(token.CapabilitySet, required);
     }
 }

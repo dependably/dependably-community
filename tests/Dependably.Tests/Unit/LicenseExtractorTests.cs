@@ -1,6 +1,7 @@
 using System.Formats.Tar;
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
@@ -17,7 +18,7 @@ public class LicenseExtractorTests
     {
         var bytes = File.ReadAllBytes(Path.Combine(
             FixtureManifest.FixturesRoot, "pypi", "mypy_extensions-1.0.0-py3-none-any.whl"));
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "mypy_extensions-1.0.0-py3-none-any.whl");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "mypy_extensions-1.0.0-py3-none-any.whl");
         Assert.NotEmpty(result.Spdx);
         Assert.Null(result.Deprecated);
     }
@@ -27,7 +28,7 @@ public class LicenseExtractorTests
     {
         var bytes = File.ReadAllBytes(Path.Combine(
             FixtureManifest.FixturesRoot, "pypi", "mypy_extensions-1.0.0.tar.gz"));
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "mypy_extensions-1.0.0.tar.gz");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "mypy_extensions-1.0.0.tar.gz");
         Assert.NotEmpty(result.Spdx);
     }
 
@@ -45,7 +46,7 @@ public class LicenseExtractorTests
 
             body
             """);
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0-py3-none-any.whl");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0-py3-none-any.whl");
         Assert.Equal(new[] { "MIT OR Apache-2.0" }, result.Spdx);
     }
 
@@ -62,7 +63,7 @@ public class LicenseExtractorTests
 
             body
             """);
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0-py3-none-any.whl");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0-py3-none-any.whl");
         Assert.Empty(result.Spdx);
     }
 
@@ -77,7 +78,7 @@ public class LicenseExtractorTests
 
             body
             """);
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0-py3-none-any.whl");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0-py3-none-any.whl");
         Assert.Equal(new[] { "BSD-3-Clause" }, result.Spdx);
     }
 
@@ -91,7 +92,7 @@ public class LicenseExtractorTests
 
             body
             """);
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "foo-1.0-py3-none-any.whl");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0-py3-none-any.whl");
         Assert.Empty(result.Spdx);
         Assert.Null(result.Deprecated);
     }
@@ -100,8 +101,125 @@ public class LicenseExtractorTests
     public void PyPi_MalformedZip_ReturnsEmptyWithoutThrowing()
     {
         var bytes = Encoding.UTF8.GetBytes("not a zip file at all");
-        var result = LicenseExtractor.FromPyPiPackageBytes(bytes, "broken.whl");
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "broken.whl");
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
+    }
+
+    // ── PyPI: yank passthrough (FromPyPiJsonFile) ────────────────────────────
+
+    [Fact]
+    public void PyPi_Yanked_WithReason_PassesReasonThrough()
+    {
+        var entry = JsonDocument.Parse("""
+            {"filename":"foo-1.0.tar.gz","yanked":true,"yanked_reason":"CVE-2024-9999 critical RCE"}
+            """).RootElement;
+        var result = LicenseExtractor.FromPyPiJsonFile(entry);
+        Assert.Equal("CVE-2024-9999 critical RCE", result.Deprecated);
+        Assert.Empty(result.Spdx);
+    }
+
+    [Fact]
+    public void PyPi_Yanked_NullReason_FallsBackToLiteralYanked()
+    {
+        var entry = JsonDocument.Parse("""
+            {"filename":"foo-1.0.tar.gz","yanked":true,"yanked_reason":null}
+            """).RootElement;
+        var result = LicenseExtractor.FromPyPiJsonFile(entry);
+        Assert.Equal("Yanked", result.Deprecated);
+    }
+
+    [Fact]
+    public void PyPi_Yanked_EmptyReason_FallsBackToLiteralYanked()
+    {
+        var entry = JsonDocument.Parse("""
+            {"filename":"foo-1.0.tar.gz","yanked":true,"yanked_reason":"   "}
+            """).RootElement;
+        var result = LicenseExtractor.FromPyPiJsonFile(entry);
+        Assert.Equal("Yanked", result.Deprecated);
+    }
+
+    [Fact]
+    public void PyPi_Yanked_MissingReasonField_FallsBackToLiteralYanked()
+    {
+        var entry = JsonDocument.Parse("""
+            {"filename":"foo-1.0.tar.gz","yanked":true}
+            """).RootElement;
+        var result = LicenseExtractor.FromPyPiJsonFile(entry);
+        Assert.Equal("Yanked", result.Deprecated);
+    }
+
+    [Fact]
+    public void PyPi_NotYanked_ReturnsNullDeprecated()
+    {
+        var entry = JsonDocument.Parse("""
+            {"filename":"foo-1.0.tar.gz","yanked":false,"yanked_reason":"ignored"}
+            """).RootElement;
+        var result = LicenseExtractor.FromPyPiJsonFile(entry);
+        Assert.Null(result.Deprecated);
+    }
+
+    [Fact]
+    public void PyPi_NoYankedField_ReturnsEmpty()
+    {
+        var entry = JsonDocument.Parse("""{"filename":"foo-1.0.tar.gz"}""").RootElement;
+        var result = LicenseExtractor.FromPyPiJsonFile(entry);
+        Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
+    }
+
+    [Fact]
+    public void PyPi_MixedBatch_YankedAndLive_EachExtractedIndependently()
+    {
+        // Mirrors how PyPI's /pypi/{name}/{version}/json returns multiple urls[]
+        // entries (sdist + several wheels). One can be yanked while siblings stay
+        // live, so each must extract on its own — assert per-entry classification.
+        var doc = JsonDocument.Parse("""
+            {
+              "urls": [
+                {"filename":"foo-1.0.tar.gz","yanked":false},
+                {"filename":"foo-1.0-py3-none-any.whl","yanked":true,"yanked_reason":"superseded"},
+                {"filename":"foo-1.0-cp39-cp39-manylinux.whl","yanked":true,"yanked_reason":""},
+                {"filename":"foo-1.0-cp310-cp310-manylinux.whl","yanked":false}
+              ]
+            }
+            """);
+
+        var entries = doc.RootElement.GetProperty("urls").EnumerateArray().ToList();
+        var results = entries.Select(LicenseExtractor.FromPyPiJsonFile).ToList();
+
+        Assert.Null(results[0].Deprecated);
+        Assert.Equal("superseded", results[1].Deprecated);
+        Assert.Equal("Yanked", results[2].Deprecated);
+        Assert.Null(results[3].Deprecated);
+    }
+
+    // ── npm: mixed-batch deprecation across versions ─────────────────────────
+
+    [Fact]
+    public void Npm_MixedBatch_DeprecatedAndLive_EachVersionExtractedIndependently()
+    {
+        // Real packuments routinely carry many versions where only some are flagged
+        // (npm deprecate runs per-version). Iterate versions[*] and assert each
+        // resolves to its own deprecation string or null.
+        var packument = JsonNode.Parse("""
+            {
+              "name": "left-pad",
+              "versions": {
+                "1.0.0": {"name":"left-pad","version":"1.0.0","license":"MIT"},
+                "1.1.0": {"name":"left-pad","version":"1.1.0","license":"MIT","deprecated":"use String.prototype.padStart"},
+                "1.1.1": {"name":"left-pad","version":"1.1.1","license":"MIT","deprecated":""},
+                "1.2.0": {"name":"left-pad","version":"1.2.0","license":"MIT","deprecated":"unmaintained"}
+              }
+            }
+            """)!;
+
+        var byVersion = packument["versions"]!.AsObject()
+            .ToDictionary(kvp => kvp.Key,
+                          kvp => LicenseExtractor.FromNpmPackumentVersion(kvp.Value));
+
+        Assert.Null(byVersion["1.0.0"].Deprecated);
+        Assert.Equal("use String.prototype.padStart", byVersion["1.1.0"].Deprecated);
+        Assert.Null(byVersion["1.1.1"].Deprecated);
+        Assert.Equal("unmaintained", byVersion["1.2.0"].Deprecated);
     }
 
     // ── npm: real fixture ────────────────────────────────────────────────────
@@ -111,7 +229,7 @@ public class LicenseExtractorTests
     {
         var bytes = File.ReadAllBytes(Path.Combine(
             FixtureManifest.FixturesRoot, "npm", "is-odd-3.0.1.tgz"));
-        var result = LicenseExtractor.FromNpmTarballPackageJson(bytes);
+        var result = LicenseExtractor.FromNpmTarballPackageJson(new MemoryStream(bytes));
         Assert.NotEmpty(result.Spdx);
     }
 
@@ -176,7 +294,7 @@ public class LicenseExtractorTests
     {
         var bytes = File.ReadAllBytes(Path.Combine(
             FixtureManifest.FixturesRoot, "nuget", "Newtonsoft.Json.13.0.3.nupkg"));
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(new[] { "MIT" }, result.Spdx);
     }
 
@@ -195,7 +313,7 @@ public class LicenseExtractorTests
               </metadata>
             </package>
             """);
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Empty(result.Spdx);
     }
 
@@ -211,7 +329,7 @@ public class LicenseExtractorTests
               </metadata>
             </package>
             """);
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Empty(result.Spdx);
     }
 
@@ -219,7 +337,7 @@ public class LicenseExtractorTests
     public void NuGet_MalformedXml_ReturnsEmptyWithoutThrowing()
     {
         var bytes = BuildNupkg("not xml");
-        var result = LicenseExtractor.FromNuspec(bytes);
+        var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 

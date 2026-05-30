@@ -12,6 +12,16 @@ public sealed class LoginService
     private const int MaxFailedAttempts = 10;
     private const int LockoutMinutes = 15;
 
+    /// <summary>
+    /// Sentinel bcrypt-shaped string used to keep <c>BCrypt.Verify</c> work identical when
+    /// the user record is missing — closes a timing oracle that would otherwise distinguish
+    /// "unknown email" from "wrong password". Deliberately not a valid bcrypt hash, so it
+    /// will never match any password. Not a credential.
+    /// </summary>
+    // deepcode ignore HardcodedNonCryptoSecret,NoHardcodedCredentials: sentinel for constant-time
+    // verification, not a usable credential.
+    private const string TimingSentinelHash = "$2a$12$invalidhashpaddingtomakebcryptrunfulltime000000000000000";
+
     private readonly IMetadataStore _db;
     private readonly OrgRepository _orgs;
     private readonly SystemAdminRepository _systemAdmins;
@@ -75,7 +85,7 @@ public sealed class LoginService
             """,
             new { email, tenantId });
 
-        var passwordHash = user.PasswordHash ?? "$2a$12$invalidhashpaddingtomakebcryptrunfulltime000000000000000";
+        var passwordHash = user.PasswordHash ?? TimingSentinelHash;
         var valid = user.Id is not null && user.AccountLocked == 0
             && BCrypt.Net.BCrypt.Verify(password, passwordHash);
 
@@ -133,7 +143,7 @@ public sealed class LoginService
         }
 
         var creds = await _systemAdmins.GetCredentialsByEmailAsync(email, ct);
-        var passwordHash = creds?.PasswordHash ?? "$2a$12$invalidhashpaddingtomakebcryptrunfulltime000000000000000";
+        var passwordHash = creds?.PasswordHash ?? TimingSentinelHash;
         // Verify hash before checking account_status so the timing of "wrong password" and
         // "locked/disabled" responses is indistinguishable to a probe.
         var hashOk = creds is not null && BCrypt.Net.BCrypt.Verify(password, passwordHash);
@@ -149,6 +159,9 @@ public sealed class LoginService
         await _audit.LogAsync("login.success", actorId: creds!.Value.Id,
             detail: System.Text.Json.JsonSerializer.Serialize(new { realm = "system" }),
             sourceIp: sourceIp, ct: ct);
+        // deepcode ignore PrivateInformationExposure: payload contains only the user UUID,
+        // realm name, and method name — no email. The `email` arg was reduced to emailHash
+        // (SHA-256) by HashEmail before any audit/log call in this method.
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginSuccess,
             null, "user", creds.Value.Id, "accepted",

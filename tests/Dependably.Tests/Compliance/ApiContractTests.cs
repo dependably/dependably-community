@@ -5,8 +5,9 @@ using Dependably.Tests.Infrastructure;
 namespace Dependably.Tests.Compliance;
 
 /// <summary>
-/// OpenAPI contract gate. Fetches /api/v1/openapi.json from an in-memory host,
-/// projects it into a normalized contract model, and compares it to
+/// OpenAPI contract gate. Fetches both /openapi/management.json and
+/// /openapi/protocol.json from an in-memory host, merges them, projects the
+/// union into a normalized contract model, and compares it to
 /// tests/Contracts/openapi.contract.json.
 ///
 /// Any change to the API surface (added, removed, or modified routes/params/responses)
@@ -27,24 +28,36 @@ public sealed class ApiContractTests : IClassFixture<DependablyFactory>, IAsyncL
     public async Task OpenApi_Loads()
     {
         using var client = _factory.CreateClient();
-        var response = await client.GetAsync("/api/v1/openapi.json");
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
-        var content = await response.Content.ReadAsStringAsync();
-        using var doc = JsonDocument.Parse(content);
-        Assert.True(doc.RootElement.TryGetProperty("paths", out var paths));
-        Assert.True(paths.EnumerateObject().Any(), "OpenAPI paths must not be empty");
+        var managementResp = await client.GetAsync("/openapi/management.json");
+        Assert.Equal(HttpStatusCode.OK, managementResp.StatusCode);
+        var managementDoc = JsonDocument.Parse(await managementResp.Content.ReadAsStringAsync());
+        Assert.True(managementDoc.RootElement.TryGetProperty("paths", out var managementPaths));
+        Assert.True(managementPaths.EnumerateObject().Any(),
+            "Management OpenAPI paths must not be empty");
+
+        var protocolResp = await client.GetAsync("/openapi/protocol.json");
+        Assert.Equal(HttpStatusCode.OK, protocolResp.StatusCode);
+        var protocolDoc = JsonDocument.Parse(await protocolResp.Content.ReadAsStringAsync());
+        Assert.True(protocolDoc.RootElement.TryGetProperty("paths", out var protocolPaths));
+        Assert.True(protocolPaths.EnumerateObject().Any(),
+            "Protocol OpenAPI paths must not be empty");
     }
 
     [Fact]
     public async Task OpenApi_MatchesContract()
     {
         using var client = _factory.CreateClient();
-        var response = await client.GetAsync("/api/v1/openapi.json");
-        response.EnsureSuccessStatusCode();
 
-        var json = await response.Content.ReadAsStringAsync();
-        var current = ContractProjector.Project(json);
+        var managementResp = await client.GetAsync("/openapi/management.json");
+        managementResp.EnsureSuccessStatusCode();
+        var managementJson = await managementResp.Content.ReadAsStringAsync();
+
+        var protocolResp = await client.GetAsync("/openapi/protocol.json");
+        protocolResp.EnsureSuccessStatusCode();
+        var protocolJson = await protocolResp.Content.ReadAsStringAsync();
+
+        var current = ContractProjector.ProjectMerged(managementJson, protocolJson);
         var currentJson = ContractProjector.Serialize(current);
 
         var contractPath = LocateContract();
@@ -94,6 +107,33 @@ internal static class ContractProjector
 
     internal static string Serialize(ApiContract contract) =>
         JsonSerializer.Serialize(contract, SerializerOptions);
+
+    /// <summary>
+    /// Projects both OpenAPI documents and merges them into a single contract.
+    /// The named-document split (management vs protocol) is an UI/spec presentation
+    /// concern; the contract gate cares about the union of the published surface.
+    /// </summary>
+    internal static ApiContract ProjectMerged(string managementJson, string protocolJson)
+    {
+        var management = Project(managementJson);
+        var protocol = Project(protocolJson);
+
+        var merged = new SortedDictionary<string, ContractPath>(StringComparer.Ordinal);
+        foreach (var (k, v) in management.Paths)
+            merged[k] = v;
+        foreach (var (k, v) in protocol.Paths)
+        {
+            // The two documents must be path-disjoint by construction (see
+            // OpenApiSplitTests.ManagementAndProtocol_AreSetDisjoint). Detect a regression
+            // here loudly rather than silently letting one document overwrite the other.
+            if (merged.ContainsKey(k))
+                throw new InvalidOperationException(
+                    $"OpenAPI split regression: path '{k}' present in both management and protocol documents.");
+            merged[k] = v;
+        }
+
+        return new ApiContract(management.Version, merged);
+    }
 
     internal static ApiContract Project(string openApiJson)
     {

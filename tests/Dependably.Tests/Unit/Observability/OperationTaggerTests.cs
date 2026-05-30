@@ -38,6 +38,8 @@ public sealed class OperationTaggerTests
     [InlineData("/packages/{file}", "GET")]
     [InlineData("/npm/tarballs/{pkg}/{file}", "GET")]
     [InlineData("/npm/tarballs/@{scope}/{pkg}/{file}", "GET")]
+    [InlineData("/npm/{pkg}/-/{file}", "GET")]
+    [InlineData("/npm/@{scope}/{pkg}/-/{file}", "GET")]
     [InlineData("/nuget/flatcontainer/{id}/{version}/{file}", "GET")]
     [InlineData("/nuget/symbols/{id}/{version}/{file}", "GET")]
     public void MapsToPackageDownload(string route, string method)

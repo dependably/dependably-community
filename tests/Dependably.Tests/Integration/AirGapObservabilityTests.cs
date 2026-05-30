@@ -104,7 +104,7 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
         var upstream = _factory.Services.GetRequiredService<Dependably.Protocol.UpstreamClient>();
 
         await Assert.ThrowsAsync<Dependably.Protocol.AirGappedException>(() =>
-            upstream.GetOrFetchAsync(
+            upstream.GetOrFetchStreamAsync(
                 blobKey: "proxy/test-airgap-not-cached",
                 upstreamUrl: "https://example.com/whatever.tgz",
                 checksumSpec: null,

@@ -3,16 +3,17 @@ namespace Dependably.Infrastructure;
 /// <summary>
 /// Maps inbound <c>Host</c> headers to ecosystem path prefixes for transparent intercept (#43).
 /// Configured via <c>HOST_ROUTING</c> as comma-separated <c>host=ecosystem</c> pairs:
-/// <code>HOST_ROUTING=registry.npmjs.org=npm,pypi.org=pypi,files.pythonhosted.org=pypi,api.nuget.org=nuget</code>
+/// <code>HOST_ROUTING=registry.npmjs.org=npm,pypi.org=pypi,files.pythonhosted.org=pypi,api.nuget.org=nuget,repo.maven.apache.org=maven,registry-1.docker.io=oci</code>
 ///
-/// Recognised ecosystem values are <c>npm</c>, <c>pypi</c>, <c>nuget</c>; anything else is
-/// rejected at parse time. Hosts are compared case-insensitively after stripping the port.
+/// Recognised ecosystem values are <c>npm</c>, <c>pypi</c>, <c>nuget</c>, <c>maven</c>, <c>rpm</c>,
+/// and <c>oci</c>; anything else is rejected at parse time. Hosts are compared
+/// case-insensitively after stripping the port.
 /// </summary>
 public sealed class HostEcosystemMap
 {
     private static readonly HashSet<string> KnownEcosystems = new(StringComparer.OrdinalIgnoreCase)
     {
-        "npm", "pypi", "nuget"
+        "npm", "pypi", "nuget", "maven", "rpm", "oci"
     };
 
     private readonly Dictionary<string, string> _map;
@@ -32,8 +33,10 @@ public sealed class HostEcosystemMap
     public bool IsEmpty => _map.Count == 0;
 
     /// <summary>
-    /// Returns the ecosystem path prefix (<c>/npm</c>, <c>/pypi</c>, <c>/nuget</c>) for the
-    /// given host, or null if the host isn't mapped.
+    /// Returns the ecosystem path prefix (<c>/npm</c>, <c>/pypi</c>, <c>/nuget</c>,
+    /// <c>/maven</c>, <c>/rpm</c>, <c>/v2</c>) for the given host, or null if the host isn't
+    /// mapped. OCI's protocol route is <c>/v2/</c> per the OCI Distribution Spec — the
+    /// ecosystem key is still <c>oci</c> internally, only the on-wire prefix differs.
     /// </summary>
     public string? PrefixForHost(string? host)
     {
@@ -41,7 +44,8 @@ public sealed class HostEcosystemMap
         var lower = host.ToLowerInvariant();
         var colon = lower.IndexOf(':');
         if (colon >= 0) lower = lower[..colon];
-        return _map.TryGetValue(lower, out var ecosystem) ? "/" + ecosystem : null;
+        if (!_map.TryGetValue(lower, out var ecosystem)) return null;
+        return ecosystem == "oci" ? "/v2" : "/" + ecosystem;
     }
 
     private static Dictionary<string, string> Parse(string? raw)

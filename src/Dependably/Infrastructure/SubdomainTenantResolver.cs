@@ -1,4 +1,5 @@
 using Dapper;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace Dependably.Infrastructure;
 
@@ -11,15 +12,35 @@ namespace Dependably.Infrastructure;
 /// Subdomain hits with a known, non-reserved slug → <see cref="TenantContext.ForTenant"/>.
 /// Anything else → <see cref="TenantContext.Uninitialized"/> (translated to 404 by the middleware).
 /// </summary>
-public sealed class SubdomainTenantResolver : ITenantResolver
+/// <summary>
+/// Eviction hook for the subdomain tenant cache. Implemented by
+/// <see cref="SubdomainTenantResolver"/> and consumed by tenant-lifecycle endpoints in
+/// <c>SystemController</c> (soft-delete / restore / status / hard-delete) so the subdomain
+/// reflects the new state immediately. Optional so single-tenant deployments — where the
+/// concrete resolver isn't registered — compile against the same controller.
+/// </summary>
+public interface ITenantSlugCacheInvalidator
 {
+    void InvalidateSlug(string slug);
+}
+
+public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheInvalidator
+{
+    // #93: 5-second sliding TTL on slug → (tenant id, slug) lookups. Short enough that
+    // restoring a soft-deleted tenant or creating a new one becomes visible within a
+    // single CI batch's lifespan; long enough to amortise the DB lookup across the burst
+    // of requests a single `npm install` / `pip install` produces against one subdomain.
+    private static readonly TimeSpan TenantCacheTtl = TimeSpan.FromSeconds(5);
+
     private readonly IMetadataStore _db;
     private readonly string _apexHost;
     private readonly IReadOnlySet<string> _extraReserved;
+    private readonly IMemoryCache? _cache;
 
-    public SubdomainTenantResolver(IMetadataStore db, IConfiguration config)
+    public SubdomainTenantResolver(IMetadataStore db, IConfiguration config, IMemoryCache? cache = null)
     {
         _db = db;
+        _cache = cache;
 
         // Prefer APEX_HOST when set (multi mode). Fall back to deriving from BASE_URL so
         // existing single-tenant installs that already configure BASE_URL continue to work
@@ -41,6 +62,16 @@ public sealed class SubdomainTenantResolver : ITenantResolver
 
         _extraReserved = ReservedSlugs.ParseExtra(config["RESERVED_SUBDOMAINS"]);
     }
+
+    private static string CacheKey(string slug) => "tenant-resolve:" + slug;
+
+    /// <summary>
+    /// Evicts the cached resolution for <paramref name="slug"/>. Called by tenant-lifecycle
+    /// endpoints (soft-delete, restore, status flip, hard-delete) so the subdomain reflects
+    /// the new state immediately instead of waiting up to <see cref="TenantCacheTtl"/>.
+    /// </summary>
+    public void InvalidateSlug(string slug)
+        => _cache?.Remove(CacheKey(slug));
 
     public async Task<TenantContext> ResolveAsync(HttpContext context, CancellationToken ct = default)
     {
@@ -69,6 +100,14 @@ public sealed class SubdomainTenantResolver : ITenantResolver
         var slug = ReservedSlugs.Normalize(rawSlug, _extraReserved);
         if (slug is null) return TenantContext.Uninitialized;
 
+        // #93 cache: slug → resolved tenant context. Short TTL keeps the resolver hot for
+        // CI fan-out without leaving tenant lifecycle changes invisible. Negative results
+        // (slug present in URL but not in DB) get the same TTL so a missing tenant doesn't
+        // cause a DB lookup per request either.
+        var cacheKey = CacheKey(slug);
+        if (_cache is not null && _cache.TryGetValue(cacheKey, out TenantContext? cached) && cached is not null)
+            return cached;
+
         await using var conn = await _db.OpenAsync(ct);
         // Soft-deleted tenants are immediately inaccessible — the subdomain returns 404 until
         // system_admin restores within the grace window.
@@ -76,7 +115,18 @@ public sealed class SubdomainTenantResolver : ITenantResolver
             "SELECT id, slug FROM orgs WHERE slug = @slug AND deleted_at IS NULL LIMIT 1",
             new { slug });
 
-        if (row.Id is null) return TenantContext.Uninitialized;
-        return TenantContext.ForTenant(row.Id, row.Slug);
+        var result = row.Id is null
+            ? TenantContext.Uninitialized
+            : TenantContext.ForTenant(row.Id, row.Slug);
+
+        _cache?.Set(cacheKey, result, new MemoryCacheEntryOptions
+        {
+            SlidingExpiration = TenantCacheTtl,
+            // Absolute cap so a long-running hot subdomain still pays the DB lookup
+            // periodically and picks up out-of-band changes (e.g. lifecycle status flips).
+            AbsoluteExpirationRelativeToNow = TenantCacheTtl,
+        });
+
+        return result;
     }
 }

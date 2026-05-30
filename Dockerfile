@@ -11,7 +11,7 @@ RUN if [ -n "$REGISTRY_URL" ] && [ -n "$REGISTRY_KEY" ]; then \
     fi
 RUN npm ci
 COPY web/ ./
-RUN npm run sbom
+RUN npm run sbom:prod
 RUN npm run build
 
 # Backend build stage — restore, generate backend SBOM, publish
@@ -65,9 +65,9 @@ RUN dotnet publish src/Dependably/Dependably.csproj \
 FROM node:22-alpine AS notices
 WORKDIR /work
 COPY build/extract-notices.mjs ./
-COPY --from=frontend /web/sbom-frontend.json ./
+COPY --from=frontend /web/sbom-frontend-prod.json ./
 COPY --from=build /sboms/sbom-backend.json ./
-RUN node extract-notices.mjs sbom-backend.json sbom-frontend.json > notices.json
+RUN node extract-notices.mjs sbom-backend.json sbom-frontend-prod.json > notices.json
 
 # Runtime stage — minimal native deps image
 FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine AS final

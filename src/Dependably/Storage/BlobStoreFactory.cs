@@ -53,6 +53,9 @@ public static class BlobStoreFactory
     /// Reads <paramref name="key"/>_<paramref name="tier"/> first (uppercased), falling
     /// back to <paramref name="key"/>. Returns null if neither is set.
     /// </summary>
+    // deepcode ignore NoHardcodedCredentials: IConfiguration accessor returning a string config
+    // value (bucket name, region, path). Callers may pass storage credentials through this
+    // helper, but the helper itself contains no hardcoded secret.
     private static string? TieredValue(IConfiguration config, string key, string? tier)
     {
         if (tier is not null)

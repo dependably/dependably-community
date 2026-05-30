@@ -59,12 +59,12 @@
       retention = { ...r }
       instanceMax = inst.MAX_UPLOAD_BYTES ? parseInt(inst.MAX_UPLOAD_BYTES) : null
       // Hours is the canonical wire format; the UI splits it into a value + unit (Hours/Days)
-      // so 48 lands as "2 Days" and 36 stays as "36 Hours". A null/0 wire value collapses
-      // to an empty input — the form treats that as "policy off" on save.
+      // so 48 lands as "2 Days" and 36 stays as "36 Hours". A null/0 wire value shows as
+      // an explicit "0" — the form treats 0 (and empty) as "policy off, allow all" on save.
       const ageHours = ps.min_release_age_hours
       const ageUnit = ageHours !== null && ageHours !== undefined && ageHours > 0 && ageHours % 24 === 0 ? 'days' : 'hours'
       const ageValue = ageHours === null || ageHours === undefined || ageHours === 0
-        ? ''
+        ? '0'
         : String(ageUnit === 'days' ? ageHours / 24 : ageHours)
       proxySettings = {
         ...ps,

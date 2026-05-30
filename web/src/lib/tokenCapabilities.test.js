@@ -6,8 +6,12 @@ describe('presetToCapabilities', () => {
     expect(presetToCapabilities('pull')).toEqual(['read:metadata', 'read:artifact'])
   })
 
-  it('push → read + publish wildcard', () => {
-    expect(presetToCapabilities('push')).toEqual(['read:metadata', 'read:artifact', 'publish:*'])
+  it('push → publish-only (no read)', () => {
+    expect(presetToCapabilities('push')).toEqual(['publish:*'])
+  })
+
+  it('both → read + publish wildcard', () => {
+    expect(presetToCapabilities('both')).toEqual(['read:metadata', 'read:artifact', 'publish:*'])
   })
 
   it('unknown preset falls back to pull (conservative default)', () => {
@@ -39,13 +43,13 @@ describe('capabilitiesToLabel', () => {
     expect(capabilitiesToLabel('["read:metadata","read:artifact"]')).toBe('pull')
   })
 
-  it('read + publish → push', () => {
-    expect(capabilitiesToLabel('["read:metadata","read:artifact","publish:*"]')).toBe('push')
-    expect(capabilitiesToLabel('["read:metadata","publish:npm"]')).toBe('push')
+  it('read + publish → both', () => {
+    expect(capabilitiesToLabel('["read:metadata","read:artifact","publish:*"]')).toBe('both')
+    expect(capabilitiesToLabel('["read:metadata","publish:npm"]')).toBe('both')
   })
 
-  it('publish without read → custom', () => {
-    expect(capabilitiesToLabel('["publish:*"]')).toBe('custom')
+  it('publish without read → push', () => {
+    expect(capabilitiesToLabel('["publish:*"]')).toBe('push')
   })
 
   it('non-string entries ignored gracefully', () => {

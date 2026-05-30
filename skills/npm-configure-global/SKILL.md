@@ -45,8 +45,13 @@ registry=https://repo.example.com/o/default/npm/
 
 ```bash
 npm config get registry       # should print the dependably URL
+npm ping                      # 200 from /-/ping → registry is reachable
+npm whoami                    # prints your email; `service:<name>` for service tokens
 npm install is-odd
 ```
+
+If `npm ping` succeeds but `npm whoami` returns "ENEEDAUTH", your token line in
+`~/.npmrc` is missing or malformed — fix that before running `npm install`.
 
 ## Reverting
 

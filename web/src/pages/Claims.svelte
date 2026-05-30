@@ -4,6 +4,7 @@
   import { api } from '../lib/api.js'
   import { submitForm, extractErrorMessage } from '../lib/form.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
+  import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
 
   let claims = []
   let loading = true
@@ -98,9 +99,9 @@
   <div class="search-bar">
     <select bind:value={filterEco} on:change={load} class="eco-select">
       <option value="">{$t('claims.filters.ecosystem')}</option>
-      <option value="npm">npm</option>
-      <option value="pypi">PyPI</option>
-      <option value="nuget">NuGet</option>
+      {#each ECOSYSTEMS as eco (eco)}
+        <option value={eco}>{ECO_LABEL[eco]}</option>
+      {/each}
     </select>
     <select bind:value={filterState} on:change={load} class="state-select">
       <option value="">{$t('claims.filters.state')}</option>
@@ -134,7 +135,7 @@
       <tbody>
         {#each claims as c (c.id)}
           <tr>
-            <td><span class="badge {c.ecosystem}">{c.ecosystem}</span></td>
+            <td><span class="badge {c.ecosystem}">{ECO_LABEL[c.ecosystem] ?? c.ecosystem}</span></td>
             <td class="mono">{c.name}</td>
             <td><span class="state-badge state-{c.state}">{$t(`claims.states.${c.state}`)}</span></td>
             <td class="reason-cell text-muted" title={c.reason}>{c.reason}</td>
@@ -166,9 +167,9 @@
         <label>
           {$t('claims.modal.ecosystem')}
           <select bind:value={mEco}>
-            <option value="npm">npm</option>
-            <option value="pypi">PyPI</option>
-            <option value="nuget">NuGet</option>
+            {#each ECOSYSTEMS as eco (eco)}
+              <option value={eco}>{ECO_LABEL[eco]}</option>
+            {/each}
           </select>
         </label>
         <label>

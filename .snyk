@@ -1,0 +1,34 @@
+version: v1.25.0
+# Snyk Code (SAST) suppressions. Inline `// deepcode ignore` markers cover
+# production-code findings (with rationale at each site). This file handles
+# bulk-suppressible test-fixture noise that doesn't warrant per-site comments.
+#
+# All entries are tracked against gitlab issue #106; rescan + retriage when
+# adding new ones.
+
+exclude:
+  code:
+    # Hardcoded credentials in test fixtures — Playwright/xUnit seed data.
+    # Test-only, never reachable from production code.
+    - tests/Dependably.Tests/Infrastructure/DependablyFactory.cs
+    - tests/Dependably.Tests/Infrastructure/DependablyMultiFactory.cs
+    - tests/Dependably.Tests/Infrastructure/Seeding/SystemAdminSeeder.cs
+    - tests/Dependably.Tests/Infrastructure/Seeding/UserSeeder.cs
+    - tests/Dependably.Tests/Integration/PasswordChangeTests.cs
+    - tests/Dependably.Tests/Integration/SystemSupportFlowsTests.cs
+    - tests/Dependably.Tests/Storage/LocalBlobStoreExtendedTests.cs
+    - tests/Dependably.Tests/Unit/Api/SystemControllerUnitTests.cs
+    - tests/Dependably.Tests/Unit/OrgAccessGuardTests.cs
+    - tests/Dependably.Tests/Unit/SensitivePropertyEnricherTests.cs
+    - tests/Dependably.Tests/Unit/TokenAuthenticationTests.cs
+
+    # Cookie-Secure flag in i18n/locale unit tests — tests intentionally exercise
+    # the http (non-Secure) path. Production cookies set Secure when on https
+    # (see web/src/lib/locale.js).
+    - web/src/i18n/index.test.js
+    - web/src/lib/locale.test.js
+
+    # Playwright e2e fixtures — first-boot admin credential is a test seed,
+    # rotated per-run. Lives outside the production bundle.
+    - web/e2e/playwright.config.ts
+    - web/e2e/specs/api/auth.spec.ts

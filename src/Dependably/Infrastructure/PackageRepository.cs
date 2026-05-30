@@ -8,6 +8,18 @@ public sealed class PackageRepository
 
     public PackageRepository(IMetadataStore db) => _db = db;
 
+    /// <summary>
+    /// Returns the trailing path segment of <paramref name="blobKey"/>. Surface-internal —
+    /// callers building a <see cref="NewPackageVersion"/> only need to pass a blob key
+    /// and the repository populates <c>filename</c> via this helper so the equality lookup
+    /// in <see cref="FindVersionByBlobKeySuffixAsync"/> can use idx_package_versions_filename.
+    /// </summary>
+    internal static string DeriveFilename(string blobKey)
+    {
+        var lastSlash = blobKey.LastIndexOf('/');
+        return lastSlash >= 0 ? blobKey[(lastSlash + 1)..] : blobKey;
+    }
+
     public async Task<IReadOnlyList<Package>> ListAsync(string orgId, string ecosystem, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
@@ -65,14 +77,15 @@ public sealed class PackageRepository
     }
 
     /// <summary>
-    /// Finds a package version whose blob_key ends with /{filename}, joined with its parent package.
-    /// Used by PyPI download to avoid N+1 queries when looking up a file by name.
+    /// Finds a package version by its filename (the trailing path segment of blob_key),
+    /// joined with its parent package. Used by PyPI/npm/NuGet downloads — equality lookup
+    /// against <c>idx_package_versions_filename</c> instead of the pre-#91 leading-wildcard
+    /// LIKE on blob_key (which couldn't use any index).
     /// </summary>
     public async Task<(Package Package, PackageVersion Version)?> FindVersionByBlobKeySuffixAsync(
         string orgId, string ecosystem, string filename, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var suffix = "%/" + filename;
         var row = await conn.QuerySingleOrDefaultAsync<(
             string PkgId, string PkgOrgId, string PkgEcosystem, string PkgName, string PkgPurlName, bool PkgIsProxy, string PkgCreatedAt,
             string VerId, string VerPackageId, string VerVersion, string VerPurl, string VerBlobKey,
@@ -89,11 +102,10 @@ public sealed class PackageRepository
                    pv.upstream_integrity_value, pv.upstream_integrity_algorithm
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
-            WHERE p.org_id = @orgId AND p.ecosystem = @ecosystem
-              AND pv.blob_key LIKE @suffix ESCAPE '\'
+            WHERE pv.filename = @filename AND p.org_id = @orgId AND p.ecosystem = @ecosystem
             LIMIT 1
             """,
-            new { orgId, ecosystem, suffix });
+            new { orgId, ecosystem, filename });
 
         if (row.PkgId is null) return null;
 
@@ -186,11 +198,14 @@ public sealed class PackageRepository
     {
         await using var conn = await _db.OpenAsync(ct);
         var id = Guid.NewGuid().ToString("N");
+        // #91: derive filename from blob_key's last path segment so download lookups can
+        // hit idx_package_versions_filename instead of a leading-wildcard LIKE.
+        var filename = DeriveFilename(data.BlobKey);
         // xtenant: INSERT pinned to a caller-supplied package_id (org-scoped via FK).
         await conn.ExecuteAsync(
             """
-            INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, checksum_sha256, first_fetch, origin, published_at, checksum_sha1, upstream_integrity_value, upstream_integrity_algorithm)
-            VALUES (@id, @packageId, @version, @purl, @blobKey, @sizeBytes, @checksumSha256, @firstFetch, @origin, @publishedAt, @checksumSha1, @upstreamIntegrityValue, @upstreamIntegrityAlgorithm)
+            INSERT INTO package_versions (id, package_id, version, purl, blob_key, filename, size_bytes, checksum_sha256, first_fetch, origin, published_at, checksum_sha1, upstream_integrity_value, upstream_integrity_algorithm)
+            VALUES (@id, @packageId, @version, @purl, @blobKey, @filename, @sizeBytes, @checksumSha256, @firstFetch, @origin, @publishedAt, @checksumSha1, @upstreamIntegrityValue, @upstreamIntegrityAlgorithm)
             """,
             new
             {
@@ -199,6 +214,7 @@ public sealed class PackageRepository
                 version = data.Version,
                 purl = data.Purl,
                 blobKey = data.BlobKey,
+                filename,
                 sizeBytes = data.SizeBytes,
                 checksumSha256 = data.ChecksumSha256,
                 firstFetch = data.FirstFetch ? 1 : 0,

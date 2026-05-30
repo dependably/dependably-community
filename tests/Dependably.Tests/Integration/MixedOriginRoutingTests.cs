@@ -274,6 +274,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         await conn0.ExecuteAsync(
             "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId",
             new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
         try
         {
 
@@ -323,6 +324,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
             await conn0.ExecuteAsync(
                 "UPDATE org_settings SET anonymous_pull = 0 WHERE org_id = @orgId",
                 new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
         }
     }
 
@@ -402,6 +404,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
             ON CONFLICT(org_id) DO UPDATE SET proxy_passthrough_enabled = 0
             """,
             new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
 
         try
         {
@@ -423,6 +426,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
             await conn.ExecuteAsync(
                 "UPDATE org_settings SET proxy_passthrough_enabled = 1 WHERE org_id = @orgId",
                 new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
         }
     }
 }

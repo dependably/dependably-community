@@ -28,6 +28,12 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<PackageAnalyticsRepository>();
         services.AddSingleton<UserService>();
         services.AddSingleton<TokenRepository>();
+        // #90 async batched activity writer. The hosted service drains the channel into
+        // batched INSERTs so the download/push hot paths no longer block on a SQLite
+        // writer-lock acquisition per row.
+        services.AddSingleton<ActivityWriter>();
+        services.AddSingleton<ActivityWriterHostedService>();
+        services.AddHostedService(sp => sp.GetRequiredService<ActivityWriterHostedService>());
         services.AddSingleton<AuditRepository>();
         services.AddSingleton<AuditEventRepository>();
         services.AddSingleton<BackgroundJobRunRepository>();

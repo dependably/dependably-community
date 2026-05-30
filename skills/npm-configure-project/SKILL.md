@@ -49,12 +49,16 @@ Substitutions:
 
 ```bash
 export NPM_TOKEN=<paste the token here>
+npm ping                      # 200 from /-/ping → registry is reachable, no token needed
+npm whoami                    # prints your email; `service:<name>` for service tokens
 npm install is-odd            # public package proxied through dependably
 npm view is-odd registry      # should print the dependably URL
 ```
 
-The first install records a `first_fetch` activity entry in the dependably
-**Activity** page — check there to confirm the proxy is being hit.
+Run `npm ping` first to confirm the URL and TLS are right (no token needed), then
+`npm whoami` to confirm your token actually authenticates. The first install
+records a `first_fetch` activity entry in the dependably **Activity** page —
+check there to confirm the proxy is being hit.
 
 ## Add to .gitignore
 

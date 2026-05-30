@@ -6,6 +6,7 @@
   import Pagination from '../lib/Pagination.svelte'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import DataTable from '../lib/DataTable.svelte'
+  import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
 
   let items = [], loading = true, error = ''
   let ecosystem = ''
@@ -76,9 +77,9 @@
   <div class="search-bar">
     <select bind:value={ecosystem} on:change={handleEcoChange} class="eco-select">
       <option value="">{$t('common.allEcosystems')}</option>
-      <option value="pypi">PyPI</option>
-      <option value="npm">npm</option>
-      <option value="nuget">NuGet</option>
+      {#each ECOSYSTEMS as eco (eco)}
+        <option value={eco}>{ECO_LABEL[eco]}</option>
+      {/each}
     </select>
   </div>
 

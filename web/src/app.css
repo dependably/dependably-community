@@ -48,11 +48,15 @@
 
   /* Ecosystem chart colors */
   --eco-pypi: #3b82f6; --eco-npm: #f59e0b; --eco-nuget: #8b5cf6;
+  --eco-maven: #ef4444; --eco-rpm: #14b8a6; --eco-oci: #0ea5e9;
 
   /* Badge palettes */
   --badge-pypi-bg:    light-dark(#fef9c3, #3b2a00);  --badge-pypi-text:    light-dark(#854d0e, #fde68a);
   --badge-npm-bg:     light-dark(#fee2e2, #3b0c0c);  --badge-npm-text:     light-dark(#991b1b, #fca5a5);
   --badge-nuget-bg:   light-dark(#dbeafe, #0c1a3b);  --badge-nuget-text:   light-dark(#1e40af, #93c5fd);
+  --badge-maven-bg:   light-dark(#ffe4e6, #3b0c11);  --badge-maven-text:   light-dark(#9f1239, #fda4af);
+  --badge-rpm-bg:     light-dark(#ccfbf1, #042f2e);  --badge-rpm-text:     light-dark(#115e59, #99f6e4);
+  --badge-oci-bg:     light-dark(#e0f2fe, #0c2030);  --badge-oci-text:     light-dark(#0369a1, #7dd3fc);
   --badge-hosted-bg:  light-dark(#dcfce7, #0a2e18);  --badge-hosted-text:  light-dark(#166534, #86efac);
   --badge-warning-bg:   light-dark(#fef3c7, #2d1a00);  --badge-warning-text:   light-dark(#92400e, #fcd34d);
   --badge-red-bg:     light-dark(#fee2e2, #3b0c0c);  --badge-red-text:     light-dark(#991b1b, #fca5a5);
@@ -164,6 +168,9 @@ tr:hover td { background: var(--bg2); }
 .badge.pypi    { background: var(--badge-pypi-bg);    color: var(--badge-pypi-text); }
 .badge.npm     { background: var(--badge-npm-bg);     color: var(--badge-npm-text); }
 .badge.nuget   { background: var(--badge-nuget-bg);   color: var(--badge-nuget-text); }
+.badge.maven   { background: var(--badge-maven-bg);   color: var(--badge-maven-text); }
+.badge.rpm     { background: var(--badge-rpm-bg);     color: var(--badge-rpm-text); }
+.badge.oci     { background: var(--badge-oci-bg);     color: var(--badge-oci-text); }
 
 /* Ecosystem name cell — thin chart-color bar + badge.
    The bar makes the eco table double as the donut's legend.
@@ -183,6 +190,9 @@ tr:hover td { background: var(--bg2); }
 .eco-bar.pypi  { background: var(--eco-pypi); }
 .eco-bar.npm   { background: var(--eco-npm); }
 .eco-bar.nuget { background: var(--eco-nuget); }
+.eco-bar.maven { background: var(--eco-maven); }
+.eco-bar.rpm   { background: var(--eco-rpm); }
+.eco-bar.oci   { background: var(--eco-oci); }
 .badge.hosted  { background: var(--badge-hosted-bg);  color: var(--badge-hosted-text); }
 .badge.proxy   { background: var(--bg3);              color: var(--text2); }
 .badge.first-fetch { background: var(--badge-warning-bg); color: var(--badge-warning-text); }

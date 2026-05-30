@@ -165,6 +165,38 @@ public sealed class AzureBlobStoreTests
         _container.Received(1).EnumerateSizesAsync(cts.Token);
     }
 
+    // ── Production constructor: argument validation ─────────────────────────
+    // The real-Azure constructor path (BlobContainerClient + CreateIfNotExists) is
+    // exercised in compose-tests against Azurite — see compose/azurite/. These unit
+    // tests cover the constructor's argument-validation surface only.
+
+    [Fact]
+    public void ProductionCtor_NullConnectionString_Throws()
+    {
+        // BlobContainerClient validates the connection string in its ctor; surfacing the
+        // exception unwrapped is the documented behaviour — verify we don't accidentally
+        // swallow it inside AzureBlobStore.
+        Assert.ThrowsAny<ArgumentException>(
+            () => new AzureBlobStore(connectionString: null!, containerName: "c"));
+    }
+
+    [Fact]
+    public void ProductionCtor_NullContainerName_Throws()
+    {
+        Assert.ThrowsAny<ArgumentException>(
+            () => new AzureBlobStore(connectionString: "UseDevelopmentStorage=true", containerName: null!));
+    }
+
+    [Fact]
+    public void ProductionCtor_MalformedConnectionString_Throws()
+    {
+        // A connection string that doesn't even tokenize — Azure SDK throws FormatException
+        // (derived from SystemException). Verify the failure surfaces; covers the
+        // BlobContainerClient construction line on the production constructor.
+        Assert.ThrowsAny<Exception>(
+            () => new AzureBlobStore(connectionString: "not-a-real-connection-string", containerName: "c"));
+    }
+
     private static async IAsyncEnumerable<long> AsyncEnum(params long[] values)
     {
         foreach (var v in values) { await Task.Yield(); yield return v; }

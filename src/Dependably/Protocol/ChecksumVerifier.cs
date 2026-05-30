@@ -66,6 +66,61 @@ public static class ChecksumVerifier
     public static string ComputeSha256Hex(byte[] data)
         => Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
 
+    /// <summary>
+    /// Streaming SHA-256 of an unread stream. Reads through to EOF using a single 81920-byte
+    /// buffer + <see cref="IncrementalHash"/>; does not buffer the whole stream. Used by the
+    /// hash-and-stage proxy-fetch path (#104) where the bytes have already been written to a
+    /// temp file and we re-read them for blob upload.
+    /// </summary>
+    public static async ValueTask<string> ComputeSha256HexAsync(Stream data, CancellationToken ct = default)
+    {
+        using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[81920];
+        int read;
+        while ((read = await data.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+            hasher.AppendData(buffer, 0, read);
+        return Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Streaming checksum verification. Mirrors <see cref="Verify(byte[], ChecksumSpec?)"/>
+    /// semantics — returns true when <paramref name="spec"/> is null (no verification
+    /// possible). Spec.Algorithm controls the hash; SHA-512 accepts either base64 or hex
+    /// expected encodings (mirrors <see cref="VerifyBase64OrHex"/>).
+    /// </summary>
+    public static async ValueTask<bool> VerifyAsync(
+        Stream data, ChecksumSpec? spec, CancellationToken ct = default)
+    {
+        if (spec is null) return true;
+
+        var algo = spec.Algorithm switch
+        {
+            ChecksumAlgorithm.Sha256 => HashAlgorithmName.SHA256,
+            ChecksumAlgorithm.Sha1   => HashAlgorithmName.SHA1,
+            ChecksumAlgorithm.Sha512 => HashAlgorithmName.SHA512,
+            _ => HashAlgorithmName.SHA256
+        };
+        using var hasher = IncrementalHash.CreateHash(algo);
+        var buffer = new byte[81920];
+        int read;
+        while ((read = await data.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+            hasher.AppendData(buffer, 0, read);
+        var actualBytes = hasher.GetHashAndReset();
+
+        if (spec.Algorithm == ChecksumAlgorithm.Sha512)
+        {
+            // NuGet form: base64-encoded SHA-512. Fall through to hex for any other source.
+            try
+            {
+                var expectedBytes = Convert.FromBase64String(spec.ExpectedValue);
+                return CryptographicOperations.FixedTimeEquals(actualBytes, expectedBytes);
+            }
+            catch { /* fall through to hex */ }
+        }
+        var actualHex = Convert.ToHexString(actualBytes).ToLowerInvariant();
+        return string.Equals(actualHex, spec.ExpectedValue.ToLowerInvariant(), StringComparison.Ordinal);
+    }
+
     private static bool VerifyHex(byte[] data, string expected, Func<byte[], byte[]> hashFn)
     {
         var actual = Convert.ToHexString(hashFn(data)).ToLowerInvariant();

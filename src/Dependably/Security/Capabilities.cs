@@ -35,18 +35,31 @@ public static class Capabilities
     public const string PublishNpm   = "publish:npm";
     public const string PublishPypi  = "publish:pypi";
     public const string PublishNuget = "publish:nuget";
+    public const string PublishMaven = "publish:maven";
+    public const string PublishRpm   = "publish:rpm";
+    public const string PublishOci   = "publish:oci";
     public const string PublishAll   = "publish:*";
 
     // ── Import (per-ecosystem and wildcard) ─────────────────────────────────────
     public const string ImportNpm    = "import:npm";
     public const string ImportPypi   = "import:pypi";
     public const string ImportNuget  = "import:nuget";
+    public const string ImportMaven  = "import:maven";
+    public const string ImportRpm    = "import:rpm";
+    public const string ImportOci    = "import:oci";
     public const string ImportAll    = "import:*";
+
+    // OCI also needs a "pull" capability for the proxy path — pure read of a public-repo
+    // image doesn't need publish. read:artifact already covers this for other ecosystems.
+    public const string PullOci      = "pull:oci";
 
     // ── Yank (per-ecosystem and wildcard) ───────────────────────────────────────
     public const string YankNpm   = "yank:npm";
     public const string YankPypi  = "yank:pypi";
     public const string YankNuget = "yank:nuget";
+    public const string YankMaven = "yank:maven";
+    public const string YankRpm   = "yank:rpm";
+    public const string YankOci   = "yank:oci";
     public const string YankAll   = "yank:*";
 
     // ── Manage ─────────────────────────────────────────────────────────────────
@@ -150,9 +163,10 @@ public static class Capabilities
     public static readonly IReadOnlySet<string> Requestable = new HashSet<string>(StringComparer.Ordinal)
     {
         ReadMetadata, ReadArtifact, ReadPackages, ReadClaims, ReadAudit, ReadTenant,
-        PublishNpm, PublishPypi, PublishNuget, PublishAll,
-        ImportNpm, ImportPypi, ImportNuget, ImportAll,
-        YankNpm, YankPypi, YankNuget, YankAll,
+        PublishNpm, PublishPypi, PublishNuget, PublishMaven, PublishRpm, PublishOci, PublishAll,
+        ImportNpm, ImportPypi, ImportNuget, ImportMaven, ImportRpm, ImportOci, ImportAll,
+        YankNpm, YankPypi, YankNuget, YankMaven, YankRpm, YankOci, YankAll,
+        PullOci,
         ClaimManage, TenantConfigure, TenantAdmin, ManageOwnTokens,
     };
 

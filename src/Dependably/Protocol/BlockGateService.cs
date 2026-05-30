@@ -33,7 +33,8 @@ public sealed class BlockGateService
         {
             await _audit.LogActivityAsync(
                 request.OrgId, request.Ecosystem, request.Purl,
-                "blocked_manual", request.UserId, sourceIp: request.SourceIp, ct: ct);
+                "blocked_manual", request.UserId, actorKind: request.ActorKind,
+                sourceIp: request.SourceIp, ct: ct);
             return BlockDecision.Blocked;
         }
         if (request.ManualState == "allowed")
@@ -52,7 +53,7 @@ public sealed class BlockGateService
                 var ageRounded = Math.Round(ageHours, 2);
                 await _audit.LogActivityAsync(
                     request.OrgId, request.Ecosystem, request.Purl,
-                    "blocked_release_age", request.UserId,
+                    "blocked_release_age", request.UserId, actorKind: request.ActorKind,
                     detail: string.Format(
                         CultureInfo.InvariantCulture,
                         "{{\"published_at\":\"{0}\",\"min_age_hours\":{1},\"age_at_block_hours\":{2}}}",
@@ -71,7 +72,7 @@ public sealed class BlockGateService
 
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_vuln_score", request.UserId,
+            "blocked_vuln_score", request.UserId, actorKind: request.ActorKind,
             detail: $"{{\"max_score\":{maxScore.Value},\"tolerance\":{request.MaxOsvScoreTolerance}}}",
             sourceIp: request.SourceIp, ct: ct);
         return BlockDecision.Blocked;
@@ -95,4 +96,11 @@ public sealed record BlockGateRequest(
     double MaxOsvScoreTolerance,
     string? SourceIp = null,
     int? MinReleaseAgeHours = null,
-    DateTimeOffset? PublishedAt = null);
+    DateTimeOffset? PublishedAt = null,
+    /// <summary>
+    /// Discriminator persisted alongside <see cref="UserId"/> in <c>activity.actor_kind</c> on
+    /// the block-decision rows. Without this, service-token-driven block events would render
+    /// as "anonymous" in the audit UI even though they are perfectly authenticated. See
+    /// <see cref="Infrastructure.ActorKinds"/>.
+    /// </summary>
+    string? ActorKind = null);

@@ -7,24 +7,34 @@ namespace Dependably.Tests.Unit;
 public class BlobKeysTests
 {
     // ---- Proxy ----
+    // Hex sentinel — 64 lowercase hex chars; the all-`a` form keeps tests legible while satisfying
+    // BlobKeys.Proxy's input contract (see issue #106 — hardened to reject non-hex input).
+    private const string HexSentinel  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private const string HexSentinel2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
     [Fact]
     public void Proxy_Golden_ReturnsProxyPrefixedKey()
     {
-        var key = BlobKeys.Proxy("abc123");
-        Assert.Equal("proxy/abc123", key);
-    }
-
-    [Fact]
-    public void Proxy_EmptySha_StillBuildsKey()
-    {
-        // BlobKeys is a pure string-builder; it does not validate input.
-        Assert.Equal("proxy/", BlobKeys.Proxy(""));
+        var key = BlobKeys.Proxy(HexSentinel);
+        Assert.Equal($"proxy/{HexSentinel}", key);
     }
 
     [Theory]
-    [InlineData("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")] // sha256 hex
+    [InlineData("")]
+    [InlineData("abc123")]
     [InlineData("UPPERCASEHEX0123")]
     [InlineData("with-dashes_and.dots")]
+    [InlineData("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85")]  // 63 chars
+    [InlineData("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b8551")] // 65 chars
+    public void Proxy_NonHex_ThrowsArgumentException(string sha)
+    {
+        // Hardened in #106: BlobKeys.Proxy now validates 64-char lowercase hex (defense in depth
+        // for the path-traversal Snyk High finding).
+        Assert.Throws<ArgumentException>(() => BlobKeys.Proxy(sha));
+    }
+
+    [Theory]
+    [InlineData("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")] // canonical sha256 hex
     public void Proxy_PreservesShaVerbatim(string sha)
     {
         Assert.Equal($"proxy/{sha}", BlobKeys.Proxy(sha));
@@ -143,7 +153,7 @@ public class BlobKeysTests
     public void Proxy_RoundTripsThroughStoreKey()
     {
         // The output of Proxy() has only 2 segments, so StoreKey leaves it untouched.
-        var k = BlobKeys.Proxy("deadbeef");
+        var k = BlobKeys.Proxy(HexSentinel2);
         Assert.Equal(k, BlobKeys.StoreKey(k));
     }
 }

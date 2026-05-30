@@ -54,6 +54,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         await conn.ExecuteAsync(
             "UPDATE org_settings SET anonymous_pull = @v WHERE org_id = @orgId",
             new { v = enabled ? 1 : 0, orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
     }
 
     private async Task SetAllowlistMode(bool enabled)
@@ -64,6 +65,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         await conn.ExecuteAsync(
             "UPDATE org_settings SET allowlist_mode = @v WHERE org_id = @orgId",
             new { v = enabled ? 1 : 0, orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
     }
 
     private async Task SetProxyPassthrough(bool enabled)
@@ -74,6 +76,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         await conn.ExecuteAsync(
             "UPDATE org_settings SET proxy_passthrough_enabled = @v WHERE org_id = @orgId",
             new { v = enabled ? 1 : 0, orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
     }
 
     private async Task AddBlocklistEntry(string pattern)

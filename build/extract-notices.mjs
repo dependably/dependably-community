@@ -12,6 +12,8 @@ if (process.argv.length < 3) {
 }
 
 const components = process.argv.slice(2).flatMap((path) => {
+  // deepcode ignore PT: argv from the build pipeline, not user input. This script is invoked
+  // by the Docker build with SBOM paths under build/; there is no runtime exposure.
   const bom = JSON.parse(fs.readFileSync(path, 'utf8'))
   return bom.components ?? []
 })

@@ -140,6 +140,7 @@ public sealed class NpmControllerTests : IClassFixture<DependablyFactory>, IAsyn
             ON CONFLICT(org_id) DO UPDATE SET proxy_passthrough_enabled = 0
             """,
             new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
 
         try
         {
@@ -156,6 +157,7 @@ public sealed class NpmControllerTests : IClassFixture<DependablyFactory>, IAsyn
             await conn.ExecuteAsync(
                 "UPDATE org_settings SET proxy_passthrough_enabled = 1 WHERE org_id = @orgId",
                 new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
         }
     }
 
@@ -181,6 +183,7 @@ public sealed class NpmControllerTests : IClassFixture<DependablyFactory>, IAsyn
         await conn.ExecuteAsync(
             "INSERT INTO org_settings (org_id) VALUES (@orgId)",
             new { orgId = otherOrgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(otherOrgId);
 
         // Token issued for the OTHER org.
         var (rawToken, _) = await tokens.CreateServiceTokenAsync(

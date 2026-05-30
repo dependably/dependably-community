@@ -2,6 +2,7 @@ using System.Formats.Tar;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.RateLimiting;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -55,6 +56,50 @@ public partial class NpmController : ControllerBase
         _publish = svc.Publish;
         _claimResolver = svc.ClaimResolver;
         _proxyFetch = svc.ProxyFetch;
+    }
+
+    // ── npm client probes ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// GET /o/{org}/npm/-/ping — connectivity probe (<c>npm ping</c>). No auth required and
+    /// no tenant data touched: the response shape is identical to registry.npmjs.org's empty
+    /// JSON object, so npm/yarn/pnpm clients treat a 200 as "registry reachable" without
+    /// further inspection. Literal <c>-/ping</c> segments win the route match over
+    /// <c>/npm/{package}/{version}</c> by ASP.NET's literal-beats-parameter precedence.
+    /// </summary>
+    [HttpGet("/npm/-/ping")]
+    public IActionResult Ping() => new JsonResult(new JsonObject());
+
+    /// <summary>
+    /// GET /o/{org}/npm/-/whoami — identity probe (<c>npm whoami</c>). Bearer-only: returns
+    /// 200 <c>{"username":"..."}</c> on a valid token, 401 with <c>WWW-Authenticate: Bearer</c>
+    /// otherwise. User tokens project the owner's email; service tokens project
+    /// <c>service:&lt;name&gt;</c> (see <see cref="TokenRepository.GetWhoAmIIdentifierAsync"/>) —
+    /// chosen over a 401 so CI pipelines using service tokens get a stable identifier they
+    /// can echo into logs. Cross-tenant tokens are coerced to null by the org-scoped resolver
+    /// and fall into the same 401 branch as anonymous callers (no information leak).
+    /// </summary>
+    [HttpGet("/npm/-/whoami")]
+    public async Task<IActionResult> WhoAmI(CancellationToken ct)
+    {
+        var orgId = CurrentTenantId();
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
+        if (token is null)
+        {
+            Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
+            return Unauthorized();
+        }
+
+        var username = await _tokens.GetWhoAmIIdentifierAsync(token, ct);
+        if (username is null)
+        {
+            // Token row resolved but the user/service row vanished between auth and lookup
+            // (e.g. owner removed mid-request). Treat as unauthenticated rather than 500.
+            Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
+            return Unauthorized();
+        }
+
+        return new JsonResult(new JsonObject { ["username"] = username });
     }
 
     // ── Read endpoints (#10) ─────────────────────────────────────────────────
@@ -136,11 +181,12 @@ public partial class NpmController : ControllerBase
         JsonNode? metadata = null;
         try
         {
-            using var response = await _upstream.GetMetadataAsync($"{upstreamBase}/{fullName}", ct);
+            // #94 single-flight packument fetch — collapses N concurrent npm-install
+            // requests onto one upstream call when a coordinate first warms up.
+            var response = await _upstream.GetOrFetchMetadataAsync($"{upstreamBase}/{fullName}", ct);
             if (response.IsSuccessStatusCode)
             {
-                var json = await response.Content.ReadAsStringAsync(ct);
-                metadata = JsonNode.Parse(json);
+                metadata = JsonNode.Parse(response.BodyAsString());
                 if (metadata is not null)
                     RewriteTarballUrls(metadata, fullName, NpmTarballBase());
             }
@@ -259,17 +305,43 @@ public partial class NpmController : ControllerBase
 
     /// <summary>GET /o/{org}/npm/tarballs/{pkg}/{file} — tarball download</summary>
     [HttpGet("/npm/tarballs/{pkg}/{file}")]
+    [EnableRateLimiting("download")]
     public Task<IActionResult> GetTarball(string pkg, string file, CancellationToken ct)
+        => ServeTarballByPackagePath(pkg, file, ct);
+
+    /// <summary>GET /o/{org}/npm/tarballs/@{scope}/{pkg}/{file} — scoped package tarball download</summary>
+    [HttpGet("/npm/tarballs/@{scope}/{pkg}/{file}")]
+    [EnableRateLimiting("download")]
+    public Task<IActionResult> GetScopedTarball(string scope, string pkg, string file, CancellationToken ct)
+        => GetTarballImpl(fullName: "@" + scope + "/" + pkg, shortName: pkg, file, ct);
+
+    /// <summary>
+    /// GET /o/{org}/npm/{pkg}/-/{file} — tarball download at the <em>conventional</em> npm
+    /// path. <c>npm ci</c> installs from package-lock.json's <c>resolved</c> URLs; when those
+    /// point at the public registry but the configured <c>registry</c> is this one, npm swaps
+    /// only the host and keeps the canonical <c>/{pkg}/-/{file}</c> layout — it never fetches
+    /// the packument, so it never sees the rewritten <c>/npm/tarballs/…</c> URL. Routing the
+    /// conventional path to the same handler lets <c>npm ci</c> resolve against a public lockfile.
+    /// </summary>
+    [HttpGet("/npm/{pkg}/-/{file}")]
+    [EnableRateLimiting("download")]
+    public Task<IActionResult> GetTarballConventional(string pkg, string file, CancellationToken ct)
+        => ServeTarballByPackagePath(pkg, file, ct);
+
+    /// <summary>GET /o/{org}/npm/@{scope}/{pkg}/-/{file} — scoped tarball at the conventional npm path (see <see cref="GetTarballConventional"/>).</summary>
+    [HttpGet("/npm/@{scope}/{pkg}/-/{file}")]
+    [EnableRateLimiting("download")]
+    public Task<IActionResult> GetScopedTarballConventional(string scope, string pkg, string file, CancellationToken ct)
+        => GetTarballImpl(fullName: "@" + scope + "/" + pkg, shortName: pkg, file, ct);
+
+    // Shared by the rewritten (/npm/tarballs/…) and conventional (/npm/{pkg}/-/…) unscoped
+    // tarball routes: decode the package name, derive the short name, and delegate.
+    private Task<IActionResult> ServeTarballByPackagePath(string pkg, string file, CancellationToken ct)
     {
         var fullName = DecodeNpmName(pkg);
         var shortName = fullName.Contains('/') ? fullName[(fullName.LastIndexOf('/') + 1)..] : fullName;
         return GetTarballImpl(fullName, shortName, file, ct);
     }
-
-    /// <summary>GET /o/{org}/npm/tarballs/@{scope}/{pkg}/{file} — scoped package tarball download</summary>
-    [HttpGet("/npm/tarballs/@{scope}/{pkg}/{file}")]
-    public Task<IActionResult> GetScopedTarball(string scope, string pkg, string file, CancellationToken ct)
-        => GetTarballImpl(fullName: "@" + scope + "/" + pkg, shortName: pkg, file, ct);
 
     private async Task<IActionResult> GetTarballImpl(
         string fullName, string shortName, string file, CancellationToken ct)
@@ -309,7 +381,7 @@ public partial class NpmController : ControllerBase
         if (await _blocklist.IsBlockedAsync(orgId, purlCheck, ct))
         {
             await _audit.LogActivityAsync(orgId, "npm", purlCheck, "blocked", token?.UserId,
-                sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+                actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
             return StatusCode(403);
         }
 
@@ -349,7 +421,8 @@ public partial class NpmController : ControllerBase
                     pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
                     token.UserId, settings.MaxOsvScoreTolerance, sourceIp,
                     MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                    PublishedAt: pkgVersion.PublishedAt), ct)
+                    PublishedAt: pkgVersion.PublishedAt,
+                    ActorKind: token.ActorKind), ct)
             == BlockDecision.Blocked) return StatusCode(403);
 
         var stream = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
@@ -358,7 +431,7 @@ public partial class NpmController : ControllerBase
         Response.Headers["X-Cache"] = "HIT";
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
         await _audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token.UserId,
-            sourceIp: sourceIp, ct: ct);
+            actorKind: token.ActorKind, sourceIp: sourceIp, ct: ct);
         return File(stream, "application/octet-stream", file);
     }
 
@@ -371,7 +444,8 @@ public partial class NpmController : ControllerBase
                     pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
                     token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
                     MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                    PublishedAt: pkgVersion.PublishedAt), ct)
+                    PublishedAt: pkgVersion.PublishedAt,
+                    ActorKind: token?.ActorKind), ct)
             == BlockDecision.Blocked) return StatusCode(403);
 
         if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase)) return null;
@@ -382,7 +456,7 @@ public partial class NpmController : ControllerBase
         Response.Headers["X-Cache"] = "HIT";
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
         await _audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token?.UserId,
-            sourceIp: sourceIp, ct: ct);
+            actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         return File(stream, "application/octet-stream", file);
     }
 
@@ -395,15 +469,38 @@ public partial class NpmController : ControllerBase
 
         try
         {
-            using var resp = await _upstream.GetMetadataAsync(upstreamUrl, ct);
+            // #94 single-flight: concurrent first-fetches of the same coordinate share a
+            // single upstream request instead of fanning out to N HTTP calls.
+            //
+            // npm/NuGet artefact fetches still route through GetOrFetchMetadataAsync (a
+            // buffered byte[]) because the upstream SHA isn't known at request time —
+            // unlike PyPI, npm's tarball URL doesn't carry a #sha256 fragment and we
+            // haven't yet flipped the path to compute-then-cache via FetchAndStageAsync.
+            // That migration is a parallel concern; #105 isolates the residue here by
+            // wrapping the byte[] in a BlobHandle so everything downstream
+            // (ProxyFetchService, ProxyVersionRecorder, LicenseExtractor) is uniformly
+            // stream-shaped.
+            var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, ct);
             if (!resp.IsSuccessStatusCode) return NotFound();
-            var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
+            var bytes = resp.Body;
 
             var baseName = file.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase) ? file[..^4] : file;
             var version = baseName.Length > shortName.Length + 1 ? baseName[(shortName.Length + 1)..] : "unknown";
             var purl = PurlNormalizer.Npm(fullName, version);
 
             var meta = await TryFetchNpmFirstFetchMetadataAsync(upstreamBase, fullName, version, ct);
+
+            // Cache the artefact under its content-addressed key once, then describe it
+            // with a BlobHandle. OpenAsync prefers the blob-store stream (LocalBlobStore =
+            // FileStream, S3/Azure = pooled GET) and falls back to a MemoryStream over the
+            // buffered bytes when the blob unexpectedly vanishes.
+            var sha = ChecksumVerifier.ComputeSha256Hex(bytes);
+            var proxyKey = BlobKeys.Proxy(sha);
+            if (!await _blobs.ExistsAsync(proxyKey, ct))
+                await _blobs.PutAsync(proxyKey, new MemoryStream(bytes), ct);
+            var blob = new BlobHandle(proxyKey, sha, bytes.LongLength,
+                async openCt => await _blobs.GetAsync(proxyKey, openCt)
+                    ?? (Stream)new MemoryStream(bytes, writable: false));
 
             // npm publishes integrity as an SRI string (e.g. "sha512-{b64}") — store verbatim
             // so operators copying out of the version detail page can paste against npmjs.com
@@ -413,12 +510,16 @@ public partial class NpmController : ControllerBase
                 ? (meta.IntegritySri, "sha512-sri")
                 : ((string?)null, (string?)null);
 
+            // deepcode ignore PT,LogForging: ProxyFetchService stores under BlobKeys.Proxy(sha256),
+            // which validates a 64-char lowercase hex — path traversal cannot escape that key. All
+            // structured logs use Serilog RenderedCompactJsonFormatter (CRLF-safe).
             var result = await _proxyFetch.RecordAndScanAsync(new Dependably.Storage.ProxyFetchRequest(
                 OrgId: orgId, Ecosystem: "npm",
                 PackageName: fullName, PurlName: fullName,
-                Version: version, Purl: purl, File: file, Bytes: bytes,
+                Version: version, Purl: purl, File: file, Blob: blob,
                 ExtractLicenses: LicenseExtractor.FromNpmTarballPackageJson,
                 UserId: token?.UserId,
+                ActorKind: token?.ActorKind,
                 SourceIp: HttpContext.GetNormalizedRemoteIp(),
                 MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
                 MinReleaseAgeHours: settings.MinReleaseAgeHours,
@@ -428,11 +529,17 @@ public partial class NpmController : ControllerBase
                 UpstreamChecksum: meta.Checksum,
                 Sha1Hex: meta.Sha1Hex,
                 UpstreamIntegrityValue: integrityValue,
-                UpstreamIntegrityAlgorithm: integrityAlgo
+                UpstreamIntegrityAlgorithm: integrityAlgo,
+                Deprecated: meta.Deprecated
             ), ct);
 
             if (result.Decision == BlockDecision.Blocked) return StatusCode(403);
-            return File(bytes, "application/octet-stream", file);
+
+            // Stream the cached blob back to the client (response memory is one read
+            // buffer, not the whole artefact).
+            var blobStream = await _blobs.GetAsync(result.BlobKey, ct);
+            if (blobStream is null) return File(bytes, "application/octet-stream", file);
+            return File(blobStream, "application/octet-stream", file);
         }
         catch (Microsoft.Data.Sqlite.SqliteException) { throw; }
         catch (ChecksumException)
@@ -461,9 +568,12 @@ public partial class NpmController : ControllerBase
     {
         try
         {
-            using var resp = await _upstream.GetMetadataAsync($"{upstreamBase}/{fullName}", ct);
+            // #94: route through single-flighted metadata fetch — TryFetchNpmFirstFetchMetadataAsync
+            // is called inline with the tarball-fetch handler, so a stampede on the tarball
+            // path otherwise drives a duplicate stampede on the packument URL too.
+            var resp = await _upstream.GetOrFetchMetadataAsync($"{upstreamBase}/{fullName}", ct);
             if (!resp.IsSuccessStatusCode) return NpmFirstFetchMetadata.Empty;
-            var json = await resp.Content.ReadAsStringAsync(ct);
+            var json = resp.BodyAsString();
             var node = JsonNode.Parse(json);
 
             DateTimeOffset? publishedAt = null;
@@ -472,7 +582,8 @@ public partial class NpmController : ControllerBase
                     System.Globalization.DateTimeStyles.RoundtripKind, out var ts))
                 publishedAt = ts;
 
-            var dist = node?["versions"]?[version]?["dist"];
+            var versionNode = node?["versions"]?[version];
+            var dist = versionNode?["dist"];
             var integrity = dist?["integrity"]?.GetValue<string>();
             var shasum = dist?["shasum"]?.GetValue<string>();
             var checksum = ChecksumVerifier.ParseNpmIntegrity(integrity, shasum);
@@ -484,7 +595,9 @@ public partial class NpmController : ControllerBase
                 && integrity.StartsWith("sha512-", StringComparison.OrdinalIgnoreCase)
                 ? integrity : null;
 
-            return new NpmFirstFetchMetadata(publishedAt, checksum, shasum, integritySri);
+            var deprecated = LicenseExtractor.FromNpmPackumentVersion(versionNode).Deprecated;
+
+            return new NpmFirstFetchMetadata(publishedAt, checksum, shasum, integritySri, deprecated);
         }
         catch { return NpmFirstFetchMetadata.Empty; }
     }
@@ -493,9 +606,10 @@ public partial class NpmController : ControllerBase
         DateTimeOffset? PublishedAt,
         ChecksumSpec? Checksum,
         string? Sha1Hex,
-        string? IntegritySri)
+        string? IntegritySri,
+        string? Deprecated)
     {
-        public static NpmFirstFetchMetadata Empty => new(null, null, null, null);
+        public static NpmFirstFetchMetadata Empty => new(null, null, null, null, null);
     }
 
 
@@ -505,6 +619,7 @@ public partial class NpmController : ControllerBase
     [HttpPut("/npm/{package}")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishNpm)]
+    [EnableRateLimiting("push")]
     [RequestSizeLimit(500 * 1024 * 1024)] // hard ceiling; UploadSizeLimitMiddleware enforces tighter per-tenant/ecosystem caps before any blob is written
     public Task<IActionResult> Publish(string package, CancellationToken ct)
         => PublishPackage(package, scope: null, ct);
@@ -513,6 +628,7 @@ public partial class NpmController : ControllerBase
     [HttpPut("/npm/@{scope}/{package}")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishNpm)]
+    [EnableRateLimiting("push")]
     [RequestSizeLimit(500 * 1024 * 1024)] // hard ceiling; UploadSizeLimitMiddleware enforces tighter per-tenant/ecosystem caps before any blob is written
     public Task<IActionResult> PublishScoped(string scope, string package, CancellationToken ct)
         => PublishPackage(package, scope: "@" + scope, ct);
@@ -566,7 +682,7 @@ public partial class NpmController : ControllerBase
         var claim = await _claimResolver.ResolveAsync(orgId, "npm", fullName, ct);
         var request = BuildNpmPublishRequest(new NpmPublishContext(
             orgId, fullName, versionKey!, filename, tarball!,
-            token.UserId, orgSettings?.AllowVersionOverwrite ?? false, claim.State));
+            token.UserId, token.ActorKind, orgSettings?.AllowVersionOverwrite ?? false, claim.State));
         var result = await _publish.StoreAndRecordAsync(request, ct);
 
         if (result is PublishResult.Rejected rej) return MapPublishRejection(rej, versionKey!);
@@ -580,7 +696,7 @@ public partial class NpmController : ControllerBase
     // builder's signature within S107's threshold while preserving the ergonomic call shape.
     private sealed record NpmPublishContext(
         string OrgId, string FullName, string VersionKey, string Filename, byte[] Tarball,
-        string? ActorUserId, bool AllowOverwrite, string ClaimState);
+        string? ActorUserId, string? ActorKind, bool AllowOverwrite, string ClaimState);
 
     private PublishRequest BuildNpmPublishRequest(NpmPublishContext ctx)
         => new()
@@ -597,6 +713,7 @@ public partial class NpmController : ControllerBase
             SizeCap = long.MaxValue,
             Origin = "uploaded",
             ActorUserId = ctx.ActorUserId,
+            ActorKind = ctx.ActorKind,
             AuditAction = "push",
             AllowOverwrite = ctx.AllowOverwrite,
             ClaimState = ctx.ClaimState,
@@ -613,7 +730,10 @@ public partial class NpmController : ControllerBase
     private async Task EmitNpmLicensesAndDeprecationAsync(
         string versionId, byte[] tarball, JsonNode? packumentVersion, CancellationToken ct)
     {
-        var fromTarball = LicenseExtractor.FromNpmTarballPackageJson(tarball);
+        // Push path holds the tarball bytes in memory (upload validation concern,
+        // out of scope for #105). Wrap in a MemoryStream for the unified extractor.
+        var fromTarball = LicenseExtractor.FromNpmTarballPackageJson(
+            new MemoryStream(tarball, writable: false));
         var fromPackument = LicenseExtractor.FromNpmPackumentVersion(packumentVersion);
         var spdx = fromTarball.Spdx.Count > 0 ? fromTarball.Spdx : fromPackument.Spdx;
         if (spdx.Count > 0)

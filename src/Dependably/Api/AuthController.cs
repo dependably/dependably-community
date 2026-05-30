@@ -84,10 +84,15 @@ public sealed class AuthController : ControllerBase
         (string? token, string? error, int? retryAfter) result;
         if (ctx is not null && ctx.IsApex)
         {
+            // deepcode ignore LogForging,PrivateInformationExposure: email reaches LoginService which
+            // SHA-256-hashes it (HashEmail) before any audit/log call; raw email never reaches the
+            // RenderedCompactJsonFormatter sink. CRLF in property values is JSON-encoded regardless.
             result = await _login.LoginSystemAsync(req.Email, req.Password, sourceIp, ct);
         }
         else if (ctx is not null && ctx.IsTenant && ctx.TenantId is not null)
         {
+            // deepcode ignore LogForging,PrivateInformationExposure: see comment above — HashEmail
+            // is applied before audit; raw email is not logged.
             result = await _login.LoginTenantAsync(req.Email, req.Password, ctx.TenantId, sourceIp, ct);
         }
         else
@@ -134,6 +139,8 @@ public sealed class AuthController : ControllerBase
         await _users.CreateFromInviteAsync(invite, req.Password, ct);
 
         // Auto-login. Invite is tenant-scoped, so we know which tenant to authenticate against.
+        // deepcode ignore PrivateInformationExposure: invite.Email is hashed by LoginService.HashEmail
+        // before any audit/log call (same path as the manual login above).
         var (token, _, _) = await _login.LoginTenantAsync(invite.Email, req.Password, invite.OrgId,
             HttpContext.GetNormalizedRemoteIp(), ct);
         if (token is null)

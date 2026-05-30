@@ -56,6 +56,7 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
             ON CONFLICT(org_id) DO UPDATE SET anonymous_pull = @flag
             """,
             new { orgId, flag = enabled ? 1 : 0 });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
     }
 
     // ── GetVersion happy path ────────────────────────────────────────────────
@@ -257,6 +258,7 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
             ON CONFLICT(org_id) DO UPDATE SET allowlist_mode = 1
             """,
             new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
 
         try
         {
@@ -271,6 +273,7 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
             await conn.ExecuteAsync(
                 "UPDATE org_settings SET allowlist_mode = 0 WHERE org_id = @orgId",
                 new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
         }
     }
 

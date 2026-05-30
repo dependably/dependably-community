@@ -42,6 +42,17 @@ public static class DependablyMeter
             "dependably.upstream.inflight_fetches",
             description: "Upstream fetches currently in flight. Attributes: ecosystem.");
 
+    /// <summary>
+    /// Maven artifact fetch bailed out because the SHA-256 sidecar was unavailable or
+    /// verification was explicitly disabled. UpstreamClient routing requires a known
+    /// content-addressed key, so the fetcher cannot proceed without a sidecar. Attributes:
+    /// <c>reason</c> (<c>verify_disabled</c>|<c>sidecar_unavailable</c>) — bounded set.
+    /// </summary>
+    public static readonly Counter<long> MavenSidecarMissing =
+        Meter.CreateCounter<long>(
+            "dependably.maven.sidecar_missing",
+            description: "Maven artifact fetch bailed out because sidecar SHA-256 was unavailable or verification disabled. Attributes: reason.");
+
     public static readonly Counter<long> AuditEmitFailures =
         Meter.CreateCounter<long>(
             "dependably.audit.emit_failures",
@@ -95,10 +106,32 @@ public static class DependablyMeter
             "dependably.token_auth.requests",
             description: "Token-auth attempts. Attributes: outcome.");
 
+    /// <summary>
+    /// Activity rows dropped because the async writer channel was full (#90). Watch this
+    /// counter to know when the writer has fallen behind sustained download throughput —
+    /// activity rows are observability, not audit, so shedding under load is fine, but
+    /// operators should see when it's happening.
+    /// </summary>
+    public static readonly Counter<long> ActivityWriterDropped =
+        Meter.CreateCounter<long>(
+            "dependably.activity_writer.dropped",
+            description: "Activity records dropped because the async writer channel was full.");
+
     public static readonly Counter<long> ScanFindings =
         Meter.CreateCounter<long>(
             "dependably.scan.findings",
             description: "Vuln-scan findings. Attributes: severity, ecosystem.");
+
+    /// <summary>
+    /// Requests rejected by the download / push rate limiters (#96). Attributes:
+    /// <c>policy</c> (download|push|...), <c>partition</c> prefix (<c>token:HHHH</c>
+    /// or <c>ip:1.2.3.4</c>). Lets operators see when a single token is rate-locked
+    /// and identify it via the 12-hex prefix without leaking the full hash.
+    /// </summary>
+    public static readonly Counter<long> RateLimitRejected =
+        Meter.CreateCounter<long>(
+            "dependably.rate_limit.rejected",
+            description: "Requests rejected by rate limiting. Attributes: policy, partition.");
 
     // ── Observable gauges — values pushed from elsewhere, read on scrape ────
 

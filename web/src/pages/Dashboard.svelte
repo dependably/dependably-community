@@ -4,6 +4,7 @@
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { currentOrg } from '../lib/store.js'
   import { formatBytes } from '../lib/format.js'
+  import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
 
   let stats = null
   let loading = true
@@ -27,7 +28,7 @@
 
   // ── Constants ────────────────────────────────────────────────────────────────
 
-  const ECOSYSTEMS = ['pypi', 'npm', 'nuget']
+  // ECOSYSTEMS lives in lib/ecosystems.js so every page renders the same six.
   // 'UNKNOWN' is the bucket the backend emits when an advisory has no CVSS/severity
   // (e.g. some GHSA records on first publish). Render it explicitly — silently
   // dropping it would hide real vulnerabilities from the operator.
@@ -242,7 +243,7 @@
                   <td>
                     <div class="eco-name-cell">
                       <span class="eco-bar {eco}" aria-hidden="true"></span>
-                      <span class="badge {eco}">{eco}</span>
+                      <span class="badge {eco}">{ECO_LABEL[eco]}</span>
                     </div>
                   </td>
                   <td class="text-right">{ecoCount(eco).toLocaleString()}</td>
@@ -360,6 +361,9 @@
   .slice-pypi  { fill: var(--eco-pypi); }
   .slice-npm   { fill: var(--eco-npm); }
   .slice-nuget { fill: var(--eco-nuget); }
+  .slice-maven { fill: var(--eco-maven); }
+  .slice-rpm   { fill: var(--eco-rpm); }
+  .slice-oci   { fill: var(--eco-oci); }
 
   .zero {
     color: var(--text2);

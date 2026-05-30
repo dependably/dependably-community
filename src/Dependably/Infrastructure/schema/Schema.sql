@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS org_settings (
     max_upload_bytes_pypi   INTEGER,
     max_upload_bytes_npm    INTEGER,
     max_upload_bytes_nuget  INTEGER,
+    max_upload_bytes_maven  INTEGER,           -- #99 per-ecosystem Maven cap; falls back to max_upload_bytes
+    max_upload_bytes_rpm    INTEGER,           -- #100 per-ecosystem RPM cap; falls back to max_upload_bytes
+    max_upload_bytes_oci    INTEGER,           -- #101 per-ecosystem OCI (Docker) cap; falls back to max_upload_bytes
     keep_versions       INTEGER,            -- GC: max versions to retain per package per ecosystem
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
     activity_retention_days INTEGER,        -- GC: delete activity rows older than this
@@ -151,6 +154,12 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- upstream claim to compare against) and for legacy rows pre-dating the column.
     upstream_integrity_value TEXT,
     upstream_integrity_algorithm TEXT,  -- 'sha256' | 'sha512-sri' | 'sha512-b64'
+    -- Trailing path segment of blob_key. Populated at insert time by the repository so
+    -- the PyPI/npm/NuGet file-download lookups can hit an equality index instead of the
+    -- previous leading-wildcard LIKE on blob_key. NULL is reserved for legacy rows that
+    -- pre-date the column; the additive backfill migration in SchemaInitializer fills
+    -- them in from blob_key's last '/' segment.
+    filename    TEXT,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     UNIQUE (package_id, version)
 );
@@ -219,6 +228,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
     scope       TEXT NOT NULL DEFAULT 'tenant' CHECK (scope IN ('tenant','system')),
     org_id      TEXT,
     actor_id    TEXT,
+    -- Discriminator for actor_id: 'user' (users.id) or 'service' (service_tokens.id). NULL
+    -- means anonymous (only possible on pull paths when AnonymousPull=1) OR a legacy row
+    -- written before this column existed — the list query falls back to a users join for
+    -- back-compat. Set explicitly by every new write so service-token actors render as
+    -- 'service:<name>' instead of being indistinguishable from anonymous.
+    actor_kind  TEXT,
     action      TEXT NOT NULL,
     ecosystem   TEXT,
     purl        TEXT,
@@ -235,6 +250,7 @@ CREATE TABLE IF NOT EXISTS activity (
     purl        TEXT,           -- null for non-package events (auth)
     event_type  TEXT NOT NULL,  -- 'push' | 'pull' | 'first_fetch' | 'delete' | 'vuln_scan' | 'login.success' | 'login.failure' | 'login.locked'
     actor_id    TEXT,
+    actor_kind  TEXT,           -- see audit_log.actor_kind; 'user' | 'service' | NULL
     detail      TEXT,
     source_ip   TEXT,           -- captured for HTTP-originated events (downloads, push, delete, blocked_*); null for background paths
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
@@ -274,6 +290,11 @@ CREATE INDEX IF NOT EXISTS idx_packages_org_ecosystem ON packages(org_id, ecosys
 CREATE INDEX IF NOT EXISTS idx_vulns_ecosystem_pkg ON vulnerabilities(ecosystem, package_name);
 CREATE INDEX IF NOT EXISTS idx_pkg_version_vulns_version ON package_version_vulns(package_version_id);
 CREATE INDEX IF NOT EXISTS idx_package_versions_package ON package_versions(package_id);
+-- Hot path: PyPI/npm/NuGet downloads resolve a file to a version row by trailing filename.
+-- The pre-#91 query used `blob_key LIKE '%/' || filename` — a leading-wildcard LIKE that
+-- SQLite cannot serve from any index, so every download was a full scan of package_versions.
+-- This index serves the equality lookup on the normalized `filename` column.
+CREATE INDEX IF NOT EXISTS idx_package_versions_filename ON package_versions(filename);
 CREATE INDEX IF NOT EXISTS idx_audit_log_org ON audit_log(org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_org ON activity(org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_tokens_hash ON user_tokens(token_hash);
@@ -306,6 +327,104 @@ CREATE TABLE IF NOT EXISTS license_blocklist (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pkg_version_licenses ON package_version_licenses(package_version_id);
+
+-- #100 RPM metadata. One row per package_versions row carrying everything the RPM header
+-- parser pulls from a .rpm upload. Arrays (requires/provides/files/changelogs) are stored
+-- as JSON strings so the repodata generator can re-emit them as XML without a second
+-- query roundtrip.
+CREATE TABLE IF NOT EXISTS rpm_metadata (
+    package_version_id  TEXT PRIMARY KEY REFERENCES package_versions(id) ON DELETE CASCADE,
+    rpm_name            TEXT NOT NULL,
+    epoch               INTEGER NOT NULL DEFAULT 0,
+    rpm_version         TEXT NOT NULL,
+    rpm_release         TEXT NOT NULL,
+    arch                TEXT NOT NULL,
+    summary             TEXT,
+    description         TEXT,
+    build_host          TEXT,
+    build_time          INTEGER,
+    packager            TEXT,
+    vendor              TEXT,
+    rpm_group           TEXT,
+    source_rpm          TEXT,
+    url                 TEXT,
+    installed_size      INTEGER NOT NULL DEFAULT 0,
+    archive_size        INTEGER NOT NULL DEFAULT 0,
+    header_start        INTEGER NOT NULL DEFAULT 0,
+    header_end          INTEGER NOT NULL DEFAULT 0,
+    requires_json       TEXT NOT NULL DEFAULT '[]',
+    provides_json       TEXT NOT NULL DEFAULT '[]',
+    conflicts_json      TEXT NOT NULL DEFAULT '[]',
+    obsoletes_json      TEXT NOT NULL DEFAULT '[]',
+    files_json          TEXT NOT NULL DEFAULT '[]',
+    changelogs_json     TEXT NOT NULL DEFAULT '[]',
+    rpm_license         TEXT,
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_rpm_metadata_arch ON rpm_metadata(arch);
+
+-- #100 repodata generation state. One row per (org, arch); dirty flag drives the async
+-- rebuild service. generation increments each rebuild so concurrent rebuilds detect
+-- stale generations and back off without rewriting the same arch twice.
+CREATE TABLE IF NOT EXISTS rpm_repodata_state (
+    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    arch          TEXT NOT NULL,
+    last_built_at TEXT,
+    dirty         INTEGER NOT NULL DEFAULT 1,
+    generation    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (org_id, arch)
+);
+
+-- #99 Maven: one package_versions row per (groupId:artifactId, version) but multiple files
+-- per version (JAR + POM + sources JAR + javadoc + checksum sidecars). This table tracks
+-- the per-file extension/classifier/blob mapping so the controller can answer arbitrary
+-- file-suffix requests without re-parsing PURLs at the DB layer.
+CREATE TABLE IF NOT EXISTS maven_version_files (
+    id                  TEXT PRIMARY KEY,
+    package_version_id  TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    filename            TEXT NOT NULL,
+    classifier          TEXT,
+    extension           TEXT NOT NULL,
+    blob_key            TEXT NOT NULL,
+    size_bytes          INTEGER NOT NULL DEFAULT 0,
+    checksum_sha256     TEXT,
+    checksum_sha1       TEXT,
+    checksum_md5        TEXT,
+    origin              TEXT NOT NULL DEFAULT 'uploaded',  -- 'uploaded' | 'proxy'
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    UNIQUE (package_version_id, filename)
+);
+CREATE INDEX IF NOT EXISTS idx_maven_version_files_version ON maven_version_files(package_version_id);
+CREATE INDEX IF NOT EXISTS idx_maven_version_files_filename ON maven_version_files(filename);
+
+-- #98 OCI / Docker registry storage. Manifests and blobs are both content-addressed; this
+-- table is the metadata index. Bytes live under BlobKeys.OciBlob in the blob store.
+-- media_type tags whether the row is a manifest (manifest.v2+json,
+-- vnd.oci.image.index.v1+json, etc.) or a layer (vnd.oci.image.layer.v1.tar+gzip etc.).
+-- Tenant binding: every lookup MUST filter on org_id; manifests / layers can be shared
+-- across repos within an org but never across orgs.
+CREATE TABLE IF NOT EXISTS oci_blobs (
+    digest        TEXT NOT NULL,           -- '{algo}:{hex}'
+    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    media_type    TEXT NOT NULL,
+    size_bytes    INTEGER NOT NULL DEFAULT 0,
+    blob_key      TEXT NOT NULL,           -- BlobKeys.OciBlob(...)
+    cached_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    upstream_checked_at TEXT,
+    PRIMARY KEY (digest, org_id)
+);
+CREATE INDEX IF NOT EXISTS idx_oci_blobs_org ON oci_blobs(org_id);
+
+-- tag → digest mapping. Each tag points at exactly one manifest digest at a time.
+CREATE TABLE IF NOT EXISTS oci_tags (
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    repository  TEXT NOT NULL,
+    tag         TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    PRIMARY KEY (org_id, repository, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_oci_tags_repository ON oci_tags(org_id, repository);
 
 -- SPDX license reference data. Seeded from an embedded JSON list (license-list-data) by
 -- SpdxLicenseSeeder on every boot when instance_settings.spdx_list_version differs from the
@@ -551,6 +670,17 @@ CREATE INDEX IF NOT EXISTS idx_background_job_runs_started_at
     ON background_job_runs(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_background_job_runs_job_started
     ON background_job_runs(job_name, started_at DESC);
+
+-- Content-addressed negative cache for upstream 404 responses (#101, #102, #103).
+-- Shared across tenants — the key is SHA-256(url)[..32] which is content-addressed;
+-- a URL either 404s or it doesn't, regardless of which tenant fetched it first.
+-- TTL is enforced at query time (fetched_at >= now - ttl), not by a background sweep.
+CREATE TABLE IF NOT EXISTS upstream_negative_cache (
+    url_key     TEXT NOT NULL,   -- SHA-256(url)[..32] hex
+    ecosystem   TEXT NOT NULL,
+    fetched_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    PRIMARY KEY (url_key, ecosystem)
+);
 
 -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
 -- Those are no-ops on fresh installs (duplicate column error is swallowed / IF NOT EXISTS).

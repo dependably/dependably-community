@@ -96,13 +96,19 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
 
         // Invite links go to the apex (system_admin/landing) for join flows. BASE_URL wins
         // when set so links are stable across hosts; falls back to the request's base.
-        var baseUrl = _config["BASE_URL"] ?? _urls.BaseUrl(HttpContext);
+        var baseUrl = _config.PublicBaseUrl() ?? _urls.BaseUrl(HttpContext);
         var inviteLink = $"{baseUrl}/join?token={raw}";
 
         var smtpHost = _config["SMTP_HOST"];
         if (smtpHost is null)
         {
-            _logger.LogInformation("Invite created for {Email} (tenant {TenantId}); SMTP not configured — retrieve link from API response.", req.Email, orgId);
+            // Information-level: invite id + tenant id are enough to correlate without exposing
+            // the recipient's email at default verbosity. The email lives in the audit_log entry
+            // above (intentional, per audit_log vs activity policy) and on the API response.
+            _logger.LogInformation("Invite {InviteId} created for tenant {TenantId}; SMTP not configured — retrieve link from API response.", record.Id, orgId);
+            // Debug-level: full link including the token. Only enabled at developer verbosity.
+            // deepcode ignore PrivateInformationExposure: Debug-only; gated by log-level config,
+            // not emitted in production deployments.
             _logger.LogDebug("Invite link for {Email} (tenant {TenantId}): {Link}", req.Email, orgId, inviteLink);
         }
         // SMTP delivery deferred — until SMTP_HOST wiring lands, callers retrieve the

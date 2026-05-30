@@ -29,6 +29,9 @@ public sealed class UploadLimitResolver : IUploadLimitResolver
             "pypi"  => settings?.MaxUploadBytesPyPi  ?? settings?.MaxUploadBytes,
             "npm"   => settings?.MaxUploadBytesNpm   ?? settings?.MaxUploadBytes,
             "nuget" => settings?.MaxUploadBytesNuGet ?? settings?.MaxUploadBytes,
+            "maven" => settings?.MaxUploadBytesMaven ?? settings?.MaxUploadBytes,
+            "rpm"   => settings?.MaxUploadBytesRpm   ?? settings?.MaxUploadBytes,
+            "oci"   => settings?.MaxUploadBytesOci   ?? settings?.MaxUploadBytes,
             _       => settings?.MaxUploadBytes,
         };
 

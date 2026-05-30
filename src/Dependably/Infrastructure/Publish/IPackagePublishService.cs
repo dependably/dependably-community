@@ -62,6 +62,15 @@ public sealed record PublishRequest
 
     public string? ActorUserId { get; init; }
 
+    /// <summary>
+    /// Discriminator persisted alongside <see cref="ActorUserId"/> in
+    /// <c>activity.actor_kind</c> / <c>audit_log.actor_kind</c>. Protocol publishes (npm/PyPI/
+    /// NuGet push) pass <c>token.ActorKind</c> so service-token pushes resolve as
+    /// <c>service:&lt;name&gt;</c> in the audit UI instead of "anonymous". JWT-session callers
+    /// (admin import) pass <see cref="ActorKinds.User"/>; background callers leave it NULL.
+    /// </summary>
+    public string? ActorKind { get; init; }
+
     /// <summary>Audit action verb. Defaults to 'push' for protocol publishes, 'import' for bulk.</summary>
     public string AuditAction { get; init; } = "push";
 

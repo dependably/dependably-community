@@ -29,11 +29,11 @@ public sealed class PublishAuditor
         if (request.AuditAction != "import")
         {
             await _audit.LogAsync(request.AuditAction, request.OrgId, request.ActorUserId,
-                request.Ecosystem, request.Purl, detail: request.AuditDetail, ct: ct);
+                request.ActorKind, request.Ecosystem, request.Purl, detail: request.AuditDetail, ct: ct);
         }
         await _audit.LogActivityAsync(request.OrgId, request.Ecosystem, request.Purl,
-            request.AuditAction, request.ActorUserId, detail: request.AuditDetail,
-            sourceIp: request.SourceIp, ct: ct);
+            request.AuditAction, request.ActorUserId, actorKind: request.ActorKind,
+            detail: request.AuditDetail, sourceIp: request.SourceIp, ct: ct);
 
         var actorType = request.ActorUserId is null ? "system" : "user";
         await EmitTypedAsync(request, sha256, actorType, ct);
@@ -77,7 +77,7 @@ public sealed class PublishAuditor
             origin = request.Origin,
         });
         await _audit.LogAsync("package.replace", request.OrgId, request.ActorUserId,
-            request.Ecosystem, request.Purl, detail: replaceDetail, ct: ct);
+            request.ActorKind, request.Ecosystem, request.Purl, detail: replaceDetail, ct: ct);
 
         var replacePayload = new PackageEvents.Replace(
             request.Ecosystem, request.PurlName, request.Version, request.Filename,

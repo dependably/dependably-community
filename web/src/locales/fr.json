@@ -526,7 +526,7 @@
       "osvTolerance": "Score OSV maximal toléré",
       "osvToleranceHint": "Les paquets dont le score de vulnérabilité dépasse ce seuil sont bloqués (0 – 10). La valeur par défaut 10 autorise tout.",
       "minReleaseAge": "Âge minimal de la version",
-      "minReleaseAgeHint": "Bloque les téléchargements via le proxy pour les versions amont plus récentes que ce délai. Laisser vide pour désactiver. L'âge est mesuré à partir de l'horodatage de publication du registre amont ; les versions sans horodatage sont autorisées.",
+      "minReleaseAgeHint": "Bloque les téléchargements via le proxy pour les versions amont plus récentes que ce délai. La valeur par défaut 0 autorise tout. L'âge est mesuré à partir de l'horodatage de publication du registre amont ; les versions sans horodatage sont autorisées.",
       "minReleaseAgeUnitHours": "Heures",
       "minReleaseAgeUnitDays": "Jours",
       "allowlistSection": "Liste d'autorisation",
@@ -1036,6 +1036,9 @@
         "maxUploadBytesPyPi": "Taille max. d'envoi — PyPI",
         "maxUploadBytesNpm": "Taille max. d'envoi — npm",
         "maxUploadBytesNuGet": "Taille max. d'envoi — NuGet",
+        "maxUploadBytesMaven": "Taille max. d'envoi — Maven",
+        "maxUploadBytesRpm": "Taille max. d'envoi — RPM",
+        "maxUploadBytesOci": "Taille max. d'envoi — Docker",
         "gcSchedule": "Planification GC (cron)",
         "siemMaxLookbackDays": "Lookback SIEM max (jours)"
       },
@@ -1049,6 +1052,9 @@
         "maxUploadBytesPyPi": "100 Mo — équivalent à pypi.org",
         "maxUploadBytesNpm": "50 Mo",
         "maxUploadBytesNuGet": "250 Mo — équivalent à nuget.org",
+        "maxUploadBytesMaven": "100 Mo",
+        "maxUploadBytesRpm": "250 Mo",
+        "maxUploadBytesOci": "2048 Mo — adapté aux images conteneur multicouches",
         "gcSchedule": "0 3 * * * (03:00 UTC, quotidien)",
         "siemMaxLookbackDays": "90 jours"
       },

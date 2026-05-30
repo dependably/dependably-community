@@ -14,7 +14,11 @@ export function applyLocale(code) {
   // Cookie is what ASP.NET CookieRequestCultureProvider reads, so server-rendered errors
   // and login pages stay in the chosen language.
   const value = encodeURIComponent(`c=${code}|uic=${code}`)
-  document.cookie = `.AspNetCore.Culture=${value}; path=/; max-age=31536000; SameSite=Lax`
+  // Add Secure when served over HTTPS so the cookie can't be downgraded on a hostile network.
+  // Local development (file:// or plain http://localhost) skips the flag because the browser
+  // would otherwise drop the cookie entirely.
+  const secure = typeof location !== 'undefined' && location.protocol === 'https:' ? '; Secure' : ''
+  document.cookie = `.AspNetCore.Culture=${value}; path=/; max-age=31536000; SameSite=Lax${secure}`
   localStorage.setItem('locale', code)
   if (typeof document !== 'undefined') document.documentElement.lang = code
 }

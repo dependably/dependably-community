@@ -78,6 +78,10 @@ public sealed class UploadSizeLimitMiddleware
             var s when s.StartsWith("simple/", StringComparison.OrdinalIgnoreCase) => "pypi",
             var s when s.StartsWith("npm/", StringComparison.OrdinalIgnoreCase) => "npm",
             var s when s.StartsWith("nuget/", StringComparison.OrdinalIgnoreCase) => "nuget",
+            var s when s.StartsWith("maven/", StringComparison.OrdinalIgnoreCase) => "maven",
+            var s when s.StartsWith("rpm/", StringComparison.OrdinalIgnoreCase) => "rpm",
+            // OCI Distribution Spec mandates /v2/ — the path differs from the ecosystem key.
+            var s when s.StartsWith("v2/", StringComparison.OrdinalIgnoreCase) => "oci",
             _ => null
         };
 

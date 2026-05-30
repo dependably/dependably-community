@@ -40,12 +40,16 @@ public static class PackageSeeder
         CancellationToken ct = default)
     {
         var id = Guid.NewGuid().ToString("N");
+        // Mirror PackageRepository.CreateVersionAsync: derive filename from blob_key so
+        // the new download lookup (FindVersionByBlobKeySuffixAsync) can find seeded rows
+        // via idx_package_versions_filename instead of the pre-#91 LIKE.
+        var filename = PackageRepository.DeriveFilename(blobKey);
         await using var conn = await db.OpenAsync(ct);
         await conn.ExecuteAsync("""
-            INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, checksum_sha256, origin)
-            VALUES (@id, @packageId, @version, @purl, @blobKey, @sizeBytes, @checksumSha256, @origin)
+            INSERT INTO package_versions (id, package_id, version, purl, blob_key, filename, size_bytes, checksum_sha256, origin)
+            VALUES (@id, @packageId, @version, @purl, @blobKey, @filename, @sizeBytes, @checksumSha256, @origin)
             """,
-            new { id, packageId, version, purl, blobKey, sizeBytes, checksumSha256, origin });
+            new { id, packageId, version, purl, blobKey, filename, sizeBytes, checksumSha256, origin });
         return id;
     }
 }

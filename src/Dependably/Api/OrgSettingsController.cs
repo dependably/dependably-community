@@ -90,7 +90,10 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             req.MaxUploadBytesNuGet,
             instanceMax,
             req.DefaultLanguage,
-            req.AllowVersionOverwrite), ct);
+            req.AllowVersionOverwrite,
+            MaxUploadBytesMaven: req.MaxUploadBytesMaven,
+            MaxUploadBytesRpm:   req.MaxUploadBytesRpm,
+            MaxUploadBytesOci:   req.MaxUploadBytesOci), ct);
 
         await _audit.LogAsync("org_settings_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -101,6 +104,9 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 max_upload_bytes_pypi = req.MaxUploadBytesPyPi,
                 max_upload_bytes_npm = req.MaxUploadBytesNpm,
                 max_upload_bytes_nuget = req.MaxUploadBytesNuGet,
+                max_upload_bytes_maven = req.MaxUploadBytesMaven,
+                max_upload_bytes_rpm = req.MaxUploadBytesRpm,
+                max_upload_bytes_oci = req.MaxUploadBytesOci,
                 pypi_upstream = req.PyPiUpstream,
                 npm_upstream = req.NpmUpstream,
                 nuget_upstream = req.NuGetUpstream,

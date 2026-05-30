@@ -33,7 +33,7 @@ public sealed class ProxyVersionRecorder
     /// </summary>
     public async Task<string?> RecordAsync(
         ProxyVersionRequest req,
-        Func<byte[], LicenseExtractor.ExtractedMetadata>? extractLicenses,
+        Func<Stream, LicenseExtractor.ExtractedMetadata>? extractLicenses,
         CancellationToken ct = default)
     {
         try
@@ -46,19 +46,37 @@ public sealed class ProxyVersionRecorder
             // is metadata-only so the simple index / flatcontainer responses can recover it.
             var dbBlobKey = $"{BlobKeys.Proxy(req.Sha256)}/{req.File}";
             var newVer = await _packages.CreateVersionAsync(
-                new NewPackageVersion(pkg.Id, req.Version, req.Purl, dbBlobKey, req.Bytes.Length, req.Sha256,
+                new NewPackageVersion(pkg.Id, req.Version, req.Purl, dbBlobKey, req.Blob.SizeBytes, req.Sha256,
                     FirstFetch: true, PublishedAt: req.PublishedAt, ChecksumSha1: req.Sha1Hex,
                     UpstreamIntegrityValue: req.UpstreamIntegrityValue,
                     UpstreamIntegrityAlgorithm: req.UpstreamIntegrityAlgorithm),
                 ct);
-            await _audit.LogActivityAsync(req.OrgId, req.Ecosystem, req.Purl, "first_fetch", req.UserId, sourceIp: req.SourceIp, ct: ct);
+            await _audit.LogActivityAsync(req.OrgId, req.Ecosystem, req.Purl, "first_fetch", req.UserId, actorKind: req.ActorKind, sourceIp: req.SourceIp, ct: ct);
 
             if (extractLicenses is not null)
             {
-                var extracted = extractLicenses(req.Bytes);
+                // Open the blob lazily so cache-miss license extraction reads the cached
+                // file rather than holding the artefact in memory. Open / extract failures
+                // (transient backend error, malformed package) are tolerated: the response
+                // already streamed, so swallow and skip the licence row. See
+                // feedback_test_partial_failure_scenarios — this swallow covers both
+                // stream-open failures and extractor parse failures.
+                LicenseExtractor.ExtractedMetadata extracted;
+                try
+                {
+                    var stream = await req.Blob.OpenAsync(ct);
+                    extracted = extractLicenses(stream);
+                }
+                catch
+                {
+                    extracted = LicenseExtractor.ExtractedMetadata.Empty;
+                }
                 if (extracted.Spdx.Count > 0)
                     await _licenses.SetLicensesAsync(newVer.Id, extracted.Spdx, "upstream", ct);
             }
+
+            if (req.Deprecated is not null)
+                await _packages.UpdateDeprecatedAsync(newVer.Id, req.Deprecated, ct);
 
             return newVer.Id;
         }
@@ -88,8 +106,17 @@ public sealed record ProxyVersionRequest(
     string Purl,
     string Sha256,
     string File,
-    byte[] Bytes,
+    BlobHandle Blob,
     string? UserId,
+    /// <summary>
+    /// Discriminator persisted alongside <see cref="UserId"/> in <c>activity.actor_kind</c>:
+    /// <see cref="ActorKinds.User"/> for user-token-attributed first fetches,
+    /// <see cref="ActorKinds.Service"/> for service-token-attributed ones, or NULL for
+    /// truly-anonymous fetches (only reachable on pull paths when AnonymousPull=1). Without
+    /// this, service-token first fetches show up as "anonymous" in the audit UI because
+    /// <c>TokenRepository.ResolveAsync</c> never sets <c>UserId</c> for service tokens.
+    /// </summary>
+    string? ActorKind = null,
     string? SourceIp = null,
     /// <summary>
     /// Upstream first-publish timestamp extracted on the cache-miss path (PyPI upload_time,
@@ -108,4 +135,13 @@ public sealed record ProxyVersionRequest(
     /// surfaced in the UI so operators can cross-check against the public registry's listing.
     /// </summary>
     string? UpstreamIntegrityValue = null,
-    string? UpstreamIntegrityAlgorithm = null);
+    string? UpstreamIntegrityAlgorithm = null,
+    /// <summary>
+    /// Upstream deprecation message captured at first-fetch. npm carries a free-text
+    /// <c>versions[v].deprecated</c> string; PyPI maps <c>yanked: true</c> to
+    /// <c>yanked_reason</c> (or the literal <c>"Yanked"</c>); NuGet maps
+    /// <c>listed: false</c> to <c>"Unlisted upstream"</c>. Null when upstream didn't
+    /// flag the version. Persisted via <c>PackageRepository.UpdateDeprecatedAsync</c>
+    /// so the UI badge mirrors the publish-path behaviour.
+    /// </summary>
+    string? Deprecated = null);

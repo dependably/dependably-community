@@ -70,6 +70,8 @@ public sealed class ClaimsController : ControllerBase
             try { await _blobs.DeleteAsync(key, ct); }
             catch (Exception ex)
             {
+                // deepcode ignore LogForging: Serilog RenderedCompactJsonFormatter JSON-encodes property
+                // values, so CRLF in tenant-route inputs (org/ecosystem/name) cannot break the log envelope.
                 _logger.LogWarning(ex,
                     "Failed to delete proxy blob {BlobKey} during local_only purge for {Org}/{Ecosystem}/{Name}.",
                     key, orgId, ecosystem, name);
@@ -129,8 +131,8 @@ public sealed class ClaimsController : ControllerBase
 
         var ecosystem = req.Ecosystem?.ToLowerInvariant() ?? "";
         var name = req.Name?.ToLowerInvariant() ?? "";
-        if (ecosystem is not "npm" and not "pypi" and not "nuget")
-            return BadRequest("ecosystem must be 'npm', 'pypi', or 'nuget'.");
+        if (ecosystem is not ("npm" or "pypi" or "nuget" or "maven" or "rpm" or "oci"))
+            return BadRequest("ecosystem must be one of: npm, pypi, nuget, maven, rpm, oci.");
         if (string.IsNullOrEmpty(name)) return BadRequest("name is required.");
 
         var existing = await _claims.GetAsync(ctx.OrgId!, ecosystem, name, ct);

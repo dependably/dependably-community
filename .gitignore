@@ -1,7 +1,10 @@
 node_modules/
 **/bin/
 **/obj/
-src/Dependably/wwwroot/
+# Built Svelte output is generated into wwwroot/ — ignore everything except the
+# vendored Swagger UI bundle (checked in to replace the external CDN load).
+src/Dependably/wwwroot/*
+!src/Dependably/wwwroot/swagger/
 .env.deploy
 dotnet-install.sh
 **/.DS_Store

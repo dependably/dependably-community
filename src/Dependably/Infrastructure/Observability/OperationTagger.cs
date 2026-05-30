@@ -39,6 +39,8 @@ public static class OperationTagger
             ("/npm/@{scope}/{package}", "PUT") => "package.publish",
             ("/npm/tarballs/{pkg}/{file}", _) => "package.download",
             ("/npm/tarballs/@{scope}/{pkg}/{file}", _) => "package.download",
+            ("/npm/{pkg}/-/{file}", _) => "package.download",
+            ("/npm/@{scope}/{pkg}/-/{file}", _) => "package.download",
 
             // NuGet
             ("/nuget/v3/index.json", _) => "index.simple",

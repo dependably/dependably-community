@@ -26,10 +26,18 @@ public class CacheEvictionServiceTests : IAsyncLifetime
     private static IConfiguration Config(IDictionary<string, string?> values) =>
         new ConfigurationBuilder().AddInMemoryCollection(values).Build();
 
+    private static string ShaSentinelFor(string version)
+    {
+        var bytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(version));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
     private async Task SeedAsync(string version, DateTimeOffset accessed, long size = 100)
     {
         // Insert blob first so eviction's blob-delete step has something to remove.
-        var blobKey = BlobKeys.Proxy($"sha-{version}");
+        // BlobKeys.Proxy requires 64-char lowercase hex (hardened in #106); derive a
+        // deterministic-but-valid sentinel from the version.
+        var blobKey = BlobKeys.Proxy(ShaSentinelFor(version));
         await _blobs.PutAsync(blobKey, new MemoryStream(new byte[size]));
 
         var repo = new CacheArtifactRepository(_db);

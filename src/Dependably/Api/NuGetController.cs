@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.RateLimiting;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
@@ -244,14 +245,17 @@ public partial class NuGetController : ControllerBase
         {
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            using var resp = await _upstream.GetMetadataAsync(upstreamUrl, linkedCts.Token);
+            // #94 single-flight registration fetch.
+            var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, linkedCts.Token);
             if (resp.IsSuccessStatusCode)
-                upstreamJson = await resp.Content.ReadAsStringAsync(linkedCts.Token);
+                upstreamJson = resp.BodyAsString();
             else
-                _logger.LogWarning("NuGet upstream registration fetch failed: {Status} for {Url}", (int)resp.StatusCode, upstreamUrl);
+                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                _logger.LogWarning("NuGet upstream registration fetch failed: {Status} for {Url}", resp.StatusCode, upstreamUrl);
         }
         catch (Exception ex)
         {
+            // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
             _logger.LogWarning(ex, "NuGet upstream registration fetch threw for {Url}", upstreamUrl);
         }
 
@@ -426,19 +430,22 @@ public partial class NuGetController : ControllerBase
         {
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            using var resp = await _upstream.GetMetadataAsync(url, linkedCts.Token);
+            // #94 single-flight: collapses N concurrent NuGet list requests onto one
+            // upstream call for the same flatcontainer index.
+            var resp = await _upstream.GetOrFetchMetadataAsync(url, linkedCts.Token);
             if (!resp.IsSuccessStatusCode)
             {
                 Response.Headers["X-Upstream-Status"] = "error";
-                _logger.LogWarning("NuGet upstream version-list fetch failed: {Status} for {Url}", (int)resp.StatusCode, url);
+                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                _logger.LogWarning("NuGet upstream version-list fetch failed: {Status} for {Url}", resp.StatusCode, url);
                 return;
             }
 
-            var content = await resp.Content.ReadAsStringAsync(ct);
-            using var doc = JsonDocument.Parse(content);
+            using var doc = JsonDocument.Parse(resp.Body);
             if (!doc.RootElement.TryGetProperty("versions", out var versionsElem))
             {
                 Response.Headers["X-Upstream-Status"] = "error";
+                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
                 _logger.LogWarning("NuGet upstream version-list response missing 'versions' property for {Url}", url);
                 return;
             }
@@ -452,17 +459,20 @@ public partial class NuGetController : ControllerBase
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             Response.Headers["X-Upstream-Status"] = "timeout";
+            // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
             _logger.LogWarning("NuGet upstream version-list fetch timed out for {Url}", url);
         }
         catch (Exception ex)
         {
             Response.Headers["X-Upstream-Status"] = "error";
+            // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
             _logger.LogWarning(ex, "NuGet upstream version-list fetch threw for {Url}", url);
         }
     }
 
     /// <summary>GET /o/{org}/nuget/flatcontainer/{id}/{version}/{file} — package download</summary>
     [HttpGet("/nuget/flatcontainer/{id}/{version}/{file}")]
+    [EnableRateLimiting("download")]
     public async Task<IActionResult> Flatcontainer(string id, string version, string file, CancellationToken ct)
     {
         var orgId = CurrentTenantId();
@@ -493,7 +503,7 @@ public partial class NuGetController : ControllerBase
         if (await _blocklist.IsBlockedAsync(orgId, purlCheck, ct))
         {
             await _audit.LogActivityAsync(orgId, "nuget", purlCheck, "blocked", token?.UserId,
-                sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+                actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
             return StatusCode(403);
         }
 
@@ -542,7 +552,8 @@ public partial class NuGetController : ControllerBase
                     pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
                     token.UserId, settings.MaxOsvScoreTolerance, sourceIp,
                     MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                    PublishedAt: pkgVersion.PublishedAt), ct)
+                    PublishedAt: pkgVersion.PublishedAt,
+                    ActorKind: token.ActorKind), ct)
             == BlockDecision.Blocked) return StatusCode(403);
 
         var stream = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
@@ -551,7 +562,7 @@ public partial class NuGetController : ControllerBase
         Response.Headers["X-Cache"] = "HIT";
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
         await _audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token.UserId,
-            sourceIp: sourceIp, ct: ct);
+            actorKind: token.ActorKind, sourceIp: sourceIp, ct: ct);
         return File(stream, "application/octet-stream", file);
     }
 
@@ -568,7 +579,8 @@ public partial class NuGetController : ControllerBase
                     pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
                     token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
                     MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                    PublishedAt: pkgVersion.PublishedAt), ct)
+                    PublishedAt: pkgVersion.PublishedAt,
+                    ActorKind: token?.ActorKind), ct)
             == BlockDecision.Blocked) return StatusCode(403);
 
         if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase))
@@ -580,7 +592,7 @@ public partial class NuGetController : ControllerBase
         Response.Headers["X-Cache"] = "HIT";
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
         await _audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token?.UserId,
-            sourceIp: sourceIp, ct: ct);
+            actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         return File(stream, "application/octet-stream", file);
     }
 
@@ -597,9 +609,18 @@ public partial class NuGetController : ControllerBase
         Response.Headers["X-Cache"] = "MISS";
         try
         {
-            using var resp = await _upstream.GetMetadataAsync(upstreamUrl, ct);
+            // #94 single-flight flatcontainer fetch — collapses concurrent first-fetches
+            // of the same coordinate onto one upstream call.
+            //
+            // NuGet artefacts still route through GetOrFetchMetadataAsync (a buffered
+            // byte[]) because flatcontainer URLs don't carry a content-addressed hash,
+            // and we haven't yet flipped this path onto FetchAndStageAsync. That's a
+            // parallel concern; #105 isolates the residue here by wrapping the byte[]
+            // in a BlobHandle so everything downstream (ProxyFetchService,
+            // ProxyVersionRecorder, LicenseExtractor) stays uniformly stream-shaped.
+            var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, ct);
             if (!resp.IsSuccessStatusCode) return NotFound();
-            var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
+            var bytes = resp.Body;
 
             var normalizedId = id.ToLowerInvariant();
             var normalizedVersion = NormalizeNuGetVersion(version);
@@ -608,14 +629,30 @@ public partial class NuGetController : ControllerBase
 
             var meta = await TryFetchNuGetFirstFetchMetadataAsync(upstreamBase, normalizedId, normalizedVersion, ct);
 
+            // Cache the artefact under its content-addressed key once and describe it
+            // with a BlobHandle. OpenAsync prefers the blob-store stream; the byte[]
+            // fallback covers the edge case where the blob vanishes between the put and
+            // the licence read.
+            var sha = ChecksumVerifier.ComputeSha256Hex(bytes);
+            var proxyKey = BlobKeys.Proxy(sha);
+            if (!await _blobs.ExistsAsync(proxyKey, ct))
+                await _blobs.PutAsync(proxyKey, new MemoryStream(bytes), ct);
+            var blob = new BlobHandle(proxyKey, sha, bytes.LongLength,
+                async openCt => await _blobs.GetAsync(proxyKey, openCt)
+                    ?? (Stream)new MemoryStream(bytes, writable: false));
+
+            // deepcode ignore PT,LogForging: ProxyFetchService stores under BlobKeys.Proxy(sha256),
+            // which validates a 64-char lowercase hex — path traversal cannot escape that key. All
+            // structured logs use Serilog RenderedCompactJsonFormatter (CRLF-safe).
             var result = await _proxyFetch.RecordAndScanAsync(new ProxyFetchRequest(
                 OrgId: orgId, Ecosystem: "nuget",
                 PackageName: normalizedId, PurlName: normalizedId,
-                Version: normalizedVersion, Purl: purl, File: file, Bytes: bytes,
-                ExtractLicenses: bytes2 => file.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase)
-                    ? LicenseExtractor.FromNuspec(bytes2)
+                Version: normalizedVersion, Purl: purl, File: file, Blob: blob,
+                ExtractLicenses: stream => file.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase)
+                    ? LicenseExtractor.FromNuspec(stream)
                     : LicenseExtractor.ExtractedMetadata.Empty,
                 UserId: token?.UserId,
+                ActorKind: token?.ActorKind,
                 SourceIp: HttpContext.GetNormalizedRemoteIp(),
                 MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
                 MinReleaseAgeHours: settings.MinReleaseAgeHours,
@@ -624,11 +661,17 @@ public partial class NuGetController : ControllerBase
                 PublishedAt: meta.PublishedAt,
                 UpstreamChecksum: meta.Checksum,
                 UpstreamIntegrityValue: meta.IntegrityBase64,
-                UpstreamIntegrityAlgorithm: meta.IntegrityBase64 is not null ? "sha512-b64" : null
+                UpstreamIntegrityAlgorithm: meta.IntegrityBase64 is not null ? "sha512-b64" : null,
+                Deprecated: meta.Deprecated
             ), ct);
 
             if (result.Decision == BlockDecision.Blocked) return StatusCode(403);
-            return File(bytes, "application/octet-stream", file);
+
+            // Stream the cached blob back to the client (response memory is one read
+            // buffer, not the whole artefact).
+            var blobStream = await _blobs.GetAsync(result.BlobKey, ct);
+            if (blobStream is null) return File(bytes, "application/octet-stream", file);
+            return File(blobStream, "application/octet-stream", file);
         }
         catch (Microsoft.Data.Sqlite.SqliteException) { throw; }
         catch (ChecksumException) { return StatusCode(502); }
@@ -649,10 +692,12 @@ public partial class NuGetController : ControllerBase
         try
         {
             var leafUrl = $"{upstreamBase}/registration5-semver1/{normalizedId}/{normalizedVersion}.json";
-            using var resp = await _upstream.GetMetadataAsync(leafUrl, ct);
+            // #94: route through single-flight — this leaf fetch is called inline with
+            // every NuGet first-fetch download, so concurrent fan-out would otherwise
+            // stampede the registration URL too.
+            var resp = await _upstream.GetOrFetchMetadataAsync(leafUrl, ct);
             if (!resp.IsSuccessStatusCode) return NuGetFirstFetchMetadata.Empty;
-            var json = await resp.Content.ReadAsStringAsync(ct);
-            var node = JsonNode.Parse(json);
+            var node = JsonNode.Parse(resp.BodyAsString());
 
             DateTimeOffset? publishedAt = null;
             var published = node?["published"]?.GetValue<string>()
@@ -677,7 +722,12 @@ public partial class NuGetController : ControllerBase
                 && string.Equals(algorithm, "SHA512", StringComparison.OrdinalIgnoreCase)
                 ? hash : null;
 
-            return new NuGetFirstFetchMetadata(publishedAt, checksum, integrityB64);
+            string? deprecated = null;
+            var listed = node?["listed"] ?? node?["catalogEntry"]?["listed"];
+            if (listed is JsonValue lv && lv.TryGetValue<bool>(out var listedVal) && !listedVal)
+                deprecated = "Unlisted upstream";
+
+            return new NuGetFirstFetchMetadata(publishedAt, checksum, integrityB64, deprecated);
         }
         catch { return NuGetFirstFetchMetadata.Empty; }
     }
@@ -685,9 +735,10 @@ public partial class NuGetController : ControllerBase
     private readonly record struct NuGetFirstFetchMetadata(
         DateTimeOffset? PublishedAt,
         ChecksumSpec? Checksum,
-        string? IntegrityBase64)
+        string? IntegrityBase64,
+        string? Deprecated)
     {
-        public static NuGetFirstFetchMetadata Empty => new(null, null, null);
+        public static NuGetFirstFetchMetadata Empty => new(null, null, null, null);
     }
 
     // NuGet client URLs use lowercase IDs, but OSV PURL lookups are case-sensitive.
@@ -721,6 +772,7 @@ public partial class NuGetController : ControllerBase
     [HttpPut("/nuget/publish")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishNuget)]
+    [EnableRateLimiting("push")]
     [RequestSizeLimit(500 * 1024 * 1024)] // hard ceiling; UploadSizeLimitMiddleware enforces tighter per-tenant/ecosystem caps before any blob is written
     public Task<IActionResult> Push(CancellationToken ct)
         => PushPackage(isSymbol: false, ct);
@@ -729,6 +781,7 @@ public partial class NuGetController : ControllerBase
     [HttpPut("/nuget/symbols")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishNuget)]
+    [EnableRateLimiting("push")]
     [RequestSizeLimit(500 * 1024 * 1024)] // hard ceiling; UploadSizeLimitMiddleware enforces tighter per-tenant/ecosystem caps before any blob is written
     public Task<IActionResult> PushSymbols(CancellationToken ct)
         => PushPackage(isSymbol: true, ct);
@@ -871,6 +924,7 @@ public partial class NuGetController : ControllerBase
             Origin = "uploaded",
             SizeCap = ctx.Limit,
             ActorUserId = ctx.Token.UserId,
+            ActorKind = ctx.Token.ActorKind,
             AuditAction = "push",
             AllowOverwrite = ctx.Settings?.AllowVersionOverwrite ?? false,
             ClaimState = claimState,
@@ -884,7 +938,9 @@ public partial class NuGetController : ControllerBase
     /// </summary>
     private async Task EmitNuspecLicensesAsync(string versionId, byte[] bytes, CancellationToken ct)
     {
-        var extracted = LicenseExtractor.FromNuspec(bytes);
+        // Push path holds the .nupkg bytes in memory (upload validation concern,
+        // out of scope for #105). Wrap in a MemoryStream for the unified extractor.
+        var extracted = LicenseExtractor.FromNuspec(new MemoryStream(bytes, writable: false));
         if (extracted.Spdx.Count > 0)
             await _licenses.SetLicensesAsync(versionId, extracted.Spdx, "upstream", ct);
     }

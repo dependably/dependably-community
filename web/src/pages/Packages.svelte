@@ -6,6 +6,7 @@
   import { formatDateShort } from '../lib/format.js'
   import DataTable from '../lib/DataTable.svelte'
   import Pagination from '../lib/Pagination.svelte'
+  import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
 
   let items = [], loading = true, error = ''
   let search = '', filterEco = ''
@@ -86,9 +87,9 @@
   <div class="search-bar">
     <select bind:value={filterEco} on:change={handleEcoChange} class="eco-select">
       <option value="">{$t('common.allEcosystems')}</option>
-      <option value="pypi">PyPI</option>
-      <option value="npm">npm</option>
-      <option value="nuget">NuGet</option>
+      {#each ECOSYSTEMS as eco (eco)}
+        <option value={eco}>{ECO_LABEL[eco]}</option>
+      {/each}
     </select>
   </div>
 
@@ -105,7 +106,7 @@
   >
     <tr class="cursor-pointer" on:click={() => openPackage(pkg)}>
       <td class="name-cell" title={pkg.name}><strong>{pkg.name}</strong></td>
-      <td class="nowrap"><span class="badge {pkg.ecosystem}">{pkg.ecosystem}</span></td>
+      <td class="nowrap"><span class="badge {pkg.ecosystem}">{ECO_LABEL[pkg.ecosystem] ?? pkg.ecosystem}</span></td>
       <td class="mono purl-cell" title={fullPurl(pkg)}>{fullPurl(pkg)}</td>
       <td class="nowrap text-right text-muted">{pkg.versionCount ?? 0}</td>
       <td class="vuln-cell">
