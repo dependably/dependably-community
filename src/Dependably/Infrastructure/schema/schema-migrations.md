@@ -1,6 +1,12 @@
 # Schema Migration Rules
 
-Dependably applies its schema on startup via `SchemaInitializer`, which executes the embedded `Schema.sql` using `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`. There is no migration history table — every statement is idempotent.
+Dependably applies its schema on startup via `SchemaInitializer`, in three layers:
+
+1. **Base schema** — the embedded `Schema.sql` / `Schema.pg.sql` is applied with `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`, so re-running is a safe no-op.
+2. **Additive columns** — `ALTER TABLE ... ADD COLUMN` statements in `RunAdditiveMigrationsAsync`. SQLite has no `IF NOT EXISTS` for column adds, so `MigrateSqliteAsync` swallows only the "duplicate column" error (code 1); Postgres rewrites to `ADD COLUMN IF NOT EXISTS`.
+3. **One-time migrations** — destructive DDL (`DROP COLUMN`, table rebuilds) and data backfills that are **not** idempotent on their own. These run through `RunOnceAsync`, which records each by name in the `_applied_migrations` ledger table so it runs exactly once per database.
+
+So there *is* a migration history table (`_applied_migrations`) — it exists precisely because the layer-3 migrations are not idempotent.
 
 Because blue-green deploys run both the old (blue) and new (green) version against the same database during the cutover window, schema changes must be backward-compatible with the previous release.
 
@@ -25,14 +31,12 @@ ALTER TABLE packages ADD COLUMN is_featured INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE packages ADD COLUMN required_field TEXT NOT NULL;  -- breaks old code
 ```
 
-Since `Schema.sql` is applied idempotently via `CREATE TABLE IF NOT EXISTS`, adding a column to an existing table requires a separate `ALTER TABLE` statement, not a change to the `CREATE TABLE` block. Place new `ALTER TABLE` statements after all `CREATE TABLE` blocks, guarded with a conditional:
+Adding a column requires **two** edits, both enforced by `SchemaSyncComplianceTests`:
 
-```sql
--- Add description column if it doesn't exist yet (SQLite doesn't support IF NOT EXISTS on ALTER TABLE)
-INSERT OR IGNORE INTO _schema_migrations(statement) VALUES ('add_packages_description');
-```
+1. Append an `ALTER TABLE ... ADD COLUMN` to the `migrations` array in `SchemaInitializer.RunAdditiveMigrationsAsync`. This upgrades existing databases; re-runs are made safe by `MigrateSqliteAsync` (swallows the "duplicate column" error on SQLite) and by the `ADD COLUMN IF NOT EXISTS` rewrite on Postgres.
+2. Add the same column to the `CREATE TABLE` block in **both** `Schema.sql` and `Schema.pg.sql`. This is what fresh installs get, and keeps the two providers in parity.
 
-The simplest guard: attempt the `ALTER TABLE` and ignore the `duplicate column` error in `SchemaInitializer.cs`.
+Do not skip (2): a column that lives only in the `ALTER` array means a fresh install gets it solely from the upgrade path, and the two provider schemas can silently drift. `SchemaSyncComplianceTests` fails the build if an additive column is absent from either `CREATE TABLE` block.
 
 ### Renaming columns or tables
 
@@ -62,7 +66,7 @@ Never pair a destructive statement (`DROP COLUMN`, `DROP TABLE`) with a statemen
 
 - All tables use `CREATE TABLE IF NOT EXISTS` — idempotent, never fails on re-run.
 - All indexes use `CREATE INDEX IF NOT EXISTS`.
-- Columns added to existing tables go in `ALTER TABLE` statements at the bottom of the file, wrapped in the `SchemaInitializer` idempotency guard.
+- Columns added to existing tables go in the `RunAdditiveMigrationsAsync` array in `SchemaInitializer.cs` (duplicate-column-safe) **and** in the `CREATE TABLE` block of both schema files — see "New columns" above.
 - Foreign key constraints use `ON DELETE CASCADE` so parent deletes propagate cleanly.
 - All timestamps are ISO 8601 UTC strings (`TEXT`), defaulting to `strftime('%Y-%m-%dT%H:%M:%SZ','now')`.
 
@@ -93,4 +97,10 @@ All current schema statements satisfy the blue-green compatibility rules.
 
 ## CI check
 
-`scripts/schema-lint.sh` fails if a new `ALTER TABLE ... ADD COLUMN` statement adds a `NOT NULL` column without a `DEFAULT`. This prevents incompatible migrations from reaching main.
+The `schema-integrity` CI job (xUnit tests tagged `Category=Schema`) enforces these rules on every pipeline:
+
+- **`SchemaSyncComplianceTests`** — fails if an additive `ALTER TABLE ... ADD COLUMN` adds a `NOT NULL` column without a `DEFAULT`; if an additive column is missing from the `CREATE TABLE` block of either `Schema.sql` or `Schema.pg.sql` (the "authoritative complete schema" rule above); or if an object name is declared twice in a file.
+- **`SchemaParityComplianceTests`** — fails if `Schema.sql` and `Schema.pg.sql` declare different tables, or different column names for the same table.
+- **`SchemaIntegrityTests`** — applies the full schema to a fresh SQLite database and asserts structural soundness (no duplicate columns, every table has a primary key, foreign keys resolve, `PRAGMA integrity_check` is `ok`) and that re-running `SchemaInitializer` is a stable no-op.
+
+This prevents incompatible migrations from reaching main.

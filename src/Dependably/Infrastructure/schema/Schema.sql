@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- action once the threshold passes (no automatic rescan).
     min_release_age_hours     INTEGER,
     default_language          TEXT    NOT NULL DEFAULT 'en',  -- new tenant users start with this locale
-    allow_version_overwrite   INTEGER NOT NULL DEFAULT 0    -- #45 replacement policy; off by default
+    allow_version_overwrite   INTEGER NOT NULL DEFAULT 0,   -- #45 replacement policy; off by default
+    maven_reserved_prefixes   TEXT    NOT NULL DEFAULT '[]' -- #101 dep-confusion guard; JSON array of groupId prefixes
 );
 
 CREATE TABLE IF NOT EXISTS instance_settings (
@@ -411,6 +412,7 @@ CREATE TABLE IF NOT EXISTS oci_blobs (
     blob_key      TEXT NOT NULL,           -- BlobKeys.OciBlob(...)
     cached_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     upstream_checked_at TEXT,
+    origin        TEXT NOT NULL DEFAULT 'uploaded',  -- #103 'uploaded' (local push) or 'proxy' (upstream cache)
     PRIMARY KEY (digest, org_id)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_blobs_org ON oci_blobs(org_id);
@@ -422,6 +424,7 @@ CREATE TABLE IF NOT EXISTS oci_tags (
     tag         TEXT NOT NULL,
     digest      TEXT NOT NULL,
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    last_revalidated TEXT,  -- #103 per-tag TTL revalidation timestamp; NULL forces a re-check on first access
     PRIMARY KEY (org_id, repository, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_tags_repository ON oci_tags(org_id, repository);

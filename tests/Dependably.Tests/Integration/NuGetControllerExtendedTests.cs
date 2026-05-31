@@ -243,6 +243,98 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         Assert.Contains("9.9.9", versions);
     }
 
+    // ── Registration leaf: {id}/{version}.json ───────────────────────────────
+
+    [Fact]
+    public async Task RegistrationLeaf_LocalVersion_ServedFromLocalData()
+    {
+        // A version with a local row is served as a local leaf; packageContent points at our flatcontainer.
+        var id = $"leaflocal{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        await _factory.PushNuGetPackage(id, "9.9.9");
+
+        var token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        var resp = await client.GetAsync($"/nuget/registration/{id}/9.9.9.json");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Equal("9.9.9", doc.RootElement.GetProperty("catalogEntry").GetProperty("version").GetString());
+        Assert.Contains($"/flatcontainer/{id}/9.9.9/{id}.9.9.9.nupkg",
+            doc.RootElement.GetProperty("packageContent").GetString());
+    }
+
+    [Theory]
+    [InlineData("registration", "registration5-semver1")]                 // unversioned base → semver1 upstream
+    [InlineData("registration5-gz-semver2", "registration5-gz-semver2")]  // SemVer2 base
+    public async Task RegistrationLeaf_NoLocal_ProxiesUpstreamLeaf(string clientBase, string upstreamVariant)
+    {
+        var id = $"leafup{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        var leafJson = "{\"@id\":\"x\",\"@type\":\"Package\","
+            + "\"catalogEntry\":{\"id\":\"X\",\"version\":\"6.2.0\",\"listed\":true},"
+            + "\"listed\":true,\"packageContent\":\"y\"}";
+        _factory.MockUpstream.Given(
+                Request.Create()
+                    .WithPath($"/{upstreamVariant}/{id}/6.2.0.json")
+                    .UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/json").WithBody(leafJson));
+
+        var token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        var resp = await client.GetAsync($"/nuget/{clientBase}/{id}/6.2.0.json");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Contains("\"6.2.0\"", await resp.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task RegistrationLeaf_NoLocal_UpstreamMissing_Returns404()
+    {
+        var id = $"leaf404{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        _factory.MockUpstream.Given(
+                Request.Create()
+                    .WithPath($"/registration5-semver1/{id}/1.2.3.json")
+                    .UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
+
+        var token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        var resp = await client.GetAsync($"/nuget/registration/{id}/1.2.3.json");
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task RegistrationIndexJson_OutranksLeafRoute_StillMergesLocal()
+    {
+        // Route-precedence guard: the literal `index.json` segment must out-rank the `{version}.json`
+        // leaf route, so `…/{id}/index.json` reaches the index handler (which merges the local 9.9.9
+        // page). A mis-route to the leaf would proxy the bare upstream index and drop the local page.
+        var id = $"leafprec{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        await _factory.PushNuGetPackage(id, "9.9.9");
+        var upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
+            + "{\"@id\":\"x\",\"catalogEntry\":{\"id\":\"" + id + "\",\"version\":\"1.0.0\",\"listed\":true}}"
+            + "]}]}";
+        _factory.MockUpstream.Given(
+                Request.Create()
+                    .WithPath($"/registration5-semver1/{id}/index.json")
+                    .UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/json").WithBody(upstreamJson));
+
+        var token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        var resp = await client.GetAsync($"/nuget/registration/{id}/index.json");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var versions = JsonDocument.Parse(await resp.Content.ReadAsStringAsync())
+            .RootElement.GetProperty("items").EnumerateArray()
+            .SelectMany(p => p.GetProperty("items").EnumerateArray())
+            .Select(e => e.GetProperty("catalogEntry").GetProperty("version").GetString()!)
+            .ToHashSet();
+        Assert.Contains("9.9.9", versions);  // local page present → index handler ran, not the leaf
+    }
+
     // ── FlatcontainerVersions: upstream malformed JSON → error header ─────────
 
     [Fact]

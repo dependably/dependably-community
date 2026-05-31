@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Reflection;
 using Dapper;
 using Dependably.Infrastructure;
@@ -35,6 +36,49 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
 
     private static SchemaInitializer NewInitializer(IMetadataStore db, ILogger<SchemaInitializer>? logger = null)
         => new(db, logger ?? NullLogger<SchemaInitializer>.Instance);
+
+    // A one-time migration that creates a table and then fails before its ledger insert —
+    // stands in for a process killed mid-migration (the partial-failure wedge class).
+    private static async Task FailingMigrationAsync(DbConnection conn)
+    {
+        await conn.ExecuteAsync("CREATE TABLE wedge_probe (id TEXT)");
+        throw new InvalidOperationException("boom");
+    }
+
+    [Fact]
+    public async Task RunOnceAsync_WhenActionThrows_RollsBackPartialDdl_AndDoesNotRecordLedger()
+    {
+        var initializer = NewInitializer(_db);
+        await initializer.InitializeAsync(); // builds the schema + _applied_migrations ledger
+
+        await using var conn = await _db.OpenAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => initializer.RunOnceAsync(conn, "wedge_probe_migration", FailingMigrationAsync));
+
+        // The wrapping transaction rolled back: the table the action created is gone...
+        var tableCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='wedge_probe'");
+        Assert.Equal(0, tableCount);
+
+        // ...and the ledger never records a migration that didn't fully commit, so a retry
+        // re-runs it from a clean slate instead of wedging on a leftover artefact.
+        var recorded = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM _applied_migrations WHERE name = 'wedge_probe_migration'");
+        Assert.Equal(0, recorded);
+    }
+
+    [Fact]
+    public async Task FixNuGetProxyPurlNames_IsLedgerGated_AfterInitialize()
+    {
+        // Previously ran unguarded on every boot; it is now a ledger-gated RunOnceAsync migration.
+        var initializer = NewInitializer(_db);
+        await initializer.InitializeAsync();
+
+        await using var conn = await _db.OpenAsync();
+        var recorded = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM _applied_migrations WHERE name = 'fix_nuget_proxy_purl_names'");
+        Assert.Equal(1, recorded);
+    }
 
     /// <summary>
     /// Re-runs a one-time migration by deleting its tracking row, then re-invoking
@@ -216,10 +260,11 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task FixNuGetProxyPurlNames_IsIdempotentAndUnguarded()
+    public async Task FixNuGetProxyPurlNames_FixesBrokenProxyRows_WhenRun()
     {
-        // This migration is the only one *not* gated by RunOnceAsync — it runs on every
-        // InitializeAsync call. Insert a broken-shaped row, run init, assert rename.
+        // fix_nuget_proxy_purl_names is now a ledger-gated RunOnceAsync migration (it used to run
+        // unguarded on every boot). Insert a broken-shaped row, clear the ledger entry to re-trigger
+        // the migration, and assert the rename logic still fixes it.
         await NewInitializer(_db).InitializeAsync();
         await using (var setup = await _db.OpenAsync())
         {
@@ -230,6 +275,7 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
                 VALUES ('p1','o1','nuget','Newtonsoft.Json','pkg:nuget/Newtonsoft.Json@13.0.1', 1)
                 """);
         }
+        await ResetMigrationAsync("fix_nuget_proxy_purl_names");
 
         await NewInitializer(_db).InitializeAsync();
 
@@ -237,12 +283,6 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         var purlName = await verify.ExecuteScalarAsync<string>(
             "SELECT purl_name FROM packages WHERE id = 'p1'");
         Assert.Equal("Newtonsoft.Json", purlName);
-
-        // Re-running again is a no-op (idempotency).
-        await NewInitializer(_db).InitializeAsync();
-        var stillCorrect = await verify.ExecuteScalarAsync<string>(
-            "SELECT purl_name FROM packages WHERE id = 'p1'");
-        Assert.Equal("Newtonsoft.Json", stillCorrect);
     }
 
     [Fact]

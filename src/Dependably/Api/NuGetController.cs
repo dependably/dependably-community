@@ -175,6 +175,101 @@ public partial class NuGetController : ControllerBase
     public Task<IActionResult> RegistrationIndexSemVer2(string id, CancellationToken ct)
         => RegistrationIndexCoreAsync(id, semVer2: true, ct);
 
+    // Per-version registration leaf: `{RegistrationsBaseUrl}/{lowerId}/{version}.json`. The index we
+    // serve is inlined (catalogEntry embedded in the page), so clients never need to follow the leaf
+    // @id today — but the index emits these leaf URLs (BuildLocalRegistration/BuildLocalLeaf) and a
+    // paged registry (or a client that fetches leaves directly) would 404 without a route here.
+    // The literal `index.json` route out-ranks `{version}.json`, so the index path is unaffected.
+    [HttpGet("/nuget/registration/{id}/{version}.json")]
+    [HttpGet("/nuget/registration5-semver1/{id}/{version}.json")]
+    [HttpGet("/nuget/registration5-gz-semver1/{id}/{version}.json")]
+    public Task<IActionResult> RegistrationLeaf(string id, string version, CancellationToken ct)
+        => RegistrationLeafCoreAsync(id, version, semVer2: false, ct);
+
+    /// <summary>GET /o/{org}/nuget/registration5-{,gz-}semver2/{id}/{version}.json — SemVer 2 leaf</summary>
+    [HttpGet("/nuget/registration5-semver2/{id}/{version}.json")]
+    [HttpGet("/nuget/registration5-gz-semver2/{id}/{version}.json")]
+    public Task<IActionResult> RegistrationLeafSemVer2(string id, string version, CancellationToken ct)
+        => RegistrationLeafCoreAsync(id, version, semVer2: true, ct);
+
+    private async Task<IActionResult> RegistrationLeafCoreAsync(string id, string version, bool semVer2, CancellationToken ct)
+    {
+        var orgId = CurrentTenantId();
+        var settings = await _orgs.GetSettingsAsync(orgId, ct);
+        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
+        if (!settings!.AnonymousPull && token is null)
+        {
+            Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
+            return Unauthorized();
+        }
+
+        var normalizedId = id.ToLowerInvariant();
+        var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
+
+        // A version with a local row (uploaded or proxy-cached) is served from our own data — its
+        // packageContent points at our flatcontainer, matching per-version download routing.
+        if (pkg is not null)
+        {
+            var pkgVersion = await _packages.GetVersionAsync(pkg.Id, NormalizeNuGetVersion(version), ct);
+            if (pkgVersion is not null && !pkgVersion.Yanked)
+                return BuildLocalLeafResponse(normalizedId, pkg.Name, pkgVersion.Version);
+        }
+
+        // Otherwise the version lives upstream — proxy its leaf when passthrough + claims allow.
+        if (settings.ProxyPassthroughEnabled
+            && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
+        {
+            return await ProxyRegistrationLeafAsync(normalizedId, version, semVer2, ct);
+        }
+
+        return NotFound();
+    }
+
+    private JsonResult BuildLocalLeafResponse(string normalizedId, string pkgName, string version)
+    {
+        var baseUrl = BaseUrl();
+        var packageContent = $"{baseUrl}/flatcontainer/{normalizedId}/{version}/{normalizedId}.{version}.nupkg";
+        return new JsonResult(new
+        {
+            @id = $"{baseUrl}/registration/{normalizedId}/{version}.json",
+            @type = "Package",
+            catalogEntry = new
+            {
+                id = pkgName,
+                version,
+                listed = true,
+                packageContent
+            },
+            listed = true,
+            packageContent,
+            registration = $"{baseUrl}/registration/{normalizedId}/index.json"
+        });
+    }
+
+    private async Task<IActionResult> ProxyRegistrationLeafAsync(string normalizedId, string version, bool semVer2, CancellationToken ct)
+    {
+        var upstreamBase = _config["NuGet:Upstream"] ?? "https://api.nuget.org/v3";
+        var variant = semVer2 ? "registration5-gz-semver2" : "registration5-semver1";
+        var upstreamUrl = $"{upstreamBase}/{variant}/{normalizedId}/{version.ToLowerInvariant()}.json";
+        try
+        {
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+            var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, linkedCts.Token);
+            if (resp.IsSuccessStatusCode)
+                return Content(resp.BodyAsString(), "application/json");
+            // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+            _logger.LogWarning("NuGet upstream registration leaf fetch failed: {Status} for {Url}", resp.StatusCode, upstreamUrl);
+        }
+        catch (Exception ex)
+        {
+            // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+            _logger.LogWarning(ex, "NuGet upstream registration leaf fetch threw for {Url}", upstreamUrl);
+        }
+        return NotFound();
+    }
+
     private async Task<IActionResult> RegistrationIndexCoreAsync(string id, bool semVer2, CancellationToken ct)
     {
         var orgId = CurrentTenantId();

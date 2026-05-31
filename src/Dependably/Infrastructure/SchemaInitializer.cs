@@ -57,9 +57,13 @@ public sealed class SchemaInitializer
         await RunOnceAsync(conn, "fix_npm_version_purl_at_encoding", FixNpmVersionPurlAtEncodingAsync);
         await RunOnceAsync(conn, "fix_npm_version_purl_slash_encoding", FixNpmVersionPurlSlashEncodingAsync);
         await RunOnceAsync(conn, "fix_npm_activity_purl_encoding", FixNpmActivityPurlEncodingAsync);
-        await FixNuGetProxyPurlNamesAsync(conn); // unguarded; idempotent SQL
+        await RunOnceAsync(conn, "fix_nuget_proxy_purl_names", FixNuGetProxyPurlNamesAsync);
         await RunOnceAsync(conn, "backfill_users_account_type_saml", BackfillUsersAccountTypeSamlAsync);
-        await RunOnceAsync(conn, "expand_role_check_with_auditor", ExpandRoleCheckWithAuditorAsync);
+        // transactional: false — ExpandRoleCheckSqliteAsync drives PRAGMA writable_schema + a
+        // schema_version bump that don't compose with an enclosing transaction. Safe because the
+        // migration is idempotent (PG drops-then-adds the constraint; SQLite REPLACEs the stored
+        // CREATE text), so an un-recorded partial run is harmlessly repeated next boot.
+        await RunOnceAsync(conn, "expand_role_check_with_auditor", ExpandRoleCheckWithAuditorAsync, transactional: false);
         await RunOnceAsync(conn, "collapse_origin_to_uploaded", CollapseOriginToUploadedAsync);
         await RunOnceAsync(conn, "drop_legacy_token_scope_column", DropLegacyTokenScopeColumnAsync);
         await RunOnceAsync(conn, "drop_package_versions_sbom_column", DropPackageVersionsSbomColumnAsync);
@@ -460,18 +464,40 @@ public sealed class SchemaInitializer
         }
     }
 
-    private static async Task EnsureMigrationsTableAsync(DbConnection conn)
+    private async Task EnsureMigrationsTableAsync(DbConnection conn)
     {
-        // Tracks one-time data migrations so they only run once per database.
-        await conn.ExecuteAsync("""
+        // Tracks one-time data migrations so they only run once per database. The applied_at
+        // default is provider-specific: SQLite has strftime, Postgres does not — emitting strftime
+        // to Postgres fails CREATE TABLE outright, and since this is the FIRST DDL on startup it
+        // would abort a fresh Postgres boot. Mirror the to_char pattern used by Schema.pg.sql.
+        const string sqliteSql = """
             CREATE TABLE IF NOT EXISTS _applied_migrations (
                 name TEXT PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             )
-            """);
+            """;
+        const string pgSql = """
+            CREATE TABLE IF NOT EXISTS _applied_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+            )
+            """;
+        await conn.ExecuteAsync(_db.Provider == DbProvider.Postgres ? pgSql : sqliteSql);
     }
 
-    private async Task RunOnceAsync(DbConnection conn, string name, Func<DbConnection, Task> action)
+    // Runs a one-time migration exactly once per database, recording it in the _applied_migrations
+    // ledger. By default the migration body AND its ledger insert run inside a single transaction —
+    // SQLite and Postgres both support transactional DDL — so a process killed mid-migration rolls
+    // back cleanly: no half-applied state, no orphan rebuild tables (e.g. allowlist_new), and the
+    // ledger can never record a migration that didn't fully commit. A failed retry therefore always
+    // starts from a clean slate instead of wedging on a leftover artefact.
+    //
+    // Migrations that manage their own transaction semantics opt out with transactional: false —
+    // currently only the SQLite CHECK rewrite, which drives PRAGMA writable_schema + a
+    // schema_version bump that don't compose with an enclosing transaction. Such migrations MUST be
+    // idempotent so an un-recorded partial run is safely repeated on the next boot.
+    // internal (not private) so SchemaInitializerTests can drive the rollback path directly.
+    internal async Task RunOnceAsync(DbConnection conn, string name, Func<DbConnection, Task> action, bool transactional = true)
     {
         var already = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM _applied_migrations WHERE name = @name", new { name });
@@ -481,10 +507,50 @@ public sealed class SchemaInitializer
             return;
         }
         _logger.LogInformation("Schema migration {Migration} applying…", name);
-        await action(conn);
-        await conn.ExecuteAsync(
-            "INSERT INTO _applied_migrations (name) VALUES (@name)", new { name });
+        if (transactional)
+            await RunInTransactionAsync(conn, name, action);
+        else
+            await RunUnwrappedAsync(conn, name, action);
         _logger.LogInformation("Schema migration {Migration} applied.", name);
+    }
+
+    // Raw BEGIN/COMMIT (not DbTransaction) so the existing action delegates — which call
+    // conn.ExecuteAsync without a transaction parameter — participate in the transaction. A
+    // SqliteTransaction object would instead make Microsoft.Data.Sqlite reject those un-enlisted
+    // commands as "pending transaction".
+    private static async Task RunInTransactionAsync(DbConnection conn, string name, Func<DbConnection, Task> action)
+    {
+        await ExecRawAsync(conn, "BEGIN");
+        try
+        {
+            await action(conn);
+            await conn.ExecuteAsync("INSERT INTO _applied_migrations (name) VALUES (@name)", new { name });
+            await ExecRawAsync(conn, "COMMIT");
+        }
+        catch
+        {
+            // Roll the partial migration back so a retry starts clean. Swallow only the rollback's
+            // own failure (e.g. no transaction is open) so the original exception still propagates.
+            try { await ExecRawAsync(conn, "ROLLBACK"); }
+            catch (DbException) { /* nothing to roll back */ }
+            throw;
+        }
+    }
+
+    private static async Task RunUnwrappedAsync(DbConnection conn, string name, Func<DbConnection, Task> action)
+    {
+        await action(conn);
+        await conn.ExecuteAsync("INSERT INTO _applied_migrations (name) VALUES (@name)", new { name });
+    }
+
+    // Transaction-control statements go through raw ADO.NET, not Dapper: Dapper infers
+    // CommandType.StoredProcedure for a single-word command ("BEGIN"/"COMMIT"/"ROLLBACK"), which
+    // Microsoft.Data.Sqlite rejects. A raw command keeps the default CommandType.Text on both providers.
+    private static async Task ExecRawAsync(DbConnection conn, string sql)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync();
     }
 
     // Clear vuln_checked_at for NuGet proxy packages so the scan service re-queries OSV

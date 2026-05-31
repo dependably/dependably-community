@@ -1227,6 +1227,19 @@
         }
       }
     },
+    "/nuget/registration/{id}/{version}.json": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "id",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/nuget/registration5-gz-semver1/{id}": {
       "operations": {
         "get": {
@@ -1244,6 +1257,19 @@
         "get": {
           "requiredParams": [
             "id"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/nuget/registration5-gz-semver1/{id}/{version}.json": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "id",
+            "version"
           ],
           "responseCodes": [
             "200"
@@ -1275,6 +1301,19 @@
         }
       }
     },
+    "/nuget/registration5-gz-semver2/{id}/{version}.json": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "id",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/nuget/registration5-semver1/{id}": {
       "operations": {
         "get": {
@@ -1299,6 +1338,19 @@
         }
       }
     },
+    "/nuget/registration5-semver1/{id}/{version}.json": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "id",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/nuget/registration5-semver2/{id}": {
       "operations": {
         "get": {
@@ -1316,6 +1368,19 @@
         "get": {
           "requiredParams": [
             "id"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/nuget/registration5-semver2/{id}/{version}.json": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "id",
+            "version"
           ],
           "responseCodes": [
             "200"

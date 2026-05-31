@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS org_settings (
     max_upload_bytes_nuget  INTEGER,
     max_upload_bytes_maven  INTEGER,        -- #99 per-ecosystem Maven cap; falls back to max_upload_bytes
     max_upload_bytes_rpm    INTEGER,        -- #100 per-ecosystem RPM cap; falls back to max_upload_bytes
+    max_upload_bytes_oci    INTEGER,        -- #101 per-ecosystem OCI (Docker) cap; falls back to max_upload_bytes
     keep_versions       INTEGER,            -- GC: max versions to retain per package per ecosystem
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
     activity_retention_days INTEGER,        -- GC: delete activity rows older than this
@@ -41,7 +42,8 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- clears the block gate. NULL = policy off. See Schema.sql for the full rationale.
     min_release_age_hours     INTEGER,
     default_language          TEXT    NOT NULL DEFAULT 'en',
-    allow_version_overwrite   INTEGER NOT NULL DEFAULT 0
+    allow_version_overwrite   INTEGER NOT NULL DEFAULT 0,
+    maven_reserved_prefixes   TEXT    NOT NULL DEFAULT '[]' -- #101 dep-confusion guard; JSON array of groupId prefixes
 );
 
 CREATE TABLE IF NOT EXISTS instance_settings (
@@ -341,6 +343,7 @@ CREATE TABLE IF NOT EXISTS oci_blobs (
     blob_key      TEXT NOT NULL,
     cached_at     TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
     upstream_checked_at TEXT,
+    origin        TEXT NOT NULL DEFAULT 'uploaded',  -- #103 'uploaded' (local push) or 'proxy' (upstream cache)
     PRIMARY KEY (digest, org_id)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_blobs_org ON oci_blobs(org_id);
@@ -351,6 +354,7 @@ CREATE TABLE IF NOT EXISTS oci_tags (
     tag         TEXT NOT NULL,
     digest      TEXT NOT NULL,
     updated_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    last_revalidated TEXT,  -- #103 per-tag TTL revalidation timestamp; NULL forces a re-check on first access
     PRIMARY KEY (org_id, repository, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_tags_repository ON oci_tags(org_id, repository);

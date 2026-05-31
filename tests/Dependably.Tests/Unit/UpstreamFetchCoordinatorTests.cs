@@ -12,20 +12,28 @@ public class UpstreamFetchCoordinatorTests
         var coordinator = new UpstreamFetchCoordinator();
         var fetchCount = 0;
         var gate = new TaskCompletionSource();
+        var fetchStarted = new TaskCompletionSource();
 
         Func<Task<byte[]>> fetch = async () =>
         {
             Interlocked.Increment(ref fetchCount);
+            fetchStarted.TrySetResult();
             await gate.Task;
             return [1, 2, 3];
         };
 
-        var t1 = Task.Run(() => coordinator.FetchAsync("k", fetch));
-        var t2 = Task.Run(() => coordinator.FetchAsync("k", fetch));
-        var t3 = Task.Run(() => coordinator.FetchAsync("k", fetch));
+        // Start the first caller and wait until it has registered the in-flight entry and is
+        // parked on the gate. FetchAsync runs its GetOrAdd synchronously before the first
+        // await, so while the gate is held the entry cannot complete and be removed. This
+        // makes the single-flight window deterministic instead of relying on wall-clock timing
+        // to overlap three Task.Run callers — which fails under a loaded CI runner.
+        var t1 = coordinator.FetchAsync("k", fetch);
+        await fetchStarted.Task;
 
-        // Give scheduler a moment to register all three before unblocking the fetch.
-        await Task.Delay(50);
+        // The remaining callers now observe the same in-flight entry and share its task.
+        var t2 = coordinator.FetchAsync("k", fetch);
+        var t3 = coordinator.FetchAsync("k", fetch);
+
         gate.SetResult();
 
         var results = await Task.WhenAll(t1, t2, t3);

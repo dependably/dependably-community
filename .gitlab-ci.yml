@@ -76,6 +76,7 @@ stages:
   - { job: unit-tests,             artifacts: false }
   - { job: api-contract,           artifacts: false }
   - { job: integration-tests,      artifacts: false }
+  - { job: schema-integrity,       artifacts: false }
   - { job: frontend-tests,         artifacts: false }
   - { job: e2e,                    artifacts: false }
   - { job: sbom-backend,           artifacts: false }
@@ -83,31 +84,54 @@ stages:
   - { job: dt-publish,             artifacts: false }
   - { job: zap-baseline,           artifacts: false }
 
-# Wires `REGISTRY_URL` + `REGISTRY_KEY` (set in GitLab CI variables) into npm + NuGet
-# so restores route through the private Dependably instance. No-op when either var is
-# unset, so MR/fork pipelines without the protected vars still build against public.
+# Wires `REGISTRY_URL` + `REGISTRY_KEY` (set as unprotected project CI variables) into npm +
+# NuGet so restores route through the private Dependably instance. HARD-FAILS when either var
+# is empty rather than silently falling back to public — the GitLab pipeline must always use
+# the private feed. (GitHub Actions intentionally stays on public; see .github/workflows.)
 .private-registry-setup:
   before_script:
     - |
-      if [ -n "$REGISTRY_URL" ] && [ -n "$REGISTRY_KEY" ]; then
-        HOST=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^https?://||; s|/.*||')
-        printf 'registry=%s/npm/\n//%s/npm/:_authToken=%s\nfund=false\n' \
-          "$REGISTRY_URL" "$HOST" "$REGISTRY_KEY" > "$HOME/.npmrc"
-        {
-          echo '<?xml version="1.0" encoding="utf-8"?>'
-          echo '<configuration>'
-          echo '  <packageSources>'
-          echo '    <clear />'
-          echo "    <add key=\"dependably\" value=\"${REGISTRY_URL}/nuget/v3/index.json\" />"
-          echo '  </packageSources>'
-          echo '  <packageSourceCredentials>'
-          echo '    <dependably>'
-          echo '      <add key="Username" value="ci" />'
-          echo "      <add key=\"ClearTextPassword\" value=\"${REGISTRY_KEY}\" />"
-          echo '    </dependably>'
-          echo '  </packageSourceCredentials>'
-          echo '</configuration>'
-        } > "$CI_PROJECT_DIR/NuGet.Config"
+      # No `set -eu` here: GitLab concatenates before_script + script into one shell, so a
+      # stray `set -u` would leak into the job script and trip on optional unset vars. Use
+      # explicit checks + `exit 1` (which aborts the job) instead.
+      if [ -z "${REGISTRY_URL:-}" ] || [ -z "${REGISTRY_KEY:-}" ]; then
+        echo "ERROR: REGISTRY_URL/REGISTRY_KEY are empty — refusing to restore from public registries." >&2
+        echo "Both are unprotected project CI/CD variables; an empty value means they were removed or scoped out (e.g. a fork pipeline)." >&2
+        exit 1
+      fi
+      HOST=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^https?://||; s|/.*||')
+      printf 'registry=%s/npm/\n//%s/npm/:_authToken=%s\nfund=false\n' \
+        "$REGISTRY_URL" "$HOST" "$REGISTRY_KEY" > "$HOME/.npmrc"
+      # Write LOWERCASE nuget.config so it OVERWRITES the committed public one. On a
+      # case-sensitive Linux runner NuGet checks "nuget.config" before "NuGet.Config" and
+      # returns on the first match, so a capital-N file is shadowed by the committed lowercase
+      # one. Same path => exactly one config => the private feed wins deterministically.
+      {
+        echo '<?xml version="1.0" encoding="utf-8"?>'
+        echo '<configuration>'
+        echo '  <packageSources>'
+        echo '    <clear />'
+        echo "    <add key=\"dependably\" value=\"${REGISTRY_URL}/nuget/v3/index.json\" />"
+        echo '  </packageSources>'
+        echo '  <packageSourceCredentials>'
+        echo '    <dependably>'
+        echo '      <add key="Username" value="ci" />'
+        echo "      <add key=\"ClearTextPassword\" value=\"${REGISTRY_KEY}\" />"
+        echo '    </dependably>'
+        echo '  </packageSourceCredentials>'
+        echo '</configuration>'
+      } > "$CI_PROJECT_DIR/nuget.config"
+      # Self-check: the active config must reference the private host and never a public one.
+      # Catches a future regression (e.g. a re-added public fallback) loudly instead of
+      # silently shipping public traffic.
+      if grep -qiE 'api\.nuget\.org|registry\.npmjs\.org' "$CI_PROJECT_DIR/nuget.config" "$HOME/.npmrc"; then
+        echo "ERROR: generated registry config still references a public host:" >&2
+        grep -niE 'api\.nuget\.org|registry\.npmjs\.org' "$CI_PROJECT_DIR/nuget.config" "$HOME/.npmrc" >&2
+        exit 1
+      fi
+      if ! grep -qF "$HOST" "$CI_PROJECT_DIR/nuget.config"; then
+        echo "ERROR: nuget.config does not reference the private host '$HOST' after write." >&2
+        exit 1
       fi
 
 # === validate ===
@@ -240,6 +264,46 @@ lockfile-registry-guard:
         exit 1
       fi
 
+# Fails the pipeline early when the private registry isn't actually in effect, so a
+# misconfigured pipeline can't silently restore from public registries. Not release-gating
+# (absent from release-gate.needs): .private-registry-setup already hard-fails every restore
+# job without the vars, so a green release implies the private feed was used — this is the
+# fast, explicit signal. Inline rules mirror .runs-on-ci but exclude fork MRs, which
+# legitimately lack the unprotected project vars (so they aren't failed for it).
+private-registry-guard:
+  stage: validate
+  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID'
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - *release-tag-rule
+  script:
+    - apk add --no-cache curl
+    - |
+      if [ -z "${REGISTRY_URL:-}" ] || [ -z "${REGISTRY_KEY:-}" ]; then
+        echo "ERROR: REGISTRY_URL/REGISTRY_KEY are empty on an internal pipeline." >&2
+        echo "Restores would fall back to public registries. Set both project CI/CD variables." >&2
+        exit 1
+      fi
+      base="${REGISTRY_URL%/}"
+      # NuGet v3 service index — authenticated GET should return 200 on a healthy private feed.
+      code=$(curl -sSL -o /dev/null -w '%{http_code}' -u "ci:$REGISTRY_KEY" "$base/nuget/v3/index.json" || echo 000)
+      if [ "$code" != "200" ]; then
+        echo "ERROR: NuGet service index $base/nuget/v3/index.json returned HTTP $code (expected 200)." >&2
+        exit 1
+      fi
+      # npm endpoint — prove reachability + that the token isn't rejected. A healthy proxy may
+      # answer the bare root with 200/3xx/404; only an unreachable host or a 401/403 is fatal.
+      code=$(curl -sSL -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $REGISTRY_KEY" "$base/npm/" || echo 000)
+      case "$code" in
+        000)     echo "ERROR: npm endpoint $base/npm/ unreachable (curl failed)." >&2; exit 1 ;;
+        401|403) echo "ERROR: npm endpoint $base/npm/ rejected the CI token (HTTP $code)." >&2; exit 1 ;;
+        *)       echo "npm endpoint reachable (HTTP $code), token accepted." ;;
+      esac
+      echo "private-registry-guard: $base reachable; NuGet index 200, npm token accepted."
+
 # === build ===
 
 build-web:
@@ -340,7 +404,7 @@ unit-tests:
     # directory, which would land the file at tests/Dependably.Tests/test-results/…
     # — outside the artifact path below, so GitLab's Tests tab stays empty. Pin to
     # $CI_PROJECT_DIR so the file lands where artifacts:reports:junit looks.
-    - dotnet test --filter "Category!=Integration&Category!=ApiContract" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/unit.xml"
+    - dotnet test --filter "Category!=Integration&Category!=ApiContract&Category!=Schema&Category!=SchemaPostgres" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/unit.xml"
   artifacts:
     when: always
     expire_in: 7 days
@@ -372,6 +436,37 @@ integration-tests:
     expire_in: 7 days
     reports:
       junit: test-results/integration.xml
+
+# Schema/migration guard. Two test categories, both gating:
+#   Category=Schema         — applies the full schema to a fresh SQLite DB and asserts structural
+#                             soundness + idempotent replay (SchemaIntegrityTests), and statically
+#                             checks additive-migration sync, NOT NULL-without-DEFAULT, and
+#                             SQLite↔Postgres source parity (Schema*ComplianceTests). No external deps.
+#   Category=SchemaPostgres — applies Schema.pg.sql + migrations against the live postgres service
+#                             below via NpgsqlMetadataStore (PostgresSchemaApplyTests), proving the
+#                             Postgres path boots, is idempotent, and matches the SQLite shape.
+# Both excluded from unit-tests so this job is the single schema signal. TEST_POSTGRES_CONNECTION
+# points at the service (alias `postgres`); the database is disposable (each test resets `public`).
+schema-integrity:
+  stage: test
+  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  image: mcr.microsoft.com/dotnet/sdk:10.0
+  tags: [amd64]
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_DB: dependably_test
+    POSTGRES_USER: dependably
+    POSTGRES_PASSWORD: dependably_test_pw
+    TEST_POSTGRES_CONNECTION: "Host=postgres;Port=5432;Database=dependably_test;Username=dependably;Password=dependably_test_pw"
+  script:
+    - dotnet test --filter "Category=Schema|Category=SchemaPostgres" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/schema.xml"
+  artifacts:
+    when: always
+    expire_in: 7 days
+    reports:
+      junit: test-results/schema.xml
 
 frontend-tests:
   stage: test
@@ -454,7 +549,7 @@ sonarqube-check:
       /d:sonar.exclusions="web/e2e/**"
       /d:sonar.test.inclusions="**/*Tests.cs,**/*.test.js,**/*.spec.js,**/*.spec.ts"
     - dotnet build
-    - dotnet test --filter "Category!=Integration&Category!=ApiContract" --settings coverlet.runsettings --collect:"XPlat Code Coverage" --logger "trx;LogFileName=tests.trx" --results-directory ./test-results
+    - dotnet test --filter "Category!=Integration&Category!=ApiContract&Category!=SchemaPostgres" --settings coverlet.runsettings --collect:"XPlat Code Coverage" --logger "trx;LogFileName=tests.trx" --results-directory ./test-results
     # coverlet.collector now emits opencover (per coverlet.runsettings <Format>opencover</Format>)
     # at test-results/<guid>/coverage.opencover.xml. Move to a deterministic path so the
     # scanner config can point at a literal filename.
