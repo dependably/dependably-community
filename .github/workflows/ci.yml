@@ -38,8 +38,11 @@ jobs:
             exit 1
           fi
 
+      # SchemaPostgres tests require a live Postgres (TEST_POSTGRES_CONNECTION) and throw loudly
+      # without one — they run only in GitLab's dedicated schema-integrity job. Exclude them here
+      # so the offline unit suite stays green, matching the test class's stated design intent.
       - name: Test (unit + compliance + security)
-        run: dotnet test --no-build -c Release --verbosity normal --filter "Category!=Integration" --collect:"XPlat Code Coverage"
+        run: dotnet test --no-build -c Release --verbosity normal --filter "Category!=Integration&Category!=SchemaPostgres" --collect:"XPlat Code Coverage"
 
       - name: Upload unit coverage
         if: always()
