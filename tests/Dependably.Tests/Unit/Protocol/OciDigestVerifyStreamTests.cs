@@ -5,7 +5,7 @@ using Xunit;
 namespace Dependably.Tests.Unit.Protocol;
 
 /// <summary>
-/// Unit coverage for <see cref="OciDigestVerifyStream"/> (#103).
+/// Unit coverage for <see cref="OciDigestVerifyStream"/>.
 ///
 /// The stream is a read-only pass-through that hashes all bytes read via SHA-256.
 /// Coverage targets:

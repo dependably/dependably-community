@@ -7,7 +7,7 @@ namespace Dependably.Api;
 
 /// <summary>
 /// Tenant membership — list, role patch, removal. Split out of <see cref="OrgController"/>
-/// (#61). Both <see cref="PatchMemberRole"/> and <see cref="RemoveUser"/> enforce a
+/// Both <see cref="PatchMemberRole"/> and <see cref="RemoveUser"/> enforce a
 /// two-tier authorization gate: tenant:configure to enter, plus tenant:admin to touch
 /// owner-role rows or grant the owner role. See <c>project_role_management_policy.md</c>.
 /// </summary>

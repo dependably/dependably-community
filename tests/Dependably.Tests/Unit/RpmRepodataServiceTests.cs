@@ -7,7 +7,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Unit tests for <see cref="RpmRepodataService"/> (#100) — the static helpers
+/// Unit tests for <see cref="RpmRepodataService"/> — the static helpers
 /// <see cref="RpmRepodataService.BuildRepomd"/> and <see cref="RpmRepodataService.Gzip"/>
 /// plus the end-to-end pipeline that mirrors what <c>RpmController</c> serves to dnf/yum.
 ///

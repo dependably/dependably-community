@@ -49,7 +49,12 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
                 .Returns(call => Task.FromResult(
                     call.Arg<IReadOnlyList<string>>().Select(_ => new List<OsvAdvisory>()).ToList()));
         }
+        var airGap = Substitute.For<IAirGapMode>();
+        airGap.IsEnabled.Returns(false);
+        airGap.DisabledJobs.Returns(new System.Collections.Generic.HashSet<string>());
+        airGap.IsJobDisabled(Arg.Any<string>()).Returns(false);
         var scanner = new VulnerabilityScanService(_db, osv, vulns, audit, cfg,
+            airGap,
             NullLogger<VulnerabilityScanService>.Instance);
         var proxyVersions = new ProxyVersionRecorder(packages, audit, licenses);
         var blockGate = new BlockGateService(vulns, audit);
@@ -121,6 +126,66 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             CacheAccess: null));
 
         Assert.Equal(BlockDecision.Blocked, result.Decision);
+    }
+
+    [Theory]
+    [InlineData("block_new")]
+    [InlineData("block_all")]
+    public async Task RecordAndScanAsync_deprecated_first_fetch_blocks_and_does_not_cache(string mode)
+    {
+        // Both blocking modes refuse a deprecated version on the first fetch (cache miss). The
+        // gate runs before recording, so no version row is created — the controllers' cache-hit
+        // lookup then keeps missing and every later request re-enters this path and re-blocks.
+        var svc = Build();
+
+        var bytes = "deprecated-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        var result = await svc.RecordAndScanAsync(new ProxyFetchRequest(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "abandoned", PurlName: "abandoned",
+            Version: "1.0.0", Purl: "pkg:npm/abandoned@1.0.0",
+            File: "abandoned-1.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: null,
+            Deprecated: "use successor@2 instead",
+            BlockDeprecatedMode: mode));
+
+        Assert.Equal(BlockDecision.Blocked, result.Decision);
+        Assert.Null(result.VersionId);
+
+        await using var conn = await _db.OpenAsync();
+        var rowCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions");
+        Assert.Equal(0, rowCount);
+        var blockCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM activity WHERE event_type = 'blocked_deprecated'");
+        Assert.Equal(1, blockCount);
+    }
+
+    [Fact]
+    public async Task RecordAndScanAsync_deprecated_warn_mode_first_fetch_records_normally()
+    {
+        // warn never blocks: a deprecated version is still cached on first fetch (the UI/API
+        // surface the deprecation status separately).
+        var svc = Build();
+
+        var bytes = "warn-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        var result = await svc.RecordAndScanAsync(new ProxyFetchRequest(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "warned", PurlName: "warned",
+            Version: "1.0.0", Purl: "pkg:npm/warned@1.0.0",
+            File: "warned-1.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: null,
+            Deprecated: "deprecated upstream",
+            BlockDeprecatedMode: "warn"));
+
+        Assert.Equal(BlockDecision.Allowed, result.Decision);
+        Assert.NotNull(result.VersionId);
     }
 
     [Fact]

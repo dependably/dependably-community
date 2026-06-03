@@ -3,7 +3,7 @@ using Dapper;
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Persistence for the per-tenant package-name claim model (#47). Two tables:
+/// Persistence for the per-tenant package-name claim model. Two tables:
 /// <c>claim</c> (current state per <c>(org, ecosystem, name)</c>) and <c>claim_history</c>
 /// (append-only transitions). State transitions go through <see cref="ClaimStateMachine"/>;
 /// this repository is a thin DB layer that does not enforce the rules itself.

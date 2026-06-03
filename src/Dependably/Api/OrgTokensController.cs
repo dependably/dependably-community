@@ -9,7 +9,7 @@ using Dependably.Security;
 namespace Dependably.Api;
 
 /// <summary>
-/// User and service access tokens. Split out of <see cref="OrgController"/> (#61): tokens are
+/// User and service access tokens. Split out of <see cref="OrgController"/>: tokens are
 /// a single REST resource with member-scoped CRUD (user) and admin-scoped CRUD (service).
 /// Capability validation uses the caller's role grants as the ceiling — admins can mint
 /// tokens with capabilities they themselves hold, never above.

@@ -45,6 +45,7 @@ public partial class PyPiController : ControllerBase
     private readonly CacheAccessRecorder _cacheRecorder;
     private readonly ClaimResolver _claimResolver;
     private readonly Dependably.Storage.ProxyFetchService _proxyFetch;
+    private readonly UpstreamRegistryResolver _registries;
 
     public PyPiController(PyPiControllerServices svc)
     {
@@ -64,9 +65,10 @@ public partial class PyPiController : ControllerBase
         _cacheRecorder = svc.CacheRecorder;
         _claimResolver = svc.ClaimResolver;
         _proxyFetch = svc.ProxyFetch;
+        _registries = svc.Registries;
     }
 
-    // ── Read endpoints (#8) ─────────────────────────────────────────────────
+    // ── Read endpoints ─────────────────────────────────────────────────
 
     /// <summary>GET /o/{org}/simple/ — PEP 503 package listing</summary>
     [HttpGet("/simple/")]
@@ -114,7 +116,7 @@ public partial class PyPiController : ControllerBase
         // Always merge upstream + local versions when passthrough + claims allow. Routing must
         // not gate on packages.is_proxy — a name with privately uploaded versions is still a
         // namespace that holds proxy-fetched versions; clients need to discover both.
-        var passthroughAllowed = settings!.ProxyPassthroughEnabled
+        var passthroughAllowed = settings!.ProxyPassthroughEffective
             && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "pypi", purlName, ct);
 
         if (passthroughAllowed)
@@ -169,15 +171,20 @@ public partial class PyPiController : ControllerBase
             ? Array.Empty<PackageVersion>() as IReadOnlyList<PackageVersion>
             : await _packages.GetVersionsAsync(localPkg.Id, ct);
 
-        var upstreamBase = _config["PyPI:Upstream"] ?? "https://pypi.org";
+        // Walk the org's configured upstreams in priority order; the first that answers wins.
+        // No configured upstream ⇒ proxying is disabled for this ecosystem, so fall through to
+        // local-only below.
+        var bases = await _registries.ResolveAsync(CurrentTenantId(), "pypi", ct);
         string? upstreamHtml = null;
-        try
+        foreach (var upstreamBase in bases)
         {
-            // #94 single-flight simple-index fetch — collapses N concurrent pip-install
-            // requests onto a single upstream call when a coordinate first warms up.
-            var response = await _upstream.GetOrFetchMetadataAsync($"{upstreamBase}/simple/{purlName}/", ct);
-            if (response.IsSuccessStatusCode)
+            try
             {
+                // Single-flight simple-index fetch — collapses N concurrent pip-install
+                // requests onto a single upstream call when a coordinate first warms up.
+                var response = await _upstream.GetOrFetchMetadataAsync($"{upstreamBase}/simple/{purlName}/", ct);
+                if (!response.IsSuccessStatusCode) continue;
+
                 var html = response.BodyAsString();
                 html = Regex.Replace(html, @"\s*data-(?:dist-info-metadata|core-metadata)=""[^""]*""", "", RegexOptions.None, RegexTimeout);
                 html = Regex.Replace(
@@ -195,11 +202,12 @@ public partial class PyPiController : ControllerBase
                     RegexOptions.None,
                     RegexTimeout);
                 upstreamHtml = html;
+                break;
             }
-        }
-        catch
-        {
-            // Upstream unreachable — fall back to local-only when we have versions to serve.
+            catch
+            {
+                // Upstream unreachable — try the next one, then fall back to local-only.
+            }
         }
 
         if (upstreamHtml is null)
@@ -268,24 +276,28 @@ public partial class PyPiController : ControllerBase
                         token?.UserId, settings!.MaxOsvScoreTolerance, sourceIp,
                         MinReleaseAgeHours: settings.MinReleaseAgeHours,
                         PublishedAt: v.PublishedAt,
-                        ActorKind: token?.ActorKind), ct)
+                        ActorKind: token?.ActorKind,
+                        Deprecated: v.Deprecated,
+                        BlockDeprecatedMode: settings.BlockDeprecated), ct)
                 == BlockDecision.Blocked) return StatusCode(403);
 
             var cached = await TryServeCachedBlobAsync(pkgVersions.Value, file, orgId, token, sourceIp, ct);
             if (cached is not null) return cached;
         }
 
-        // Cache miss — proxy from upstream
+        // Cache miss — proxy from upstream. No configured upstream for pypi ⇒ proxying is
+        // disabled for this ecosystem, so a miss is a 404 (mirrors ProxyPassthroughEnabled=false).
         Response.Headers["X-Cache"] = "MISS";
-        var resolved = await ResolveProxyUpstreamUrlAsync(file, parsed, pkgVersions, ct);
+        var bases = await _registries.ResolveAsync(orgId, "pypi", ct);
+        var resolved = await ResolveProxyUpstreamUrlAsync(file, parsed, pkgVersions, bases, ct);
         if (resolved is null) return NotFound();
 
         var gateError = await CheckProxyAllowlistBlocklistAsync(orgId, parsed, token, settings!, sourceIp, ct);
         if (gateError is not null) return gateError;
 
-        if (!settings!.ProxyPassthroughEnabled) return NotFound();
+        if (!settings!.ProxyPassthroughEffective) return NotFound();
 
-        // #47: claim state gates the proxy fetch. local_only (including air-gap implicit
+        // Claim state gates the proxy fetch. local_only (including air-gap implicit
         // local_only) disables proxy serving for that name.
         var purlNameForClaim = pkgVersions?.Package.PurlName ?? parsed.PurlName;
         if (!await _claimResolver.IsProxyFetchAllowedAsync(orgId, "pypi", purlNameForClaim, ct))
@@ -351,16 +363,23 @@ public partial class PyPiController : ControllerBase
     // upstream-supplied hash is available.
     private async Task<(string Url, string? Sha256Hex)?> ResolveProxyUpstreamUrlAsync(
         string file, PyPiFilename parsed,
-        (Package Package, PackageVersion Version)? pkgVersions, CancellationToken ct)
+        (Package Package, PackageVersion Version)? pkgVersions,
+        IReadOnlyList<string> bases, CancellationToken ct)
     {
+        // No configured upstream ⇒ proxying disabled for pypi; resolve nothing.
+        if (bases.Count == 0) return null;
+
         var sha256 = pkgVersions?.Version.ChecksumSha256;
         if (sha256 is not null)
             return ($"https://files.pythonhosted.org/packages/{sha256[..2]}/{sha256[2..4]}/{sha256}/{file}", sha256);
 
-        var upstreamBase = _config["PyPI:Upstream"] ?? "https://pypi.org";
-        var resolved = await ResolveUpstreamPyPiUrlAsync(upstreamBase, parsed.PurlName, file, ct);
-        if (resolved is null) return null;
-        return (resolved.Value.Url, resolved.Value.Sha256Hex);
+        // Walk upstreams in priority order; the first whose simple index resolves the file wins.
+        foreach (var upstreamBase in bases)
+        {
+            var resolved = await ResolveUpstreamPyPiUrlAsync(upstreamBase, parsed.PurlName, file, ct);
+            if (resolved is not null) return (resolved.Value.Url, resolved.Value.Sha256Hex);
+        }
+        return null;
     }
 
     private async Task<IActionResult?> CheckProxyAllowlistBlocklistAsync(string orgId, PyPiFilename parsed,
@@ -396,7 +415,7 @@ public partial class PyPiController : ControllerBase
             if (pkgVersions is not null)
                 Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersions.Value.Version.Purl);
 
-            // #48: record into cache_artifact + tenant_artifact_access on every fetch path
+            // Record into cache_artifact + tenant_artifact_access on every fetch path
             // (hit and miss). Best-effort — recorder swallows failures.
             var purlName = pkgVersions?.Package.PurlName ?? parsed.PurlName;
             var version = pkgVersions?.Version.Version ?? parsed.Version;
@@ -432,7 +451,7 @@ public partial class PyPiController : ControllerBase
     /// <list type="bullet">
     ///   <item><b>Known-sha path:</b> routes through
     ///         <see cref="UpstreamClient.GetOrFetchStreamAsync"/> which hash-and-stages the
-    ///         body to disk (#104) — no full-artefact byte[] is ever materialised.</item>
+    ///         body to disk — no full-artefact byte[] is ever materialised.</item>
     ///   <item><b>Unknown-sha cold-start:</b> still buffers via
     ///         <see cref="UpstreamClient.GetOrFetchMetadataAsync"/> because the cache key
     ///         only exists after hashing. The byte[] residue is bounded to this path and
@@ -471,11 +490,11 @@ public partial class PyPiController : ControllerBase
         }
 
         // Unknown checksum — fetch, compute, cache, wrap in a BlobHandle. Route through
-        // single-flighted metadata fetch (#94) so a stampede of concurrent CI clients
+        // single-flighted metadata fetch so a stampede of concurrent CI clients
         // pulling an unchecked-sha coordinate triggers just one upstream call.
         //
-        // This is the PyPi cold-start residue called out in #105's scope: the SHA isn't
-        // known up front so the content-addressed hash-and-stage pipeline (#104) can't
+        // This is the PyPi cold-start residue of the proxy-fetch refactor: the SHA isn't
+        // known up front so the content-addressed hash-and-stage pipeline can't
         // route this request. Wrapping the byte[] in a BlobHandle keeps the residue
         // localized — ProxyFetchService, ProxyVersionRecorder, and LicenseExtractor
         // never see a byte[].
@@ -501,8 +520,11 @@ public partial class PyPiController : ControllerBase
         ProxyContext gate, CancellationToken ct)
     {
         var purl = PurlNormalizer.PyPi(parsed.PurlName, parsed.Version);
-        var upstreamBase = _config["PyPI:Upstream"] ?? "https://pypi.org";
-        var jsonMeta = await TryFetchPyPiJsonMetadataAsync(upstreamBase, parsed.PurlName, parsed.Version, file, ct);
+        // Use the highest-priority configured upstream for the supplementary JSON metadata fetch.
+        var bases = await _registries.ResolveAsync(gate.OrgId, "pypi", ct);
+        var jsonMeta = bases.Count == 0
+            ? PyPiJsonMetadata.Empty
+            : await TryFetchPyPiJsonMetadataAsync(bases[0], parsed.PurlName, parsed.Version, file, ct);
 
         // Prefer the simple-index #sha256= fragment (it's already verified against the bytes
         // by UpstreamClient on the way in). Fall back to the JSON API's digests.sha256 when
@@ -526,7 +548,8 @@ public partial class PyPiController : ControllerBase
             PublishedAt: jsonMeta.PublishedAt,
             UpstreamIntegrityValue: integrityValue,
             UpstreamIntegrityAlgorithm: integrityAlgo,
-            Deprecated: jsonMeta.Deprecated), ct);
+            Deprecated: jsonMeta.Deprecated,
+            BlockDeprecatedMode: gate.Settings.BlockDeprecated), ct);
         return result.Decision == BlockDecision.Blocked ? StatusCode(403) : null;
     }
 
@@ -543,7 +566,7 @@ public partial class PyPiController : ControllerBase
         try
         {
             var url = $"{upstreamBase}/pypi/{purlName}/{version}/json";
-            // Routes through single-flighted metadata fetch (#94) so an artefact stampede
+            // Routes through single-flighted metadata fetch so an artefact stampede
             // doesn't also stampede this endpoint.
             var resp = await _upstream.GetOrFetchMetadataAsync(url, ct);
             if (!resp.IsSuccessStatusCode) return PyPiJsonMetadata.Empty;
@@ -598,7 +621,7 @@ public partial class PyPiController : ControllerBase
     {
         try
         {
-            // #94: this simple-index fetch fires inline with every PyPI file-download path,
+            // This simple-index fetch fires inline with every PyPI file-download path,
             // so concurrent CI fan-out would otherwise stampede here too. Route through
             // single-flight.
             var resp = await _upstream.GetOrFetchMetadataAsync($"{upstreamBase}/simple/{pkgName}/", ct);
@@ -627,7 +650,7 @@ public partial class PyPiController : ControllerBase
         string orgId, string filename, CancellationToken ct)
         => _packages.FindVersionByBlobKeySuffixAsync(orgId, "pypi", filename, ct);
 
-    // ── Upload endpoint (#9) ────────────────────────────────────────────────
+    // ── Upload endpoint ────────────────────────────────────────────────
 
     /// <summary>POST /pypi/legacy/ — twine-compatible upload (tenant-implicit from host)</summary>
     [HttpPost("/pypi/legacy/")]
@@ -792,7 +815,7 @@ public partial class PyPiController : ControllerBase
 
         // Format-specific post-publish: license info comes from the wheel METADATA / sdist
         // PKG-INFO. Stays here because the extractor is PyPI-only. Push path holds the
-        // upload bytes in memory — an upload-validation concern, out of scope for #105 —
+        // upload bytes in memory — an upload-validation concern, out of scope here —
         // so we wrap in a MemoryStream for the unified extractor.
         var versionId = ((Dependably.Infrastructure.Publish.PublishResult.Accepted)result).VersionId;
         var extracted = LicenseExtractor.FromPyPiPackageBytes(
@@ -878,4 +901,5 @@ public sealed record PyPiControllerServices(
     Dependably.Infrastructure.Publish.IPackagePublishService Publish,
     CacheAccessRecorder CacheRecorder,
     ClaimResolver ClaimResolver,
-    Dependably.Storage.ProxyFetchService ProxyFetch);
+    Dependably.Storage.ProxyFetchService ProxyFetch,
+    UpstreamRegistryResolver Registries);

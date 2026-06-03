@@ -3,7 +3,7 @@ using Dapper;
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Persistence for the global shared proxy-cache index (#48). One row per
+/// Persistence for the global shared proxy-cache index. One row per
 /// <c>(ecosystem, name, version, filename)</c>; no tenant column. Per-tenant access lives in
 /// <see cref="TenantArtifactAccessRepository"/>.
 /// </summary>

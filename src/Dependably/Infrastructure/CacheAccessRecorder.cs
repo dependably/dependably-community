@@ -3,14 +3,14 @@ using Dapper;
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Wires the proxy fetch path (#48) to the <c>cache_artifact</c> and
+/// Wires the proxy fetch path to the <c>cache_artifact</c> and
 /// <c>tenant_artifact_access</c> tables. Called by each ecosystem's controller after a
 /// successful upstream fetch or cache hit.
 ///
 /// Every call upserts both: a global row identifying the artefact at the coordinate
 /// (creating it on first sight and touching <c>last_accessed_at</c> thereafter) and a
 /// per-tenant row tracking access count + first/last seen for that tenant. The latter is
-/// what drives the vulnerability-response query in #48.
+/// what drives the vulnerability-response query.
 ///
 /// Designed to be idempotent and side-effect-light — failures here log and continue rather
 /// than break the request, because the originating fetch already succeeded.

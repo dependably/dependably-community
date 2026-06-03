@@ -258,9 +258,14 @@ public sealed class ControllerScenario : IAsyncDisposable
         var osv = Substitute.For<IOsvSource>();
         osv.QueryAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
            .Returns(Task.FromResult(new List<OsvAdvisory>()));
+        var noAirGap = Substitute.For<IAirGapMode>();
+        noAirGap.IsEnabled.Returns(false);
+        noAirGap.DisabledJobs.Returns(new System.Collections.Generic.HashSet<string>());
+        noAirGap.IsJobDisabled(Arg.Any<string>()).Returns(false);
         var scanner = new VulnerabilityScanService(
             db, osv, vulns, audit,
             new ConfigurationBuilder().Build(),
+            noAirGap,
             NullLogger<VulnerabilityScanService>.Instance);
 
         var systemAdmins = new SystemAdminRepository(db);
@@ -275,7 +280,8 @@ public sealed class ControllerScenario : IAsyncDisposable
         var orgAuditEmitter = Substitute.For<Dependably.Infrastructure.Audit.IAuditEmitter>();
 
         var license = new LicenseController(licenses, orgs, guard, problems, audit) { ControllerContext = ctx };
-        var instance = new InstanceController(orgs, audit, guard) { ControllerContext = ctx };
+        var jobRuns = new BackgroundJobRunRepository(db);
+        var instance = new InstanceController(orgs, audit, guard, noAirGap, jobRuns) { ControllerContext = ctx };
         var vuln = new VulnerabilityController(vulns, packages, scanner, audit, guard) { ControllerContext = ctx };
         var system = new SystemController(orgs, systemAdmins, db, audit, problems,
             new ConfigurationBuilder().Build(),
@@ -286,7 +292,8 @@ public sealed class ControllerScenario : IAsyncDisposable
             Orgs: orgs, Packages: packages, PackageAnalytics: packageAnalytics,
             Tokens: tokens, Invites: invites,
             Allowlist: allowlist, Blocklist: blocklist, Audit: audit, Guard: guard,
-            Blobs: blobs, Config: new ConfigurationBuilder().Build(),
+            Blobs: blobs, BlobStorage: new Dependably.Storage.TieredBlobStorage(blobs, blobs),
+            Config: new ConfigurationBuilder().Build(),
             Logger: NullLogger<OrgController>.Instance, Problems: problems,
             Licenses: licenses, Vulns: vulns, Urls: publicUrl,
             AuditEmitter: orgAuditEmitter);
@@ -294,7 +301,8 @@ public sealed class ControllerScenario : IAsyncDisposable
         var orgSettingsRepo = new OrgSettingsRepository(db);
         var orgSettings = new OrgSettingsController(
             orgSettingsRepo, guard, audit, orgAuditEmitter,
-            new ConfigurationBuilder().Build(), problems) { ControllerContext = ctx };
+            new ConfigurationBuilder().Build(), problems,
+            new AirGapMode(new ConfigurationBuilder().Build())) { ControllerContext = ctx };
         var orgTokens = new OrgTokensController(
             tokens, guard, audit, orgAuditEmitter, problems) { ControllerContext = ctx };
         var orgInvites = new OrgInvitesController(

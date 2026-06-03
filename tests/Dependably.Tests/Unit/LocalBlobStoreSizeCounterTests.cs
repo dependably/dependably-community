@@ -4,7 +4,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Acceptance tests for #92: <see cref="LocalBlobStore.GetTotalSizeAsync"/> must return a
+/// Acceptance tests for <see cref="LocalBlobStore.GetTotalSizeAsync"/>: it must return a
 /// running counter (O(1)) instead of walking the disk on every call, while still recovering
 /// from drift via a one-time walk on startup or an admin recompute.
 /// </summary>
@@ -93,7 +93,7 @@ public sealed class LocalBlobStoreSizeCounterTests : IDisposable
     [Fact]
     public async Task GetTotalSizeAsync_IsConstantTime_NoDirectoryWalkAfterInit()
     {
-        // The whole point of #92: subsequent calls must NOT re-walk. We can't directly assert
+        // The whole point: subsequent calls must NOT re-walk. We can't directly assert
         // "no syscalls" but we can prove the call returns instantly even with many files.
         var store = new LocalBlobStore(_root);
         for (var i = 0; i < 200; i++)

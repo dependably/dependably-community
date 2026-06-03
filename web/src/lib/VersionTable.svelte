@@ -1,5 +1,5 @@
 <!--
-  Version table extracted from VersionDetail.svelte (#67). Owns the table's local UI
+  Version table extracted from VersionDetail.svelte. Owns the table's local UI
   state — sort col/dir, which row is expanded, which row's actions popover is open,
   popover position — and renders the row + the expanded detail panel + the actions
   popover itself. Parent passes the data and the action handlers and supplies the
@@ -188,15 +188,13 @@
           {/if}
         </td>
         <td>
-          {#if isAdmin}
-            <button
-              class="kebab-btn"
-              on:click={(e) => toggleActions(ver.id, e)}
-              aria-label={$t('versionDetail.actionsMenu.open')}
-              aria-haspopup="true"
-              aria-expanded={openActionsId === ver.id}
-            >⋯</button>
-          {/if}
+          <button
+            class="kebab-btn"
+            on:click={(e) => toggleActions(ver.id, e)}
+            aria-label={$t('versionDetail.actionsMenu.open')}
+            aria-haspopup="true"
+            aria-expanded={openActionsId === ver.id}
+          >⋯</button>
         </td>
       </tr>
 
@@ -268,26 +266,31 @@
   {@const ver = versions.find(v => v.id === openActionsId)}
   {#if ver}
     <div class="actions-popover" style:top="{popoverPos.top}px" style:left="{popoverPos.left}px">
-      <button
-        class="popover-item"
-        on:click|stopPropagation={() => fire('rescan', ver)}
-        disabled={scanningId === ver.id || scanCooldownRemaining(ver) > 0}
-        title={scanCooldownRemaining(ver) > 0 ? $t('versionDetail.rescanCooldown', { values: { minutes: Math.ceil(scanCooldownRemaining(ver)/60000) } }) : $t('versionDetail.rescanTitle')}
-      >{scanningId === ver.id ? $t('versionDetail.rescanning') : $t('versionDetail.actionsMenu.rescan')}</button>
-      <button
-        class="popover-item"
-        on:click|stopPropagation={() => fire('block', ver)}
-        disabled={ver.status === 'blocked'}
-        title={ver.status === 'blocked' ? $t('versionDetail.blockDisabledTitle') : ''}
-      >{$t('versionDetail.actionsMenu.block')}</button>
-      <button
-        class="popover-item"
-        on:click|stopPropagation={() => fire('unblock', ver)}
-        disabled={ver.status !== 'blocked'}
-        title={ver.status !== 'blocked' ? $t('versionDetail.unblockDisabledTitle') : ''}
-      >{$t('versionDetail.actionsMenu.unblock')}</button>
-      <div class="popover-divider"></div>
-      <button class="popover-item danger" on:click|stopPropagation={() => fire('delete', ver)}>{$t('versionDetail.actionsMenu.delete')}</button>
+      <!-- Download is available to every viewer; the admin-only actions below are gated. -->
+      <button class="popover-item" on:click|stopPropagation={() => fire('download', ver)}>{$t('versionDetail.actionsMenu.download')}</button>
+      {#if isAdmin}
+        <div class="popover-divider"></div>
+        <button
+          class="popover-item"
+          on:click|stopPropagation={() => fire('rescan', ver)}
+          disabled={scanningId === ver.id || scanCooldownRemaining(ver) > 0}
+          title={scanCooldownRemaining(ver) > 0 ? $t('versionDetail.rescanCooldown', { values: { minutes: Math.ceil(scanCooldownRemaining(ver)/60000) } }) : $t('versionDetail.rescanTitle')}
+        >{scanningId === ver.id ? $t('versionDetail.rescanning') : $t('versionDetail.actionsMenu.rescan')}</button>
+        <button
+          class="popover-item"
+          on:click|stopPropagation={() => fire('block', ver)}
+          disabled={ver.status === 'blocked'}
+          title={ver.status === 'blocked' ? $t('versionDetail.blockDisabledTitle') : ''}
+        >{$t('versionDetail.actionsMenu.block')}</button>
+        <button
+          class="popover-item"
+          on:click|stopPropagation={() => fire('unblock', ver)}
+          disabled={ver.status !== 'blocked'}
+          title={ver.status !== 'blocked' ? $t('versionDetail.unblockDisabledTitle') : ''}
+        >{$t('versionDetail.actionsMenu.unblock')}</button>
+        <div class="popover-divider"></div>
+        <button class="popover-item danger" on:click|stopPropagation={() => fire('delete', ver)}>{$t('versionDetail.actionsMenu.delete')}</button>
+      {/if}
     </div>
   {/if}
 {/if}

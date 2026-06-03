@@ -7,7 +7,7 @@ namespace Dependably.Api;
 
 /// <summary>
 /// Activity feed + tenant audit log, plus their CSV export variants. Split out of
-/// <see cref="OrgController"/> (#61). Both endpoints share <see cref="Capabilities.ReadAudit"/>
+/// <see cref="OrgController"/>. Both endpoints share <see cref="Capabilities.ReadAudit"/>
 /// as the only auth check and converge on <see cref="CsvExportRowCap"/> when
 /// <c>?format=csv</c> is set.
 /// </summary>

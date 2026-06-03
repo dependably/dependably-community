@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 namespace Dependably.Protocol;
 
 /// <summary>
-/// OCI Distribution Spec error codes (#98). Returned in <see cref="OciErrorResponse"/>
+/// OCI Distribution Spec error codes. Returned in <see cref="OciErrorResponse"/>
 /// bodies so docker clients can disambiguate "blob unknown" from "manifest unknown"
 /// without parsing the message text. Wire form is SCREAMING_SNAKE_CASE per the spec.
 /// </summary>

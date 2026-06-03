@@ -31,7 +31,7 @@ public sealed class CacheAccessRecorderTests : IClassFixture<DependablyFactory>,
     public async Task ProxyFetch_PopulatesCacheArtifactAndTenantArtifactAccess()
     {
         // Push a real version first so the simple-index path can locate the file. Then fetch
-        // the artefact via the proxy/cache flow — that's the path that wires #48's recorder.
+        // the artefact via the proxy/cache flow — that's the path that wires the cache-access recorder.
         await _factory.PushPyPiPackage("acme-cache48-a", "1.0.0");
 
         // PushPyPiPackage uses the publish path, not the proxy fetch. To exercise the
@@ -66,7 +66,7 @@ public sealed class CacheAccessRecorderTests : IClassFixture<DependablyFactory>,
     {
         // The whole point of tenant_artifact_access is the "which tenants pulled X" query.
         // Two tenants record access to the same artefact; the cross-tenant query returns
-        // both ids — which is what audit / vulnerability-response rely on per #48.
+        // both ids — which is what audit / vulnerability-response rely on.
         var orgs = _factory.Services.GetRequiredService<OrgRepository>();
         _factory.CreateClient().Dispose();   // ensures first-boot ran and 'default' exists
         var defaultOrg = (await orgs.GetBySlugAsync("default"))!;

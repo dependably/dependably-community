@@ -5,7 +5,7 @@ namespace Dependably.Infrastructure;
 
 /// <summary>
 /// Translates <see cref="AirGappedException"/> raised by <c>UpstreamClient</c> into a
-/// well-formed <c>503 Service Unavailable</c> response (#48). Without this, the
+/// well-formed <c>503 Service Unavailable</c> response. Without this, the
 /// exception would surface as a 500 and the caller would have no way to tell
 /// "upstream is down" from "this deployment doesn't talk to upstream by policy".
 ///

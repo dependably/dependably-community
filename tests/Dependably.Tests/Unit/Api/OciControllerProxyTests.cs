@@ -21,7 +21,7 @@ using Xunit;
 namespace Dependably.Tests.Unit.Api;
 
 /// <summary>
-/// Proxy-path coverage for <see cref="OciController"/> (#103).
+/// Proxy-path coverage for <see cref="OciController"/>.
 ///
 /// Coverage targets:
 ///  - GET manifest: local cache HIT → X-Cache: HIT, no upstream call
@@ -447,5 +447,7 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     private sealed class DisabledAirGap : IAirGapMode
     {
         public bool IsEnabled => false;
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => false;
     }
 }

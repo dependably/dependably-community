@@ -3,8 +3,8 @@ using Dependably.Security;
 namespace Dependably.Infrastructure.Publish;
 
 /// <summary>
-/// Shared tail end of the publish flow used by the protocol controllers (#45) and the
-/// admin import controller (#46). Each ecosystem's controller still owns its format-specific
+/// Shared tail end of the publish flow used by the protocol controllers and the
+/// admin import controller. Each ecosystem's controller still owns its format-specific
 /// extraction (npm tarball, PyPI sdist/wheel, NuGet nupkg) and produces a normalised
 /// <see cref="PublishRequest"/>; this service handles everything from path safety through
 /// to audit emission so the dedup, size, and claim-gate rules stay uniform across surfaces.
@@ -19,7 +19,7 @@ public interface IPackagePublishService
     Task<PublishResult> StoreAndRecordAsync(PublishRequest request, CancellationToken ct = default);
 
     /// <summary>
-    /// Dry-run companion to <see cref="StoreAndRecordAsync"/> (#46): runs every validation
+    /// Dry-run companion to <see cref="StoreAndRecordAsync"/>: runs every validation
     /// step (path safety, size cap, claim gate, dedup) without writing the blob, creating
     /// the version row, or emitting audit events. Returns the same <see cref="PublishResult"/>
     /// shape so the caller can render projected outcomes verbatim. Used by the bulk-import
@@ -80,13 +80,13 @@ public sealed record PublishRequest
     /// <summary>
     /// When true, a duplicate (name, version) overwrites the existing artefact and emits a
     /// <c>package.replace</c> audit event recording both old and new hashes. Wired from the
-    /// per-tenant <c>org_settings.allow_version_overwrite</c> setting (#45). Default false
+    /// per-tenant <c>org_settings.allow_version_overwrite</c> setting. Default false
     /// preserves the strict immutable-coordinate behaviour.
     /// </summary>
     public bool AllowOverwrite { get; init; }
 
     /// <summary>
-    /// The resolved claim state at publish time (#47): <c>unclaimed</c>, <c>local_only</c>,
+    /// The resolved claim state at publish time: <c>unclaimed</c>, <c>local_only</c>,
     /// or <c>mixed</c>. Recorded in the typed audit event payload so forensic correlation
     /// of "what was the policy at the moment this version landed?" is one query, not a
     /// reconstruction. Default <c>unclaimed</c> when the caller doesn't pass one.

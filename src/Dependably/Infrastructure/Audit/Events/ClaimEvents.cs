@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace Dependably.Infrastructure.Audit.Events;
 
 /// <summary>
-/// Typed payloads for claim lifecycle events (#47, #52). The claim audit trail is the
+/// Typed payloads for claim lifecycle events. The claim audit trail is the
 /// supply-chain-shaped surface that compliance reviewers query most often, so it gets
 /// dedicated typed records — not freeform audit_log strings — for grep stability.
 /// </summary>

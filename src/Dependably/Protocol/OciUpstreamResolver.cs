@@ -9,7 +9,7 @@ using Microsoft.Extensions.Options;
 namespace Dependably.Protocol;
 
 /// <summary>
-/// Fetches OCI manifests, blobs, and tag lists from configured upstream registries (#103).
+/// Fetches OCI manifests, blobs, and tag lists from configured upstream registries.
 ///
 /// Prefix routing: the first <see cref="OciUpstreamRegistryOptions"/> whose
 /// <c>Prefixes</c> list contains a prefix of the repository name wins.

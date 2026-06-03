@@ -3,7 +3,7 @@ namespace Dependably.Protocol;
 /// <summary>
 /// Source of OSV vulnerability advisories. Two implementations: <see cref="OsvClient"/>
 /// (remote, calls api.osv.dev) and <c>LocalOsvSource</c> (offline, reads a sideloaded
-/// directory of OSV JSON dumps for air-gapped deployments per #41).
+/// directory of OSV JSON dumps for air-gapped deployments).
 ///
 /// Selected by <c>OSV_MODE=remote|local</c>; the consumer (<c>VulnerabilityScanService</c>)
 /// is unaware of which is in use.

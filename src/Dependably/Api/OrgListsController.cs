@@ -6,7 +6,7 @@ using Dependably.Security;
 namespace Dependably.Api;
 
 /// <summary>
-/// Tenant allowlist + blocklist. Split out of <see cref="OrgController"/> (#61). Both lists
+/// Tenant allowlist + blocklist. Split out of <see cref="OrgController"/>. Both lists
 /// share the same shape (list / add / delete) and live alongside each other as policy lists
 /// — the only difference is allowlist takes PURL prefix patterns and blocklist takes regular
 /// expressions on the package name.

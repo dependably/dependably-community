@@ -18,7 +18,7 @@ namespace Dependably.Protocol;
 public sealed class UpstreamClient
 {
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly IBlobStore _blobs;   // resolved to TieredBlobStorage.Cache (#57)
+    private readonly IBlobStore _blobs;   // resolved to TieredBlobStorage.Cache
     private readonly AuditRepository _audit;
     private readonly IUpstreamUrlValidator _urlValidator;
     private readonly IAirGapMode _airGap;
@@ -53,7 +53,7 @@ public sealed class UpstreamClient
         _airGap = airGap;
         _logger = logger;
 
-        // #104 staging dir for hash-and-stage MISS path. Defaults to the OS temp
+        // Staging dir for hash-and-stage MISS path. Defaults to the OS temp
         // directory — operators expecting large artefacts on containerised deployments
         // should point this at a disk-backed volume (e.g. /data/staging), because /tmp
         // is often tmpfs (RAM-backed), which defeats the memory-bounding goal of streaming.
@@ -72,7 +72,7 @@ public sealed class UpstreamClient
     }
 
     /// <summary>
-    /// Streaming proxy fetch (#89 + #104). On cache HIT, returns the blob-store stream
+    /// Streaming proxy fetch. On cache HIT, returns the blob-store stream
     /// directly so the controller can <c>File(stream, ...)</c> straight through to the
     /// response without ever materialising the artifact in memory. On cache MISS, streams
     /// upstream → local temp file (hashing inline) → verifies → uploads to blob store →
@@ -105,7 +105,7 @@ public sealed class UpstreamClient
         SnapshotCounters.IncrementCacheMiss();
         SnapshotCounters.IncrementProxyFetch();
 
-        // Air-gapped deployments must never reach upstream on a cache miss (#48). Cached
+        // Air-gapped deployments must never reach upstream on a cache miss. Cached
         // artefacts above still serve normally; only the fetch path is blocked. The
         // exception bubbles up to the AirGappedExceptionMiddleware which translates it
         // to a 503 with a clear body — better than a 504 timeout when egress is firewalled.
@@ -191,7 +191,7 @@ public sealed class UpstreamClient
     private const long MaxUpstreamResponseBytes = 600L * 1024 * 1024; // 600 MB
 
     /// <summary>
-    /// Hash-and-stage MISS path (#104): streams upstream → temp file (with SHA-256
+    /// Hash-and-stage MISS path: streams upstream → temp file (with SHA-256
     /// computed inline via <see cref="IncrementalHash"/> and a running byte counter
     /// that throws on the 600 MB cap) → verifies checksum → uploads verified bytes to
     /// the blob store via <see cref="IBlobStore.PutAsync"/>. Cleans up the temp file
@@ -352,7 +352,7 @@ public sealed class UpstreamClient
     }
 
     /// <summary>
-    /// Single-flighted metadata fetch (#94). Returns a buffered response shareable across
+    /// Single-flighted metadata fetch. Returns a buffered response shareable across
     /// concurrent callers — only one upstream HTTP request runs per URL at a time, even
     /// when N CI runners hit a cold-start coordinate simultaneously. Returned value is
     /// immutable; callers inspect <see cref="UpstreamMetadataResponse.StatusCode"/> and
@@ -398,7 +398,7 @@ public sealed class UpstreamClient
 }
 
 /// <summary>
-/// Result of the hash-and-stage MISS path (#104). No byte[] — concurrent waiters share
+/// Result of the hash-and-stage MISS path. No byte[] — concurrent waiters share
 /// the (sha, size, blobKey) triple and each independently re-open the cached blob via
 /// <see cref="IBlobStore.GetAsync"/>.
 /// </summary>

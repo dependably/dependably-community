@@ -11,7 +11,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Acceptance for #89 + #105: <see cref="UpstreamClient.GetOrFetchStreamAsync"/> is now
+/// Acceptance: <see cref="UpstreamClient.GetOrFetchStreamAsync"/> is now
 /// the only proxy-fetch entry point. Cache HIT hands back the blob-store stream
 /// untouched (no MemoryStream copy); cache MISS hashes upstream into the staging file
 /// and the freshly cached blob streams back.
@@ -45,7 +45,7 @@ public sealed class UpstreamClientStreamingTests
     [Fact]
     public async Task GetOrFetchStreamAsync_CacheHit_ExactSizedRoundTrip()
     {
-        // Regression for #89: the cache-HIT stream is consumable as a fixed-size buffer
+        // Regression test: the cache-HIT stream is consumable as a fixed-size buffer
         // without going through the legacy MemoryStream-grow-and-ToArray path.
         var payload = new byte[12345];
         Random.Shared.NextBytes(payload);
@@ -102,7 +102,7 @@ public sealed class UpstreamClientStreamingTests
         var factory = new FactoryFor(handler ?? new StaticHandler(HttpStatusCode.OK, Array.Empty<byte>()));
         var audit = new AuditRepository(new InMemoryAudit());
         var tiered = new TieredBlobStorage(blobs, blobs);
-        // #104 staging path: per-test temp dir keeps parallel xunit runs from colliding.
+        // Staging path: per-test temp dir keeps parallel xunit runs from colliding.
         var stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-test-{Guid.NewGuid():N}");
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["PROXY_STAGING_PATH"] = stagingDir })
@@ -139,6 +139,8 @@ public sealed class UpstreamClientStreamingTests
     {
         public AirGap(bool enabled) => IsEnabled = enabled;
         public bool IsEnabled { get; }
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => IsEnabled;
     }
 
     private sealed class InMemoryAudit : IMetadataStore

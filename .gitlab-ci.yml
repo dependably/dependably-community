@@ -138,7 +138,7 @@ stages:
 
 # Single authority for tag identity. Owns: annotated-tag check, tag→commit
 # binding, ancestor-of-main check, Directory.Build.props version match.
-# Downstream scripts must not re-validate these — see plan §2.
+# Downstream scripts must not re-validate these.
 validate-release-tag:
   stage: validate
   extends: [.runs-on-release-tag, .release-required]
@@ -174,7 +174,7 @@ validate-release-tag:
 # .release-required must equal release-gate.needs, and every required job
 # must inherit its release-tag rule from .runs-on-ci{,-main} (no inline
 # `rules:`, no other rule-providing template). Drift fails at MR/branch
-# time, not at release time. See plan §3 for failure modes.
+# time, not at release time.
 release-contract-lint:
   stage: validate
   extends: .runs-on-ci
@@ -741,7 +741,7 @@ release-gate:
 # vX.Y.Z tag into one commit on github/main, plus an annotated tag at the
 # same SHA. Tag-triggered + serialized + ff-only + drift-detecting +
 # provenance-emitting. CI owns tag identity (validate-release-tag);
-# this job owns publishing only. See build/release-to-github.sh and plan §4.
+# this job owns publishing only. See build/release-to-github.sh.
 release-to-github:
   stage: release
   extends: .runs-on-release-tag

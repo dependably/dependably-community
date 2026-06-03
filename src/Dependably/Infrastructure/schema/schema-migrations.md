@@ -54,6 +54,29 @@ Only drop in a release where no application code reads or writes that column/tab
 
 Destructive drops live in `SchemaInitializer` as a `RunOnceAsync(...)` call so the migration ledger guarantees they run exactly once per database. SQLite ≥ 3.35 and Postgres both support `ALTER TABLE ... DROP COLUMN` natively. Examples: `drop_legacy_token_scope_column` retires the `user_tokens.scope` / `service_tokens.scope` columns now that capabilities is the single source of truth; `drop_package_versions_sbom_column` retires the orphaned per-version SBOM blob (the only producer wrapped coordinate fields in CycloneDX JSON; the read endpoint was removed in the API cleanup pass). The `RunOnceAsync` helper emits an info-level log on apply and on skip so operators can confirm the migration state from startup logs.
 
+### Widening a CHECK constraint (enum-style columns)
+
+Several columns constrain their values with `CHECK (col IN (...))` (e.g. `users.role`,
+`org_settings.block_deprecated`). Adding a new allowed value needs work on **both** the fresh-install
+and the upgrade path, because the two paths produce different on-disk shapes:
+
+- **Fresh installs** get the constraint from the `CREATE TABLE` block — so widen the `IN (...)` list
+  in both `Schema.sql` and `Schema.pg.sql`.
+- **Existing databases** need the stored constraint rewritten via a `RunOnceAsync(..., transactional: false)`
+  one-shot. Postgres drops + re-adds the auto-named `<table>_<col>_check` constraint (`IF EXISTS` covers
+  installs that never had one); SQLite rewrites the stored `CREATE TABLE` text through the
+  `PRAGMA writable_schema` pattern, then bumps `PRAGMA schema_version` and runs `integrity_check`.
+  Both branches are idempotent, which is why they opt out of the enclosing transaction.
+- **Columns added by a later `ALTER ADD COLUMN`** (rather than the original `CREATE TABLE`) carry **no**
+  CHECK on upgraded databases, so those installs rely on controller-side validation — the rewrite simply
+  no-ops on them.
+
+Precedents: `expand_role_check_with_auditor` (adds `'auditor'` to `users.role` / `invites.role`) and
+`expand_block_deprecated_check` (widens `org_settings.block_deprecated` to `'block_new'`/`'block_all'`).
+When the new value also supersedes an old one, follow the CHECK widen with a normal transactional data
+migration to rewrite legacy rows — e.g. `migrate_block_deprecated_to_block_all` rewrites the retired
+`'block'` value to `'block_all'`, ordered *after* the CHECK widen so the new value is permitted.
+
 ### Index changes
 
 Adding or removing indexes is always safe — they don't affect data visible to running code.
@@ -87,6 +110,7 @@ The current `Schema.sql` is fully blue-green compatible:
 | `service_tokens` | ✓ | `expires_at` nullable |
 | `invites` | ✓ | `accepted_at` nullable |
 | `allowlist` | ✓ | Unique constraint is additive |
+| `upstream_registry` | ✓ | New table; all non-null columns have defaults; unique/index additive |
 | `audit_log` | ✓ | All optional columns nullable |
 | `activity` | ✓ | `detail` nullable |
 | `vulnerabilities` | ✓ | Optional fields nullable |

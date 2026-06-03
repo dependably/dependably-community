@@ -1,7 +1,7 @@
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Maps inbound <c>Host</c> headers to ecosystem path prefixes for transparent intercept (#43).
+/// Maps inbound <c>Host</c> headers to ecosystem path prefixes for transparent intercept.
 /// Configured via <c>HOST_ROUTING</c> as comma-separated <c>host=ecosystem</c> pairs:
 /// <code>HOST_ROUTING=registry.npmjs.org=npm,pypi.org=pypi,files.pythonhosted.org=pypi,api.nuget.org=nuget,repo.maven.apache.org=maven,registry-1.docker.io=oci</code>
 ///

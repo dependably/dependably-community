@@ -4,7 +4,7 @@ using System.Text;
 namespace Dependably.Protocol;
 
 /// <summary>
-/// Parses the RPM v3 / v4 header structure from a .rpm file's leading bytes (#100).
+/// Parses the RPM v3 / v4 header structure from a .rpm file's leading bytes.
 ///
 /// File layout reference (RPM Package Format Wiki / rpm-software-management/rpm headerlib.c):
 /// <code>

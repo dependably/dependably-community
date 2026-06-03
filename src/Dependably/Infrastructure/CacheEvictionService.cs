@@ -4,7 +4,7 @@ using Dependably.Storage;
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Periodic eviction of the shared proxy cache (#48). Three caps, all optional:
+/// Periodic eviction of the shared proxy cache. Three caps, all optional:
 /// <list type="bullet">
 ///   <item><c>CACHE_MAX_AGE_DAYS</c> — evict artifacts not accessed in N days</item>
 ///   <item><c>CACHE_MAX_SIZE_BYTES</c> — evict oldest-accessed until under cap</item>
@@ -15,13 +15,13 @@ namespace Dependably.Infrastructure;
 /// is what prevents two replicas evicting the same row twice.
 ///
 /// Eviction always cascades: deleting a <c>cache_artifact</c> row drops the FK-cascade
-/// <c>tenant_artifact_access</c> rows automatically (#48 keep/cascade decision: cascade by
+/// <c>tenant_artifact_access</c> rows automatically (keep/cascade decision: cascade by
 /// default; usage history without a backing artifact is dead weight).
 /// </summary>
 public sealed class CacheEvictionService : BackgroundService
 {
     private readonly CacheArtifactRepository _cache;
-    private readonly IBlobStore _blobs;   // TieredBlobStorage.Cache — only ever deletes from the cache tier (#57)
+    private readonly IBlobStore _blobs;   // TieredBlobStorage.Cache — only ever deletes from the cache tier
     private readonly IConfiguration _config;
     private readonly ILogger<CacheEvictionService> _logger;
 

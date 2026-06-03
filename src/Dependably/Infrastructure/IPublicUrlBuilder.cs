@@ -7,7 +7,7 @@ namespace Dependably.Infrastructure;
 ///
 /// Scheme precedence: <c>BASE_URL</c>'s scheme when set (e.g. https behind a TLS-terminating
 /// proxy), otherwise the request's scheme. Host always comes from the inbound request — this is
-/// what makes transparent intercept (#43) work, where the host the client reached us on is the
+/// what makes transparent intercept work, where the host the client reached us on is the
 /// host we must echo back in metadata documents.
 /// </summary>
 public interface IPublicUrlBuilder

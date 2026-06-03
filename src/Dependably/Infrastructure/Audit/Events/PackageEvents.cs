@@ -15,7 +15,7 @@ internal static class EventJsonOptions
 }
 
 /// <summary>
-/// Typed payload shapes for package-level audit events (#52). Each record's
+/// Typed payload shapes for package-level audit events. Each record's
 /// <c>ToJson()</c> produces the JSON body the audit_event row's <c>payload</c> column
 /// expects. Required-init properties enforce that mandatory fields land in every event;
 /// missing data fails at construction rather than on read.

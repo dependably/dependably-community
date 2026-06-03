@@ -137,6 +137,8 @@ public sealed class SystemController : ControllerBase
                 await conn.ExecuteAsync(
                     "INSERT INTO org_settings (org_id) VALUES (@id)",
                     new { id = orgId });
+                // Seed the standard public upstreams so the new tenant proxies out of the box.
+                await Dependably.Infrastructure.UpstreamRegistrySeeder.SeedForOrgAsync(conn, orgId, _config, ct: ct);
 
                 ownerPassword = Convert.ToBase64String(
                     System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
@@ -367,8 +369,8 @@ public sealed class SystemController : ControllerBase
 
     /// <summary>
     /// GET /api/v1/system/background-jobs — per-run history for the IHostedService workers
-    /// (vuln scan / rescan, retention, cache eviction, orphan reconciler, …). Replaces the
-    /// in-memory last-success dictionary that used to surface on the Observability page.
+    /// (vuln scan / rescan, retention, cache eviction, orphan reconciler, …). Replaces an
+    /// earlier in-memory last-success dictionary with a persistent per-run record.
     /// Filters: <c>?search=</c>, <c>?jobName=</c>, <c>?outcome=</c>. Sort:
     /// <c>?sortBy=startedAt|jobName|durationMs|outcome</c>, <c>?sortDir=asc|desc</c>.
     /// </summary>

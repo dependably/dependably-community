@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 namespace Dependably.Protocol;
 
 /// <summary>
-/// Offline <see cref="IOsvSource"/> for air-gapped deployments (#41). Reads OSV JSON dumps
+/// Offline <see cref="IOsvSource"/> for air-gapped deployments. Reads OSV JSON dumps
 /// from a sideloaded directory at <c>OSV_LOCAL_PATH</c> and answers queries from an
 /// in-memory index. The operator's out-of-band process refreshes the directory; this source
 /// re-loads on a configurable interval (<c>OSV_LOCAL_REFRESH_MINUTES</c>, default 60).

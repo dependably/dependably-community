@@ -43,9 +43,9 @@ CREATE TABLE IF NOT EXISTS org_settings (
     max_upload_bytes_pypi   INTEGER,
     max_upload_bytes_npm    INTEGER,
     max_upload_bytes_nuget  INTEGER,
-    max_upload_bytes_maven  INTEGER,           -- #99 per-ecosystem Maven cap; falls back to max_upload_bytes
-    max_upload_bytes_rpm    INTEGER,           -- #100 per-ecosystem RPM cap; falls back to max_upload_bytes
-    max_upload_bytes_oci    INTEGER,           -- #101 per-ecosystem OCI (Docker) cap; falls back to max_upload_bytes
+    max_upload_bytes_maven  INTEGER,           -- per-ecosystem Maven cap; falls back to max_upload_bytes
+    max_upload_bytes_rpm    INTEGER,           -- per-ecosystem RPM cap; falls back to max_upload_bytes
+    max_upload_bytes_oci    INTEGER,           -- per-ecosystem OCI (Docker) cap; falls back to max_upload_bytes
     keep_versions       INTEGER,            -- GC: max versions to retain per package per ecosystem
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
     activity_retention_days INTEGER,        -- GC: delete activity rows older than this
@@ -59,8 +59,18 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- action once the threshold passes (no automatic rescan).
     min_release_age_hours     INTEGER,
     default_language          TEXT    NOT NULL DEFAULT 'en',  -- new tenant users start with this locale
-    allow_version_overwrite   INTEGER NOT NULL DEFAULT 0,   -- #45 replacement policy; off by default
-    maven_reserved_prefixes   TEXT    NOT NULL DEFAULT '[]' -- #101 dep-confusion guard; JSON array of groupId prefixes
+    allow_version_overwrite   INTEGER NOT NULL DEFAULT 0,   -- replacement policy; off by default
+    maven_reserved_prefixes   TEXT    NOT NULL DEFAULT '[]', -- dep-confusion guard; JSON array of groupId prefixes
+    -- Per-tenant air-gap posture. When 1, this org makes no outbound network requests:
+    -- proxy passthrough is forced off (uncached upstream returns 404), and the vulnerability
+    -- and deprecation-metadata scan passes skip this org. Composes with the instance AIR_GAPPED
+    -- env var (effective air-gap = instance OR tenant).
+    air_gapped                INTEGER NOT NULL DEFAULT 0,
+    -- Policy for upstream-deprecated/abandoned packages: 'off' (allow), 'warn' (surface in UI),
+    -- 'block_new' (refuse a deprecated version on cache miss — never fetch/cache/serve it — but
+    -- keep serving already-cached versions), 'block_all' (block_new plus deny already-cached
+    -- versions once deprecated). Both gates key on package_versions.deprecated being set.
+    block_deprecated          TEXT    NOT NULL DEFAULT 'off' CHECK (block_deprecated IN ('off', 'warn', 'block_new', 'block_all'))
 );
 
 CREATE TABLE IF NOT EXISTS instance_settings (
@@ -161,6 +171,9 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- pre-date the column; the additive backfill migration in SchemaInitializer fills
     -- them in from blob_key's last '/' segment.
     filename    TEXT,
+    -- ISO 8601 UTC; set after the last upstream deprecation metadata refresh.
+    -- NULL on rows that pre-date the deprecation refresh service or have never been checked.
+    deprecation_checked_at TEXT,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     UNIQUE (package_id, version)
 );
@@ -219,6 +232,26 @@ CREATE TABLE IF NOT EXISTS blocklist (
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     UNIQUE (org_id, pattern)
 );
+
+-- Per-org upstream proxy registries. One ordered list per ecosystem; `position` ascending is
+-- priority (lowest tried first, falling through on miss/unreachable). An ecosystem with zero
+-- rows has proxying effectively disabled for that org. auth_type/username/secret are reserved
+-- for authenticated upstreams and are dormant in community (anonymous-only).
+CREATE TABLE IF NOT EXISTS upstream_registry (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem   TEXT NOT NULL,              -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm'
+    name        TEXT,                       -- optional display label
+    url         TEXT NOT NULL,
+    position    INTEGER NOT NULL DEFAULT 0, -- ascending = priority; lowest tried first
+    auth_type   TEXT NOT NULL DEFAULT 'anonymous',
+    username    TEXT,
+    secret      TEXT,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    UNIQUE (org_id, ecosystem, url)
+);
+CREATE INDEX IF NOT EXISTS idx_upstream_registry_org_eco
+    ON upstream_registry(org_id, ecosystem, position);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id          TEXT PRIMARY KEY,
@@ -292,16 +325,16 @@ CREATE INDEX IF NOT EXISTS idx_vulns_ecosystem_pkg ON vulnerabilities(ecosystem,
 CREATE INDEX IF NOT EXISTS idx_pkg_version_vulns_version ON package_version_vulns(package_version_id);
 CREATE INDEX IF NOT EXISTS idx_package_versions_package ON package_versions(package_id);
 -- Hot path: PyPI/npm/NuGet downloads resolve a file to a version row by trailing filename.
--- The pre-#91 query used `blob_key LIKE '%/' || filename` — a leading-wildcard LIKE that
--- SQLite cannot serve from any index, so every download was a full scan of package_versions.
--- This index serves the equality lookup on the normalized `filename` column.
+-- A leading-wildcard `blob_key LIKE '%/' || filename` lookup cannot be served from any
+-- index, forcing a full scan of package_versions on every download. This index serves the
+-- equality lookup on the normalized `filename` column instead.
 CREATE INDEX IF NOT EXISTS idx_package_versions_filename ON package_versions(filename);
 CREATE INDEX IF NOT EXISTS idx_audit_log_org ON audit_log(org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_org ON activity(org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_tokens_hash ON user_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_service_tokens_hash ON service_tokens(token_hash);
 
--- License governance (#21)
+-- License governance
 CREATE TABLE IF NOT EXISTS package_version_licenses (
     id                  TEXT PRIMARY KEY,
     package_version_id  TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
@@ -329,7 +362,7 @@ CREATE TABLE IF NOT EXISTS license_blocklist (
 
 CREATE INDEX IF NOT EXISTS idx_pkg_version_licenses ON package_version_licenses(package_version_id);
 
--- #100 RPM metadata. One row per package_versions row carrying everything the RPM header
+-- RPM metadata. One row per package_versions row carrying everything the RPM header
 -- parser pulls from a .rpm upload. Arrays (requires/provides/files/changelogs) are stored
 -- as JSON strings so the repodata generator can re-emit them as XML without a second
 -- query roundtrip.
@@ -364,7 +397,7 @@ CREATE TABLE IF NOT EXISTS rpm_metadata (
 );
 CREATE INDEX IF NOT EXISTS idx_rpm_metadata_arch ON rpm_metadata(arch);
 
--- #100 repodata generation state. One row per (org, arch); dirty flag drives the async
+-- Repodata generation state. One row per (org, arch); dirty flag drives the async
 -- rebuild service. generation increments each rebuild so concurrent rebuilds detect
 -- stale generations and back off without rewriting the same arch twice.
 CREATE TABLE IF NOT EXISTS rpm_repodata_state (
@@ -376,7 +409,7 @@ CREATE TABLE IF NOT EXISTS rpm_repodata_state (
     PRIMARY KEY (org_id, arch)
 );
 
--- #99 Maven: one package_versions row per (groupId:artifactId, version) but multiple files
+-- Maven: one package_versions row per (groupId:artifactId, version) but multiple files
 -- per version (JAR + POM + sources JAR + javadoc + checksum sidecars). This table tracks
 -- the per-file extension/classifier/blob mapping so the controller can answer arbitrary
 -- file-suffix requests without re-parsing PURLs at the DB layer.
@@ -398,7 +431,7 @@ CREATE TABLE IF NOT EXISTS maven_version_files (
 CREATE INDEX IF NOT EXISTS idx_maven_version_files_version ON maven_version_files(package_version_id);
 CREATE INDEX IF NOT EXISTS idx_maven_version_files_filename ON maven_version_files(filename);
 
--- #98 OCI / Docker registry storage. Manifests and blobs are both content-addressed; this
+-- OCI / Docker registry storage. Manifests and blobs are both content-addressed; this
 -- table is the metadata index. Bytes live under BlobKeys.OciBlob in the blob store.
 -- media_type tags whether the row is a manifest (manifest.v2+json,
 -- vnd.oci.image.index.v1+json, etc.) or a layer (vnd.oci.image.layer.v1.tar+gzip etc.).
@@ -412,7 +445,7 @@ CREATE TABLE IF NOT EXISTS oci_blobs (
     blob_key      TEXT NOT NULL,           -- BlobKeys.OciBlob(...)
     cached_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     upstream_checked_at TEXT,
-    origin        TEXT NOT NULL DEFAULT 'uploaded',  -- #103 'uploaded' (local push) or 'proxy' (upstream cache)
+    origin        TEXT NOT NULL DEFAULT 'uploaded',  -- 'uploaded' (local push) or 'proxy' (upstream cache)
     PRIMARY KEY (digest, org_id)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_blobs_org ON oci_blobs(org_id);
@@ -424,7 +457,7 @@ CREATE TABLE IF NOT EXISTS oci_tags (
     tag         TEXT NOT NULL,
     digest      TEXT NOT NULL,
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    last_revalidated TEXT,  -- #103 per-tag TTL revalidation timestamp; NULL forces a re-check on first access
+    last_revalidated TEXT,  -- per-tag TTL revalidation timestamp; NULL forces a re-check on first access
     PRIMARY KEY (org_id, repository, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_tags_repository ON oci_tags(org_id, repository);
@@ -473,6 +506,11 @@ CREATE TABLE IF NOT EXISTS tenant_saml_config (
     button_label        TEXT,
     last_test_at        TEXT,
     last_test_email     TEXT,
+    last_test_claims    TEXT,                          -- JSON array of {type,values[]} from latest test
+    idp_signing_cert_override TEXT,                    -- base64 X.509 admin-pinned override; sole trust anchor when set
+    role_attribute      TEXT,                          -- claim type to read roles from; NULL = built-in list
+    role_mapping        TEXT,                          -- JSON object {"<idp value>": "owner|admin|member|auditor"}
+    default_role        TEXT NOT NULL DEFAULT 'member', -- role when no mapping matches
     updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 
@@ -507,11 +545,11 @@ CREATE TABLE IF NOT EXISTS external_identities (
 );
 CREATE INDEX IF NOT EXISTS idx_external_identities_user ON external_identities(user_id);
 
--- ── Multitenant architecture (#43–#54) ─────────────────────────────────────────
+-- ── Multitenant architecture ─────────────────────────────────────────
 -- New tables and columns introduced by the multitenant architecture roadmap. Each
 -- table here keeps the org_id-first composite-index convention from older tables.
 
--- #47 per-tenant package name claims. Three states: unclaimed (default; reject local writes),
+-- Per-tenant package name claims. Three states: unclaimed (default; reject local writes),
 -- local_only (proxy disabled, local writes accepted), mixed (both, local wins on collision).
 CREATE TABLE IF NOT EXISTS claim (
     id          TEXT PRIMARY KEY,
@@ -528,7 +566,7 @@ CREATE TABLE IF NOT EXISTS claim (
 );
 CREATE INDEX IF NOT EXISTS idx_claim_org_state ON claim (org_id, state);
 
--- #47 append-only history of claim transitions. Forensic record + UI history view.
+-- Append-only history of claim transitions. Forensic record + UI history view.
 CREATE TABLE IF NOT EXISTS claim_history (
     id              TEXT PRIMARY KEY,
     org_id          TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -545,7 +583,7 @@ CREATE TABLE IF NOT EXISTS claim_history (
 CREATE INDEX IF NOT EXISTS idx_claim_history_org_time ON claim_history (org_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_claim_history_claim ON claim_history (claim_id, occurred_at DESC);
 
--- #48 global shared proxy-cache index. One row per (ecosystem, name, version, filename).
+-- Global shared proxy-cache index. One row per (ecosystem, name, version, filename).
 -- No tenant column: the artifact is content-addressed and shared across tenants.
 -- last_accessed_at drives LRU eviction; per-tenant access lives in tenant_artifact_access.
 CREATE TABLE IF NOT EXISTS cache_artifact (
@@ -565,7 +603,7 @@ CREATE TABLE IF NOT EXISTS cache_artifact (
 );
 CREATE INDEX IF NOT EXISTS idx_cache_artifact_lru ON cache_artifact (last_accessed_at);
 
--- #48 per-tenant access tracking on the shared cache. Answers "which tenants pulled X" for
+-- Per-tenant access tracking on the shared cache. Answers "which tenants pulled X" for
 -- vulnerability response. Upserted on every cache hit and lazy fetch.
 CREATE TABLE IF NOT EXISTS tenant_artifact_access (
     org_id              TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -578,7 +616,7 @@ CREATE TABLE IF NOT EXISTS tenant_artifact_access (
 CREATE INDEX IF NOT EXISTS idx_tenant_artifact_access_artifact
     ON tenant_artifact_access (cache_artifact_id);
 
--- #48 cached upstream metadata documents (npm package JSON, PyPI simple HTML, NuGet registration).
+-- Cached upstream metadata documents (npm package JSON, PyPI simple HTML, NuGet registration).
 -- Global; freshness via TTL revalidation. Per-tenant access is not tracked (low privacy value;
 -- metadata changes too often for the tracking to be useful).
 CREATE TABLE IF NOT EXISTS metadata_cache (
@@ -594,8 +632,8 @@ CREATE TABLE IF NOT EXISTS metadata_cache (
 );
 CREATE INDEX IF NOT EXISTS idx_metadata_cache_expires ON metadata_cache (expires_at);
 
--- #52 typed audit events. Replaces the freeform audit_log gradually; both tables coexist
--- during M1.4. Envelope columns are required; payload is JSON. event_id is UUIDv7.
+-- Typed audit events. Replaces the freeform audit_log gradually; both tables coexist.
+-- Envelope columns are required; payload is JSON. event_id is UUIDv7.
 CREATE TABLE IF NOT EXISTS audit_event (
     event_id            TEXT PRIMARY KEY,                    -- UUIDv7
     schema_version      INTEGER NOT NULL DEFAULT 1,
@@ -656,8 +694,8 @@ CREATE INDEX IF NOT EXISTS idx_tenant_provisioning_jobs_org ON tenant_provisioni
 -- BackgroundJobScope.Dispose() fire-and-forget; surfaced in the sysadmin Audit page
 -- "Background Jobs" tab. id is a GUID-N; run_id matches the OTel trace correlation id
 -- attached to the activity. outcome is the same vocabulary BackgroundJobScope already
--- emits to the histogram ('success' | 'server_error' | 'cancelled'). No GC yet — see
--- the follow-up tracked alongside this PR for the retention pass.
+-- emits to the histogram ('success' | 'server_error' | 'cancelled'). No automatic
+-- retention yet — rows accumulate until a retention pass ages them out.
 CREATE TABLE IF NOT EXISTS background_job_runs (
     id              TEXT PRIMARY KEY,
     job_name        TEXT NOT NULL,
@@ -674,7 +712,7 @@ CREATE INDEX IF NOT EXISTS idx_background_job_runs_started_at
 CREATE INDEX IF NOT EXISTS idx_background_job_runs_job_started
     ON background_job_runs(job_name, started_at DESC);
 
--- Content-addressed negative cache for upstream 404 responses (#101, #102, #103).
+-- Content-addressed negative cache for upstream 404 responses.
 -- Shared across tenants — the key is SHA-256(url)[..32] which is content-addressed;
 -- a URL either 404s or it doesn't, regardless of which tenant fetched it first.
 -- TTL is enforced at query time (fetched_at >= now - ttl), not by a background sweep.

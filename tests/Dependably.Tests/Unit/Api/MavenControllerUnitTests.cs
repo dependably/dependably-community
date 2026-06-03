@@ -111,7 +111,10 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             // ProxyFetch is only reached on the proxy-miss path, which short-circuits to 404
             // here because Upstream is null. BlockGate runs on every cache hit, so it's real.
             ProxyFetch: null!,
-            BlockGate: new BlockGateService(new VulnerabilityRepository(_db), _audit));
+            BlockGate: new BlockGateService(new VulnerabilityRepository(_db), _audit),
+            // Real resolver over an empty registry list — these tests exercise publish/auth
+            // paths, not proxy fetches.
+            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db)));
 
         return new MavenController(svc)
         {
@@ -351,7 +354,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         Assert.False(string.IsNullOrWhiteSpace(content.Content));
     }
 
-    // ── Block gate (#101 vuln/manual gate on download) ───────────────────────
+    // ── Block gate (vuln/manual gate on download) ───────────────────────
 
     private async Task SetManualBlockStateAsync(string versionId, string state)
     {

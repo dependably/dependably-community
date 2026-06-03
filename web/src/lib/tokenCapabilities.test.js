@@ -14,6 +14,14 @@ describe('presetToCapabilities', () => {
     expect(presetToCapabilities('both')).toEqual(['read:metadata', 'read:artifact', 'publish:*'])
   })
 
+  it('admin → tenant configure + read tenant', () => {
+    expect(presetToCapabilities('admin')).toEqual(['tenant:configure', 'read:tenant'])
+  })
+
+  it('audit → audit-log read only', () => {
+    expect(presetToCapabilities('audit')).toEqual(['read:audit'])
+  })
+
   it('unknown preset falls back to pull (conservative default)', () => {
     expect(presetToCapabilities('something-else')).toEqual(['read:metadata', 'read:artifact'])
     expect(presetToCapabilities(undefined)).toEqual(['read:metadata', 'read:artifact'])
@@ -50,6 +58,14 @@ describe('capabilitiesToLabel', () => {
 
   it('publish without read → push', () => {
     expect(capabilitiesToLabel('["publish:*"]')).toBe('push')
+  })
+
+  it('tenant:configure → admin', () => {
+    expect(capabilitiesToLabel('["tenant:configure","read:tenant"]')).toBe('admin')
+  })
+
+  it('read:audit alone → audit', () => {
+    expect(capabilitiesToLabel('["read:audit"]')).toBe('audit')
   })
 
   it('non-string entries ignored gracefully', () => {

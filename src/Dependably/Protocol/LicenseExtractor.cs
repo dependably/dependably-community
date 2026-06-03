@@ -14,7 +14,7 @@ namespace Dependably.Protocol;
 /// returns <see cref="ExtractedMetadata.Empty"/> instead of throwing, so callers
 /// can wire it inline next to the version-create call without try/catch.
 ///
-/// <para><b>Stream ownership (#105):</b> all stream-accepting entry points assume the
+/// <para><b>Stream ownership:</b> all stream-accepting entry points assume the
 /// caller hands them a fresh stream positioned at offset 0 and never reads from it
 /// afterwards. The extractor takes ownership and disposes the stream before returning.
 /// Pass <c>await blob.OpenAsync(ct)</c> directly — do not wrap in <c>using</c>.</para>
@@ -25,7 +25,7 @@ namespace Dependably.Protocol;
 /// </summary>
 public static class LicenseExtractor
 {
-    // RecyclableMemoryStream pool for the non-seekable-backend zip path (#105). Default
+    // RecyclableMemoryStream pool for the non-seekable-backend zip path. Default
     // configuration is appropriate for the proxy-fetch artefact range — buffers are
     // capped at the upstream 600 MB ceiling enforced in UpstreamClient.FetchAndStageAsync,
     // and extraction runs serially after the response has been written, so the worst
@@ -83,7 +83,7 @@ public static class LicenseExtractor
             if (tarResult is not null) return tarResult;
             // Tar parse failed — we've consumed the upstream stream so we can't retry as
             // zip. PyPI almost never serves sdists with a tar.gz extension that aren't
-            // actually tar.gz; returning null is the same fail-soft we had before #105.
+            // actually tar.gz; returning null is the same fail-soft we had previously.
             return null;
         }
 

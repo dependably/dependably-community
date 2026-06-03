@@ -173,6 +173,41 @@ public sealed class FirstBootServiceTests
     }
 
     [Fact]
+    public async Task RunAsync_SingleMode_SeedsDefaultUpstreamRegistries_RpmOnlyWhenConfigured()
+    {
+        await using var fx = await NewFixtureAsync();
+        // No Rpm:Upstream set → rpm must NOT be seeded (no default upstream for RPM).
+        await NewSut(fx, Cfg()).RunAsync();
+
+        await using var conn = await fx.Store.OpenAsync();
+        var rows = (await conn.QueryAsync<(string Ecosystem, string Url)>(
+            "SELECT ecosystem AS Ecosystem, url AS Url FROM upstream_registry ORDER BY ecosystem")).ToList();
+
+        var map = rows.ToDictionary(r => r.Ecosystem, r => r.Url);
+        Assert.Equal("https://pypi.org", map["pypi"]);
+        Assert.Equal("https://registry.npmjs.org", map["npm"]);
+        Assert.Equal("https://api.nuget.org/v3", map["nuget"]);
+        Assert.Equal("https://repo1.maven.org/maven2", map["maven"]);
+        Assert.False(map.ContainsKey("rpm"));   // RPM has no default — not seeded
+    }
+
+    [Fact]
+    public async Task RunAsync_SingleMode_UpstreamConfigOverride_IsSeededInsteadOfDefault()
+    {
+        await using var fx = await NewFixtureAsync();
+        await NewSut(fx, Cfg(
+            ("PyPI:Upstream", "https://pypi.internal.example"),
+            ("Rpm:Upstream", "https://rpm.internal.example/repo"))).RunAsync();
+
+        await using var conn = await fx.Store.OpenAsync();
+        Assert.Equal("https://pypi.internal.example", await conn.ExecuteScalarAsync<string>(
+            "SELECT url FROM upstream_registry WHERE ecosystem = 'pypi'"));
+        // Rpm:Upstream set → rpm IS seeded with the configured mirror.
+        Assert.Equal("https://rpm.internal.example/repo", await conn.ExecuteScalarAsync<string>(
+            "SELECT url FROM upstream_registry WHERE ecosystem = 'rpm'"));
+    }
+
+    [Fact]
     public async Task RunAsync_MultiMode_PreferringSystemAdminPasswordOverGenericAdminPassword()
     {
         // The multi-mode system admin password takes precedence over the generic

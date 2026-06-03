@@ -10,7 +10,7 @@ using Microsoft.Extensions.Options;
 namespace Dependably.Protocol;
 
 /// <summary>
-/// Manages upstream Bearer tokens for OCI pull operations (#103).
+/// Manages upstream Bearer tokens for OCI pull operations.
 ///
 /// Each (upstream host, repository, scope) triple gets its own cached token. Thundering-herd
 /// prevention: a SemaphoreSlim per key ensures only one concurrent token-exchange request

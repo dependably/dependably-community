@@ -1,7 +1,7 @@
 namespace Dependably.Infrastructure.Audit;
 
 /// <summary>
-/// Typed audit event base record per #52. The envelope is mandatory and populated by
+/// Typed audit event base record. The envelope is mandatory and populated by
 /// <see cref="IAuditEmitter"/> from the request context — <c>EventType</c>, <c>OrgId</c>,
 /// <c>ActorType</c>, <c>Outcome</c>, and <c>Payload</c> are the only fields callers set
 /// explicitly.

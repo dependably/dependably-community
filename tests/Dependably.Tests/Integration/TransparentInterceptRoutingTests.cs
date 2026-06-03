@@ -5,7 +5,7 @@ using Xunit;
 namespace Dependably.Tests.Integration;
 
 /// <summary>
-/// #43 Phase 1: end-to-end proof that <c>HOST_ROUTING</c> + the
+/// End-to-end proof that <c>HOST_ROUTING</c> + the
 /// <c>TransparentInterceptMiddleware</c> rewrite the request path when the inbound
 /// <c>Host</c> matches a configured ecosystem host, and pass through unchanged
 /// otherwise. Without this test a regression in the middleware ordering, the host-map

@@ -1,12 +1,12 @@
 namespace Dependably.Security;
 
 /// <summary>
-/// Capability strings and role mappings per the RBAC matrix (#54). Capabilities are
+/// Capability strings and role mappings per the RBAC matrix. Capabilities are
 /// fine-grained permission strings; tokens carry an explicit subset and roles map to a
 /// fixed set. Capabilities are the single source of truth for permission checks — the
 /// legacy <c>scope</c> column was retired in PR-7 / followup.
 ///
-/// 1:1 tenancy stance (overrides #54's multi-tenant user model): every user belongs to
+/// 1:1 tenancy stance (overrides the multi-tenant user model): every user belongs to
 /// exactly one tenant. Cross-tenant work happens only via the system_admin operator
 /// dashboard with an audited assume-tenant flow. The roles defined here therefore apply
 /// within a tenant only; the platform-admin level is represented by the
@@ -134,7 +134,7 @@ public static class Capabilities
     /// <summary>
     /// Capability set for the operator (<c>system_admin</c> role on the JWT). Platform
     /// admins read everything but to write to tenant-scoped data they assume a tenant role
-    /// temporarily — see <c>system.assume_tenant_role</c> audit event in M1.4.
+    /// temporarily — see <c>system.assume_tenant_role</c> audit event.
     /// </summary>
     public static IReadOnlySet<string> ForPlatformAdmin() => PlatformAdminCaps;
 

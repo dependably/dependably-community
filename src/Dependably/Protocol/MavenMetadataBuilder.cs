@@ -4,7 +4,7 @@ using System.Xml.Linq;
 namespace Dependably.Protocol;
 
 /// <summary>
-/// Generates artifact-level <c>maven-metadata.xml</c> from a list of known versions (#99).
+/// Generates artifact-level <c>maven-metadata.xml</c> from a list of known versions.
 ///
 /// Shape (per Maven convention):
 /// <code>

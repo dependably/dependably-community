@@ -7,6 +7,7 @@
 -->
 <script>
   import { t } from 'svelte-i18n'
+  import InfoTip from '../InfoTip.svelte'
 
   export let settings
   export let saving = false
@@ -19,22 +20,33 @@
     <input type="checkbox" bind:checked={settings.anonymousPull} class="w-auto" />
   </div>
   <div class="form-row form-row-inline">
-    <label class="flex-1">{$t('settings.general.defaultLanguage')}</label>
+    <label class="flex-1 label-row">{$t('settings.general.defaultLanguage')} <InfoTip text={$t('settings.general.defaultLanguageHint')} /></label>
     <select bind:value={settings.defaultLanguage} class="w-auto">
       <option value="en">English</option>
       <option value="fr">Français</option>
     </select>
   </div>
-  <div class="form-hint nudge-up mb-3">{$t('settings.general.defaultLanguageHint')}</div>
 
   <div class="form-row form-row-inline">
-    <label class="flex-1">{$t('settings.general.allowVersionOverwrite')}</label>
+    <label class="flex-1 label-row">{$t('settings.general.allowVersionOverwrite')} <InfoTip text={$t('settings.general.allowVersionOverwriteHint')} /></label>
     <input type="checkbox" bind:checked={settings.allowVersionOverwrite} class="w-auto" />
   </div>
   {#if settings.allowVersionOverwrite}
     <div class="warning-box mb-3">{$t('settings.general.allowVersionOverwriteWarning')}</div>
-  {:else}
-    <div class="form-hint nudge-up mb-3">{$t('settings.general.allowVersionOverwriteHint')}</div>
+  {/if}
+
+  <div class="form-row form-row-inline">
+    <label class="flex-1 label-row">{$t('settings.general.airGapped')} <InfoTip text={$t('settings.general.airGappedHint')} /></label>
+    {#if settings.airGappedEnforced}
+      <input type="checkbox" checked disabled class="w-auto" />
+    {:else}
+      <input type="checkbox" bind:checked={settings.airGapped} class="w-auto" />
+    {/if}
+  </div>
+  {#if settings.airGappedEnforced}
+    <div class="form-hint mb-3">{$t('settings.general.airGappedEnforcedNote')}</div>
+  {:else if settings.airGapped}
+    <div class="warning-box mb-3">{$t('settings.general.airGappedWarning')}</div>
   {/if}
 
   <button class="primary" on:click={onSave} disabled={saving}>
@@ -54,5 +66,4 @@
   }
   .card-narrow { max-width: 480px; }
   .form-row-inline { flex-direction: row; align-items: center; gap: 12px; }
-  .nudge-up { margin-top: -8px; }
 </style>

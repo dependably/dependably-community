@@ -23,7 +23,7 @@ public sealed class TokenRepository
 
         var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-        // #93: single UNION ALL query collapses the previous two-round-trip lookup
+        // Single UNION ALL query collapses the previous two-round-trip lookup
         // (user_tokens THEN service_tokens) into one. token_hash is SHA-256 of a
         // securely-generated token, so the same hash cannot appear in both tables — at
         // most one branch matches. The `source` literal column lets us route the result

@@ -69,7 +69,7 @@ public static class ChecksumVerifier
     /// <summary>
     /// Streaming SHA-256 of an unread stream. Reads through to EOF using a single 81920-byte
     /// buffer + <see cref="IncrementalHash"/>; does not buffer the whole stream. Used by the
-    /// hash-and-stage proxy-fetch path (#104) where the bytes have already been written to a
+    /// hash-and-stage proxy-fetch path where the bytes have already been written to a
     /// temp file and we re-read them for blob upload.
     /// </summary>
     public static async ValueTask<string> ComputeSha256HexAsync(Stream data, CancellationToken ct = default)

@@ -106,7 +106,7 @@ public sealed class AuditRepository
             SourceIp: sourceIp,
             CreatedAt: NowMs());
 
-        // #90: fast path — when the async writer is wired (production DI), enqueue and
+        // Fast path — when the async writer is wired (production DI), enqueue and
         // return without touching the DB on the request thread. The hosted-service
         // drainer batches inserts. The synchronous fallback below preserves test
         // behaviour (tests that introspect the `activity` table after a call still see

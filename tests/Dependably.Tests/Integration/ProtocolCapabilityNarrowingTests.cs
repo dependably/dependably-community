@@ -9,7 +9,7 @@ using Xunit;
 namespace Dependably.Tests.Integration;
 
 /// <summary>
-/// #54: prove that protocol publish endpoints (NpmController, PyPiController,
+/// Prove that protocol publish endpoints (NpmController, PyPiController,
 /// NuGetController) enforce per-ecosystem capability narrowing via
 /// <c>HasCapability(Capabilities.PublishNpm/Pypi/Nuget)</c>. A token with
 /// <c>capabilities=["publish:npm"]</c> must publish npm but be rejected by PyPI and

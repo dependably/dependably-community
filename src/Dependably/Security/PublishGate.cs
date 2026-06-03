@@ -4,14 +4,14 @@ using Microsoft.AspNetCore.Mvc;
 namespace Dependably.Security;
 
 /// <summary>
-/// Feature-flagged claim gate for publish/import paths (#45 + #47). When
+/// Feature-flagged claim gate for publish/import paths. When
 /// <c>CLAIM_ENFORCEMENT=on</c>, every publish handler consults this gate before accepting an
 /// upload; unclaimed names are rejected with a structured 409 that includes the action the
 /// caller should take. Default is <c>off</c> for backward-compatibility — existing
 /// deployments and the compliance test suite continue working unchanged. Operators flip the
 /// flag once they have established their initial set of claims.
 ///
-/// In air-gap mode every name resolves to implicit <c>local_only</c> (#46/#47), so the gate
+/// In air-gap mode every name resolves to implicit <c>local_only</c>, so the gate
 /// is effectively a no-op there even when the flag is on. The check still runs because an
 /// operator might have created an explicit <c>unclaimed</c> claim row to deny publishing on
 /// a specific name.

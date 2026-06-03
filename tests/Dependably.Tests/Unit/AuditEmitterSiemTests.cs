@@ -12,7 +12,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// #40 + #52: AuditEmitter must enqueue every persisted event to the optional
+/// AuditEmitter must enqueue every persisted event to the optional
 /// <see cref="SiemForwarderQueue"/>. Without this wiring the entire outbound SIEM
 /// path is dead weight — this test exists so future refactors that drop the
 /// enqueue (eg. by accident during DI cleanup) fail loudly.

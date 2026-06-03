@@ -7,7 +7,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Acceptance tests for #90: <see cref="AuditRepository.LogActivityAsync"/> hot-path
+/// Acceptance tests for <see cref="AuditRepository.LogActivityAsync"/>: the hot-path
 /// must enqueue into the writer's channel and return without touching the DB; the
 /// hosted-service drainer must batch the rows into a single INSERT pass.
 /// </summary>

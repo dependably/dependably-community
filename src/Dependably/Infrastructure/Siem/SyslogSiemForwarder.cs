@@ -7,7 +7,7 @@ using System.Text;
 namespace Dependably.Infrastructure.Siem;
 
 /// <summary>
-/// Sends each event as one syslog message over UDP, TCP, or TLS (#40). Format selectable
+/// Sends each event as one syslog message over UDP, TCP, or TLS. Format selectable
 /// via <c>SIEM_SYSLOG_FORMAT</c>: <c>cef</c> (default; matches the CEF formatter used by
 /// <c>SiemController</c>'s pull endpoint) or <c>rfc5424</c>. The CEF body uses the same
 /// escape rules as the controller so collectors that already parse Dependably's pull-API
@@ -97,7 +97,7 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
     /// <summary>
     /// CEF body. Mirrors <c>SiemController.CefResult</c> — same field mapping and same escape rules.
     /// Both formatters should converge into a shared helper in a follow-up; for now they are
-    /// kept as parallel small implementations to avoid churn in the controller during M4.1.
+    /// kept as parallel small implementations to avoid churn in the controller.
     /// </summary>
     internal static string FormatCef(SiemEvent ev)
     {

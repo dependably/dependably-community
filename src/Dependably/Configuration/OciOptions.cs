@@ -3,7 +3,7 @@ using Microsoft.Extensions.Options;
 namespace Dependably.Configuration;
 
 /// <summary>
-/// Strongly typed configuration for OCI upstream proxy (#103).
+/// Strongly typed configuration for OCI upstream proxy.
 /// Bound from <c>Oci</c> section in appsettings.json / env vars.
 /// </summary>
 public sealed class OciOptions

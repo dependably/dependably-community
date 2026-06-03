@@ -6,7 +6,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Unit coverage for the RPM upload gate (#100). The validator is the cheap first-pass
+/// Unit coverage for the RPM upload gate. The validator is the cheap first-pass
 /// reject between raw upload bytes and the heavy <see cref="RpmHeaderParser"/>. Every
 /// rejection branch (size, parser failure, illegal NEVRA characters) needs a test so a
 /// regression to "accept everything" can't slip through.

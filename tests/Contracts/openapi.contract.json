@@ -148,6 +148,22 @@
         }
       }
     },
+    "/api/v1/auth-config/signing-cert": {
+      "operations": {
+        "delete": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/auth/login": {
       "operations": {
         "post": {
@@ -217,6 +233,16 @@
       }
     },
     "/api/v1/bootstrap": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/instance/background-jobs": {
       "operations": {
         "get": {
           "requiredParams": [],
@@ -402,6 +428,20 @@
     "/api/v1/packages/{ecosystem}/{name}/{version}": {
       "operations": {
         "delete": {
+          "requiredParams": [
+            "ecosystem",
+            "name",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/packages/{ecosystem}/{name}/{version}/download": {
+      "operations": {
+        "get": {
           "requiredParams": [
             "ecosystem",
             "name",
@@ -892,6 +932,46 @@
       }
     },
     "/api/v1/tokens/{id}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/upstream-registries": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/upstream-registries/{ecosystem}/order": {
+      "operations": {
+        "put": {
+          "requiredParams": [
+            "ecosystem"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/upstream-registries/{id}": {
       "operations": {
         "delete": {
           "requiredParams": [

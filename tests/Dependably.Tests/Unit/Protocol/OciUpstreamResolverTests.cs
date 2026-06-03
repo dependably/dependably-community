@@ -16,7 +16,7 @@ using Xunit;
 namespace Dependably.Tests.Unit.Protocol;
 
 /// <summary>
-/// Unit coverage for <see cref="OciUpstreamResolver"/> (#103).
+/// Unit coverage for <see cref="OciUpstreamResolver"/>.
 ///
 /// Coverage targets:
 ///  - MatchUpstream: prefix routing, catch-all (""), no match when list empty
@@ -279,7 +279,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     [Fact]
     public async Task FetchManifestAsync_UpstreamReturns401_ReturnsNull_DoesNotThrow()
     {
-        // Regression for #108: Docker Hub returns 401 (not 404) for a nonexistent /
+        // Regression test: Docker Hub returns 401 (not 404) for a nonexistent /
         // unauthorized repository, even after the token retry. The resolver must return
         // null — so OciController emits a clean OCI 404 MANIFEST_UNKNOWN — rather than
         // letting an HttpRequestException escape to a 500 with an empty body.
@@ -571,5 +571,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     {
         public StubAirGap(bool enabled) => IsEnabled = enabled;
         public bool IsEnabled { get; }
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => IsEnabled;
     }
 }

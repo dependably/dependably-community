@@ -10,10 +10,10 @@ using Dependably.Storage;
 namespace Dependably.Api;
 
 /// <summary>
-/// OCI Distribution Spec v2 surface (#98 + #103). Implements the read side so Docker daemons
+/// OCI Distribution Spec v2 surface. Implements the read side so Docker daemons
 /// configured against <c>/v2/</c> can <c>docker pull</c> images. Push is deferred.
 ///
-/// Cache-miss path (#103): when a manifest, blob, or tag list is not found in the local DB /
+/// Cache-miss path: when a manifest, blob, or tag list is not found in the local DB /
 /// blob store, <see cref="OciUpstreamResolver"/> is consulted. It probes the first matching
 /// upstream registry (prefix-based routing), fetches with Bearer-token auth, verifies the blob
 /// SHA-256 digest, writes to the Cache tier, and returns a stream the controller serves

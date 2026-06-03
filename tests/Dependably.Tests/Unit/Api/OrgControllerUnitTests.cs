@@ -30,7 +30,8 @@ public sealed class OrgControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = await b.OrgSettingsController.GetOrgSettings(CancellationToken.None);
-        Assert.IsType<OkObjectResult>(result);
+        // GET composes the settings model with airGappedEnforced and returns it via JsonResult.
+        Assert.IsType<JsonResult>(result);
     }
 
     [Fact]
@@ -461,32 +462,9 @@ public sealed class OrgControllerUnitTests
         Assert.True(result is OkObjectResult or NoContentResult or ObjectResult);
     }
 
-    // ── UpdateOrgSettings: upstream URL validation ────────────────────────────
-
-    [Theory]
-    [InlineData("not-a-url")]
-    [InlineData("ftp://registry.example.com")]
-    [InlineData("")]
-    public async Task UpdateOrgSettings_InvalidUpstreamUrl_Returns400(string badUrl)
-    {
-        await using var s = await ControllerScenario.CreateAsync();
-        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
-        var b = await s.BuildAsync();
-
-        // Pass the bad URL in each upstream slot in turn — the controller rejects the
-        // first bad one encountered and returns a BadRequest (not 422 — uses BadRequest
-        // directly with an `error` field).
-        var result = await b.OrgSettingsController.UpdateOrgSettings(
-            new UpdateOrgSettingsRequest(
-                AnonymousPull: false, AllowlistMode: false,
-                MaxUploadBytes: null,
-                MaxUploadBytesPyPi: null, MaxUploadBytesNpm: null, MaxUploadBytesNuGet: null,
-                PyPiUpstream: badUrl),
-            CancellationToken.None);
-
-        var status = (result as IStatusCodeActionResult)?.StatusCode;
-        Assert.Equal(StatusCodes.Status400BadRequest, status);
-    }
+    // Upstream URL validation moved off the settings endpoint to the dedicated
+    // upstream-registries endpoint (UpstreamRegistryController), which reuses the same
+    // UpstreamUrlValidator SSRF guard. Covered by UpstreamRegistryApiTests.
 
     // ── UpdateProxySettings: tolerance out of [0,10] ─────────────────────────
 
@@ -501,6 +479,67 @@ public sealed class OrgControllerUnitTests
 
         var result = await b.OrgSettingsController.UpdateProxySettings(
             new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true, MaxOsvScoreTolerance: badTolerance),
+            CancellationToken.None);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    // ── UpdateProxySettings: block_deprecated value handling ──────────────────
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("warn")]
+    [InlineData("block_new")]
+    [InlineData("block_all")]
+    public async Task UpdateProxySettings_ValidBlockDeprecated_Persists(string mode)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true, MaxOsvScoreTolerance: 10.0,
+                BlockDeprecated: mode),
+            CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        await using var conn = await b.Db.OpenAsync();
+        var stored = await conn.ExecuteScalarAsync<string>(
+            "SELECT block_deprecated FROM org_settings WHERE org_id = @org", new { org = b.PrimaryOrgId });
+        Assert.Equal(mode, stored);
+    }
+
+    [Fact]
+    public async Task UpdateProxySettings_LegacyBlock_NormalizesToBlockAll()
+    {
+        // Back-compat: the retired 'block' value maps to its successor 'block_all'.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true, MaxOsvScoreTolerance: 10.0,
+                BlockDeprecated: "block"),
+            CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        await using var conn = await b.Db.OpenAsync();
+        var stored = await conn.ExecuteScalarAsync<string>(
+            "SELECT block_deprecated FROM org_settings WHERE org_id = @org", new { org = b.PrimaryOrgId });
+        Assert.Equal("block_all", stored);
+    }
+
+    [Fact]
+    public async Task UpdateProxySettings_InvalidBlockDeprecated_Returns422()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true, MaxOsvScoreTolerance: 10.0,
+                BlockDeprecated: "nonsense"),
             CancellationToken.None);
 
         var obj = Assert.IsType<ObjectResult>(result);

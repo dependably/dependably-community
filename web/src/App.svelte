@@ -256,7 +256,7 @@
     border-radius: var(--radius);
   }
 
-  /* #46 air-gap badge: surfaces AIR_GAPPED=true so operators always see the deployment
+  /* Air-gap badge: surfaces AIR_GAPPED=true so operators always see the deployment
      mode without checking config. Amber to signal "the proxy fetch path is disabled" */
   .air-gap-badge {
     display: inline-flex;

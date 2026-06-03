@@ -19,7 +19,7 @@ using Xunit;
 namespace Dependably.Tests.Unit.Api;
 
 /// <summary>
-/// Proxy-path coverage for <see cref="RpmController"/> (#102).
+/// Proxy-path coverage for <see cref="RpmController"/>.
 ///
 /// Coverage targets:
 ///  - GET package: local miss → proxy resolves → UpstreamClient fetches → DB row written → bytes served
@@ -73,12 +73,29 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             new { orgId = _orgId });
     }
 
+    /// <summary>
+    /// Seeds one rpm upstream registry for the test org so the controller's
+    /// <see cref="UpstreamRegistryResolver"/> returns a non-empty list and the proxy path runs.
+    /// Without this the org has zero configured rpm registries (proxying disabled = 404).
+    /// </summary>
+    private async Task SeedRpmRegistryAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO upstream_registry (id, org_id, ecosystem, url, position)
+            VALUES (@id, @orgId, 'rpm', 'https://rpm.example.test/repo', 0)
+            """,
+            new { id = Guid.NewGuid().ToString("N"), orgId = _orgId });
+    }
+
     // ── Package proxy ─────────────────────────────────────────────────────────
 
     [Fact]
     public async Task Download_LocalMiss_FetchesFromUpstreamAndCachesInDb()
     {
         await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
         var bytes = RandomBytes(256);
         var sha256 = Sha256Hex(bytes);
         var filename = "tree-2.1.1-1.fc40.x86_64.rpm";
@@ -134,6 +151,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         // dnf composes baseurl + the upstream <location href> ("Packages/t/<file>"),
         // so the nested route must resolve to the same flat-filename download flow.
         await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
         var bytes = RandomBytes(256);
         var sha256 = Sha256Hex(bytes);
         var filename = "tree-2.1.1-1.fc40.x86_64.rpm";
@@ -181,6 +199,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     public async Task Download_LocalMiss_ResolutionNull_Returns404AndRecordsNegative()
     {
         await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
         var stubProxy = new StubProxy(resolution: null);
         var ctl = BuildController(proxy: stubProxy);
 
@@ -194,6 +213,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     public async Task Download_LocalMiss_NegativelyCached_Returns404WithoutResolve()
     {
         await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
         var stubProxy = new StubProxy(resolution: null, negativeCache: true);
         var ctl = BuildController(proxy: stubProxy);
 
@@ -232,12 +252,29 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         Assert.False(stubProxy.ResolveWasCalled);
     }
 
+    [Fact]
+    public async Task Download_NoRpmRegistryConfigured_Returns404()
+    {
+        // Empty upstream list = proxying disabled for the ecosystem, even with the proxy
+        // in passthrough mode. The controller must 404 without consulting the proxy.
+        await EnableAnonPullAsync();
+        // Deliberately no SeedRpmRegistryAsync(): the org has zero configured rpm registries.
+        var stubProxy = new StubProxy(resolution: null, assertNotCalled: true);
+        var ctl = BuildController(proxy: stubProxy);
+
+        var result = await ctl.Download("pkg-1.0-1.fc40.x86_64.rpm", default);
+
+        Assert.IsType<NotFoundResult>(result);
+        Assert.False(stubProxy.ResolveWasCalled);
+    }
+
     // ── Repodata proxy ────────────────────────────────────────────────────────
 
     [Fact]
     public async Task Repodata_RepomdXml_Passthrough_Returns200WithETag()
     {
         await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
         var repomdBytes = System.Text.Encoding.UTF8.GetBytes("<repomd/>");
         var repodata = new RepodataResult(repomdBytes, "application/xml", "\"abc\"", null, NotModified: false);
         var stubProxy = new StubProxy(repodataResult: repodata);
@@ -254,6 +291,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     public async Task Repodata_RepomdXml_Passthrough_304Propagated()
     {
         await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
         var repodata = new RepodataResult([], "application/xml", "\"abc\"", null, NotModified: true);
         var stubProxy = new StubProxy(repodataResult: repodata);
         var ctl = BuildController(proxy: stubProxy);
@@ -268,6 +306,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     public async Task Repodata_HashPrefixedFile_PassthroughServes()
     {
         await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
         var sha256 = new string('a', 64);
         var filename = $"{sha256}-primary.xml.gz";
         var body = new byte[] { 1, 2, 3 };
@@ -300,6 +339,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task GpgKey_ProxyReturnsKey_Returns200WithCorrectContentType()
     {
+        await SeedRpmRegistryAsync();
         var keyBytes = System.Text.Encoding.ASCII.GetBytes("-----BEGIN PGP PUBLIC KEY BLOCK-----\n");
         var stubProxy = new StubProxy(gpgKey: keyBytes);
         var ctl = BuildController(proxy: stubProxy);
@@ -324,6 +364,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task Upload_PassthroughMode_Returns409WithProblemDetails()
     {
+        await SeedRpmRegistryAsync();
         var stubProxy = new StubProxy(isPassthrough: true);
         var ctl = BuildController(proxy: stubProxy);
         ctl.ControllerContext.HttpContext.Request.Body = new MemoryStream();
@@ -372,6 +413,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             BlobStore: new TieredBlobStorage(_blobs, _blobs),
             Db: _db,
             Repodata: new RpmRepodataService(_db),
+            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db)),
             UpstreamClient: upstreamClient,
             Proxy: proxy);
 
@@ -424,6 +466,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         public bool NegativeRecorded { get; private set; }
         public bool ResolveWasCalled { get; private set; }
         public string? LastResolvedFilename { get; private set; }
+        public string? LastUpstreamBase { get; private set; }
 
         public StubProxy(
             PackageResolution? resolution = null,
@@ -441,15 +484,15 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             _assertNotCalled = assertNotCalled;
         }
 
-        public bool IsConfigured => true;
-        public bool IsPassthroughMode => _isPassthrough;
+        public bool IsPassthroughModeSelected => _isPassthrough;
 
-        public Task<PackageResolution?> ResolvePackageUrlAsync(string filename, CancellationToken ct)
+        public Task<PackageResolution?> ResolvePackageUrlAsync(string upstreamBase, string filename, CancellationToken ct)
         {
             if (_assertNotCalled)
                 throw new InvalidOperationException($"ResolvePackageUrlAsync must not be called (filename={filename})");
             ResolveWasCalled = true;
             LastResolvedFilename = filename;
+            LastUpstreamBase = upstreamBase;
             return Task.FromResult(_resolution);
         }
 
@@ -462,11 +505,17 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             return Task.CompletedTask;
         }
 
-        public Task<RepodataResult?> GetRepodataAsync(string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
-            => Task.FromResult(_repodataResult);
+        public Task<RepodataResult?> GetRepodataAsync(string upstreamBase, string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
+        {
+            LastUpstreamBase = upstreamBase;
+            return Task.FromResult(_repodataResult);
+        }
 
-        public Task<byte[]?> GetGpgKeyAsync(CancellationToken ct)
-            => Task.FromResult(_gpgKey);
+        public Task<byte[]?> GetGpgKeyAsync(string upstreamBase, CancellationToken ct)
+        {
+            LastUpstreamBase = upstreamBase;
+            return Task.FromResult(_gpgKey);
+        }
     }
 
     private sealed class NullHttpClientFactory : IHttpClientFactory
@@ -484,6 +533,8 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     private sealed class DisabledAirGap : IAirGapMode
     {
         public bool IsEnabled => false;
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => false;
     }
 
     private sealed class AllowAllValidator : IUpstreamUrlValidator

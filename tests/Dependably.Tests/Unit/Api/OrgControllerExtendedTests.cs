@@ -211,6 +211,70 @@ public sealed class OrgControllerExtendedTests
         Assert.Equal(expectedStatus, status);
     }
 
+    // ── GetPackage: deprecated status ─────────────────────────────────
+
+    [Theory]
+    [InlineData("block_all", "blocked")]    // block_all + deprecated (cached) → blocked
+    [InlineData("block_new", "deprecated")] // block_new keeps serving cached versions → surfaced, not blocked
+    [InlineData("warn",      "deprecated")] // warn mode + deprecated → deprecated (surfaced, not blocked)
+    [InlineData("off",       "deprecated")] // off mode + deprecated → deprecated (same badge, no block)
+    public async Task GetPackage_DeprecatedVersion_StatusReflectsPolicy(string mode, string expectedStatus)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
+        await s.WithPackageAsync("dep-pkg");
+        await s.WithPackageVersionAsync("dep-pkg", "1.0.0");
+        var b = await s.BuildAsync();
+
+        await using (var conn = await b.Db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET block_deprecated = @mode WHERE org_id = @org",
+                new { mode, org = b.PrimaryOrgId });
+            await conn.ExecuteAsync(
+                "UPDATE package_versions SET deprecated = 'use v2 instead', vuln_checked_at = '2025-01-01T00:00:00Z' WHERE version = '1.0.0'");
+        }
+
+        var result = await b.OrgController.GetPackage("npm", "dep-pkg", CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(result);
+
+        var versions = (System.Collections.IEnumerable)ok.Value!.GetType().GetProperty("versions")!.GetValue(ok.Value)!;
+        object? first = null;
+        foreach (var v in versions) { first = v; break; }
+        Assert.NotNull(first);
+        var status = (string)first!.GetType().GetProperty("Status")!.GetValue(first)!;
+        Assert.Equal(expectedStatus, status);
+    }
+
+    [Fact]
+    public async Task GetPackage_NullDeprecated_BlockMode_NotBlocked()
+    {
+        // block_deprecated = 'block_all' only activates when deprecated is set; non-deprecated
+        // versions must remain clean/unscanned regardless.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
+        await s.WithPackageAsync("nodep-pkg");
+        await s.WithPackageVersionAsync("nodep-pkg", "1.0.0");
+        var b = await s.BuildAsync();
+
+        await using (var conn = await b.Db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET block_deprecated = 'block_all' WHERE org_id = @org",
+                new { org = b.PrimaryOrgId });
+        }
+
+        var result = await b.OrgController.GetPackage("npm", "nodep-pkg", CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(result);
+
+        var versions = (System.Collections.IEnumerable)ok.Value!.GetType().GetProperty("versions")!.GetValue(ok.Value)!;
+        object? first = null;
+        foreach (var v in versions) { first = v; break; }
+        Assert.NotNull(first);
+        var status = (string)first!.GetType().GetProperty("Status")!.GetValue(first)!;
+        Assert.Equal("unscanned", status);
+    }
+
     // ── DeleteVersion: pypi / nuget happy paths + audit + GC ────────────────
 
     [Theory]

@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 namespace Dependably.Protocol;
 
 /// <summary>
-/// Surface-level validation for an uploaded .rpm file (#100). Confirms the file is at
+/// Surface-level validation for an uploaded .rpm file. Confirms the file is at
 /// least minimally structured before we accept it for storage / metadata extraction.
 /// Heavy parsing lives in <see cref="RpmHeaderParser"/>; this is the gate that produces
 /// a clean 422 for obvious garbage.

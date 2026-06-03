@@ -87,7 +87,7 @@ public sealed class PostgresSchemaApplyTests
             "Live Postgres / SQLite schema shape mismatch:\n" + string.Join("\n", violations));
     }
 
-    private static async Task<Dictionary<string, HashSet<string>>> PostgresShapeAsync(IMetadataStore store)
+    private static async Task<Dictionary<string, HashSet<string>>> PostgresShapeAsync(NpgsqlMetadataStore store)
     {
         await using var conn = await store.OpenAsync();
         var rows = await conn.QueryAsync<(string Table, string Column)>(
@@ -99,7 +99,7 @@ public sealed class PostgresSchemaApplyTests
         return Group(rows);
     }
 
-    private static async Task<Dictionary<string, HashSet<string>>> SqliteShapeAsync(IMetadataStore store)
+    private static async Task<Dictionary<string, HashSet<string>>> SqliteShapeAsync(TestMetadataStore store)
     {
         await using var conn = await store.OpenAsync();
         var tables = (await conn.QueryAsync<string>(

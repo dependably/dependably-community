@@ -3,9 +3,9 @@ using System.Collections.Concurrent;
 namespace Dependably.Storage;
 
 /// <summary>
-/// Single-flight coordinator for upstream proxy fetches (#48). When multiple tenants request
+/// Single-flight coordinator for upstream proxy fetches. When multiple tenants request
 /// the same uncached coordinate simultaneously, exactly one outbound fetch happens and the
-/// others wait on the same task. Scoped to a single process — that's acceptable per #48,
+/// others wait on the same task. Scoped to a single process — that's acceptable
 /// because the de-duplication is a hot-path optimisation, not a correctness invariant
 /// (cross-replica races resolve through the unique constraint on <c>cache_artifact</c>).
 ///

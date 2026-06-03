@@ -26,6 +26,7 @@ public sealed class HealthcheckPinger : BackgroundService
     private readonly IHttpClientFactory _http;
     private readonly IDistributedLock _locks;
     private readonly ReadinessAggregator _readiness;
+    private readonly IAirGapMode _airGap;
     private readonly ILogger<HealthcheckPinger> _logger;
     private readonly string? _pingUrl;
     private readonly string? _failUrl;
@@ -42,12 +43,14 @@ public sealed class HealthcheckPinger : BackgroundService
         IHttpClientFactory http,
         IDistributedLock locks,
         ReadinessAggregator readiness,
+        IAirGapMode airGap,
         IConfiguration config,
         ILogger<HealthcheckPinger> logger)
     {
         _http = http;
         _locks = locks;
         _readiness = readiness;
+        _airGap = airGap;
         _logger = logger;
 
         _pingUrl = config["HEALTHCHECK_PING_URL"];
@@ -81,6 +84,11 @@ public sealed class HealthcheckPinger : BackgroundService
 
     private async Task PingOnceAsync(CancellationToken ct)
     {
+        // Air-gap gate: the heartbeat is an outbound request, so suppress it when the instance
+        // is air-gapped (AIR_GAPPED) or this job is named in DISABLE_BACKGROUND_JOBS.
+        if (_airGap.IsJobDisabled("healthcheck-pinger"))
+            return;
+
         // In leader scope, only the elected leader pings.
         if (_leaderScope)
         {

@@ -27,7 +27,7 @@ public sealed class LocalBlobStore : IBlobStore
 
     /// <summary>
     /// Forces a fresh full-directory walk and resets the running counter. Backs the
-    /// <c>/api/v1/system/blob-store/recompute</c> admin trigger from #92 so operators can
+    /// <c>/api/v1/system/blob-store/recompute</c> admin trigger so operators can
     /// recover after out-of-band writes to the blob root.
     /// </summary>
     public void RecomputeSize() => _sizeCounter.Recompute();
@@ -86,8 +86,8 @@ public sealed class LocalBlobStore : IBlobStore
 
     public Task<long> GetTotalSizeAsync(CancellationToken ct = default)
     {
-        // #92: O(1) read of the running counter (first call lazily walks the tree once).
-        // The pre-#92 path re-enumerated every file on every call which blocked a thread-
+        // O(1) read of the running counter (first call lazily walks the tree once).
+        // The previous implementation re-enumerated every file on every call which blocked a thread-
         // pool thread for seconds on caches with millions of blobs.
         return Task.FromResult(_sizeCounter.GetTotal());
     }

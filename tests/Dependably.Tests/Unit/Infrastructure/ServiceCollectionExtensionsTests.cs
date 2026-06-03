@@ -74,13 +74,13 @@ public sealed class ServiceCollectionExtensionsTests
         Assert.True(HasSingleton<ProxyVersionRecorder>(services));
         Assert.True(HasSingleton<Dependably.Storage.ProxyFetchService>(services));
 
-        // M2.1 — two-tier storage formalisation
+        // Two-tier storage formalisation
         Assert.True(HasSingleton<CacheArtifactRepository>(services));
         Assert.True(HasSingleton<TenantArtifactAccessRepository>(services));
         Assert.True(HasSingleton<MetadataCacheRepository>(services));
         Assert.True(HasSingleton<CacheAccessRecorder>(services));
 
-        // M2.2 — name-claim mechanism
+        // Name-claim mechanism
         Assert.True(HasSingleton<ClaimRepository>(services));
         Assert.True(HasSingleton<ClaimResolver>(services));
     }

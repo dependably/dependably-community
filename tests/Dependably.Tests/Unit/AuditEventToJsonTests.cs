@@ -5,7 +5,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Covers the typed audit-event records' <c>ToJson()</c> helpers (#52). The snake_case
+/// Covers the typed audit-event records' <c>ToJson()</c> helpers. The snake_case
 /// serialization is load-bearing: SIEM consumers grep on these keys, and a regression that
 /// silently emits PascalCase would only surface as a missing-data alert downstream.
 /// </summary>

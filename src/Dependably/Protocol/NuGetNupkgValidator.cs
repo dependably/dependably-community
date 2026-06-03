@@ -8,7 +8,7 @@ namespace Dependably.Protocol;
 
 /// <summary>
 /// Validates a <c>.nupkg</c> by reading its <c>.nuspec</c> XML and extracting <c>id</c> and
-/// <c>version</c>. Used by the publish controller (#45) and the bulk-import controller (#46).
+/// <c>version</c>. Used by the publish controller and the bulk-import controller.
 /// Mirrors the rules in <c>NuGetController.ParseNupkg</c>: known nuspec namespace, id charset,
 /// version parseable by NuGet.Versioning, mandatory description and authors fields.
 /// </summary>

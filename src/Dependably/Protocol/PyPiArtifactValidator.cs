@@ -6,7 +6,7 @@ using Dependably.Security;
 namespace Dependably.Protocol;
 
 /// <summary>
-/// Extracts package name and version from a PyPI artefact for the bulk-import path (#46).
+/// Extracts package name and version from a PyPI artefact for the bulk-import path.
 /// Two formats are supported:
 /// <list type="bullet">
 ///   <item>Wheel (<c>.whl</c>): zip with metadata at <c>{name}-{version}.dist-info/METADATA</c>.

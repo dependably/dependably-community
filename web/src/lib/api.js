@@ -27,11 +27,12 @@ function qs(params) {
 }
 
 /**
- * Download a CSV from `path` with the given query params. Builds a Blob and triggers
- * a synthetic <a download> so the browser saves the file. Throws ApiError on non-OK
- * so callers can render errors uniformly.
+ * Fetch `path` (cookie-authenticated) and trigger a synthetic <a download> so the browser
+ * saves the response as a file. Throws ApiError on non-OK so callers can render errors
+ * uniformly. Prefers the server-provided Content-Disposition filename, falling back to
+ * `fallbackFilename` when none is present.
  */
-async function downloadCsv(path, params, fallbackBaseName) {
+async function downloadBlob(path, params, fallbackFilename) {
   const q = qs(params)
   const res = await fetch(`${BASE}${path}${q ? '?' + q : ''}`, { credentials: 'include' })
   if (!res.ok) {
@@ -50,11 +51,8 @@ async function downloadCsv(path, params, fallbackBaseName) {
   // that isn't word-class / dot / dash / underscore; fall back if nothing survives.
   const cd = res.headers.get('Content-Disposition') ?? ''
   const m = /filename="?([^";]+)"?/.exec(cd)
-  const rawName = m?.[1] ?? ''
-  const sanitized = rawName.replace(/[^\w.-]/g, '').replace(/^\.+/, '')
-  const filename = sanitized.length > 0
-    ? sanitized
-    : `${fallbackBaseName}-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
+  const rawName = (m?.[1] ?? '').trim() || fallbackFilename
+  const filename = rawName.replace(/[^\w.-]/g, '').replace(/^\.+/, '') || 'download'
 
   const url = URL.createObjectURL(blob)
   try {
@@ -67,6 +65,14 @@ async function downloadCsv(path, params, fallbackBaseName) {
   } finally {
     URL.revokeObjectURL(url)
   }
+}
+
+/**
+ * Download a CSV from `path` with the given query params. Thin wrapper over downloadBlob
+ * that supplies a timestamped `.csv` fallback name for when the server omits Content-Disposition.
+ */
+function downloadCsv(path, params, fallbackBaseName) {
+  return downloadBlob(path, params, `${fallbackBaseName}-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`)
 }
 
 async function req(method, path, body) {
@@ -150,6 +156,7 @@ export const api = {
     maxUploadBytesOci: s.maxUploadBytesOci,
     defaultLanguage: s.defaultLanguage,
     allowVersionOverwrite: s.allowVersionOverwrite,
+    airGapped: s.airGapped,
   }),
   getRetention: () => req('GET', '/retention'),
   updateRetention: (r) => req('PUT', '/retention', r),
@@ -163,6 +170,10 @@ export const api = {
   },
   getPackage: (eco, name) => req('GET', `/packages/${eco}/${name.replaceAll('/', '%2F')}`),
   deleteVersion: (eco, name, ver) => req('DELETE', `/packages/${eco}/${name.replaceAll('/', '%2F')}/${ver}`),
+  // Download a single artifact. Cookie-authenticated; the server streams from the correct
+  // storage tier and sets Content-Disposition, so the saved filename matches the artifact.
+  downloadVersion: (eco, name, ver) =>
+    downloadBlob(`/packages/${eco}/${name.replaceAll('/', '%2F')}/${ver}/download`, {}, `${name}-${ver}`),
 
   // Activity
   getActivity: (params = {}) => {
@@ -171,7 +182,7 @@ export const api = {
   },
   exportActivity: (params = {}) => downloadCsv('/activity', { ...params, format: 'csv' }, 'activity'),
 
-  // Claims (#47) — admin only. State machine on the server enforces the legal transitions;
+  // Claims — admin only. State machine on the server enforces the legal transitions;
   // 4xx responses contain a structured `detail` that the UI surfaces verbatim.
   listClaims: (params = {}) => {
     const q = new URLSearchParams(params).toString()
@@ -224,6 +235,12 @@ export const api = {
   addBlocklist: (pattern) => req('POST', '/blocklist', { pattern }),
   deleteBlocklist: (id) => req('DELETE', `/blocklist/${id}`),
 
+  // Upstream proxy registries — per ecosystem, priority-ordered (top = tried first).
+  getUpstreamRegistries: () => req('GET', '/upstream-registries'),
+  addUpstreamRegistry: (ecosystem, url, name) => req('POST', '/upstream-registries', { ecosystem, url, name }),
+  deleteUpstreamRegistry: (id) => req('DELETE', `/upstream-registries/${id}`),
+  reorderUpstreamRegistries: (ecosystem, ids) => req('PUT', `/upstream-registries/${ecosystem}/order`, { ids }),
+
   // User tokens. capabilities is an array like ["read:metadata", "publish:*"];
   // the server rejects the retired `scope` field with a 400.
   listTokens: () => req('GET', '/tokens'),
@@ -250,7 +267,7 @@ export const api = {
   // Setup snippets
   getSetup: (ecosystem) => req('GET', `/setup/${ecosystem}`),
 
-  // License policy (#21). Mode is one of 'off' | 'warn' | 'block'. Allow/block lists are
+  // License policy. Mode is one of 'off' | 'warn' | 'block'. Allow/block lists are
   // SPDX identifiers; DELETE keys on the SPDX itself (not an opaque id).
   getLicensePolicy: () => req('GET', '/license-policy'),
   setLicenseMode: (mode) => req('PUT', '/license-policy/mode', { mode }),

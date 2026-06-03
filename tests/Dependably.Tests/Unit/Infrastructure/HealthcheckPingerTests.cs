@@ -48,6 +48,7 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
             factory,
             new InProcessDistributedLock(),
             _readiness,
+            new AirGapMode(config),
             config,
             NullLogger<HealthcheckPinger>.Instance);
 
@@ -182,6 +183,56 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
         var ex = await Record.ExceptionAsync(() => task);
         Assert.True(ex is null or OperationCanceledException,
             $"Unexpected exception: {ex?.GetType().Name}: {ex?.Message}");
+    }
+
+    /// <summary>
+    /// With a ping URL configured but AIR_GAPPED=true, the pinger must not emit the outbound
+    /// heartbeat — it never creates an HTTP client. Closes the air-gap gap for this job.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_AirGapped_SuppressesOutboundPing()
+    {
+        var config = BuildConfig(
+            ("HEALTHCHECK_PING_URL", "http://example.com/ping"),
+            ("HEALTHCHECK_PING_INTERVAL_SECONDS", "0"),
+            ("AIR_GAPPED", "true"));
+
+        var trackingFactory = new TrackingHttpClientFactory();
+        var pinger = BuildPinger(config, trackingFactory);
+
+        using var cts = new CancellationTokenSource();
+        var task = pinger.StartAsync(cts.Token);
+        await Task.Delay(200);
+        cts.Cancel();
+        await pinger.StopAsync(default);
+        try { await task; } catch (OperationCanceledException) { }
+
+        Assert.Equal(0, trackingFactory.CreateClientCallCount);
+    }
+
+    /// <summary>
+    /// DISABLE_BACKGROUND_JOBS=healthcheck-pinger suppresses the heartbeat even when the
+    /// instance is not fully air-gapped — the granular per-job opt-out.
+    /// </summary>
+    [Fact]
+    public async Task ExecuteAsync_JobDisabledByName_SuppressesOutboundPing()
+    {
+        var config = BuildConfig(
+            ("HEALTHCHECK_PING_URL", "http://example.com/ping"),
+            ("HEALTHCHECK_PING_INTERVAL_SECONDS", "0"),
+            ("DISABLE_BACKGROUND_JOBS", "healthcheck-pinger"));
+
+        var trackingFactory = new TrackingHttpClientFactory();
+        var pinger = BuildPinger(config, trackingFactory);
+
+        using var cts = new CancellationTokenSource();
+        var task = pinger.StartAsync(cts.Token);
+        await Task.Delay(200);
+        cts.Cancel();
+        await pinger.StopAsync(default);
+        try { await task; } catch (OperationCanceledException) { }
+
+        Assert.Equal(0, trackingFactory.CreateClientCallCount);
     }
 }
 

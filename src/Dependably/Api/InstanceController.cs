@@ -16,12 +16,21 @@ public sealed class InstanceController : ControllerBase
     private readonly OrgRepository _orgs;
     private readonly AuditRepository _audit;
     private readonly OrgAccessGuard _guard;
+    private readonly IAirGapMode _airGap;
+    private readonly BackgroundJobRunRepository _jobRuns;
 
-    public InstanceController(OrgRepository orgs, AuditRepository audit, OrgAccessGuard guard)
+    public InstanceController(
+        OrgRepository orgs,
+        AuditRepository audit,
+        OrgAccessGuard guard,
+        IAirGapMode airGap,
+        BackgroundJobRunRepository jobRuns)
     {
         _orgs = orgs;
         _audit = audit;
         _guard = guard;
+        _airGap = airGap;
+        _jobRuns = jobRuns;
     }
 
     // ── Instance Settings ─────────────────────────────────────────────────────
@@ -73,6 +82,56 @@ public sealed class InstanceController : ControllerBase
             ct: ct);
 
         return NoContent();
+    }
+
+    // ── Background Jobs ──────────────────────────────────────────────────────────
+
+    private static readonly string[] AllJobNames =
+    [
+        "vuln-scan",
+        "vuln-rescan",
+        "deprecation-refresh",
+        "healthcheck-pinger",
+        "cache-eviction",
+        "retention",
+        "orphan-reconciler",
+        "tenant-hard-delete",
+        "blob-size-poller",
+        "tenant-count-poller",
+    ];
+
+    /// <summary>GET /api/v1/instance/background-jobs</summary>
+    [HttpGet("api/v1/instance/background-jobs")]
+    public async Task<IActionResult> GetBackgroundJobs(CancellationToken ct)
+    {
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        if (deny is not null) return deny;
+
+        var jobStatuses = new List<object>();
+        foreach (var jobName in AllJobNames)
+        {
+            var disabled = _airGap.IsJobDisabled(jobName);
+            string disabledReason;
+            if (!disabled)
+                disabledReason = "none";
+            else
+                disabledReason = _airGap.IsEnabled ? "AIR_GAPPED=true" : "DISABLE_BACKGROUND_JOBS";
+
+            var (runs, _) = await _jobRuns.ListAsync(
+                new BackgroundJobRunQuery(JobName: jobName, Limit: 1, SortBy: "startedAt", SortDir: "desc"), ct);
+            var lastRun = runs.Count > 0 ? runs[0] : null;
+
+            jobStatuses.Add(new
+            {
+                name            = jobName,
+                enabled         = !disabled,
+                disabled_reason = disabled ? disabledReason : null as string,
+                last_run_at     = lastRun?.StartedAt,
+                last_outcome    = lastRun?.Outcome,
+            });
+        }
+
+        return Ok(new { jobs = jobStatuses });
     }
 
     // The legacy /api/v1/admin/users, /api/v1/admin/users/{id}/role, and /api/v1/admin/audit

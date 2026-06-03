@@ -46,7 +46,7 @@ public sealed record PackageResolution(
 // ── Proxy ─────────────────────────────────────────────────────────────────────
 
 /// <summary>
-/// Upstream mirror proxy for the RPM ecosystem (#102).
+/// Upstream mirror proxy for the RPM ecosystem.
 ///
 /// Responsibilities:
 ///  - <c>repomd.xml</c> / <c>repomd.xml.asc</c>: short-TTL passthrough with
@@ -61,11 +61,10 @@ public sealed record PackageResolution(
 /// </summary>
 public interface IRpmUpstreamProxy
 {
-    bool IsConfigured { get; }
-    bool IsPassthroughMode { get; }
-    Task<RepodataResult?> GetRepodataAsync(string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct);
-    Task<PackageResolution?> ResolvePackageUrlAsync(string filename, CancellationToken ct);
-    Task<byte[]?> GetGpgKeyAsync(CancellationToken ct);
+    bool IsPassthroughModeSelected { get; }
+    Task<RepodataResult?> GetRepodataAsync(string upstreamBase, string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct);
+    Task<PackageResolution?> ResolvePackageUrlAsync(string upstreamBase, string filename, CancellationToken ct);
+    Task<byte[]?> GetGpgKeyAsync(string upstreamBase, CancellationToken ct);
     Task<bool> IsNegativelyCachedAsync(string upstreamPath, CancellationToken ct);
     Task RecordNegativeAsync(string upstreamPath, CancellationToken ct);
 }
@@ -85,20 +84,20 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     private readonly IAirGapMode _airGap;
     private readonly IUpstreamUrlValidator _urlValidator;
 
-    private readonly string? _upstreamBase; // trimmed, no trailing slash
     private readonly string _upstreamMode;  // "passthrough" | "merged"
     private readonly TimeSpan _repomdTtl;
     private readonly TimeSpan _gpgKeyTtl;
     private readonly TimeSpan _negativeCacheTtl;
 
-    // Dedup concurrent repomd.xml fetches — only one HTTP round-trip per base URL at a time.
+    // Dedup concurrent repomd.xml fetches — only one HTTP round-trip per (base URL, file) at a time.
     private readonly ConcurrentDictionary<string, Lazy<Task<(byte[] Body, string? ETag, string? LastModified)>>> _repomdInflight = new();
 
-    /// <summary>True when <c>Rpm:Upstream</c> is configured.</summary>
-    public bool IsConfigured => _upstreamBase is not null;
-
-    /// <summary>True when <c>Rpm:Upstream</c> is set AND mode is 'passthrough'.</summary>
-    public bool IsPassthroughMode => IsConfigured && string.Equals(_upstreamMode, "passthrough", StringComparison.OrdinalIgnoreCase);
+    /// <summary>
+    /// True when the instance-level mode is 'passthrough'. Per-org configured-ness comes
+    /// from the upstream registry list (resolved controller-side); the controller combines
+    /// this selector with "the org has at least one rpm registry" to decide effective passthrough.
+    /// </summary>
+    public bool IsPassthroughModeSelected => string.Equals(_upstreamMode, "passthrough", StringComparison.OrdinalIgnoreCase);
 
     public RpmUpstreamProxy(
         IHttpClientFactory httpClientFactory,
@@ -116,7 +115,6 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         _airGap = airGap;
         _urlValidator = urlValidator;
 
-        _upstreamBase = configuration["Rpm:Upstream"]?.TrimEnd('/');
         _upstreamMode = configuration["Rpm:UpstreamMode"] ?? "passthrough";
 
         _repomdTtl = TimeSpan.TryParse(configuration["Rpm:RepomdTtl"], out var r) ? r : TimeSpan.FromSeconds(60);
@@ -137,22 +135,22 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     ///   <item>Everything else — not recognised; returns null.</item>
     /// </list>
     ///
-    /// Returns null when not configured, when the upstream returns 404, or when the
-    /// filename is not in a known category.
+    /// Returns null when the upstream returns 404 or when the filename is not in a known
+    /// category. <paramref name="upstreamBase"/> is the org's top-priority rpm registry base
+    /// (trailing-slash-trimmed), used for both URL building and cache keys.
     /// Throws <see cref="AirGappedException"/> in air-gapped deployments.
     /// </summary>
     public async Task<RepodataResult?> GetRepodataAsync(
-        string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
+        string upstreamBase, string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
     {
-        if (_upstreamBase is null) return null;
         if (_airGap.IsEnabled) throw new AirGappedException($"rpm:repodata:{filename}");
 
         if (filename.Equals("repomd.xml", StringComparison.OrdinalIgnoreCase)
          || filename.Equals("repomd.xml.asc", StringComparison.OrdinalIgnoreCase))
-            return await GetRepomdAsync(filename, ifNoneMatch, ifModifiedSince, ct);
+            return await GetRepomdAsync(upstreamBase, filename, ifNoneMatch, ifModifiedSince, ct);
 
         if (IsHashPrefixedFilename(filename))
-            return await GetHashPrefixedAsync(filename, ct);
+            return await GetHashPrefixedAsync(upstreamBase, filename, ct);
 
         return null;
     }
@@ -165,17 +163,17 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// <c>primary.xml.gz</c>. Also returns the metadata fields needed to populate the
     /// <c>rpm_metadata</c> table without re-parsing the RPM binary header.
     ///
-    /// Returns null when not configured, when <c>repomd.xml</c> cannot be fetched, when
-    /// <c>primary.xml.gz</c> is not found, or when the package is absent from the index.
+    /// Returns null when <c>repomd.xml</c> cannot be fetched, when <c>primary.xml.gz</c> is
+    /// not found, or when the package is absent from the index. <paramref name="upstreamBase"/>
+    /// is the org's top-priority rpm registry base (trailing-slash-trimmed).
     /// Throws <see cref="AirGappedException"/> in air-gapped deployments.
     /// </summary>
-    public async Task<PackageResolution?> ResolvePackageUrlAsync(string filename, CancellationToken ct)
+    public async Task<PackageResolution?> ResolvePackageUrlAsync(string upstreamBase, string filename, CancellationToken ct)
     {
-        if (_upstreamBase is null) return null;
         if (_airGap.IsEnabled) throw new AirGappedException($"rpm:resolve:{filename}");
 
         // 1. Get current repomd.xml bytes (from memory cache or upstream)
-        var repomdBytes = await GetRepomdBodyAsync(ct);
+        var repomdBytes = await GetRepomdBodyAsync(upstreamBase, ct);
         if (repomdBytes is null) return null;
 
         // 2. Parse repomd.xml to find primary.xml.gz href + checksum
@@ -183,14 +181,14 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         if (primaryFilename is null || primarySha256 is null) return null;
 
         // 3. Get primary.xml.gz bytes (from blob cache or upstream)
-        var primaryGzBytes = await GetOrFetchRepodataBlobAsync(primaryFilename, primarySha256, ct);
+        var primaryGzBytes = await GetOrFetchRepodataBlobAsync(upstreamBase, primaryFilename, primarySha256, ct);
         if (primaryGzBytes is null) return null;
 
         // 4. Parse primary.xml.gz (cached by sha256 so it automatically tracks repodata rotation)
         var mapKey = $"rpm:primary-map:{primarySha256}";
         if (!_memCache.TryGetValue<Dictionary<string, PackageResolution>>(mapKey, out var packageMap))
         {
-            packageMap = ParsePrimaryXmlGz(primaryGzBytes, _upstreamBase);
+            packageMap = ParsePrimaryXmlGz(primaryGzBytes, upstreamBase);
             // Long TTL is fine — the map invalidates naturally when repomd.xml rotates to a
             // new primary.xml.gz sha256, creating a new cache slot and letting the old one GC.
             _memCache.Set(mapKey, packageMap, TimeSpan.FromHours(4));
@@ -204,15 +202,15 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// <summary>
     /// Fetches the upstream GPG public key. Tries common paths used by Fedora / RHEL mirrors.
     /// Cached for <c>Rpm:GpgKeyTtl</c> (default 1 day).
-    /// Returns null when not configured or when no key path responds with 200.
+    /// Returns null when no key path responds with 200. <paramref name="upstreamBase"/> is the
+    /// org's top-priority rpm registry base (trailing-slash-trimmed).
     /// Throws <see cref="AirGappedException"/> in air-gapped deployments.
     /// </summary>
-    public async Task<byte[]?> GetGpgKeyAsync(CancellationToken ct)
+    public async Task<byte[]?> GetGpgKeyAsync(string upstreamBase, CancellationToken ct)
     {
-        if (_upstreamBase is null) return null;
         if (_airGap.IsEnabled) throw new AirGappedException("rpm:gpg-key");
 
-        var cacheKey = $"rpm:gpgkey:{_upstreamBase}";
+        var cacheKey = $"rpm:gpgkey:{upstreamBase}";
         if (_memCache.TryGetValue<byte[]>(cacheKey, out var cached))
             return cached;
 
@@ -221,7 +219,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         var client = _http.CreateClient("upstream");
         foreach (var path in paths)
         {
-            var url = $"{_upstreamBase}/{path}";
+            var url = $"{upstreamBase}/{path}";
             if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct)) continue;
 
             using var resp = await client.GetAsync(url, ct);
@@ -281,9 +279,9 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// would fail GPG verification in dnf).
     /// </summary>
     private async Task<RepodataResult?> GetRepomdAsync(
-        string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
+        string upstreamBase, string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
     {
-        var cacheKey = $"rpm:repomd:{_upstreamBase}:{filename}";
+        var cacheKey = $"rpm:repomd:{upstreamBase}:{filename}";
 
         // Memory cache hit — serve immediately, propagating 304 if client's ETag matches.
         if (_memCache.TryGetValue<CachedRepomd>(cacheKey, out var cached))
@@ -299,7 +297,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         var lazy = _repomdInflight.GetOrAdd(
             cacheKey,
             _ => new Lazy<Task<(byte[], string?, string?)>>(
-                () => FetchRepomdFromUpstreamAsync(filename, ifNoneMatch, ifModifiedSince, CancellationToken.None)));
+                () => FetchRepomdFromUpstreamAsync(upstreamBase, filename, ifNoneMatch, ifModifiedSince, CancellationToken.None)));
 
         (byte[] body, string? etag, string? lastModified) result;
         try
@@ -324,9 +322,9 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     }
 
     private async Task<(byte[] Body, string? ETag, string? LastModified)> FetchRepomdFromUpstreamAsync(
-        string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
+        string upstreamBase, string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
     {
-        var url = $"{_upstreamBase}/repodata/{filename}";
+        var url = $"{upstreamBase}/repodata/{filename}";
         if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct))
             return ([], null, null);
 
@@ -357,19 +355,19 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// Returns the raw bytes of the current <c>repomd.xml</c> (from memory cache if present,
     /// fetching from upstream otherwise). Used internally by <see cref="ResolvePackageUrlAsync"/>.
     /// </summary>
-    private async Task<byte[]?> GetRepomdBodyAsync(CancellationToken ct)
+    private async Task<byte[]?> GetRepomdBodyAsync(string upstreamBase, CancellationToken ct)
     {
-        var cacheKey = $"rpm:repomd:{_upstreamBase}:repomd.xml";
+        var cacheKey = $"rpm:repomd:{upstreamBase}:repomd.xml";
         if (_memCache.TryGetValue<CachedRepomd>(cacheKey, out var cached))
             return cached!.Body;
 
-        var result = await GetRepomdAsync("repomd.xml", null, null, ct);
+        var result = await GetRepomdAsync(upstreamBase, "repomd.xml", null, null, ct);
         return result?.NotModified == false ? result.Body : null;
     }
 
     // ── Internal: hash-prefixed metadata files ────────────────────────────────
 
-    private async Task<RepodataResult?> GetHashPrefixedAsync(string filename, CancellationToken ct)
+    private async Task<RepodataResult?> GetHashPrefixedAsync(string upstreamBase, string filename, CancellationToken ct)
     {
         var sha256 = ExtractSha256Prefix(filename);
         if (sha256 is null) return null;
@@ -385,7 +383,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         }
 
         // Fetch from upstream, cache, serve.
-        var body = await GetOrFetchRepodataBlobAsync(filename, sha256, ct);
+        var body = await GetOrFetchRepodataBlobAsync(upstreamBase, filename, sha256, ct);
         if (body is null) return null;
         return new RepodataResult(body, ContentTypeFor(filename), ETag: null, LastModified: null, NotModified: false);
     }
@@ -394,14 +392,14 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// Gets a hash-prefixed metadata blob from blob store or upstream.
     /// Stores fetched bytes in the Cache tier at <c>BlobKeys.RpmRepodataProxy(sha256)</c>.
     /// </summary>
-    private async Task<byte[]?> GetOrFetchRepodataBlobAsync(string filename, string sha256, CancellationToken ct)
+    private async Task<byte[]?> GetOrFetchRepodataBlobAsync(string upstreamBase, string filename, string sha256, CancellationToken ct)
     {
         var blobKey = BlobKeys.RpmRepodataProxy(sha256);
         var existing = await _cacheStore.GetAsync(blobKey, ct);
         if (existing is not null)
             return await ReadStreamAsync(existing, ct);
 
-        var url = $"{_upstreamBase}/repodata/{filename}";
+        var url = $"{upstreamBase}/repodata/{filename}";
         if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct)) return null;
 
         var client = _http.CreateClient("upstream");

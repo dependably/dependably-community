@@ -15,7 +15,10 @@
   import { formatDateShort } from '../format.js'
   import { copyToClipboard } from '../clipboard.js'
   import DataTable from '../DataTable.svelte'
-  import { presetToCapabilities, capabilitiesToLabel } from '../tokenCapabilities.js'
+  import { presetToCapabilities, capabilitiesToLabel, PACKAGE_PRESETS, PRIVILEGED_PRESETS } from '../tokenCapabilities.js'
+
+  // This tab is admin-only, so all presets — package and privileged — are offered.
+  const scopeOptions = [...PACKAGE_PRESETS, ...PRIVILEGED_PRESETS]
 
   let tokens = [], loading = true, error = ''
   let showCreate = false, newName = '', newScope = 'pull', newExpiry = '', newDescription = '', creating = false
@@ -108,7 +111,7 @@
   <tr>
     <td>{tok.name}</td>
     <td class="t-sm" title={tok.description || ''}>{tok.description || '—'}</td>
-    <td><span class="badge {label}">{label}</span></td>
+    <td><span class="badge {label}">{label === '—' ? '—' : $t('tokenScopes.' + label)}</span></td>
     <td class="text-muted">{$formatDateShort(tok.createdAt)}</td>
     <td>
       {#if expired(tok)}<span class="badge expired">{$t('serviceTokens.expired')}</span>
@@ -129,7 +132,7 @@
       <div class="form-row"><label>{$t('serviceTokens.modal.description')}</label><input type="text" maxlength="200" bind:value={newDescription} placeholder={$t('serviceTokens.modal.descriptionPlaceholder')} /></div>
       <div class="form-row">
         <label>{$t('serviceTokens.modal.scope')}</label>
-        <select bind:value={newScope} class="w-auto"><option value="pull">pull</option><option value="push">push</option><option value="both">both</option></select>
+        <select bind:value={newScope} class="w-auto">{#each scopeOptions as s (s)}<option value={s}>{$t('tokenScopes.' + s)}</option>{/each}</select>
       </div>
       <div class="form-row"><label>{$t('serviceTokens.modal.expiresAt')}</label><input type="datetime-local" bind:value={newExpiry} /></div>
       <div class="modal-actions">

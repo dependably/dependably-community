@@ -7,8 +7,8 @@ namespace Dependably.Protocol;
 
 /// <summary>
 /// Decodes an npm tarball, finds the top-level <c>package.json</c>, and extracts the package
-/// name and version. Used by both the npm publish controller (#45) and the bulk-import
-/// controller (#46) so the validation rules stay aligned.
+/// name and version. Used by both the npm publish controller and the bulk-import
+/// controller so the validation rules stay aligned.
 ///
 /// <para>Accepts <c>package.json</c> either at the root or inside a single wrapper directory
 /// of any name (<c>npm pack</c> always writes <c>package/</c>, but tarballs from

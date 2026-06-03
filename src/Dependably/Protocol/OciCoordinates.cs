@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 namespace Dependably.Protocol;
 
 /// <summary>
-/// One parsed OCI repository name + reference (#98). The Distribution Spec requires repo
+/// One parsed OCI repository name + reference. The Distribution Spec requires repo
 /// names to match <c>[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*</c>;
 /// references are either a tag (alphanumeric with limited punctuation) or a digest
 /// (<c>{algo}:{hex}</c>).

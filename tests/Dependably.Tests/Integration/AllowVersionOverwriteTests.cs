@@ -44,7 +44,7 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
         Assert.True(doc.GetProperty("allowVersionOverwrite").GetBoolean());
 
         // Audit should carry both the wide org_settings_updated event AND the targeted
-        // tenant.setting.change shaped for #45 supply-chain reviewers.
+        // tenant.setting.change shaped for supply-chain reviewers.
         var db = _factory.Services.GetRequiredService<Dependably.Infrastructure.IMetadataStore>();
         await using var conn = await db.OpenAsync();
         var rows = (await conn.QueryAsync<(string Action, string Detail)>(

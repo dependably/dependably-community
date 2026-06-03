@@ -49,6 +49,7 @@ public partial class NuGetController : ControllerBase
     private readonly ClaimResolver _claimResolver;
     private readonly Dependably.Storage.ProxyFetchService _proxyFetch;
     private readonly ILogger<NuGetController> _logger;
+    private readonly UpstreamRegistryResolver _registries;
 
     public NuGetController(NuGetControllerServices svc)
     {
@@ -70,6 +71,7 @@ public partial class NuGetController : ControllerBase
         _claimResolver = svc.ClaimResolver;
         _proxyFetch = svc.ProxyFetch;
         _logger = svc.Logger;
+        _registries = svc.Registries;
     }
 
     // ── Service index ────────────────────────────────────────────────────────
@@ -217,10 +219,10 @@ public partial class NuGetController : ControllerBase
         }
 
         // Otherwise the version lives upstream — proxy its leaf when passthrough + claims allow.
-        if (settings.ProxyPassthroughEnabled
+        if (settings.ProxyPassthroughEffective
             && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
         {
-            return await ProxyRegistrationLeafAsync(normalizedId, version, semVer2, ct);
+            return await ProxyRegistrationLeafAsync(orgId, normalizedId, version, semVer2, ct);
         }
 
         return NotFound();
@@ -247,25 +249,31 @@ public partial class NuGetController : ControllerBase
         });
     }
 
-    private async Task<IActionResult> ProxyRegistrationLeafAsync(string normalizedId, string version, bool semVer2, CancellationToken ct)
+    private async Task<IActionResult> ProxyRegistrationLeafAsync(string orgId, string normalizedId, string version, bool semVer2, CancellationToken ct)
     {
-        var upstreamBase = _config["NuGet:Upstream"] ?? "https://api.nuget.org/v3";
         var variant = semVer2 ? "registration5-gz-semver2" : "registration5-semver1";
-        var upstreamUrl = $"{upstreamBase}/{variant}/{normalizedId}/{version.ToLowerInvariant()}.json";
-        try
+        // Walk the org's configured upstreams in priority order; the first that answers wins.
+        // No configured upstream ⇒ proxying is disabled for nuget, so the loop is skipped and
+        // the leaf 404s.
+        var bases = await _registries.ResolveAsync(orgId, "nuget", ct);
+        foreach (var upstreamBase in bases)
         {
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, linkedCts.Token);
-            if (resp.IsSuccessStatusCode)
-                return Content(resp.BodyAsString(), "application/json");
-            // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
-            _logger.LogWarning("NuGet upstream registration leaf fetch failed: {Status} for {Url}", resp.StatusCode, upstreamUrl);
-        }
-        catch (Exception ex)
-        {
-            // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
-            _logger.LogWarning(ex, "NuGet upstream registration leaf fetch threw for {Url}", upstreamUrl);
+            var upstreamUrl = $"{upstreamBase}/{variant}/{normalizedId}/{version.ToLowerInvariant()}.json";
+            try
+            {
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+                var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, linkedCts.Token);
+                if (resp.IsSuccessStatusCode)
+                    return Content(resp.BodyAsString(), "application/json");
+                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                _logger.LogWarning("NuGet upstream registration leaf fetch failed: {Status} for {Url}", resp.StatusCode, upstreamUrl);
+            }
+            catch (Exception ex)
+            {
+                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                _logger.LogWarning(ex, "NuGet upstream registration leaf fetch threw for {Url}", upstreamUrl);
+            }
         }
         return NotFound();
     }
@@ -291,11 +299,11 @@ public partial class NuGetController : ControllerBase
         // a private prerelease must not delete the public version line from the listing, or
         // downstream packages pinning ">= <stable>" of the same name fail NU1103. Mirrors
         // FlatcontainerVersions and PyPi's PackageIndex.
-        var passthroughAllowed = settings.ProxyPassthroughEnabled
+        var passthroughAllowed = settings.ProxyPassthroughEffective
             && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct);
 
         if (passthroughAllowed)
-            return await ProxyMergedRegistrationAsync(id, pkg, semVer2, ct);
+            return await ProxyMergedRegistrationAsync(orgId, id, pkg, semVer2, ct);
 
         // Passthrough disabled or claim-local — local-only.
         if (pkg is null) return NotFound();
@@ -333,35 +341,43 @@ public partial class NuGetController : ControllerBase
         });
     }
 
-    private async Task<IActionResult> ProxyMergedRegistrationAsync(string id, Package? pkg, bool semVer2, CancellationToken ct)
+    private async Task<IActionResult> ProxyMergedRegistrationAsync(string orgId, string id, Package? pkg, bool semVer2, CancellationToken ct)
     {
         var normalizedId = id.ToLowerInvariant();
-        var upstreamBase = _config["NuGet:Upstream"] ?? "https://api.nuget.org/v3";
         // semver1 excludes SemVer-2 build metadata (+suffix); semver2 is the superset. Pick the
         // upstream variant that matches what the client asked for. api.nuget.org publishes
         // -semver1 uncompressed but only -gz-semver2 for the SemVer 2 superset (the
         // registration5-semver2 path returns 404); HttpClient's AutomaticDecompression handles
         // the gzip transparently.
         var variant = semVer2 ? "registration5-gz-semver2" : "registration5-semver1";
-        var upstreamUrl = $"{upstreamBase}/{variant}/{normalizedId}/index.json";
 
+        // Walk the org's configured upstreams in priority order; the first that answers wins.
+        // No configured upstream ⇒ proxying is disabled for nuget, so the loop is skipped and
+        // we fall through to local-only below.
+        var bases = await _registries.ResolveAsync(orgId, "nuget", ct);
         string? upstreamJson = null;
-        try
+        foreach (var upstreamBase in bases)
         {
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            // #94 single-flight registration fetch.
-            var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, linkedCts.Token);
-            if (resp.IsSuccessStatusCode)
-                upstreamJson = resp.BodyAsString();
-            else
+            var upstreamUrl = $"{upstreamBase}/{variant}/{normalizedId}/index.json";
+            try
+            {
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+                // Single-flight registration fetch.
+                var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, linkedCts.Token);
+                if (resp.IsSuccessStatusCode)
+                {
+                    upstreamJson = resp.BodyAsString();
+                    break;
+                }
                 // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
                 _logger.LogWarning("NuGet upstream registration fetch failed: {Status} for {Url}", resp.StatusCode, upstreamUrl);
-        }
-        catch (Exception ex)
-        {
-            // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
-            _logger.LogWarning(ex, "NuGet upstream registration fetch threw for {Url}", upstreamUrl);
+            }
+            catch (Exception ex)
+            {
+                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                _logger.LogWarning(ex, "NuGet upstream registration fetch threw for {Url}", upstreamUrl);
+            }
         }
 
         var localVersions = pkg is null
@@ -503,10 +519,10 @@ public partial class NuGetController : ControllerBase
         // Merge upstream regardless of pkg.IsProxy — a name with uploaded versions is still a
         // namespace that can hold proxy-fetched versions. Gate on passthrough + claims, not on
         // whether anyone has ever published into this name.
-        if (settings.ProxyPassthroughEnabled
+        if (settings.ProxyPassthroughEffective
             && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
         {
-            await MergeUpstreamVersionsAsync(id, versionSet, ct);
+            await MergeUpstreamVersionsAsync(orgId, id, versionSet, ct);
         }
         else
         {
@@ -527,51 +543,58 @@ public partial class NuGetController : ControllerBase
     // Fetch the upstream version list and merge. Short timeout so slow upstream responses don't
     // hang clients after they have what they need. Sets X-Upstream-Status header (ok|error|timeout)
     // and logs at warning level when the merge fails so operators can see silent fallbacks.
-    private async Task MergeUpstreamVersionsAsync(string id, HashSet<string> versionSet, CancellationToken ct)
+    private async Task MergeUpstreamVersionsAsync(string orgId, string id, HashSet<string> versionSet, CancellationToken ct)
     {
-        var upstreamBase = _config["NuGet:Upstream"] ?? "https://api.nuget.org/v3";
-        var url = $"{upstreamBase}/flatcontainer/{id.ToLowerInvariant()}/index.json";
-        try
+        // Walk the org's configured upstreams in priority order; the first that returns a usable
+        // version list wins and we stop. No configured upstream ⇒ proxying is disabled for nuget,
+        // so the loop is skipped and the status reflects the unreachable/empty outcome.
+        var bases = await _registries.ResolveAsync(orgId, "nuget", ct);
+        foreach (var upstreamBase in bases)
         {
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            // #94 single-flight: collapses N concurrent NuGet list requests onto one
-            // upstream call for the same flatcontainer index.
-            var resp = await _upstream.GetOrFetchMetadataAsync(url, linkedCts.Token);
-            if (!resp.IsSuccessStatusCode)
+            var url = $"{upstreamBase}/flatcontainer/{id.ToLowerInvariant()}/index.json";
+            try
             {
-                Response.Headers["X-Upstream-Status"] = "error";
-                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
-                _logger.LogWarning("NuGet upstream version-list fetch failed: {Status} for {Url}", resp.StatusCode, url);
-                return;
-            }
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+                // Single-flight: collapses N concurrent NuGet list requests onto one
+                // upstream call for the same flatcontainer index.
+                var resp = await _upstream.GetOrFetchMetadataAsync(url, linkedCts.Token);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    Response.Headers["X-Upstream-Status"] = "error";
+                    // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                    _logger.LogWarning("NuGet upstream version-list fetch failed: {Status} for {Url}", resp.StatusCode, url);
+                    continue;
+                }
 
-            using var doc = JsonDocument.Parse(resp.Body);
-            if (!doc.RootElement.TryGetProperty("versions", out var versionsElem))
+                using var doc = JsonDocument.Parse(resp.Body);
+                if (!doc.RootElement.TryGetProperty("versions", out var versionsElem))
+                {
+                    Response.Headers["X-Upstream-Status"] = "error";
+                    // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                    _logger.LogWarning("NuGet upstream version-list response missing 'versions' property for {Url}", url);
+                    continue;
+                }
+                foreach (var v in versionsElem.EnumerateArray())
+                {
+                    var ver = v.GetString();
+                    if (ver is not null) versionSet.Add(ver);
+                }
+                Response.Headers["X-Upstream-Status"] = "ok";
+                return;
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                Response.Headers["X-Upstream-Status"] = "timeout";
+                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                _logger.LogWarning("NuGet upstream version-list fetch timed out for {Url}", url);
+            }
+            catch (Exception ex)
             {
                 Response.Headers["X-Upstream-Status"] = "error";
                 // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
-                _logger.LogWarning("NuGet upstream version-list response missing 'versions' property for {Url}", url);
-                return;
+                _logger.LogWarning(ex, "NuGet upstream version-list fetch threw for {Url}", url);
             }
-            foreach (var v in versionsElem.EnumerateArray())
-            {
-                var ver = v.GetString();
-                if (ver is not null) versionSet.Add(ver);
-            }
-            Response.Headers["X-Upstream-Status"] = "ok";
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            Response.Headers["X-Upstream-Status"] = "timeout";
-            // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
-            _logger.LogWarning("NuGet upstream version-list fetch timed out for {Url}", url);
-        }
-        catch (Exception ex)
-        {
-            Response.Headers["X-Upstream-Status"] = "error";
-            // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
-            _logger.LogWarning(ex, "NuGet upstream version-list fetch threw for {Url}", url);
         }
     }
 
@@ -612,9 +635,9 @@ public partial class NuGetController : ControllerBase
             return StatusCode(403);
         }
 
-        if (!settings.ProxyPassthroughEnabled) return NotFound();
+        if (!settings.ProxyPassthroughEffective) return NotFound();
 
-        // #47: claim state gates the proxy fetch. local_only (or air-gap implicit local_only)
+        // Claim state gates the proxy fetch. local_only (or air-gap implicit local_only)
         // disables proxy serving for that name.
         if (!await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
             return NotFound();
@@ -658,7 +681,9 @@ public partial class NuGetController : ControllerBase
                     token.UserId, settings.MaxOsvScoreTolerance, sourceIp,
                     MinReleaseAgeHours: settings.MinReleaseAgeHours,
                     PublishedAt: pkgVersion.PublishedAt,
-                    ActorKind: token.ActorKind), ct)
+                    ActorKind: token.ActorKind,
+                    Deprecated: pkgVersion.Deprecated,
+                    BlockDeprecatedMode: settings.BlockDeprecated), ct)
             == BlockDecision.Blocked) return StatusCode(403);
 
         var stream = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
@@ -685,7 +710,9 @@ public partial class NuGetController : ControllerBase
                     token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
                     MinReleaseAgeHours: settings.MinReleaseAgeHours,
                     PublishedAt: pkgVersion.PublishedAt,
-                    ActorKind: token?.ActorKind), ct)
+                    ActorKind: token?.ActorKind,
+                    Deprecated: pkgVersion.Deprecated,
+                    BlockDeprecatedMode: settings.BlockDeprecated), ct)
             == BlockDecision.Blocked) return StatusCode(403);
 
         if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase))
@@ -709,23 +736,37 @@ public partial class NuGetController : ControllerBase
     private async Task<IActionResult> ProxyFetchNupkgAsync(
         string orgId, string id, string version, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
-        var upstreamBase = _config["NuGet:Upstream"] ?? "https://api.nuget.org/v3";
-        var upstreamUrl = $"{upstreamBase}/flatcontainer/{id.ToLowerInvariant()}/{version}/{file}";
+        // Resolve the org's configured upstreams in priority order. An empty list means
+        // proxying is disabled for nuget — a download miss is a 404.
+        var bases = await _registries.ResolveAsync(orgId, "nuget", ct);
+        if (bases.Count == 0) return NotFound();
+
         Response.Headers["X-Cache"] = "MISS";
         try
         {
-            // #94 single-flight flatcontainer fetch — collapses concurrent first-fetches
-            // of the same coordinate onto one upstream call.
+            // Walk upstreams in priority order; the first reachable one to return the artefact
+            // wins, and the heavy cache/record/scan/serve work runs single-shot for that URL.
             //
             // NuGet artefacts still route through GetOrFetchMetadataAsync (a buffered
             // byte[]) because flatcontainer URLs don't carry a content-addressed hash,
             // and we haven't yet flipped this path onto FetchAndStageAsync. That's a
-            // parallel concern; #105 isolates the residue here by wrapping the byte[]
+            // parallel concern; the proxy-fetch refactor isolates the residue here by wrapping the byte[]
             // in a BlobHandle so everything downstream (ProxyFetchService,
             // ProxyVersionRecorder, LicenseExtractor) stays uniformly stream-shaped.
-            var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, ct);
-            if (!resp.IsSuccessStatusCode) return NotFound();
-            var bytes = resp.Body;
+            string? upstreamBase = null;
+            byte[]? bytes = null;
+            foreach (var candidateBase in bases)
+            {
+                // Single-flight flatcontainer fetch — collapses concurrent first-fetches
+                // of the same coordinate onto one upstream call.
+                var resp = await _upstream.GetOrFetchMetadataAsync(
+                    $"{candidateBase}/flatcontainer/{id.ToLowerInvariant()}/{version}/{file}", ct);
+                if (!resp.IsSuccessStatusCode) continue;
+                upstreamBase = candidateBase;
+                bytes = resp.Body;
+                break;
+            }
+            if (upstreamBase is null || bytes is null) return NotFound();
 
             var normalizedId = id.ToLowerInvariant();
             var normalizedVersion = NormalizeNuGetVersion(version);
@@ -767,7 +808,8 @@ public partial class NuGetController : ControllerBase
                 UpstreamChecksum: meta.Checksum,
                 UpstreamIntegrityValue: meta.IntegrityBase64,
                 UpstreamIntegrityAlgorithm: meta.IntegrityBase64 is not null ? "sha512-b64" : null,
-                Deprecated: meta.Deprecated
+                Deprecated: meta.Deprecated,
+                BlockDeprecatedMode: settings.BlockDeprecated
             ), ct);
 
             if (result.Decision == BlockDecision.Blocked) return StatusCode(403);
@@ -797,7 +839,7 @@ public partial class NuGetController : ControllerBase
         try
         {
             var leafUrl = $"{upstreamBase}/registration5-semver1/{normalizedId}/{normalizedVersion}.json";
-            // #94: route through single-flight — this leaf fetch is called inline with
+            // Route through single-flight — this leaf fetch is called inline with
             // every NuGet first-fetch download, so concurrent fan-out would otherwise
             // stampede the registration URL too.
             var resp = await _upstream.GetOrFetchMetadataAsync(leafUrl, ct);
@@ -1044,7 +1086,7 @@ public partial class NuGetController : ControllerBase
     private async Task EmitNuspecLicensesAsync(string versionId, byte[] bytes, CancellationToken ct)
     {
         // Push path holds the .nupkg bytes in memory (upload validation concern,
-        // out of scope for #105). Wrap in a MemoryStream for the unified extractor.
+        // out of scope for this change). Wrap in a MemoryStream for the unified extractor.
         var extracted = LicenseExtractor.FromNuspec(new MemoryStream(bytes, writable: false));
         if (extracted.Spdx.Count > 0)
             await _licenses.SetLicensesAsync(versionId, extracted.Spdx, "upstream", ct);
@@ -1210,4 +1252,5 @@ public sealed record NuGetControllerServices(
     Dependably.Infrastructure.Publish.IPackagePublishService Publish,
     ClaimResolver ClaimResolver,
     Dependably.Storage.ProxyFetchService ProxyFetch,
-    ILogger<NuGetController> Logger);
+    ILogger<NuGetController> Logger,
+    UpstreamRegistryResolver Registries);

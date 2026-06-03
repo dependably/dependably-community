@@ -35,7 +35,7 @@ public class CacheEvictionServiceTests : IAsyncLifetime
     private async Task SeedAsync(string version, DateTimeOffset accessed, long size = 100)
     {
         // Insert blob first so eviction's blob-delete step has something to remove.
-        // BlobKeys.Proxy requires 64-char lowercase hex (hardened in #106); derive a
+        // BlobKeys.Proxy requires 64-char lowercase hex (hardened to reject non-hex input); derive a
         // deterministic-but-valid sentinel from the version.
         var blobKey = BlobKeys.Proxy(ShaSentinelFor(version));
         await _blobs.PutAsync(blobKey, new MemoryStream(new byte[size]));

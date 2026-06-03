@@ -11,7 +11,7 @@ using Xunit;
 namespace Dependably.Tests.Unit.Protocol;
 
 /// <summary>
-/// Unit coverage for <see cref="OciUpstreamAuthService"/> (#103).
+/// Unit coverage for <see cref="OciUpstreamAuthService"/>.
 ///
 /// Coverage targets:
 ///  - Anonymous upstream: GetAuthorizationAsync returns null
@@ -244,5 +244,7 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
     {
         public StubAirGap(bool enabled) => IsEnabled = enabled;
         public bool IsEnabled { get; }
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => IsEnabled;
     }
 }

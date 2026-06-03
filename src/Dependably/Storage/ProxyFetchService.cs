@@ -16,6 +16,9 @@ namespace Dependably.Storage;
 ///   <item>Trust-boundary checksum re-verify against an upstream-supplied integrity hash
 ///         (the SHA-256 itself is already known — <see cref="UpstreamClient"/> computed it
 ///         inline during hash-and-stage).</item>
+///   <item>First-fetch deprecation gate (<see cref="BlockGateService.EvaluateFirstFetchDeprecationAsync"/>):
+///         under <c>block_new</c>/<c>block_all</c> a deprecated version is refused here, before
+///         the version row is recorded, so it never enters the cache catalogue.</item>
 ///   <item>Best-effort <see cref="CacheAccessRecorder"/> tick (per-tenant first/last access).</item>
 ///   <item>Record the version row via <see cref="ProxyVersionRecorder"/> (handles the
 ///         unique-constraint race when two concurrent first-fetches collide).</item>
@@ -54,7 +57,7 @@ public sealed class ProxyFetchService
     /// <summary>
     /// Runs the post-fetch pipeline: optional fail-fast checksum verify, cache-access
     /// tick, record version row, scan, evaluate block gate. The blob has already been
-    /// written by <see cref="UpstreamClient.FetchAndStageAsync"/> (#104) and the
+    /// written by <see cref="UpstreamClient.FetchAndStageAsync"/> and the
     /// SHA-256 was computed inline — both are passed through on <see cref="BlobHandle"/>.
     /// </summary>
     public async Task<ProxyFetchResult> RecordAndScanAsync(
@@ -86,7 +89,28 @@ public sealed class ProxyFetchService
                 $"Upstream-supplied {spec.Algorithm} hash for {request.Purl} did not match the downloaded bytes.");
         }
 
-        // #48 cache_artifact + tenant_artifact_access. Best-effort: a recorder failure
+        // First-fetch deprecation gate. Runs BEFORE the version row is recorded so a deprecated
+        // version is never adopted into the cache catalogue under block_new / block_all: with no
+        // version row, the controllers' cache-hit lookup misses and every subsequent request
+        // re-enters this fetch path and re-blocks. (The blob bytes were already staged by
+        // UpstreamClient; that orphan lives in the eviction-friendly cache tier and is never
+        // served because nothing references it.) block_new vs block_all is resolved here — both
+        // deny on the first fetch; only block_all additionally denies cached versions, which is
+        // handled later by EvaluateAsync on the serve path.
+        if (request.Deprecated is not null)
+        {
+            var firstFetch = await _blockGate.EvaluateFirstFetchDeprecationAsync(
+                new BlockGateRequest(request.OrgId, request.Ecosystem, request.Purl, string.Empty,
+                    null, null,
+                    request.UserId, request.MaxOsvScoreTolerance, request.SourceIp,
+                    ActorKind: request.ActorKind,
+                    Deprecated: request.Deprecated,
+                    BlockDeprecatedMode: request.BlockDeprecatedMode), ct);
+            if (firstFetch == BlockDecision.Blocked)
+                return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey, VersionId: null);
+        }
+
+        // Cache-access record into cache_artifact + tenant_artifact_access. Best-effort: a recorder failure
         // shouldn't fail the proxy fetch, so the caller may pass null to opt out and the
         // controller can skip this entirely.
         if (request.CacheAccess is { } access)
@@ -127,7 +151,9 @@ public sealed class ProxyFetchService
                 request.UserId, request.MaxOsvScoreTolerance, request.SourceIp,
                 MinReleaseAgeHours: request.MinReleaseAgeHours,
                 PublishedAt: request.PublishedAt,
-                ActorKind: request.ActorKind), ct);
+                ActorKind: request.ActorKind,
+                Deprecated: existing?.Deprecated,
+                BlockDeprecatedMode: request.BlockDeprecatedMode), ct);
 
         return new ProxyFetchResult(decision, sha256, blobKey, scanVersionId);
     }
@@ -156,7 +182,7 @@ public sealed class ProxyFetchService
 /// <summary>
 /// Reference to a blob that's already been written to <see cref="IBlobStore"/> and whose
 /// SHA-256 is known. Replaces the byte[]-shaped <c>Bytes</c>/<c>Sha256Hex</c>/<c>SizeBytes</c>
-/// triple that #104 still threaded through ProxyFetchService. <see cref="OpenAsync"/>
+/// triple that ProxyFetchService still threaded through. <see cref="OpenAsync"/>
 /// lazily opens a fresh blob-store stream when the consumer actually needs the bytes
 /// (license extraction, non-SHA-256 checksum re-verify); cache HITs that only need to
 /// stream the response body never call it.
@@ -195,7 +221,7 @@ public sealed record ProxyFetchRequest(
     string? SourceIp,
     double MaxOsvScoreTolerance,
     /// <summary>
-    /// Optional #48 cache-access record. Pass null to skip (e.g. PyPI's pre-known-sha
+    /// Optional cache-access record. Pass null to skip (e.g. PyPI's pre-known-sha
     /// path tracks access elsewhere). The recorder updates Sha256/BlobKey/SizeBytes from
     /// the freshly-computed values regardless of what the caller seeded them with.
     /// </summary>
@@ -249,7 +275,9 @@ public sealed record ProxyFetchRequest(
     /// <c>listed: false</c>. Persisted into <c>package_versions.deprecated</c> so
     /// the existing UI badge surfaces it. Null when upstream didn't flag the version.
     /// </summary>
-    string? Deprecated = null);
+    string? Deprecated = null,
+    /// <summary>Tenant policy from <c>org_settings.block_deprecated</c>: 'off' | 'warn' | 'block'.</summary>
+    string? BlockDeprecatedMode = null);
 
 /// <summary>Outcome of <see cref="ProxyFetchService.RecordAndScanAsync"/>.</summary>
 public sealed record ProxyFetchResult(

@@ -63,6 +63,20 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         _orgId = await OrgSeeder.InsertAsync(_db, "acme");
         _userId = await UserSeeder.InsertAsync(_db, _orgId, "owner@acme.test", "owner");
         await SetAnonymousPullAsync(true);
+        // The controller now resolves the upstream from the per-org registry list rather than
+        // Maven:Upstream config — seed one pointing at the WireMock server so proxy paths fire.
+        await SeedMavenRegistryAsync(_upstream);
+    }
+
+    private async Task SeedMavenRegistryAsync(string url)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO upstream_registry (id, org_id, ecosystem, url, position)
+            VALUES (@id, @org, 'maven', @url, 0)
+            """,
+            new { id = Guid.NewGuid().ToString("N"), org = _orgId, url });
     }
 
     public async Task DisposeAsync()
@@ -153,7 +167,9 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         var vulns = new VulnerabilityRepository(_db);
         var licenses = new LicenseRepository(_db);
         var scanner = new VulnerabilityScanService(
-            _db, osv, vulns, _audit, config, NullLogger<VulnerabilityScanService>.Instance);
+            _db, osv, vulns, _audit, config,
+            new StubAirGapMode(false),
+            NullLogger<VulnerabilityScanService>.Instance);
         var proxyVersions = new ProxyVersionRecorder(_packages, _audit, licenses);
         var blockGate = new BlockGateService(vulns, _audit);
         var cacheRecorder = new CacheAccessRecorder(
@@ -165,7 +181,8 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         var svc = new MavenControllerServices(
             Packages: _packages, Tokens: _tokens, Audit: _audit, Orgs: _orgs,
             Blobs: _blobs, Db: _db, Upstream: upstream, Config: config,
-            ProxyFetch: proxyFetch, BlockGate: blockGate);
+            ProxyFetch: proxyFetch, BlockGate: blockGate,
+            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db)));
 
         return new MavenController(svc)
         {
@@ -251,6 +268,8 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
     private sealed class StubAirGapMode : IAirGapMode
     {
         public bool IsEnabled { get; }
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => IsEnabled;
         public StubAirGapMode(bool enabled) => IsEnabled = enabled;
     }
 

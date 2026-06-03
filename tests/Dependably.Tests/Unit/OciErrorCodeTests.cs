@@ -5,7 +5,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Unit coverage for the OCI Distribution Spec error payload (#98). The wire form is
+/// Unit coverage for the OCI Distribution Spec error payload. The wire form is
 /// canonical SCREAMING_SNAKE_CASE per the spec — docker clients disambiguate on
 /// <c>code</c> string equality, so any drift here breaks <c>docker pull</c>.
 /// </summary>

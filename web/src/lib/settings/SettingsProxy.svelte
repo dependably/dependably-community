@@ -1,7 +1,7 @@
 <!--
   Proxy tab — passthrough toggle, OSV score tolerance (0.0 – 10.0), the allowlistMode
   gate, and the Allowlist/Blocklist sections that the gate governs. Consolidating all
-  proxy-related controls here (#87) makes the relationship between the mode toggle
+  proxy-related controls here makes the relationship between the mode toggle
   and the lists it gates obvious. The tolerance input stays a free-form text field
   with a decimal pattern so users can type intermediate values (`9.`) without the
   browser clamping or stripping; the blur handler normalises to one decimal place to
@@ -10,9 +10,12 @@
 <script>
   import { t } from 'svelte-i18n'
   import SettingsList from './SettingsList.svelte'
+  import SettingsUpstreamRegistries from './SettingsUpstreamRegistries.svelte'
+  import InfoTip from '../InfoTip.svelte'
 
   export let proxySettings
   export let allowlistMode = false
+  export let airGapped = false
   export let saving = false
   export let onSave = () => {}
 
@@ -33,16 +36,18 @@
 
 <div class="card card-narrow">
   <div class="form-row form-row-inline">
-    <label class="flex-1">{$t('settings.proxy.passthroughEnabled')}</label>
-    <input type="checkbox" bind:checked={proxySettings.proxy_passthrough_enabled} class="w-auto" />
+    <label class="flex-1 label-row">{$t('settings.proxy.passthroughEnabled')} <InfoTip text={$t('settings.proxy.passthroughHint')} /></label>
+    <input type="checkbox" bind:checked={proxySettings.proxy_passthrough_enabled} disabled={airGapped} class="w-auto" />
   </div>
-  <div class="form-hint nudge-up mb-3">{$t('settings.proxy.passthroughHint')}</div>
+  {#if airGapped}
+    <div class="form-hint mb-3">{$t('settings.proxy.passthroughOverriddenByAirGap')}</div>
+  {/if}
   <div class="form-row form-row-inline">
     <label class="flex-1">{$t('settings.proxy.allowlistMode')}</label>
     <input type="checkbox" bind:checked={allowlistMode} class="w-auto" />
   </div>
   <div class="form-row">
-    <label>{$t('settings.proxy.osvTolerance')}</label>
+    <label class="label-row">{$t('settings.proxy.osvTolerance')} <InfoTip text={$t('settings.proxy.osvToleranceHint')} /></label>
     <input
       type="text"
       inputmode="decimal"
@@ -50,10 +55,9 @@
       bind:value={proxySettings.max_osv_score_tolerance}
       on:blur={(e) => proxySettings.max_osv_score_tolerance = Number(e.currentTarget.value || 0).toFixed(1)}
     />
-    <div class="form-hint">{$t('settings.proxy.osvToleranceHint')}</div>
   </div>
   <div class="form-row">
-    <label for="min-release-age">{$t('settings.proxy.minReleaseAge')}</label>
+    <label class="label-row" for="min-release-age">{$t('settings.proxy.minReleaseAge')} <InfoTip text={$t('settings.proxy.minReleaseAgeHint')} /></label>
     <div class="value-unit-row">
       <input
         id="min-release-age"
@@ -67,7 +71,15 @@
         <option value="days">{$t('settings.proxy.minReleaseAgeUnitDays')}</option>
       </select>
     </div>
-    <div class="form-hint">{$t('settings.proxy.minReleaseAgeHint')}</div>
+  </div>
+  <div class="form-row">
+    <label class="label-row" for="block-deprecated">{$t('settings.proxy.blockDeprecated')} <InfoTip text={$t('settings.proxy.blockDeprecatedHint')} /></label>
+    <select id="block-deprecated" bind:value={proxySettings.block_deprecated}>
+      <option value="off">{$t('settings.proxy.blockDeprecatedOff')}</option>
+      <option value="warn">{$t('settings.proxy.blockDeprecatedWarn')}</option>
+      <option value="block_new">{$t('settings.proxy.blockDeprecatedBlockNew')}</option>
+      <option value="block_all">{$t('settings.proxy.blockDeprecatedBlockAll')}</option>
+    </select>
   </div>
   <button class="primary" on:click={onSave} disabled={saving}>
     {saving ? $t('common.actions.saving') : $t('common.actions.save')}
@@ -96,10 +108,11 @@
   onAdd={onAddBlocklist}
   onRemove={onRemoveBlocklist} />
 
+<SettingsUpstreamRegistries />
+
 <style>
   .card-narrow { max-width: 480px; }
   .form-row-inline { flex-direction: row; align-items: center; gap: 12px; }
-  .nudge-up { margin-top: -8px; }
   /* Value + unit pair (e.g. "48 Hours") — number input on the left, unit picker on the right.
      Width-constrained so a 4-digit value never pushes the select off the card edge. */
   .value-unit-row { display: flex; gap: 8px; align-items: center; }

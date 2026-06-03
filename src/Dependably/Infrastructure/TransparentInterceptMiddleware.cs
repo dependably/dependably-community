@@ -1,7 +1,7 @@
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Path rewriter for transparent-intercept deployments (#43). When <c>ROUTING_MODE=transparent</c>
+/// Path rewriter for transparent-intercept deployments. When <c>ROUTING_MODE=transparent</c>
 /// and the inbound <c>Host</c> header matches a configured ecosystem hostname, prepends the
 /// ecosystem prefix (<c>/npm</c>, <c>/pypi</c>, <c>/nuget</c>) to the request path so the
 /// existing prefix-routed controllers serve the request unchanged.

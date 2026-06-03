@@ -6,7 +6,7 @@ namespace Dependably.Infrastructure;
 /// Resolver for <c>DEPLOYMENT_MODE=header</c> deployments. Reads the tenant slug from a configured
 /// header (default <c>X-Dependably-Tenant</c>, override via <c>TENANT_HEADER_NAME</c>) injected by
 /// an upstream edge proxy. Suitable for managed multi-tenant deployments under transparent
-/// intercept (#43) where subdomain resolution is not viable because the host is owned by an
+/// intercept where subdomain resolution is not viable because the host is owned by an
 /// impersonated public registry.
 ///
 /// Trust assumption: the edge proxy is the only path into the application. If the application

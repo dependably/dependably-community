@@ -8,7 +8,7 @@ public class BlobKeysTests
 {
     // ---- Proxy ----
     // Hex sentinel — 64 lowercase hex chars; the all-`a` form keeps tests legible while satisfying
-    // BlobKeys.Proxy's input contract (see issue #106 — hardened to reject non-hex input).
+    // BlobKeys.Proxy's input contract (hardened to reject non-hex input).
     private const string HexSentinel  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string HexSentinel2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -28,7 +28,7 @@ public class BlobKeysTests
     [InlineData("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b8551")] // 65 chars
     public void Proxy_NonHex_ThrowsArgumentException(string sha)
     {
-        // Hardened in #106: BlobKeys.Proxy now validates 64-char lowercase hex (defense in depth
+        // Hardened to reject non-hex input: BlobKeys.Proxy now validates 64-char lowercase hex (defense in depth
         // for the path-traversal Snyk High finding).
         Assert.Throws<ArgumentException>(() => BlobKeys.Proxy(sha));
     }

@@ -5,7 +5,7 @@ using Microsoft.Extensions.Options;
 namespace Dependably.Security;
 
 /// <summary>
-/// Per-route capability enforcement (#54). Applied as an attribute on actions or
+/// Per-route capability enforcement. Applied as an attribute on actions or
 /// controllers; ASP.NET Core's authorization pipeline resolves the policy via
 /// <see cref="CapabilityPolicyProvider"/> and authorises with
 /// <see cref="CapabilityHandler"/>. The capability granted by the request is

@@ -4,7 +4,7 @@ using System.Text;
 namespace Dependably.Security;
 
 /// <summary>
-/// Partition-key derivation for the download / push rate limiters (#96).
+/// Partition-key derivation for the download / push rate limiters.
 ///
 /// Bucketing strategy: per-token-hash when an Authorization header is present so a single
 /// misbehaving CI client can't DoS the writer queue, falling back to client IP so anonymous

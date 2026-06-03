@@ -8,9 +8,9 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Acceptance tests for #93: slug → tenant context cache, tenant id → OrgSettings cache,
+/// Acceptance tests for the slug → tenant context cache, tenant id → OrgSettings cache,
 /// and the unified UNION-ALL token lookup. Each test exercises both the cached path and
-/// the invalidation/eviction guarantees the issue calls out.
+/// the invalidation/eviction guarantees.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class TenantSettingsTokenCacheTests : IAsyncLifetime

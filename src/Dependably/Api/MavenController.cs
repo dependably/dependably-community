@@ -13,13 +13,13 @@ using Dependably.Storage;
 namespace Dependably.Api;
 
 /// <summary>
-/// Maven 2/3 repository surface (#99 local, #101 upstream proxy). Implements the file-tree
+/// Maven 2/3 repository surface — local serving and upstream proxy. Implements the file-tree
 /// contract Gradle / Maven clients expect — every artifact lives at
 /// <c>/{groupId-as-path}/{artifactId}/{version}/{artifactId}-{version}[-{classifier}].{extension}</c>
 /// — plus the <c>maven-metadata.xml</c> documents that drive version resolution and
 /// SNAPSHOT lookup.
 ///
-/// Proxy (#101): on a local cache miss the controller falls through to the configured upstream
+/// Proxy: on a local cache miss the controller falls through to the configured upstream
 /// (default Maven Central). Locally published artifacts always win over upstream — dependency
 /// confusion protection per spec §11. GroupId prefixes listed in
 /// <c>org_settings.maven_reserved_prefixes</c> never consult upstream.
@@ -160,7 +160,8 @@ public sealed class MavenController : OrgScopedControllerBase
                    mvf.checksum_sha256 AS ChecksumSha256,
                    mvf.checksum_sha1 AS ChecksumSha1, mvf.checksum_md5 AS ChecksumMd5,
                    pv.purl AS Purl, pv.manual_block_state AS ManualBlockState,
-                   pv.vuln_checked_at AS VulnCheckedAt, pv.published_at AS PublishedAt
+                   pv.vuln_checked_at AS VulnCheckedAt, pv.published_at AS PublishedAt,
+                   pv.deprecated AS Deprecated
             FROM maven_version_files mvf
             JOIN package_versions pv ON pv.id = mvf.package_version_id
             JOIN packages p ON p.id = pv.package_id
@@ -191,7 +192,9 @@ public sealed class MavenController : OrgScopedControllerBase
                         HttpContext.GetNormalizedRemoteIp(),
                         MinReleaseAgeHours: settings?.MinReleaseAgeHours,
                         PublishedAt: row.PublishedAt,
-                        ActorKind: token?.ActorKind), ct)
+                        ActorKind: token?.ActorKind,
+                        Deprecated: row.Deprecated,
+                        BlockDeprecatedMode: settings?.BlockDeprecated), ct)
                 == BlockDecision.Blocked) return StatusCode(403);
 
             Response.Headers["X-Cache"] = "HIT";
@@ -202,7 +205,7 @@ public sealed class MavenController : OrgScopedControllerBase
             return await ServePrimaryFromCacheAsync(orgId, coords, token?.UserId, row, ct);
         }
 
-        // ── Cache miss: proxy upstream (#101) ──────────────────────────────────
+        // ── Cache miss: proxy upstream ──────────────────────────────────
         return await ProxyFetchAndCacheAsync(orgId, coords, settings, token, ct);
     }
 
@@ -252,8 +255,9 @@ public sealed class MavenController : OrgScopedControllerBase
     }
 
     /// <summary>
-    /// Handles a Maven artifact cache miss by fetching from the configured upstream registry
-    /// (default Maven Central). Dep-confusion protection: reserved groupId prefixes and
+    /// Handles a Maven artifact cache miss by fetching from the org's configured upstream
+    /// registries in priority order (first reachable wins); an empty list disables proxying.
+    /// Dep-confusion protection: reserved groupId prefixes and
     /// SNAPSHOT versions never consult upstream.
     /// </summary>
     private async Task<IActionResult> ProxyFetchAndCacheAsync(
@@ -261,14 +265,17 @@ public sealed class MavenController : OrgScopedControllerBase
     {
         // No upstream service registered — treat as local-only.
         if (_svc.Upstream is null) return NotFound();
-        var upstreamBase = _svc.Config?["Maven:Upstream"] ?? "https://repo1.maven.org/maven2";
+
+        // Resolve the org's priority-ordered upstream registries. Empty ⇒ proxying disabled.
+        var bases = await _svc.Registries.ResolveAsync(orgId, "maven", ct);
+        if (bases.Count == 0) return NotFound();
 
         // Dep-confusion guard: locally-reserved prefixes never go upstream.
         var reservedPrefixes = await GetReservedPrefixesAsync(orgId, ct);
         if (IsReservedPrefix(coords.GroupId, reservedPrefixes))
             return NotFound();
 
-        // Snapshot proxying is out of scope for v1 (#101 Out of Scope).
+        // Snapshot proxying is out of scope for v1.
         if (coords.IsSnapshot) return NotFound();
 
         // For sidecar requests on a proxied primary: if the primary isn't cached yet,
@@ -282,18 +289,26 @@ public sealed class MavenController : OrgScopedControllerBase
         var groupPath = coords.GroupId.Replace('.', '/');
         var upstreamPath = $"{groupPath}/{coords.ArtifactId}/{coords.Version}/{coords.Filename}";
 
-        MavenArtifactFetchResult? result;
-        try
+        var purlForLog = coords.Version is not null
+            ? PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version)
+            : null;
+
+        // Walk the configured upstreams in priority order; the first that yields the
+        // artifact wins. A single configured registry behaves identically to before.
+        MavenArtifactFetchResult? result = null;
+        foreach (var upstreamBase in bases)
         {
-            var purlForLog = coords.Version is not null
-                ? PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version)
-                : null;
-            result = await _svc.Upstream.FetchArtifactAsync(
-                upstreamBase, upstreamPath, ct, orgId: orgId, purl: purlForLog);
-        }
-        catch (ChecksumException)
-        {
-            return StatusCode(502);
+            try
+            {
+                result = await _svc.Upstream.FetchArtifactAsync(
+                    upstreamBase, upstreamPath, ct, orgId: orgId, purl: purlForLog);
+            }
+            catch (ChecksumException)
+            {
+                return StatusCode(502);
+            }
+
+            if (result is not null) break;
         }
 
         if (result is null) return NotFound();
@@ -321,7 +336,8 @@ public sealed class MavenController : OrgScopedControllerBase
             MaxOsvScoreTolerance: settings?.MaxOsvScoreTolerance ?? 10.0,
             CacheAccess: null,
             MinReleaseAgeHours: settings?.MinReleaseAgeHours,
-            Sha1Hex: result.Sha1), ct);
+            Sha1Hex: result.Sha1,
+            BlockDeprecatedMode: settings?.BlockDeprecated), ct);
 
         if (fetch.Decision == BlockDecision.Blocked) return StatusCode(403);
 
@@ -411,22 +427,29 @@ public sealed class MavenController : OrgScopedControllerBase
             """,
             new { orgId, purlName = coords.PackageName })).ToList();
 
-        // #101: merge upstream versions unless this groupId is reserved.
+        // Merge upstream versions unless this groupId is reserved. An empty registry list
+        // (proxying disabled for maven) leaves mergedVersions local-only.
         var reservedPrefixes = await GetReservedPrefixesAsync(orgId, ct);
         var mergedVersions = localVersions;
-        var upstreamBase = _svc.Config?["Maven:Upstream"];
+        var bases = await _svc.Registries.ResolveAsync(orgId, "maven", ct);
         if (_svc.Upstream is not null &&
-            !string.IsNullOrEmpty(upstreamBase) &&
+            bases.Count > 0 &&
             !IsReservedPrefix(coords.GroupId, reservedPrefixes))
         {
             var groupPath = coords.GroupId.Replace('.', '/');
             var artifactPath = $"{groupPath}/{coords.ArtifactId}";
-            var upstreamVersions = await _svc.Upstream.FetchUpstreamVersionsAsync(upstreamBase, artifactPath, ct);
-            if (upstreamVersions is { Count: > 0 })
+
+            // Walk upstreams in priority order; the first that returns versions wins.
+            foreach (var upstreamBase in bases)
             {
-                // Union: local wins on collision; preserve order (local first, then upstream-only additions).
-                var localSet = new HashSet<string>(localVersions, StringComparer.OrdinalIgnoreCase);
-                mergedVersions = [.. localVersions, .. upstreamVersions.Where(v => !localSet.Contains(v))];
+                var upstreamVersions = await _svc.Upstream.FetchUpstreamVersionsAsync(upstreamBase, artifactPath, ct);
+                if (upstreamVersions is { Count: > 0 })
+                {
+                    // Union: local wins on collision; preserve order (local first, then upstream-only additions).
+                    var localSet = new HashSet<string>(localVersions, StringComparer.OrdinalIgnoreCase);
+                    mergedVersions = [.. localVersions, .. upstreamVersions.Where(v => !localSet.Contains(v))];
+                    break;
+                }
             }
         }
 
@@ -616,8 +639,8 @@ public sealed class MavenController : OrgScopedControllerBase
         var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
         if (settings is null) return null;
 
-        // Read max_upload_bytes_maven dynamically because the column was added in #99
-        // and the strongly-typed OrgSettings model in this MR doesn't surface it yet.
+        // Read max_upload_bytes_maven dynamically because the column was added after the
+        // strongly-typed OrgSettings model, which doesn't surface it yet.
         await using var conn = await _svc.Db.OpenAsync(ct);
         var orgMaven = await conn.ExecuteScalarAsync<long?>(
             "SELECT max_upload_bytes_maven FROM org_settings WHERE org_id = @orgId",
@@ -691,7 +714,8 @@ public sealed class MavenController : OrgScopedControllerBase
         string Purl,
         string? ManualBlockState,
         DateTimeOffset? VulnCheckedAt,
-        DateTimeOffset? PublishedAt);
+        DateTimeOffset? PublishedAt,
+        string? Deprecated);
 }
 
 /// <summary>Scoped DI bundle for the Maven controller — mirrors the npm/PyPI shape.</summary>
@@ -705,4 +729,5 @@ public sealed record MavenControllerServices(
     MavenUpstreamFetcher Upstream,
     IConfiguration Config,
     ProxyFetchService ProxyFetch,
-    BlockGateService BlockGate);
+    BlockGateService BlockGate,
+    UpstreamRegistryResolver Registries);

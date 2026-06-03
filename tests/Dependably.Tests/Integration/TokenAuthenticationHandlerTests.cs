@@ -9,7 +9,7 @@ using Xunit;
 namespace Dependably.Tests.Integration;
 
 /// <summary>
-/// #55: TokenAuthenticationHandler must produce a ClaimsPrincipal carrying the right
+/// TokenAuthenticationHandler must produce a ClaimsPrincipal carrying the right
 /// role + capability claims so that <c>[Authorize(AuthenticationSchemes = "ApiToken")]</c>
 /// + <c>[RequireCapability]</c> on protocol publish endpoints actually gates correctly.
 ///

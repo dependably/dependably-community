@@ -13,7 +13,7 @@ using Xunit;
 namespace Dependably.Tests.Unit.Api;
 
 /// <summary>
-/// Unit coverage for <see cref="RpmController"/> (#100). The controller is constructed
+/// Unit coverage for <see cref="RpmController"/>. The controller is constructed
 /// against real repositories + an in-memory blob store + a fresh SQLite schema, so each
 /// test exercises the actual SQL paths in the controller. <c>RpmControllerServices</c>
 /// isn't wired into <see cref="ControllerScenario"/> yet — building the bundle inline
@@ -47,7 +47,8 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
         var audit = new AuditRepository(_db);
         var orgs = new OrgRepository(_db);
         var repodata = new RpmRepodataService(_db);
-        var svc = new RpmControllerServices(packages, _tokens, audit, orgs, new TieredBlobStorage(_blobs, _blobs), _db, repodata);
+        var svc = new RpmControllerServices(packages, _tokens, audit, orgs, new TieredBlobStorage(_blobs, _blobs), _db, repodata,
+            new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db)));
         _controller = new RpmController(svc)
         {
             ControllerContext = BuildContext(_orgId),

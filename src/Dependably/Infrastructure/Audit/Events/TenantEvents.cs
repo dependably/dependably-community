@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace Dependably.Infrastructure.Audit.Events;
 
 /// <summary>
-/// Typed payloads for tenant settings + token lifecycle events (#52). Token events carry
+/// Typed payloads for tenant settings + token lifecycle events. Token events carry
 /// the token id but never the raw secret — that's emitted exactly once in the API response
 /// and never stored in plaintext.
 /// </summary>

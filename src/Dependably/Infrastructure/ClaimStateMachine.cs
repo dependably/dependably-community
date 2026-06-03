@@ -1,7 +1,7 @@
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Encodes the legal claim transitions from #47. Pure logic, no DB access — paired with
+/// Encodes the legal claim transitions. Pure logic, no DB access — paired with
 /// <see cref="ClaimRepository"/> at the call site.
 ///
 /// Transition table:

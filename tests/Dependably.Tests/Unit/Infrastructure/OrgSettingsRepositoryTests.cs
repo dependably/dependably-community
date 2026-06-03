@@ -190,6 +190,53 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
         Assert.True(settings.AllowlistMode);
     }
 
+    // ── UpsertSettingsAsync — air_gapped round-trip + tristate ───────────────
+
+    [Fact]
+    public async Task UpsertSettingsAsync_AirGapped_RoundTripsAndTristateNullPreserves()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"airgap-{Guid.NewGuid():N}");
+        // Default: off.
+        Assert.False((await _repo.GetSettingsAsync(orgId))!.AirGapped);
+
+        // Set on.
+        await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
+            orgId, AnonymousPull: false, AllowlistMode: false,
+            null, null, null, null, null, DefaultLanguage: null,
+            AirGapped: true));
+        Assert.True((await _repo.GetSettingsAsync(orgId))!.AirGapped);
+
+        // null = leave unchanged → stays on (COALESCE(@airGapped, air_gapped)).
+        await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
+            orgId, AnonymousPull: false, AllowlistMode: false,
+            null, null, null, null, null, DefaultLanguage: null,
+            AirGapped: null));
+        Assert.True((await _repo.GetSettingsAsync(orgId))!.AirGapped);
+
+        // Explicitly back off.
+        await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
+            orgId, AnonymousPull: false, AllowlistMode: false,
+            null, null, null, null, null, DefaultLanguage: null,
+            AirGapped: false));
+        Assert.False((await _repo.GetSettingsAsync(orgId))!.AirGapped);
+    }
+
+    [Theory]
+    [InlineData(true, false, true)]    // passthrough on, not air-gapped → effective on
+    [InlineData(true, true, false)]    // passthrough on, air-gapped     → effective off
+    [InlineData(false, false, false)]  // passthrough off                → effective off
+    [InlineData(false, true, false)]   // passthrough off + air-gapped   → effective off
+    public void ProxyPassthroughEffective_TrueOnlyWhenEnabledAndNotAirGapped(
+        bool passthrough, bool airGapped, bool expected)
+    {
+        var settings = new OrgSettings
+        {
+            ProxyPassthroughEnabled = passthrough,
+            AirGapped = airGapped,
+        };
+        Assert.Equal(expected, settings.ProxyPassthroughEffective);
+    }
+
     // ── UpsertRetentionAsync ─────────────────────────────────────────────────
 
     [Fact]

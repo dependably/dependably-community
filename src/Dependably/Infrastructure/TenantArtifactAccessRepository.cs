@@ -3,7 +3,7 @@ using Dapper;
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Per-tenant access tracking on <c>cache_artifact</c> (#48). Upserted on every cache hit
+/// Per-tenant access tracking on <c>cache_artifact</c>. Upserted on every cache hit
 /// and lazy-fetch population. Answers "which tenants accessed (ecosystem, name, version)"
 /// for vulnerability response without breaking tenant isolation: the underlying blob is
 /// shared, but visibility is tracked per tenant.
@@ -35,7 +35,7 @@ public sealed class TenantArtifactAccessRepository
     }
 
     /// <summary>
-    /// Cross-tenant query for vulnerability response (#48). Returns the orgs that have
+    /// Cross-tenant query for vulnerability response. Returns the orgs that have
     /// accessed any artifact matching the coordinate. Platform-admin scope only — callers
     /// must enforce.
     /// </summary>

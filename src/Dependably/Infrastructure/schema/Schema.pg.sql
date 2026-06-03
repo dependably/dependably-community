@@ -29,9 +29,9 @@ CREATE TABLE IF NOT EXISTS org_settings (
     max_upload_bytes_pypi   INTEGER,
     max_upload_bytes_npm    INTEGER,
     max_upload_bytes_nuget  INTEGER,
-    max_upload_bytes_maven  INTEGER,        -- #99 per-ecosystem Maven cap; falls back to max_upload_bytes
-    max_upload_bytes_rpm    INTEGER,        -- #100 per-ecosystem RPM cap; falls back to max_upload_bytes
-    max_upload_bytes_oci    INTEGER,        -- #101 per-ecosystem OCI (Docker) cap; falls back to max_upload_bytes
+    max_upload_bytes_maven  INTEGER,        -- per-ecosystem Maven cap; falls back to max_upload_bytes
+    max_upload_bytes_rpm    INTEGER,        -- per-ecosystem RPM cap; falls back to max_upload_bytes
+    max_upload_bytes_oci    INTEGER,        -- per-ecosystem OCI (Docker) cap; falls back to max_upload_bytes
     keep_versions       INTEGER,            -- GC: max versions to retain per package per ecosystem
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
     activity_retention_days INTEGER,        -- GC: delete activity rows older than this
@@ -43,7 +43,12 @@ CREATE TABLE IF NOT EXISTS org_settings (
     min_release_age_hours     INTEGER,
     default_language          TEXT    NOT NULL DEFAULT 'en',
     allow_version_overwrite   INTEGER NOT NULL DEFAULT 0,
-    maven_reserved_prefixes   TEXT    NOT NULL DEFAULT '[]' -- #101 dep-confusion guard; JSON array of groupId prefixes
+    maven_reserved_prefixes   TEXT    NOT NULL DEFAULT '[]', -- dep-confusion guard; JSON array of groupId prefixes
+    -- Per-tenant air-gap posture; forces proxy passthrough off and skips the vuln/deprecation
+    -- scan passes for this org. Composes with the instance AIR_GAPPED env var. See Schema.sql.
+    air_gapped                INTEGER NOT NULL DEFAULT 0,
+    -- Policy for upstream-deprecated/abandoned packages. See Schema.sql for the full rationale.
+    block_deprecated          TEXT    NOT NULL DEFAULT 'off' CHECK (block_deprecated IN ('off', 'warn', 'block_new', 'block_all'))
 );
 
 CREATE TABLE IF NOT EXISTS instance_settings (
@@ -118,8 +123,10 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- Upstream-published integrity hash + algorithm tag. See Schema.sql.
     upstream_integrity_value TEXT,
     upstream_integrity_algorithm TEXT,
-    -- Trailing path segment of blob_key. See Schema.sql for rationale (#91).
+    -- Trailing path segment of blob_key. See Schema.sql for rationale.
     filename    TEXT,
+    -- ISO 8601 UTC; set after the last upstream deprecation metadata refresh. See Schema.sql.
+    deprecation_checked_at TEXT,
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
     UNIQUE (package_id, version)
 );
@@ -246,6 +253,26 @@ CREATE TABLE IF NOT EXISTS blocklist (
     UNIQUE (org_id, pattern)
 );
 
+-- Per-org upstream proxy registries. One ordered list per ecosystem; `position` ascending is
+-- priority (lowest tried first, falling through on miss/unreachable). An ecosystem with zero
+-- rows has proxying effectively disabled for that org. auth_type/username/secret are reserved
+-- for authenticated upstreams and are dormant in community (anonymous-only).
+CREATE TABLE IF NOT EXISTS upstream_registry (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem   TEXT NOT NULL,              -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm'
+    name        TEXT,                       -- optional display label
+    url         TEXT NOT NULL,
+    position    INTEGER NOT NULL DEFAULT 0, -- ascending = priority; lowest tried first
+    auth_type   TEXT NOT NULL DEFAULT 'anonymous',
+    username    TEXT,
+    secret      TEXT,
+    created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    UNIQUE (org_id, ecosystem, url)
+);
+CREATE INDEX IF NOT EXISTS idx_upstream_registry_org_eco
+    ON upstream_registry(org_id, ecosystem, position);
+
 -- License governance
 CREATE TABLE IF NOT EXISTS package_version_licenses (
     id                  TEXT PRIMARY KEY,
@@ -274,7 +301,7 @@ CREATE TABLE IF NOT EXISTS license_blocklist (
 
 CREATE INDEX IF NOT EXISTS idx_pkg_version_licenses ON package_version_licenses(package_version_id);
 
--- #100 RPM metadata. See Schema.sql for full rationale.
+-- RPM metadata. See Schema.sql for full rationale.
 CREATE TABLE IF NOT EXISTS rpm_metadata (
     package_version_id  TEXT PRIMARY KEY REFERENCES package_versions(id) ON DELETE CASCADE,
     rpm_name            TEXT NOT NULL,
@@ -315,7 +342,7 @@ CREATE TABLE IF NOT EXISTS rpm_repodata_state (
     PRIMARY KEY (org_id, arch)
 );
 
--- #99 Maven multi-file per-version tracker. See Schema.sql for full rationale.
+-- Maven multi-file per-version tracker. See Schema.sql for full rationale.
 CREATE TABLE IF NOT EXISTS maven_version_files (
     id                  TEXT PRIMARY KEY,
     package_version_id  TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
@@ -334,7 +361,7 @@ CREATE TABLE IF NOT EXISTS maven_version_files (
 CREATE INDEX IF NOT EXISTS idx_maven_version_files_version ON maven_version_files(package_version_id);
 CREATE INDEX IF NOT EXISTS idx_maven_version_files_filename ON maven_version_files(filename);
 
--- #98 OCI / Docker registry storage. See Schema.sql for full rationale.
+-- OCI / Docker registry storage. See Schema.sql for full rationale.
 CREATE TABLE IF NOT EXISTS oci_blobs (
     digest        TEXT NOT NULL,
     org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -343,7 +370,7 @@ CREATE TABLE IF NOT EXISTS oci_blobs (
     blob_key      TEXT NOT NULL,
     cached_at     TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
     upstream_checked_at TEXT,
-    origin        TEXT NOT NULL DEFAULT 'uploaded',  -- #103 'uploaded' (local push) or 'proxy' (upstream cache)
+    origin        TEXT NOT NULL DEFAULT 'uploaded',  -- 'uploaded' (local push) or 'proxy' (upstream cache)
     PRIMARY KEY (digest, org_id)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_blobs_org ON oci_blobs(org_id);
@@ -354,7 +381,7 @@ CREATE TABLE IF NOT EXISTS oci_tags (
     tag         TEXT NOT NULL,
     digest      TEXT NOT NULL,
     updated_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
-    last_revalidated TEXT,  -- #103 per-tag TTL revalidation timestamp; NULL forces a re-check on first access
+    last_revalidated TEXT,  -- per-tag TTL revalidation timestamp; NULL forces a re-check on first access
     PRIMARY KEY (org_id, repository, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_tags_repository ON oci_tags(org_id, repository);
@@ -399,6 +426,11 @@ CREATE TABLE IF NOT EXISTS tenant_saml_config (
     button_label        TEXT,
     last_test_at        TEXT,
     last_test_email     TEXT,
+    last_test_claims    TEXT,
+    idp_signing_cert_override TEXT,
+    role_attribute      TEXT,
+    role_mapping        TEXT,
+    default_role        TEXT NOT NULL DEFAULT 'member',
     updated_at          TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
 );
 
@@ -429,7 +461,7 @@ CREATE TABLE IF NOT EXISTS external_identities (
 );
 CREATE INDEX IF NOT EXISTS idx_external_identities_user ON external_identities(user_id);
 
--- ── Multitenant architecture (#43-#54) ─────────────────────────────────────────
+-- ── Multitenant architecture ─────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS claim (
     id          TEXT PRIMARY KEY,
@@ -564,7 +596,7 @@ CREATE INDEX IF NOT EXISTS idx_background_job_runs_started_at
 CREATE INDEX IF NOT EXISTS idx_background_job_runs_job_started
     ON background_job_runs(job_name, started_at DESC);
 
--- Content-addressed negative cache for upstream 404 responses (#101, #102, #103).
+-- Content-addressed negative cache for upstream 404 responses.
 -- Shared across tenants — the key is SHA-256(url)[..32] which is content-addressed.
 -- TTL enforced at query time.
 CREATE TABLE IF NOT EXISTS upstream_negative_cache (

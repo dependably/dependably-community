@@ -107,7 +107,7 @@ public static class DependablyMeter
             description: "Token-auth attempts. Attributes: outcome.");
 
     /// <summary>
-    /// Activity rows dropped because the async writer channel was full (#90). Watch this
+    /// Activity rows dropped because the async writer channel was full. Watch this
     /// counter to know when the writer has fallen behind sustained download throughput —
     /// activity rows are observability, not audit, so shedding under load is fine, but
     /// operators should see when it's happening.
@@ -123,7 +123,7 @@ public static class DependablyMeter
             description: "Vuln-scan findings. Attributes: severity, ecosystem.");
 
     /// <summary>
-    /// Requests rejected by the download / push rate limiters (#96). Attributes:
+    /// Requests rejected by the download / push rate limiters. Attributes:
     /// <c>policy</c> (download|push|...), <c>partition</c> prefix (<c>token:HHHH</c>
     /// or <c>ip:1.2.3.4</c>). Lets operators see when a single token is rate-locked
     /// and identify it via the 12-hex prefix without leaking the full hash.
@@ -132,6 +132,33 @@ public static class DependablyMeter
         Meter.CreateCounter<long>(
             "dependably.rate_limit.rejected",
             description: "Requests rejected by rate limiting. Attributes: policy, partition.");
+
+    /// <summary>
+    /// Package versions whose deprecation status changed during a refresh pass.
+    /// Attributes: <c>ecosystem</c>.
+    /// </summary>
+    public static readonly Counter<long> DeprecationRefreshUpdated =
+        Meter.CreateCounter<long>(
+            "dependably.deprecation_refresh.updated",
+            description: "Package versions whose deprecation status changed during a refresh pass. Attributes: ecosystem.");
+
+    /// <summary>
+    /// Package versions checked during a deprecation refresh pass (changed + unchanged).
+    /// Attributes: <c>ecosystem</c>.
+    /// </summary>
+    public static readonly Counter<long> DeprecationRefreshChecked =
+        Meter.CreateCounter<long>(
+            "dependably.deprecation_refresh.checked",
+            description: "Package versions checked during a deprecation refresh pass. Attributes: ecosystem.");
+
+    /// <summary>
+    /// Downloads blocked because the version is upstream-deprecated and the tenant's
+    /// <c>block_deprecated</c> policy is set to 'block'. Attributes: <c>ecosystem</c>.
+    /// </summary>
+    public static readonly Counter<long> DeprecatedBlocks =
+        Meter.CreateCounter<long>(
+            "dependably.security.deprecated_blocks",
+            description: "Downloads blocked by the block_deprecated proxy policy. Attributes: ecosystem.");
 
     // ── Observable gauges — values pushed from elsewhere, read on scrape ────
 

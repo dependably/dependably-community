@@ -40,7 +40,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         Program.ConfigureBuilder(builder);
 
         // Test overrides: replace real stores with in-memory equivalents. Both the legacy
-        // IBlobStore registration AND the new TieredBlobStorage registration (#57) must be
+        // IBlobStore registration AND the new TieredBlobStorage registration must be
         // replaced so tier-aware code (UpstreamClient, CacheEvictionService,
         // PackagePublishService) lands on the in-memory store rather than the real backend.
         builder.Services.RemoveAll<IBlobStore>();

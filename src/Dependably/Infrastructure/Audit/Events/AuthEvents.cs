@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace Dependably.Infrastructure.Audit.Events;
 
 /// <summary>
-/// Typed payloads for authentication events (#52). Email is intentionally never recorded
+/// Typed payloads for authentication events. Email is intentionally never recorded
 /// in plaintext — login.failure carries an email_hash. Login realm is <c>tenant</c> (regular
 /// user) or <c>system</c> (operator dashboard).
 /// </summary>

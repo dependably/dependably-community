@@ -5,7 +5,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// #57: prove the factory's per-tier override path actually picks up <c>_CACHE</c> /
+/// Prove the factory's per-tier override path actually picks up <c>_CACHE</c> /
 /// <c>_REGISTRY</c> suffixes, and that <see cref="TieredBlobStorage.IsSplit"/> reports
 /// truth. A regression here would mean operators thinking they had split-tier storage
 /// while both tiers silently shared a backend.
@@ -101,7 +101,7 @@ public sealed class TieredBlobStorageTests
 
             Assert.IsType<LocalBlobStore>(cache);
             Assert.IsType<LocalBlobStore>(registry);
-            // Reference inequality matters: a shared instance would break #57's eviction
+            // Reference inequality matters: a shared instance would break the per-tier eviction
             // guarantees.
             Assert.False(ReferenceEquals(cache, registry));
         }

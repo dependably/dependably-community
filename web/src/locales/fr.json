@@ -219,6 +219,7 @@
     "del": "Supp.",
     "actionsMenu": {
       "open": "Actions",
+      "download": "Télécharger",
       "rescan": "Relancer",
       "block": "Bloquer",
       "unblock": "Débloquer",
@@ -348,6 +349,14 @@
       "checksum_failure": "Échec de somme de contrôle amont"
     },
     "empty": "Aucun événement d'audit"
+  },
+  "tokenScopes": {
+    "pull": "lecture seule",
+    "push": "écriture seule",
+    "both": "lecture & écriture",
+    "admin": "admin",
+    "audit": "audit",
+    "custom": "personnalisé"
   },
   "tokens": {
     "title": "Jetons d'accès",
@@ -485,13 +494,35 @@
       "testResultHint": "La connexion par formulaire peut maintenant être désactivée dans les 10 prochaines minutes si vous souhaitez exiger SAML.",
       "testResultBack": "Retour aux paramètres",
       "testResultCloseWindow": "Fermer la fenêtre",
-      "testResultAutoClose": "Fermeture dans {seconds}s",
+      "testResultAllClaimsHeader": "Tous les attributs affirmés",
+      "testResultUsedForSignIn": "utilisé pour la connexion",
+      "testResultNoAdditionalAttributes": "Aucun attribut supplémentaire n'a été inclus dans l'assertion.",
       "testResultFailedTitle": "Échec du test SAML",
       "testResultFailedBanner": "L'aller-retour SAML n'a pas abouti.",
       "testResultFailedHint": "Vérifiez la configuration côté IdP (ID d'entité, certificat, URL ACS) et réessayez. La connexion par formulaire reste la seule méthode active tant qu'un test réussi n'a pas été enregistré.",
       "testResultFailureDetails": "Détails de l'échec",
       "testResultErrorCode": "Erreur",
       "testResultErrorDetail": "Détail",
+      "signingCertOverrideTitle": "Certificat de signature remplacé",
+      "signingCertOverrideHint": "Facultatif. Collez un certificat PEM ou DER pour épingler la clé de signature IdP hors bande. Lorsqu'il est défini, il devient la seule ancre de confiance pour la validation de signature SAML.",
+      "signingCertOverridePlaceholder": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+      "signingCertOverrideSet": "Le certificat de remplacement est actif",
+      "signingCertOverrideFingerprint": "Empreinte : {fp}",
+      "signingCertOverrideClear": "Supprimer le remplacement",
+      "signingCertOverrideSave": "Définir le certificat",
+      "signingCertOverrideCleared": "Remplacement du certificat de signature supprimé.",
+      "signingCertOverrideSaved": "Remplacement du certificat de signature enregistré.",
+      "roleMappingTitle": "Mappage des rôles",
+      "roleMappingHint": "Mappez les valeurs de revendication de rôle/groupe IdP aux rôles de locataire Dependably. Lorsqu'un mappage correspond, le rôle de l'utilisateur est défini à chaque connexion.",
+      "roleAttributeLabel": "Attribut de revendication de rôle",
+      "roleAttributePlaceholder": "Par défaut : Role, groups, …",
+      "defaultRoleLabel": "Rôle par défaut (aucune correspondance)",
+      "roleMappingTableHeader": "Valeur IdP → Rôle",
+      "roleMappingAddRow": "Ajouter un mappage",
+      "roleMappingRemoveRow": "Supprimer",
+      "roleMappingIdpValue": "Valeur IdP",
+      "roleMappingRole": "Rôle",
+      "roleMappingSaved": "Mappage des rôles enregistré.",
       "testPopupBlocked": "Le navigateur a bloqué la fenêtre contextuelle de test SAML. Autorisez les fenêtres contextuelles pour ce site et réessayez.",
       "testSucceeded": "Test SAML réussi (courriel reçu : {email}). La connexion par formulaire peut maintenant être désactivée dans les 10 prochaines minutes.",
       "testFailed": "Échec du test SAML : {reason}"
@@ -504,7 +535,11 @@
       "defaultLanguageHint": "Les nouveaux utilisateurs de ce locataire démarrent dans cette langue. Chacun peut la remplacer dans son profil.",
       "allowVersionOverwrite": "Autoriser l'écrasement de version",
       "allowVersionOverwriteHint": "Lorsque désactivé, publier un (nom, version) en doublon est rejeté. Les opérateurs doivent d'abord supprimer la version existante.",
-      "allowVersionOverwriteWarning": "Activer cette option permet à une publication de remplacer le contenu d'une version existante. Le changement est audité (package.replace enregistre les deux empreintes) mais les implications pour la chaîne d'approvisionnement sont réelles — les paquets déjà téléchargés par vos développeurs peuvent avoir un contenu différent au prochain téléchargement. Le basculement de ce paramètre est lui-même audité."
+      "allowVersionOverwriteWarning": "Activer cette option permet à une publication de remplacer le contenu d'une version existante. Le changement est audité (package.replace enregistre les deux empreintes) mais les implications pour la chaîne d'approvisionnement sont réelles — les paquets déjà téléchargés par vos développeurs peuvent avoir un contenu différent au prochain téléchargement. Le basculement de ce paramètre est lui-même audité.",
+      "airGapped": "Environnement isolé (air-gap)",
+      "airGappedHint": "Lorsque activé, Dependably n'émet aucune requête réseau sortante pour cette organisation : les récupérations via le proxy amont sont désactivées (les paquets non mis en cache renvoient 404), et les analyses de vulnérabilités et de métadonnées d'obsolescence ignorent cette organisation. À utiliser pour les déploiements isolés / air-gap.",
+      "airGappedEnforcedNote": "Imposé pour toute l'instance par l'opérateur (AIR_GAPPED) ; non modifiable ici.",
+      "airGappedWarning": "Les requêtes sortantes sont désactivées pour cette organisation : les paquets amont non mis en cache renvoient 404, et les analyses de vulnérabilités et d'obsolescence l'ignorent."
     },
     "uploadLimits": {
       "instanceCeiling": "Plafond de l'instance : {mb} Mo",
@@ -522,6 +557,7 @@
     "proxy": {
       "passthroughEnabled": "Relais proxy activé",
       "passthroughHint": "Lorsque désactivé, seuls les paquets déjà mis en cache dans ce registre sont servis.",
+      "passthroughOverriddenByAirGap": "Remplacé par le paramètre Environnement isolé (onglet Général) : le relais proxy est désactivé en mode air-gap.",
       "allowlistMode": "Proxy : liste d'autorisation et de blocage uniquement",
       "osvTolerance": "Score OSV maximal toléré",
       "osvToleranceHint": "Les paquets dont le score de vulnérabilité dépasse ce seuil sont bloqués (0 – 10). La valeur par défaut 10 autorise tout.",
@@ -531,7 +567,29 @@
       "minReleaseAgeUnitDays": "Jours",
       "allowlistSection": "Liste d'autorisation",
       "blocklistSection": "Liste de blocage",
-      "saved": "Paramètres proxy enregistrés."
+      "blockDeprecated": "Politique des paquets obsolètes",
+      "blockDeprecatedHint": "Traitement des versions marquées obsolètes en amont. « Avertir » affiche un statut « obsolète » dans l'interface et l'API. « Bloquer les nouveaux » refuse une version obsolète absente du cache — elle n'est jamais récupérée, mise en cache ni servie — tandis que les versions déjà en cache continuent d'être servies. « Tout bloquer » renvoie en plus une erreur 403 pour les versions déjà en cache une fois obsolètes. Les données d'obsolescence sont capturées lors de la récupération via le proxy et actualisées chaque jour par la tâche d'actualisation.",
+      "blockDeprecatedOff": "Désactivé — autoriser les obsolètes",
+      "blockDeprecatedWarn": "Avertir — signaler seulement",
+      "blockDeprecatedBlockNew": "Bloquer les nouveaux — refuser les nouvelles récupérations obsolètes",
+      "blockDeprecatedBlockAll": "Tout bloquer — cesser aussi de servir le cache",
+      "saved": "Paramètres proxy enregistrés.",
+      "upstreamRegistries": {
+        "section": "Registres en amont",
+        "hint": "Par écosystème, les registres interrogés par ce proxy, par ordre de priorité. La première entrée est essayée en premier ; en cas d'échec ou d'indisponibilité, la suivante est tentée. Faites glisser une ligne par sa poignée pour réordonner. Sans registre configuré, le proxy est désactivé pour cet écosystème — seuls les paquets déjà en cache sont servis.",
+        "add": "Ajouter un registre",
+        "emptyDisabled": "Aucun registre en amont — le proxy est désactivé pour {ecosystem}.",
+        "dragHint": "Glisser pour réordonner",
+        "removeConfirm": "Supprimer ce registre en amont ?",
+        "modal": {
+          "title": "Ajouter un registre en amont",
+          "ecosystem": "Écosystème",
+          "url": "URL du registre",
+          "urlHint": "URL de base du registre en amont (ex. https://pypi.org, https://registry.npmjs.org).",
+          "name": "Libellé (facultatif)",
+          "namePlaceholder": "ex. Miroir interne"
+        }
+      }
     },
     "licenses": {
       "intro": "Définissez les licences SPDX autorisées pour les paquets de ce locataire. Les métadonnées de licence sont extraites à la publication et lors du remplissage du cache proxy.",
@@ -706,7 +764,8 @@
     "window7d": "7 j",
     "window30d": "30 j",
     "activeUsers": "Utilisateurs actifs (7j)",
-    "blockedPulls": "Téléchargements bloqués (30j)",
+    "totalDownloads": "Total (30j)",
+    "blockedPulls": "Bloqués (30j)",
     "packages": "Paquets",
     "diskUsed": "Espace disque",
     "vulns": "Vulnérabilités",

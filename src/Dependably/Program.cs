@@ -46,6 +46,7 @@ try
     // hook avoids threading IServiceProvider through every per-service Begin() call site.
     Dependably.Infrastructure.Observability.BackgroundJobScope.Services = app.Services;
     Program.WarnOnDeprecatedConfiguration(app.Configuration);
+    Program.WarnOnAirGapContradictions(app.Configuration);
     Program.ConfigureApp(app);
     await app.RunAsync();
     return 0;
@@ -111,7 +112,7 @@ public partial class Program
         // Startup: schema migration + first-boot + JWT key load (must complete before other services)
         builder.Services.AddHostedService<StartupService>();
 
-        // Leader election for background jobs in HA mode (#66)
+        // Leader election for background jobs in HA mode
         builder.Services.AddHostedService<LeaderElectedScheduler>();
 
         // Health infrastructure
@@ -123,7 +124,7 @@ public partial class Program
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddDependablyRepositories();
 
-        // M2.1 — two-tier storage glue that isn't a repository. The repositories themselves
+        // Two-tier storage glue that isn't a repository. The repositories themselves
         // are registered by AddDependablyRepositories.
         builder.Services.AddSingleton<Dependably.Storage.UpstreamFetchCoordinator>();
         builder.Services.AddSingleton<IAirGapMode, AirGapMode>();
@@ -147,11 +148,11 @@ public partial class Program
         builder.Services.AddSingleton<Dependably.Security.ScrapeDiagnostics>();
         builder.Services.AddSingleton<Dependably.Infrastructure.Observability.MetricsSnapshotProvider>();
 
-        // M2.3 — feature-flagged claim gate for publish/import paths. Default off; operators
+        // Feature-flagged claim gate for publish/import paths. Default off; operators
         // flip CLAIM_ENFORCEMENT=on once their initial claim set is in place.
         builder.Services.AddSingleton<Dependably.Security.PublishGate>();
 
-        // M3.1 — admin bulk import (#46). One service record so the controller ctor stays
+        // Admin bulk import. One service record so the controller ctor stays
         // under S107; same shape as the protocol controllers.
         builder.Services.AddScoped<Dependably.Api.ImportControllerServices>();
 
@@ -162,27 +163,28 @@ public partial class Program
         builder.Services.AddSingleton<Dependably.Infrastructure.Publish.IPackagePublishService,
                                       Dependably.Infrastructure.Publish.PackagePublishService>();
 
-        // M2.2 — claim REST surface (#47). State machine + repository already registered
+        // Claim REST surface. State machine + repository already registered
         // above; the controller services record bundles the deps.
         builder.Services.AddScoped<Dependably.Api.ClaimsControllerServices>();
 
-        // M4.1 — SIEM push (opt-in via env vars). Webhook and syslog both sit behind
+        // SIEM push (opt-in via env vars). Webhook and syslog both sit behind
         // ISiemForwarder; webhook wins when both are set. No-op when neither is configured.
         builder.Services.AddDependablySiemForwarding(builder.Configuration);
 
         // Protocol services
         builder.Services.AddSingleton<UpstreamClient>();
+        builder.Services.AddSingleton<UpstreamRegistryResolver>();
         builder.Services.AddSingleton<IUpstreamUrlValidator, UpstreamUrlValidator>();
         builder.Services.AddSingleton<AllowlistService>();
         builder.Services.AddSingleton<BlockGateService>();
 
-        // Maven upstream proxy (#101)
+        // Maven upstream proxy
         builder.Services.AddSingleton<Dependably.Protocol.MavenUpstreamFetcher>();
 
-        // RPM upstream proxy (#102)
+        // RPM upstream proxy
         builder.Services.AddSingleton<Dependably.Protocol.RpmUpstreamProxy>();
 
-        // OCI upstream proxy (#103) — auth service is singleton (owns token cache + semaphores)
+        // OCI upstream proxy — auth service is singleton (owns token cache + semaphores)
         builder.Services.AddOptions<Dependably.Configuration.OciOptions>()
             .BindConfiguration("Oci")
             .ValidateOnStart();
@@ -201,6 +203,7 @@ public partial class Program
         // Other background services
         builder.Services.AddHostedService<RetentionService>();
         builder.Services.AddHostedService<Dependably.Background.TenantHardDeleteService>();
+        builder.Services.AddHostedService<DeprecationRefreshService>();
 
         // Auth services
         builder.Services.AddSingleton<LoginService>();
@@ -238,11 +241,11 @@ public partial class Program
         // and derives host from the inbound request.
         builder.Services.AddSingleton<IPublicUrlBuilder, RequestPublicUrlBuilder>();
 
-        // M3.2 — transparent intercept host→ecosystem map. Always registered; the middleware
+        // Transparent intercept host→ecosystem map. Always registered; the middleware
         // is a no-op when HOST_ROUTING is unset (default deployment).
         builder.Services.AddSingleton<HostEcosystemMap>();
 
-        // JWT authentication (#16) — secret loaded at startup after first-boot
+        // JWT authentication — secret loaded at startup after first-boot
         // We use a deferred key resolver so the secret is read from DB after schema init
         builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             .AddJwtBearer(options =>
@@ -281,7 +284,7 @@ public partial class Program
                     IssuerSigningKey = new SymmetricSecurityKey(new byte[32])
                 };
             })
-            // #55: API-token scheme for protocol endpoints. Endpoints opt in via
+            // API-token scheme for protocol endpoints. Endpoints opt in via
             // [Authorize(AuthenticationSchemes = "Bearer,ApiToken")] — JWT (admin path)
             // and API tokens (npm/pypi/nuget clients) both authenticate. Anonymous-pull
             // endpoints don't add [Authorize] and stay on their existing
@@ -291,7 +294,7 @@ public partial class Program
                 TokenAuthenticationDefaults.Scheme, _ => { });
 
         builder.Services.AddAuthorization();
-        // #54 capability enforcement: dynamic policy provider materialises a policy per
+        // Capability enforcement: dynamic policy provider materialises a policy per
         // [RequireCapability("...")] attribute; the handler resolves the principal's role
         // claim through Capabilities.ForRole and checks Capabilities.Grants.
         builder.Services.AddSingleton<IAuthorizationPolicyProvider, CapabilityPolicyProvider>();
@@ -304,7 +307,7 @@ public partial class Program
 
         ConfigureRateLimiter(builder);
 
-        // CORS — management API only allows BASE_URL origin (#13). PublicBaseUrl() strips any
+        // CORS — management API only allows BASE_URL origin. PublicBaseUrl() strips any
         // trailing slash: a CORS origin with one never matches the browser-sent Origin header.
         var baseUrl = builder.Configuration.PublicBaseUrl() ?? DefaultBaseUrl;
         builder.Services.AddCors(o => o.AddPolicy("ManagementApi", policy =>
@@ -313,7 +316,7 @@ public partial class Program
                   .WithHeaders("Content-Type", "Authorization")
                   .WithMethods("GET", "POST", "PUT", "DELETE")));
 
-        // Named HTTP client for upstream proxy requests (#22)
+        // Named HTTP client for upstream proxy requests
         // ConnectTimeout=30s, total timeout=5min, max 3 redirects, max 10 connections/server
         builder.Services.AddHttpClient("upstream", client =>
         {
@@ -335,7 +338,7 @@ public partial class Program
             AutomaticDecompression = System.Net.DecompressionMethods.All,
         });
 
-        // Named HTTP client for OCI upstream proxy (#103).
+        // Named HTTP client for OCI upstream proxy.
         // Timeout is configurable via Oci:UpstreamHttpTimeout (default 30 min — large layer blobs).
         // AutomaticDecompression is disabled: OCI layer blobs are already compressed at the file
         // level and we need the raw bytes for SHA-256 digest verification.
@@ -359,7 +362,7 @@ public partial class Program
         // Fallback generic client (used by non-upstream code)
         builder.Services.AddHttpClient();
 
-        // Named client for outbound healthcheck pinger (#74) — no redirects, no auth, short timeout
+        // Named client for outbound healthcheck pinger — no redirects, no auth, short timeout
         builder.Services.AddHttpClient("healthcheck-pinger", client =>
         {
             client.Timeout = TimeSpan.FromSeconds(
@@ -399,11 +402,11 @@ public partial class Program
         builder.Services.AddScoped<NpmControllerServices>();
         builder.Services.AddScoped<NuGetControllerServices>();
         builder.Services.AddScoped<PyPiControllerServices>();
-        builder.Services.AddScoped<MavenControllerServices>(); // #99
-        builder.Services.AddSingleton<Dependably.Protocol.IRpmUpstreamProxy, Dependably.Protocol.RpmUpstreamProxy>(); // #102
-        builder.Services.AddScoped<RpmControllerServices>(); // #100 + #102
+        builder.Services.AddScoped<MavenControllerServices>();
+        builder.Services.AddSingleton<Dependably.Protocol.IRpmUpstreamProxy, Dependably.Protocol.RpmUpstreamProxy>();
+        builder.Services.AddScoped<RpmControllerServices>();
         builder.Services.AddSingleton<Dependably.Storage.RpmRepodataService>();
-        builder.Services.AddScoped<OciControllerServices>(); // #98
+        builder.Services.AddScoped<OciControllerServices>();
         builder.Services.AddScoped<OrgControllerServices>();
 
         // Controllers + OpenAPI
@@ -461,7 +464,7 @@ public partial class Program
         });
     }
 
-    // Serilog — structured JSON logging with sensitive field redaction (#18).
+    // Serilog — structured JSON logging with sensitive field redaction.
     // Optional OTel logs bridge (Serilog.Sinks.OpenTelemetry) ships log records via
     // OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set. Air-gap deployments leave it unset
     // and keep the console sink only. See docs/observability/logs.md.
@@ -559,7 +562,7 @@ public partial class Program
             });
     }
 
-    // Graceful shutdown — configurable pre-stop delay + drain period (#67)
+    // Graceful shutdown — configurable pre-stop delay + drain period
     private static void ConfigureGracefulShutdown(WebApplicationBuilder builder)
     {
         var gracePeriod = int.TryParse(builder.Configuration["SHUTDOWN_GRACE_PERIOD"], out var gp) ? gp : 30;
@@ -588,7 +591,7 @@ public partial class Program
     // Blob storage. STORAGE_BACKEND selects the default backend for both tiers; per-tier
     // overrides (STORAGE_BACKEND_CACHE / STORAGE_BACKEND_REGISTRY plus the corresponding
     // backend-specific vars suffixed _CACHE / _REGISTRY) opt one or both tiers into a
-    // different backing store for split-tier deployments (#48 follow-up).
+    // different backing store for split-tier deployments.
     //
     // The default IBlobStore registration resolves to the REGISTRY tier so legacy callers
     // that don't know about the split land on durable storage (the safer default — losing
@@ -635,7 +638,7 @@ public partial class Program
         || !string.IsNullOrWhiteSpace(cfg[$"AZURE_CONNECTION_STRING_{tier}"]);
 
     // Redis — optional in standalone mode, required in HA mode. When configured, also
-    // shares Data Protection keys across replicas via Redis (#70).
+    // shares Data Protection keys across replicas via Redis.
     private static void ConfigureRedisAndDataProtection(WebApplicationBuilder builder)
     {
         builder.Services.Configure<RedisOptions>(opts =>
@@ -688,7 +691,7 @@ public partial class Program
                 "DataProtection-Keys");
     }
 
-    // Rate limiting (#23 / #69) — Redis-backed when REDIS_CONNECTION_STRING is set; in-process otherwise.
+    // Rate limiting — Redis-backed when REDIS_CONNECTION_STRING is set; in-process otherwise.
     private static void ConfigureRateLimiter(WebApplicationBuilder builder)
     {
         var useRedis = !string.IsNullOrWhiteSpace(builder.Configuration["REDIS_CONNECTION_STRING"]);
@@ -702,7 +705,7 @@ public partial class Program
                         ? ((int)retryAfter.TotalSeconds).ToString()
                         : "60";
 
-                // #96 metric. Endpoint metadata carries the policy name set by
+                // Metric. Endpoint metadata carries the policy name set by
                 // [EnableRateLimiting("…")]; partition prefix lets operators identify which
                 // token (12-hex SHA prefix) or IP is being rate-locked without leaking the
                 // full hash on the cardinality budget.
@@ -722,7 +725,7 @@ public partial class Program
                 o.AddPolicy<string, RedisRateLimitPolicy>("login");
                 o.AddPolicy<string, RedisRateLimitPolicy>("invite");
                 o.AddPolicy<string, RedisRateLimitPolicy>("token-create");
-                // #96: download / push run in-process even with Redis configured. The
+                // Download / push run in-process even with Redis configured. The
                 // limiter state is per-second sliding-window over a request-derived
                 // partition key — Redis round-trips would land on the very hot path we're
                 // trying to protect.
@@ -736,7 +739,7 @@ public partial class Program
         });
     }
 
-    // #96 download / push limiters. Partition by token-hash with IP fallback so a single
+    // Download / push limiters. Partition by token-hash with IP fallback so a single
     // misbehaving client can't saturate the writer queue and DoS other tenants.
     private static void AddDownloadPushLimiters(ConfigurationManager cfg, RateLimiterOptions o)
     {
@@ -829,6 +832,45 @@ public partial class Program
         }
     }
 
+    private static void WarnOnAirGapContradictions(IConfiguration configuration)
+    {
+        var airGapped = string.Equals(configuration["AIR_GAPPED"], "true", StringComparison.OrdinalIgnoreCase)
+                     || string.Equals(configuration["AIR_GAPPED"], "1", StringComparison.OrdinalIgnoreCase);
+        if (!airGapped) return;
+
+        var osvMode = configuration["OSV_MODE"];
+        if (!string.Equals(osvMode, "local", StringComparison.OrdinalIgnoreCase))
+            Log.Warning(
+                "AIR_GAPPED=true but OSV_MODE is not 'local' (current: '{OsvMode}'). " +
+                "Vulnerability scans will fail or silently skip. Set OSV_MODE=local.",
+                string.IsNullOrWhiteSpace(osvMode) ? "(not set)" : osvMode);
+
+        var pingUrl = configuration["HEALTHCHECK_PING_URL"];
+        if (!string.IsNullOrWhiteSpace(pingUrl))
+            Log.Warning(
+                "AIR_GAPPED=true but HEALTHCHECK_PING_URL is set ({PingUrl}). " +
+                "Healthcheck pings will fail in an air-gapped environment.",
+                pingUrl);
+
+        var siemWebhook = configuration["SIEM_WEBHOOK_URL"];
+        if (!string.IsNullOrWhiteSpace(siemWebhook))
+            Log.Information(
+                "AIR_GAPPED=true and SIEM_WEBHOOK_URL is configured. " +
+                "SIEM webhook delivery will fail if the endpoint is unreachable from this host.");
+
+        var otlpEndpoint = configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
+        if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+            Log.Information(
+                "AIR_GAPPED=true and OTEL_EXPORTER_OTLP_ENDPOINT is configured. " +
+                "OTLP telemetry export will fail if the collector is unreachable from this host.");
+
+        var syslogHost = configuration["SIEM_SYSLOG_HOST"];
+        if (!string.IsNullOrWhiteSpace(syslogHost))
+            Log.Information(
+                "AIR_GAPPED=true and SIEM_SYSLOG_HOST is configured. " +
+                "Syslog SIEM delivery will fail if the host is unreachable.");
+    }
+
     public static void ConfigureApp(WebApplication app)
     {
         // ── Middleware pipeline (order matters) ─────────────────────────────────
@@ -846,22 +888,22 @@ public partial class Program
         // See dependably-enterprise/docs/observability/taxonomy.md for property names.
         app.UseMiddleware<Dependably.Infrastructure.Observability.TenantEnrichmentMiddleware>();
 
-        // M3.2 — transparent intercept (#43). When ROUTING_MODE=transparent and the inbound Host
+        // Transparent intercept. When ROUTING_MODE=transparent and the inbound Host
         // matches a configured ecosystem hostname (HOST_ROUTING), prepends the ecosystem prefix
         // so the existing prefix-routed controllers handle the request unchanged. Always-on
         // middleware: when the map is empty (default deployment) it is a no-op pass-through.
         app.UseMiddleware<Dependably.Infrastructure.TransparentInterceptMiddleware>();
 
-        // #22: Upload size limits — must be before routing so body size is set before the body is read
+        // Upload size limits — must be before routing so body size is set before the body is read
         app.UseMiddleware<Dependably.Security.UploadSizeLimitMiddleware>();
 
-        // #13: Security headers — must be first after upload limit
+        // Security headers — must be first after upload limit
         app.UseMiddleware<SecurityHeadersMiddleware>();
 
-        // #18: Metrics access restriction
+        // Metrics access restriction
         app.UseMiddleware<MetricsAccessMiddleware>();
 
-        // #48: AIR_GAPPED mode — translate UpstreamClient.AirGappedException into 503 with
+        // AIR_GAPPED mode — translate UpstreamClient.AirGappedException into 503 with
         // a clear problem-JSON body. Sits high in the pipeline so it catches exceptions
         // from any controller / protocol path that hits the upstream client.
         app.UseMiddleware<Dependably.Infrastructure.AirGappedExceptionMiddleware>();
@@ -899,7 +941,7 @@ public partial class Program
 
         app.UseRateLimiter();
 
-        // Serve embedded Svelte frontend (#24). The embedded provider needs the build-time
+        // Serve embedded Svelte frontend. The embedded provider needs the build-time
         // wwwroot manifest; tests without a built frontend fall through to physical/null.
         Microsoft.Extensions.FileProviders.IFileProvider embeddedProvider;
         try
@@ -980,7 +1022,7 @@ public partial class Program
 
         app.MapControllers();
 
-        // SPA fallback — serve index.html for all non-API, non-registry paths (#24).
+        // SPA fallback — serve index.html for all non-API, non-registry paths.
         // Two endpoints: an explicit "/package/{**path}" pattern that drops the default
         // `:nonfile` route constraint (so /package/nuget/microsoft.extensions.dependencyinjection
         // still resolves even though its final segment contains dots), plus the default

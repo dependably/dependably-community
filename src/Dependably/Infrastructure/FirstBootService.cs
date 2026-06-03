@@ -77,7 +77,7 @@ public sealed class FirstBootService
             }
             else
             {
-                BootstrapSingle(conn, _config);
+                await BootstrapSingleAsync(conn, _config);
             }
 
             await conn.ExecuteAsync("COMMIT");
@@ -89,7 +89,7 @@ public sealed class FirstBootService
         }
     }
 
-    private static void BootstrapSingle(DbConnection conn, IConfiguration config)
+    private static async Task BootstrapSingleAsync(DbConnection conn, IConfiguration config)
     {
         var orgSlug = config["DEFAULT_TENANT_SLUG"] ?? config["DEFAULT_ORG_SLUG"] ?? "default";
         var orgId = NewId();
@@ -101,6 +101,9 @@ public sealed class FirstBootService
         conn.Execute(
             "INSERT INTO org_settings (org_id) VALUES (@org_id)",
             new { org_id = orgId });
+
+        // Seed the standard public upstreams so the default org keeps proxying out of the box.
+        await UpstreamRegistrySeeder.SeedForOrgAsync(conn, orgId, config);
 
         var rawPassword = config["FIRST_BOOT_ADMIN_PASSWORD"]
             ?? Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));

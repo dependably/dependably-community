@@ -3,7 +3,7 @@ using Dapper;
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// TTL-cached upstream metadata documents (#48). Global, no tenant column — metadata is the
+/// TTL-cached upstream metadata documents. Global, no tenant column — metadata is the
 /// same for all tenants reading the same upstream. Per-tenant access is not tracked
 /// (low privacy value; metadata changes too often for tracking to be useful).
 ///

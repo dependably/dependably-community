@@ -6,7 +6,7 @@ using Dependably.Storage;
 
 namespace Dependably.Api;
 
-// Shared request DTOs for the org-scoped controllers (#61 split). One file keeps the
+// Shared request DTOs for the org-scoped controllers. One file keeps the
 // surface discoverable: an admin looking for "what does the PATCH user role endpoint
 // accept" finds PatchRoleRequest here without bouncing through controllers.
 
@@ -22,11 +22,9 @@ public sealed record UpdateOrgSettingsRequest(
     long? MaxUploadBytesMaven = null,
     long? MaxUploadBytesRpm = null,
     long? MaxUploadBytesOci = null,
-    string? PyPiUpstream = null,
-    string? NpmUpstream = null,
-    string? NuGetUpstream = null,
     string? DefaultLanguage = null,
-    bool? AllowVersionOverwrite = null);
+    bool? AllowVersionOverwrite = null,
+    bool? AirGapped = null);
 
 public sealed record UpdateRetentionRequest(
     int? KeepVersions,
@@ -36,7 +34,8 @@ public sealed record UpdateRetentionRequest(
 public sealed record UpdateProxySettingsRequest(
     bool ProxyPassthroughEnabled,
     double MaxOsvScoreTolerance,
-    int? MinReleaseAgeHours = null);
+    int? MinReleaseAgeHours = null,
+    string? BlockDeprecated = null);
 
 // Scope is retained as a nullable field purely so the controller can detect callers still
 // sending the retired field and return a clear 400. The repository never sees it.
@@ -59,10 +58,14 @@ public sealed record AllowlistRequest(string PurlPattern);
 
 public sealed record BlocklistRequest(string Pattern);
 
+public sealed record AddUpstreamRegistryRequest(string Ecosystem, string Url, string? Name = null);
+
+public sealed record ReorderUpstreamRegistryRequest(IReadOnlyList<string> Ids);
+
 public sealed record PatchRoleRequest(string Role);
 
 // DI-injected dependency aggregate retained for OrgController's remaining (packages + stats +
-// setup) surface. Most controllers split out in #61 take their own focused dependency lists.
+// setup) surface. Most controllers split out take their own focused dependency lists.
 public sealed record OrgControllerServices(
     OrgRepository Orgs,
     PackageRepository Packages,
@@ -74,6 +77,7 @@ public sealed record OrgControllerServices(
     AuditRepository Audit,
     OrgAccessGuard Guard,
     IBlobStore Blobs,
+    TieredBlobStorage BlobStorage,
     IConfiguration Config,
     ILogger<OrgController> Logger,
     ProblemResults Problems,

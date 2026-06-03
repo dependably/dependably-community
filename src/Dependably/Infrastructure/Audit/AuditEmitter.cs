@@ -21,7 +21,7 @@ public sealed class AuditEmitter : IAuditEmitter
     private readonly IHttpContextAccessor _http;
     private readonly ILogger<AuditEmitter> _logger;
     private readonly string _resolverMode;
-    // SIEM forwarder is opt-in (#40). Resolved at construction so the call path stays a
+    // SIEM forwarder is opt-in. Resolved at construction so the call path stays a
     // single null check; null when no forwarder is configured.
     private readonly SiemForwarderQueue? _siemQueue;
 
@@ -70,7 +70,7 @@ public sealed class AuditEmitter : IAuditEmitter
         {
             await _repo.InsertAsync(ev, ct);
 
-            // Outbound SIEM (#40 + #52). Fire-and-forget: TryEnqueue is non-blocking and
+            // Outbound SIEM. Fire-and-forget: TryEnqueue is non-blocking and
             // drops on overflow with its own metric. Queue is null when SIEM_WEBHOOK_URL /
             // SIEM_SYSLOG_HOST aren't configured — most deployments. Map to the lightweight
             // SiemEvent shape; the typed payload travels in Detail, the forwarder formats
@@ -90,7 +90,7 @@ public sealed class AuditEmitter : IAuditEmitter
         {
             // Audit gap: log + count + continue. Don't propagate — the originating operation
             // already succeeded and the caller is past the rollback point. Ops alerts on
-            // dependably_audit_emit_failures_total going non-zero (#52 acceptance).
+            // dependably_audit_emit_failures_total going non-zero.
             DependablyMeter.AuditEmitFailures.Add(1, new KeyValuePair<string, object?>("event_type", eventType));
             _logger.LogError(ex,
                 "Audit emit failed for {EventType} (org {OrgId}, actor {ActorId})",

@@ -8,12 +8,12 @@ using Dependably.Storage;
 namespace Dependably.Protocol;
 
 /// <summary>
-/// Upstream fetch layer for Maven artifacts and metadata (#101).
+/// Upstream fetch layer for Maven artifacts and metadata.
 ///
 /// Outbound HTTP is routed through <see cref="UpstreamClient"/> so Maven shares the
 /// platform-wide guarantees with PyPI / npm / NuGet / RPM: <c>IUpstreamUrlValidator</c>
-/// SSRF defence on every URL, hash-and-stage memory bounding on the fetch path
-/// (#104), the audit hook on first proxy fetch, the <c>proxy_fetches</c> metric, and
+/// SSRF defence on every URL, hash-and-stage memory bounding on the fetch path,
+/// the audit hook on first proxy fetch, the <c>proxy_fetches</c> metric, and
 /// single-flight thundering-herd dedup on concurrent fetches of the same artifact.
 ///
 /// Maven-specific concerns that stay in this fetcher:
@@ -37,7 +37,7 @@ namespace Dependably.Protocol;
 public sealed class MavenUpstreamFetcher
 {
     private readonly UpstreamClient _upstream;
-    private readonly IBlobStore _blobs;   // cache tier (#57) — matches UpstreamClient
+    private readonly IBlobStore _blobs;   // cache tier — matches UpstreamClient
     private readonly IMetadataStore _db;
     private readonly IConfiguration _config;
     private readonly ILogger<MavenUpstreamFetcher> _logger;
@@ -144,7 +144,7 @@ public sealed class MavenUpstreamFetcher
         // content-addressed blob key up front, so we fall back to fetch-then-hash: buffer
         // the artefact via the single-flighted metadata path, derive the key locally, and
         // verify integrity against the .sha1 sidecar when present. This mirrors PyPi's
-        // unknown-sha cold-start path (#105) and is bounded byte[] residue on the MISS path.
+        // unknown-sha cold-start path and is bounded byte[] residue on the MISS path.
         if (expectedSha256 is null)
         {
             Dependably.Infrastructure.Observability.DependablyMeter.MavenSidecarMissing.Add(1,

@@ -17,6 +17,9 @@
   let metadataUploading = false, authSaving = false
   let authError = '', authSuccess = ''
   let metadataFileInput = null
+  let certOverrideInput = ''
+  let certOverrideSaving = false
+  let roleMappingRows = []
 
   // Snapshot of the last server-confirmed connection-field values; anything that
   // diverges surfaces the dirty-only sticky save bar.
@@ -26,7 +29,10 @@
     (authConfig.buttonLabel    || '') !== (pristineConnection.buttonLabel    || '') ||
     (authConfig.nameIdFormat   || '') !== (pristineConnection.nameIdFormat   || '') ||
     (authConfig.emailAttribute || '') !== (pristineConnection.emailAttribute || '') ||
-    (authConfig.spEntityId     || '') !== (pristineConnection.spEntityId     || '')
+    (authConfig.spEntityId     || '') !== (pristineConnection.spEntityId     || '') ||
+    (authConfig.roleAttribute  || '') !== (pristineConnection.roleAttribute  || '') ||
+    (authConfig.defaultRole    || 'member') !== (pristineConnection.defaultRole || 'member') ||
+    JSON.stringify(roleMappingRows) !== (pristineConnection.roleMappingRowsJson || '[]')
   )
 
   onMount(async () => {
@@ -40,16 +46,45 @@
     authError = ''; authSuccess = ''
     try {
       authConfig = await api.getAuthConfig()
+      // Initialize role mapping rows from server state
+      roleMappingRows = parseRoleMappingJson(authConfig.roleMapping)
       pristineConnection = snapshotConnection(authConfig)
     } catch (e) { authError = e.message }
   }
 
+  function parseRoleMappingJson(json) {
+    if (!json) return []
+    try {
+      const obj = typeof json === 'string' ? JSON.parse(json) : json
+      return Object.entries(obj).map(([key, value]) => ({ key, value }))
+    } catch { return [] }
+  }
+
+  function roleMappingToJson() {
+    const obj = {}
+    for (const row of roleMappingRows) {
+      if (row.key && row.key.trim()) obj[row.key.trim()] = row.value || 'member'
+    }
+    return Object.keys(obj).length > 0 ? JSON.stringify(obj) : null
+  }
+
+  function addRoleMappingRow() {
+    roleMappingRows = [...roleMappingRows, { key: '', value: 'member' }]
+  }
+
+  function removeRoleMappingRow(i) {
+    roleMappingRows = roleMappingRows.filter((_, idx) => idx !== i)
+  }
+
   function snapshotConnection(cfg) {
     return {
-      buttonLabel:    cfg.buttonLabel    || '',
-      nameIdFormat:   cfg.nameIdFormat   || '',
-      emailAttribute: cfg.emailAttribute || '',
-      spEntityId:     cfg.spEntityId     || '',
+      buttonLabel:         cfg.buttonLabel    || '',
+      nameIdFormat:        cfg.nameIdFormat   || '',
+      emailAttribute:      cfg.emailAttribute || '',
+      spEntityId:          cfg.spEntityId     || '',
+      roleAttribute:       cfg.roleAttribute  || '',
+      defaultRole:         cfg.defaultRole    || 'member',
+      roleMappingRowsJson: JSON.stringify(roleMappingRows),
     }
   }
 
@@ -61,6 +96,9 @@
       nameIdFormat: authConfig.nameIdFormat,
       emailAttribute: authConfig.emailAttribute || null,
       buttonLabel: authConfig.buttonLabel || null,
+      roleAttribute: authConfig.roleAttribute || null,
+      roleMapping: roleMappingToJson(),
+      defaultRole: authConfig.defaultRole || 'member',
     }
   }
 
@@ -141,6 +179,44 @@
       'dependably-saml-test-popup',
       `popup,width=${w},height=${h}`)
     if (!popup) authError = $t('settings.auth.testPopupBlocked')
+  }
+
+  async function saveSigningCertOverride() {
+    certOverrideSaving = true; authError = ''; authSuccess = ''
+    try {
+      const res = await fetch('/api/v1/auth-config/signing-cert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ certificate: certOverrideInput }),
+        credentials: 'include',
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        authError = err?.errors?.certificate?.[0] || err?.detail || 'Failed to set certificate.'
+        return
+      }
+      certOverrideInput = ''
+      authSuccess = $t('settings.auth.signingCertOverrideSaved')
+      await loadAuthConfig()
+    } catch { authError = 'Failed to set certificate.' }
+    finally { certOverrideSaving = false }
+  }
+
+  async function clearSigningCertOverride() {
+    certOverrideSaving = true; authError = ''; authSuccess = ''
+    try {
+      const res = await fetch('/api/v1/auth-config/signing-cert', {
+        method: 'DELETE',
+        credentials: 'include',
+      })
+      if (!res.ok) {
+        authError = 'Failed to clear certificate.'
+        return
+      }
+      authSuccess = $t('settings.auth.signingCertOverrideCleared')
+      await loadAuthConfig()
+    } catch { authError = 'Failed to clear certificate.' }
+    finally { certOverrideSaving = false }
   }
 
   function onSamlTestMessage(ev) {
@@ -361,6 +437,35 @@
               </tbody>
             </table>
           {/if}
+
+          <!-- Optional: signing certificate override -->
+          <details class="cert-override disclosure cert-override-spacing">
+            <summary class="disclosure-summary">{$t('settings.auth.signingCertOverrideTitle')}</summary>
+            <div class="cert-override-body">
+              <p class="step-hint">{$t('settings.auth.signingCertOverrideHint')}</p>
+              {#if authConfig.idpSigningCertOverrideThumbprint}
+                <div class="cert-active-row">
+                  <span class="badge success">{$t('settings.auth.signingCertOverrideSet')}</span>
+                  <span class="hint">{$t('settings.auth.signingCertOverrideFingerprint', { values: { fp: authConfig.idpSigningCertOverrideThumbprint } })}</span>
+                  <button class="danger-outline" on:click={clearSigningCertOverride} disabled={certOverrideSaving}>
+                    {$t('settings.auth.signingCertOverrideClear')}
+                  </button>
+                </div>
+              {:else}
+                <textarea
+                  class="cert-input"
+                  rows="6"
+                  placeholder={$t('settings.auth.signingCertOverridePlaceholder')}
+                  bind:value={certOverrideInput}
+                  disabled={certOverrideSaving}
+                ></textarea>
+                <button class="secondary" on:click={saveSigningCertOverride}
+                  disabled={certOverrideSaving || !certOverrideInput?.trim()}>
+                  {$t('settings.auth.signingCertOverrideSave')}
+                </button>
+              {/if}
+            </div>
+          </details>
         </div>
       </div>
 
@@ -457,6 +562,54 @@
             <div class="form-hint">{$t('settings.auth.spEntityIdHint')}</div>
           </div>
 
+          <!-- Role mapping -->
+          <div class="field-group">
+            <h4>{$t('settings.auth.roleMappingTitle')}</h4>
+            <p class="form-hint">{$t('settings.auth.roleMappingHint')}</p>
+            <div class="form-row">
+              <label>{$t('settings.auth.roleAttributeLabel')}</label>
+              <input type="text"
+                placeholder={$t('settings.auth.roleAttributePlaceholder')}
+                bind:value={authConfig.roleAttribute}
+              />
+            </div>
+            <div class="form-row">
+              <label>{$t('settings.auth.defaultRoleLabel')}</label>
+              <select bind:value={authConfig.defaultRole}>
+                <option value="member">member</option>
+                <option value="auditor">auditor</option>
+                <option value="admin">admin</option>
+                <option value="owner">owner</option>
+              </select>
+            </div>
+            <table class="kv-table role-map-table">
+              <thead>
+                <tr>
+                  <th>{$t('settings.auth.roleMappingIdpValue')}</th>
+                  <th>{$t('settings.auth.roleMappingRole')}</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each roleMappingRows as row, i (i)}
+                  <tr>
+                    <td><input type="text" bind:value={row.key} placeholder="e.g. Admins" /></td>
+                    <td>
+                      <select bind:value={row.value}>
+                        <option value="member">member</option>
+                        <option value="auditor">auditor</option>
+                        <option value="admin">admin</option>
+                        <option value="owner">owner</option>
+                      </select>
+                    </td>
+                    <td><button class="danger-outline btn-sm" on:click={() => removeRoleMappingRow(i)}>{$t('settings.auth.roleMappingRemoveRow')}</button></td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            <button class="secondary btn-sm" on:click={addRoleMappingRow}>{$t('settings.auth.roleMappingAddRow')}</button>
+          </div>
+
           <div class="save-row">
             <button class="primary" on:click={saveAuthConnectionFields} disabled={authSaving}>
               {authSaving ? $t('common.actions.saving') : $t('settings.auth.saveConnectionFields')}
@@ -510,5 +663,13 @@
   }
   .reset-row { margin-top: 12px; }
   .reset-hint { margin-top: 6px; }
+  .cert-override-spacing { margin-top: 12px; }
+  .cert-override-body { padding: 10px 0 0 0; display: flex; flex-direction: column; gap: 8px; }
+  .cert-active-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .cert-input { width: 100%; font-family: var(--mono, monospace); font-size: 12px; resize: vertical; }
+  .role-map-table input { width: 100%; }
+  .btn-sm { padding: 4px 8px; font-size: 13px; }
+  .field-group { margin-top: 16px; }
+  .field-group h4 { margin: 0 0 4px 0; font-size: 14px; }
 </style>
 

@@ -18,7 +18,7 @@ using Xunit;
 namespace Dependably.Tests.Unit.Protocol;
 
 /// <summary>
-/// Coverage for <see cref="RpmUpstreamProxy"/> (#102).
+/// Coverage for <see cref="RpmUpstreamProxy"/>.
 ///
 /// Tests:
 ///  - repomd.xml fetched and memory-cached; second call skips HTTP
@@ -67,7 +67,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
         var proxy = BuildProxy();
 
-        var result = await proxy.GetRepodataAsync("repomd.xml", null, null, default);
+        var result = await proxy.GetRepodataAsync(_upstream, "repomd.xml", null, null, default);
 
         Assert.NotNull(result);
         Assert.False(result!.NotModified);
@@ -85,8 +85,8 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
         var proxy = BuildProxy();
 
-        await proxy.GetRepodataAsync("repomd.xml", null, null, default);
-        await proxy.GetRepodataAsync("repomd.xml", null, null, default);
+        await proxy.GetRepodataAsync(_upstream, "repomd.xml", null, null, default);
+        await proxy.GetRepodataAsync(_upstream, "repomd.xml", null, null, default);
 
         // Only one upstream request should have been made.
         Assert.Equal(1, _server.LogEntries.Count(e => e.RequestMessage?.Path?.EndsWith("repomd.xml") == true));
@@ -102,7 +102,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
                    .WithHeader("ETag", "\"abc\""));
 
         var proxy = BuildProxy();
-        var result = await proxy.GetRepodataAsync("repomd.xml", "\"abc\"", null, default);
+        var result = await proxy.GetRepodataAsync(_upstream, "repomd.xml", "\"abc\"", null, default);
 
         Assert.NotNull(result);
         Assert.True(result!.NotModified);
@@ -117,7 +117,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(ascBytes));
 
         var proxy = BuildProxy();
-        var result = await proxy.GetRepodataAsync("repomd.xml.asc", null, null, default);
+        var result = await proxy.GetRepodataAsync(_upstream, "repomd.xml.asc", null, null, default);
 
         Assert.NotNull(result);
         Assert.False(result!.NotModified);
@@ -139,7 +139,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         var blobs = new InMemoryBlobStore();
         var proxy = BuildProxy(blobs: blobs);
 
-        var result1 = await proxy.GetRepodataAsync(filename, null, null, default);
+        var result1 = await proxy.GetRepodataAsync(_upstream, filename, null, null, default);
         Assert.NotNull(result1);
         Assert.Equal(body, result1!.Body);
 
@@ -148,7 +148,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         Assert.NotNull(stored);
 
         // Second request must NOT hit the server.
-        var result2 = await proxy.GetRepodataAsync(filename, null, null, default);
+        var result2 = await proxy.GetRepodataAsync(_upstream, filename, null, null, default);
         Assert.NotNull(result2);
         Assert.Equal(body, result2!.Body);
 
@@ -252,7 +252,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGzBytes));
 
         var proxy = BuildProxy();
-        var result = await proxy.ResolvePackageUrlAsync("curl-8.6.0-1.fc40.x86_64.rpm", default);
+        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
 
         Assert.NotNull(result);
         Assert.Equal($"{_upstream}/Packages/c/curl-8.6.0-1.fc40.x86_64.rpm", result!.PackageUrl);
@@ -276,7 +276,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGzBytes));
 
         var proxy = BuildProxy();
-        var result = await proxy.ResolvePackageUrlAsync("nonexistent-1.0-1.fc40.x86_64.rpm", default);
+        var result = await proxy.ResolvePackageUrlAsync(_upstream, "nonexistent-1.0-1.fc40.x86_64.rpm", default);
 
         Assert.Null(result);
     }
@@ -312,7 +312,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     {
         var proxy = BuildProxy(airGapped: true);
         await Assert.ThrowsAsync<AirGappedException>(
-            () => proxy.GetRepodataAsync("repomd.xml", null, null, default));
+            () => proxy.GetRepodataAsync(_upstream, "repomd.xml", null, null, default));
     }
 
     [Fact]
@@ -320,7 +320,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     {
         var proxy = BuildProxy(airGapped: true);
         await Assert.ThrowsAsync<AirGappedException>(
-            () => proxy.ResolvePackageUrlAsync("tree-2.1.1-1.fc40.x86_64.rpm", default));
+            () => proxy.ResolvePackageUrlAsync(_upstream, "tree-2.1.1-1.fc40.x86_64.rpm", default));
     }
 
     [Fact]
@@ -328,7 +328,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     {
         var proxy = BuildProxy(airGapped: true);
         await Assert.ThrowsAsync<AirGappedException>(
-            () => proxy.GetGpgKeyAsync(default));
+            () => proxy.GetGpgKeyAsync(_upstream, default));
     }
 
     // ── GPG key ────────────────────────────────────────────────────────────────
@@ -341,7 +341,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(keyBytes));
 
         var proxy = BuildProxy();
-        var result = await proxy.GetGpgKeyAsync(default);
+        var result = await proxy.GetGpgKeyAsync(_upstream, default);
 
         Assert.NotNull(result);
         Assert.Equal(keyBytes, result);
@@ -355,8 +355,8 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(keyBytes));
 
         var proxy = BuildProxy();
-        await proxy.GetGpgKeyAsync(default);
-        await proxy.GetGpgKeyAsync(default);
+        await proxy.GetGpgKeyAsync(_upstream, default);
+        await proxy.GetGpgKeyAsync(_upstream, default);
 
         Assert.Equal(1, _server.LogEntries.Count(e => e.RequestMessage?.Path?.EndsWith("RPM-GPG-KEY") == true));
     }
@@ -470,6 +470,8 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     private sealed class StubAirGapMode : IAirGapMode
     {
         public bool IsEnabled { get; }
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => IsEnabled;
         public StubAirGapMode(bool enabled) => IsEnabled = enabled;
     }
 

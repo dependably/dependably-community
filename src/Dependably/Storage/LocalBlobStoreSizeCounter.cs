@@ -1,9 +1,9 @@
 namespace Dependably.Storage;
 
 /// <summary>
-/// Per-instance running byte counter for <see cref="LocalBlobStore"/> (#92).
+/// Per-instance running byte counter for <see cref="LocalBlobStore"/>.
 ///
-/// The pre-#92 path recomputed total size on every <see cref="LocalBlobStore.GetTotalSizeAsync"/>
+/// The previous implementation recomputed total size on every <see cref="LocalBlobStore.GetTotalSizeAsync"/>
 /// call by enumerating the entire blob tree. <see cref="BlobStoreSizePoller"/> hit that path
 /// every 5 minutes — twice when cache and registry tiers point at different paths — and a
 /// cache holding millions of blobs would block a thread-pool thread for seconds, contend on
@@ -28,7 +28,7 @@ public sealed class LocalBlobStoreSizeCounter
     public LocalBlobStoreSizeCounter(string root)
     {
         _root = root;
-        // Eager startup walk. The whole #92 contract is "one walk on process boot, then
+        // Eager startup walk. The design contract is "one walk on process boot, then
         // O(1) reads thereafter." Doing the walk lazily on first read created a race with
         // Put/Delete writers — they'd add their delta first, then trigger the walk which
         // saw the just-written file and counted it again, double-billing the same byte.
@@ -53,7 +53,7 @@ public sealed class LocalBlobStoreSizeCounter
     }
 
     /// <summary>Forces a fresh recompute via full directory walk. Backs the
-    /// <c>/api/v1/system/blob-store/recompute</c> admin trigger from #92.</summary>
+    /// <c>/api/v1/system/blob-store/recompute</c> admin trigger.</summary>
     public void Recompute() => Interlocked.Exchange(ref _bytes, WalkRoot());
 
     private long WalkRoot()

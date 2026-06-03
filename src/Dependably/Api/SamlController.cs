@@ -226,13 +226,22 @@ public sealed class SamlController : ControllerBase
 
         if (isTest)
         {
+            // Collect all claims from the assertion grouped by type so the admin can see
+            // exactly what the IdP sent. Group multi-valued claims (e.g. group memberships).
+            var claimsDict = authnResponse!.ClaimsIdentity.Claims
+                .GroupBy(c => c.Type)
+                .Select(g => new { type = g.Key, values = g.Select(c => c.Value).ToArray() })
+                .ToList();
+            var claimsJson = System.Text.Json.JsonSerializer.Serialize(claimsDict);
+
             await _login.RecordSamlTestAsync(tenant.TenantId!, cfg!.IdpEntityId!, nameId, email, testActorId, ct);
-            await _samlConfig.RecordTestSuccessAsync(tenant.TenantId!, email ?? "", ct);
+            await _samlConfig.RecordTestSuccessAsync(tenant.TenantId!, email ?? "", claimsJson, ct);
             return RedirectToTestResult(email: email, nameId: nameId);
         }
 
+        var mappedRole = Dependably.Infrastructure.Saml.RoleAttributeResolver.Resolve(authnResponse!, cfg!);
         var result = await _login.LoginSamlAsync(tenant.TenantId!, cfg!.IdpEntityId!, nameId, email,
-            HttpContext.GetNormalizedRemoteIp(), ct);
+            mappedRole, HttpContext.GetNormalizedRemoteIp(), ct);
         if (result.Token is null)
             return Problem(statusCode: 401, detail: result.Error ?? "SAML login failed.");
 
@@ -343,7 +352,7 @@ public sealed class SamlController : ControllerBase
         cfg is not null
         && !string.IsNullOrWhiteSpace(cfg.IdpEntityId)
         && !string.IsNullOrWhiteSpace(cfg.IdpSsoUrl)
-        && !string.IsNullOrWhiteSpace(cfg.IdpSigningCert);
+        && (!string.IsNullOrWhiteSpace(cfg.IdpSigningCert) || !string.IsNullOrWhiteSpace(cfg.IdpSigningCertOverride));
 
     private RedirectResult RedirectToTestResult(
         string? email = null, string? nameId = null, string? error = null, string? detail = null)
@@ -385,13 +394,20 @@ public sealed class SamlController : ControllerBase
 
         if (requireIdp)
         {
-            if (cfg is null || string.IsNullOrWhiteSpace(cfg.IdpEntityId) || string.IsNullOrWhiteSpace(cfg.IdpSigningCert))
+            if (cfg is null || string.IsNullOrWhiteSpace(cfg.IdpEntityId))
+                throw new InvalidOperationException("IdP not configured.");
+
+            var effectiveCert = !string.IsNullOrWhiteSpace(cfg.IdpSigningCertOverride)
+                ? cfg.IdpSigningCertOverride
+                : cfg.IdpSigningCert;
+
+            if (string.IsNullOrWhiteSpace(effectiveCert))
                 throw new InvalidOperationException("IdP not configured.");
 
             saml2.AllowedIssuer = cfg.IdpEntityId;
             saml2.SingleSignOnDestination = new Uri(cfg.IdpSsoUrl!);
 
-            var certBytes = Convert.FromBase64String(cfg.IdpSigningCert.Replace("\n", "").Replace("\r", "").Replace(" ", ""));
+            var certBytes = Convert.FromBase64String(effectiveCert.Replace("\n", "").Replace("\r", "").Replace(" ", ""));
             var idpCert = X509CertificateLoader.LoadCertificate(certBytes);
             saml2.SignatureValidationCertificates.Add(idpCert);
         }
@@ -473,14 +489,14 @@ public sealed class SamlController : ControllerBase
 /// </summary>
 public static class IdpMetadataParser
 {
-    public sealed record ParsedIdp(string EntityId, string SsoUrl, string SigningCertBase64);
+    public sealed record ParsedIdp(string EntityId, string SsoUrl, string? SigningCertBase64);
 
     private const string MdNs = "urn:oasis:names:tc:SAML:2.0:metadata";
     private const string DsNs = "http://www.w3.org/2000/09/xmldsig#";
     private const string HttpRedirectBinding = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect";
     private const string HttpPostBinding = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST";
 
-    public static ParsedIdp Parse(string metadataXml)
+    public static ParsedIdp Parse(string metadataXml, bool requireCert = true)
     {
         if (string.IsNullOrWhiteSpace(metadataXml))
             throw new ArgumentException("Metadata XML is empty.", nameof(metadataXml));
@@ -521,16 +537,24 @@ public static class IdpMetadataParser
         var certNode = idpDescriptor.SelectSingleNode(
                 "md:KeyDescriptor[@use='signing']/ds:KeyInfo/ds:X509Data/ds:X509Certificate", nsm)
             ?? idpDescriptor.SelectSingleNode(
-                "md:KeyDescriptor/ds:KeyInfo/ds:X509Data/ds:X509Certificate", nsm)
-            ?? throw new InvalidOperationException("Metadata is missing a signing X509Certificate.");
-        var certText = certNode.InnerText.Trim();
-        var certClean = new StringBuilder(certText.Length);
-        foreach (var ch in certText) if (!char.IsWhiteSpace(ch)) certClean.Append(ch);
-        var certBase64 = certClean.ToString();
+                "md:KeyDescriptor/ds:KeyInfo/ds:X509Data/ds:X509Certificate", nsm);
 
-        // Validate it's actually a parseable X.509 certificate.
-        try { _ = X509CertificateLoader.LoadCertificate(Convert.FromBase64String(certBase64)); }
-        catch (Exception ex) { throw new InvalidOperationException("X509Certificate is not valid base64 X.509.", ex); }
+        string? certBase64 = null;
+        if (certNode is not null)
+        {
+            var certText = certNode.InnerText.Trim();
+            var certClean = new StringBuilder(certText.Length);
+            foreach (var ch in certText) if (!char.IsWhiteSpace(ch)) certClean.Append(ch);
+            certBase64 = certClean.ToString();
+
+            // Validate it's actually a parseable X.509 certificate.
+            try { _ = X509CertificateLoader.LoadCertificate(Convert.FromBase64String(certBase64)); }
+            catch (Exception ex) { throw new InvalidOperationException("X509Certificate is not valid base64 X.509.", ex); }
+        }
+        else if (requireCert)
+        {
+            throw new InvalidOperationException("Metadata is missing a signing X509Certificate.");
+        }
 
         return new ParsedIdp(entityId, ssoUrl, certBase64);
     }

@@ -104,7 +104,7 @@ public sealed class PackagePublishService : IPackagePublishService
             return new PublishResult.Rejected(409, "claim_required",
                 $"Name '{request.PurlName}' is unclaimed; create a 'local_only' or 'mixed' claim first.");
 
-        // Dedup vs overwrite (#45). When AllowOverwrite is false (default) a duplicate
+        // Dedup vs overwrite. When AllowOverwrite is false (default) a duplicate
         // coordinate rejects with 409. When true, the existing row's artefact is replaced
         // in place and a package.replace audit event records both old and new hashes.
         var blobKey = BlobKeys.Hosted(request.OrgId, request.Ecosystem, request.PurlName, request.Version, request.Filename);
@@ -145,7 +145,7 @@ public sealed class PackagePublishService : IPackagePublishService
     }
 
     /// <summary>
-    /// Dry-run companion to <see cref="StoreAndRecordAsync"/> (#46). Runs the same
+    /// Dry-run companion to <see cref="StoreAndRecordAsync"/>. Runs the same
     /// validation chain — path safety, size cap, claim gate, dedup — but stops short of
     /// any write: no blob put, no version row, no audit emission. Uses
     /// <see cref="PackageRepository.GetByPurlNameAsync"/> in place of

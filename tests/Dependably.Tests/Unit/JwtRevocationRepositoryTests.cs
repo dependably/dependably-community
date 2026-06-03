@@ -21,7 +21,7 @@ public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
         await _db.DisposeAsync();
     }
 
-    // Acceptance check from #95: lookup by jti must be index-served, not a full table scan.
+    // Acceptance check: lookup by jti must be index-served, not a full table scan.
     // jti is PRIMARY KEY, so SQLite backs it with sqlite_autoindex_jwt_revocations_1.
     [Fact]
     public async Task IsRevokedQuery_UsesIndex_NotTableScan()

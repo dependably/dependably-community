@@ -43,7 +43,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             new Dependably.Infrastructure.Audit.AuditEventRepository(_db),
             new Microsoft.AspNetCore.Http.HttpContextAccessor(),
             NullLogger<Dependably.Infrastructure.Audit.AuditEmitter>.Instance, cfg,
-            // SIEM queue is opt-in (#40); empty service provider yields a null forwarder
+            // SIEM queue is opt-in; empty service provider yields a null forwarder
             // and the emit path becomes a no-op for SIEM, which is correct for unit tests.
             new Microsoft.Extensions.DependencyInjection.ServiceCollection().BuildServiceProvider());
         // Tier-shared bootstrap: PackagePublishService writes to Registry; in unit tests
@@ -56,6 +56,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         _osv = new RecordingOsvSource();
         var scanner = new VulnerabilityScanService(_db, _osv,
             new VulnerabilityRepository(_db), audit, cfg,
+            new NoAirGap(),
             NullLogger<VulnerabilityScanService>.Instance);
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
@@ -587,6 +588,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         _osv ??= new RecordingOsvSource();
         var scanner = new VulnerabilityScanService(_db, _osv,
             new VulnerabilityRepository(_db), audit, cfg,
+            new NoAirGap(),
             NullLogger<VulnerabilityScanService>.Instance);
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
@@ -682,5 +684,12 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             QueriedPurls.AddRange(purls);
             return Task.FromResult(purls.Select(_ => new List<OsvAdvisory>()).ToList());
         }
+    }
+
+    private sealed class NoAirGap : IAirGapMode
+    {
+        public bool IsEnabled => false;
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => false;
     }
 }

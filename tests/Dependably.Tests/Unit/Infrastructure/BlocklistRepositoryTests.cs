@@ -50,7 +50,7 @@ public sealed class BlocklistRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task IsBlockedAsync_LoosePatternMatchesAllEcosystems()
     {
-        // Documents the intentional behaviour shift after #87: a pattern without the
+        // Documents the intentional behaviour: a pattern without the
         // `pkg:<eco>/` anchor matches the substring anywhere in the PURL, including
         // ecosystems the operator may not have intended.
         var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");

@@ -7,7 +7,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// #54 schema migration: <c>auditor</c> must be a permitted value of <c>users.role</c> and
+/// Schema migration: <c>auditor</c> must be a permitted value of <c>users.role</c> and
 /// <c>invites.role</c> on both fresh and existing databases. The Capabilities matrix maps
 /// the role to a capability set; without this constraint expansion the row insert fails
 /// at the database layer.

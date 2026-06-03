@@ -6,7 +6,7 @@ using Dependably.Security;
 namespace Dependably.Api;
 
 /// <summary>
-/// License governance endpoints (#21).
+/// License governance endpoints.
 ///
 ///   GET    /api/v1/orgs/{org}/license-policy                              — get mode + lists (member+)
 ///   PUT    /api/v1/orgs/{org}/license-policy/mode                         — set enforcement mode (admin+)

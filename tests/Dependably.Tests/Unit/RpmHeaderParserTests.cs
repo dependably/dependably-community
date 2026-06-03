@@ -6,7 +6,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Unit tests for the RPM binary header parser (#100). Each test constructs a synthetic
+/// Unit tests for the RPM binary header parser. Each test constructs a synthetic
 /// .rpm byte-stream (lead + signature + main header) so we can assert against precise
 /// inputs without shipping real RPM fixtures.
 /// </summary>

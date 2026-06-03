@@ -96,11 +96,33 @@ public class OrgSettings
     /// <summary>BCP-47 short code (e.g. "en", "fr"). New users in this tenant inherit this value.</summary>
     public string DefaultLanguage { get; set; } = "en";
     /// <summary>
-    /// #45 replacement policy. When true, publishing a duplicate (name, version) overwrites
+    /// Replacement policy. When true, publishing a duplicate (name, version) overwrites
     /// the existing artefact and emits a <c>package.replace</c> audit event recording both
     /// hashes. Default false — the strict immutable-coordinate behaviour.
     /// </summary>
     public bool AllowVersionOverwrite { get; set; }
+    /// <summary>
+    /// Per-tenant air-gap posture. When true, this org makes no outbound network requests:
+    /// proxy passthrough is forced off (uncached upstream returns 404 via
+    /// <see cref="ProxyPassthroughEffective"/>), and the vulnerability and deprecation-metadata
+    /// scan passes skip this org. Composes with the instance <c>AIR_GAPPED</c> env var
+    /// (<see cref="IAirGapMode"/>): the effective posture is instance OR tenant.
+    /// </summary>
+    public bool AirGapped { get; set; }
+    /// <summary>
+    /// Computed proxy-passthrough gate used by the protocol controllers: passthrough is allowed
+    /// only when it is enabled AND the tenant is not air-gapped. The raw
+    /// <see cref="ProxyPassthroughEnabled"/> value is still surfaced verbatim in the settings API.
+    /// </summary>
+    public bool ProxyPassthroughEffective => ProxyPassthroughEnabled && !AirGapped;
+    /// <summary>
+    /// Proxy gate for upstream-deprecated packages (keyed on <c>package_versions.deprecated</c>).
+    /// 'off' = allow through (default); 'warn' = surface deprecation in UI without blocking;
+    /// 'block_new' = refuse a deprecated version on cache miss (never fetch/cache/serve it) while
+    /// still serving already-cached versions; 'block_all' = block_new plus deny already-cached
+    /// versions. Legacy 'block' rows are migrated to 'block_all'.
+    /// </summary>
+    public string BlockDeprecated { get; set; } = "off";
 }
 
 public class Package
@@ -163,6 +185,8 @@ public class PackageVersion
     /// <c>'sha256'</c> (hex), <c>'sha512-sri'</c>, or <c>'sha512-b64'</c>.
     /// </summary>
     public string? UpstreamIntegrityAlgorithm { get; set; }
+    /// <summary>ISO 8601 UTC; set by <c>DeprecationRefreshService</c> after each upstream metadata check. NULL = never checked.</summary>
+    public DateTimeOffset? DeprecationCheckedAt { get; set; }
 }
 
 public class User
@@ -378,6 +402,22 @@ public class BlocklistEntry
     public DateTimeOffset CreatedAt { get; set; }
 }
 
+/// <summary>
+/// A single configured upstream proxy registry for one (org, ecosystem). The org's entries for
+/// an ecosystem form a priority-ordered list (ascending <see cref="Position"/>, lowest first).
+/// Zero entries for an ecosystem disables proxying for it.
+/// </summary>
+public class UpstreamRegistryEntry
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string Ecosystem { get; set; } = "";
+    public string? Name { get; set; }
+    public string Url { get; set; } = "";
+    public int Position { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
 public class AuditEntry
 {
     public string Id { get; set; } = "";
@@ -513,6 +553,16 @@ public class TenantSamlConfig
     public string? ButtonLabel { get; set; }
     public DateTimeOffset? LastTestAt { get; set; }
     public string? LastTestEmail { get; set; }
+    /// <summary>JSON array of { type, values[] } from the latest successful test assertion. NULL until a test is run.</summary>
+    public string? LastTestClaims { get; set; }
+    /// <summary>Admin-pinned X.509 signing cert (base64 DER). When set, this is the sole trust anchor (overrides metadata cert).</summary>
+    public string? IdpSigningCertOverride { get; set; }
+    /// <summary>Claim type to read role/group values from. NULL = use built-in list (Role, groups, etc.).</summary>
+    public string? RoleAttribute { get; set; }
+    /// <summary>JSON object mapping IdP role value → Dependably role ("owner"|"admin"|"member"|"auditor").</summary>
+    public string? RoleMapping { get; set; }
+    /// <summary>Fallback role when no mapping matches. Defaults to "member".</summary>
+    public string DefaultRole { get; set; } = "member";
     public DateTimeOffset UpdatedAt { get; set; }
 }
 

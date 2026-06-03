@@ -35,7 +35,8 @@ public sealed class SamlConfigRepositoryTests : IClassFixture<InMemoryDbFixture>
         await _repo.UpsertSettingsAsync(new SamlSettingsUpdate(
             OrgId: orgId, Enabled: true, FormsLoginEnabled: false,
             SpEntityId: "sp-1", NameIdFormat: "emailAddress",
-            EmailAttribute: "mail", ButtonLabel: "SSO"));
+            EmailAttribute: "mail", ButtonLabel: "SSO",
+            RoleAttribute: null, RoleMapping: null, DefaultRole: "member"));
 
         var cfg = (await _repo.GetAsync(orgId))!;
         Assert.True(cfg.Enabled);
@@ -69,8 +70,8 @@ public sealed class SamlConfigRepositoryTests : IClassFixture<InMemoryDbFixture>
         var withoutConfig = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
 
         await _repo.UpsertMetadataAsync(withConfig, "idp", "https://idp", "c", "<x/>");
-        await _repo.RecordTestSuccessAsync(withConfig, "admin@example.com");
-        await _repo.RecordTestSuccessAsync(withoutConfig, "ghost@example.com"); // safe no-op
+        await _repo.RecordTestSuccessAsync(withConfig, "admin@example.com", claimsJson: null);
+        await _repo.RecordTestSuccessAsync(withoutConfig, "ghost@example.com", claimsJson: null); // safe no-op
 
         var cfg = (await _repo.GetAsync(withConfig))!;
         Assert.Equal("admin@example.com", cfg.LastTestEmail);

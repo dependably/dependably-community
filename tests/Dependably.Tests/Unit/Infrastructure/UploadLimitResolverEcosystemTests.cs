@@ -8,7 +8,7 @@ using Xunit;
 namespace Dependably.Tests.Unit.Infrastructure;
 
 /// <summary>
-/// Exercises the per-ecosystem resolution arms for the three ecosystems wired in #101
+/// Exercises the per-ecosystem resolution arms for the three ecosystems
 /// (maven, rpm, oci). The existing pypi/npm/nuget arms are covered indirectly through
 /// the controllers; this file is intentionally narrow — one assertion per fallback
 /// step, run against each new ecosystem.

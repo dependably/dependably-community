@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace Dependably.Infrastructure.Siem;
 
 /// <summary>
-/// POSTs each event as one NDJSON line to the configured collector URL (#40). Optional bearer
+/// POSTs each event as one NDJSON line to the configured collector URL. Optional bearer
 /// token via <c>SIEM_WEBHOOK_BEARER</c>. Failure throws so the queue's retry path can record
 /// it; the queue, not the forwarder, owns drop-with-metric on overflow.
 /// </summary>

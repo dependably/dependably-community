@@ -12,7 +12,7 @@ using Xunit;
 
 namespace Dependably.Tests.Unit;
 
-// #105: the byte[] GetOrFetchAsync adapter has been retired. All call sites here drive
+// The byte[] GetOrFetchAsync adapter has been retired. All call sites here drive
 // GetOrFetchStreamAsync directly and consume the returned stream — the legacy byte[]
 // assertions ("Equal(data, bytes)") become "drain stream, then compare".
 
@@ -48,7 +48,7 @@ public class UpstreamClientTests : IAsyncLifetime
         // Tier-shared bootstrap: cache and registry point at the same store. UpstreamClient
         // only ever touches the Cache tier.
         var tiered = new TieredBlobStorage(store, store);
-        // #104 staging path: route to a fresh temp dir per test so MISS-path artefacts
+        // Staging path: route to a fresh temp dir per test so MISS-path artefacts
         // don't collide across parallel xunit runs.
         var stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-test-{Guid.NewGuid():N}");
         var config = new ConfigurationBuilder()
@@ -62,6 +62,8 @@ public class UpstreamClientTests : IAsyncLifetime
     {
         public StubAirGapMode(bool enabled) => IsEnabled = enabled;
         public bool IsEnabled { get; }
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => IsEnabled;
     }
 
     private static byte[] RandomBytes(int length = 64)
@@ -210,7 +212,7 @@ public class UpstreamClientTests : IAsyncLifetime
             client.GetOrFetchStreamAsync("blobs/too-large", "http://upstream.test/huge", null, "nuget"));
     }
 
-    // ── AIR_GAPPED enforcement (#48) ──────────────────────────────────────────
+    // ── AIR_GAPPED enforcement ──────────────────────────────────────────
 
     [Fact]
     public async Task GetOrFetchStreamAsync_AirGapped_CacheHitStillServes()

@@ -4,7 +4,7 @@ namespace Dependably.Infrastructure.Audit;
 
 /// <summary>
 /// Persistence for <see cref="AuditEvent"/> on the <c>audit_event</c> table. Append-only;
-/// no UPDATE/DELETE methods exist by design (#51 §6).
+/// no UPDATE/DELETE methods exist by design.
 /// </summary>
 public sealed class AuditEventRepository
 {

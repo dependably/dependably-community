@@ -4,7 +4,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Routing acceptance for #98: the OCI Distribution Spec catches the three GET-side
+/// Routing acceptance: the OCI Distribution Spec catches the three GET-side
 /// surfaces — manifests/, blobs/, tags/list — out of an arbitrary-depth repository path.
 /// Repository names can contain slashes (e.g. <c>library/ubuntu</c>) which is why we
 /// can't use the ASP.NET catch-all-with-trailing-segments pattern.

@@ -7,13 +7,13 @@ using Dependably.Security;
 namespace Dependably.Api;
 
 /// <summary>
-/// Admin CRUD on package-name claims (#47). The state machine lives in
+/// Admin CRUD on package-name claims. The state machine lives in
 /// <see cref="ClaimStateMachine"/>; the persistence in <see cref="ClaimRepository"/>;
 /// this controller is a thin HTTP wrapper that authorises (admin role), validates input,
 /// runs the transition through the state machine, persists the result, and emits the
 /// audit event.
 ///
-/// Routes mirror the surface in #47 / #53:
+/// Route surface:
 /// <list type="bullet">
 ///   <item>GET    /api/v1/admin/claims                         — list, filter by ecosystem/state/search</item>
 ///   <item>GET    /api/v1/admin/claims/{ecosystem}/{name}      — single claim</item>
@@ -54,7 +54,7 @@ public sealed class ClaimsController : ControllerBase
     }
 
     /// <summary>
-    /// #47: when a transition flips the claim into <c>local_only</c>, every cached proxy
+    /// When a transition flips the claim into <c>local_only</c>, every cached proxy
     /// version for that name must be evicted — both the metadata row and the underlying
     /// blob — so subsequent installs are forced through the local-only artefact set rather
     /// than serving a stale proxy copy. Returns the count for the audit/history record.
@@ -148,7 +148,7 @@ public sealed class ClaimsController : ControllerBase
         if (!validation.Allowed)
             return BadRequest(new ProblemDetails { Status = 400, Detail = validation.RejectionReason });
 
-        // #47 purge: when the claim transition demands it (creating with state=local_only),
+        // Purge: when the claim transition demands it (creating with state=local_only),
         // evict cached proxy versions BEFORE persisting the transition. Doing it before
         // means a concurrent install racing the create can't repopulate the cache between
         // purge and claim-row creation.
@@ -175,7 +175,7 @@ public sealed class ClaimsController : ControllerBase
             $"pkg:{ecosystem}/{name}",
             detail: $"{{\"state\":\"{req.State}\",\"reason\":{System.Text.Json.JsonSerializer.Serialize(req.Reason)},\"purged\":{purgedCount}}}",
             ct: ct);
-        // #52 typed event into audit_event.
+        // Typed event into audit_event.
         var createPayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Create(
             ecosystem, name, req.State!, req.Reason!, validation.PurgesProxy).ToJson();
         await _auditEmitter.EmitAsync(
@@ -213,7 +213,7 @@ public sealed class ClaimsController : ControllerBase
         if (!validation.Allowed)
             return BadRequest(new ProblemDetails { Status = 400, Detail = validation.RejectionReason });
 
-        // #47 purge on mixed → local_only. See Create for the purge-before-persist rationale.
+        // Purge on mixed → local_only. See Create for the purge-before-persist rationale.
         var purgedCount = validation.PurgesProxy
             ? await PurgeProxyArtefactsAsync(ctx.OrgId!, ecosystem, name, ct)
             : 0;

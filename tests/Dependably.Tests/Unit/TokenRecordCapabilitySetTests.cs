@@ -51,7 +51,7 @@ public sealed class TokenRecordCapabilitySetTests
         Assert.Contains("publish:npm", token.CapabilitySet);
     }
 
-    // Caching invariant from #97: repeated reads must return the same instance — proves
+    // Caching invariant: repeated reads must return the same instance — proves
     // we parsed the JSON exactly once and cached the result on the TokenRecord.
     [Fact]
     public void CapabilitySet_CachedAcrossReads()

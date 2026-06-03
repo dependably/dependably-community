@@ -198,107 +198,178 @@ public sealed class LoginService
         string idpEntityId,
         string nameId,
         string? assertionEmail,
+        string? mappedRole = null,
         string? sourceIp = null,
         CancellationToken ct = default)
     {
+        var ctx = new SamlLoginContext(tenantId, idpEntityId, nameId, assertionEmail, mappedRole, sourceIp);
         await using var conn = await _db.OpenAsync(ct);
 
         // 1. Primary lookup: by external identity. This is the stable path — if the IdP
         //    rotates the user's email, we still find them here.
         var existing = await _externalIdentities.FindAsync(tenantId, idpEntityId, nameId, ct);
         if (existing is not null)
-        {
-            var user = await conn.QuerySingleOrDefaultAsync<(string Id, string Role, string AccountStatus, string Email)>(
-                "SELECT id AS Id, role AS Role, account_status AS AccountStatus, email AS Email FROM users WHERE id = @id",
-                new { id = existing.UserId });
-            if (user.Id is null)
-                return new SamlLoginResult(null, "Linked user not found.", null, null, false, false);
-            if (user.AccountStatus is "locked" or "disabled")
-            {
-                await _audit.LogAsync("auth.saml.login.failure",
-                    orgId: tenantId, actorId: user.Id,
-                    detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = user.AccountStatus }),
-                    sourceIp: sourceIp, ct: ct);
-                await EmitSamlFailureAsync(tenantId, user.Id, "account_status_" + user.AccountStatus, idpEntityId, nameId, ct);
-                return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
-            }
-
-            await _externalIdentities.UpdateLastLoginAsync(existing.Id, assertionEmail, ct);
-            await StampUserLoginAsync(conn, user.Id, assertionEmail, user.Email);
-
-            await LogSamlSuccessAsync(tenantId, user.Id, idpEntityId, nameId, "external_identity", sourceIp, ct);
-            return new SamlLoginResult(IssueJwt(user.Id, tenantId, user.Role, await JwtSecretAsync(ct)),
-                null, user.Id, user.Role, false, false);
-        }
+            return await LoginViaExternalIdentityAsync(conn, existing, ctx, ct);
 
         // 2. No external identity yet. Try to link by email.
         if (!string.IsNullOrWhiteSpace(assertionEmail))
         {
-            var existingByEmail = await conn.QuerySingleOrDefaultAsync<(string Id, string Role, string AccountStatus)>(
-                """
-                SELECT id AS Id, role AS Role, account_status AS AccountStatus
-                FROM users
-                WHERE lower(email) = lower(@email) AND tenant_id = @tenantId
-                LIMIT 1
-                """,
-                new { email = assertionEmail, tenantId });
-            if (existingByEmail.Id is not null)
-            {
-                if (existingByEmail.AccountStatus is "locked" or "disabled")
-                {
-                    await _audit.LogAsync("auth.saml.login.failure",
-                        orgId: tenantId, actorId: existingByEmail.Id,
-                        detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = existingByEmail.AccountStatus }),
-                        sourceIp: sourceIp, ct: ct);
-                    await EmitSamlFailureAsync(tenantId, existingByEmail.Id,
-                        "account_status_" + existingByEmail.AccountStatus, idpEntityId, nameId, ct);
-                    return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
-                }
-
-                await _externalIdentities.LinkAsync(tenantId, existingByEmail.Id, idpEntityId, nameId, assertionEmail, ct);
-                await StampUserLoginAsync(conn, existingByEmail.Id, assertionEmail, currentEmail: assertionEmail);
-
-                await _audit.LogAsync("auth.saml.user_linked",
-                    orgId: tenantId, actorId: existingByEmail.Id,
-                    detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid = nameId, email = assertionEmail }),
-                    sourceIp: sourceIp, ct: ct);
-                await LogSamlSuccessAsync(tenantId, existingByEmail.Id, idpEntityId, nameId, "email_link", sourceIp, ct);
-
-                return new SamlLoginResult(IssueJwt(existingByEmail.Id, tenantId, existingByEmail.Role, await JwtSecretAsync(ct)),
-                    null, existingByEmail.Id, existingByEmail.Role, false, true);
-            }
+            var linked = await TryLoginViaEmailLinkAsync(conn, ctx, ct);
+            if (linked is not null) return linked.Value;
         }
 
-        // 3. First-time JIT user. Default role is 'member'. password_hash is empty (BCrypt
-        //    verify naturally rejects '' so this user can't accidentally use forms login).
-        if (string.IsNullOrWhiteSpace(assertionEmail))
+        // 3. First-time JIT user.
+        return await ProvisionJitUserAsync(conn, ctx, ct);
+    }
+
+    // The (entityId, nameId, email) tuple plus role/source-IP that every SAML login branch
+    // threads through. Bundled so branch helpers stay within a sane parameter count.
+    private readonly record struct SamlLoginContext(
+        string TenantId,
+        string IdpEntityId,
+        string NameId,
+        string? AssertionEmail,
+        string? MappedRole,
+        string? SourceIp);
+
+    // Branch 1: an external identity (idpEntityId, nameId) already maps to a local user.
+    private async Task<SamlLoginResult> LoginViaExternalIdentityAsync(
+        System.Data.Common.DbConnection conn, ExternalIdentity existing, SamlLoginContext ctx, CancellationToken ct)
+    {
+        var user = await conn.QuerySingleOrDefaultAsync<(string Id, string Role, string AccountStatus, string Email)>(
+            "SELECT id AS Id, role AS Role, account_status AS AccountStatus, email AS Email FROM users WHERE id = @id",
+            new { id = existing.UserId });
+        if (user.Id is null)
+            return new SamlLoginResult(null, "Linked user not found.", null, null, false, false);
+        if (user.AccountStatus is "locked" or "disabled")
         {
             await _audit.LogAsync("auth.saml.login.failure",
-                orgId: tenantId,
-                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "no_email_in_assertion", idp_entity_id = idpEntityId, nameid = nameId }),
-                sourceIp: sourceIp, ct: ct);
-            await EmitSamlFailureAsync(tenantId, null, "no_email_in_assertion", idpEntityId, nameId, ct);
+                orgId: ctx.TenantId, actorId: user.Id,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = user.AccountStatus }),
+                sourceIp: ctx.SourceIp, ct: ct);
+            await EmitSamlFailureAsync(ctx.TenantId, user.Id, "account_status_" + user.AccountStatus, ctx.IdpEntityId, ctx.NameId, ct);
+            return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
+        }
+
+        await _externalIdentities.UpdateLastLoginAsync(existing.Id, ctx.AssertionEmail, ct);
+        await StampUserLoginAsync(conn, user.Id, ctx.AssertionEmail, user.Email);
+
+        await LogSamlSuccessAsync(ctx.TenantId, user.Id, ctx.IdpEntityId, ctx.NameId, "external_identity", ctx.SourceIp, ct);
+
+        var effectiveRole = await ResyncRoleAsync(ctx, user.Id, user.Role, logRefusal: true, ct);
+
+        return new SamlLoginResult(IssueJwt(user.Id, ctx.TenantId, effectiveRole, await JwtSecretAsync(ct)),
+            null, user.Id, effectiveRole, false, false);
+    }
+
+    // Branch 2: no external identity, but a local user shares the asserted email — link them.
+    // Returns null when no user matches the email, so the caller falls through to JIT provisioning.
+    private async Task<SamlLoginResult?> TryLoginViaEmailLinkAsync(
+        System.Data.Common.DbConnection conn, SamlLoginContext ctx, CancellationToken ct)
+    {
+        var existingByEmail = await conn.QuerySingleOrDefaultAsync<(string Id, string Role, string AccountStatus)>(
+            """
+            SELECT id AS Id, role AS Role, account_status AS AccountStatus
+            FROM users
+            WHERE lower(email) = lower(@email) AND tenant_id = @tenantId
+            LIMIT 1
+            """,
+            new { email = ctx.AssertionEmail, tenantId = ctx.TenantId });
+        if (existingByEmail.Id is null)
+            return null;
+
+        if (existingByEmail.AccountStatus is "locked" or "disabled")
+        {
+            await _audit.LogAsync("auth.saml.login.failure",
+                orgId: ctx.TenantId, actorId: existingByEmail.Id,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = existingByEmail.AccountStatus }),
+                sourceIp: ctx.SourceIp, ct: ct);
+            await EmitSamlFailureAsync(ctx.TenantId, existingByEmail.Id,
+                "account_status_" + existingByEmail.AccountStatus, ctx.IdpEntityId, ctx.NameId, ct);
+            return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
+        }
+
+        await _externalIdentities.LinkAsync(ctx.TenantId, existingByEmail.Id, ctx.IdpEntityId, ctx.NameId, ctx.AssertionEmail, ct);
+        await StampUserLoginAsync(conn, existingByEmail.Id, ctx.AssertionEmail, currentEmail: ctx.AssertionEmail);
+
+        await _audit.LogAsync("auth.saml.user_linked",
+            orgId: ctx.TenantId, actorId: existingByEmail.Id,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId, email = ctx.AssertionEmail }),
+            sourceIp: ctx.SourceIp, ct: ct);
+        await LogSamlSuccessAsync(ctx.TenantId, existingByEmail.Id, ctx.IdpEntityId, ctx.NameId, "email_link", ctx.SourceIp, ct);
+
+        var finalRole = await ResyncRoleAsync(ctx, existingByEmail.Id, existingByEmail.Role, logRefusal: false, ct);
+
+        return new SamlLoginResult(IssueJwt(existingByEmail.Id, ctx.TenantId, finalRole, await JwtSecretAsync(ct)),
+            null, existingByEmail.Id, finalRole, false, true);
+    }
+
+    // Branch 3: first-time JIT user. Default role is 'member'. password_hash is empty (BCrypt
+    // verify naturally rejects '' so this user can't accidentally use forms login).
+    private async Task<SamlLoginResult> ProvisionJitUserAsync(
+        System.Data.Common.DbConnection conn, SamlLoginContext ctx, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(ctx.AssertionEmail))
+        {
+            await _audit.LogAsync("auth.saml.login.failure",
+                orgId: ctx.TenantId,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "no_email_in_assertion", idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId }),
+                sourceIp: ctx.SourceIp, ct: ct);
+            await EmitSamlFailureAsync(ctx.TenantId, null, "no_email_in_assertion", ctx.IdpEntityId, ctx.NameId, ct);
             return new SamlLoginResult(null, "Assertion did not include an email and no existing user matches.", null, null, false, false);
         }
 
+        var jitRole = ctx.MappedRole ?? "member";
         var newUserId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             """
             INSERT INTO users (id, tenant_id, email, password_hash, role, account_type)
-            VALUES (@id, @tenantId, @email, '', 'member', 'saml')
+            VALUES (@id, @tenantId, @email, '', @role, 'saml')
             """,
-            new { id = newUserId, tenantId, email = assertionEmail });
-        await _externalIdentities.LinkAsync(tenantId, newUserId, idpEntityId, nameId, assertionEmail, ct);
-        await StampUserLoginAsync(conn, newUserId, assertionEmail, currentEmail: assertionEmail);
+            new { id = newUserId, tenantId = ctx.TenantId, email = ctx.AssertionEmail, role = jitRole });
+        await _externalIdentities.LinkAsync(ctx.TenantId, newUserId, ctx.IdpEntityId, ctx.NameId, ctx.AssertionEmail, ct);
+        await StampUserLoginAsync(conn, newUserId, ctx.AssertionEmail, currentEmail: ctx.AssertionEmail);
 
         await _audit.LogAsync("auth.saml.user_provisioned",
-            orgId: tenantId, actorId: newUserId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid = nameId, email = assertionEmail }),
-            sourceIp: sourceIp, ct: ct);
-        await LogSamlSuccessAsync(tenantId, newUserId, idpEntityId, nameId, "jit_provisioned", sourceIp, ct);
+            orgId: ctx.TenantId, actorId: newUserId,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId, email = ctx.AssertionEmail, role = jitRole }),
+            sourceIp: ctx.SourceIp, ct: ct);
 
-        return new SamlLoginResult(IssueJwt(newUserId, tenantId, "member", await JwtSecretAsync(ct)),
-            null, newUserId, "member", true, false);
+        if (ctx.MappedRole is not null)
+            await _audit.LogAsync("auth.saml.role_assigned", orgId: ctx.TenantId, actorId: newUserId,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { role = jitRole, idp_entity_id = ctx.IdpEntityId }),
+                sourceIp: ctx.SourceIp, ct: ct);
+
+        await LogSamlSuccessAsync(ctx.TenantId, newUserId, ctx.IdpEntityId, ctx.NameId, "jit_provisioned", ctx.SourceIp, ct);
+
+        return new SamlLoginResult(IssueJwt(newUserId, ctx.TenantId, jitRole, await JwtSecretAsync(ct)),
+            null, newUserId, jitRole, true, false);
+    }
+
+    // Re-syncs the user's role to the IdP-mapped role, with last-owner protection: never demote
+    // the last owner. Returns the role in effect after the attempt. When logRefusal is set, a
+    // blocked demotion is audited as auth.saml.role_change_refused.
+    private async Task<string> ResyncRoleAsync(
+        SamlLoginContext ctx, string userId, string currentRole, bool logRefusal, CancellationToken ct)
+    {
+        if (ctx.MappedRole is null || ctx.MappedRole == currentRole)
+            return currentRole;
+
+        var canResync = !(currentRole == "owner" && await _orgs.CountOwnersAsync(ctx.TenantId, ct) <= 1);
+        if (canResync)
+        {
+            await _orgs.UpdateMemberRoleAsync(ctx.TenantId, userId, ctx.MappedRole, ct);
+            await _audit.LogAsync("auth.saml.role_changed", orgId: ctx.TenantId, actorId: userId,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { old_role = currentRole, new_role = ctx.MappedRole, idp_entity_id = ctx.IdpEntityId }),
+                sourceIp: ctx.SourceIp, ct: ct);
+            return ctx.MappedRole;
+        }
+
+        if (logRefusal)
+            await _audit.LogAsync("auth.saml.role_change_refused", orgId: ctx.TenantId, actorId: userId,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "last_owner_protection", attempted_role = ctx.MappedRole }),
+                sourceIp: ctx.SourceIp, ct: ct);
+        return currentRole;
     }
 
     private async Task<string> JwtSecretAsync(CancellationToken ct) =>

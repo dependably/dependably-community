@@ -28,7 +28,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<PackageAnalyticsRepository>();
         services.AddSingleton<UserService>();
         services.AddSingleton<TokenRepository>();
-        // #90 async batched activity writer. The hosted service drains the channel into
+        // Async batched activity writer. The hosted service drains the channel into
         // batched INSERTs so the download/push hot paths no longer block on a SQLite
         // writer-lock acquisition per row.
         services.AddSingleton<ActivityWriter>();
@@ -41,6 +41,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<InviteRepository>();
         services.AddSingleton<AllowlistRepository>();
         services.AddSingleton<BlocklistRepository>();
+        services.AddSingleton<UpstreamRegistryRepository>();
         services.AddSingleton<LicenseRepository>();
         services.AddSingleton<SpdxLicenseRepository>();
         services.AddSingleton<SpdxLicenseSeeder>();
@@ -49,13 +50,13 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ProxyVersionRecorder>();
         services.AddSingleton<Dependably.Storage.ProxyFetchService>();
 
-        // M2.1 — two-tier storage formalisation
+        // Two-tier storage formalisation
         services.AddSingleton<CacheArtifactRepository>();
         services.AddSingleton<TenantArtifactAccessRepository>();
         services.AddSingleton<MetadataCacheRepository>();
         services.AddSingleton<CacheAccessRecorder>();
 
-        // M2.2 — name-claim mechanism
+        // Name-claim mechanism
         services.AddSingleton<ClaimRepository>();
         services.AddSingleton<ClaimResolver>();
 
@@ -110,7 +111,17 @@ public static class ServiceCollectionExtensions
     {
         services.AddSingleton<VulnerabilityRepository>();
 
-        var osvMode = (config["OSV_MODE"] ?? "remote").Trim().ToLowerInvariant();
+        // Auto-select local OSV when AIR_GAPPED=true and OSV_MODE is not explicitly set,
+        // preventing outbound OSV.dev calls in air-gapped deployments.
+        var airGapped = string.Equals(config["AIR_GAPPED"], "true", StringComparison.OrdinalIgnoreCase)
+                     || string.Equals(config["AIR_GAPPED"], "1", StringComparison.OrdinalIgnoreCase);
+        var osvModeRaw = config["OSV_MODE"];
+        string osvMode;
+        if (!string.IsNullOrWhiteSpace(osvModeRaw))
+            osvMode = osvModeRaw.Trim().ToLowerInvariant();
+        else
+            osvMode = airGapped ? "local" : "remote";
+
         if (osvMode == "local")
         {
             services.AddSingleton<LocalOsvSource>();

@@ -19,7 +19,7 @@ using Xunit;
 namespace Dependably.Tests.Integration;
 
 /// <summary>
-/// Acceptance for #104: the proxy-fetch MISS path stages bytes to disk (via
+/// Acceptance: the proxy-fetch MISS path stages bytes to disk (via
 /// <c>HashingFileStream</c> + temp file) before uploading the verified artefact to the
 /// blob store, then streams the response back from the blob store rather than handing
 /// the controller a buffered byte[].
@@ -72,8 +72,8 @@ public sealed class ProxyFetchSoakTests
             var version = "1.0.0";
             var filename = $"{name}-{version}.tgz";
             // Smaller payload for the end-to-end test — the controller path still
-            // buffers via GetOrFetchMetadataAsync + ProxyFetchService (cleanup in
-            // #105). Memory bound for hash-and-stage is asserted in the focused
+            // buffers via GetOrFetchMetadataAsync + ProxyFetchService. Memory bound
+            // for hash-and-stage is asserted in the focused
             // direct-streaming test below.
             var bytes = RandomNumberGenerator.GetBytes(256 * 1024);
             var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
@@ -126,7 +126,7 @@ public sealed class ProxyFetchSoakTests
     [Fact]
     public async Task StreamingFetchPath_PassesFileStreamToBlobStore_NotMemoryStream()
     {
-        // Direct, deterministic evidence that #104 stages to disk: the stream
+        // Direct, deterministic evidence that the MISS path stages to disk: the stream
         // FetchAndStageAsync hands to IBlobStore.PutAsync must be a FileStream pointing
         // at the staging temp file, not a MemoryStream (or any other in-memory
         // container). Wraps a real LocalBlobStore with an inspector that records the
@@ -500,6 +500,8 @@ public sealed class ProxyFetchSoakTests
     private sealed class SoakNoAirGap : IAirGapMode
     {
         public bool IsEnabled => false;
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => false;
     }
 
     /// <summary>

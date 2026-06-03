@@ -7,7 +7,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// #54: covers the dynamic policy provider + capability handler. The attribute itself is
+/// Covers the dynamic policy provider + capability handler. The attribute itself is
 /// trivial wrapping over <see cref="AuthorizeAttribute.Policy"/> so we don't unit-test
 /// it independently — the round-trip through provider + handler proves it works.
 /// </summary>

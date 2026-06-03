@@ -216,6 +216,7 @@
     "del": "Del",
     "actionsMenu": {
       "open": "Actions",
+      "download": "Download",
       "rescan": "Rescan",
       "block": "Block",
       "unblock": "Unblock",
@@ -344,6 +345,14 @@
       "checksum_failure": "Upstream checksum mismatch"
     },
     "empty": "No audit events"
+  },
+  "tokenScopes": {
+    "pull": "pull only",
+    "push": "push only",
+    "both": "push & pull",
+    "admin": "admin",
+    "audit": "audit",
+    "custom": "custom"
   },
   "tokens": {
     "title": "Access Tokens",
@@ -481,13 +490,35 @@
       "testResultHint": "Forms login can now be disabled within the next 10 minutes if you want to require SAML.",
       "testResultBack": "Back to settings",
       "testResultCloseWindow": "Close window",
-      "testResultAutoClose": "Closing in {seconds}s",
+      "testResultAllClaimsHeader": "All asserted attributes",
+      "testResultUsedForSignIn": "used for sign-in",
+      "testResultNoAdditionalAttributes": "No additional attributes were included in the assertion.",
       "testResultFailedTitle": "SAML test failed",
       "testResultFailedBanner": "The SAML round-trip did not complete successfully.",
       "testResultFailedHint": "Check the IdP-side configuration (entity ID, certificate, ACS URL) and try again. Forms login remains the only working method until a successful test is recorded.",
       "testResultFailureDetails": "Failure details",
       "testResultErrorCode": "Error",
       "testResultErrorDetail": "Detail",
+      "signingCertOverrideTitle": "Signing certificate override",
+      "signingCertOverrideHint": "Optional. Paste a PEM or DER certificate to pin the IdP signing key out-of-band. When set, this becomes the sole trust anchor for SAML signature validation.",
+      "signingCertOverridePlaceholder": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+      "signingCertOverrideSet": "Override certificate is active",
+      "signingCertOverrideFingerprint": "Fingerprint: {fp}",
+      "signingCertOverrideClear": "Clear override",
+      "signingCertOverrideSave": "Set certificate",
+      "signingCertOverrideCleared": "Signing certificate override cleared.",
+      "signingCertOverrideSaved": "Signing certificate override saved.",
+      "roleMappingTitle": "Role mapping",
+      "roleMappingHint": "Map IdP role/group claim values to Dependably tenant roles. When a mapping matches, the user's role is set on every login.",
+      "roleAttributeLabel": "Role claim attribute",
+      "roleAttributePlaceholder": "Default: Role, groups, …",
+      "defaultRoleLabel": "Default role (no match)",
+      "roleMappingTableHeader": "IdP value → Role",
+      "roleMappingAddRow": "Add mapping",
+      "roleMappingRemoveRow": "Remove",
+      "roleMappingIdpValue": "IdP value",
+      "roleMappingRole": "Role",
+      "roleMappingSaved": "Role mapping saved.",
       "testPopupBlocked": "The browser blocked the SAML test popup. Allow popups for this site and try again.",
       "testSucceeded": "SAML test succeeded (asserted email: {email}). Forms login can now be safely disabled within the next 10 minutes.",
       "testFailed": "SAML test failed: {reason}"
@@ -500,7 +531,11 @@
       "defaultLanguageHint": "New users in this tenant start with this language. Each user can override it in their profile.",
       "allowVersionOverwrite": "Allow version overwrite",
       "allowVersionOverwriteHint": "When off, publishing a duplicate (name, version) is rejected. Operators must delete the existing version first.",
-      "allowVersionOverwriteWarning": "Enabling this lets a publish replace an existing version's bytes. The change is audited (package.replace records both hashes) but the supply-chain implications are real — packages your developers already pulled may have different contents on a refetch. Toggling this setting is itself audited."
+      "allowVersionOverwriteWarning": "Enabling this lets a publish replace an existing version's bytes. The change is audited (package.replace records both hashes) but the supply-chain implications are real — packages your developers already pulled may have different contents on a refetch. Toggling this setting is itself audited.",
+      "airGapped": "Air-gapped environment",
+      "airGappedHint": "When on, Dependably makes no outbound network requests for this organization: upstream proxy fetches are disabled (uncached packages return 404), and vulnerability and deprecation-metadata scans skip this organization. Use for isolated / air-gapped deployments.",
+      "airGappedEnforcedNote": "Enforced instance-wide by the operator (AIR_GAPPED); can't be changed here.",
+      "airGappedWarning": "Outbound requests are disabled for this organization: uncached upstream packages return 404, and vulnerability and deprecation scans skip it."
     },
     "uploadLimits": {
       "instanceCeiling": "Instance ceiling: {mb} MB",
@@ -518,6 +553,7 @@
     "proxy": {
       "passthroughEnabled": "Proxy passthrough enabled",
       "passthroughHint": "When disabled, only packages already cached in this registry are served.",
+      "passthroughOverriddenByAirGap": "Overridden by the Air-gapped environment setting (General tab): proxy passthrough is off while air-gapped.",
       "allowlistMode": "Proxy: allowlist & blocklist only",
       "osvTolerance": "Max OSV score tolerance",
       "osvToleranceHint": "Packages with a vulnerability score above this threshold are blocked (0 – 10). Default 10 allows all.",
@@ -527,7 +563,29 @@
       "minReleaseAgeUnitDays": "Days",
       "allowlistSection": "Allowlist",
       "blocklistSection": "Blocklist",
-      "saved": "Proxy settings saved."
+      "blockDeprecated": "Deprecated package policy",
+      "blockDeprecatedHint": "How upstream-deprecated versions are handled. Warn surfaces a 'deprecated' status in the UI and API. Block new refuses a deprecated version on cache miss — it is never fetched, cached, or served — while already-cached versions keep serving. Block all additionally returns 403 for already-cached versions once deprecated. Deprecation data is captured at proxy fetch and refreshed daily by the deprecation-refresh job.",
+      "blockDeprecatedOff": "Off — allow deprecated",
+      "blockDeprecatedWarn": "Warn — flag only",
+      "blockDeprecatedBlockNew": "Block new — refuse new deprecated fetches",
+      "blockDeprecatedBlockAll": "Block all — also stop serving cached",
+      "saved": "Proxy settings saved.",
+      "upstreamRegistries": {
+        "section": "Upstream registries",
+        "hint": "Per ecosystem, the registries this proxy fetches from, in priority order. The top entry is tried first; on a miss or unreachable upstream the next is tried. Drag a row by its handle to reorder. With no registries configured, proxying is disabled for that ecosystem — only already-cached packages are served.",
+        "add": "Add registry",
+        "emptyDisabled": "No upstream registries — proxying is disabled for {ecosystem}.",
+        "dragHint": "Drag to reorder",
+        "removeConfirm": "Remove this upstream registry?",
+        "modal": {
+          "title": "Add upstream registry",
+          "ecosystem": "Ecosystem",
+          "url": "Registry URL",
+          "urlHint": "Base URL of the upstream registry (e.g. https://pypi.org, https://registry.npmjs.org).",
+          "name": "Label (optional)",
+          "namePlaceholder": "e.g. Internal mirror"
+        }
+      }
     },
     "licenses": {
       "intro": "Govern which SPDX licenses are permitted for packages in this tenant. License metadata is extracted on publish and on proxy cache fill.",
@@ -691,8 +749,8 @@
     "title": "Overview",
     "totalPackages": "Total packages",
     "totalDisk": "Total disk used",
-    "fetchesTitle": "Package fetches — last 24 hours",
-    "fetchesTotal": "Total: {n} fetches",
+    "fetchesTitle": "Package downloads — last 24 hours",
+    "fetchesTotal": "Total: {n} downloads",
     "vulnsTitle": "Vulnerabilities by ecosystem",
     "ecosystem": "Ecosystem",
     "total": "Total",
@@ -702,7 +760,8 @@
     "window7d": "7d",
     "window30d": "30d",
     "activeUsers": "Active users (7d)",
-    "blockedPulls": "Blocked pulls (30d)",
+    "totalDownloads": "Total (30d)",
+    "blockedPulls": "Blocked (30d)",
     "packages": "Packages",
     "diskUsed": "Disk used",
     "vulns": "Vulnerabilities",

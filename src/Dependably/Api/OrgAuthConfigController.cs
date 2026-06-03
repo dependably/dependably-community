@@ -6,7 +6,7 @@ using Dependably.Security;
 namespace Dependably.Api;
 
 /// <summary>
-/// SAML / auth-config surface — split off OrgController (#61). Owns the tenant's
+/// SAML / auth-config surface — split off OrgController. Owns the tenant's
 /// IdP relationship: read the current config + SP info, update toggles + SP fields,
 /// upload IdP metadata XML, and wipe the config back to forms-only.
 ///
@@ -59,12 +59,17 @@ public sealed class OrgAuthConfigController : ControllerBase
             idpEntityId = cfg?.IdpEntityId,
             idpSsoUrl = cfg?.IdpSsoUrl,
             idpSigningCertThumbprint = ThumbprintOrNull(cfg?.IdpSigningCert),
+            idpSigningCertOverrideThumbprint = ThumbprintOrNull(cfg?.IdpSigningCertOverride),
             spEntityId = cfg?.SpEntityId ?? defaultSpEntityId,
             nameIdFormat = cfg?.NameIdFormat ?? "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
             emailAttribute = cfg?.EmailAttribute,
             buttonLabel = cfg?.ButtonLabel,
             lastTestAt = cfg?.LastTestAt,
             lastTestEmail = cfg?.LastTestEmail,
+            lastTestClaims = ParseClaimsJson(cfg?.LastTestClaims),
+            roleAttribute = cfg?.RoleAttribute,
+            roleMapping = cfg?.RoleMapping,
+            defaultRole = cfg?.DefaultRole ?? "member",
             spInfo = new { acsUrl, metadataUrl, defaultSpEntityId },
         });
     }
@@ -87,21 +92,8 @@ public sealed class OrgAuthConfigController : ControllerBase
         var disablingForms = (existing?.FormsLoginEnabled ?? true) && !req.FormsLoginEnabled;
         if (disablingForms)
         {
-            if (!req.Enabled)
-                return _problems.ValidationErrorAction("formsLoginEnabled",
-                    "Forms login can only be disabled when SAML is enabled.");
-
-            var samlReady = existing is not null
-                && !string.IsNullOrWhiteSpace(existing.IdpEntityId)
-                && !string.IsNullOrWhiteSpace(existing.IdpSigningCert);
-            if (!samlReady)
-                return _problems.ValidationErrorAction("formsLoginEnabled",
-                    "Upload IdP metadata before disabling forms login.");
-
-            var lastTest = existing!.LastTestAt;
-            if (lastTest is null || DateTimeOffset.UtcNow - lastTest.Value > TimeSpan.FromMinutes(10))
-                return _problems.ValidationErrorAction("formsLoginEnabled",
-                    "Run a successful SAML test within the last 10 minutes before disabling forms login.");
+            var lockoutError = ValidateFormsLoginDisable(existing, req);
+            if (lockoutError is not null) return lockoutError;
         }
 
         await _samlConfig.UpsertSettingsAsync(new SamlSettingsUpdate(
@@ -111,7 +103,10 @@ public sealed class OrgAuthConfigController : ControllerBase
             string.IsNullOrWhiteSpace(req.SpEntityId) ? null : req.SpEntityId,
             req.NameIdFormat,
             string.IsNullOrWhiteSpace(req.EmailAttribute) ? null : req.EmailAttribute,
-            string.IsNullOrWhiteSpace(req.ButtonLabel) ? null : req.ButtonLabel), ct);
+            string.IsNullOrWhiteSpace(req.ButtonLabel) ? null : req.ButtonLabel,
+            string.IsNullOrWhiteSpace(req.RoleAttribute) ? null : req.RoleAttribute,
+            string.IsNullOrWhiteSpace(req.RoleMapping) ? null : req.RoleMapping,
+            string.IsNullOrWhiteSpace(req.DefaultRole) ? "member" : req.DefaultRole), ct);
 
         await _audit.LogAsync("saml.config_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -122,6 +117,8 @@ public sealed class OrgAuthConfigController : ControllerBase
                 name_id_format = req.NameIdFormat,
                 email_attribute = req.EmailAttribute,
                 button_label = req.ButtonLabel,
+                role_attribute = req.RoleAttribute,
+                default_role = req.DefaultRole,
             }), ct: ct);
 
         return NoContent();
@@ -137,11 +134,14 @@ public sealed class OrgAuthConfigController : ControllerBase
         if (string.IsNullOrWhiteSpace(req.MetadataXml))
             return _problems.ValidationErrorAction("metadataXml", "metadataXml is required.");
 
+        var orgId = CurrentTenantId();
+        var existing = await _samlConfig.GetAsync(orgId, ct);
+        var hasOverride = !string.IsNullOrWhiteSpace(existing?.IdpSigningCertOverride);
+
         IdpMetadataParser.ParsedIdp parsed;
-        try { parsed = IdpMetadataParser.Parse(req.MetadataXml); }
+        try { parsed = IdpMetadataParser.Parse(req.MetadataXml, requireCert: !hasOverride); }
         catch (Exception ex) { return _problems.ValidationErrorAction("metadataXml", ex.Message); }
 
-        var orgId = CurrentTenantId();
         await _samlConfig.UpsertMetadataAsync(orgId, parsed.EntityId, parsed.SsoUrl, parsed.SigningCertBase64, req.MetadataXml, ct);
 
         await _audit.LogAsync("saml.metadata_uploaded", orgId, GetUserId(),
@@ -173,6 +173,126 @@ public sealed class OrgAuthConfigController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>POST /api/v1/auth-config/signing-cert — set the admin-pinned IdP signing certificate override.</summary>
+    [HttpPost("api/v1/auth-config/signing-cert")]
+    public async Task<IActionResult> SetSigningCert([FromBody] SetSigningCertRequest req, CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (result is not null) return result;
+
+        if (string.IsNullOrWhiteSpace(req.Certificate))
+            return _problems.ValidationErrorAction("certificate", "certificate is required.");
+
+        // Accept PEM or raw base64 DER.
+        string certBase64;
+        try { certBase64 = NormalizeCertInput(req.Certificate); }
+        catch (Exception ex) { return _problems.ValidationErrorAction("certificate", ex.Message); }
+
+        System.Security.Cryptography.X509Certificates.X509Certificate2 cert;
+        try
+        {
+            var bytes = Convert.FromBase64String(certBase64);
+            cert = System.Security.Cryptography.X509Certificates.X509CertificateLoader.LoadCertificate(bytes);
+        }
+        catch { return _problems.ValidationErrorAction("certificate", "Certificate is not valid base64 X.509."); }
+
+        // Compute summary for response + audit.
+        var summary = CertSummary(cert);
+
+        var orgId = CurrentTenantId();
+        await _samlConfig.SetSigningCertOverrideAsync(orgId, certBase64, ct);
+        await _audit.LogAsync("saml.signing_cert_set", orgId, GetUserId(),
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                fingerprint = summary.Fingerprint,
+                subject = summary.Subject,
+                not_after = summary.NotAfter,
+            }), ct: ct);
+
+        return Ok(summary);
+    }
+
+    /// <summary>DELETE /api/v1/auth-config/signing-cert — clear the override, reverting to metadata cert.</summary>
+    [HttpDelete("api/v1/auth-config/signing-cert")]
+    public async Task<IActionResult> ClearSigningCert(CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (result is not null) return result;
+
+        var orgId = CurrentTenantId();
+        var existing = await _samlConfig.GetAsync(orgId, ct);
+        if (string.IsNullOrWhiteSpace(existing?.IdpSigningCertOverride))
+            return NoContent(); // already clear, idempotent
+
+        await _samlConfig.ClearSigningCertOverrideAsync(orgId, ct);
+        await _audit.LogAsync("saml.signing_cert_cleared", orgId, GetUserId(), ct: ct);
+        return NoContent();
+    }
+
+    // Returns null only when the lockout preconditions are met; otherwise the validation
+    // error to short-circuit the caller with.
+    private IActionResult? ValidateFormsLoginDisable(TenantSamlConfig? existing, UpdateAuthConfigRequest req)
+    {
+        if (!req.Enabled)
+            return _problems.ValidationErrorAction("formsLoginEnabled",
+                "Forms login can only be disabled when SAML is enabled.");
+
+        var samlReady = existing is not null
+            && !string.IsNullOrWhiteSpace(existing.IdpEntityId)
+            && (!string.IsNullOrWhiteSpace(existing.IdpSigningCert) || !string.IsNullOrWhiteSpace(existing.IdpSigningCertOverride));
+        if (!samlReady)
+            return _problems.ValidationErrorAction("formsLoginEnabled",
+                "Upload IdP metadata before disabling forms login.");
+
+        var lastTest = existing!.LastTestAt;
+        if (lastTest is null || DateTimeOffset.UtcNow - lastTest.Value > TimeSpan.FromMinutes(10))
+            return _problems.ValidationErrorAction("formsLoginEnabled",
+                "Run a successful SAML test within the last 10 minutes before disabling forms login.");
+
+        return null;
+    }
+
+    private static readonly System.Text.Json.JsonSerializerOptions ClaimsJsonOptions =
+        new() { PropertyNameCaseInsensitive = true };
+
+    private static object[] ParseClaimsJson(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return Array.Empty<object>();
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize<object[]>(json, ClaimsJsonOptions)
+                ?? Array.Empty<object>();
+        }
+        catch { return Array.Empty<object>(); }
+    }
+
+    private static string NormalizeCertInput(string input)
+    {
+        var trimmed = input.Trim();
+        // PEM format: strip header/footer and whitespace.
+        if (trimmed.StartsWith("-----BEGIN", StringComparison.Ordinal))
+        {
+            var lines = trimmed.Split('\n');
+            var b64 = string.Concat(
+                lines
+                    .Where(l => !l.StartsWith("-----", StringComparison.Ordinal))
+                    .Select(l => l.Trim()));
+            return b64;
+        }
+        // Raw base64 DER: strip any whitespace.
+        return new string(trimmed.Where(c => !char.IsWhiteSpace(c)).ToArray());
+    }
+
+    private static (string Fingerprint, string Subject, string Issuer, string NotBefore, string NotAfter) CertSummary(
+        System.Security.Cryptography.X509Certificates.X509Certificate2 cert) =>
+        (
+            Fingerprint: cert.Thumbprint,
+            Subject: cert.Subject,
+            Issuer: cert.Issuer,
+            NotBefore: cert.NotBefore.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            NotAfter: cert.NotAfter.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        );
+
     private static string? ThumbprintOrNull(string? base64Cert)
     {
         if (string.IsNullOrWhiteSpace(base64Cert)) return null;
@@ -199,6 +319,11 @@ public sealed record UpdateAuthConfigRequest(
     string? SpEntityId,
     string NameIdFormat,
     string? EmailAttribute,
-    string? ButtonLabel);
+    string? ButtonLabel,
+    string? RoleAttribute,
+    string? RoleMapping,
+    string? DefaultRole);
 
 public sealed record UploadSamlMetadataRequest(string MetadataXml);
+
+public sealed record SetSigningCertRequest(string Certificate);

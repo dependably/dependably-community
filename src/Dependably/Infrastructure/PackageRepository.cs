@@ -79,7 +79,7 @@ public sealed class PackageRepository
     /// <summary>
     /// Finds a package version by its filename (the trailing path segment of blob_key),
     /// joined with its parent package. Used by PyPI/npm/NuGet downloads — equality lookup
-    /// against <c>idx_package_versions_filename</c> instead of the pre-#91 leading-wildcard
+    /// against <c>idx_package_versions_filename</c> instead of the legacy leading-wildcard
     /// LIKE on blob_key (which couldn't use any index).
     /// </summary>
     public async Task<(Package Package, PackageVersion Version)?> FindVersionByBlobKeySuffixAsync(
@@ -198,7 +198,7 @@ public sealed class PackageRepository
     {
         await using var conn = await _db.OpenAsync(ct);
         var id = Guid.NewGuid().ToString("N");
-        // #91: derive filename from blob_key's last path segment so download lookups can
+        // Derive filename from blob_key's last path segment so download lookups can
         // hit idx_package_versions_filename instead of a leading-wildcard LIKE.
         var filename = DeriveFilename(data.BlobKey);
         // xtenant: INSERT pinned to a caller-supplied package_id (org-scoped via FK).
@@ -248,7 +248,7 @@ public sealed class PackageRepository
     }
 
     /// <summary>
-    /// #45 replacement-policy update: rewrites blob_key/size/checksum/origin on an existing
+    /// Replacement-policy update: rewrites blob_key/size/checksum/origin on an existing
     /// row when allow_version_overwrite is on. The package_version id is preserved so vuln
     /// scans, license rows, and existing FKs follow the new artefact without re-stitching.
     /// </summary>
@@ -392,7 +392,7 @@ public sealed class PackageRepository
     }
 
     /// <summary>
-    /// #47: deletes every <c>origin = 'proxy'</c> version row for (org, ecosystem, purl_name)
+    /// Deletes every <c>origin = 'proxy'</c> version row for (org, ecosystem, purl_name)
     /// and returns the blob keys that were just dereferenced. Caller is expected to delete the
     /// blobs after this completes — doing it here would couple the repo to <c>IBlobStore</c> and
     /// leave the path harder to test. Imported / private artefacts are never touched.
@@ -474,6 +474,64 @@ public sealed class PackageRepository
         await conn.ExecuteAsync(
             "UPDATE package_versions SET manual_block_state = @state WHERE id = @id",
             new { id = versionId, state });
+    }
+
+    /// <summary>
+    /// Stamps <c>deprecation_checked_at</c> to now without changing the <c>deprecated</c> value.
+    /// Called when an upstream metadata fetch confirms the deprecation status is unchanged.
+    /// </summary>
+    public async Task UpdateDeprecationCheckedAtAsync(string versionId, CancellationToken ct = default)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE package_versions SET deprecation_checked_at = @now WHERE id = @id",
+            new { now, id = versionId });
+    }
+
+    /// <summary>
+    /// Updates both <c>deprecated</c> and <c>deprecation_checked_at</c> in a single UPDATE.
+    /// Called when upstream metadata shows a changed deprecation state.
+    /// </summary>
+    public async Task UpdateDeprecatedAndCheckedAsync(string versionId, string? deprecated, CancellationToken ct = default)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE package_versions SET deprecated = @deprecated, deprecation_checked_at = @now WHERE id = @id",
+            new { id = versionId, deprecated, now });
+    }
+
+    /// <summary>
+    /// Returns distinct packages that have at least one proxy version whose deprecation metadata
+    /// is stale (never checked, or checked more than <paramref name="ageHours"/> ago). Ordered
+    /// oldest-first so a partial run still makes progress on the most stale packages. Soft-deleted
+    /// tenants are excluded.
+    /// </summary>
+    // xtenant: cross-tenant query scoped to proxy origin and age threshold; caller (DeprecationRefreshService)
+    // processes each package independently and gates writes on the version id.
+    public async Task<IReadOnlyList<(string PackageId, string Ecosystem, string PurlName, string OrgId)>>
+        ListPackagesNeedingDeprecationRefreshAsync(int ageHours, int limit, CancellationToken ct = default)
+    {
+        var threshold = DateTimeOffset.UtcNow.AddHours(-ageHours).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        await using var conn = await _db.OpenAsync(ct);
+        var rows = await conn.QueryAsync<(string PackageId, string Ecosystem, string PurlName, string OrgId)>(
+            """
+            SELECT p.id AS PackageId, p.ecosystem AS Ecosystem, p.purl_name AS PurlName, p.org_id AS OrgId
+            FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            JOIN orgs o ON o.id = p.org_id
+            LEFT JOIN org_settings os ON os.org_id = p.org_id
+            WHERE pv.origin = 'proxy'
+              AND (pv.deprecation_checked_at IS NULL OR pv.deprecation_checked_at < @threshold)
+              AND o.deleted_at IS NULL
+              AND COALESCE(os.air_gapped, 0) = 0
+            GROUP BY p.id, p.ecosystem, p.purl_name, p.org_id
+            ORDER BY MIN(pv.deprecation_checked_at) ASC
+            LIMIT @limit
+            """,
+            new { threshold, limit });
+        return rows.ToList();
     }
 }
 

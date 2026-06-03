@@ -4,7 +4,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// #46: parser must accept the canonical GNU coreutils format and reject obviously
+/// Parser must accept the canonical GNU coreutils format and reject obviously
 /// malformed input. The integration path relies on these guarantees — a parse error
 /// becomes a 422 to the operator, while a successful parse is treated as gospel.
 /// </summary>

@@ -26,7 +26,7 @@ public interface ITenantSlugCacheInvalidator
 
 public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheInvalidator
 {
-    // #93: 5-second sliding TTL on slug → (tenant id, slug) lookups. Short enough that
+    // 5-second sliding TTL on slug → (tenant id, slug) lookups. Short enough that
     // restoring a soft-deleted tenant or creating a new one becomes visible within a
     // single CI batch's lifespan; long enough to amortise the DB lookup across the burst
     // of requests a single `npm install` / `pip install` produces against one subdomain.
@@ -100,7 +100,7 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
         var slug = ReservedSlugs.Normalize(rawSlug, _extraReserved);
         if (slug is null) return TenantContext.Uninitialized;
 
-        // #93 cache: slug → resolved tenant context. Short TTL keeps the resolver hot for
+        // Cache: slug → resolved tenant context. Short TTL keeps the resolver hot for
         // CI fan-out without leaving tenant lifecycle changes invisible. Negative results
         // (slug present in URL but not in DB) get the same TTL so a missing tenant doesn't
         // cause a DB lookup per request either.

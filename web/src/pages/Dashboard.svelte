@@ -185,6 +185,10 @@
         <div class="stat-value">{stats.activeUsers7d ?? 0}</div>
       </div>
       <div class="stat-card">
+        <div class="eyebrow">{$t('dashboard.totalDownloads')}</div>
+        <div class="stat-value">{(stats.totalDownloads30d ?? 0).toLocaleString()}</div>
+      </div>
+      <div class="stat-card">
         <div class="eyebrow">{$t('dashboard.blockedPulls')}</div>
         <div class="stat-value" class:warn={stats.blockedPulls30d > 0}>{stats.blockedPulls30d ?? 0}</div>
       </div>

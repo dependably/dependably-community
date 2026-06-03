@@ -124,7 +124,7 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
     [Fact]
     public async Task CreateClaim_EmitsTypedClaimCreateEventInAuditEventTable()
     {
-        // #52: claim.create lands in audit_event with typed shape, alongside the legacy
+        // claim.create lands in audit_event with typed shape, alongside the legacy
         // audit_log dual-write. The supply-chain reviewer queries the typed table directly —
         // we used to read it through /api/v1/admin/audit-events, but that endpoint was
         // unused-and-redundant with /api/v1/siem/events/auth and got removed.
@@ -170,7 +170,7 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         Assert.DoesNotContain(items, x => x.GetProperty("name").GetString() == "acme-list-local");
     }
 
-    // ── #47: local_only purge actually evicts proxy artefacts ─────────────────────
+    // ── local_only purge actually evicts proxy artefacts ─────────────────────
     // The state-machine flag has always reported purgesProxy=true; this test exists to
     // catch a regression where the side-effect path stops running. Imported / private
     // versions for an unrelated package are seeded so the purge is verifiably scoped.

@@ -18,7 +18,7 @@ public static partial class PurlNormalizer
         => $"pkg:npm/{name}@{version}";
 
     /// <summary>
-    /// Canonical Maven PURL (#99): <c>pkg:maven/{groupId}/{artifactId}@{version}</c>
+    /// Canonical Maven PURL: <c>pkg:maven/{groupId}/{artifactId}@{version}</c>
     /// per the PURL spec. Group/artifact stay as-is (Maven coordinates are case-sensitive);
     /// the path-style separator matches the on-disk repo layout Maven/Gradle clients walk.
     /// </summary>
@@ -26,7 +26,7 @@ public static partial class PurlNormalizer
         => $"pkg:maven/{groupId}/{artifactId}@{version}";
 
     /// <summary>
-    /// Canonical RPM PURL (#100): <c>pkg:rpm/{name}@{version}-{release}?arch={arch}[&amp;epoch={n}]</c>.
+    /// Canonical RPM PURL: <c>pkg:rpm/{name}@{version}-{release}?arch={arch}[&amp;epoch={n}]</c>.
     /// Name is lowercased (rpm package names are case-insensitive); epoch is omitted from
     /// the qualifier list when zero so the most common (non-epoch) form stays terse.
     /// </summary>

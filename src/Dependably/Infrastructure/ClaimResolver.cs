@@ -1,8 +1,8 @@
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Returns the effective claim state for <c>(org, ecosystem, name)</c>. Honors air-gap mode
-/// per #46/#47: when <see cref="IAirGapMode.IsEnabled"/> is true, every name resolves to
+/// Returns the effective claim state for <c>(org, ecosystem, name)</c>. Honors air-gap mode:
+/// when <see cref="IAirGapMode.IsEnabled"/> is true, every name resolves to
 /// <see cref="ClaimStateMachine.LocalOnly"/> implicitly, even if no <c>claim</c> row exists.
 /// Operators can still create explicit claim rows in air-gap mode for auditing — those rows
 /// are honored if present.

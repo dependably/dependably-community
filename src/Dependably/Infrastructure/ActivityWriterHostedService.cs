@@ -4,7 +4,7 @@ using Dapper;
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Drains <see cref="ActivityWriter"/> into the <c>activity</c> table in batches (#90).
+/// Drains <see cref="ActivityWriter"/> into the <c>activity</c> table in batches.
 /// Flush trigger is whichever of these comes first:
 ///   - <see cref="MaxBatch"/> records accumulated, or
 ///   - <see cref="MaxFlushInterval"/> since the first row in the buffer.

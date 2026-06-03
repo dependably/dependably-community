@@ -219,6 +219,9 @@ tr:hover td { background: var(--bg2); }
 }
 .form-row label { font-weight: 500; font-size: 13px; color: var(--text2); }
 .form-hint { font-size: 12px; color: var(--text2); margin-top: 3px; }
+/* Label paired with an InfoTip "i" icon — keeps the icon on the label's baseline. The label
+   stays flex-1 on inline toggle rows so the row's control still aligns to the right edge. */
+.label-row { display: flex; align-items: center; gap: 6px; }
 
 .error-msg {
   color: var(--danger);
@@ -363,7 +366,7 @@ table td, .copy-block { font-variant-numeric: tabular-nums; }
   margin: 0 0 12px;
 }
 
-/* Severity chip (#23) */
+/* Severity chip */
 .sev {
   display: inline-block;
   font-size: 11px;

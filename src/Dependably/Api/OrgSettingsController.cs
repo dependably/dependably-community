@@ -8,7 +8,7 @@ using Dependably.Security;
 namespace Dependably.Api;
 
 /// <summary>
-/// Tenant-scoped configuration endpoints. Split out of <see cref="OrgController"/> (#61):
+/// Tenant-scoped configuration endpoints. Split out of <see cref="OrgController"/>:
 /// org settings, retention, and proxy settings are all the same "configuration of a single
 /// org row" shape, and they share a single dependency surface (OrgSettingsRepository,
 /// OrgAccessGuard, AuditRepository). Tenant role-management remains in OrgController for
@@ -24,6 +24,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     private readonly IAuditEmitter _auditEmitter;
     private readonly IConfiguration _config;
     private readonly ProblemResults _problems;
+    private readonly IAirGapMode _airGap;
 
     public OrgSettingsController(
         OrgSettingsRepository settings,
@@ -31,7 +32,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         AuditRepository audit,
         IAuditEmitter auditEmitter,
         IConfiguration config,
-        ProblemResults problems)
+        ProblemResults problems,
+        IAirGapMode airGap)
     {
         _settings = settings;
         _guard = guard;
@@ -39,6 +41,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         _auditEmitter = auditEmitter;
         _config = config;
         _problems = problems;
+        _airGap = airGap;
     }
 
     /// <summary>GET /api/v1/orgs/{org}/settings</summary>
@@ -50,8 +53,19 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
         var orgId = CurrentTenantId();
         var settings = await _settings.GetSettingsAsync(orgId, ct);
-        return Ok(settings);
+
+        // Serialize the settings model verbatim (camelCase, all fields the UI reads) and add
+        // airGappedEnforced — the instance-level AIR_GAPPED posture. The UI renders the
+        // air-gap checkbox checked + read-only when enforced; the tenant flag (airGapped)
+        // remains the editable per-tenant value.
+        var node = System.Text.Json.JsonSerializer.SerializeToNode(settings, SettingsJsonOptions)
+                   ?? new System.Text.Json.Nodes.JsonObject();
+        node["airGappedEnforced"] = _airGap.IsEnabled;
+        return new JsonResult(node);
     }
+
+    private static readonly System.Text.Json.JsonSerializerOptions SettingsJsonOptions =
+        new(System.Text.Json.JsonSerializerDefaults.Web);
 
     /// <summary>PUT /api/v1/orgs/{org}/settings</summary>
     [HttpPut("api/v1/settings")]
@@ -60,25 +74,18 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (result is not null) return result;
 
-        foreach (var url in new[] { req.PyPiUpstream, req.NpmUpstream, req.NuGetUpstream })
-        {
-            if (url is null) continue;
-            var problem = UpstreamUrlValidator.ValidateUrl(url);
-            if (problem is not null)
-                return BadRequest(new { error = problem });
-        }
-
         if (req.DefaultLanguage is { } lang && !LanguageCodes.IsSupported(lang))
             return BadRequest(new { detail = $"Unsupported language code '{lang}'. Allowed: {string.Join(", ", LanguageCodes.Supported)}." });
 
         var orgId = CurrentTenantId();
         var instanceMax = _config["MAX_UPLOAD_BYTES"] is { } s && long.TryParse(s, out var v) ? (long?)v : null;
 
-        // Capture prior allow_version_overwrite so the targeted tenant.setting.change event
-        // can carry before/after when the toggle moves — that's the supply-chain-shaped
-        // surface (#45) audit reviewers grep for.
+        // Capture prior allow_version_overwrite + air_gapped so the targeted
+        // tenant.setting.change events can carry before/after when a toggle moves — that's the
+        // supply-chain-shaped surface audit reviewers grep for.
         var prior = await _settings.GetSettingsAsync(orgId, ct);
         var priorOverwrite = prior?.AllowVersionOverwrite ?? false;
+        var priorAirGapped = prior?.AirGapped ?? false;
 
         await _settings.UpsertSettingsAsync(new OrgSettingsUpdate(
             orgId,
@@ -93,7 +100,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             req.AllowVersionOverwrite,
             MaxUploadBytesMaven: req.MaxUploadBytesMaven,
             MaxUploadBytesRpm:   req.MaxUploadBytesRpm,
-            MaxUploadBytesOci:   req.MaxUploadBytesOci), ct);
+            MaxUploadBytesOci:   req.MaxUploadBytesOci,
+            AirGapped:           req.AirGapped), ct);
 
         await _audit.LogAsync("org_settings_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -107,11 +115,9 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 max_upload_bytes_maven = req.MaxUploadBytesMaven,
                 max_upload_bytes_rpm = req.MaxUploadBytesRpm,
                 max_upload_bytes_oci = req.MaxUploadBytesOci,
-                pypi_upstream = req.PyPiUpstream,
-                npm_upstream = req.NpmUpstream,
-                nuget_upstream = req.NuGetUpstream,
                 default_language = req.DefaultLanguage,
                 allow_version_overwrite = req.AllowVersionOverwrite,
+                air_gapped = req.AirGapped,
             }), ct: ct);
 
         if (req.AllowVersionOverwrite is { } newOverwrite && newOverwrite != priorOverwrite)
@@ -128,6 +134,22 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 orgId, "user", GetUserId(), "accepted",
                 new Dependably.Infrastructure.Audit.Events.TenantEvents.SettingChange(
                     "allow_version_overwrite", priorOverwrite, newOverwrite).ToJson(), ct);
+        }
+
+        if (req.AirGapped is { } newAirGapped && newAirGapped != priorAirGapped)
+        {
+            await _audit.LogAsync("tenant.setting.change", orgId, GetUserId(),
+                detail: System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    key = "air_gapped",
+                    prior_value = priorAirGapped,
+                    new_value = newAirGapped,
+                }), ct: ct);
+            await _auditEmitter.EmitAsync(
+                Dependably.Infrastructure.Audit.Events.TenantEvents.TypeSettingChange,
+                orgId, "user", GetUserId(), "accepted",
+                new Dependably.Infrastructure.Audit.Events.TenantEvents.SettingChange(
+                    "air_gapped", priorAirGapped, newAirGapped).ToJson(), ct);
         }
 
         return NoContent();
@@ -185,6 +207,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             proxy_passthrough_enabled = settings?.ProxyPassthroughEnabled ?? true,
             max_osv_score_tolerance   = settings?.MaxOsvScoreTolerance   ?? 10.0,
             min_release_age_hours     = settings?.MinReleaseAgeHours,
+            block_deprecated          = settings?.BlockDeprecated ?? "off",
         });
     }
 
@@ -207,9 +230,17 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 "min_release_age_hours",
                 $"Must be between 0 and {MaxReleaseAgeHours} hours (1 year), or null to disable.");
 
+        // Normalize the retired 'block' value (deny-everything) to its successor 'block_all' so
+        // existing automation keeps working after the new/all split.
+        var blockDeprecated = req.BlockDeprecated ?? "off";
+        if (blockDeprecated == "block") blockDeprecated = "block_all";
+        if (blockDeprecated is not ("off" or "warn" or "block_new" or "block_all"))
+            return _problems.ValidationErrorAction(
+                "block_deprecated", "Must be 'off', 'warn', 'block_new', or 'block_all'.");
+
         var orgId = CurrentTenantId();
         await _settings.UpsertProxySettingsAsync(
-            orgId, req.ProxyPassthroughEnabled, req.MaxOsvScoreTolerance, req.MinReleaseAgeHours, ct);
+            orgId, req.ProxyPassthroughEnabled, req.MaxOsvScoreTolerance, req.MinReleaseAgeHours, blockDeprecated, ct);
 
         await _audit.LogAsync("proxy_settings_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -217,6 +248,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 proxy_passthrough_enabled = req.ProxyPassthroughEnabled,
                 max_osv_score_tolerance = req.MaxOsvScoreTolerance,
                 min_release_age_hours = req.MinReleaseAgeHours,
+                block_deprecated = blockDeprecated,
             }), ct: ct);
 
         return NoContent();

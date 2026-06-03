@@ -14,6 +14,7 @@ public sealed class SchemaInitializer
     private readonly IMetadataStore _db;
     private readonly ILogger<SchemaInitializer> _logger;
     private readonly SpdxLicenseSeeder _spdxSeeder;
+    private readonly IConfiguration? _config;
 
     static SchemaInitializer()
     {
@@ -25,13 +26,17 @@ public sealed class SchemaInitializer
     public SchemaInitializer(
         IMetadataStore db,
         ILogger<SchemaInitializer>? logger = null,
-        SpdxLicenseSeeder? spdxSeeder = null)
+        SpdxLicenseSeeder? spdxSeeder = null,
+        IConfiguration? config = null)
     {
         _db = db;
         _logger = logger ?? NullLogger<SchemaInitializer>.Instance;
         // Test ctors that pass only the IMetadataStore get a seeder with a null logger —
         // the embedded JSON is still read so the spdx_license table is populated.
         _spdxSeeder = spdxSeeder ?? new SpdxLicenseSeeder(NullLogger<SpdxLicenseSeeder>.Instance);
+        // Optional: drives upstream-registry default URLs from config overrides during the
+        // backfill. Null in lightweight test ctors — falls back to the hard-coded public defaults.
+        _config = config;
     }
 
     public async Task InitializeAsync(CancellationToken ct = default)
@@ -67,12 +72,21 @@ public sealed class SchemaInitializer
         await RunOnceAsync(conn, "collapse_origin_to_uploaded", CollapseOriginToUploadedAsync);
         await RunOnceAsync(conn, "drop_legacy_token_scope_column", DropLegacyTokenScopeColumnAsync);
         await RunOnceAsync(conn, "drop_package_versions_sbom_column", DropPackageVersionsSbomColumnAsync);
+        await RunOnceAsync(conn, "drop_org_settings_disable_job_columns", DropOrgSettingsDisableJobColumnsAsync);
         await RunOnceAsync(conn, "drop_allowlist_blocklist_ecosystem", DropAllowlistBlocklistEcosystemAsync);
         await RunOnceAsync(conn, "backfill_package_versions_filename", BackfillPackageVersionsFilenameAsync);
         await RunOnceAsync(conn, "backfill_oci_catalog", BackfillOciCatalogAsync);
+        await RunOnceAsync(conn, "seed_default_upstream_registries", SeedDefaultUpstreamRegistriesAsync);
+        // transactional: false — the SQLite branch drives PRAGMA writable_schema + a schema_version
+        // bump that don't compose with an enclosing transaction (same shape as the auditor CHECK
+        // rewrite above). Idempotent on both providers, so an un-recorded partial run is repeated
+        // harmlessly next boot. Must run before migrate_block_deprecated_to_block_all so the widened
+        // CHECK permits the 'block_all' value the data rewrite writes.
+        await RunOnceAsync(conn, "expand_block_deprecated_check", ExpandBlockDeprecatedCheckAsync, transactional: false);
+        await RunOnceAsync(conn, "migrate_block_deprecated_to_block_all", MigrateBlockDeprecatedToBlockAllAsync);
     }
 
-    // #91: Populate package_versions.filename for rows that pre-date the column. The new
+    // Populate package_versions.filename for rows that pre-date the column. The new
     // download lookup path (FindVersionByBlobKeySuffixAsync) hits an equality index instead
     // of a leading-wildcard LIKE, but it can only do so when filename is set. We derive
     // the value from blob_key's trailing path segment — the same suffix the old query
@@ -93,7 +107,7 @@ public sealed class SchemaInitializer
     }
 
     // Backfills the package catalogue for OCI/Docker images pulled before they were recorded in
-    // packages/package_versions (#98/#103 stored them only in oci_blobs/oci_tags, so every
+    // packages/package_versions (these were stored only in oci_blobs/oci_tags, so every
     // dashboard counted Docker as zero). One catalogue version per tagged manifest: the digest is
     // the content-addressed version identity, the resolving tag is captured in the PURL. Idempotent
     // — the version insert is skipped on any unique hit (re-run, many-tags-to-one-digest, or the
@@ -165,6 +179,46 @@ public sealed class SchemaInitializer
                     sha256 = sha256Hex,
                 });
         }
+    }
+
+    // Backfills the per-org upstream_registry table for installs that predate configurable
+    // upstreams. Before this feature every ecosystem proxied through a single hard-coded default;
+    // the proxy now treats "no configured registry" as "proxying disabled", so existing orgs must
+    // inherit those defaults as real rows or they'd silently lose proxying on upgrade. For each
+    // org that has zero registries for an ecosystem, the default URL (config override or hard-coded
+    // public default; RPM only when Rpm:Upstream is set) is inserted. Idempotent via the
+    // (org_id, ecosystem, url) unique constraint and the per-ecosystem existence check.
+    // xtenant: one-shot backfill across every tenant on the instance.
+    private async Task SeedDefaultUpstreamRegistriesAsync(DbConnection conn)
+    {
+        var defaults = UpstreamRegistrySeeder.ResolveDefaults(_config);
+        if (defaults.Count == 0) return;
+
+        var orgIds = (await conn.QueryAsync<string>("SELECT id FROM orgs")).ToList();
+        var seeded = 0;
+        var skipped = 0;
+        foreach (var orgId in orgIds)
+        {
+            foreach (var (eco, url) in defaults)
+            {
+                var existing = await conn.ExecuteScalarAsync<int>(
+                    "SELECT COUNT(*) FROM upstream_registry WHERE org_id = @orgId AND ecosystem = @eco",
+                    new { orgId, eco });
+                if (existing > 0) { skipped++; continue; }
+
+                await conn.ExecuteAsync(
+                    """
+                    INSERT INTO upstream_registry (id, org_id, ecosystem, url, position)
+                    VALUES (@id, @orgId, @eco, @url, 0)
+                    ON CONFLICT (org_id, ecosystem, url) DO NOTHING
+                    """,
+                    new { id = Guid.NewGuid().ToString("N"), orgId, eco, url });
+                seeded++;
+            }
+        }
+        _logger.LogInformation(
+            "Backfilled upstream registries: {Seeded} seeded, {Skipped} already-configured across {Orgs} orgs.",
+            seeded, skipped, orgIds.Count);
     }
 
     // Drops the `ecosystem` column from `allowlist` and `blocklist`. The ecosystem is already
@@ -309,6 +363,33 @@ public sealed class SchemaInitializer
         await conn.ExecuteAsync("ALTER TABLE package_versions DROP COLUMN sbom");
     }
 
+    // Collapses the retired per-tenant disable_vuln_scan / disable_deprecation_refresh flags into
+    // the single air_gapped posture, then drops both columns. A tenant that had either job
+    // disabled is treated as air-gapped (no outbound). Runs after the additive air_gapped add so
+    // the target column always exists; guards each old column independently so the migration is
+    // safe on fresh installs (neither column present) and partial-state restores.
+    // xtenant: one-shot data migration, runs across every tenant on the instance.
+    private async Task DropOrgSettingsDisableJobColumnsAsync(DbConnection conn)
+    {
+        var hasVulnScan = await ColumnExistsAsync(conn, "org_settings", "disable_vuln_scan");
+        var hasDeprecation = await ColumnExistsAsync(conn, "org_settings", "disable_deprecation_refresh");
+
+        if (hasVulnScan && hasDeprecation)
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET air_gapped = 1 WHERE disable_vuln_scan = 1 OR disable_deprecation_refresh = 1");
+        else if (hasVulnScan)
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET air_gapped = 1 WHERE disable_vuln_scan = 1");
+        else if (hasDeprecation)
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET air_gapped = 1 WHERE disable_deprecation_refresh = 1");
+
+        if (hasVulnScan)
+            await conn.ExecuteAsync("ALTER TABLE org_settings DROP COLUMN disable_vuln_scan");
+        if (hasDeprecation)
+            await conn.ExecuteAsync("ALTER TABLE org_settings DROP COLUMN disable_deprecation_refresh");
+    }
+
     private async Task<bool> ColumnExistsAsync(DbConnection conn, string table, string column)
     {
         if (_db.Provider == DbProvider.Postgres)
@@ -360,7 +441,7 @@ public sealed class SchemaInitializer
             // Legacy 'imported'/'private' rows are rewritten to 'uploaded' by the
             // collapse_origin_to_uploaded one-shot migration below.
             "ALTER TABLE package_versions ADD COLUMN origin TEXT NOT NULL DEFAULT 'proxy'",
-            // #45 replacement policy: opt-in per-tenant. Default 0 (off) preserves the strict
+            // Replacement policy: opt-in per-tenant. Default 0 (off) preserves the strict
             // immutable-coordinate behaviour. When 1, the publish service overwrites the row
             // and emits a package.replace audit event recording both old and new hashes.
             "ALTER TABLE org_settings ADD COLUMN allow_version_overwrite INTEGER NOT NULL DEFAULT 0",
@@ -420,15 +501,15 @@ public sealed class SchemaInitializer
             // block gate. NULL = policy off. Lets community detection catch malicious uploads
             // before tenants pull them. Enforced first-fetch in BlockGateService.
             "ALTER TABLE org_settings ADD COLUMN min_release_age_hours INTEGER",
-            // #99: Maven per-ecosystem upload cap.
+            // Maven per-ecosystem upload cap.
             "ALTER TABLE org_settings ADD COLUMN max_upload_bytes_maven INTEGER",
-            // #100: RPM per-ecosystem upload cap.
+            // RPM per-ecosystem upload cap.
             "ALTER TABLE org_settings ADD COLUMN max_upload_bytes_rpm INTEGER",
-            // #101: OCI (Docker) per-ecosystem upload cap. OCI artefacts are routinely multi-GB
+            // OCI (Docker) per-ecosystem upload cap. OCI artefacts are routinely multi-GB
             // (multi-layer ML / CUDA bases); the column is INTEGER so SQLite stores a 64-bit
             // value transparently, and every consumer carries long? end-to-end.
             "ALTER TABLE org_settings ADD COLUMN max_upload_bytes_oci INTEGER",
-            // #91: trailing path segment of blob_key, populated at insert time so the
+            // Trailing path segment of blob_key, populated at insert time so the
             // PyPI/npm/NuGet download lookups can equality-probe an index instead of
             // running a leading-wildcard LIKE. Backfilled by
             // backfill_package_versions_filename for rows that pre-date the column.
@@ -441,18 +522,43 @@ public sealed class SchemaInitializer
             // from real anonymous pulls.
             "ALTER TABLE activity ADD COLUMN actor_kind TEXT",
             "ALTER TABLE audit_log ADD COLUMN actor_kind TEXT",
-            // #101: Maven reserved-prefix list (JSON array of groupId prefix strings).
+            // Maven reserved-prefix list (JSON array of groupId prefix strings).
             // Coordinates matching these prefixes are NEVER forwarded to upstream — dep confusion
             // protection. Empty array by default (no restrictions). Stored as JSON so per-org
             // lists can grow without schema changes.
             "ALTER TABLE org_settings ADD COLUMN maven_reserved_prefixes TEXT NOT NULL DEFAULT '[]'",
-            // #103: OCI origin tracking — 'uploaded' (local push) or 'proxy' (upstream cache).
+            // OCI origin tracking — 'uploaded' (local push) or 'proxy' (upstream cache).
             // Additive on oci_blobs; existing rows default to 'uploaded' to preserve the
             // existing semantics (all rows before this column were locally stored).
             "ALTER TABLE oci_blobs ADD COLUMN origin TEXT NOT NULL DEFAULT 'uploaded'",
-            // #103: Per-tag TTL revalidation timestamp. NULL on existing rows (forces a
+            // Per-tag TTL revalidation timestamp. NULL on existing rows (forces a
             // re-check on first access, which is the correct conservative default).
             "ALTER TABLE oci_tags ADD COLUMN last_revalidated TEXT",
+            // Timestamp of the last upstream deprecation metadata refresh for a proxy version.
+            // NULL = never checked. Set by DeprecationRefreshService on each pass.
+            "ALTER TABLE package_versions ADD COLUMN deprecation_checked_at TEXT",
+            // Per-tenant air-gap posture. When 1, the org makes no outbound requests: proxy
+            // passthrough is forced off and the vuln/deprecation scan passes skip it. Composes
+            // with the instance AIR_GAPPED env var. Backfilled from the retired disable_* flags
+            // by drop_org_settings_disable_job_columns below.
+            "ALTER TABLE org_settings ADD COLUMN air_gapped INTEGER NOT NULL DEFAULT 0",
+            // Policy for upstream-deprecated/abandoned packages at the proxy gate.
+            // 'off' (default) = allow through; 'warn' = surface in UI only; 'block_new' = refuse a
+            // deprecated version on cache miss (never fetch/cache/serve it) but keep serving
+            // already-cached versions; 'block_all' = block_new plus deny already-cached versions.
+            // Added without a CHECK (SQLite ALTER can't add one); upgraded DBs rely on controller
+            // validation. Fresh installs get the CHECK from Schema.sql, widened on existing DBs by
+            // the expand_block_deprecated_check one-shot; legacy 'block' rows are rewritten to
+            // 'block_all' by migrate_block_deprecated_to_block_all.
+            "ALTER TABLE org_settings ADD COLUMN block_deprecated TEXT NOT NULL DEFAULT 'off'",
+            // Persist the full claim set from the latest SAML test run for diagnostics.
+            "ALTER TABLE tenant_saml_config ADD COLUMN last_test_claims TEXT",
+            // Admin-provided IdP signing cert override for pin-based trust anchoring.
+            "ALTER TABLE tenant_saml_config ADD COLUMN idp_signing_cert_override TEXT",
+            // IdP role/group claim → Dependably role mapping.
+            "ALTER TABLE tenant_saml_config ADD COLUMN role_attribute TEXT",
+            "ALTER TABLE tenant_saml_config ADD COLUMN role_mapping TEXT",
+            "ALTER TABLE tenant_saml_config ADD COLUMN default_role TEXT NOT NULL DEFAULT 'member'",
         };
 
         foreach (var ddl in migrations)
@@ -662,7 +768,7 @@ public sealed class SchemaInitializer
             "UPDATE packages SET purl_name = name WHERE ecosystem = 'nuget' AND is_proxy = 1 AND purl_name LIKE 'pkg:%'");
     }
 
-    // #54: extend the users.role + invites.role CHECK constraint to include 'auditor'.
+    // Extend the users.role + invites.role CHECK constraint to include 'auditor'.
     // New databases pick this up from the CREATE TABLE statements in Schema.sql /
     // Schema.pg.sql; this migration brings existing databases in line.
     //
@@ -727,6 +833,73 @@ public sealed class SchemaInitializer
         // The SchemaInitializer caller surfaces the exception and aborts startup.
         await conn.ExecuteAsync("PRAGMA integrity_check");
     }
+
+    // Widen the org_settings.block_deprecated CHECK from the legacy 3-value set
+    // ('off','warn','block') to the 4-value set ('off','warn','block_new','block_all'). Same
+    // shape as ExpandRoleCheckWithAuditorAsync: new databases pick this up from Schema.sql /
+    // Schema.pg.sql; this brings existing databases in line.
+    //
+    // Postgres: drop + re-add the auto-named CHECK constraint. IF EXISTS covers upgraded DBs
+    // that added the column via ALTER (no constraint) as well as fresh installs (constraint
+    // present, named org_settings_block_deprecated_check by default).
+    //
+    // SQLite: rewrite the stored CREATE TABLE text in place via the writable_schema pattern.
+    // The substring REPLACE is a no-op on upgraded DBs whose org_settings has no CHECK clause
+    // (the column was added via plain ALTER ADD COLUMN), so it only rewrites DBs that carry the
+    // old constraint from a fresh CREATE TABLE.
+    private Task ExpandBlockDeprecatedCheckAsync(DbConnection conn)
+    {
+        if (_db.Provider == DbProvider.Postgres)
+        {
+            return conn.ExecuteAsync("""
+                ALTER TABLE org_settings DROP CONSTRAINT IF EXISTS org_settings_block_deprecated_check;
+                ALTER TABLE org_settings ADD  CONSTRAINT org_settings_block_deprecated_check
+                    CHECK (block_deprecated IN ('off', 'warn', 'block_new', 'block_all'));
+                """);
+        }
+
+        return ExpandBlockDeprecatedCheckSqliteAsync(conn);
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatted SQL queries should be reviewed",
+        Justification = "PRAGMA schema_version cannot be parameter-bound — SQLite's PRAGMA grammar does not " +
+                        "accept ? / @name placeholders for the right-hand side. The interpolated value is a " +
+                        "long we just read from PRAGMA schema_version itself; it never touches user input.")]
+    private static async Task ExpandBlockDeprecatedCheckSqliteAsync(DbConnection conn)
+    {
+        const string oldCheck = "CHECK (block_deprecated IN ('off', 'warn', 'block'))";
+        const string newCheck = "CHECK (block_deprecated IN ('off', 'warn', 'block_new', 'block_all'))";
+
+        // Bumping schema_version forces SQLite to reload the schema on the next read so existing
+        // connections stop enforcing the old CHECK; writable_schema = RESET both disables write
+        // mode and forces the reload. See ExpandRoleCheckSqliteAsync for the full rationale.
+        await conn.ExecuteAsync("PRAGMA writable_schema = ON");
+        try
+        {
+            await conn.ExecuteAsync("""
+                UPDATE sqlite_schema
+                SET sql = REPLACE(sql, @old, @new)
+                WHERE type = 'table' AND name = 'org_settings'
+                """, new { old = oldCheck, @new = newCheck });
+            var version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
+            await conn.ExecuteAsync(
+                "PRAGMA schema_version = " + (version + 1).ToString(CultureInfo.InvariantCulture));
+        }
+        finally
+        {
+            await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
+        }
+        await conn.ExecuteAsync("PRAGMA integrity_check");
+    }
+
+    // Rewrite legacy 'block' policy rows to 'block_all'. The old single 'block' value denied
+    // every request for a deprecated version — both new fetches and already-cached artifacts —
+    // which is exactly the new 'block_all' semantics, so observable behaviour is unchanged.
+    // Runs after the CHECK widen so 'block_all' is a permitted value.
+    // xtenant: one-shot data migration, runs across every tenant on the instance.
+    private static Task MigrateBlockDeprecatedToBlockAllAsync(DbConnection conn) =>
+        conn.ExecuteAsync(
+            "UPDATE org_settings SET block_deprecated = 'block_all' WHERE block_deprecated = 'block'");
 
     // Backfill account_type for users JIT-provisioned via SAML before the column existed.
     // Signal: empty password_hash AND a row in external_identities. Forms users later linked

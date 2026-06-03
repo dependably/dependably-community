@@ -5,7 +5,7 @@ namespace Dependably.Infrastructure;
 
 public sealed class OrgRepository
 {
-    // #93: 1-second sliding TTL on org-settings reads. The settings record is fetched 3-6
+    // 1-second sliding TTL on org-settings reads. The settings record is fetched 3-6
     // times per controller action on the hot paths (upload-limit resolver, allowlist
     // service, license enforcement, block gate, OSV tolerance, release-age gate). At
     // 200+ RPS that becomes 600-1200 DB opens/sec just for settings; cache amortises
@@ -70,7 +70,9 @@ public sealed class OrgRepository
                    COALESCE(max_osv_score_tolerance, 10.0) as MaxOsvScoreTolerance,
                    min_release_age_hours as MinReleaseAgeHours,
                    COALESCE(default_language, 'en') as DefaultLanguage,
-                   COALESCE(allow_version_overwrite, 0) as AllowVersionOverwrite
+                   COALESCE(allow_version_overwrite, 0) as AllowVersionOverwrite,
+                   COALESCE(air_gapped, 0) as AirGapped,
+                   COALESCE(block_deprecated, 'off') as BlockDeprecated
             FROM org_settings WHERE org_id = @orgId
             """,
             new { orgId });
@@ -228,6 +230,9 @@ public sealed class OrgRepository
         await conn.ExecuteAsync(
             "INSERT INTO org_settings (org_id) VALUES (@id)",
             new { id });
+        // Seed the standard public upstreams so a new org proxies out of the box. No IConfiguration
+        // here, so config overrides aren't visible — falls back to the hard-coded public defaults.
+        await UpstreamRegistrySeeder.SeedForOrgAsync(conn, id, config: null, ct: ct);
         return new Org { Id = id, Slug = slug, CreatedAt = DateTimeOffset.UtcNow };
     }
 
@@ -320,17 +325,18 @@ public sealed class OrgRepository
 
     public async Task UpsertProxySettingsAsync(
         string orgId, bool proxyPassthroughEnabled, double maxOsvScoreTolerance,
-        int? minReleaseAgeHours, CancellationToken ct = default)
+        int? minReleaseAgeHours, string blockDeprecated = "off", CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO org_settings (org_id, proxy_passthrough_enabled, max_osv_score_tolerance, min_release_age_hours)
-            VALUES (@orgId, @proxyEnabled, @maxScore, @minAgeHours)
+            INSERT INTO org_settings (org_id, proxy_passthrough_enabled, max_osv_score_tolerance, min_release_age_hours, block_deprecated)
+            VALUES (@orgId, @proxyEnabled, @maxScore, @minAgeHours, @blockDeprecated)
             ON CONFLICT(org_id) DO UPDATE SET
                 proxy_passthrough_enabled = @proxyEnabled,
                 max_osv_score_tolerance   = @maxScore,
-                min_release_age_hours     = @minAgeHours
+                min_release_age_hours     = @minAgeHours,
+                block_deprecated          = @blockDeprecated
             """,
             new
             {
@@ -338,6 +344,7 @@ public sealed class OrgRepository
                 proxyEnabled = proxyPassthroughEnabled ? 1 : 0,
                 maxScore = maxOsvScoreTolerance,
                 minAgeHours = minReleaseAgeHours,
+                blockDeprecated,
             });
     }
 
@@ -569,9 +576,13 @@ public sealed record OrgSettingsUpdate(
     long? InstanceMaxUploadBytes,
     string? DefaultLanguage,
     bool? AllowVersionOverwrite = null,
-    // #101 — new fields land at the end with defaults so the positional call sites
+    // New fields land at the end with defaults so the positional call sites
     // (incl. unit tests in tests/Dependably.Tests/Unit/Infrastructure) keep compiling
     // without a sweep. Callers that need the new caps pass them by name.
     long? MaxUploadBytesMaven = null,
     long? MaxUploadBytesRpm = null,
-    long? MaxUploadBytesOci = null);
+    long? MaxUploadBytesOci = null,
+    // Per-tenant air-gap posture. null = leave unchanged (the controller passes the request
+    // value through; tristate matches AllowVersionOverwrite). Only OrgSettingsRepository's
+    // upsert persists it — see OrgSettings.AirGapped.
+    bool? AirGapped = null);

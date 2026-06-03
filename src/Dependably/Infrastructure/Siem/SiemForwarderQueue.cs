@@ -3,7 +3,7 @@ using System.Threading.Channels;
 namespace Dependably.Infrastructure.Siem;
 
 /// <summary>
-/// Bounded in-memory queue + worker for outbound SIEM events (#40). Producers (audit emit
+/// Bounded in-memory queue + worker for outbound SIEM events. Producers (audit emit
 /// sites) call <see cref="TryEnqueue"/> — non-blocking, drops on overflow with a metric so
 /// the originating request never blocks waiting for the collector. The hosted background
 /// service consumes the channel, dispatches to the configured forwarder, and retries

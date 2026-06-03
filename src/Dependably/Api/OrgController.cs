@@ -10,7 +10,7 @@ namespace Dependably.Api;
 /// <summary>
 /// Slim tenant-scoped controller for the resources that didn't fit a dedicated controller:
 /// packages, stats, and the setup-snippet generator. Most tenant-scoped surface has been
-/// split out (#61) into <see cref="OrgSettingsController"/>, <see cref="OrgTokensController"/>,
+/// split out into <see cref="OrgSettingsController"/>, <see cref="OrgTokensController"/>,
 /// <see cref="OrgInvitesController"/>, <see cref="OrgUsersController"/>,
 /// <see cref="OrgListsController"/>, <see cref="OrgAuditController"/>, and
 /// <c>OrgAuthConfigController</c>.
@@ -25,6 +25,7 @@ public sealed class OrgController : OrgScopedControllerBase
     private readonly AuditRepository _audit;
     private readonly OrgAccessGuard _guard;
     private readonly IBlobStore _blobs;
+    private readonly TieredBlobStorage _blobStorage;
     private readonly LicenseRepository _licenses;
     private readonly VulnerabilityRepository _vulns;
     private readonly IPublicUrlBuilder _urls;
@@ -37,6 +38,7 @@ public sealed class OrgController : OrgScopedControllerBase
         _audit = svc.Audit;
         _guard = svc.Guard;
         _blobs = svc.Blobs;
+        _blobStorage = svc.BlobStorage;
         _licenses = svc.Licenses;
         _vulns = svc.Vulns;
         _urls = svc.Urls;
@@ -87,11 +89,12 @@ public sealed class OrgController : OrgScopedControllerBase
         var scoreMap = await _vulns.GetMaxScoresForVersionsAsync(versions.Select(v => v.Id), ct);
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         var tolerance = settings?.MaxOsvScoreTolerance ?? 10.0;
+        var blockDeprecatedMode = settings?.BlockDeprecated ?? "off";
 
         var versionsWithLicenses = versions.Select(v => {
             scoreMap.TryGetValue(v.Id, out var maxScore);
             var hasMax = scoreMap.ContainsKey(v.Id);
-            var status = ComputeVersionStatus(v, hasMax ? maxScore : (double?)null, tolerance);
+            var status = ComputeVersionStatus(v, hasMax ? maxScore : (double?)null, tolerance, blockDeprecatedMode);
             return new {
                 v.Id, v.PackageId, v.Version, v.Purl, v.BlobKey,
                 v.SizeBytes, v.ChecksumSha256, v.ChecksumSha1, v.Yanked, v.YankReason,
@@ -107,12 +110,16 @@ public sealed class OrgController : OrgScopedControllerBase
         return Ok(new { package = pkg, versions = versionsWithLicenses });
     }
 
-    private static string ComputeVersionStatus(PackageVersion v, double? maxScore, double tolerance)
+    private static string ComputeVersionStatus(PackageVersion v, double? maxScore, double tolerance, string blockDeprecatedMode = "off")
     {
         if (v.ManualBlockState == "blocked") return "blocked";
+        // Only block_all denies an already-cached deprecated version; under block_new the cached
+        // version keeps serving, so it surfaces as "deprecated" below. Legacy 'block' == block_all.
+        if (v.Deprecated is not null && blockDeprecatedMode is "block_all" or "block") return "blocked";
         var autoBlocked = v.VulnCheckedAt is not null && maxScore.HasValue && maxScore.Value > tolerance;
         if (v.ManualBlockState == "allowed") return autoBlocked ? "allowed" : "clean";
         if (autoBlocked) return "blocked";
+        if (v.Deprecated is not null) return "deprecated";
         if (v.VulnCheckedAt is null) return "unscanned";
         return "clean";
     }
@@ -159,6 +166,31 @@ public sealed class OrgController : OrgScopedControllerBase
             actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return NoContent();
+    }
+
+    /// <summary>GET /api/v1/packages/{ecosystem}/{name}/{version}/download — stream one artifact to the UI</summary>
+    [HttpGet("api/v1/packages/{ecosystem}/{name}/{version}/download")]
+    public async Task<IActionResult> DownloadVersion(string ecosystem, string name, string version, CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadArtifact, ct);
+        if (result is not null) return result;
+
+        var orgId = CurrentTenantId();
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
+        if (pkg is null) return NotFound();
+
+        var ver = await _packages.GetVersionAsync(pkg.Id, version, ct);
+        if (ver is null) return NotFound();
+
+        // Route by per-version origin: proxy artifacts live on the eviction-friendly cache tier,
+        // uploaded artifacts on the durable registry tier. Under split storage these are distinct
+        // backends, so picking the wrong tier would 404 or serve the wrong bytes.
+        var store = ver.Origin == "proxy" ? _blobStorage.Cache : _blobStorage.Registry;
+        var stream = await store.GetAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
+        if (stream is null) return NotFound();
+
+        var filename = ver.BlobKey.Split('/').Last();
+        return File(stream, "application/octet-stream", filename);
     }
 
     // ── Stats ─────────────────────────────────────────────────────────────────

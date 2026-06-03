@@ -5,7 +5,7 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Acceptance for #96: the partition function must derive a per-token key from the
+/// Acceptance: the partition function must derive a per-token key from the
 /// Authorization header so a single misbehaving CI client gets its own bucket, and
 /// fall back to client IP when no auth is present so anonymous fetches still get a
 /// sane cap.

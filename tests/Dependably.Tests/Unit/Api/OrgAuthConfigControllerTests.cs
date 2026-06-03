@@ -167,7 +167,8 @@ public sealed class OrgAuthConfigControllerTests
                 SpEntityId: "https://sp.example.com",
                 NameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
                 EmailAttribute: "mail",
-                ButtonLabel: "SSO"),
+                ButtonLabel: "SSO",
+                RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
         Assert.IsType<NoContentResult>(result);
 
@@ -192,7 +193,7 @@ public sealed class OrgAuthConfigControllerTests
         var b = await s.BuildAsync();
 
         var result = await b.OrgAuthConfigController.Put(
-            new UpdateAuthConfigRequest(false, true, null, "   ", null, null),
+            new UpdateAuthConfigRequest(false, true, null, "   ", null, null, null, null, "member"),
             CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(422, obj.StatusCode);
@@ -211,7 +212,8 @@ public sealed class OrgAuthConfigControllerTests
             new UpdateAuthConfigRequest(
                 Enabled: false, FormsLoginEnabled: true,
                 SpEntityId: "  ", NameIdFormat: "fmt",
-                EmailAttribute: "", ButtonLabel: null),
+                EmailAttribute: "", ButtonLabel: null,
+                RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
         Assert.IsType<NoContentResult>(result);
 
@@ -231,7 +233,7 @@ public sealed class OrgAuthConfigControllerTests
         var b = await s.BuildAsync();
 
         var result = await b.OrgAuthConfigController.Put(
-            new UpdateAuthConfigRequest(false, true, null, "fmt", null, null),
+            new UpdateAuthConfigRequest(false, true, null, "fmt", null, null, null, null, "member"),
             CancellationToken.None);
         Assert.False(result is NoContentResult);
     }
@@ -251,7 +253,8 @@ public sealed class OrgAuthConfigControllerTests
             new UpdateAuthConfigRequest(
                 Enabled: false, FormsLoginEnabled: false,
                 SpEntityId: null, NameIdFormat: "fmt",
-                EmailAttribute: null, ButtonLabel: null),
+                EmailAttribute: null, ButtonLabel: null,
+                RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(422, obj.StatusCode);
@@ -278,7 +281,8 @@ public sealed class OrgAuthConfigControllerTests
             new UpdateAuthConfigRequest(
                 Enabled: true, FormsLoginEnabled: false,
                 SpEntityId: null, NameIdFormat: "fmt",
-                EmailAttribute: null, ButtonLabel: null),
+                EmailAttribute: null, ButtonLabel: null,
+                RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(422, obj.StatusCode);
@@ -306,7 +310,8 @@ public sealed class OrgAuthConfigControllerTests
             new UpdateAuthConfigRequest(
                 Enabled: true, FormsLoginEnabled: false,
                 SpEntityId: null, NameIdFormat: "fmt",
-                EmailAttribute: null, ButtonLabel: null),
+                EmailAttribute: null, ButtonLabel: null,
+                RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(422, obj.StatusCode);
@@ -334,7 +339,8 @@ public sealed class OrgAuthConfigControllerTests
             new UpdateAuthConfigRequest(
                 Enabled: true, FormsLoginEnabled: false,
                 SpEntityId: null, NameIdFormat: "fmt",
-                EmailAttribute: null, ButtonLabel: null),
+                EmailAttribute: null, ButtonLabel: null,
+                RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
         Assert.IsType<NoContentResult>(result);
     }
@@ -483,7 +489,8 @@ public sealed class OrgAuthConfigControllerTests
             new UpdateAuthConfigRequest(
                 Enabled: false, FormsLoginEnabled: false,
                 SpEntityId: null, NameIdFormat: "fmt",
-                EmailAttribute: null, ButtonLabel: null),
+                EmailAttribute: null, ButtonLabel: null,
+                RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
         Assert.IsType<NoContentResult>(result);
     }
@@ -513,7 +520,8 @@ public sealed class OrgAuthConfigControllerTests
             new UpdateAuthConfigRequest(
                 Enabled: true, FormsLoginEnabled: true,
                 SpEntityId: null, NameIdFormat: "fmt",
-                EmailAttribute: null, ButtonLabel: null),
+                EmailAttribute: null, ButtonLabel: null,
+                RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
         Assert.IsType<NoContentResult>(result);
     }

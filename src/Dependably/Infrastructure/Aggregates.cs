@@ -14,4 +14,5 @@ public sealed record OrgStats(
     long TotalDiskBytes,
     VulnPeriodCounts NewVulns,
     int ActiveUsers7d,
-    int BlockedPulls30d);
+    int BlockedPulls30d,
+    int TotalDownloads30d);

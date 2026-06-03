@@ -11,7 +11,7 @@ public static class BlobStoreFactory
     public static IBlobStore Create(IConfiguration config) => CreateForTier(config, tier: null);
 
     /// <summary>
-    /// Two-tier factory (#48 follow-up). When <paramref name="tier"/> is non-null, every
+    /// Two-tier factory. When <paramref name="tier"/> is non-null, every
     /// env-var lookup falls back to a tier-specific override first
     /// (<c>STORAGE_BACKEND_CACHE</c>, <c>LOCAL_STORAGE_PATH_REGISTRY</c>, etc.) and only
     /// uses the unsuffixed value when no override is set. This is what makes

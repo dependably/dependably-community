@@ -31,7 +31,7 @@ public sealed class TokenAuthenticationOptions : AuthenticationSchemeOptions
 /// Resolves a registry API token (Bearer / Basic / X-NuGet-ApiKey) into a
 /// <see cref="ClaimsPrincipal"/> so protocol endpoints can rely on
 /// <c>[Authorize(AuthenticationSchemes = "ApiToken")]</c> and <c>[RequireCapability]</c>
-/// instead of doing the resolution + capability check inline (#55).
+/// instead of doing the resolution + capability check inline.
 ///
 /// Claims emitted on success:
 /// <list type="bullet">

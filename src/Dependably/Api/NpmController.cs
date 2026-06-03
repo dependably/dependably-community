@@ -38,6 +38,7 @@ public partial class NpmController : ControllerBase
     private readonly IPackagePublishService _publish;
     private readonly ClaimResolver _claimResolver;
     private readonly Dependably.Storage.ProxyFetchService _proxyFetch;
+    private readonly UpstreamRegistryResolver _registries;
 
     public NpmController(NpmControllerServices svc)
     {
@@ -56,6 +57,7 @@ public partial class NpmController : ControllerBase
         _publish = svc.Publish;
         _claimResolver = svc.ClaimResolver;
         _proxyFetch = svc.ProxyFetch;
+        _registries = svc.Registries;
     }
 
     // ── npm client probes ────────────────────────────────────────────────────
@@ -102,7 +104,7 @@ public partial class NpmController : ControllerBase
         return new JsonResult(new JsonObject { ["username"] = username });
     }
 
-    // ── Read endpoints (#10) ─────────────────────────────────────────────────
+    // ── Read endpoints ─────────────────────────────────────────────────
 
     /// <summary>GET /o/{org}/npm/{package} — CouchDB package metadata</summary>
     [HttpGet("/npm/{package}")]
@@ -146,7 +148,7 @@ public partial class NpmController : ControllerBase
 
         // Route by passthrough + claims, not packages.is_proxy. A name with uploaded versions
         // is still a namespace that can hold proxy-fetched versions.
-        var passthroughAllowed = settings!.ProxyPassthroughEnabled
+        var passthroughAllowed = settings!.ProxyPassthroughEffective
             && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "npm", purlName, ct);
 
         if (passthroughAllowed)
@@ -177,23 +179,28 @@ public partial class NpmController : ControllerBase
             ? Array.Empty<PackageVersion>() as IReadOnlyList<PackageVersion>
             : await _packages.GetVersionsAsync(localPkg.Id, ct);
 
-        var upstreamBase = _config["Npm:Upstream"] ?? "https://registry.npmjs.org";
+        // Walk the org's configured upstreams in priority order; the first that answers wins.
+        // No configured upstream ⇒ proxying is disabled for this ecosystem, so fall through to
+        // local-only below.
+        var bases = await _registries.ResolveAsync(CurrentTenantId(), "npm", ct);
         JsonNode? metadata = null;
-        try
+        foreach (var upstreamBase in bases)
         {
-            // #94 single-flight packument fetch — collapses N concurrent npm-install
-            // requests onto one upstream call when a coordinate first warms up.
-            var response = await _upstream.GetOrFetchMetadataAsync($"{upstreamBase}/{fullName}", ct);
-            if (response.IsSuccessStatusCode)
+            try
             {
+                // Single-flight packument fetch — collapses N concurrent npm-install
+                // requests onto one upstream call when a coordinate first warms up.
+                var response = await _upstream.GetOrFetchMetadataAsync($"{upstreamBase}/{fullName}", ct);
+                if (!response.IsSuccessStatusCode) continue;
                 metadata = JsonNode.Parse(response.BodyAsString());
                 if (metadata is not null)
                     RewriteTarballUrls(metadata, fullName, NpmTarballBase());
+                break;
             }
-        }
-        catch
-        {
-            // Upstream unreachable — fall back to local versions only when we have them.
+            catch
+            {
+                // Upstream unreachable — try the next one, then fall back to local-only.
+            }
         }
 
         if (metadata is null)
@@ -385,10 +392,10 @@ public partial class NpmController : ControllerBase
             return StatusCode(403);
         }
 
-        if (!settings!.ProxyPassthroughEnabled)
+        if (!settings!.ProxyPassthroughEffective)
             return NotFound();
 
-        // #47: claim state gates the proxy fetch.
+        // Claim state gates the proxy fetch.
         if (!await _claimResolver.IsProxyFetchAllowedAsync(orgId, "npm", fullName, ct))
             return NotFound();
 
@@ -422,7 +429,9 @@ public partial class NpmController : ControllerBase
                     token.UserId, settings.MaxOsvScoreTolerance, sourceIp,
                     MinReleaseAgeHours: settings.MinReleaseAgeHours,
                     PublishedAt: pkgVersion.PublishedAt,
-                    ActorKind: token.ActorKind), ct)
+                    ActorKind: token.ActorKind,
+                    Deprecated: pkgVersion.Deprecated,
+                    BlockDeprecatedMode: settings.BlockDeprecated), ct)
             == BlockDecision.Blocked) return StatusCode(403);
 
         var stream = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
@@ -445,7 +454,9 @@ public partial class NpmController : ControllerBase
                     token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
                     MinReleaseAgeHours: settings.MinReleaseAgeHours,
                     PublishedAt: pkgVersion.PublishedAt,
-                    ActorKind: token?.ActorKind), ct)
+                    ActorKind: token?.ActorKind,
+                    Deprecated: pkgVersion.Deprecated,
+                    BlockDeprecatedMode: settings.BlockDeprecated), ct)
             == BlockDecision.Blocked) return StatusCode(403);
 
         if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase)) return null;
@@ -463,26 +474,43 @@ public partial class NpmController : ControllerBase
     private async Task<IActionResult> ProxyFetchAndCacheAsync(
         string orgId, string fullName, string shortName, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
-        var upstreamBase = _config["Npm:Upstream"] ?? "https://registry.npmjs.org";
-        var upstreamUrl = $"{upstreamBase}/{fullName}/-/{file}";
+        // Walk the org's configured upstreams in priority order. No configured upstream ⇒
+        // proxying is disabled for npm, so a miss is a 404 (mirrors ProxyPassthroughEnabled=false).
+        var bases = await _registries.ResolveAsync(orgId, "npm", ct);
+        if (bases.Count == 0) return NotFound();
         Response.Headers["X-Cache"] = "MISS";
 
         try
         {
-            // #94 single-flight: concurrent first-fetches of the same coordinate share a
+            // Single-flight: concurrent first-fetches of the same coordinate share a
             // single upstream request instead of fanning out to N HTTP calls.
             //
             // npm/NuGet artefact fetches still route through GetOrFetchMetadataAsync (a
             // buffered byte[]) because the upstream SHA isn't known at request time —
             // unlike PyPI, npm's tarball URL doesn't carry a #sha256 fragment and we
             // haven't yet flipped the path to compute-then-cache via FetchAndStageAsync.
-            // That migration is a parallel concern; #105 isolates the residue here by
+            // That migration is a parallel concern; the proxy-fetch refactor isolates the residue here by
             // wrapping the byte[] in a BlobHandle so everything downstream
             // (ProxyFetchService, ProxyVersionRecorder, LicenseExtractor) is uniformly
             // stream-shaped.
-            var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, ct);
-            if (!resp.IsSuccessStatusCode) return NotFound();
-            var bytes = resp.Body;
+            //
+            // First upstream whose tarball fetch succeeds wins; the chosen base also
+            // sources the first-fetch packument metadata below so both come from the
+            // same registry.
+            byte[]? bytes = null;
+            string? upstreamBase = null;
+            string upstreamUrl = "";
+            foreach (var candidateBase in bases)
+            {
+                var candidateUrl = $"{candidateBase}/{fullName}/-/{file}";
+                var resp = await _upstream.GetOrFetchMetadataAsync(candidateUrl, ct);
+                if (!resp.IsSuccessStatusCode) continue;
+                bytes = resp.Body;
+                upstreamBase = candidateBase;
+                upstreamUrl = candidateUrl;
+                break;
+            }
+            if (bytes is null || upstreamBase is null) return NotFound();
 
             var baseName = file.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase) ? file[..^4] : file;
             var version = baseName.Length > shortName.Length + 1 ? baseName[(shortName.Length + 1)..] : "unknown";
@@ -530,7 +558,8 @@ public partial class NpmController : ControllerBase
                 Sha1Hex: meta.Sha1Hex,
                 UpstreamIntegrityValue: integrityValue,
                 UpstreamIntegrityAlgorithm: integrityAlgo,
-                Deprecated: meta.Deprecated
+                Deprecated: meta.Deprecated,
+                BlockDeprecatedMode: settings.BlockDeprecated
             ), ct);
 
             if (result.Decision == BlockDecision.Blocked) return StatusCode(403);
@@ -568,7 +597,7 @@ public partial class NpmController : ControllerBase
     {
         try
         {
-            // #94: route through single-flighted metadata fetch — TryFetchNpmFirstFetchMetadataAsync
+            // Route through single-flighted metadata fetch — TryFetchNpmFirstFetchMetadataAsync
             // is called inline with the tarball-fetch handler, so a stampede on the tarball
             // path otherwise drives a duplicate stampede on the packument URL too.
             var resp = await _upstream.GetOrFetchMetadataAsync($"{upstreamBase}/{fullName}", ct);
@@ -613,7 +642,7 @@ public partial class NpmController : ControllerBase
     }
 
 
-    // ── Publish endpoint (#11) ───────────────────────────────────────────────
+    // ── Publish endpoint ───────────────────────────────────────────────
 
     /// <summary>PUT /o/{org}/npm/{package} — npm publish</summary>
     [HttpPut("/npm/{package}")]
@@ -639,8 +668,7 @@ public partial class NpmController : ControllerBase
 
         // [Authorize] above already enforced auth + capability. We still resolve the token
         // for the cross-tenant guard (token.OrgId vs requested org) and to attribute the
-        // audit row to the token owner (token.UserId). Both could be read off User claims
-        // post-#55 — left as a follow-up to keep this migration tight.
+        // audit row to the token owner (token.UserId).
         var token = await Request.ResolveTokenAsync(_tokens, ct);
         if (token is null || token.OrgId != orgId)
         {
@@ -731,7 +759,7 @@ public partial class NpmController : ControllerBase
         string versionId, byte[] tarball, JsonNode? packumentVersion, CancellationToken ct)
     {
         // Push path holds the tarball bytes in memory (upload validation concern,
-        // out of scope for #105). Wrap in a MemoryStream for the unified extractor.
+        // out of scope for this change). Wrap in a MemoryStream for the unified extractor.
         var fromTarball = LicenseExtractor.FromNpmTarballPackageJson(
             new MemoryStream(tarball, writable: false));
         var fromPackument = LicenseExtractor.FromNpmPackumentVersion(packumentVersion);
@@ -849,4 +877,5 @@ public sealed record NpmControllerServices(
     IPublicUrlBuilder Urls,
     IPackagePublishService Publish,
     ClaimResolver ClaimResolver,
-    Dependably.Storage.ProxyFetchService ProxyFetch);
+    Dependably.Storage.ProxyFetchService ProxyFetch,
+    UpstreamRegistryResolver Registries);

@@ -7,7 +7,7 @@ using Dependably.Security;
 namespace Dependably.Api;
 
 /// <summary>
-/// Tenant invites — create / list / cancel. Split out of <see cref="OrgController"/> (#61).
+/// Tenant invites — create / list / cancel. Split out of <see cref="OrgController"/>.
 /// Owner-role invites are gated by tenant:admin (mirrors PatchMemberRole); admins with
 /// tenant:configure can invite member / admin / auditor.
 /// </summary>

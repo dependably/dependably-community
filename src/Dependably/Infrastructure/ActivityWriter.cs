@@ -5,7 +5,7 @@ using Dependably.Infrastructure.Observability;
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Bounded channel-backed activity writer (#90). Every <see cref="AuditRepository.LogActivityAsync"/>
+/// Bounded channel-backed activity writer. Every <see cref="AuditRepository.LogActivityAsync"/>
 /// call on the download / push hot paths previously awaited a fresh SQLite connection open
 /// and a synchronous INSERT before the response could continue. SQLite WAL serialises
 /// writers, so at sustained 200+ downloads/sec the writer queue grew, <c>busy_timeout</c>
@@ -73,7 +73,7 @@ public sealed class ActivityWriter
 /// <summary>
 /// One activity row queued for async insertion. Field set mirrors the columns inserted
 /// by <see cref="AuditRepository.LogActivityAsync"/>'s synchronous fallback so the wire
-/// shape matches the pre-#90 contract exactly.
+/// shape matches the original contract exactly.
 /// </summary>
 public sealed record ActivityRecord(
     string Id,

@@ -25,12 +25,19 @@ public sealed class PackageAnalyticsRepository
             """,
             new { orgId })).ToList();
 
+        // Every served download, counted once. Cache hits and hosted/published serves log
+        // 'download'; PyPI/npm/NuGet/Maven proxy cache-misses log 'first_fetch' instead (and
+        // never a paired 'download'), while RPM/OCI log 'download' for both hit and miss and
+        // never emit 'first_fetch'. So spanning both event types covers all downloads with no
+        // double-counting — do not narrow this to 'download' alone or cache-miss downloads on
+        // PyPI/npm/NuGet/Maven vanish from the chart. Blocked attempts ('blocked*') are not
+        // downloads and are excluded.
         var downloadsByHour = (await conn.QueryAsync<HourCount>(
             """
             SELECT strftime('%Y-%m-%dT%H:00:00Z', created_at) as Hour, COUNT(*) as Count
             FROM activity
             WHERE org_id = @orgId
-              AND event_type IN ('pull', 'first_fetch')
+              AND event_type IN ('download', 'first_fetch')
               AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-24 hours'))
             GROUP BY strftime('%Y-%m-%dT%H', created_at)
             ORDER BY Hour ASC
@@ -101,6 +108,19 @@ public sealed class PackageAnalyticsRepository
             """,
             new { orgId });
 
+        // Total served downloads over the same 30-day window as the blocked count — the same
+        // 'download' + 'first_fetch' definition the hourly chart uses (see DownloadsByHour above).
+        // Blocked attempts are not downloads and are counted separately by blockedPulls.
+        var totalDownloads30d = await conn.ExecuteScalarAsync<int>(
+            """
+            SELECT COUNT(*)
+            FROM activity
+            WHERE org_id = @orgId
+              AND event_type IN ('download', 'first_fetch')
+              AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-30 days'))
+            """,
+            new { orgId });
+
         return new OrgStats(
             PackagesByEcosystem: packagesByEco,
             DownloadsByHour: downloadsByHour,
@@ -109,6 +129,7 @@ public sealed class PackageAnalyticsRepository
             TotalDiskBytes: diskByEco.Sum(d => d.TotalBytes),
             NewVulns: vulnPeriods,
             ActiveUsers7d: activeUsers,
-            BlockedPulls30d: blockedPulls);
+            BlockedPulls30d: blockedPulls,
+            TotalDownloads30d: totalDownloads30d);
     }
 }

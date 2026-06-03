@@ -30,7 +30,7 @@ public static partial class BlobKeys
         => $"hosted/{orgId}/{ecosystem}/{purlName}/{version}/{filename}";
 
     /// <summary>
-    /// Org-scoped key for generated RPM repodata files (#100). repomd.xml and the
+    /// Org-scoped key for generated RPM repodata files. repomd.xml and the
     /// compressed primary/filelists/other XML documents live under a per-arch path so
     /// <c>dnf</c> clients reading <c>/o/{org}/rpm/repodata/{arch}/{file}</c> resolve
     /// directly.
@@ -39,14 +39,14 @@ public static partial class BlobKeys
         => $"hosted/{orgId}/rpm/repodata/{arch}/{filename}";
 
     /// <summary>
-    /// Content-addressed key for RPM repodata proxy files (#102). Hash-prefixed metadata
+    /// Content-addressed key for RPM repodata proxy files. Hash-prefixed metadata
     /// files (e.g. <c>{sha256}-primary.xml.gz</c>) are cached forever keyed by their
     /// SHA-256 prefix, which is the content-address. Lives on the Cache tier.
     /// </summary>
     public static string RpmRepodataProxy(string sha256) => $"proxy/rpm-repodata/{sha256}";
 
     /// <summary>
-    /// Content-addressed key for OCI manifests and blobs (#98). The Distribution Spec
+    /// Content-addressed key for OCI manifests and blobs. The Distribution Spec
     /// stores both manifests and layers under their digest <c>{algo}:{hex}</c>; we collapse
     /// to a single namespace because dedup-by-digest is the whole point of OCI storage.
     /// Manifests live under the same prefix as layer blobs — they're just JSON blobs with

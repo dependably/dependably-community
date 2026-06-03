@@ -11,9 +11,9 @@ using Xunit;
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Single-flight acceptance for #94: <see cref="UpstreamClient.GetOrFetchMetadataAsync"/>
+/// Single-flight acceptance: <see cref="UpstreamClient.GetOrFetchMetadataAsync"/>
 /// must coalesce N concurrent calls for the same URL into one upstream HTTP request.
-/// The pre-#94 controllers called <see cref="UpstreamClient.GetMetadataAsync"/> directly
+/// The previous controllers called <see cref="UpstreamClient.GetMetadataAsync"/> directly
 /// from the first-fetch path, which had no dedup map and let cold-start CI fan-out hit
 /// upstream N times for one coordinate.
 /// </summary>
@@ -167,6 +167,8 @@ public sealed class UpstreamMetadataSingleFlightTests
     {
         public AirGap(bool enabled) => IsEnabled = enabled;
         public bool IsEnabled { get; }
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => IsEnabled;
     }
 
     private sealed class AllowEverythingValidator : IUpstreamUrlValidator

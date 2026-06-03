@@ -1,7 +1,7 @@
 namespace Dependably.Protocol;
 
 /// <summary>
-/// Parser for <c>sha256sums</c>-format sidecar files (#46): one line per artefact, of the
+/// Parser for <c>sha256sums</c>-format sidecar files: one line per artefact, of the
 /// form <c>&lt;hex digest&gt;  &lt;filename&gt;</c>. Whitespace separator is one or more
 /// spaces (the canonical GNU coreutils format uses two spaces). Empty lines and lines
 /// beginning with <c>#</c> are ignored. Filenames may contain spaces — only the first

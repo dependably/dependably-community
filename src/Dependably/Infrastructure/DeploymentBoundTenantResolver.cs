@@ -5,7 +5,7 @@ namespace Dependably.Infrastructure;
 /// <summary>
 /// Resolver for <c>DEPLOYMENT_MODE=bound</c> deployments. Pinned to a single configured tenant
 /// regardless of Host header or any other request context. This is the common shape for
-/// transparent intercept (#43) at an enterprise customer that has exactly one tenant: the
+/// transparent intercept at an enterprise customer that has exactly one tenant: the
 /// instance pretends to be <c>registry.npmjs.org</c> et al. for that one organisation.
 ///
 /// Configure via <c>BOUND_TENANT_SLUG</c>. The slug is resolved on every request (one indexed

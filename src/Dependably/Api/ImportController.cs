@@ -103,7 +103,7 @@ public sealed class ImportController : ControllerBase
     }
 
     /// <summary>
-    /// #46: parses the optional <c>sha256sums</c> multipart part and verifies every artefact
+    /// Parses the optional <c>sha256sums</c> multipart part and verifies every artefact
     /// in the batch matches its declared digest. Returns null when the sidecar is absent
     /// (legacy path) or all files match; returns a 422 IActionResult on parse error or
     /// digest mismatch. Files NOT mentioned in the sidecar are rejected — if you sign a
@@ -434,7 +434,7 @@ public sealed class ImportController : ControllerBase
         string ecosystem, byte[] bytes, string filename) => ecosystem switch
     {
         // Push/import path holds the artefact bytes in memory (an upload validation
-        // concern, out of scope for #105's proxy-fetch refactor). Wrap in a
+        // concern, out of scope for the proxy-fetch refactor). Wrap in a
         // MemoryStream so we use the unified Stream-shaped LicenseExtractor surface.
         "nuget" => LicenseExtractor.FromNuspec(new MemoryStream(bytes, writable: false)),
         "pypi"  => LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes, writable: false), filename),

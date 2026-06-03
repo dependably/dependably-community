@@ -86,7 +86,7 @@ src/Dependably/
 
 tests/Dependably.Tests/
   Unit/                   — fast unit tests, no I/O
-  Integration/            — WebApplicationFactory-based; use DependablyFactory (to be built in #29)
+  Integration/            — WebApplicationFactory-based; use DependablyFactory
   Fixtures/packages/      — real package files (pypi/, npm/, nuget/)
 ```
 
@@ -95,6 +95,7 @@ tests/Dependably.Tests/
 - **BlobKeys is the only place blob keys are constructed.** Callers never build key strings inline.
 - **All Dapper queries must use parameterized form.** No string interpolation inside SQL calls — enforced by CI Roslyn analyzer.
 - **SQL touching tenant-scoped tables must filter on `org_id`/`tenant_id`** — enforced by the `OrgIdFilteringComplianceTests` test. Legitimately cross-tenant queries (one-shot migrations, system-admin views, queries keyed by an FK-bound id that's already org-scoped) opt out with a `// xtenant: <reason>` comment in the 5 lines above the SQL literal.
+- **Comments describe the current architecture, not its development history.** No issue/tracker numbers (`#123`), milestone tags (`M2.1`), or ephemeral branch/PR pointers (`this PR`, `see plan §2`, `pre-#91`, `used to…`) in code or config comments — that provenance belongs in git history and the issue tracker, not the source. Write present-tense descriptions of how the code behaves now. (Functional markers such as the `// xtenant:` opt-out above and `// deepcode ignore` suppressions are not provenance and are fine.)
 - **`IBlobStore` never makes naming decisions** — keys always come from `BlobKeys`.
 - **`IMetadataStore` returns raw connections.** Callers use Dapper extension methods and are responsible for `await using`.
 - **PURLs are the canonical package identity.** `PurlNormalizer` is the single source of truth — used by push handlers, proxy handlers, simple index generator, and npm metadata rewriter.

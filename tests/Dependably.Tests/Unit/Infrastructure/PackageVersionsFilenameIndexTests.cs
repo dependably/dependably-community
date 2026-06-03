@@ -7,7 +7,7 @@ using Xunit;
 namespace Dependably.Tests.Unit.Infrastructure;
 
 /// <summary>
-/// Acceptance for #91: the PyPI/npm/NuGet download lookup must equality-probe the
+/// Acceptance: the PyPI/npm/NuGet download lookup must equality-probe the
 /// idx_package_versions_filename index instead of running a leading-wildcard LIKE
 /// over the whole table. Also covers the SchemaInitializer backfill that populates
 /// `filename` for rows that pre-date the column.

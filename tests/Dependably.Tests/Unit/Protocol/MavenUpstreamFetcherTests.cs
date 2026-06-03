@@ -477,6 +477,8 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     private sealed class StubAirGapMode : IAirGapMode
     {
         public bool IsEnabled { get; }
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => IsEnabled;
         public StubAirGapMode(bool enabled) => IsEnabled = enabled;
     }
 

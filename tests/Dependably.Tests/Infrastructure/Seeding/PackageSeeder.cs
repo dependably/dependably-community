@@ -42,7 +42,7 @@ public static class PackageSeeder
         var id = Guid.NewGuid().ToString("N");
         // Mirror PackageRepository.CreateVersionAsync: derive filename from blob_key so
         // the new download lookup (FindVersionByBlobKeySuffixAsync) can find seeded rows
-        // via idx_package_versions_filename instead of the pre-#91 LIKE.
+        // via idx_package_versions_filename instead of the previous LIKE.
         var filename = PackageRepository.DeriveFilename(blobKey);
         await using var conn = await db.OpenAsync(ct);
         await conn.ExecuteAsync("""

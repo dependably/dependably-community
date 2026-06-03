@@ -2,11 +2,11 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
-  import { currentOrg } from '../lib/store.js'
+  import { currentOrg, user } from '../lib/store.js'
   import { formatDateShort } from '../lib/format.js'
   import { copyToClipboard } from '../lib/clipboard.js'
   import DataTable from '../lib/DataTable.svelte'
-  import { presetToCapabilities, capabilitiesToLabel } from '../lib/tokenCapabilities.js'
+  import { presetToCapabilities, capabilitiesToLabel, PACKAGE_PRESETS, PRIVILEGED_PRESETS } from '../lib/tokenCapabilities.js'
 
   let tokens = [], loading = true, error = ''
   let showCreate = false, newScope = 'pull', newExpiry = '', newDescription = '', creating = false
@@ -21,6 +21,12 @@
 
   $: org = $currentOrg
   $: if (org) load()
+
+  // Package presets are always offered; admin/audit only to admin/owner callers. The
+  // server enforces the same role ceiling, so this is UX gating, not the trust boundary.
+  $: scopeOptions = ['admin', 'owner'].includes($user?.role ?? '')
+    ? [...PACKAGE_PRESETS, ...PRIVILEGED_PRESETS]
+    : PACKAGE_PRESETS
 
   async function load() {
     loading = true
@@ -99,10 +105,11 @@
     tableClass="tokens-table"
     let:row={tok}
   >
+    {@const label = capabilitiesToLabel(tok.capabilities)}
     <tr>
       <td class="t-mono t-sm">{tok.id.slice(0,8)}…</td>
       <td class="t-sm" title={tok.description || ''}>{tok.description || '—'}</td>
-      <td><span class="badge">{capabilitiesToLabel(tok.capabilities)}</span></td>
+      <td><span class="badge {label}">{label === '—' ? '—' : $t('tokenScopes.' + label)}</span></td>
       <td class="text-muted">{$formatDateShort(tok.createdAt)}</td>
       <td>
         {#if expired(tok)}<span class="badge expired">{$t('tokens.expired')}</span>
@@ -126,9 +133,7 @@
       <div class="form-row">
         <label>{$t('tokens.modal.scope')}</label>
         <select bind:value={newScope} class="w-auto">
-          <option value="pull">pull</option>
-          <option value="push">push</option>
-          <option value="both">both</option>
+          {#each scopeOptions as s (s)}<option value={s}>{$t('tokenScopes.' + s)}</option>{/each}
         </select>
       </div>
       <div class="form-row">

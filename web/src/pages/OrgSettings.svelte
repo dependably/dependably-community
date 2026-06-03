@@ -27,14 +27,14 @@
   let blocklistEntries = [], blocklistLoaded = false
   let showAddBlocklist = false, newBlPattern = '', addingBl = false
 
-  // License policy state (#21). Single fetch returns mode + both lists.
+  // License policy state. Single fetch returns mode + both lists.
   let licensePolicyLoaded = false
   let licenseMode = 'off'
   let licenseAllowEntries = [], licenseBlockEntries = []
   let showAddLicenseAllow = false, newLicenseAllowSpdx = ''
   let showAddLicenseBlock = false, newLicenseBlockSpdx = ''
   let savingLicenseMode = false
-  // Review queue (#21 follow-on): SPDX IDs seen during ingestion not yet on either list.
+  // Review queue: SPDX IDs seen during ingestion not yet on either list.
   let licenseReviewEntries = [], licenseReviewLoaded = false
   let licenseReviewIncludeDeprecated = false
   // Per-row pending flag so the operator-facing buttons disable while their POST is in flight.
@@ -191,7 +191,7 @@
   }
 
   // Proxy save: persists the proxy form *and* the allowlistMode gate together. The mode
-  // toggle lives in the same tab now (#87) but the value still rides on the /settings
+  // toggle lives in the same tab now but the value still rides on the /settings
   // payload, so we fire both endpoints in parallel.
   async function saveProxySettings() {
     success = ''
@@ -208,6 +208,7 @@
         proxyPassthroughEnabled: proxySettings.proxy_passthrough_enabled,
         maxOsvScoreTolerance:    Number(proxySettings.max_osv_score_tolerance),
         minReleaseAgeHours,
+        blockDeprecated:         proxySettings.block_deprecated,
       }),
       api.updateOrgSettings(settings),
     ]), {
@@ -324,6 +325,7 @@
     {:else if tab === 'proxy'}
       <SettingsProxy
         {proxySettings}
+        airGapped={settings.airGapped}
         bind:allowlistMode={settings.allowlistMode}
         {allowlistEntries} {allowlistLoaded}
         {blocklistEntries} {blocklistLoaded}

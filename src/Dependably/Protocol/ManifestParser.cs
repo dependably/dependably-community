@@ -4,7 +4,7 @@ namespace Dependably.Protocol;
 
 /// <summary>
 /// Parses ecosystem lockfile / requirements formats into a normalised list of
-/// <see cref="ManifestEntry"/> records for the manifest-driven import path (#46).
+/// <see cref="ManifestEntry"/> records for the manifest-driven import path.
 ///
 /// Supported:
 /// <list type="bullet">

@@ -19,6 +19,7 @@ public sealed class SamlConfigRepository
                    idp_entity_id       AS IdpEntityId,
                    idp_sso_url         AS IdpSsoUrl,
                    idp_signing_cert    AS IdpSigningCert,
+                   idp_signing_cert_override AS IdpSigningCertOverride,
                    metadata_xml        AS MetadataXml,
                    sp_entity_id        AS SpEntityId,
                    name_id_format      AS NameIdFormat,
@@ -26,6 +27,10 @@ public sealed class SamlConfigRepository
                    button_label        AS ButtonLabel,
                    last_test_at        AS LastTestAt,
                    last_test_email     AS LastTestEmail,
+                   last_test_claims    AS LastTestClaims,
+                   role_attribute      AS RoleAttribute,
+                   role_mapping        AS RoleMapping,
+                   default_role        AS DefaultRole,
                    updated_at          AS UpdatedAt
             FROM tenant_saml_config
             WHERE org_id = @orgId
@@ -44,9 +49,11 @@ public sealed class SamlConfigRepository
         await conn.ExecuteAsync(
             """
             INSERT INTO tenant_saml_config (org_id, enabled, forms_login_enabled,
-                sp_entity_id, name_id_format, email_attribute, button_label, updated_at)
+                sp_entity_id, name_id_format, email_attribute, button_label,
+                role_attribute, role_mapping, default_role, updated_at)
             VALUES (@orgId, @enabled, @formsEnabled,
-                @spEntityId, @nameIdFormat, @emailAttribute, @buttonLabel, @now)
+                @spEntityId, @nameIdFormat, @emailAttribute, @buttonLabel,
+                @roleAttribute, @roleMapping, @defaultRole, @now)
             ON CONFLICT(org_id) DO UPDATE SET
                 enabled             = @enabled,
                 forms_login_enabled = @formsEnabled,
@@ -54,6 +61,9 @@ public sealed class SamlConfigRepository
                 name_id_format      = @nameIdFormat,
                 email_attribute     = @emailAttribute,
                 button_label        = @buttonLabel,
+                role_attribute      = @roleAttribute,
+                role_mapping        = @roleMapping,
+                default_role        = @defaultRole,
                 updated_at          = @now
             """,
             new
@@ -65,6 +75,9 @@ public sealed class SamlConfigRepository
                 nameIdFormat   = update.NameIdFormat,
                 emailAttribute = update.EmailAttribute,
                 buttonLabel    = update.ButtonLabel,
+                roleAttribute  = update.RoleAttribute,
+                roleMapping    = update.RoleMapping,
+                defaultRole    = update.DefaultRole,
                 now            = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
     }
@@ -78,7 +91,7 @@ public sealed class SamlConfigRepository
         string orgId,
         string idpEntityId,
         string idpSsoUrl,
-        string idpSigningCertBase64,
+        string? idpSigningCertBase64,
         string metadataXml,
         CancellationToken ct = default)
     {
@@ -107,19 +120,57 @@ public sealed class SamlConfigRepository
     }
 
     /// <summary>Records a successful SAML test. Used by the forms-disable lockout guard.</summary>
-    public async Task RecordTestSuccessAsync(string orgId, string email, CancellationToken ct = default)
+    public async Task RecordTestSuccessAsync(string orgId, string email, string? claimsJson, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
             UPDATE tenant_saml_config
-            SET last_test_at = @now, last_test_email = @email, updated_at = @now
+            SET last_test_at = @now, last_test_email = @email, last_test_claims = @claimsJson, updated_at = @now
             WHERE org_id = @orgId
             """,
             new
             {
                 orgId,
                 email,
+                claimsJson,
+                now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            });
+    }
+
+    /// <summary>Sets or replaces the admin-pinned IdP signing certificate override.</summary>
+    public async Task SetSigningCertOverrideAsync(string orgId, string certBase64, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO tenant_saml_config (org_id, idp_signing_cert_override, updated_at)
+            VALUES (@orgId, @cert, @now)
+            ON CONFLICT(org_id) DO UPDATE SET
+                idp_signing_cert_override = @cert,
+                updated_at = @now
+            """,
+            new
+            {
+                orgId,
+                cert = certBase64,
+                now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            });
+    }
+
+    /// <summary>Clears the admin-pinned signing cert override, reverting to the metadata-derived cert.</summary>
+    public async Task ClearSigningCertOverrideAsync(string orgId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            UPDATE tenant_saml_config
+            SET idp_signing_cert_override = NULL, updated_at = @now
+            WHERE org_id = @orgId
+            """,
+            new
+            {
+                orgId,
                 now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
     }
@@ -200,4 +251,7 @@ public sealed record SamlSettingsUpdate(
     string? SpEntityId,
     string NameIdFormat,
     string? EmailAttribute,
-    string? ButtonLabel);
+    string? ButtonLabel,
+    string? RoleAttribute,
+    string? RoleMapping,
+    string DefaultRole);

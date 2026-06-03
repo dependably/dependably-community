@@ -9,7 +9,7 @@
 
   $: params = $route.params
   let pkg = null, versions = [], loading = true, error = ''
-  // #47 claim badge: surface the resolved claim state on the package header. null = no
+  // Claim badge: surface the resolved claim state on the package header. null = no
   // claim row (implicit unclaimed in connected mode, implicit local_only in air-gap).
   let claim = null
   let scanningId = null, scanError = ''
@@ -58,6 +58,12 @@
     if (!confirm($t('versionDetail.deleteTitle', { values: { version: ver.version } }))) return
     await api.deleteVersion(params.ecosystem, params.name, ver.version)
     versions = versions.filter(v => v.id !== ver.id)
+  }
+
+  async function downloadVersion(ver) {
+    try {
+      await api.downloadVersion(params.ecosystem, params.name, ver.version)
+    } catch (e) { error = e.message }
   }
 
   async function rescan(ver) {
@@ -155,6 +161,7 @@
       {loading}
       {scanCooldownRemaining}
       {copy}
+      on:download={(e) => downloadVersion(e.detail)}
       on:rescan={(e) => rescan(e.detail)}
       on:block={(e) => blockVersion(e.detail)}
       on:unblock={(e) => unblockVersion(e.detail)}
@@ -164,7 +171,7 @@
 </div>
 
 <style>
-  /* #47 claim badge: surfaces the resolved claim state on the package header. Visual
+  /* Claim badge: surfaces the resolved claim state on the package header. Visual
      hierarchy matches Claims.svelte's state-badge so the two views feel consistent. */
   .claim-badge {
     display: inline-flex;

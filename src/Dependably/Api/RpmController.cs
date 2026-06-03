@@ -12,7 +12,7 @@ using Dependably.Storage;
 namespace Dependably.Api;
 
 /// <summary>
-/// RPM repository surface (#100 + #102). Implements the <c>dnf</c>/<c>yum</c> contract:
+/// RPM repository surface. Implements the <c>dnf</c>/<c>yum</c> contract:
 /// HTTP PUT a <c>.rpm</c> to upload, GET <c>/rpm/packages/{file}</c> to download, GET
 /// <c>/rpm/repodata/{file}</c> to drive package resolution (repomd.xml passthrough when
 /// <c>Rpm:Upstream</c> is configured), and GET <c>/rpm/repodata/RPM-GPG-KEY</c> for the
@@ -43,19 +43,22 @@ public sealed class RpmController : OrgScopedControllerBase
     [RequestSizeLimit(500 * 1024 * 1024)]
     public async Task<IActionResult> Upload(CancellationToken ct)
     {
-        // Refuse uploads when upstream passthrough is active — a locally published package
-        // would silently shadow upstream content and break dep-resolution for dnf clients.
-        if (_svc.Proxy is { IsPassthroughMode: true })
+        var orgId = CurrentTenantId();
+
+        // Refuse uploads when upstream passthrough is active for this org — a locally published
+        // package would silently shadow upstream content and break dep-resolution for dnf clients.
+        // Effective passthrough = instance mode is 'passthrough' AND the org has ≥1 rpm registry.
+        if (_svc.Proxy is { IsPassthroughModeSelected: true }
+            && (await _svc.Registries.ResolveAsync(orgId, "rpm", ct)).Count > 0)
             return Conflict(new ProblemDetails
             {
                 Title = "Cannot publish under passthrough proxy mode",
-                Detail = "This org is configured with Rpm:Upstream and Rpm:UpstreamMode=passthrough. " +
+                Detail = "This org has a configured rpm upstream registry and Rpm:UpstreamMode=passthrough. " +
                          "Publishing would silently shadow upstream content. Switch Rpm:UpstreamMode " +
-                         "to 'merged' (deferred) or unset Rpm:Upstream to enable hosted publishing.",
+                         "to 'merged' (deferred) or remove the org's rpm upstream registry to enable hosted publishing.",
                 Status = 409,
             });
 
-        var orgId = CurrentTenantId();
         var token = await Request.ResolveTokenAsync(_svc.Tokens, orgId, ct);
         if (token is null || token.OrgId != orgId)
         {
@@ -228,9 +231,13 @@ public sealed class RpmController : OrgScopedControllerBase
 
         // Cache MISS — attempt upstream proxy if configured.
         if (_svc.Proxy is null || _svc.UpstreamClient is null) return NotFound();
-        if (settings is null || !settings.ProxyPassthroughEnabled) return NotFound();
+        if (settings is null || !settings.ProxyPassthroughEffective) return NotFound();
 
-        return await ProxyDownloadAsync(orgId, file, token, ct);
+        // Per-org upstream: top-priority configured rpm registry. Empty ⇒ proxying disabled.
+        var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
+        if (bases.Count == 0) return NotFound();
+
+        return await ProxyDownloadAsync(orgId, bases[0], file, token, ct);
     }
 
     private async Task<IActionResult> ServePackageFromCacheAsync(
@@ -252,13 +259,13 @@ public sealed class RpmController : OrgScopedControllerBase
     }
 
     private async Task<IActionResult> ProxyDownloadAsync(
-        string orgId, string file, TokenRecord? token, CancellationToken ct)
+        string orgId, string upstreamBase, string file, TokenRecord? token, CancellationToken ct)
     {
         // 1. Negative cache
         if (await _svc.Proxy!.IsNegativelyCachedAsync(file, ct)) return NotFound();
 
         // 2. Resolve package URL from primary.xml.gz
-        var resolution = await TryResolveUpstreamPackageAsync(file, ct);
+        var resolution = await TryResolveUpstreamPackageAsync(upstreamBase, file, ct);
         if (resolution is null)
         {
             await _svc.Proxy.RecordNegativeAsync(file, ct);
@@ -302,11 +309,11 @@ public sealed class RpmController : OrgScopedControllerBase
         return File(body, "application/x-rpm", file);
     }
 
-    private async Task<PackageResolution?> TryResolveUpstreamPackageAsync(string file, CancellationToken ct)
+    private async Task<PackageResolution?> TryResolveUpstreamPackageAsync(string upstreamBase, string file, CancellationToken ct)
     {
         try
         {
-            return await _svc.Proxy!.ResolvePackageUrlAsync(file, ct);
+            return await _svc.Proxy!.ResolvePackageUrlAsync(upstreamBase, file, ct);
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {
@@ -358,18 +365,24 @@ public sealed class RpmController : OrgScopedControllerBase
             return Unauthorized();
         }
 
-        // Passthrough mode: delegate repodata to upstream proxy.
-        if (_svc.Proxy is { IsPassthroughMode: true } && settings!.ProxyPassthroughEnabled)
+        // Passthrough mode: delegate repodata to upstream proxy. Effective passthrough =
+        // instance mode is 'passthrough' AND org passthrough effective (air-gap-aware) AND the
+        // org has ≥1 rpm registry. The top-priority registry (bases[0]) is the whole-repo source.
+        if (_svc.Proxy is { IsPassthroughModeSelected: true } && settings!.ProxyPassthroughEffective)
         {
-            var passthrough = await TryServeRepodataFromUpstreamAsync(file, ct);
-            if (passthrough is not null) return passthrough;
-            // Fall through to local generation on null (unrecognised filename / upstream 404).
+            var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
+            if (bases.Count > 0)
+            {
+                var passthrough = await TryServeRepodataFromUpstreamAsync(bases[0], file, ct);
+                if (passthrough is not null) return passthrough;
+                // Fall through to local generation on null (unrecognised filename / upstream 404).
+            }
         }
 
         return await ServeRepodataLocallyAsync(orgId, file, ct);
     }
 
-    private async Task<IActionResult?> TryServeRepodataFromUpstreamAsync(string file, CancellationToken ct)
+    private async Task<IActionResult?> TryServeRepodataFromUpstreamAsync(string upstreamBase, string file, CancellationToken ct)
     {
         var ifNoneMatch = Request.Headers.IfNoneMatch.FirstOrDefault();
         var ifModifiedSince = Request.Headers.IfModifiedSince.FirstOrDefault();
@@ -377,7 +390,7 @@ public sealed class RpmController : OrgScopedControllerBase
         RepodataResult? upstreamResult;
         try
         {
-            upstreamResult = await _svc.Proxy!.GetRepodataAsync(file, ifNoneMatch, ifModifiedSince, ct);
+            upstreamResult = await _svc.Proxy!.GetRepodataAsync(upstreamBase, file, ifNoneMatch, ifModifiedSince, ct);
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {
@@ -437,10 +450,15 @@ public sealed class RpmController : OrgScopedControllerBase
     {
         if (_svc.Proxy is null) return NotFound();
 
+        // Per-org upstream: top-priority configured rpm registry. Empty ⇒ proxying disabled.
+        var orgId = CurrentTenantId();
+        var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
+        if (bases.Count == 0) return NotFound();
+
         byte[]? key;
         try
         {
-            key = await _svc.Proxy.GetGpgKeyAsync(ct);
+            key = await _svc.Proxy.GetGpgKeyAsync(bases[0], ct);
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {
@@ -577,7 +595,7 @@ public sealed class RpmController : OrgScopedControllerBase
     }
 }
 
-/// <summary>Scoped DI bundle for the RPM controller (#100 + #102).</summary>
+/// <summary>Scoped DI bundle for the RPM controller.</summary>
 public sealed record RpmControllerServices(
     PackageRepository Packages,
     TokenRepository Tokens,
@@ -586,5 +604,6 @@ public sealed record RpmControllerServices(
     TieredBlobStorage BlobStore,
     IMetadataStore Db,
     RpmRepodataService Repodata,
+    UpstreamRegistryResolver Registries,
     UpstreamClient? UpstreamClient = null,
     IRpmUpstreamProxy? Proxy = null);
