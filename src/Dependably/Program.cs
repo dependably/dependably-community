@@ -90,15 +90,7 @@ public partial class Program
         ConfigureBlobStore(builder);
         ConfigureRedisAndDataProtection(builder);
 
-        // Forwarded headers — honour X-Forwarded-Proto/For so Request.IsHttps reflects the
-        // client-facing scheme behind a TLS-terminating reverse proxy. Self-hosted deployments
-        // sit behind varied proxies (Docker bridge, k8s pods, LAN nginx), so trust any forwarder.
-        builder.Services.Configure<ForwardedHeadersOptions>(options =>
-        {
-            options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
-            options.KnownIPNetworks.Clear();
-            options.KnownProxies.Clear();
-        });
+        ConfigureForwardedHeaders(builder);
 
         // Cookie policy — None: call sites own the Secure decision via IPublicUrlBuilder.SessionCookieOptions,
         // which blends Request.IsHttps and BASE_URL to handle both proxy and plain-HTTP deployments correctly.
@@ -175,6 +167,10 @@ public partial class Program
         builder.Services.AddSingleton<UpstreamClient>();
         builder.Services.AddSingleton<UpstreamRegistryResolver>();
         builder.Services.AddSingleton<IUpstreamUrlValidator, UpstreamUrlValidator>();
+        // Connect-time SSRF gate shared by the upstream HTTP handlers. Validates the IP
+        // actually dialed (every connection + every redirect hop), closing the DNS-rebinding
+        // window the URL-level pre-check cannot. Predicate is the same SsrfGuard block-list.
+        builder.Services.AddSingleton(new SsrfConnectCallback(SsrfGuard.IsBlockedIp));
         builder.Services.AddSingleton<AllowlistService>();
         builder.Services.AddSingleton<BlockGateService>();
 
@@ -182,6 +178,7 @@ public partial class Program
         builder.Services.AddSingleton<Dependably.Protocol.MavenUpstreamFetcher>();
 
         // RPM upstream proxy
+        builder.Services.AddSingleton<Dependably.Protocol.RpmUpstreamProxyServices>();
         builder.Services.AddSingleton<Dependably.Protocol.RpmUpstreamProxy>();
 
         // OCI upstream proxy — auth service is singleton (owns token cache + semaphores)
@@ -225,6 +222,16 @@ public partial class Program
                 // cache it touches is IMemoryCache (singleton), so any instance can evict.
                 builder.Services.AddScoped<ITenantSlugCacheInvalidator>(
                     sp => (SubdomainTenantResolver)sp.GetRequiredService<ITenantResolver>());
+                // Multi mode resolves tenants by subdomain under an apex host. Without a real
+                // apex host, every bare/IP/non-subdomain request falls to apex/uninitialized and
+                // per-tenant login methods (forms, SAML) never render. Warn so the misconfig is
+                // visible instead of silently hiding the login page.
+                if (!HasUsableApexHost(builder.Configuration))
+                    Log.Warning(
+                        "DEPLOYMENT_MODE=multi but no usable APEX_HOST (and BASE_URL is unset or localhost). "
+                        + "Tenants are reached at slug.apexhost; non-subdomain hosts resolve to apex/uninitialized "
+                        + "and per-tenant login methods such as SAML will not appear. Set APEX_HOST, or use "
+                        + "DEPLOYMENT_MODE=single for a single-tenant appliance.");
                 break;
             case "header":
                 builder.Services.AddScoped<ITenantResolver, HeaderTenantResolver>();
@@ -245,53 +252,7 @@ public partial class Program
         // is a no-op when HOST_ROUTING is unset (default deployment).
         builder.Services.AddSingleton<HostEcosystemMap>();
 
-        // JWT authentication — secret loaded at startup after first-boot
-        // We use a deferred key resolver so the secret is read from DB after schema init
-        builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-            .AddJwtBearer(options =>
-            {
-                options.Events = new JwtBearerEvents
-                {
-                    // Read JWT from cookie for UI sessions
-                    OnMessageReceived = ctx =>
-                    {
-                        ctx.Token = ctx.Request.Cookies["dependably_session"];
-                        return Task.CompletedTask;
-                    },
-                    // Reject revoked tokens (logged-out sessions)
-                    OnTokenValidated = async ctx =>
-                    {
-                        var jti = ctx.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
-                        if (jti is not null)
-                        {
-                            var revocations = ctx.HttpContext.RequestServices.GetRequiredService<JwtRevocationRepository>();
-                            if (await revocations.IsRevokedAsync(jti))
-                                ctx.Fail("Token has been revoked.");
-                        }
-                    }
-                };
-                // Keep JWT claim names as-is (role, sub, org_id) without mapping to ClaimTypes URIs
-                options.MapInboundClaims = false;
-                // Validation parameters are configured after first-boot below
-                options.TokenValidationParameters = new TokenValidationParameters
-                {
-                    ValidateIssuer = false,
-                    ValidateAudience = false,
-                    ValidateLifetime = true,
-                    ClockSkew = TimeSpan.Zero,
-                    ValidateIssuerSigningKey = true,
-                    // Placeholder — replaced after first-boot with actual secret
-                    IssuerSigningKey = new SymmetricSecurityKey(new byte[32])
-                };
-            })
-            // API-token scheme for protocol endpoints. Endpoints opt in via
-            // [Authorize(AuthenticationSchemes = "Bearer,ApiToken")] — JWT (admin path)
-            // and API tokens (npm/pypi/nuget clients) both authenticate. Anonymous-pull
-            // endpoints don't add [Authorize] and stay on their existing
-            // ResolveTokenAsync flow so the "no token + AnonymousPull=true" case still
-            // works.
-            .AddScheme<TokenAuthenticationOptions, TokenAuthenticationHandler>(
-                TokenAuthenticationDefaults.Scheme, _ => { });
+        ConfigureJwtAuthentication(builder);
 
         builder.Services.AddAuthorization();
         // Capability enforcement: dynamic policy provider materialises a policy per
@@ -304,6 +265,8 @@ public partial class Program
         // `scope` claim and pins each scope to its realm: tenant routes require
         // scope=tenant + matching tid, system routes require scope=system + apex.
         builder.Services.AddScoped<Dependably.Security.RouteScopeFilter>();
+        // Forces a user holding a temporary password to rotate it before using the API.
+        builder.Services.AddScoped<Dependably.Security.PasswordRotationGuard>();
 
         ConfigureRateLimiter(builder);
 
@@ -322,7 +285,7 @@ public partial class Program
         {
             client.Timeout = TimeSpan.FromMinutes(5);
         })
-        .ConfigurePrimaryHttpMessageHandler(() => new System.Net.Http.SocketsHttpHandler
+        .ConfigurePrimaryHttpMessageHandler(sp => new System.Net.Http.SocketsHttpHandler
         {
             ConnectTimeout = TimeSpan.FromSeconds(30),
             MaxConnectionsPerServer = 10,
@@ -336,6 +299,8 @@ public partial class Program
             // CDNs serve them with Content-Encoding: identity, so checksum bytes are
             // unaffected.
             AutomaticDecompression = System.Net.DecompressionMethods.All,
+            // SSRF gate: validate the dialed IP on every connection and redirect hop.
+            ConnectCallback = sp.GetRequiredService<SsrfConnectCallback>().ConnectAsync,
         });
 
         // Named HTTP client for OCI upstream proxy.
@@ -347,7 +312,7 @@ public partial class Program
             var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<Dependably.Configuration.OciOptions>>();
             client.Timeout = opts.Value.UpstreamHttpTimeout;
         })
-        .ConfigurePrimaryHttpMessageHandler(() => new System.Net.Http.SocketsHttpHandler
+        .ConfigurePrimaryHttpMessageHandler(sp => new System.Net.Http.SocketsHttpHandler
         {
             ConnectTimeout          = TimeSpan.FromSeconds(30),
             MaxConnectionsPerServer = 20,
@@ -357,6 +322,9 @@ public partial class Program
             // Do NOT decompress: OCI layer blobs are raw compressed tarballs.
             // Decompressing would corrupt the digest (the digest is over the compressed bytes).
             AutomaticDecompression  = System.Net.DecompressionMethods.None,
+            // SSRF gate: OciUpstreamResolver does no URL pre-check, so the connect callback
+            // is the sole gate here — it validates the dialed IP on every hop.
+            ConnectCallback = sp.GetRequiredService<SsrfConnectCallback>().ConnectAsync,
         });
 
         // Fallback generic client (used by non-upstream code)
@@ -415,6 +383,8 @@ public partial class Program
         builder.Services.AddControllers(options =>
             {
                 options.Filters.AddService<Dependably.Security.RouteScopeFilter>();
+                // After RouteScopeFilter (realm first), block flagged users until they rotate.
+                options.Filters.AddService<Dependably.Security.PasswordRotationGuard>();
             })
             .AddApplicationPart(typeof(Program).Assembly)
             .AddDataAnnotationsLocalization()
@@ -462,6 +432,81 @@ public partial class Program
             o.Providers.Add<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProvider>();
             o.Providers.Add<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProvider>();
         });
+    }
+
+    // Forwarded headers — honour X-Forwarded-Proto/For so Request.IsHttps reflects the
+    // client-facing scheme behind a TLS-terminating reverse proxy. When TRUSTED_PROXIES is
+    // set, only those source IPs/networks may set X-Forwarded-*; otherwise forwarded headers
+    // are accepted from any immediate forwarder (back-compat for existing self-hosted
+    // deployments behind varied proxies — StartupService warns that this is spoofable).
+    private static void ConfigureForwardedHeaders(WebApplicationBuilder builder)
+    {
+        builder.Services.Configure<ForwardedHeadersOptions>(options =>
+        {
+            options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+            options.KnownIPNetworks.Clear();
+            options.KnownProxies.Clear();
+
+            var (networks, proxies) = Dependably.Infrastructure.ConfigurationExtensions.ParseTrustedProxies(builder.Configuration["TRUSTED_PROXIES"]);
+            if (networks.Count > 0 || proxies.Count > 0)
+            {
+                foreach (var n in networks) options.KnownIPNetworks.Add(n);
+                foreach (var p in proxies) options.KnownProxies.Add(p);
+                options.ForwardLimit = null; // walk the chain to the first untrusted hop
+            }
+        });
+    }
+
+    // JWT authentication — secret loaded at startup after first-boot via a deferred key resolver
+    // so the secret is read from DB after schema init. Pairs the Bearer scheme (admin/UI path,
+    // cookie-backed) with the ApiToken scheme for protocol clients.
+    private static void ConfigureJwtAuthentication(WebApplicationBuilder builder)
+    {
+        builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+            .AddJwtBearer(options =>
+            {
+                options.Events = new JwtBearerEvents
+                {
+                    // Read JWT from cookie for UI sessions
+                    OnMessageReceived = ctx =>
+                    {
+                        ctx.Token = ctx.Request.Cookies["dependably_session"];
+                        return Task.CompletedTask;
+                    },
+                    // Reject revoked tokens (logged-out sessions)
+                    OnTokenValidated = async ctx =>
+                    {
+                        var jti = ctx.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
+                        if (jti is not null)
+                        {
+                            var revocations = ctx.HttpContext.RequestServices.GetRequiredService<JwtRevocationRepository>();
+                            if (await revocations.IsRevokedAsync(jti))
+                                ctx.Fail("Token has been revoked.");
+                        }
+                    }
+                };
+                // Keep JWT claim names as-is (role, sub, org_id) without mapping to ClaimTypes URIs
+                options.MapInboundClaims = false;
+                // Validation parameters are configured after first-boot below
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = false,
+                    ValidateAudience = false,
+                    ValidateLifetime = true,
+                    ClockSkew = TimeSpan.Zero,
+                    ValidateIssuerSigningKey = true,
+                    // Placeholder — replaced after first-boot with actual secret
+                    IssuerSigningKey = new SymmetricSecurityKey(new byte[32])
+                };
+            })
+            // API-token scheme for protocol endpoints. Endpoints opt in via
+            // [Authorize(AuthenticationSchemes = "Bearer,ApiToken")] — JWT (admin path)
+            // and API tokens (npm/pypi/nuget clients) both authenticate. Anonymous-pull
+            // endpoints don't add [Authorize] and stay on their existing
+            // ResolveTokenAsync flow so the "no token + AnonymousPull=true" case still
+            // works.
+            .AddScheme<TokenAuthenticationOptions, TokenAuthenticationHandler>(
+                TokenAuthenticationDefaults.Scheme, _ => { });
     }
 
     // Serilog — structured JSON logging with sensitive field redaction.
@@ -830,6 +875,28 @@ public partial class Program
                 "Configuration key Maven:MetadataTtl is deprecated and ignored (configured value: {ConfiguredValue}). Maven metadata caching is now handled by UpstreamClient (single-flight, no TTL).",
                 mavenMetadataTtl);
         }
+    }
+
+    /// <summary>
+    /// True when DEPLOYMENT_MODE=multi has an apex host it can route tenant subdomains
+    /// under: an explicit APEX_HOST, or a BASE_URL whose host is not localhost. Mirrors
+    /// the apex derivation in <see cref="SubdomainTenantResolver"/> — the default
+    /// BASE_URL of http://localhost:8080 is not usable for real multi-tenant routing.
+    /// </summary>
+    private static bool HasUsableApexHost(ConfigurationManager configuration)
+    {
+        var apex = configuration["APEX_HOST"];
+        if (!string.IsNullOrWhiteSpace(apex)) return true;
+
+        var baseUrl = configuration["BASE_URL"];
+        if (!string.IsNullOrWhiteSpace(baseUrl)
+            && Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
+        {
+            var host = uri.Host.ToLowerInvariant();
+            return host != "localhost" && host != "127.0.0.1" && host != "[::1]";
+        }
+
+        return false;
     }
 
     private static void WarnOnAirGapContradictions(IConfiguration configuration)

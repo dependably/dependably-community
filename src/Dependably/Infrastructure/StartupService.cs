@@ -70,6 +70,25 @@ public sealed class StartupService : IHostedService
                 baseUrl);
         }
 
+        if (string.IsNullOrWhiteSpace(_config["TRUSTED_PROXIES"]))
+        {
+            _logger.LogWarning(
+                "TRUSTED_PROXIES is not set. Forwarded headers (X-Forwarded-For / -Proto) are " +
+                "accepted from any client, so a directly-reachable instance can spoof its source " +
+                "IP (affecting the /metrics allowlist, rate-limit keys, and audit source_ip). " +
+                "Set TRUSTED_PROXIES to your reverse proxy's IP(s)/CIDR(s) to restrict this.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_config["Rpm:Upstream"])
+            && string.IsNullOrWhiteSpace(_config["Rpm:GpgKey"]))
+        {
+            _logger.LogWarning(
+                "Rpm:GpgKey is not set. The RPM proxy fetches repomd.xml from upstream but does NOT " +
+                "verify its detached OpenPGP signature (repomd.xml.asc), so a hostile or MITM upstream " +
+                "can serve tampered metadata that poisons the package-checksum chain. Set Rpm:GpgKey to " +
+                "your repo's pinned public key to enforce signature verification.");
+        }
+
         var jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", cancellationToken);
         if (jwtSecret is not null)
         {

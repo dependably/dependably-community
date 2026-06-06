@@ -23,6 +23,18 @@ public sealed class SystemAdminRepository
     }
 
     /// <summary>
+    /// Lean check used by the request pipeline to force temp-password rotation for system
+    /// admins: true when the admin must change their password before continuing. Missing row → false.
+    /// </summary>
+    public async Task<bool> IsPasswordChangeRequiredAsync(string adminId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var flag = await conn.ExecuteScalarAsync<long?>(
+            "SELECT must_change_password FROM system_admins WHERE id = @id", new { id = adminId });
+        return flag == 1;
+    }
+
+    /// <summary>
     /// Bucketed counts for the sysadmin dashboard. Single round-trip. Mirrors
     /// <c>OrgRepository.CountByStatusAsync</c>'s shape so the dashboard render is symmetric.
     /// </summary>

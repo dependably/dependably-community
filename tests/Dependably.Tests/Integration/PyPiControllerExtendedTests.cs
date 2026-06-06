@@ -132,6 +132,30 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         }
     }
 
+    [Fact]
+    public async Task SimpleIndex_PackageNameWithHtmlMetachars_IsEncoded()
+    {
+        _factory.CreateClient().Dispose(); // ensure first-boot ran
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        var orgId = await conn.ExecuteScalarAsync<string>("SELECT id FROM orgs WHERE slug = 'default' LIMIT 1");
+
+        // Insert a name with HTML metacharacters directly, bypassing the upload-time PEP 508
+        // regex, so the renderer's output encoding is what's under test.
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES (@id, @orgId, 'pypi', @name, @name, 0)",
+            new { id = Guid.NewGuid().ToString("N"), orgId, name = "evil\"<b>x</b>" });
+
+        var token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        var resp = await client.GetAsync("/simple/");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadAsStringAsync();
+
+        Assert.DoesNotContain("<b>x</b>", body);          // raw markup must not survive
+        Assert.Contains("&lt;b&gt;x&lt;/b&gt;", body);    // entity-encoded form is emitted
+    }
+
     // ── PackageIndex — proxy merge ON ────────────────────────────────────────
 
     [Fact]

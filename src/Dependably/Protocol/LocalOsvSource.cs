@@ -142,11 +142,13 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     {
         try
         {
-            using var stream = File.OpenRead(file);
-            var raw = await JsonSerializer.DeserializeAsync<RawOsvDump>(stream, JsonOpts, ct);
+            // Read the file as a string (each dump file is a single advisory) so the raw OSV
+            // JSON can be carried on the advisory for persistence, mirroring the remote client.
+            var content = await File.ReadAllTextAsync(file, ct);
+            var raw = JsonSerializer.Deserialize<RawOsvDump>(content, JsonOpts);
             if (raw is null) return false;
 
-            var advisory = BuildAdvisory(raw);
+            var advisory = BuildAdvisory(raw, content);
             foreach (var pkg in advisory.AffectedPackages)
             {
                 if (pkg.Ecosystem is null || pkg.Name is null) continue;
@@ -209,7 +211,7 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
             && string.Equals(apName, name, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static OsvAdvisory BuildAdvisory(RawOsvDump raw)
+    private static OsvAdvisory BuildAdvisory(RawOsvDump raw, string rawJson)
     {
         var affected = raw.Affected?
             .Where(a => a.Package is not null)
@@ -243,7 +245,8 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
             AffectedPackages: affected,
             Published: raw.Published,
             Modified: raw.Modified,
-            IsHydrated: true);
+            IsHydrated: true,
+            RawJson: rawJson);
     }
 
     public void Dispose() => _refreshTimer?.Dispose();

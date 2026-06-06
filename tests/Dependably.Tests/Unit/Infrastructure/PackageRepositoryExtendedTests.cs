@@ -131,6 +131,53 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
         }
     }
 
+    // ── IncrementDownloadCountAsync ──────────────────────────────────────────
+
+    [Fact]
+    public async Task IncrementDownloadCountAsync_AccumulatesAndStampsLastUsed()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        var verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
+            blobKey: $"k-{Guid.NewGuid():N}");
+
+        // Fresh row starts at 0 and surfaces through the read model.
+        var initial = await _repo.GetVersionAsync(pkgId, "1.0.0");
+        Assert.Equal(0, initial!.DownloadCount);
+
+        await _repo.IncrementDownloadCountAsync(verId);
+        await _repo.IncrementDownloadCountAsync(verId);
+        await _repo.IncrementDownloadCountAsync(verId);
+
+        var after = await _repo.GetVersionAsync(pkgId, "1.0.0");
+        Assert.Equal(3, after!.DownloadCount);
+
+        // The download is also the moment last_used advances.
+        await using var conn = await _fixture.Store.OpenAsync();
+        var lastUsed = await conn.ExecuteScalarAsync<string?>(
+            "SELECT last_used FROM package_versions WHERE id = @id", new { id = verId });
+        Assert.False(string.IsNullOrEmpty(lastUsed));
+    }
+
+    [Fact]
+    public async Task IncrementDownloadCountByPurlAsync_BumpsTheMatchingRow()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "rpm", "acme");
+        var purl = Purl();
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", purl,
+            blobKey: $"k-{Guid.NewGuid():N}");
+
+        await _repo.IncrementDownloadCountByPurlAsync(purl);
+        await _repo.IncrementDownloadCountByPurlAsync(purl);
+
+        var after = await _repo.GetVersionAsync(pkgId, "1.0.0");
+        Assert.Equal(2, after!.DownloadCount);
+
+        // Unknown purl is a harmless no-op.
+        await _repo.IncrementDownloadCountByPurlAsync("pkg:rpm/nope@9.9.9");
+    }
+
     // ── DeleteVersionAsync ───────────────────────────────────────────────────
 
     [Fact]

@@ -1047,6 +1047,18 @@
         }
       }
     },
+    "/api/v1/vulnerabilities/{osvId}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "osvId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/health": {
       "operations": {
         "get": {

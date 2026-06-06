@@ -108,6 +108,8 @@ CREATE TABLE IF NOT EXISTS package_versions (
     yank_reason TEXT,
     first_fetch INTEGER NOT NULL DEFAULT 0,  -- 1 if this was a cache-miss proxy fetch
     last_used   TEXT,                         -- ISO 8601 UTC; updated on each download
+    -- Cumulative count of served downloads (download + first_fetch events). See Schema.sql.
+    download_count BIGINT NOT NULL DEFAULT 0,
     vuln_checked_at TEXT,        -- ISO 8601 UTC; set after OSV vulnerability scan
     manual_block_state TEXT,     -- NULL = follow auto policy, 'blocked' = manual block, 'allowed' = manual override of auto-block
     deprecated  TEXT,            -- NULL = not deprecated; otherwise upstream deprecation message (npm/NuGet)
@@ -215,6 +217,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     severity        TEXT,           -- 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | NULL
     cvss_score      REAL,
     affected_versions TEXT,         -- JSON array of version strings
+    osv_json        TEXT,           -- full OSV advisory JSON; source of truth for the rich detail panel
     published_at    TEXT,
     modified_at     TEXT,
     fetched_at      TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))

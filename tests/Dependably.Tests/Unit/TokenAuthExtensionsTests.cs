@@ -234,7 +234,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
         var resolved = await req.ResolveTokenAsync(_tokens);
 
         Assert.NotNull(resolved);
-        var after = await _tokens.GetTokenByIdAsync(tokenId);
+        var after = await _tokens.GetTokenByIdAsync(tokenId, "org-touch");
         Assert.NotNull(after!.LastUsedAt);
         Assert.True((DateTimeOffset.UtcNow - after.LastUsedAt!.Value).Duration() < TimeSpan.FromSeconds(10));
     }

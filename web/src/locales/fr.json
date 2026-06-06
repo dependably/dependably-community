@@ -182,7 +182,7 @@
       "pushed": "Reçu le",
       "flags": "Indicateurs",
       "license": "Licence",
-      "published": "Publié le",
+      "downloads": "Téléchargements",
       "vulnScan": "Scan vuln.",
       "origin": "Origine",
       "status": "Statut",
@@ -228,6 +228,7 @@
     "detail": {
       "purl": "PURL",
       "checksum": "SHA-256",
+      "published": "Publié le",
       "downloads": "Téléchargements",
       "vulnScan": "Dernier scan",
       "vulns": "Vulnérabilités",
@@ -782,7 +783,23 @@
       "score": "Score",
       "osvId": "ID OSV",
       "summary": "Résumé",
+      "published": "Publié le",
       "checkedAt": "Vérifié le"
+    },
+    "detail": {
+      "modified": "Modifié le",
+      "withdrawn": "Retiré le",
+      "withdrawnNotice": "Cet avis a été retiré.",
+      "aliases": "Alias",
+      "related": "Associés",
+      "references": "Références",
+      "affected": "Affecté",
+      "versions": "Versions",
+      "credits": "Crédits",
+      "details": "Détails",
+      "databaseSpecific": "Spécifique à la base",
+      "loading": "Chargement du détail de l'avis…",
+      "error": "Impossible de charger le détail de l'avis."
     },
     "empty": "Aucun paquet vulnérable trouvé"
   },

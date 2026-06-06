@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { get } from 'svelte/store'
 import { locale } from 'svelte-i18n'
-import { formatBytes, formatDate, formatDateShort, formatRelativeTime } from './format.js'
+import { formatBytes, formatDate, formatDateShort, formatRelativeTime, formatNumber } from './format.js'
 
 describe('format — store-pattern proof', () => {
   beforeEach(() => locale.set('en'))
@@ -65,6 +65,14 @@ describe('format — store-pattern proof', () => {
     // 1.5 KB exercises the decimal path
     expect(fmt(1536)).toBe('1.5 KB')
     expect(fmt(1.5 * 1024 * 1024)).toBe('1.5 MB')
+  })
+
+  it('formatNumber renders 0 for null/undefined and groups thousands', () => {
+    const fmt = get(formatNumber)
+    expect(fmt(null)).toBe('0')
+    expect(fmt(undefined)).toBe('0')
+    expect(fmt(0)).toBe('0')
+    expect(fmt(1234567)).toBe('1,234,567')
   })
 
   it('formatDate returns a non-empty formatted string for a valid ISO date', () => {

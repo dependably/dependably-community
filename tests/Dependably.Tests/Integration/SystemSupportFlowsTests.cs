@@ -156,11 +156,16 @@ public sealed class SystemSupportFlowsTests : IClassFixture<DependablyMultiFacto
     public async Task SystemAdminMe_ReturnsIdentityWithMustChangeFlag()
     {
         using var sys = await _factory.CreateSystemAdminClient();
+        // CreateSystemAdminClient hands out an onboarded session (flag cleared); set it back so
+        // this test exercises that /api/v1/system/me surfaces the rotate flag. The route is on
+        // PasswordRotationGuard's allowlist, so it stays reachable while the flag is set.
+        await using (var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync())
+            await conn.ExecuteAsync("UPDATE system_admins SET must_change_password = 1");
+
         var resp = await sys.GetAsync("/api/v1/system/me");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         Assert.Equal(DependablyMultiFactory.SystemAdminEmail, doc.RootElement.GetProperty("email").GetString());
-        // The seeded system_admin has must_change_password=1 by design.
         Assert.True(doc.RootElement.GetProperty("mustChangePassword").GetBoolean());
     }
 

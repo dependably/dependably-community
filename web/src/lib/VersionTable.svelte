@@ -13,7 +13,7 @@
   import { createEventDispatcher } from 'svelte'
   import { t } from 'svelte-i18n'
   import VulnerabilityRow from './VulnerabilityRow.svelte'
-  import { formatDate, formatBytes } from './format.js'
+  import { formatDate, formatBytes, formatNumber } from './format.js'
   import { sortIndicator } from './sortIndicator.js'
 
   /** @type {{ ecosystem: string, isProxy: boolean, name: string } | null} */
@@ -49,7 +49,7 @@
     else if (sortCol === 'pushed')    cmp = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
     else if (sortCol === 'checksum')  cmp = (a.checksumSha256 ?? '').localeCompare(b.checksumSha256 ?? '')
     else if (sortCol === 'license')   cmp = (a.licenses?.join(', ') ?? '').localeCompare(b.licenses?.join(', ') ?? '')
-    else if (sortCol === 'published') cmp = (a.publishedAt ?? '').localeCompare(b.publishedAt ?? '')
+    else if (sortCol === 'downloads') cmp = (a.downloadCount ?? 0) - (b.downloadCount ?? 0)
     else if (sortCol === 'status')    cmp = (a.status ?? '').localeCompare(b.status ?? '')
     return sortDir === 'asc' ? cmp : -cmp
   })
@@ -107,7 +107,7 @@
     <col class="col-size">
     <col class="col-pushed">
     <col class="col-license">
-    <col class="col-published">
+    <col class="col-downloads">
     <col class="col-status">
     <col class="col-actions">
   </colgroup>
@@ -119,7 +119,7 @@
       <th class="sortable" on:click={() => toggleSort('size')}>{$t('versionDetail.columns.size')}{sortIndicator('size', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('pushed')}>{$t('versionDetail.columns.pushed')}{sortIndicator('pushed', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('license')}>{$t('versionDetail.columns.license')}{sortIndicator('license', sortCol, sortDir)}</th>
-      <th class="sortable" on:click={() => toggleSort('published')}>{$t('versionDetail.columns.published')}{sortIndicator('published', sortCol, sortDir)}</th>
+      <th class="sortable num-col" on:click={() => toggleSort('downloads')}>{$t('versionDetail.columns.downloads')}{sortIndicator('downloads', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('status')}>{$t('versionDetail.columns.status')}{sortIndicator('status', sortCol, sortDir)}</th>
       <th>{$t('versionDetail.columns.actions')}</th>
     </tr>
@@ -175,13 +175,7 @@
             <span class="text-muted">—</span>
           {/if}
         </td>
-        <td class="nowrap">
-          {#if ver.publishedAt}
-            <span class="text-muted t-xs">{$formatDate(ver.publishedAt)}</span>
-          {:else}
-            <span class="text-muted">—</span>
-          {/if}
-        </td>
+        <td class="nowrap num-col">{$formatNumber(ver.downloadCount)}</td>
         <td>
           {#if ver.status}
             <span class="status-badge status-{ver.status}">{$t(`versionDetail.status.${ver.status}`)}</span>
@@ -233,6 +227,13 @@
                   </div>
                 {/if}
               {/if}
+
+              <div class="detail-section">
+                <span class="detail-label">{$t('versionDetail.detail.published')}</span>
+                <span class="detail-value text-muted">
+                  {ver.publishedAt ? $formatDate(ver.publishedAt) : '—'}
+                </span>
+              </div>
 
               <div class="detail-section">
                 <span class="detail-label">{$t('versionDetail.detail.vulnScan')}</span>
@@ -316,9 +317,10 @@
   .versions-table .col-size      { width: 80px; }
   .versions-table .col-pushed    { width: 150px; }
   .versions-table .col-license   { width: 120px; }
-  .versions-table .col-published { width: 150px; }
+  .versions-table .col-downloads { width: 100px; }
   .versions-table .col-status    { width: 100px; }
   .versions-table .col-actions   { width: 60px; }
+  .num-col { text-align: right; font-variant-numeric: tabular-nums; }
 
   .detail-row td { padding: 0; border-top: none; }
   .copy-btn { padding: 1px 6px; font-size: 11px; flex-shrink: 0; }

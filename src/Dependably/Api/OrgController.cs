@@ -98,7 +98,7 @@ public sealed class OrgController : OrgScopedControllerBase
             return new {
                 v.Id, v.PackageId, v.Version, v.Purl, v.BlobKey,
                 v.SizeBytes, v.ChecksumSha256, v.ChecksumSha1, v.Yanked, v.YankReason,
-                v.FirstFetch, v.CreatedAt, v.VulnCheckedAt, v.PublishedAt,
+                v.FirstFetch, v.DownloadCount, v.CreatedAt, v.VulnCheckedAt, v.PublishedAt,
                 v.ManualBlockState,
                 v.Deprecated, v.Origin,
                 v.UpstreamIntegrityValue, v.UpstreamIntegrityAlgorithm,
@@ -188,6 +188,13 @@ public sealed class OrgController : OrgScopedControllerBase
         var store = ver.Origin == "proxy" ? _blobStorage.Cache : _blobStorage.Registry;
         var stream = await store.GetAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
         if (stream is null) return NotFound();
+
+        // Count the UI download the same way protocol pulls are counted, and log it as a
+        // 'download' activity so it also appears on the dashboard chart — the UI is just
+        // another download surface.
+        await _audit.LogActivityAsync(orgId, ecosystem, ver.Purl, "download", GetUserId(),
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        await _packages.IncrementDownloadCountAsync(ver.Id, ct);
 
         var filename = ver.BlobKey.Split('/').Last();
         return File(stream, "application/octet-stream", filename);

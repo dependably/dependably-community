@@ -280,6 +280,10 @@ public sealed class AirGapEnforcedSettingsTests : IAsyncLifetime
                 "SELECT id FROM users WHERE tenant_id = @orgId AND role = 'owner' LIMIT 1",
                 new { orgId })
                 ?? throw new InvalidOperationException("Bootstrap owner not found.");
+            // Onboarded-admin session: clear the first-boot must_change_password flag so
+            // PasswordRotationGuard doesn't 403 non-allowlisted /api/v1 calls.
+            await conn.ExecuteAsync(
+                "UPDATE users SET must_change_password = 0 WHERE id = @adminId", new { adminId });
             var jwtSecret = await conn.ExecuteScalarAsync<string>(
                 "SELECT value FROM instance_settings WHERE key = 'jwt_secret' LIMIT 1")
                 ?? throw new InvalidOperationException("JWT secret not found.");

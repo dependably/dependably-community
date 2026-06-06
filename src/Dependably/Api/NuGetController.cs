@@ -39,7 +39,6 @@ public partial class NuGetController : ControllerBase
     private readonly UpstreamClient _upstream;
     private readonly AllowlistService _allowlist;
     private readonly BlocklistRepository _blocklist;
-    private readonly IConfiguration _config;
     private readonly IMetadataStore _db;
     private readonly BlockGateService _blockGate;
     private readonly LicenseRepository _licenses;
@@ -61,7 +60,6 @@ public partial class NuGetController : ControllerBase
         _upstream = svc.Upstream;
         _allowlist = svc.Allowlist;
         _blocklist = svc.Blocklist;
-        _config = svc.Config;
         _db = svc.Db;
         _blockGate = svc.BlockGate;
         _licenses = svc.Licenses;
@@ -110,6 +108,11 @@ public partial class NuGetController : ControllerBase
     [HttpGet("/nuget/query")]
     public async Task<IActionResult> Search([FromQuery] string? q, [FromQuery] int skip = 0, [FromQuery] int take = 20, CancellationToken ct = default)
     {
+        // Clamp paging: bound the per-result N+1 version lookups, and guard a negative skip
+        // (which would throw in Enumerable.Skip → 500). 100 covers any legitimate UI page.
+        skip = Math.Max(0, skip);
+        take = Math.Clamp(take, 0, 100);
+
         var orgId = CurrentTenantId();
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
@@ -693,6 +696,7 @@ public partial class NuGetController : ControllerBase
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
         await _audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token.UserId,
             actorKind: token.ActorKind, sourceIp: sourceIp, ct: ct);
+        await _packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
         return File(stream, "application/octet-stream", file);
     }
 
@@ -725,6 +729,7 @@ public partial class NuGetController : ControllerBase
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
         await _audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token?.UserId,
             actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
+        await _packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
         return File(stream, "application/octet-stream", file);
     }
 
@@ -1154,7 +1159,17 @@ public partial class NuGetController : ControllerBase
         var match = versions.FirstOrDefault(v => v.Version == normalizedSymbolVersion && v.BlobKey.EndsWith(".snupkg"));
         if (match is null) return NotFound();
 
-        var stream = await _blobs.GetAsync(match.BlobKey, ct);
+        // Privately-uploaded symbols require a token regardless of AnonymousPull, mirroring the
+        // .nupkg path (ServeHostedVersionAsync). Symbols are always uploaded-origin (there is no
+        // proxy path for .snupkg), and their PDBs/debug info are at least as sensitive as the
+        // package itself, so anonymous read must not leak them even when AnonymousPull is on.
+        if (match.Origin == "uploaded" && token is null)
+        {
+            Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
+            return Unauthorized();
+        }
+
+        var stream = await _blobs.GetAsync(BlobKeys.StoreKey(match.BlobKey), ct);
         if (stream is null) return NotFound();
 
         return File(stream, "application/octet-stream", file);

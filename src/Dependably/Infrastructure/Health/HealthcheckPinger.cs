@@ -107,39 +107,8 @@ public sealed class HealthcheckPinger : BackgroundService
             using var client = _http.CreateClient("healthcheck-pinger");
             client.Timeout = _timeout;
 
-            HttpResponseMessage resp;
-            if (_usePost || _sendPayload)
-            {
-                var uptime = (long)(DateTimeOffset.UtcNow - _startedAt).TotalSeconds;
-                var body = new
-                {
-                    instance_id = _instanceId,
-                    uptime_seconds = uptime,
-                    deployment_mode = _deploymentMode,
-                    status = ready ? "ready" : "degraded",
-                    checks = checks.ToDictionary(
-                        kv => kv.Key,
-                        kv => kv.Value is null ? "ok" : "error"),
-                };
-                resp = await client.PostAsJsonAsync(targetUrl, body, ct);
-            }
-            else
-            {
-                resp = await client.GetAsync(targetUrl, HttpCompletionOption.ResponseHeadersRead, ct);
-            }
-
-            if (resp.IsSuccessStatusCode)
-            {
-                DependablyMeter.HealthcheckPings.Add(1, new KeyValuePair<string, object?>("outcome", "success"));
-                _logger.LogDebug("HealthcheckPinger: ping succeeded ({StatusCode}).", (int)resp.StatusCode);
-            }
-            else
-            {
-                DependablyMeter.HealthcheckPings.Add(1, new KeyValuePair<string, object?>("outcome", "server_error"));
-                _logger.LogWarning(
-                    "HealthcheckPinger: ping returned non-2xx ({StatusCode}) from {Url}.",
-                    (int)resp.StatusCode, targetUrl);
-            }
+            using var resp = await SendPingAsync(client, targetUrl, ready, checks, ct);
+            RecordPingResult(resp, targetUrl);
         }
         catch (Exception ex)
         {
@@ -149,6 +118,45 @@ public sealed class HealthcheckPinger : BackgroundService
         finally
         {
             DependablyMeter.HealthcheckPingDuration.Record(stopwatch.Elapsed.TotalSeconds);
+        }
+    }
+
+    // POSTs a JSON status payload when configured (HEALTHCHECK_USE_POST / payload mode), else
+    // issues a lightweight GET. Caller owns disposal of the returned response.
+    private async Task<HttpResponseMessage> SendPingAsync(
+        HttpClient client, string targetUrl, bool ready, IReadOnlyDictionary<string, string?> checks, CancellationToken ct)
+    {
+        if (_usePost || _sendPayload)
+        {
+            var uptime = (long)(DateTimeOffset.UtcNow - _startedAt).TotalSeconds;
+            var body = new
+            {
+                instance_id = _instanceId,
+                uptime_seconds = uptime,
+                deployment_mode = _deploymentMode,
+                status = ready ? "ready" : "degraded",
+                checks = checks.ToDictionary(
+                    kv => kv.Key,
+                    kv => kv.Value is null ? "ok" : "error"),
+            };
+            return await client.PostAsJsonAsync(targetUrl, body, ct);
+        }
+        return await client.GetAsync(targetUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+    }
+
+    private void RecordPingResult(HttpResponseMessage resp, string targetUrl)
+    {
+        if (resp.IsSuccessStatusCode)
+        {
+            DependablyMeter.HealthcheckPings.Add(1, new KeyValuePair<string, object?>("outcome", "success"));
+            _logger.LogDebug("HealthcheckPinger: ping succeeded ({StatusCode}).", (int)resp.StatusCode);
+        }
+        else
+        {
+            DependablyMeter.HealthcheckPings.Add(1, new KeyValuePair<string, object?>("outcome", "server_error"));
+            _logger.LogWarning(
+                "HealthcheckPinger: ping returned non-2xx ({StatusCode}) from {Url}.",
+                (int)resp.StatusCode, targetUrl);
         }
     }
 }

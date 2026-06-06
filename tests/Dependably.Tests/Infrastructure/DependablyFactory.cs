@@ -58,6 +58,12 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         builder.Services.RemoveAll<IUpstreamUrlValidator>();
         builder.Services.AddSingleton<IUpstreamUrlValidator, PermissiveUpstreamUrlValidator>();
 
+        // The connect-time SSRF guard (SsrfConnectCallback) also blocks 127.0.0.0/8 at the
+        // socket level, which would refuse WireMock on loopback. Swap in a permissive
+        // predicate so integration tests connect; production keeps SsrfGuard.IsBlockedIp.
+        builder.Services.RemoveAll<SsrfConnectCallback>();
+        builder.Services.AddSingleton(new SsrfConnectCallback(_ => false));
+
         builder.WebHost.UseTestServer();
 
         builder.WebHost.UseSetting("PyPI:Upstream", MockUpstream.Urls[0]);
@@ -162,6 +168,12 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
             "SELECT id FROM users WHERE tenant_id = @orgId AND role = 'owner' LIMIT 1",
             new { orgId })
             ?? throw new InvalidOperationException("Bootstrap owner not found.");
+
+        // The first-boot owner is flagged must_change_password; this helper hands out a session
+        // for an *onboarded* admin, so clear it (PasswordRotationGuard would otherwise 403 every
+        // non-allowlisted /api/v1 call made with this token).
+        await conn.ExecuteAsync(
+            "UPDATE users SET must_change_password = 0 WHERE id = @adminId", new { adminId });
 
         var jwtSecret = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret' LIMIT 1")

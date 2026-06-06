@@ -197,6 +197,109 @@ public sealed class OsvClientTests : IDisposable
         Assert.Equal(100, strippedCount);
     }
 
+    // ── Raw advisory JSON capture (osv_json persistence) ────────────────────────
+
+    [Fact]
+    public async Task QueryAsync_HydratedAdvisory_CapturesRawJsonPerElement()
+    {
+        // /query returns {"vulns":[…]}; each advisory must carry the raw JSON of its own
+        // array element (not the whole envelope) for persistence into vulnerabilities.osv_json.
+        var vulnJson = """
+            {"vulns":[
+              {"id":"GHSA-aaaa","summary":"hello","details":"# heading","references":[{"type":"WEB","url":"https://example.test"}]}
+            ]}
+            """;
+        _server.Given(Request.Create().WithPath("/query").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(vulnJson));
+
+        var result = await _sut.QueryAsync("pkg:npm/foo@1.0.0");
+
+        Assert.Single(result);
+        Assert.True(result[0].IsHydrated);
+        Assert.NotNull(result[0].RawJson);
+        using var parsed = JsonDocument.Parse(result[0].RawJson!);
+        Assert.Equal("GHSA-aaaa", parsed.RootElement.GetProperty("id").GetString());
+        // The captured text is the advisory element, not the {"vulns":[…]} envelope.
+        Assert.False(parsed.RootElement.TryGetProperty("vulns", out _));
+        Assert.Equal("# heading", parsed.RootElement.GetProperty("details").GetString());
+    }
+
+    [Fact]
+    public async Task QueryBatchAsync_HydratedAdvisory_CapturesRawJsonFromVulnsEndpoint()
+    {
+        var batchJson = """
+            {"results":[
+              {"vulns":[{"id":"GHSA-1","modified":"2026-01-01T00:00:00Z"}]}
+            ]}
+            """;
+        _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(batchJson));
+        _server.Given(Request.Create().WithPath("/vulns/GHSA-1").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithBody("""{"id":"GHSA-1","summary":"hydrated","withdrawn":"2026-02-01T00:00:00Z"}"""));
+
+        var result = await _sut.QueryBatchAsync(new[] { "pkg:npm/a@1.0.0" });
+
+        var advisory = Assert.Single(result[0]);
+        Assert.True(advisory.IsHydrated);
+        Assert.NotNull(advisory.RawJson);
+        using var parsed = JsonDocument.Parse(advisory.RawJson!);
+        Assert.Equal("GHSA-1", parsed.RootElement.GetProperty("id").GetString());
+        Assert.Equal("2026-02-01T00:00:00Z", parsed.RootElement.GetProperty("withdrawn").GetString());
+    }
+
+    [Fact]
+    public async Task QueryBatchAsync_StrippedFallback_HasNullRawJson()
+    {
+        // Hydration 404s ⇒ stripped record ⇒ IsHydrated false ⇒ RawJson null, so the upsert's
+        // COALESCE can never clobber a previously-stored full advisory with this batch's stub.
+        var batchJson = """
+            {"results":[
+              {"vulns":[{"id":"GHSA-MISS","modified":"2026-01-01T00:00:00Z"}]}
+            ]}
+            """;
+        _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(batchJson));
+        _server.Given(Request.Create().WithPath("/vulns/GHSA-MISS").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
+
+        var result = await _sut.QueryBatchAsync(new[] { "pkg:npm/a@1.0.0" });
+
+        var advisory = Assert.Single(result[0]);
+        Assert.False(advisory.IsHydrated);
+        Assert.Null(advisory.RawJson);
+    }
+
+    [Fact]
+    public async Task QueryBatchAsync_MixedHydration_CapturesRawJsonOnlyForHydrated()
+    {
+        // Mixed/partial batch: one advisory hydrates (RawJson set), the other 404s (RawJson null).
+        var batchJson = """
+            {"results":[
+              {"vulns":[{"id":"GHSA-OK","modified":"2026-01-01T00:00:00Z"}]},
+              {"vulns":[{"id":"GHSA-FAIL","modified":"2026-01-01T00:00:00Z"}]}
+            ]}
+            """;
+        _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(batchJson));
+        _server.Given(Request.Create().WithPath("/vulns/GHSA-OK").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithBody("""{"id":"GHSA-OK","summary":"good"}"""));
+        _server.Given(Request.Create().WithPath("/vulns/GHSA-FAIL").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
+
+        var result = await _sut.QueryBatchAsync(new[] { "pkg:npm/ok@1.0.0", "pkg:npm/fail@1.0.0" });
+
+        var ok = Assert.Single(result[0]);
+        Assert.True(ok.IsHydrated);
+        Assert.NotNull(ok.RawJson);
+        Assert.Contains("GHSA-OK", ok.RawJson);
+
+        var fail = Assert.Single(result[1]);
+        Assert.False(fail.IsHydrated);
+        Assert.Null(fail.RawJson);
+    }
+
     // ── Retry behaviour ────────────────────────────────────────────────────────
 
     [Fact]

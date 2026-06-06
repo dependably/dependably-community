@@ -10,6 +10,12 @@ using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
+using Org.BouncyCastle.Bcpg;
+using Org.BouncyCastle.Bcpg.OpenPgp;
+using Org.BouncyCastle.Crypto.Generators;
+using Org.BouncyCastle.Crypto.Parameters;
+using Org.BouncyCastle.Math;
+using Org.BouncyCastle.Security;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
@@ -130,9 +136,9 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetRepodataAsync_HashPrefixedFile_FirstFetchStoresBlobSecondServesFromBlob()
     {
-        var sha256 = new string('a', 64);
-        var filename = $"{sha256}-primary.xml.gz";
         var body = new byte[] { 1, 2, 3, 4, 5 };
+        var sha256 = Convert.ToHexString(SHA256.HashData(body)).ToLowerInvariant();
+        var filename = $"{sha256}-primary.xml.gz";
         _server.Given(Request.Create().WithPath($"/repodata/{filename}").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(body));
 
@@ -154,6 +160,66 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
         Assert.Equal(1, _server.LogEntries.Count(e =>
             e.RequestMessage?.Path?.Contains(sha256) == true));
+    }
+
+    [Fact]
+    public async Task GetRepodataAsync_HashPrefixedFile_BodyHashMismatch_RejectedAndNotCached()
+    {
+        // A poisoned / MITM'd upstream serves bytes that do not hash to the requested prefix.
+        var sha256 = new string('a', 64);                 // not the hash of `body`
+        var filename = $"{sha256}-primary.xml.gz";
+        var body = new byte[] { 9, 8, 7 };
+        _server.Given(Request.Create().WithPath($"/repodata/{filename}").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(body));
+
+        var blobs = new InMemoryBlobStore();
+        var proxy = BuildProxy(blobs: blobs);
+
+        var result = await proxy.GetRepodataAsync(_upstream, filename, null, null, default);
+
+        Assert.Null(result);                                                  // not served
+        Assert.Null(await blobs.GetAsync(BlobKeys.RpmRepodataProxy(sha256)));  // not cached
+    }
+
+    [Fact]
+    public async Task ResolvePackageUrlAsync_OpenChecksumOnly_NotFalselyRejected()
+    {
+        // Repos that declare only <open-checksum> name the hash of the DECOMPRESSED primary.xml;
+        // the body verification must accept that interpretation, not just the compressed hash.
+        var packageSha256 = new string('e', 64);
+        var primaryGzBytes = BuildPrimaryXmlGz(new[]
+        {
+            ("curl", 0, "8.6.0", "1.fc40", "x86_64", packageSha256,
+             "Packages/c/curl-8.6.0-1.fc40.x86_64.rpm", (string?)"HTTP client", (string?)null)
+        });
+
+        byte[] decompressed;
+        using (var gz = new GZipStream(new MemoryStream(primaryGzBytes), CompressionMode.Decompress))
+        using (var ms = new MemoryStream()) { gz.CopyTo(ms); decompressed = ms.ToArray(); }
+        var openSha = Convert.ToHexString(SHA256.HashData(decompressed)).ToLowerInvariant();
+        var compressedSha = Convert.ToHexString(SHA256.HashData(primaryGzBytes)).ToLowerInvariant();
+        var primaryFilename = $"{compressedSha}-primary.xml.gz";  // DNF names by compressed hash
+
+        var repomd = $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <repomd xmlns="http://linux.duke.edu/metadata/repo">
+              <data type="primary">
+                <location href="repodata/{primaryFilename}"/>
+                <open-checksum type="sha256">{openSha}</open-checksum>
+              </data>
+            </repomd>
+            """;
+
+        _server.Given(Request.Create().WithPath("/repodata/repomd.xml").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(Encoding.UTF8.GetBytes(repomd)));
+        _server.Given(Request.Create().WithPath($"/repodata/{primaryFilename}").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGzBytes));
+
+        var proxy = BuildProxy();
+        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+
+        Assert.NotNull(result);
+        Assert.Equal(packageSha256, result!.Sha256);
     }
 
     // ── ParsePrimaryFromRepomd ────────────────────────────────────────────────
@@ -235,16 +301,18 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public async Task ResolvePackageUrlAsync_PackageInPrimary_ReturnsResolution()
     {
-        var primarySha256 = new string('d', 64);
-        var primaryFilename = $"{primarySha256}-primary.xml.gz";
         var packageSha256 = new string('e', 64);
 
-        var repomdBytes = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
         var primaryGzBytes = BuildPrimaryXmlGz(new[]
         {
             ("curl", 0, "8.6.0", "1.fc40", "x86_64", packageSha256,
              "Packages/c/curl-8.6.0-1.fc40.x86_64.rpm", (string?)"HTTP client", (string?)null)
         });
+        // The repomd checksum must be the real hash of the primary.xml.gz, or the proxy's
+        // integrity check rejects it before parsing.
+        var primarySha256 = Convert.ToHexString(SHA256.HashData(primaryGzBytes)).ToLowerInvariant();
+        var primaryFilename = $"{primarySha256}-primary.xml.gz";
+        var repomdBytes = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
 
         _server.Given(Request.Create().WithPath("/repodata/repomd.xml").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(repomdBytes));
@@ -264,11 +332,10 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public async Task ResolvePackageUrlAsync_PackageAbsentFromPrimary_ReturnsNull()
     {
-        var primarySha256 = new string('f', 64);
-        var primaryFilename = $"{primarySha256}-primary.xml.gz";
-
-        var repomdBytes = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
         var primaryGzBytes = BuildPrimaryXmlGz([]);
+        var primarySha256 = Convert.ToHexString(SHA256.HashData(primaryGzBytes)).ToLowerInvariant();
+        var primaryFilename = $"{primarySha256}-primary.xml.gz";
+        var repomdBytes = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
 
         _server.Given(Request.Create().WithPath("/repodata/repomd.xml").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(repomdBytes));
@@ -375,35 +442,223 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         Assert.Equal(expected, RpmUpstreamProxy.IsHashPrefixedFilename(filename));
     }
 
+    // ── repomd.xml GPG signature verification ─────────────────────────────────
+
+    [Fact]
+    public async Task ResolvePackageUrlAsync_ValidSignature_TrustedKey_ResolvesPackage()
+    {
+        var (secret, pubArmored) = GeneratePgpKeyPair();
+        var (repomdBytes, primaryFilename, primaryGz) = BuildSignedRepoFixture(packageName: "curl");
+        var asc = SignDetached(repomdBytes, secret);
+
+        StubRepo(repomdBytes, asc, primaryFilename, primaryGz);
+
+        var proxy = BuildProxy(gpgKey: Encoding.UTF8.GetString(pubArmored));
+        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+
+        Assert.NotNull(result);
+        Assert.Equal("curl", result!.Name);
+    }
+
+    [Fact]
+    public async Task ResolvePackageUrlAsync_TamperedRepomd_ReturnsNull_PrimaryNeverFetched()
+    {
+        var (secret, pubArmored) = GeneratePgpKeyPair();
+        var (repomdBytes, primaryFilename, primaryGz) = BuildSignedRepoFixture(packageName: "curl");
+        var asc = SignDetached(repomdBytes, secret);                 // signature over the ORIGINAL bytes
+
+        var tampered = (byte[])repomdBytes.Clone();
+        tampered[^5] ^= 0xFF;                                        // flip a byte → signature no longer matches
+        StubRepo(tampered, asc, primaryFilename, primaryGz);
+
+        var proxy = BuildProxy(gpgKey: Encoding.UTF8.GetString(pubArmored));
+        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+
+        Assert.Null(result);
+        // Fail-before-parse: the primary.xml.gz must never be fetched once repomd fails verification.
+        Assert.DoesNotContain(_server.LogEntries, e => e.RequestMessage?.Path?.Contains(primaryFilename) == true);
+    }
+
+    [Fact]
+    public async Task ResolvePackageUrlAsync_SignatureFromUntrustedKey_ReturnsNull()
+    {
+        var (signingKey, _) = GeneratePgpKeyPair();
+        var (_, trustedPubArmored) = GeneratePgpKeyPair();           // a DIFFERENT key is trusted
+        var (repomdBytes, primaryFilename, primaryGz) = BuildSignedRepoFixture(packageName: "curl");
+        var asc = SignDetached(repomdBytes, signingKey);
+
+        StubRepo(repomdBytes, asc, primaryFilename, primaryGz);
+
+        var proxy = BuildProxy(gpgKey: Encoding.UTF8.GetString(trustedPubArmored));
+        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task ResolvePackageUrlAsync_MissingAscFile_ReturnsNull()
+    {
+        var (_, pubArmored) = GeneratePgpKeyPair();
+        var (repomdBytes, primaryFilename, primaryGz) = BuildSignedRepoFixture(packageName: "curl");
+        // No repomd.xml.asc stub → 404.
+        _server.Given(Request.Create().WithPath("/repodata/repomd.xml").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(repomdBytes));
+        _server.Given(Request.Create().WithPath($"/repodata/{primaryFilename}").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGz));
+
+        var proxy = BuildProxy(gpgKey: Encoding.UTF8.GetString(pubArmored));
+        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task ResolvePackageUrlAsync_NoKeyConfigured_ResolvesWithoutVerification()
+    {
+        // Back-compat: when no trust anchor is pinned, verification is skipped and resolution
+        // proceeds exactly as before — no repomd.xml.asc is required.
+        var (repomdBytes, primaryFilename, primaryGz) = BuildSignedRepoFixture(packageName: "curl");
+        _server.Given(Request.Create().WithPath("/repodata/repomd.xml").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(repomdBytes));
+        _server.Given(Request.Create().WithPath($"/repodata/{primaryFilename}").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGz));
+
+        var proxy = BuildProxy();   // no Rpm:GpgKey
+        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+
+        Assert.NotNull(result);
+    }
+
+    [Fact]
+    public async Task ResolvePackageUrlAsync_VerifyForcedButNoKey_ReturnsNull()
+    {
+        var (repomdBytes, primaryFilename, primaryGz) = BuildSignedRepoFixture(packageName: "curl");
+        StubRepo(repomdBytes, SignDetached(GeneratePgpKeyPair().secret, repomdBytes), primaryFilename, primaryGz);
+
+        // Operator demanded enforcement but provided no parseable key → fail closed.
+        var proxy = BuildProxy(verifyFlag: "true");
+        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void VerifyRepomdSignature_ValidTamperedAndWrongKey()
+    {
+        var (secret, pubArmored) = GeneratePgpKeyPair();
+        var (_, otherPubArmored) = GeneratePgpKeyPair();
+        var repomd = Encoding.UTF8.GetBytes("<repomd>trusted</repomd>");
+        var asc = SignDetached(repomd, secret);
+
+        var trustedRing = LoadRing(pubArmored);
+        var otherRing = LoadRing(otherPubArmored);
+
+        Assert.True(RpmUpstreamProxy.VerifyRepomdSignature(repomd, asc, trustedRing));
+
+        var tampered = (byte[])repomd.Clone();
+        tampered[0] ^= 0xFF;
+        Assert.False(RpmUpstreamProxy.VerifyRepomdSignature(tampered, asc, trustedRing));
+
+        Assert.False(RpmUpstreamProxy.VerifyRepomdSignature(repomd, asc, otherRing));
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private RpmUpstreamProxy BuildProxy(InMemoryBlobStore? blobs = null, bool airGapped = false)
+    private static (byte[] Repomd, string PrimaryFilename, byte[] PrimaryGz) BuildSignedRepoFixture(string packageName)
+    {
+        var primaryGz = BuildPrimaryXmlGz(new[]
+        {
+            (packageName, 0, "8.6.0", "1.fc40", "x86_64", new string('e', 64),
+             $"Packages/c/{packageName}-8.6.0-1.fc40.x86_64.rpm", (string?)"HTTP client", (string?)null)
+        });
+        // The repomd checksum must be the real hash of the primary.xml.gz, or the proxy's
+        // repodata-body integrity check (RepodataBodyMatches) rejects it before parsing.
+        var primarySha256 = Convert.ToHexString(SHA256.HashData(primaryGz)).ToLowerInvariant();
+        var primaryFilename = $"{primarySha256}-primary.xml.gz";
+        var repomd = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
+        return (repomd, primaryFilename, primaryGz);
+    }
+
+    private void StubRepo(byte[] repomd, byte[] asc, string primaryFilename, byte[] primaryGz)
+    {
+        _server.Given(Request.Create().WithPath("/repodata/repomd.xml").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(repomd));
+        _server.Given(Request.Create().WithPath("/repodata/repomd.xml.asc").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(asc));
+        _server.Given(Request.Create().WithPath($"/repodata/{primaryFilename}").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGz));
+    }
+
+    private static PgpPublicKeyRingBundle LoadRing(byte[] armoredPublicKey)
+    {
+        using var keyIn = PgpUtilities.GetDecoderStream(new MemoryStream(armoredPublicKey));
+        return new PgpPublicKeyRingBundle(keyIn);
+    }
+
+    private static (PgpSecretKey secret, byte[] armoredPublicKey) GeneratePgpKeyPair()
+    {
+        var gen = new RsaKeyPairGenerator();
+        gen.Init(new RsaKeyGenerationParameters(BigInteger.ValueOf(0x10001), new SecureRandom(), 1024, 25));
+        var kp = gen.GenerateKeyPair();
+        var secretKey = new PgpSecretKey(
+            PgpSignature.DefaultCertification, PublicKeyAlgorithmTag.RsaGeneral,
+            kp.Public, kp.Private, DateTime.UtcNow, "test@example.com",
+            SymmetricKeyAlgorithmTag.Aes256, System.Array.Empty<char>(), null, null, new SecureRandom());
+
+        using var ms = new MemoryStream();
+        using (var armored = new ArmoredOutputStream(ms))
+            secretKey.PublicKey.Encode(armored);
+        return (secretKey, ms.ToArray());
+    }
+
+    private static byte[] SignDetached(PgpSecretKey secretKey, byte[] data) => SignDetached(data, secretKey);
+
+    private static byte[] SignDetached(byte[] data, PgpSecretKey secretKey)
+    {
+        var privKey = secretKey.ExtractPrivateKey(System.Array.Empty<char>());
+        var sigGen = new PgpSignatureGenerator(secretKey.PublicKey.Algorithm, HashAlgorithmTag.Sha256);
+        sigGen.InitSign(PgpSignature.BinaryDocument, privKey);
+        sigGen.Update(data);
+        var sig = sigGen.Generate();
+
+        using var ms = new MemoryStream();
+        using (var armored = new ArmoredOutputStream(ms))
+        using (var bcpgOut = new BcpgOutputStream(armored))
+            sig.Encode(bcpgOut);
+        return ms.ToArray();
+    }
+
+    private RpmUpstreamProxy BuildProxy(
+        InMemoryBlobStore? blobs = null, bool airGapped = false,
+        string? gpgKey = null, string? verifyFlag = null)
     {
         blobs ??= new InMemoryBlobStore();
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["Rpm:Upstream"] = _upstream,
-                ["Rpm:UpstreamMode"] = "passthrough",
-                ["Rpm:RepomdTtl"] = "00:05:00",
-                ["Rpm:GpgKeyTtl"] = "1.00:00:00",
-                ["Rpm:NegativeCacheTtl"] = "00:05:00",
-            })
-            .Build();
+        var settings = new Dictionary<string, string?>
+        {
+            ["Rpm:Upstream"] = _upstream,
+            ["Rpm:UpstreamMode"] = "passthrough",
+            ["Rpm:RepomdTtl"] = "00:05:00",
+            ["Rpm:GpgKeyTtl"] = "1.00:00:00",
+            ["Rpm:NegativeCacheTtl"] = "00:05:00",
+        };
+        if (gpgKey is not null) settings["Rpm:GpgKey"] = gpgKey;
+        if (verifyFlag is not null) settings["Rpm:VerifyRepomdSignature"] = verifyFlag;
+        var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
 
         var httpFactory = new StaticHttpClientFactory(new HttpClient(new WireMockHandler(_server)));
         var memCache = new MemoryCache(new MemoryCacheOptions());
         var airGapMode = new StubAirGapMode(airGapped);
         var urlValidator = new AllowAllValidator();
 
-        return new RpmUpstreamProxy(
+        return new RpmUpstreamProxy(new RpmUpstreamProxyServices(
             httpFactory,
             new TieredBlobStorage(blobs, blobs),
             _db,
             memCache,
             config,
             airGapMode,
-            urlValidator);
+            urlValidator,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<RpmUpstreamProxy>.Instance));
     }
 
     // ── XML builders ─────────────────────────────────────────────────────────

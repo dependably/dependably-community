@@ -328,17 +328,19 @@ public sealed class OciUpstreamResolver
         sha256Hex = Convert.ToHexString(sha256Bytes).ToLowerInvariant();
         var digest = "sha256:" + sha256Hex;
 
-        // Honour the upstream's Docker-Content-Digest if provided (can differ for
-        // Docker v1-to-v2 schema conversion).
+        // The content-addressed identity is the SHA-256 of the exact bytes cached and served, so
+        // a by-digest fetch always returns bytes that hash to the requested digest (the OCI
+        // Distribution Spec invariant). If upstream's Docker-Content-Digest disagrees, treat it
+        // as an upstream integrity anomaly and keep the computed value — never adopt an
+        // unverified header as the stored digest identity.
         if (resp.Headers.TryGetValues("Docker-Content-Digest", out var dcdValues))
         {
             var upstreamDigest = dcdValues.FirstOrDefault();
             if (!string.IsNullOrEmpty(upstreamDigest) && upstreamDigest != digest)
             {
-                _logger.LogDebug(
-                    "OCI {Repository}/{Reference}: upstream digest {Upstream} differs from computed {Computed}; using upstream",
+                _logger.LogWarning(
+                    "OCI {Repository}/{Reference}: upstream Docker-Content-Digest {Upstream} differs from computed {Computed}; using computed",
                     repository, reference, upstreamDigest, digest);
-                digest = upstreamDigest;
             }
         }
         return digest;

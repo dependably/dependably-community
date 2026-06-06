@@ -67,6 +67,18 @@ public sealed class UserService
     }
 
     /// <summary>
+    /// Lean check used by the request pipeline to force temp-password rotation: true when the
+    /// user must change their password before continuing. Missing row → false.
+    /// </summary>
+    public async Task<bool> IsPasswordChangeRequiredAsync(string userId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var flag = await conn.ExecuteScalarAsync<long?>(
+            "SELECT must_change_password FROM users WHERE id = @id", new { id = userId });
+        return flag == 1;
+    }
+
+    /// <summary>
     /// "Me" projection: per-user must_change_password + language override + the tenant's
     /// default_language. Returns null when the user row doesn't exist.
     /// </summary>

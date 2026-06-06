@@ -1,5 +1,4 @@
 using System.Net;
-using NetTools;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Observability;
 
@@ -7,25 +6,13 @@ namespace Dependably.Security;
 
 /// <summary>
 /// Validates upstream registry URLs to prevent SSRF attacks (OWASP API7:2023).
-/// Blocks all private, loopback, link-local, and cloud-metadata IP ranges.
-/// Re-validates via DNS resolution on every proxy request to prevent DNS rebinding.
+/// Blocks all private, loopback, link-local, and cloud-metadata IP ranges via
+/// <see cref="SsrfGuard"/>. This URL-level check is a cheap fail-fast plus audit emitter;
+/// the authoritative gate against DNS rebinding is <see cref="SsrfConnectCallback"/>, which
+/// validates the IP actually dialed at connect time.
 /// </summary>
 public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
 {
-    // Blocked ranges: RFC 1918 private, loopback, link-local, cloud metadata, shared address space
-    private static readonly IPAddressRange[] BlockedRanges =
-    [
-        IPAddressRange.Parse("127.0.0.0/8"),
-        IPAddressRange.Parse("10.0.0.0/8"),
-        IPAddressRange.Parse("172.16.0.0/12"),
-        IPAddressRange.Parse("192.168.0.0/16"),
-        IPAddressRange.Parse("169.254.0.0/16"),
-        IPAddressRange.Parse("100.64.0.0/10"),
-        IPAddressRange.Parse("::1/128"),
-        IPAddressRange.Parse("fc00::/7"),
-        IPAddressRange.Parse("fe80::/10"),
-    ];
-
     private readonly AuditRepository _audit;
 
     public UpstreamUrlValidator(AuditRepository audit) => _audit = audit;
@@ -46,7 +33,7 @@ public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
             return "Only http:// and https:// schemes are accepted.";
 
         // Static host check (IP addresses only — hostnames checked at request time)
-        if (IPAddress.TryParse(uri.Host, out var ip) && IsBlocked(ip))
+        if (IPAddress.TryParse(uri.Host, out var ip) && SsrfGuard.IsBlockedIp(ip))
             return $"Upstream URL resolves to a blocked IP range: {ip}";
 
         return null;
@@ -64,7 +51,7 @@ public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
         try
         {
             var addresses = await Dns.GetHostAddressesAsync(uri.Host, ct);
-            var blocked = addresses.FirstOrDefault(IsBlocked);
+            var blocked = addresses.FirstOrDefault(SsrfGuard.IsBlockedIp);
             if (blocked is null) return true;
 
             DependablyMeter.UpstreamUrlBlocks.Add(1);
@@ -81,7 +68,4 @@ public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
             return false;
         }
     }
-
-    private static bool IsBlocked(IPAddress ip) =>
-        BlockedRanges.Any(range => range.Contains(ip));
 }

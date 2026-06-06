@@ -54,6 +54,19 @@ public sealed class EcosystemDetectorTests
     }
 
     [Fact]
+    public void Detects_PyPi_Egg_From_Zip_With_EggInfo_PkgInfo()
+    {
+        var (bytes, _) = PyPiFixtures.BuildEgg("acme_detect_egg", "0.3.0");
+        var (ok, err) = EcosystemDetector.Detect("acme_detect_egg-0.3.0-py3.11.egg", bytes);
+
+        Assert.Null(err);
+        Assert.NotNull(ok);
+        Assert.Equal("pypi", ok!.Ecosystem);
+        Assert.Equal("acme-detect-egg", ok.Name);
+        Assert.Equal("0.3.0", ok.Version);
+    }
+
+    [Fact]
     public void Detects_NuGet_From_Zip_With_Nuspec()
     {
         var (bytes, _) = NuGetFixtures.BuildNupkg("Acme.Detect.NuGet", "1.0.0");

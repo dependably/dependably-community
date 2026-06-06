@@ -43,15 +43,16 @@
   <ItemGroup>
     <PackageReference Include="AWSSDK.S3" Version="4.0.20.3" />
     <PackageReference Include="StackExchange.Redis" Version="2.8.41" />
-    <PackageReference Include="Microsoft.AspNetCore.DataProtection.StackExchangeRedis" Version="10.0.*" />
+    <PackageReference Include="Microsoft.AspNetCore.DataProtection.StackExchangeRedis" Version="10.0.8" />
     <PackageReference Include="Azure.Storage.Blobs" Version="12.27.0" />
     <PackageReference Include="BCrypt.Net-Next" Version="4.1.0" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
     <PackageReference Include="zxcvbn-core" Version="7.0.92" />
     <PackageReference Include="Cronos" Version="0.11.1" />
     <PackageReference Include="Dapper" Version="2.1.72" />
     <PackageReference Include="IPAddressRange" Version="6.3.0" />
     <PackageReference Include="ITfoxtec.Identity.Saml2.MvcCore" Version="4.17.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.*" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.8" />
     <!-- Pin Microsoft.IdentityModel.* and System.IdentityModel.* to a coherent version. Without
          these pins, ITfoxtec.Identity.Saml2 pulls in Microsoft.IdentityModel.Tokens 8.15.0 while
          the JwtBearer chain stays on 8.0.1, producing a binary mismatch that surfaces at runtime
@@ -60,8 +61,8 @@
     <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.15.0" />
     <PackageReference Include="Microsoft.IdentityModel.Protocols" Version="8.15.0" />
     <PackageReference Include="Microsoft.IdentityModel.Protocols.OpenIdConnect" Version="8.15.0" />
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.*" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.*" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.8" />
     <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" Version="3.0.1" />
     <PackageReference Include="Npgsql" Version="8.0.7" />
     <PackageReference Include="NuGet.Versioning" Version="7.3.0" />
@@ -77,6 +78,7 @@
     </PackageReference>
     <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
     <PackageReference Include="Serilog.Sinks.OpenTelemetry" Version="4.2.0" />
+    <PackageReference Include="Tomlyn" Version="2.4.2" />
   </ItemGroup>
 
 </Project>

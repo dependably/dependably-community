@@ -121,6 +121,12 @@ public sealed class OciController : OrgScopedControllerBase
                     // "download" is the canonical fetch event across ecosystems (npm/PyPI/NuGet)
                     // and the only one the Audit page filter knows; the PURL digest distinguishes
                     // a manifest pull from a layer pull, so a dedicated event name isn't needed.
+                    //
+                    // OCI is deliberately omitted from the package_versions.download_count counter:
+                    // one `docker pull` fans out into a manifest GET plus N layer-blob GETs (which
+                    // would multi-count a single pull), and the bare digest PURL logged here doesn't
+                    // match the version row's canonical PURL (which carries ?repository_url=…&tag=…).
+                    // OCI download volume is still tracked org-wide via these activity rows.
                     await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{resolved}", "download",
                         actorId: auth.Token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
                     return File(stream, row.MediaType!);

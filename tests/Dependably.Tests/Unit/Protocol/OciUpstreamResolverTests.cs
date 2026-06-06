@@ -263,6 +263,47 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         Assert.Equal(newDigest, result!.Digest);
     }
 
+    [Fact]
+    public async Task FetchManifestAsync_UpstreamDigestHeaderMismatch_UsesComputedDigest()
+    {
+        var orgId = await OrgSeeder.InsertAsync(_db, "digest-mismatch-org");
+
+        var manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"x\":1}");
+        var computedDigest = "sha256:" + Sha256Hex(manifestBytes);
+        var bogusDigest = "sha256:" + new string('b', 64); // upstream lies / MITM
+
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(manifestBytes)
+            {
+                Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/vnd.oci.image.manifest.v1+json") },
+            },
+        };
+        upstreamResp.Headers.TryAddWithoutValidation("Docker-Content-Digest", bogusDigest);
+
+        var http = new SingleResponseFactory(upstreamResp);
+        var opts = Options.Create(DefaultOptions());
+        var authSvc = new OciUpstreamAuthService(http, opts, new StubAirGap(false),
+            NullLogger<OciUpstreamAuthService>.Instance);
+        var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
+        var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
+            NullLogger<OciUpstreamResolver>.Instance);
+
+        var result = await resolver.FetchManifestAsync(orgId, "library/ubuntu", "latest", isDigest: false, default);
+
+        Assert.NotNull(result);
+        // The unverified upstream header must NOT become the stored identity; computed wins so a
+        // by-digest fetch returns bytes that hash to the requested digest (OCI spec invariant).
+        Assert.Equal(computedDigest, result!.Digest);
+        Assert.NotEqual(bogusDigest, result.Digest);
+
+        await using var conn = await _db.OpenAsync();
+        var storedTagDigest = await conn.ExecuteScalarAsync<string>(
+            "SELECT digest FROM oci_tags WHERE org_id = @o AND repository = 'library/ubuntu' AND tag = 'latest'",
+            new { o = orgId });
+        Assert.Equal(computedDigest, storedTagDigest);
+    }
+
     // ── FetchManifestAsync — no upstream ──────────────────────────────────────
 
     [Fact]

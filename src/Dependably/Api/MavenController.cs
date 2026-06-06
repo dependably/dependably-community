@@ -244,12 +244,13 @@ public sealed class MavenController : OrgScopedControllerBase
         var stream = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(row.BlobKey), ct);
         if (stream is null) return NotFound();
 
+        var purl = PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version ?? "unknown");
         await _svc.Audit.LogActivityAsync(
-            orgId, "maven",
-            PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version ?? "unknown"),
+            orgId, "maven", purl,
             "download", actorId,
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
+        await _svc.Packages.IncrementDownloadCountByPurlAsync(purl, ct);
 
         return File(stream, ContentTypeFor(coords.Extension), coords.Filename);
     }

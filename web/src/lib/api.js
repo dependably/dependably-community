@@ -289,6 +289,8 @@ export const api = {
     const q = qs({ limit: 50, page: 1, ...params })
     return req('GET', `/vuln-report?${q}`)
   },
+  // Lazy advisory detail for the expandable row — tenant-scoped server-side (BOLA).
+  getVulnDetail: (osvId) => req('GET', `/vulnerabilities/${encodeURIComponent(osvId)}`),
   rescanVersion: (eco, name, version) =>
     req('POST', `/packages/${eco}/${name.replaceAll('/', '%2F')}/${version}/rescan`),
   blockVersion: (eco, name, version) =>

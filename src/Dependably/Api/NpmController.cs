@@ -31,7 +31,6 @@ public partial class NpmController : ControllerBase
     private readonly UpstreamClient _upstream;
     private readonly AllowlistService _allowlist;
     private readonly BlocklistRepository _blocklist;
-    private readonly IConfiguration _config;
     private readonly BlockGateService _blockGate;
     private readonly LicenseRepository _licenses;
     private readonly IPublicUrlBuilder _urls;
@@ -50,7 +49,6 @@ public partial class NpmController : ControllerBase
         _upstream = svc.Upstream;
         _allowlist = svc.Allowlist;
         _blocklist = svc.Blocklist;
-        _config = svc.Config;
         _blockGate = svc.BlockGate;
         _licenses = svc.Licenses;
         _urls = svc.Urls;
@@ -441,6 +439,7 @@ public partial class NpmController : ControllerBase
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
         await _audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token.UserId,
             actorKind: token.ActorKind, sourceIp: sourceIp, ct: ct);
+        await _packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
         return File(stream, "application/octet-stream", file);
     }
 
@@ -468,6 +467,7 @@ public partial class NpmController : ControllerBase
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
         await _audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token?.UserId,
             actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
+        await _packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
         return File(stream, "application/octet-stream", file);
     }
 

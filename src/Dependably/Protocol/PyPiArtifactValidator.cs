@@ -7,12 +7,14 @@ namespace Dependably.Protocol;
 
 /// <summary>
 /// Extracts package name and version from a PyPI artefact for the bulk-import path.
-/// Two formats are supported:
+/// Supported formats:
 /// <list type="bullet">
 ///   <item>Wheel (<c>.whl</c>): zip with metadata at <c>{name}-{version}.dist-info/METADATA</c>.
 ///   The filename itself encodes <c>{name}-{version}-...</c> per PEP 427.</item>
 ///   <item>Sdist (<c>.tar.gz</c> or <c>.tgz</c>): gzipped tar with PEP 314
 ///   <c>{name}-{version}/PKG-INFO</c> at the top level.</item>
+///   <item>Egg (<c>.egg</c>): legacy setuptools zip with metadata at <c>EGG-INFO/PKG-INFO</c>.
+///   Supported for proxying and importing existing artefacts; PyPI no longer accepts egg uploads.</item>
 /// </list>
 /// Names are normalised per PEP 503 (lowercase, runs of <c>_</c>, <c>.</c>, or <c>-</c>
 /// collapse to a single <c>-</c>) before comparison.
@@ -45,8 +47,11 @@ public static partial class PyPiArtifactValidator
                 || lowered.EndsWith(".tgz", StringComparison.Ordinal))
                 return ValidateSdist(bytes, out name, out version);
 
+            if (lowered.EndsWith(".egg", StringComparison.Ordinal))
+                return ValidateEggStrict(filename, bytes, out name, out version);
+
             return ValidationResult.Fail("filename",
-                "Unrecognised PyPI artefact extension; expected .whl or .tar.gz/.tgz.");
+                "Unrecognised PyPI artefact extension; expected .whl, .tar.gz/.tgz, or .egg.");
         }
         catch (Exception ex)
         {
@@ -115,6 +120,69 @@ public static partial class PyPiArtifactValidator
         if (fileVersion != metaVersion)
             return ValidationResult.Fail("content",
                 $"Wheel filename version '{fileVersion}' does not match METADATA Version '{metaVersion}'.");
+
+        name = metaNameNormalized;
+        version = metaVersion;
+        return ValidationResult.Ok();
+    }
+
+    /// <summary>
+    /// Content-only egg validation. Derives name+version from <c>EGG-INFO/PKG-INFO</c> inside
+    /// the zip — no filename involved. Eggs are a legacy setuptools format supported for
+    /// proxying and importing existing artefacts; PyPI no longer accepts egg uploads.
+    /// </summary>
+    public static ValidationResult ValidateEgg(byte[] bytes, out string? name, out string? version)
+    {
+        name = null;
+        version = null;
+        try
+        {
+            using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
+            var metaEntry = zip.Entries.FirstOrDefault(e =>
+                e.FullName.EndsWith("EGG-INFO/PKG-INFO", StringComparison.OrdinalIgnoreCase));
+            if (metaEntry is null)
+                return ValidationResult.Fail("content", "Egg is missing EGG-INFO/PKG-INFO.");
+
+            using var stream = metaEntry.Open();
+            using var reader = new StreamReader(stream);
+            var (metaName, metaVersion) = ReadHeaders(reader, "Name", "Version");
+
+            if (!ValidateNameVersion(metaName, metaVersion, out var error))
+                return ValidationResult.Fail("content", error);
+
+            name = Normalize(metaName!);
+            version = metaVersion;
+            return ValidationResult.Ok();
+        }
+        catch (Exception ex)
+        {
+            return ValidationResult.Fail("content", $"Failed to parse egg: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Strict egg validation for the protocol push path: cross-checks the filename-derived name
+    /// against <c>EGG-INFO/PKG-INFO</c>. The setuptools egg filename mangles <c>-</c> to <c>_</c>
+    /// in both name and version, so only the PEP 503-normalised name is cross-checked; the
+    /// version is taken from PKG-INFO, which is authoritative.
+    /// </summary>
+    private static ValidationResult ValidateEggStrict(string filename, byte[] bytes, out string? name, out string? version)
+    {
+        name = null;
+        version = null;
+
+        // Filename per setuptools: {name}-{version}(-py{X.Y})?(-{platform})?.egg
+        var stem = filename[..^4];
+        var parts = stem.Split('-');
+        if (parts.Length < 2)
+            return ValidationResult.Fail("filename", "Egg filename must have at least 2 dash-separated segments.");
+
+        var inner = ValidateEgg(bytes, out var metaNameNormalized, out var metaVersion);
+        if (!inner.IsValid) return inner;
+
+        if (!Normalize(parts[0]).Equals(metaNameNormalized!, StringComparison.Ordinal))
+            return ValidationResult.Fail("content",
+                $"Egg filename name '{parts[0]}' does not match EGG-INFO/PKG-INFO Name.");
 
         name = metaNameNormalized;
         version = metaVersion;
@@ -202,13 +270,18 @@ public static partial class PyPiArtifactValidator
     public static string Normalize(string name) =>
         Pep503Replace().Replace(name.ToLowerInvariant(), "-");
 
+    /// <summary>True when <paramref name="version"/> is PEP 440-shaped (digit-leading). Public so
+    /// manifest parsers can skip non-version entries (e.g. poetry vcs/path source deps).</summary>
+    public static bool IsPep440Version(string version) => Pep440VersionRegex().IsMatch(version);
+
     [GeneratedRegex(@"[-_.]+")]
     private static partial Regex Pep503Replace();
 
     /// <summary>
     /// Filename-only parser used by the proxy <c>/packages/{file}</c> path, where the
-    /// archive bytes aren't in hand yet. Wheels follow PEP 427 strictly; sdists need a
-    /// right-to-left PEP 440 scan because the distribution segment can contain hyphens
+    /// archive bytes aren't in hand yet. Wheels and eggs follow a strict dash-split (name and
+    /// version are the first two segments); sdists need a right-to-left PEP 440 scan because the
+    /// distribution segment can contain hyphens
     /// (e.g. <c>psycopg2-binary-2.9.10.tar.gz</c> → <c>psycopg2-binary</c> + <c>2.9.10</c>).
     /// Returned <paramref name="purlName"/> is PEP 503 normalised.
     /// </summary>
@@ -219,34 +292,64 @@ public static partial class PyPiArtifactValidator
         if (string.IsNullOrEmpty(filename)) return false;
 
         var lowered = filename.ToLowerInvariant();
-        string stem;
-        bool isWheel;
-        if (lowered.EndsWith(".whl", StringComparison.Ordinal))
-        {
-            stem = filename[..^4];
-            isWheel = true;
-        }
-        else if (lowered.EndsWith(".tar.gz", StringComparison.Ordinal)) { stem = filename[..^7]; isWheel = false; }
-        else if (lowered.EndsWith(".tar.bz2", StringComparison.Ordinal)) { stem = filename[..^8]; isWheel = false; }
+
+        if (lowered.EndsWith(".egg", StringComparison.Ordinal))
+            return TryParseEggFilename(filename, out purlName, out version);
+
+        if (!TryStripArchiveExtension(filename, lowered, out var stem, out var isWheel)) return false;
+
+        return isWheel
+            ? TryParseWheelStem(stem, out purlName, out version)
+            : TryParseSdistStem(stem, out purlName, out version);
+    }
+
+    // setuptools egg: {name}-{version}(-py{X.Y})?(-{platform})?.egg. '-' inside the name/version
+    // is mangled to '_', so the first two dash segments are name + version.
+    private static bool TryParseEggFilename(string filename, out string? purlName, out string? version)
+    {
+        purlName = null;
+        version = null;
+        var eggParts = filename[..^4].Split('-');
+        if (eggParts.Length < 2 || !Pep440VersionRegex().IsMatch(eggParts[1])) return false;
+        purlName = Normalize(eggParts[0]);
+        version = eggParts[1];
+        return true;
+    }
+
+    // Strips the sdist/wheel archive extension, yielding the stem and whether it's a wheel.
+    private static bool TryStripArchiveExtension(string filename, string lowered, out string stem, out bool isWheel)
+    {
+        isWheel = false;
+        if (lowered.EndsWith(".whl", StringComparison.Ordinal)) { stem = filename[..^4]; isWheel = true; return true; }
+        if (lowered.EndsWith(".tar.gz", StringComparison.Ordinal)) { stem = filename[..^7]; return true; }
+        if (lowered.EndsWith(".tar.bz2", StringComparison.Ordinal)) { stem = filename[..^8]; return true; }
         // .zip is legacy PEP 314 sdist; PyPI still serves them. Same 4-char strip as .tgz.
-        else if (lowered.EndsWith(".tgz", StringComparison.Ordinal)
-            || lowered.EndsWith(".zip", StringComparison.Ordinal)) { stem = filename[..^4]; isWheel = false; }
-        else return false;
+        if (lowered.EndsWith(".tgz", StringComparison.Ordinal)
+            || lowered.EndsWith(".zip", StringComparison.Ordinal)) { stem = filename[..^4]; return true; }
+        stem = "";
+        return false;
+    }
 
-        if (isWheel)
-        {
-            // PEP 427: {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.
-            // Distribution is mandated to use underscores, so split-on-dash is safe here.
-            var parts = stem.Split('-');
-            if (parts.Length < 5) return false;
-            if (!Pep440VersionRegex().IsMatch(parts[1])) return false;
-            purlName = Normalize(parts[0]);
-            version = parts[1];
-            return true;
-        }
+    // PEP 427: {distribution}-{version}(-{build})?-{python}-{abi}-{platform}. Distribution is
+    // mandated to use underscores, so split-on-dash is safe here.
+    private static bool TryParseWheelStem(string stem, out string? purlName, out string? version)
+    {
+        purlName = null;
+        version = null;
+        var parts = stem.Split('-');
+        if (parts.Length < 5) return false;
+        if (!Pep440VersionRegex().IsMatch(parts[1])) return false;
+        purlName = Normalize(parts[0]);
+        version = parts[1];
+        return true;
+    }
 
-        // Sdist: scan right-to-left for the first split where the right side is PEP 440-shaped.
-        // This is how pip disambiguates names like "psycopg2-binary" from version suffixes.
+    // Sdist: scan right-to-left for the first split where the right side is PEP 440-shaped. This
+    // is how pip disambiguates names like "psycopg2-binary" from version suffixes.
+    private static bool TryParseSdistStem(string stem, out string? purlName, out string? version)
+    {
+        purlName = null;
+        version = null;
         for (var i = stem.LastIndexOf('-'); i > 0; i = stem.LastIndexOf('-', i - 1))
         {
             var candidate = stem[(i + 1)..];

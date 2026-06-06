@@ -95,12 +95,12 @@ public sealed class TokenRepository
         });
     }
 
-    public async Task<TokenRecord?> GetTokenByIdAsync(string tokenId, CancellationToken ct = default)
+    public async Task<TokenRecord?> GetTokenByIdAsync(string tokenId, string orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         var row = await conn.QuerySingleOrDefaultAsync<(string Id, string OrgId, string UserId, string? Capabilities, string? Description, string CreatedAt, string? ExpiresAt, string? LastUsedAt)>(
-            "SELECT id, org_id, user_id, capabilities, description, created_at, expires_at, last_used_at FROM user_tokens WHERE id = @id",
-            new { id = tokenId });
+            "SELECT id, org_id, user_id, capabilities, description, created_at, expires_at, last_used_at FROM user_tokens WHERE id = @id AND org_id = @orgId",
+            new { id = tokenId, orgId });
         if (row.Id is null) return null;
         return new TokenRecord
         {
@@ -113,10 +113,15 @@ public sealed class TokenRepository
         };
     }
 
-    public async Task DeleteTokenAsync(string tokenId, CancellationToken ct = default)
+    /// <summary>
+    /// Deletes a user token scoped to its org. Returns the number of rows removed (0 when the
+    /// id does not belong to <paramref name="orgId"/>), so callers reject cross-tenant deletes.
+    /// </summary>
+    public async Task<int> DeleteTokenAsync(string tokenId, string orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync("DELETE FROM user_tokens WHERE id = @id", new { id = tokenId });
+        return await conn.ExecuteAsync(
+            "DELETE FROM user_tokens WHERE id = @id AND org_id = @orgId", new { id = tokenId, orgId });
     }
 
     public async Task<IReadOnlyList<TokenRecord>> ListUserTokensAsync(string orgId, string userId, CancellationToken ct = default)
@@ -163,10 +168,15 @@ public sealed class TokenRepository
         });
     }
 
-    public async Task DeleteServiceTokenAsync(string tokenId, CancellationToken ct = default)
+    /// <summary>
+    /// Deletes a service token scoped to its org. Returns the number of rows removed (0 when
+    /// the id does not belong to <paramref name="orgId"/>), so callers reject cross-tenant deletes.
+    /// </summary>
+    public async Task<int> DeleteServiceTokenAsync(string tokenId, string orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync("DELETE FROM service_tokens WHERE id = @id", new { id = tokenId });
+        return await conn.ExecuteAsync(
+            "DELETE FROM service_tokens WHERE id = @id AND org_id = @orgId", new { id = tokenId, orgId });
     }
 
     public async Task<IReadOnlyList<ServiceTokenRecord>> ListServiceTokensAsync(string orgId, CancellationToken ct = default)

@@ -52,6 +52,11 @@ public sealed class ProxyVersionRecorder
                     UpstreamIntegrityAlgorithm: req.UpstreamIntegrityAlgorithm),
                 ct);
             await _audit.LogActivityAsync(req.OrgId, req.Ecosystem, req.Purl, "first_fetch", req.UserId, actorKind: req.ActorKind, sourceIp: req.SourceIp, ct: ct);
+            // first_fetch is itself a served download (the artefact streams to the client on this
+            // same request), so count it — matching the analytics 'download' + 'first_fetch'
+            // taxonomy. The concurrent-insert branch below logs no first_fetch and is not counted,
+            // since the winning fetch already recorded the download against this row.
+            await _packages.IncrementDownloadCountAsync(newVer.Id, ct);
 
             if (extractLicenses is not null)
             {

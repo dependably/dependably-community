@@ -92,15 +92,15 @@ public sealed class EcosystemDetectorExtendedTests
     public void Zip_With_NestedNuspec_Only_Is_Not_NuGet()
     {
         // .nuspec nested under a directory must NOT trigger the NuGet branch — detector
-        // checks `!FullName.Contains('/')`. With no root nuspec and no dist-info METADATA,
-        // we fall through to the ZIP "neither ... nor ..." message.
+        // checks `!FullName.Contains('/')`. With no root nuspec, no dist-info METADATA, and no
+        // EGG-INFO/PKG-INFO, we fall through to the ZIP "contains no ..." message.
         var bytes = BuildZipWithEntry("subdir/inner.nuspec", "<package/>");
         var (ok, err) = EcosystemDetector.Detect("nested.nupkg", bytes);
 
         Assert.Null(ok);
         Assert.NotNull(err);
         Assert.Equal("unrecognised_format", err!.Code);
-        Assert.Contains("ZIP archive contains neither", err.Message);
+        Assert.Contains("ZIP archive contains no root .nuspec", err.Message);
     }
 
     // ── ZIP-with-dist-info but wheel invalid ────────────────────────────────────

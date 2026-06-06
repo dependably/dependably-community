@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text.Json;
 using Dependably.Tests.Infrastructure;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
@@ -41,7 +42,7 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
         return content;
     }
 
-    private async Task UploadNpm(HttpClient c, string name, string version)
+    private static async Task UploadNpm(HttpClient c, string name, string version)
     {
         var (bytes, _, _) = NpmFixtures.BuildTarball(name, version);
         using var content = OneFile(bytes, $"{name}-{version}.tgz");
@@ -140,6 +141,53 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
         using var anon = _factory.CreateClient();
         var resp = await anon.GetAsync("/api/v1/packages/npm/dl-anon/1.0.0/download");
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+    }
+
+    /// <summary>Reads the durable download_count for a version off the GetPackage management DTO,
+    /// proving the counter is both persisted and surfaced to the UI.</summary>
+    private static async Task<long> DownloadCountAsync(HttpClient c, string eco, string name, string version)
+    {
+        var resp = await c.GetAsync($"/api/v1/packages/{eco}/{name}");
+        resp.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        foreach (var v in doc.RootElement.GetProperty("versions").EnumerateArray())
+            if (v.GetProperty("version").GetString() == version)
+                return v.GetProperty("downloadCount").GetInt64();
+        throw new Xunit.Sdk.XunitException($"version {version} not found in GetPackage response");
+    }
+
+    [Fact]
+    public async Task UiDownload_IncrementsDownloadCount_SurfacedInGetPackage()
+    {
+        using var c = await AdminClient();
+        var name = "dl-count-ui";
+        await UploadNpm(c, name, "1.0.0");
+
+        // Fresh upload has never been downloaded.
+        Assert.Equal(0, await DownloadCountAsync(c, "npm", name, "1.0.0"));
+
+        (await c.GetAsync($"/api/v1/packages/npm/{name}/1.0.0/download")).EnsureSuccessStatusCode();
+        (await c.GetAsync($"/api/v1/packages/npm/{name}/1.0.0/download")).EnsureSuccessStatusCode();
+
+        Assert.Equal(2, await DownloadCountAsync(c, "npm", name, "1.0.0"));
+    }
+
+    [Fact]
+    public async Task ProxyPull_FirstFetchThenCacheHit_EachCountAsADownload()
+    {
+        var name = $"dlcount{Guid.NewGuid():N}"[..16].ToLowerInvariant();
+        // SeedProxyVersion drives one cache-MISS pull → first_fetch, which is itself a download.
+        await SeedProxyVersion(name, "1.0.0");
+
+        using var c = await AdminClient();
+        Assert.Equal(1, await DownloadCountAsync(c, "npm", name, "1.0.0"));
+
+        // A second protocol pull is a cache HIT — also a download.
+        var token = await _factory.CreateToken("pull");
+        using var puller = _factory.CreateClientWithBearer(token);
+        (await puller.GetAsync($"/npm/tarballs/{name}/{name}-1.0.0.tgz")).EnsureSuccessStatusCode();
+
+        Assert.Equal(2, await DownloadCountAsync(c, "npm", name, "1.0.0"));
     }
 
     [Fact]

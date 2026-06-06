@@ -756,6 +756,56 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
+    [Fact]
+    public async Task GetSymbols_UploadedOrigin_AnonymousPullEnabled_NoToken_Returns401()
+    {
+        // Privately-uploaded symbols (PDBs) must require a token even when AnonymousPull is on —
+        // the .nupkg path enforces this, and the symbol path must match.
+        var id = $"PrivSym{Guid.NewGuid():N}"[..14];
+        var snupkg = BuildSnupkg(id, "1.0.0");
+        var pushToken = await _factory.CreateToken("push");
+        using (var pushClient = _factory.CreateClient())
+        {
+            pushClient.DefaultRequestHeaders.Add("X-NuGet-ApiKey", pushToken);
+            using var pushContent = new MultipartFormDataContent();
+            var fc = new ByteArrayContent(snupkg);
+            fc.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            pushContent.Add(fc, "package", $"{id}.1.0.0.snupkg");
+            var pushResp = await pushClient.PutAsync("/nuget/symbols", pushContent);
+            Assert.Equal(HttpStatusCode.Created, pushResp.StatusCode);
+        }
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        var orgId = await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")!;
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId", new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
+
+        var lowerId = id.ToLowerInvariant();
+        var path = $"/nuget/symbols/{lowerId}/1.0.0/{lowerId}.1.0.0.snupkg";
+        try
+        {
+            // Anonymous: blocked despite AnonymousPull, because the symbol is uploaded-origin.
+            using var anon = _factory.CreateClient();
+            var anonResp = await anon.GetAsync(path);
+            Assert.Equal(HttpStatusCode.Unauthorized, anonResp.StatusCode);
+
+            // Authenticated: still served.
+            var pullToken = await _factory.CreateToken("pull");
+            using var authed = _factory.CreateClientWithBasic(pullToken);
+            var authResp = await authed.GetAsync(path);
+            Assert.Equal(HttpStatusCode.OK, authResp.StatusCode);
+        }
+        finally
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET anonymous_pull = 0 WHERE org_id = @orgId", new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
+        }
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private static string NuspecXml(string id, string version) => $"""

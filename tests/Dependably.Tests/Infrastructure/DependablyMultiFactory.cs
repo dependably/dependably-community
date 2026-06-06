@@ -97,6 +97,10 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
         var sysId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM system_admins LIMIT 1")
             ?? throw new InvalidOperationException("system_admin not found. Was first-boot run?");
+        // Onboarded-admin session: clear the first-boot must_change_password flag so
+        // PasswordRotationGuard doesn't 403 non-allowlisted /api/v1/system calls.
+        await conn.ExecuteAsync(
+            "UPDATE system_admins SET must_change_password = 0 WHERE id = @sysId", new { sysId });
         var jwtSecret = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret'")
             ?? throw new InvalidOperationException("jwt_secret missing");

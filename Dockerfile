@@ -1,5 +1,5 @@
 # Frontend build stage
-FROM node:22-alpine AS frontend
+FROM node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920 AS frontend
 WORKDIR /web
 COPY web/package*.json ./
 ARG REGISTRY_URL=
@@ -15,7 +15,7 @@ RUN npm run sbom:prod
 RUN npm run build
 
 # Backend build stage — restore, generate backend SBOM, publish
-FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:5c559aa5d99337e400d39ab4fa1f6979d126c29b20939d53658ed38300571e74 AS build
 WORKDIR /src
 
 COPY Dependably.sln .
@@ -62,7 +62,7 @@ RUN dotnet publish src/Dependably/Dependably.csproj \
     -o /app/publish
 
 # Notices stage — combines both CycloneDX SBOMs into a curated attribution file
-FROM node:22-alpine AS notices
+FROM node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920 AS notices
 WORKDIR /work
 COPY build/extract-notices.mjs ./
 COPY --from=frontend /web/sbom-frontend-prod.json ./
@@ -70,7 +70,7 @@ COPY --from=build /sboms/sbom-backend.json ./
 RUN node extract-notices.mjs sbom-backend.json sbom-frontend-prod.json > notices.json
 
 # Runtime stage — minimal native deps image
-FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine AS final
+FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine@sha256:f276c0256ffca8fe816d48ba261962b54fea1b0e6f870b6a60b3b705c89e78ac AS final
 WORKDIR /app
 
 RUN apk add --no-cache sqlite-libs icu-libs && \

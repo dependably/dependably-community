@@ -181,7 +181,7 @@
       "size": "Size",
       "pushed": "Pushed",
       "license": "License",
-      "published": "Published",
+      "downloads": "Downloads",
       "vulnScan": "Vuln Scan",
       "origin": "Origin",
       "status": "Status",
@@ -225,6 +225,7 @@
     "detail": {
       "purl": "PURL",
       "checksum": "SHA-256",
+      "published": "Published",
       "vulnScan": "Last scan",
       "vulns": "Vulnerabilities",
       "noVulns": "No known vulnerabilities",
@@ -778,7 +779,23 @@
       "score": "Score",
       "osvId": "OSV ID",
       "summary": "Summary",
+      "published": "Published",
       "checkedAt": "Checked at"
+    },
+    "detail": {
+      "modified": "Modified",
+      "withdrawn": "Withdrawn",
+      "withdrawnNotice": "This advisory has been withdrawn.",
+      "aliases": "Aliases",
+      "related": "Related",
+      "references": "References",
+      "affected": "Affected",
+      "versions": "Versions",
+      "credits": "Credits",
+      "details": "Details",
+      "databaseSpecific": "Database-specific",
+      "loading": "Loading advisory detail…",
+      "error": "Couldn't load advisory detail."
     },
     "empty": "No vulnerable packages found"
   },

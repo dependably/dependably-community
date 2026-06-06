@@ -16,14 +16,14 @@ namespace Dependably.Api;
 /// <list type="bullet">
 ///   <item><b>upload</b> (POST <c>/api/v1/admin/upload</c>): a multipart batch of N files.
 ///   Ecosystem is detected from each file's <em>contents</em> (magic bytes + required
-///   manifest entries — <c>.nuspec</c>, <c>*.dist-info/METADATA</c>, <c>package/package.json</c>,
-///   <c>PKG-INFO</c>/<c>pyproject.toml</c>) so a renamed file can't lie. One bad file does
-///   not abort the batch; rejections are surfaced per-file.</item>
+///   manifest entries — <c>.nuspec</c>, <c>*.dist-info/METADATA</c>, <c>EGG-INFO/PKG-INFO</c>,
+///   <c>package/package.json</c>, <c>PKG-INFO</c>/<c>pyproject.toml</c>) so a renamed file
+///   can't lie. One bad file does not abort the batch; rejections are surfaced per-file.</item>
 ///   <item><b>manifest</b> (POST <c>/api/v1/admin/import/manifest</c>): a lockfile
-///   (<c>package-lock.json</c>, <c>requirements.txt</c>, or <c>packages.lock.json</c>) plus
-///   matching artefacts. All-or-nothing pre-validation — manifest↔artefact correspondence
-///   must be complete and hashes must match before any blob writes; any mismatch rejects
-///   the entire batch with a structured 422 report.</item>
+///   (<c>package-lock.json</c>, <c>requirements.txt</c>, <c>Pipfile.lock</c>, <c>poetry.lock</c>,
+///   or <c>packages.lock.json</c>) plus matching artefacts. All-or-nothing pre-validation —
+///   manifest↔artefact correspondence must be complete and hashes must match before any blob
+///   writes; any mismatch rejects the entire batch with a structured 422 report.</item>
 /// </list>
 /// Both modes emit per-file accept/reject audit rows tagged with a shared <c>batch_id</c> so
 /// ops can reconstruct what came in on a given operation.

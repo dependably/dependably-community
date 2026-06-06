@@ -99,6 +99,53 @@ Output: `sbom-backend.json` (repo root) and `web/sbom-frontend.json`. Both files
 
 ---
 
+## AI code review (CI)
+
+On every merge request, the `ai-review` stage runs four advisory reviews of the MR diff against a local LLM (Ollama), each from a different lens:
+
+| Job | Lens | Report |
+|---|---|---|
+| `ai-review-security` | auth, injection, secrets, crypto, OWASP, input validation, privilege escalation | `ai-security-review.md` |
+| `ai-review-code` | bugs, error handling, races, maintainability, complexity, performance | `ai-code-review.md` |
+| `ai-review-architecture` | design patterns, service boundaries, coupling, scalability, reliability, DevOps | `ai-architecture-review.md` |
+| `ai-review-docs` | missing README / API docs / migration notes / deployment instructions | `ai-docs-review.md` |
+
+Each lens runs in **two passes**: a review pass produces candidate findings, then a **self-verify pass** re-checks them against the diff and keeps only those grounded in a quoted added/removed line — this filters the false positives a small model over-produces. Each job posts its (verified) findings as a **merge-request comment** (one per lens, updated in place on re-runs via a hidden marker), echoes them in the **job log** (collapsible section), and uploads a **Markdown artifact**. All logic lives in `ci/ai-review.sh`; the per-lens system prompts live in `ci/prompts/` (the shared verify prompt is `ci/prompts/verify.md`).
+
+Output that degenerates (a repetition loop, or a runaway that hits the token cap without stopping) is **detected and suppressed** rather than posted as if it were a review — the artifact records that it was suppressed. Sampling is tuned to avoid both degeneration modes (small temperature against greedy loops; `min_p` tail-cutting and a modest `repeat_penalty` against word-salad).
+
+A single weak model cannot reliably filter its own output — the verify pass tends to rubber-stamp its own family's speculation. So a **deterministic guard** runs in code after both passes: it drops findings phrased as speculation (hedge words like *may / might / could / suggests / can lead to*), caps the number of findings, and caps total report length. These are heuristics — they can drop a genuinely tentative finding — but for an advisory check, suppressing confident-sounding noise is the right trade. A lens whose findings are all filtered out posts a single "no material findings" line, same as a clean review.
+
+The reviews are **advisory** — `allow_failure: true` and not part of the release gate — so non-deterministic model output never blocks a merge. They run after the `sbom` stage (so the model only reviews an MR that already built and passed tests), are serialized by a shared `resource_group` so a single local model isn't hit concurrently, and run on merge-request pipelines only.
+
+### Configuration
+
+The endpoint and tuning knobs are job variables on the `.ai-review` template in `.gitlab-ci.yml`; override any of them as project CI/CD variables without editing YAML:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OLLAMA_URL` | `http://192.168.2.25:11434` | Ollama base URL (`/api/chat` is appended) |
+| `OLLAMA_MODEL` | `qwen3-coder-30b` | Model name — must be pulled on the Ollama host |
+| `AI_REVIEW_MAX_DIFF_BYTES` | `120000` | Diff is truncated to this many bytes before review |
+| `AI_REVIEW_DIFF_CONTEXT` | `10` | `git diff -U` context lines — more lets the model verify a hunk instead of speculating, but grows the diff toward the byte/context caps |
+| `AI_REVIEW_NUM_CTX` | `16384` | Model context window |
+| `AI_REVIEW_NUM_PREDICT` | `1500` | Hard cap on response length (backstops runaway generation) |
+| `AI_REVIEW_TEMPERATURE` | `0.3` | Sampling temperature — a small non-zero value avoids greedy repetition loops |
+| `AI_REVIEW_REPEAT_PENALTY` | `1.1` | Repetition penalty — kept modest; values ≳1.2 cause incoherent word-salad |
+| `AI_REVIEW_MIN_P` | `0.05` | Min-p tail cut — drops improbable tokens; the robust guard against word-salad |
+| `AI_REVIEW_SELF_VERIFY` | `1` | Run the second self-verify pass (`0` disables it) |
+| `AI_REVIEW_VERIFY_PERSONA_FILE` | `ci/prompts/verify.md` | System prompt for the verify pass |
+| `AI_REVIEW_MAX_FINDINGS` | `5` | Deterministic cap on findings kept per lens |
+| `AI_REVIEW_MAX_REPORT_CHARS` | `2200` | Hard cap on posted report length |
+| `AI_REVIEW_CURL_MAX_TIME` | `1000` | Per-request timeout, seconds |
+| `AI_REVIEW_API_URL` | `$CI_API_V4_URL` | GitLab API base for posting comments (override if the API isn't at the default) |
+
+**MR comments require a secret.** Set `AI_REVIEW_GITLAB_TOKEN` — a **masked, unprotected** CI/CD variable — to a project or group access token with **`api`** scope and at least the **Reporter** role. Without it the jobs still run and produce artifacts and job-log output; they just skip commenting. (`CI_JOB_TOKEN` can't create MR notes, hence the dedicated token.)
+
+The runner must be able to reach `OLLAMA_URL`. Comment posting goes over the GitLab API and automatically falls back from `http` to `https` if the configured `CI_API_V4_URL` route-misses — some instances serve the v4 API only over https.
+
+---
+
 ## Versioning
 
 Dependably follows [Semantic Versioning](https://semver.org/). The version is stamped into the .NET assembly, the frontend SBOM, the Docker image label, and the `/version` runtime endpoint — all from two source-of-truth files.

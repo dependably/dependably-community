@@ -182,11 +182,10 @@ public sealed class SchemaInitializer
     }
 
     // Backfills the per-org upstream_registry table for installs that predate configurable
-    // upstreams. Before this feature every ecosystem proxied through a single hard-coded default;
-    // the proxy now treats "no configured registry" as "proxying disabled", so existing orgs must
-    // inherit those defaults as real rows or they'd silently lose proxying on upgrade. For each
-    // org that has zero registries for an ecosystem, the default URL (config override or hard-coded
-    // public default; RPM only when Rpm:Upstream is set) is inserted. Idempotent via the
+    // upstreams. The proxy treats "no configured registry" as "proxying disabled", so an org with
+    // no rows for an ecosystem inherits the default URL as a real row rather than losing proxying.
+    // For each org that has zero registries for an ecosystem, the default URL (config override or
+    // hard-coded public default, RPM only when Rpm:Upstream is set) is inserted. Idempotent via the
     // (org_id, ecosystem, url) unique constraint and the per-ecosystem existence check.
     // xtenant: one-shot backfill across every tenant on the instance.
     private async Task SeedDefaultUpstreamRegistriesAsync(DbConnection conn)
@@ -537,6 +536,11 @@ public sealed class SchemaInitializer
             // Timestamp of the last upstream deprecation metadata refresh for a proxy version.
             // NULL = never checked. Set by DeprecationRefreshService on each pass.
             "ALTER TABLE package_versions ADD COLUMN deprecation_checked_at TEXT",
+            // Cumulative served-download counter (every 'download' + 'first_fetch' event:
+            // proxy first-fetch, protocol-client pulls, UI downloads). Monotonic and durable,
+            // so it survives activity-log pruning and stays an all-time total. Existing rows
+            // backfill to 0.
+            "ALTER TABLE package_versions ADD COLUMN download_count INTEGER NOT NULL DEFAULT 0",
             // Per-tenant air-gap posture. When 1, the org makes no outbound requests: proxy
             // passthrough is forced off and the vuln/deprecation scan passes skip it. Composes
             // with the instance AIR_GAPPED env var. Backfilled from the retired disable_* flags
@@ -559,6 +563,10 @@ public sealed class SchemaInitializer
             "ALTER TABLE tenant_saml_config ADD COLUMN role_attribute TEXT",
             "ALTER TABLE tenant_saml_config ADD COLUMN role_mapping TEXT",
             "ALTER TABLE tenant_saml_config ADD COLUMN default_role TEXT NOT NULL DEFAULT 'member'",
+            // Full OSV advisory JSON, captured at hydration. Source of truth for the rich
+            // vulnerability detail panel; lets us surface fields beyond the extracted columns
+            // without re-fetching. NULL on legacy rows — backfilled naturally on the next rescan.
+            "ALTER TABLE vulnerabilities ADD COLUMN osv_json TEXT",
         };
 
         foreach (var ddl in migrations)

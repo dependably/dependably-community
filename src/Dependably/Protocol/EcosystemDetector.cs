@@ -7,9 +7,9 @@ namespace Dependably.Protocol;
 /// Content-based ecosystem detection for the unified upload endpoint. Reads magic bytes to
 /// pick the archive format (ZIP vs gzipped tar), then peeks at entries to identify the
 /// ecosystem from required manifest files — <c>.nuspec</c> for NuGet, <c>.dist-info/METADATA</c>
-/// for PyPI wheels, <c>package/package.json</c> for npm, top-level <c>PKG-INFO</c> /
-/// <c>pyproject.toml</c> for PyPI sdists. Never trusts the filename extension: a renamed
-/// <c>.nupkg</c> saved as <c>.tgz</c> is still detected as NuGet.
+/// for PyPI wheels, <c>EGG-INFO/PKG-INFO</c> for legacy PyPI eggs, <c>package/package.json</c>
+/// for npm, top-level <c>PKG-INFO</c> / <c>pyproject.toml</c> for PyPI sdists. Never trusts the
+/// filename extension: a renamed <c>.nupkg</c> saved as <c>.tgz</c> is still detected as NuGet.
 ///
 /// Returns (name, version) extracted via the ecosystem's existing validator
 /// (<see cref="NuGetNupkgValidator"/>, <see cref="PyPiArtifactValidator"/>,
@@ -80,8 +80,18 @@ public static class EcosystemDetector
             return Ok("pypi", name!, name!, version!);
         }
 
+        var hasEggInfo = zip.Entries.Any(e =>
+            e.FullName.EndsWith("EGG-INFO/PKG-INFO", StringComparison.OrdinalIgnoreCase));
+        if (hasEggInfo)
+        {
+            var egg = PyPiArtifactValidator.ValidateEgg(bytes, out var name, out var version);
+            if (!egg.IsValid)
+                return Fail("artifact_invalid", egg.Message ?? "Invalid PyPI egg.");
+            return Ok("pypi", name!, name!, version!);
+        }
+
         return Fail("unrecognised_format",
-            "ZIP archive contains neither a root .nuspec nor a *.dist-info/METADATA — not a NuGet or PyPI package.");
+            "ZIP archive contains no root .nuspec, *.dist-info/METADATA, or EGG-INFO/PKG-INFO — not a NuGet or PyPI package.");
     }
 
     private static (DetectionResult?, DetectionFailure?) DetectGzippedTar(byte[] bytes)

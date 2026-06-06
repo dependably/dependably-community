@@ -212,7 +212,8 @@ public sealed class UpstreamClient
             throw new SsrfBlockedException(url);
 
         var client = _httpClientFactory.CreateClient("upstream");
-        using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+        using var response = await UnwrapSsrfAsync(
+            () => client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct));
         response.EnsureSuccessStatusCode();
 
         // Abort early if Content-Length already exceeds 600MB limit (cheap fail-fast).
@@ -291,6 +292,23 @@ public sealed class UpstreamClient
     /// re-read the file. On mismatch audits <c>checksum_failure</c> and returns false
     /// so the caller throws.
     /// </summary>
+    // SocketsHttpHandler surfaces a SsrfBlockedException thrown by the connect-time guard
+    // (SsrfConnectCallback) wrapped inside an HttpRequestException. Unwrap it so a rebinding
+    // or redirect blocked at connect time — past the URL-level pre-check — reports with the
+    // same exception type and SSRF metric as a pre-check block.
+    private static async Task<T> UnwrapSsrfAsync<T>(Func<Task<T>> send)
+    {
+        try
+        {
+            return await send();
+        }
+        catch (HttpRequestException ex) when (ex.InnerException is SsrfBlockedException ssrf)
+        {
+            DependablyMeter.UpstreamUrlBlocks.Add(1);
+            throw ssrf;
+        }
+    }
+
     private async Task<bool> VerifyChecksumAsync(VerifyChecksumRequest req, CancellationToken ct)
     {
         bool ok;
@@ -348,7 +366,7 @@ public sealed class UpstreamClient
             throw new SsrfBlockedException(url);
 
         var client = _httpClientFactory.CreateClient("upstream");
-        return await client.GetAsync(url, ct);
+        return await UnwrapSsrfAsync(() => client.GetAsync(url, ct));
     }
 
     /// <summary>
@@ -386,7 +404,7 @@ public sealed class UpstreamClient
     private async Task<UpstreamMetadataResponse> FetchMetadataBufferedAsync(string url, CancellationToken ct)
     {
         var client = _httpClientFactory.CreateClient("upstream");
-        using var response = await client.GetAsync(url, ct);
+        using var response = await UnwrapSsrfAsync(() => client.GetAsync(url, ct));
         var body = await response.Content.ReadAsByteArrayAsync(ct);
         var contentType = response.Content.Headers.ContentType?.ToString();
         return new UpstreamMetadataResponse(

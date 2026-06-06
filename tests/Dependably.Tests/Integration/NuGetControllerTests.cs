@@ -71,6 +71,22 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
         }
     }
 
+    [Fact]
+    public async Task Search_OversizedTakeAndNegativeSkip_AreClampedNot500()
+    {
+        await _factory.PushNuGetPackage($"ClampPkg{Guid.NewGuid():N}"[..18], "1.0.0");
+        var token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        // Oversized take is clamped, not errored.
+        var big = await client.GetAsync("/nuget/query?take=100000");
+        Assert.Equal(HttpStatusCode.OK, big.StatusCode);
+
+        // Negative skip previously threw in Enumerable.Skip → 500; now clamped to 0.
+        var neg = await client.GetAsync("/nuget/query?skip=-1");
+        Assert.Equal(HttpStatusCode.OK, neg.StatusCode);
+    }
+
     // ── FlatcontainerVersions: no local versions + upstream 404 → 404 ────────
 
     [Fact]

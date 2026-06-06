@@ -282,7 +282,8 @@ public sealed class ControllerScenario : IAsyncDisposable
         var license = new LicenseController(licenses, orgs, guard, problems, audit) { ControllerContext = ctx };
         var jobRuns = new BackgroundJobRunRepository(db);
         var instance = new InstanceController(orgs, audit, guard, noAirGap, jobRuns) { ControllerContext = ctx };
-        var vuln = new VulnerabilityController(vulns, packages, scanner, audit, guard) { ControllerContext = ctx };
+        var vuln = new VulnerabilityController(vulns, packages, scanner, audit, guard,
+            NullLogger<VulnerabilityController>.Instance) { ControllerContext = ctx };
         var system = new SystemController(orgs, systemAdmins, db, audit, problems,
             new ConfigurationBuilder().Build(),
             new Dependably.Security.PasswordPolicy()) { ControllerContext = ctx };

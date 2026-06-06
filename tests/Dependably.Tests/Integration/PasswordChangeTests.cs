@@ -135,6 +135,35 @@ public sealed class PasswordChangeTests : IClassFixture<DependablyFactory>, IAsy
         Assert.Equal(1, flag);
     }
 
+    [Fact]
+    public async Task FlaggedUser_NonAllowlistedEndpoint_Blocked_AllowlistReachable()
+    {
+        const string email = "pwtest6@example.com";
+        const string password = "originalPassword123";
+        var userId = await CreateUserWithMembership(email, password);
+
+        var jwt = await IssueJwtFor(email);
+        using var client = _factory.CreateClientWithBearer(jwt);
+
+        // Before the flag: a normal authenticated endpoint is reachable (guard doesn't over-block).
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/v1/tokens")).StatusCode);
+
+        await using (var conn = await GetMetadataStore().OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE users SET must_change_password = 1 WHERE id = @id", new { id = userId });
+        }
+
+        // After the flag: the same endpoint is blocked with the machine-readable code...
+        var blocked = await client.GetAsync("/api/v1/tokens");
+        Assert.Equal(HttpStatusCode.Forbidden, blocked.StatusCode);
+        var doc = await JsonDocument.ParseAsync(await blocked.Content.ReadAsStreamAsync());
+        Assert.Equal("password_change_required", doc.RootElement.GetProperty("code").GetString());
+
+        // ...while the routes needed to recover stay reachable.
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/v1/auth/me")).StatusCode);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private IMetadataStore GetMetadataStore() => _factory.Services.GetRequiredService<IMetadataStore>();

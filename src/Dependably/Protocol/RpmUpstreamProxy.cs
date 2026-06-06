@@ -5,9 +5,12 @@ using System.Text;
 using System.Xml.Linq;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Observability;
 using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
+using Org.BouncyCastle.Bcpg.OpenPgp;
 
 namespace Dependably.Protocol;
 
@@ -83,11 +86,20 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     private readonly IMemoryCache _memCache;
     private readonly IAirGapMode _airGap;
     private readonly IUpstreamUrlValidator _urlValidator;
+    private readonly ILogger<RpmUpstreamProxy> _logger;
 
     private readonly string _upstreamMode;  // "passthrough" | "merged"
     private readonly TimeSpan _repomdTtl;
     private readonly TimeSpan _gpgKeyTtl;
     private readonly TimeSpan _negativeCacheTtl;
+
+    // Operator-pinned trust anchor for repomd.xml signature verification. When a key is
+    // configured the proxy verifies repomd.xml's detached OpenPGP signature (repomd.xml.asc)
+    // before trusting/parsing it; when unset, verification is skipped (back-compat) and a
+    // startup warning is logged. The trust anchor must be operator-provided — never the
+    // upstream-fetched GPG key, which would be circular against a MITM.
+    private readonly PgpPublicKeyRingBundle? _repomdGpgKeyRing;
+    private readonly bool _verifyRepomdSignature;
 
     // Dedup concurrent repomd.xml fetches — only one HTTP round-trip per (base URL, file) at a time.
     private readonly ConcurrentDictionary<string, Lazy<Task<(byte[] Body, string? ETag, string? LastModified)>>> _repomdInflight = new();
@@ -99,27 +111,63 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     public bool IsPassthroughModeSelected => string.Equals(_upstreamMode, "passthrough", StringComparison.OrdinalIgnoreCase);
 
-    public RpmUpstreamProxy(
-        IHttpClientFactory httpClientFactory,
-        TieredBlobStorage blobs,
-        IMetadataStore db,
-        IMemoryCache memoryCache,
-        IConfiguration configuration,
-        IAirGapMode airGap,
-        IUpstreamUrlValidator urlValidator)
+    public RpmUpstreamProxy(RpmUpstreamProxyServices svc)
     {
-        _http = httpClientFactory;
-        _cacheStore = blobs.Cache;
-        _db = db;
-        _memCache = memoryCache;
-        _airGap = airGap;
-        _urlValidator = urlValidator;
+        _http = svc.HttpClientFactory;
+        _cacheStore = svc.Blobs.Cache;
+        _db = svc.Db;
+        _memCache = svc.MemoryCache;
+        _airGap = svc.AirGap;
+        _urlValidator = svc.UrlValidator;
+        _logger = svc.Logger;
 
+        var configuration = svc.Configuration;
         _upstreamMode = configuration["Rpm:UpstreamMode"] ?? "passthrough";
 
         _repomdTtl = TimeSpan.TryParse(configuration["Rpm:RepomdTtl"], out var r) ? r : TimeSpan.FromSeconds(60);
         _gpgKeyTtl = TimeSpan.TryParse(configuration["Rpm:GpgKeyTtl"], out var g) ? g : TimeSpan.FromDays(1);
         _negativeCacheTtl = TimeSpan.TryParse(configuration["Rpm:NegativeCacheTtl"], out var n) ? n : TimeSpan.FromMinutes(5);
+
+        _repomdGpgKeyRing = LoadKeyRingOrNull(configuration["Rpm:GpgKey"]);
+        // Enforce when explicitly set; otherwise enforce iff a trust anchor was provided.
+        _verifyRepomdSignature = bool.TryParse(configuration["Rpm:VerifyRepomdSignature"], out var vf)
+            ? vf
+            : _repomdGpgKeyRing is not null;
+    }
+
+    /// <summary>
+    /// Parses the operator-provided <c>Rpm:GpgKey</c> (an inline ASCII-armored public key block,
+    /// or a file path / file: URL the operator trusts out of band) into a key-ring bundle.
+    /// Returns null when unset or unparseable (a parse failure is logged; with verification
+    /// forced on but no key, every resolution then fails closed).
+    /// </summary>
+    private PgpPublicKeyRingBundle? LoadKeyRingOrNull(string? keyConfig)
+    {
+        if (string.IsNullOrWhiteSpace(keyConfig)) return null;
+        try
+        {
+            byte[] armored;
+            if (keyConfig.Contains("-----BEGIN PGP", StringComparison.Ordinal))
+            {
+                armored = Encoding.UTF8.GetBytes(keyConfig);
+            }
+            else
+            {
+                var keyPath = keyConfig.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+                    ? new Uri(keyConfig).LocalPath
+                    : keyConfig;
+                armored = File.ReadAllBytes(keyPath);
+            }
+            using var keyIn = PgpUtilities.GetDecoderStream(new MemoryStream(armored));
+            return new PgpPublicKeyRingBundle(keyIn);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Rpm:GpgKey could not be parsed as an OpenPGP public key ({ExceptionType}); RPM repomd " +
+                "signature verification cannot be performed with this value.", ex.GetType().Name);
+            return null;
+        }
     }
 
     // ── Repodata ───────────────────────────────────────────────────────────────
@@ -358,11 +406,105 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     private async Task<byte[]?> GetRepomdBodyAsync(string upstreamBase, CancellationToken ct)
     {
         var cacheKey = $"rpm:repomd:{upstreamBase}:repomd.xml";
+        byte[]? body;
         if (_memCache.TryGetValue<CachedRepomd>(cacheKey, out var cached))
-            return cached!.Body;
+        {
+            body = cached!.Body;
+        }
+        else
+        {
+            var result = await GetRepomdAsync(upstreamBase, "repomd.xml", null, null, ct);
+            body = result?.NotModified == false ? result.Body : null;
+        }
+        if (body is null) return null;
 
-        var result = await GetRepomdAsync(upstreamBase, "repomd.xml", null, null, ct);
-        return result?.NotModified == false ? result.Body : null;
+        // Gate the proxy's OWN trust: when a trust anchor is pinned, verify repomd.xml's detached
+        // OpenPGP signature before these bytes are parsed into the package-checksum map. A failure
+        // returns null → resolution fails → the controller serves unavailable, so tampered upstream
+        // metadata is never trusted. (The raw repomd.xml/.asc passthrough GET is intentionally not
+        // gated — dnf clients re-verify the signature themselves against their pinned gpgkey.)
+        if (_verifyRepomdSignature)
+        {
+            if (_repomdGpgKeyRing is null)
+            {
+                RecordRepomdSignatureFailure("no_trusted_key", upstreamBase);
+                return null;
+            }
+            var asc = await GetRepomdAscBytesAsync(upstreamBase, ct);
+            if (asc is null)
+            {
+                RecordRepomdSignatureFailure("missing_signature", upstreamBase);
+                return null;
+            }
+            if (!VerifyRepomdSignature(body, asc, _repomdGpgKeyRing))
+            {
+                RecordRepomdSignatureFailure("bad_signature", upstreamBase);
+                return null;
+            }
+        }
+
+        return body;
+    }
+
+    private void RecordRepomdSignatureFailure(string reason, string upstreamBase)
+    {
+        DependablyMeter.RpmRepomdSignatureFailures.Add(1, new KeyValuePair<string, object?>("reason", reason));
+        _logger.LogWarning(
+            "RPM proxy: repomd.xml signature verification failed for {UpstreamBase} (reason={Reason}); " +
+            "refusing to trust upstream metadata.", upstreamBase, reason);
+    }
+
+    /// <summary>
+    /// Fetches <c>repodata/repomd.xml.asc</c> (the detached signature), memory-cached for the
+    /// repomd TTL so the pair refreshes together and HTTP is bounded. Returns null on a missing
+    /// signature or a blocked URL.
+    /// </summary>
+    private async Task<byte[]?> GetRepomdAscBytesAsync(string upstreamBase, CancellationToken ct)
+    {
+        var cacheKey = $"rpm:repomd-asc:{upstreamBase}";
+        if (_memCache.TryGetValue<byte[]>(cacheKey, out var cached)) return cached;
+
+        var url = $"{upstreamBase}/repodata/repomd.xml.asc";
+        if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct)) return null;
+
+        var client = _http.CreateClient("upstream");
+        using var resp = await client.GetAsync(url, ct);
+        if (!resp.IsSuccessStatusCode) return null;
+
+        var asc = await resp.Content.ReadAsByteArrayAsync(ct);
+        _memCache.Set(cacheKey, asc, _repomdTtl);
+        return asc;
+    }
+
+    /// <summary>
+    /// Verifies a detached, ASCII-armored OpenPGP signature (<paramref name="asc"/>) over the
+    /// exact bytes of <paramref name="repomd"/> against the trusted key ring. Returns false when
+    /// the signature is malformed, was made by a key not in the ring, or does not verify.
+    /// </summary>
+    internal static bool VerifyRepomdSignature(byte[] repomd, byte[] asc, PgpPublicKeyRingBundle keyRing)
+    {
+        try
+        {
+            using var sigStream = PgpUtilities.GetDecoderStream(new MemoryStream(asc));
+            var factory = new PgpObjectFactory(sigStream);
+            var obj = factory.NextPgpObject();
+            if (obj is PgpCompressedData compressed)
+                obj = new PgpObjectFactory(compressed.GetDataStream()).NextPgpObject();
+
+            if (obj is not PgpSignatureList { Count: > 0 } sigList) return false;
+            var sig = sigList[0];
+
+            var publicKey = keyRing.GetPublicKey(sig.KeyId);  // null when signed by an untrusted key
+            if (publicKey is null) return false;
+
+            sig.InitVerify(publicKey);
+            sig.Update(repomd);
+            return sig.Verify();
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     // ── Internal: hash-prefixed metadata files ────────────────────────────────
@@ -407,9 +549,51 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         if (!resp.IsSuccessStatusCode) return null;
 
         var body = await resp.Content.ReadAsByteArrayAsync(ct);
+
+        // Verify the fetched bytes against the expected SHA-256 before caching. RPM repodata
+        // is content-addressed and cached "forever", and ResolvePackageUrlAsync lifts the
+        // per-package download checksums out of this primary.xml.gz — so caching an unverified
+        // body from a malicious or MITM'd upstream would poison the package-integrity chain.
+        if (!RepodataBodyMatches(body, sha256))
+        {
+            DependablyMeter.UpstreamChecksumFailures.Add(
+                1, new KeyValuePair<string, object?>("ecosystem", "rpm"));
+            return null;
+        }
+
         await _cacheStore.PutAsync(blobKey, new MemoryStream(body), ct);
         return body;
     }
+
+    /// <summary>
+    /// True if <paramref name="body"/> hashes to <paramref name="expectedSha256"/>. The
+    /// expected value is either the compressed-file checksum (repomd <c>&lt;checksum&gt;</c>,
+    /// and the hash-prefixed filename DNF derives from it) or the decompressed checksum
+    /// (<c>&lt;open-checksum&gt;</c>), so the body is accepted if it matches under either
+    /// interpretation. An attacker cannot forge a preimage for a hash they do not control
+    /// under either transform, so accepting both does not weaken the check.
+    /// </summary>
+    private static bool RepodataBodyMatches(byte[] body, string expectedSha256)
+    {
+        if (Sha256Hex(body).Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        try
+        {
+            using var gz = new GZipStream(new MemoryStream(body), CompressionMode.Decompress);
+            using var ms = new MemoryStream();
+            gz.CopyTo(ms);
+            return Sha256Hex(ms.ToArray()).Equals(expectedSha256, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            // Not gzip / corrupt: only the compressed-form check applies, and it already failed.
+            return false;
+        }
+    }
+
+    private static string Sha256Hex(byte[] data) =>
+        Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
 
     // ── Parsing helpers ────────────────────────────────────────────────────────
 
@@ -564,3 +748,15 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         }
     }
 }
+
+// DI-injected dependency aggregate for RpmUpstreamProxy. Single param avoids S107 on the
+// constructor; field unpacking in the ctor keeps the rest of the class untouched.
+public sealed record RpmUpstreamProxyServices(
+    IHttpClientFactory HttpClientFactory,
+    TieredBlobStorage Blobs,
+    IMetadataStore Db,
+    IMemoryCache MemoryCache,
+    IConfiguration Configuration,
+    IAirGapMode AirGap,
+    IUpstreamUrlValidator UrlValidator,
+    ILogger<RpmUpstreamProxy> Logger);

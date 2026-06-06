@@ -21,4 +21,26 @@ public static class ConfigurationExtensions
         var raw = config["BASE_URL"];
         return string.IsNullOrWhiteSpace(raw) ? null : raw.TrimEnd('/');
     }
+
+    /// <summary>
+    /// Parses a <c>TRUSTED_PROXIES</c> value — a comma-separated list of single IP addresses
+    /// and/or CIDR networks (e.g. <c>10.0.0.0/8,172.18.0.1,fd00::/8</c>) — into the known
+    /// networks and known proxy addresses that <c>ForwardedHeadersOptions</c> trusts. Entries
+    /// containing <c>/</c> are networks; the rest are single addresses. A malformed entry throws
+    /// at startup (fail fast) rather than silently degrading the trust boundary. Returns empty
+    /// lists when the value is null/blank.
+    /// </summary>
+    public static (List<System.Net.IPNetwork> Networks, List<System.Net.IPAddress> Proxies) ParseTrustedProxies(string? value)
+    {
+        var networks = new List<System.Net.IPNetwork>();
+        var proxies = new List<System.Net.IPAddress>();
+        if (string.IsNullOrWhiteSpace(value)) return (networks, proxies);
+
+        foreach (var entry in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (entry.Contains('/')) networks.Add(System.Net.IPNetwork.Parse(entry));
+            else proxies.Add(System.Net.IPAddress.Parse(entry));
+        }
+        return (networks, proxies);
+    }
 }

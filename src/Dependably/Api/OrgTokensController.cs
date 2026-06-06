@@ -116,12 +116,15 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         var adminCheck = await _guard.CheckCapAsync(User, userId, orgId, Capabilities.TenantConfigure, ct);
         if (adminCheck != OrgAccessGuard.AccessResult.Allowed)
         {
-            var token = await _tokens.GetTokenByIdAsync(id, ct);
+            var token = await _tokens.GetTokenByIdAsync(id, orgId, ct);
             if (token is null || token.UserId != userId)
                 return Forbid();
         }
 
-        await _tokens.DeleteTokenAsync(id, ct);
+        // Org-scoped delete: a token id from another tenant deletes nothing. 404 (not 403) so a
+        // cross-org id is indistinguishable from a nonexistent one, matching the codebase stance.
+        var deleted = await _tokens.DeleteTokenAsync(id, orgId, ct);
+        if (deleted == 0) return NotFound();
 
         await _audit.LogAsync("token_revoked", orgId, userId,
             detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }), ct: ct);
@@ -201,13 +204,17 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (result is not null) return result;
 
-        await _tokens.DeleteServiceTokenAsync(id, ct);
+        var orgId = CurrentTenantId();
 
-        await _audit.LogAsync("service_token_revoked", CurrentTenantId(), GetUserId(),
+        // Org-scoped delete: a service-token id from another tenant deletes nothing → 404.
+        var deleted = await _tokens.DeleteServiceTokenAsync(id, orgId, ct);
+        if (deleted == 0) return NotFound();
+
+        await _audit.LogAsync("service_token_revoked", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }), ct: ct);
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenRevoke,
-            CurrentTenantId(), "user", GetUserId(), "accepted",
+            orgId, "user", GetUserId(), "accepted",
             new TenantEvents.TokenRevoke(id, "service").ToJson(), ct);
 
         return NoContent();

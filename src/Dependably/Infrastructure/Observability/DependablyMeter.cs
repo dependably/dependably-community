@@ -37,6 +37,12 @@ public static class DependablyMeter
             "dependably.upstream.checksum_failures",
             description: "Upstream artifact checksum mismatches. Attributes: ecosystem.");
 
+    public static readonly Counter<long> RpmRepomdSignatureFailures =
+        Meter.CreateCounter<long>(
+            "dependably.rpm.repomd_signature_failures",
+            description: "RPM repomd.xml detached OpenPGP signature verification failures. " +
+                         "Attributes: reason (missing_signature|bad_signature|no_trusted_key).");
+
     public static readonly UpDownCounter<long> UpstreamInflightFetches =
         Meter.CreateUpDownCounter<long>(
             "dependably.upstream.inflight_fetches",

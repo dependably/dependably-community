@@ -46,8 +46,29 @@ public sealed class OsvClient : IOsvSource
         }
 
         var json = await response.Content.ReadAsStringAsync(ct);
-        var result = JsonSerializer.Deserialize<OsvQueryResponse>(json, JsonOpts);
-        return result?.Vulns?.Select(v => ParseAdvisory(v, isHydrated: true)).ToList() ?? [];
+        return ParseHydratedVulns(json);
+    }
+
+    /// <summary>
+    /// Parses a <c>{"vulns":[…]}</c> body into hydrated advisories, capturing each element's
+    /// raw JSON text on the advisory so the full schema can be persisted. The per-element
+    /// text — not the whole envelope — is what lands in <c>vulnerabilities.osv_json</c>.
+    /// </summary>
+    private static List<OsvAdvisory> ParseHydratedVulns(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("vulns", out var vulns)
+            || vulns.ValueKind != JsonValueKind.Array)
+            return [];
+
+        var list = new List<OsvAdvisory>(vulns.GetArrayLength());
+        foreach (var el in vulns.EnumerateArray())
+        {
+            var raw = el.Deserialize<OsvVulnRaw>(JsonOpts);
+            if (raw is null) continue;
+            list.Add(ParseAdvisory(raw, isHydrated: true, rawJson: el.GetRawText()));
+        }
+        return list;
     }
 
     /// <summary>
@@ -137,7 +158,8 @@ public sealed class OsvClient : IOsvSource
             }
             var json = await response.Content.ReadAsStringAsync(ct);
             var raw = JsonSerializer.Deserialize<OsvVulnRaw>(json, JsonOpts);
-            return raw is null ? null : ParseAdvisory(raw, isHydrated: true);
+            // The whole /vulns/{id} body IS the advisory, so it is the raw JSON to persist.
+            return raw is null ? null : ParseAdvisory(raw, isHydrated: true, rawJson: json);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -186,7 +208,7 @@ public sealed class OsvClient : IOsvSource
         return new HttpResponseMessage(HttpStatusCode.TooManyRequests);
     }
 
-    private static OsvAdvisory ParseAdvisory(OsvVulnRaw raw, bool isHydrated)
+    private static OsvAdvisory ParseAdvisory(OsvVulnRaw raw, bool isHydrated, string? rawJson = null)
     {
         // Build per-package affected lists, preserving the package identity from each entry.
         var affectedPackages = raw.Affected?
@@ -219,7 +241,8 @@ public sealed class OsvClient : IOsvSource
             AffectedPackages: affectedPackages,
             Published: raw.Published,
             Modified: raw.Modified,
-            IsHydrated: isHydrated);
+            IsHydrated: isHydrated,
+            RawJson: rawJson);
     }
 
     // CVSS scoring + severity normalisation moved to OsvScoring (shared with LocalOsvSource).
@@ -252,6 +275,8 @@ public sealed class OsvClient : IOsvSource
 /// <see cref="IsHydrated"/> is true only when the record came from the per-id endpoints
 /// (/query or /vulns/{id}); /querybatch returns id+modified only and yields IsHydrated=false.
 /// Callers must filter on IsHydrated before persisting — see VulnerabilityScanService.
+/// <see cref="RawJson"/> carries the full advisory JSON for persistence; it is populated only
+/// on hydrated records and is null on the /querybatch stub path.
 /// </summary>
 public sealed record OsvAdvisory(
     string Id,
@@ -262,7 +287,8 @@ public sealed record OsvAdvisory(
     OsvAffectedPackage[] AffectedPackages,
     string? Published,
     string? Modified,
-    bool IsHydrated);
+    bool IsHydrated,
+    string? RawJson = null);
 
 /// <summary>
 /// One entry from an OSV advisory's <c>affected[]</c> array — a specific package

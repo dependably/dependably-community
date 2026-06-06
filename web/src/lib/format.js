@@ -29,6 +29,9 @@ export const formatRelativeTime = derived(locale, $locale => (d) => {
   return rtf.format(Math.round(diff / 86400), 'day')
 })
 
+export const formatNumber = derived(locale, $locale => (n) =>
+  new Intl.NumberFormat($locale || 'en').format(n ?? 0))
+
 export const formatBytes = derived(locale, $locale => (n) => {
   if (!n || n === 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB']

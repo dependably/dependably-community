@@ -143,6 +143,80 @@ public sealed class PyPiArtifactValidatorTests
         Assert.Equal("content", result.FieldName);
     }
 
+    // ── ValidateEgg (content-only) ───────────────────────────────────────────
+
+    [Fact]
+    public void ValidateEgg_Synthetic_Succeeds_AndNormalisesName()
+    {
+        var (bytes, _) = PyPiFixtures.BuildEgg("My.Package", "2.3.4");
+        var result = PyPiArtifactValidator.ValidateEgg(bytes, out var name, out var version);
+        Assert.True(result.IsValid);
+        Assert.Equal("my-package", name);
+        Assert.Equal("2.3.4", version);
+    }
+
+    [Fact]
+    public void ValidateEgg_MissingEggInfo_FailsWithContentField()
+    {
+        // ZIP with no EGG-INFO/PKG-INFO entry.
+        var bytes = BuildZip(("README.txt", "no egg metadata here"));
+        var result = PyPiArtifactValidator.ValidateEgg(bytes, out var name, out var version);
+        Assert.False(result.IsValid);
+        Assert.Equal("content", result.FieldName);
+        Assert.Null(name);
+        Assert.Null(version);
+    }
+
+    [Fact]
+    public void ValidateEgg_NotAZip_FailsGracefully()
+    {
+        var result = PyPiArtifactValidator.ValidateEgg("not a zip"u8.ToArray(), out _, out _);
+        Assert.False(result.IsValid);
+        Assert.Equal("content", result.FieldName);
+    }
+
+    [Fact]
+    public void Validate_Egg_FilenameMatchesMetadata_Succeeds()
+    {
+        var (bytes, _) = PyPiFixtures.BuildEgg("acme", "1.0.0");
+        var result = PyPiArtifactValidator.Validate(
+            "acme-1.0.0-py3.11.egg", bytes, out var name, out var version);
+        Assert.True(result.IsValid);
+        Assert.Equal("acme", name);
+        Assert.Equal("1.0.0", version);
+    }
+
+    [Fact]
+    public void Validate_Egg_NoPyTag_Succeeds()
+    {
+        // Eggs without a -py{X.Y} tag have exactly two dash segments.
+        var (bytes, _) = PyPiFixtures.BuildEgg("acme", "1.0.0");
+        var result = PyPiArtifactValidator.Validate("acme-1.0.0.egg", bytes, out var name, out var version);
+        Assert.True(result.IsValid);
+        Assert.Equal("acme", name);
+        Assert.Equal("1.0.0", version);
+    }
+
+    [Fact]
+    public void Validate_Egg_FilenameLiesAboutName_RejectedByCrossCheck()
+    {
+        var (bytes, _) = PyPiFixtures.BuildEgg("acme", "1.0.0");
+        var result = PyPiArtifactValidator.Validate(
+            "fake-1.0.0-py3.11.egg", bytes, out _, out _);
+        Assert.False(result.IsValid);
+        Assert.Equal("content", result.FieldName);
+        Assert.Contains("does not match", result.Message);
+    }
+
+    [Fact]
+    public void Validate_Egg_FilenameTooFewSegments_Fails()
+    {
+        var (bytes, _) = PyPiFixtures.BuildEgg("acme", "1.0.0");
+        var result = PyPiArtifactValidator.Validate("acme.egg", bytes, out _, out _);
+        Assert.False(result.IsValid);
+        Assert.Equal("filename", result.FieldName);
+    }
+
     // ── Extension-dispatch Validate ──────────────────────────────────────────
 
     [Fact]
@@ -241,6 +315,10 @@ public sealed class PyPiArtifactValidatorTests
     [InlineData("my-pkg-1.2.3.tgz", "my-pkg", "1.2.3")]
     [InlineData("my-pkg-1.2.3.zip", "my-pkg", "1.2.3")]
     [InlineData("my-pkg-1.2.3.tar.bz2", "my-pkg", "1.2.3")]
+    // Legacy eggs: name and version are the first two dash segments; py/platform tags optional.
+    [InlineData("acme-1.0.0.egg", "acme", "1.0.0")]
+    [InlineData("acme-1.0.0-py3.11.egg", "acme", "1.0.0")]
+    [InlineData("my_pkg-2.5.0-py3.11-linux-x86_64.egg", "my-pkg", "2.5.0")]
     public void TryParseFilename_HappyPath(string filename, string expectedName, string expectedVersion)
     {
         Assert.True(PyPiArtifactValidator.TryParseFilename(filename, out var name, out var version));
@@ -253,6 +331,8 @@ public sealed class PyPiArtifactValidatorTests
     [InlineData("pkg-noversion.tar.gz")]     // no PEP 440-shaped suffix
     [InlineData("nodash.tar.gz")]            // no hyphen at all
     [InlineData("short-1.0.whl")]            // wheel with too few dash segments
+    [InlineData("noversion.egg")]            // egg with no dash → too few segments
+    [InlineData("pkg-notaversion.egg")]      // egg second segment not PEP 440-shaped
     [InlineData("")]                         // empty
     public void TryParseFilename_Rejects(string filename)
     {

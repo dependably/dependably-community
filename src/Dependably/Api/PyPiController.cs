@@ -37,7 +37,6 @@ public partial class PyPiController : ControllerBase
     private readonly UpstreamClient _upstream;
     private readonly AllowlistService _allowlist;
     private readonly BlocklistRepository _blocklist;
-    private readonly IConfiguration _config;
     private readonly BlockGateService _blockGate;
     private readonly LicenseRepository _licenses;
     private readonly PublishGate _publishGate;
@@ -57,7 +56,6 @@ public partial class PyPiController : ControllerBase
         _upstream = svc.Upstream;
         _allowlist = svc.Allowlist;
         _blocklist = svc.Blocklist;
-        _config = svc.Config;
         _blockGate = svc.BlockGate;
         _licenses = svc.Licenses;
         _publishGate = svc.PublishGate;
@@ -94,7 +92,7 @@ public partial class PyPiController : ControllerBase
         foreach (var name in pkgs.Select(pkg => pkg.PurlName))
         {
             var simpleHref = OrgPath($"simple/{name}/");
-            sb.AppendLine($"<a href=\"{simpleHref}\">{name}</a><br/>");
+            sb.AppendLine($"<a href=\"{System.Web.HttpUtility.HtmlAttributeEncode(simpleHref)}\">{System.Web.HttpUtility.HtmlEncode(name)}</a><br/>");
         }
         sb.AppendLine("</body></html>");
 
@@ -139,8 +137,8 @@ public partial class PyPiController : ControllerBase
     {
         var sb = new StringBuilder();
         sb.AppendLine("<!DOCTYPE html>");
-        sb.AppendLine($"<html><head><title>Links for {purlName}</title></head><body>");
-        sb.AppendLine($"<h1>Links for {purlName}</h1>");
+        sb.AppendLine($"<html><head><title>Links for {System.Web.HttpUtility.HtmlEncode(purlName)}</title></head><body>");
+        sb.AppendLine($"<h1>Links for {System.Web.HttpUtility.HtmlEncode(purlName)}</h1>");
         foreach (var v in versions)
         {
             var filename = v.BlobKey.Split('/').Last();
@@ -150,7 +148,7 @@ public partial class PyPiController : ControllerBase
             var yankAttr = v.Yanked
                 ? $" data-yanked=\"{System.Web.HttpUtility.HtmlAttributeEncode(v.YankReason ?? "")}\"" : "";
 
-            sb.AppendLine($"<a href=\"{href}\"{yankAttr}>{filename}</a><br/>");
+            sb.AppendLine($"<a href=\"{System.Web.HttpUtility.HtmlAttributeEncode(href)}\"{yankAttr}>{System.Web.HttpUtility.HtmlEncode(filename)}</a><br/>");
         }
         sb.AppendLine("</body></html>");
         return Content(sb.ToString(), "text/html; charset=utf-8");
@@ -197,7 +195,8 @@ public partial class PyPiController : ControllerBase
                         var hrefMatch = Regex.Match(attrs, @"href=""(https?://[^""#]+)(#[^""]*)?""", RegexOptions.None, RegexTimeout);
                         if (!hrefMatch.Success) return m.Value;
                         var fragment = hrefMatch.Groups[2].Value;
-                        return $"<a href=\"{OrgPath($"packages/{filename}{fragment}")}\">{filename}</a>";
+                        // filename/fragment come from upstream HTML — encode before re-emitting.
+                        return $"<a href=\"{System.Web.HttpUtility.HtmlAttributeEncode(OrgPath($"packages/{filename}{fragment}"))}\">{System.Web.HttpUtility.HtmlEncode(filename)}</a>";
                     },
                     RegexOptions.None,
                     RegexTimeout);
@@ -237,7 +236,7 @@ public partial class PyPiController : ControllerBase
             var yankAttr = v.Yanked
                 ? $" data-yanked=\"{System.Web.HttpUtility.HtmlAttributeEncode(v.YankReason ?? "")}\""
                 : "";
-            sb.Append($"<a href=\"{href}\"{yankAttr}>{filename}</a><br/>");
+            sb.Append($"<a href=\"{System.Web.HttpUtility.HtmlAttributeEncode(href)}\"{yankAttr}>{System.Web.HttpUtility.HtmlEncode(filename)}</a><br/>");
         }
         if (sb.Length == 0) return upstreamHtml;
 
@@ -352,6 +351,7 @@ public partial class PyPiController : ControllerBase
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVer.Version.Purl);
         await _audit.LogActivityAsync(orgId, "pypi", pkgVer.Version.Purl, "download", token?.UserId,
             actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
+        await _packages.IncrementDownloadCountAsync(pkgVer.Version.Id, ct);
         return File(blob, "application/octet-stream", file);
     }
 
@@ -776,6 +776,7 @@ public partial class PyPiController : ControllerBase
         var result = fileType switch
         {
             "bdist_wheel" => ValidateWheel(fileBytes),
+            "bdist_egg"   => ValidateEgg(fileBytes),
             "sdist"       => ValidateSdist(name, filename),
             _             => ValidationResult.Ok(),
         };
@@ -851,6 +852,23 @@ public partial class PyPiController : ControllerBase
         catch
         {
             return ValidationResult.Fail("content", "Wheel is not a valid ZIP file");
+        }
+    }
+
+    private static ValidationResult ValidateEgg(byte[] bytes)
+    {
+        try
+        {
+            using var zip = new System.IO.Compression.ZipArchive(new MemoryStream(bytes), System.IO.Compression.ZipArchiveMode.Read);
+            var hasMetadata = zip.Entries.Any(e =>
+                e.FullName.EndsWith("EGG-INFO/PKG-INFO", StringComparison.OrdinalIgnoreCase));
+            if (!hasMetadata)
+                return ValidationResult.Fail("content", "Egg is missing EGG-INFO/PKG-INFO");
+            return ValidationResult.Ok();
+        }
+        catch
+        {
+            return ValidationResult.Fail("content", "Egg is not a valid ZIP file");
         }
     }
 

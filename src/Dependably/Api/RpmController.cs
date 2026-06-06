@@ -255,6 +255,7 @@ public sealed class RpmController : OrgScopedControllerBase
         Response.Headers["X-Cache"] = "HIT";
         await _svc.Audit.LogActivityAsync(orgId, "rpm", versionMatch.Version.Purl, "download",
             token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        await _svc.Packages.IncrementDownloadCountAsync(versionMatch.Version.Id, ct);
         return File(stream, "application/x-rpm", file);
     }
 
@@ -306,6 +307,7 @@ public sealed class RpmController : OrgScopedControllerBase
         Response.Headers["X-Cache"] = isHit ? "HIT" : "MISS";
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "download",
             token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        await _svc.Packages.IncrementDownloadCountByPurlAsync(purl, ct);
         return File(body, "application/x-rpm", file);
     }
 

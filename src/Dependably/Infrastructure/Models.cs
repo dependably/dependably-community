@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Dependably.Infrastructure;
 
 // Dapper-mapped DTOs. Using classes with public setters (not positional records) so Dapper
@@ -153,6 +155,12 @@ public class PackageVersion
     public bool Yanked { get; set; }
     public string? YankReason { get; set; }
     public bool FirstFetch { get; set; }
+    /// <summary>
+    /// Cumulative count of served downloads — every 'download' + 'first_fetch' event (proxy
+    /// first-fetch, protocol-client pulls, and UI downloads). Monotonic and durable, so it
+    /// survives activity-log pruning and remains an all-time total.
+    /// </summary>
+    public long DownloadCount { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? VulnCheckedAt { get; set; }
     public string? ManualBlockState { get; set; }
@@ -458,10 +466,57 @@ public class AffectedVersionRecord
     public double? CvssScore { get; set; }
     public string OsvId { get; set; } = "";
     public string? Summary { get; set; }
+    /// <summary>OSV advisory publication time (vulnerabilities.published_at), not the version scan time.</summary>
+    public string? PublishedAt { get; set; }
     public string? VulnCheckedAt { get; set; }
     public string OrgSlug { get; set; } = "";
     public string Ecosystem { get; set; } = "";
 }
+
+// ── Rich OSV advisory detail (lazy detail endpoint) ───────────────────────────
+//
+// Projected from the stored osv_json — the full advisory captured at hydration. Records
+// (not Dapper classes) because they are deserialized from the OSV JSON via the constructor
+// and serialized straight back out as the API response. Field names follow the OSV schema
+// (https://ossf.github.io/osv-schema/); free-form objects (database_specific, ecosystem_specific)
+// round-trip as raw JsonElement rather than a hand-maintained shape. All members are nullable so
+// the same shape serves both the deserialize path and the column-fallback path used when an
+// advisory predates osv_json capture.
+
+public sealed record OsvDetail(
+    string? Id,
+    string? SchemaVersion,
+    string? Published,
+    string? Modified,
+    string? Withdrawn,
+    string? Summary,
+    string? Details,
+    string[]? Aliases,
+    string[]? Related,
+    OsvReference[]? References,
+    OsvSeverityEntry[]? Severity,
+    OsvAffectedDetail[]? Affected,
+    OsvCredit[]? Credits,
+    JsonElement? DatabaseSpecific);
+
+public sealed record OsvReference(string? Type, string? Url);
+
+public sealed record OsvSeverityEntry(string? Type, string? Score);
+
+public sealed record OsvCredit(string? Name, string[]? Contact, string? Type);
+
+public sealed record OsvAffectedDetail(
+    OsvAffectedPackageRef? Package,
+    OsvRange[]? Ranges,
+    string[]? Versions,
+    JsonElement? EcosystemSpecific,
+    JsonElement? DatabaseSpecific);
+
+public sealed record OsvAffectedPackageRef(string? Ecosystem, string? Name, string? Purl);
+
+public sealed record OsvRange(string? Type, string? Repo, OsvRangeEvent[]? Events);
+
+public sealed record OsvRangeEvent(string? Introduced, string? Fixed, string? LastAffected, string? Limit);
 
 public class PackageVersionLicense
 {

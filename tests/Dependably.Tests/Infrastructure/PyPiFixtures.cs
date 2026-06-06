@@ -74,6 +74,30 @@ public static class PyPiFixtures
         return (bytes, hash);
     }
 
+    /// <summary>
+    /// Builds a minimal but valid legacy .egg (ZIP) in memory.
+    /// Contains metadata at EGG-INFO/PKG-INFO.
+    /// </summary>
+    public static (byte[] Bytes, string Sha256Hex) BuildEgg(string name, string version)
+    {
+        var pkgInfo = $"""
+            Metadata-Version: 1.0
+            Name: {name}
+            Version: {version}
+            Summary: Synthetic test egg
+            """;
+
+        using var ms = new MemoryStream();
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            WriteEntry(zip, "EGG-INFO/PKG-INFO", pkgInfo);
+        }
+
+        var bytes = ms.ToArray();
+        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        return (bytes, hash);
+    }
+
     /// <summary>Loads the real mypy_extensions wheel fixture.</summary>
     public static (byte[] Bytes, string Sha256Hex) RealWheel()
         => LoadFixture("pypi", "mypy_extensions-1.0.0-py3-none-any.whl");

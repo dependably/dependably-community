@@ -1,5 +1,15 @@
 <Project>
   <PropertyGroup>
-    <Version>0.1.12</Version>
+    <Version>0.1.13</Version>
+    <!-- Reproducible restores: maintain packages.lock.json (pins transitive versions + hashes).
+         Locked mode is enforced only in CI so a green pipeline proves the committed lockfile is
+         exactly what restores; locally it stays off so developers can update dependencies.
+         It is also scoped to RID-agnostic restores: the self-contained `-r linux-x64` publish
+         legitimately pulls runtime-specific assets (Microsoft.NET.ILLink.Tasks, the linux-x64
+         runtime pack) that a base lockfile doesn't carry, so locking that restore is incompatible
+         with a portable lockfile. The committed lockfile covers the base TFM, which every other
+         (non-RID) CI restore validates against. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(CI)' == 'true' and '$(RuntimeIdentifier)' == ''">true</RestoreLockedMode>
   </PropertyGroup>
 </Project>
