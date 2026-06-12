@@ -3,7 +3,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -91,8 +90,8 @@ public sealed class ImportControllerUnitTests
 
         var result = await b.ImportController.Upload(dryRun: false, CancellationToken.None);
         var ok = Assert.IsType<OkObjectResult>(result);
-        var rejected = (int)ok.Value!.GetType().GetProperty("rejected")!.GetValue(ok.Value)!;
-        var accepted = (int)ok.Value!.GetType().GetProperty("accepted")!.GetValue(ok.Value)!;
+        int rejected = (int)ok.Value!.GetType().GetProperty("rejected")!.GetValue(ok.Value)!;
+        int accepted = (int)ok.Value!.GetType().GetProperty("accepted")!.GetValue(ok.Value)!;
         Assert.Equal(1, rejected);
         Assert.Equal(0, accepted);
     }
@@ -111,9 +110,9 @@ public sealed class ImportControllerUnitTests
 
         var result = await b.ImportController.Upload(dryRun: true, CancellationToken.None);
         var ok = Assert.IsType<OkObjectResult>(result);
-        var mode = (string)ok.Value!.GetType().GetProperty("mode")!.GetValue(ok.Value)!;
+        string mode = (string)ok.Value!.GetType().GetProperty("mode")!.GetValue(ok.Value)!;
         Assert.Equal("upload-bulk-dryrun", mode);
-        var dryRun = (bool)ok.Value!.GetType().GetProperty("dry_run")!.GetValue(ok.Value)!;
+        bool dryRun = (bool)ok.Value!.GetType().GetProperty("dry_run")!.GetValue(ok.Value)!;
         Assert.True(dryRun);
     }
 
@@ -208,7 +207,7 @@ public sealed class ImportControllerUnitTests
 
     private static FormFile BuildFile(string filename, string content, string name = "files")
     {
-        var bytes = Encoding.UTF8.GetBytes(content);
+        byte[] bytes = Encoding.UTF8.GetBytes(content);
         return new FormFile(
             new MemoryStream(bytes), 0, bytes.Length, name, filename)
         {

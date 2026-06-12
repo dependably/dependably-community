@@ -31,31 +31,40 @@ public static class EmailAttributeResolver
     {
         var claims = response.ClaimsIdentity.Claims;
 
-        var configured = FromAttributeOverride(claims, cfg.EmailAttribute);
-        if (configured is not null) return configured;
+        string? configured = FromAttributeOverride(claims, cfg.EmailAttribute);
+        if (configured is not null)
+        {
+            return configured;
+        }
 
-        var standard = FromCommonClaimTypes(claims);
-        if (standard is not null) return standard;
+        string? standard = FromCommonClaimTypes(claims);
+        if (standard is not null)
+        {
+            return standard;
+        }
 
         // Fall back to NameID when its format is the email format, or the value
         // looks like an email. NameId type comes from ITfoxtec.Saml2; we read its
         // Format/Value via duck typing rather than naming the concrete type so we
         // don't take a direct dependency on a versioned internal class.
-        var format = response.NameId?.Format?.OriginalString;
-        var value = response.NameId?.Value;
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        if (format is null
+        string? format = response.NameId?.Format?.OriginalString;
+        string? value = response.NameId?.Value;
+        return string.IsNullOrWhiteSpace(value)
+            ? null
+            : format is null
             || format.Equals(NameIdentifierFormats.Email.OriginalString, StringComparison.OrdinalIgnoreCase)
-            || value.Contains('@'))
-        {
-            return value;
-        }
-        return null;
+            || value.Contains('@')
+            ? value
+            : null;
     }
 
     private static string? FromAttributeOverride(IEnumerable<Claim> claims, string? configured)
     {
-        if (string.IsNullOrWhiteSpace(configured)) return null;
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            return null;
+        }
+
         var match = claims.FirstOrDefault(c =>
             string.Equals(c.Type, configured, StringComparison.OrdinalIgnoreCase));
         return string.IsNullOrWhiteSpace(match?.Value) ? null : match.Value;
@@ -64,11 +73,14 @@ public static class EmailAttributeResolver
     private static string? FromCommonClaimTypes(IEnumerable<Claim> claims)
     {
         var asList = claims.ToList();
-        foreach (var name in DefaultEmailClaimTypes)
+        foreach (string name in DefaultEmailClaimTypes)
         {
             var match = asList.FirstOrDefault(c =>
                 string.Equals(c.Type, name, StringComparison.OrdinalIgnoreCase));
-            if (!string.IsNullOrWhiteSpace(match?.Value)) return match.Value;
+            if (!string.IsNullOrWhiteSpace(match?.Value))
+            {
+                return match.Value;
+            }
         }
         return null;
     }

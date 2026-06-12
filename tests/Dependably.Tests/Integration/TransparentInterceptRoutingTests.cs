@@ -1,6 +1,5 @@
 using System.Net;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -32,7 +31,7 @@ public sealed class TransparentInterceptRoutingTests
     /// </summary>
     private static async Task WithHostRoutingAsync(string? hostRouting, Func<DependablyFactory, Task> body)
     {
-        var prior = Environment.GetEnvironmentVariable("HOST_ROUTING");
+        string? prior = Environment.GetEnvironmentVariable("HOST_ROUTING");
         Environment.SetEnvironmentVariable("HOST_ROUTING", hostRouting);
         try
         {

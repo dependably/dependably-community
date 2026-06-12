@@ -1,9 +1,9 @@
 using Dapper;
 using Dependably.Api;
+using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -109,7 +109,7 @@ public sealed class OrgTokensControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var longDesc = new string('a', 201); // > MaxDescriptionLength (200)
+        string longDesc = new('a', 201); // > MaxDescriptionLength (200)
         var result = await b.OrgTokensController.CreateToken(
             new CreateTokenRequest(
                 ExpiresAt: null,
@@ -173,7 +173,7 @@ public sealed class OrgTokensControllerUnitTests
         Assert.IsType<OkObjectResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'token_created' AND org_id = @o",
             new { o = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);
@@ -221,12 +221,12 @@ public sealed class OrgTokensControllerUnitTests
         var created = (OkObjectResult)await b.OrgTokensController.CreateToken(
             new CreateTokenRequest(null, Capabilities: new[] { "read:metadata" }),
             CancellationToken.None);
-        var record = created.Value!.GetType().GetProperty("record")!.GetValue(created.Value)!;
-        var tokenId = (string)record.GetType().GetProperty("Id")!.GetValue(record)!;
+        object record = created.Value!.GetType().GetProperty("record")!.GetValue(created.Value)!;
+        string tokenId = (string)record.GetType().GetProperty("Id")!.GetValue(record)!;
 
         // Re-point the controller's principal at Bob.
         await using var conn = await b.Db.OpenAsync();
-        var bobId = await conn.ExecuteScalarAsync<string>(
+        string? bobId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM users WHERE tenant_id = @t AND email = 'bob@acme.test'",
             new { t = b.PrimaryOrgId });
         Assert.NotNull(bobId);
@@ -261,7 +261,7 @@ public sealed class OrgTokensControllerUnitTests
 
         // Re-point principal at the member, mint a token, then put owner back.
         await using var conn = await b.Db.OpenAsync();
-        var victimId = await conn.ExecuteScalarAsync<string>(
+        string? victimId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM users WHERE tenant_id = @t AND email = 'victim@acme.test'",
             new { t = b.PrimaryOrgId });
         Assert.NotNull(victimId);
@@ -280,8 +280,8 @@ public sealed class OrgTokensControllerUnitTests
         var created = (OkObjectResult)await b.OrgTokensController.CreateToken(
             new CreateTokenRequest(null, Capabilities: new[] { "read:metadata" }),
             CancellationToken.None);
-        var record = created.Value!.GetType().GetProperty("record")!.GetValue(created.Value)!;
-        var tokenId = (string)record.GetType().GetProperty("Id")!.GetValue(record)!;
+        object record = created.Value!.GetType().GetProperty("record")!.GetValue(created.Value)!;
+        string tokenId = (string)record.GetType().GetProperty("Id")!.GetValue(record)!;
 
         // Put owner back in the seat.
         ctx.User = new System.Security.Claims.ClaimsPrincipal(
@@ -378,7 +378,7 @@ public sealed class OrgTokensControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var longDesc = new string('x', 250);
+        string longDesc = new('x', 250);
         var result = await b.OrgTokensController.CreateServiceToken(
             new CreateServiceTokenRequest("bot", null,
                 Capabilities: new[] { "read:metadata" }, Description: longDesc),
@@ -416,10 +416,174 @@ public sealed class OrgTokensControllerUnitTests
         Assert.IsType<OkObjectResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'service_token_created' AND org_id = @o",
             new { o = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);
+    }
+
+    // ── Token cap (user tokens) ─────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CreateToken_AtCap_Returns422()
+    {
+        // Set cap to 1, create one token, then verify the second attempt is rejected.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        await using var conn = await b.Db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO instance_settings (key, value) VALUES ('max_active_tokens_per_tenant', '1') ON CONFLICT(key) DO UPDATE SET value = '1'");
+
+        // First token: must succeed.
+        var first = await b.OrgTokensController.CreateToken(
+            new CreateTokenRequest(ExpiresAt: null, Capabilities: new[] { "read:metadata" }),
+            CancellationToken.None);
+        Assert.IsType<OkObjectResult>(first);
+
+        // Second token: cap reached → 422.
+        var second = await b.OrgTokensController.CreateToken(
+            new CreateTokenRequest(ExpiresAt: null, Capabilities: new[] { "read:metadata" }),
+            CancellationToken.None);
+        var obj = Assert.IsType<ObjectResult>(second);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task CreateToken_ExpiredTokenDoesNotCountTowardCap()
+    {
+        // Expired tokens are not active and must not count against the cap.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        await using var conn = await b.Db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO instance_settings (key, value) VALUES ('max_active_tokens_per_tenant', '1') ON CONFLICT(key) DO UPDATE SET value = '1'");
+
+        // Seed an already-expired token directly in the DB.
+        string expiredId = Guid.NewGuid().ToString("N");
+        string userId = b.ActorUserId!;
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO user_tokens (id, org_id, user_id, token_hash, capabilities, expires_at)
+            VALUES (@id, @orgId, @userId, 'deadbeef', '["read:metadata"]', '2000-01-01T00:00:00Z')
+            """,
+            new { id = expiredId, orgId = b.PrimaryOrgId, userId });
+
+        // Creating one live token must still be allowed (expired row doesn't count).
+        var result = await b.OrgTokensController.CreateToken(
+            new CreateTokenRequest(ExpiresAt: null, Capabilities: new[] { "read:metadata" }),
+            CancellationToken.None);
+        Assert.IsType<OkObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task CreateToken_CapFromInstanceSetting_OverridesDefault()
+    {
+        // Verify a large cap from instance_settings allows more than the hard-coded default.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        await using var conn = await b.Db.OpenAsync();
+        // Allow only 2 user tokens.
+        await conn.ExecuteAsync(
+            "INSERT INTO instance_settings (key, value) VALUES ('max_active_tokens_per_tenant', '2') ON CONFLICT(key) DO UPDATE SET value = '2'");
+
+        var r1 = await b.OrgTokensController.CreateToken(
+            new CreateTokenRequest(null, Capabilities: new[] { "read:metadata" }), CancellationToken.None);
+        Assert.IsType<OkObjectResult>(r1);
+
+        var r2 = await b.OrgTokensController.CreateToken(
+            new CreateTokenRequest(null, Capabilities: new[] { "read:metadata" }), CancellationToken.None);
+        Assert.IsType<OkObjectResult>(r2);
+
+        // Third token must be rejected.
+        var r3 = await b.OrgTokensController.CreateToken(
+            new CreateTokenRequest(null, Capabilities: new[] { "read:metadata" }), CancellationToken.None);
+        var obj = Assert.IsType<ObjectResult>(r3);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    // ── Token cap (service tokens) ──────────────────────────────────────────────
+
+    [Fact]
+    public async Task CreateServiceToken_AtCap_Returns422()
+    {
+        // Set cap to 1, create one service token, then verify the second attempt is rejected.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        await using var conn = await b.Db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO instance_settings (key, value) VALUES ('max_active_tokens_per_tenant', '1') ON CONFLICT(key) DO UPDATE SET value = '1'");
+
+        var first = await b.OrgTokensController.CreateServiceToken(
+            new CreateServiceTokenRequest("bot-1", ExpiresAt: null, Capabilities: new[] { "read:metadata" }),
+            CancellationToken.None);
+        Assert.IsType<OkObjectResult>(first);
+
+        var second = await b.OrgTokensController.CreateServiceToken(
+            new CreateServiceTokenRequest("bot-2", ExpiresAt: null, Capabilities: new[] { "read:metadata" }),
+            CancellationToken.None);
+        var obj = Assert.IsType<ObjectResult>(second);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task CreateServiceToken_ExpiredTokenDoesNotCountTowardCap()
+    {
+        // Expired service tokens must not count against the cap.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        await using var conn = await b.Db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO instance_settings (key, value) VALUES ('max_active_tokens_per_tenant', '1') ON CONFLICT(key) DO UPDATE SET value = '1'");
+
+        string expiredId = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities, expires_at)
+            VALUES (@id, @orgId, 'expired-bot', 'aabbccdd', '["read:metadata"]', '2000-01-01T00:00:00Z')
+            """,
+            new { id = expiredId, orgId = b.PrimaryOrgId });
+
+        var result = await b.OrgTokensController.CreateServiceToken(
+            new CreateServiceTokenRequest("live-bot", null, Capabilities: new[] { "read:metadata" }),
+            CancellationToken.None);
+        Assert.IsType<OkObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task TokenCap_UserAtCap_ServiceTokenStillAllowed_IfCapIsPerType()
+    {
+        // The cap counts BOTH user and service tokens together. Verify that when user
+        // tokens fill the cap, the service token path also rejects (they share the count).
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        await using var conn = await b.Db.OpenAsync();
+        // Cap of 1 across both types.
+        await conn.ExecuteAsync(
+            "INSERT INTO instance_settings (key, value) VALUES ('max_active_tokens_per_tenant', '1') ON CONFLICT(key) DO UPDATE SET value = '1'");
+
+        // Fill the cap with a user token.
+        var userTok = await b.OrgTokensController.CreateToken(
+            new CreateTokenRequest(null, Capabilities: new[] { "read:metadata" }), CancellationToken.None);
+        Assert.IsType<OkObjectResult>(userTok);
+
+        // Service token must now be rejected — the combined cap is reached.
+        var svcTok = await b.OrgTokensController.CreateServiceToken(
+            new CreateServiceTokenRequest("bot", null, Capabilities: new[] { "read:metadata" }),
+            CancellationToken.None);
+        var obj = Assert.IsType<ObjectResult>(svcTok);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
 
     // ── DeleteServiceToken ──────────────────────────────────────────────────────
@@ -435,14 +599,14 @@ public sealed class OrgTokensControllerUnitTests
         var created = (OkObjectResult)await b.OrgTokensController.CreateServiceToken(
             new CreateServiceTokenRequest("ci", null, Capabilities: new[] { "read:metadata" }),
             CancellationToken.None);
-        var record = created.Value!.GetType().GetProperty("record")!.GetValue(created.Value)!;
-        var tokenId = (string)record.GetType().GetProperty("Id")!.GetValue(record)!;
+        object record = created.Value!.GetType().GetProperty("record")!.GetValue(created.Value)!;
+        string tokenId = (string)record.GetType().GetProperty("Id")!.GetValue(record)!;
 
         var result = await b.OrgTokensController.DeleteServiceToken(tokenId, CancellationToken.None);
         Assert.IsType<NoContentResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'service_token_revoked' AND org_id = @o",
             new { o = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);

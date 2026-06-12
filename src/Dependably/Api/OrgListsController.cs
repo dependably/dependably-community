@@ -1,15 +1,17 @@
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
 using Dependably.Infrastructure;
 using Dependably.Security;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Api;
 
 /// <summary>
-/// Tenant allowlist + blocklist. Split out of <see cref="OrgController"/>. Both lists
-/// share the same shape (list / add / delete) and live alongside each other as policy lists
-/// — the only difference is allowlist takes PURL prefix patterns and blocklist takes regular
-/// expressions on the package name.
+/// Tenant policy lists: allowlist, blocklist, and reserved namespaces. Split out of
+/// <see cref="OrgController"/>. All three share the same shape (list / add / delete) and live
+/// alongside each other as policy lists — allowlist takes PURL prefix patterns, blocklist
+/// takes regular expressions on the package PURL, and reserved namespaces take per-ecosystem
+/// name patterns that must never consult upstream (dependency-confusion guard).
 /// </summary>
 [ApiController]
 [Authorize]
@@ -17,6 +19,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
 {
     private readonly AllowlistRepository _allowlist;
     private readonly BlocklistRepository _blocklist;
+    private readonly Protocol.ReservedNamespaceService _reserved;
     private readonly OrgAccessGuard _guard;
     private readonly AuditRepository _audit;
     private readonly ProblemResults _problems;
@@ -24,12 +27,14 @@ public sealed class OrgListsController : OrgScopedControllerBase
     public OrgListsController(
         AllowlistRepository allowlist,
         BlocklistRepository blocklist,
+        Protocol.ReservedNamespaceService reserved,
         OrgAccessGuard guard,
         AuditRepository audit,
         ProblemResults problems)
     {
         _allowlist = allowlist;
         _blocklist = blocklist;
+        _reserved = reserved;
         _guard = guard;
         _audit = audit;
         _problems = problems;
@@ -42,24 +47,33 @@ public sealed class OrgListsController : OrgScopedControllerBase
     public async Task<IActionResult> GetAllowlist(CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadTenant, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         var entries = await _allowlist.ListAsync(orgId, ct);
         return Ok(entries);
     }
 
     /// <summary>POST /api/v1/orgs/{org}/allowlist</summary>
     [HttpPost("api/v1/allowlist")]
+    [ProducesResponseType(StatusCodes.Status201Created)]
     public async Task<IActionResult> AddAllowlist([FromBody] AllowlistRequest req, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
         if (string.IsNullOrWhiteSpace(req.PurlPattern))
+        {
             return _problems.ValidationErrorAction("purl_pattern", "purl_pattern is required.");
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         var entry = await _allowlist.AddAsync(orgId, req.PurlPattern, ct);
 
         await _audit.LogAsync("allowlist_added", orgId, GetUserId(),
@@ -74,15 +88,23 @@ public sealed class OrgListsController : OrgScopedControllerBase
 
     /// <summary>DELETE /api/v1/orgs/{org}/allowlist/{id}</summary>
     [HttpDelete("api/v1/allowlist/{id}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> DeleteAllowlist(string id, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        await _allowlist.DeleteAsync(id, ct);
-
-        await _audit.LogAsync("allowlist_removed", CurrentTenantId(), GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
+        // org_id-scoped: a cross-tenant (or unknown) id deletes 0 rows. Delete stays idempotent
+        // (204 either way); the org scope is what enforces isolation. Audit only a real removal.
+        string orgId = CurrentTenantId();
+        if (await _allowlist.DeleteAsync(orgId, id, ct) > 0)
+        {
+            await _audit.LogAsync("allowlist_removed", orgId, GetUserId(),
+                detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
+        }
 
         return NoContent();
     }
@@ -94,27 +116,38 @@ public sealed class OrgListsController : OrgScopedControllerBase
     public async Task<IActionResult> GetBlocklist(CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadTenant, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         var entries = await _blocklist.ListAsync(orgId, ct);
         return Ok(entries);
     }
 
     /// <summary>POST /api/v1/orgs/{org}/blocklist</summary>
     [HttpPost("api/v1/blocklist")]
+    [ProducesResponseType(StatusCodes.Status201Created)]
     public async Task<IActionResult> AddBlocklist([FromBody] BlocklistRequest req, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
         if (string.IsNullOrWhiteSpace(req.Pattern))
+        {
             return _problems.ValidationErrorAction("pattern", "pattern is required.");
+        }
 
         // Length-cap: bounds worst-case compile + match cost. 512 chars is generous for
         // package-name / version globs and far below pathological-regex territory.
         if (req.Pattern.Length > 512)
+        {
             return _problems.ValidationErrorAction("pattern", "Pattern must be 512 characters or fewer.");
+        }
 
         // Reject patterns that fail to compile within 2 s — bounds the worst-case
         // validation cost without dropping legitimate complex regexes. Compile-time
@@ -126,7 +159,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
         try { _ = new System.Text.RegularExpressions.Regex(req.Pattern, System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(2)); }
         catch { return _problems.ValidationErrorAction("pattern", "Pattern is not a valid regular expression."); }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         var entry = await _blocklist.AddAsync(orgId, req.Pattern, ct);
 
         await _audit.LogAsync("blocklist_added", orgId, GetUserId(),
@@ -141,15 +174,115 @@ public sealed class OrgListsController : OrgScopedControllerBase
 
     /// <summary>DELETE /api/v1/orgs/{org}/blocklist/{id}</summary>
     [HttpDelete("api/v1/blocklist/{id}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> DeleteBlocklist(string id, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        await _blocklist.DeleteAsync(id, ct);
+        // org_id-scoped: a cross-tenant (or unknown) id deletes 0 rows. Delete stays idempotent
+        // (204 either way); the org scope is what enforces isolation. Audit only a real removal.
+        string orgId = CurrentTenantId();
+        if (await _blocklist.DeleteAsync(orgId, id, ct) > 0)
+        {
+            await _audit.LogAsync("blocklist_removed", orgId, GetUserId(),
+                detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
+        }
 
-        await _audit.LogAsync("blocklist_removed", CurrentTenantId(), GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
+        return NoContent();
+    }
+
+    // ── Reserved namespaces ───────────────────────────────────────────────────
+
+    /// <summary>GET /api/v1/reserved-namespaces</summary>
+    [HttpGet("api/v1/reserved-namespaces")]
+    public async Task<IActionResult> GetReservedNamespaces(CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadTenant, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        string orgId = CurrentTenantId();
+        var entries = await _reserved.ListAsync(orgId, ct);
+        return Ok(entries);
+    }
+
+    /// <summary>POST /api/v1/reserved-namespaces</summary>
+    [HttpPost("api/v1/reserved-namespaces")]
+    public async Task<IActionResult> AddReservedNamespace(
+        [FromBody] ReservedNamespaceRequest req, CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        string ecosystem = (req.Ecosystem ?? "").Trim().ToLowerInvariant();
+        if (!Protocol.ReservedNamespaceService.SupportedEcosystems.Contains(ecosystem))
+        {
+            return _problems.ValidationErrorAction("ecosystem",
+                "ecosystem must be one of: npm, pypi, nuget, maven.");
+        }
+
+        string pattern = (req.Pattern ?? "").Trim();
+        if (pattern.Length == 0)
+        {
+            return _problems.ValidationErrorAction("pattern", "pattern is required.");
+        }
+
+        // Length-cap keeps patterns in package-name territory; matching is a plain prefix
+        // compare so this is a sanity bound, not a ReDoS guard.
+        if (pattern.Length > 256)
+        {
+            return _problems.ValidationErrorAction("pattern", "Pattern must be 256 characters or fewer.");
+        }
+
+        // Globs are trailing-only: '*' anywhere else would silently match nothing.
+        int star = pattern.IndexOf('*');
+        if (star >= 0 && star != pattern.Length - 1)
+        {
+            return _problems.ValidationErrorAction("pattern",
+                "'*' is only supported as the final character (trailing glob).");
+        }
+
+        string orgId = CurrentTenantId();
+        var entry = await _reserved.AddAsync(orgId, ecosystem, pattern, GetUserId(), ct);
+
+        await _audit.LogAsync("reserved_namespace_added", orgId, GetUserId(),
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                id = entry.Id,
+                ecosystem = entry.Ecosystem,
+                pattern = entry.Pattern,
+            }), ct: ct);
+
+        return CreatedAtAction(nameof(GetReservedNamespaces), null, entry);
+    }
+
+    /// <summary>DELETE /api/v1/reserved-namespaces/{id}</summary>
+    [HttpDelete("api/v1/reserved-namespaces/{id}")]
+    public async Task<IActionResult> DeleteReservedNamespace(string id, CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        // org_id-scoped: a cross-tenant (or unknown) id deletes 0 rows. Delete stays idempotent
+        // (204 either way); the org scope is what enforces isolation. Audit only a real removal.
+        string orgId = CurrentTenantId();
+        if (await _reserved.DeleteAsync(orgId, id, ct) > 0)
+        {
+            await _audit.LogAsync("reserved_namespace_removed", orgId, GetUserId(),
+                detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
+        }
 
         return NoContent();
     }

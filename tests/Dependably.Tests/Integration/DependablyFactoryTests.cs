@@ -31,7 +31,7 @@ public sealed class DependablyFactoryTests : IClassFixture<DependablyFactory>, I
     [Fact]
     public async Task CreateToken_ReturnsBearerThatAuthenticates()
     {
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
         // A pull token should authenticate against the PyPI simple index (anonymous_pull = 0 by default)
         var resp = await client.GetAsync("/simple/");
@@ -41,7 +41,7 @@ public sealed class DependablyFactoryTests : IClassFixture<DependablyFactory>, I
     [Fact]
     public async Task CreateAdminToken_ReturnsValidToken()
     {
-        var token = await _factory.CreateAdminToken();
+        string token = await _factory.CreateAdminToken();
         Assert.False(string.IsNullOrEmpty(token));
     }
 
@@ -55,7 +55,7 @@ public sealed class DependablyFactoryTests : IClassFixture<DependablyFactory>, I
     [Fact]
     public async Task PushNpmPackage_StoresPackageInBlobStore()
     {
-        var sizeBefore = await _factory.BlobStore.GetTotalSizeAsync();
+        long sizeBefore = await _factory.BlobStore.GetTotalSizeAsync();
         await _factory.PushNpmPackage("test-npm-pkg", "1.0.0");
         Assert.True(await _factory.BlobStore.GetTotalSizeAsync() > sizeBefore);
     }
@@ -63,7 +63,7 @@ public sealed class DependablyFactoryTests : IClassFixture<DependablyFactory>, I
     [Fact]
     public async Task PushNuGetPackage_StoresPackageInBlobStore()
     {
-        var sizeBefore = await _factory.BlobStore.GetTotalSizeAsync();
+        long sizeBefore = await _factory.BlobStore.GetTotalSizeAsync();
         await _factory.PushNuGetPackage("TestPkg", "1.0.0");
         Assert.True(await _factory.BlobStore.GetTotalSizeAsync() > sizeBefore);
     }
@@ -90,8 +90,8 @@ public sealed class DependablyFactoryTests : IClassFixture<DependablyFactory>, I
 
     private static string Sha256OfFixture(string ecosystem, string filename)
     {
-        var path = Path.Combine(FixtureManifest.FixturesRoot, ecosystem, filename);
-        var bytes = File.ReadAllBytes(path);
+        string path = Path.Combine(FixtureManifest.FixturesRoot, ecosystem, filename);
+        byte[] bytes = File.ReadAllBytes(path);
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
     }
 }

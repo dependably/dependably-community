@@ -5,7 +5,6 @@ using Dependably.Infrastructure.Audit;
 using Dependably.Infrastructure.Audit.Events;
 using Dependably.Infrastructure.Publish;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -39,23 +38,23 @@ public sealed class PublishAuditorTests : IAsyncLifetime
         string origin = "uploaded",
         string claimState = "unclaimed",
         long size = 42) => new()
-    {
-        OrgId = "o1",
-        Ecosystem = "npm",
-        Name = "lodash",
-        PurlName = "lodash",
-        Version = "1.2.3",
-        Filename = "lodash-1.2.3.tgz",
-        Purl = "pkg:npm/lodash@1.2.3",
-        ArtifactBytes = new byte[size],
-        Origin = origin,
-        SizeCap = long.MaxValue,
-        ActorUserId = actorUserId,
-        AuditAction = auditAction,
-        AuditDetail = auditDetail,
-        ClaimState = claimState,
-        SourceIp = sourceIp,
-    };
+        {
+            OrgId = "o1",
+            Ecosystem = "npm",
+            Name = "lodash",
+            PurlName = "lodash",
+            Version = "1.2.3",
+            Filename = "lodash-1.2.3.tgz",
+            Purl = "pkg:npm/lodash@1.2.3",
+            ArtifactBytes = new byte[size],
+            Origin = origin,
+            SizeCap = long.MaxValue,
+            ActorUserId = actorUserId,
+            AuditAction = auditAction,
+            AuditDetail = auditDetail,
+            ClaimState = claimState,
+            SourceIp = sourceIp,
+        };
 
     private async Task<int> CountAsync(string table)
     {
@@ -97,10 +96,9 @@ public sealed class PublishAuditorTests : IAsyncLifetime
         Assert.Equal("push", audit.Action);
         Assert.Equal("{\"foo\":\"bar\"}", audit.Detail);
         Assert.Equal("u1", audit.ActorId);
-
-        var activity = (await ActivityRowsAsync()).Single();
-        Assert.Equal("push", activity.EventType);
-        Assert.Equal("10.0.0.1", activity.SourceIp);
+        var (EventType, _, SourceIp, _) = (await ActivityRowsAsync()).Single();
+        Assert.Equal("push", EventType);
+        Assert.Equal("10.0.0.1", SourceIp);
 
         var typed = Assert.Single(_emitter.Emitted);
         Assert.Equal(PackageEvents.TypePublish, typed.EventType);
@@ -134,17 +132,16 @@ public sealed class PublishAuditorTests : IAsyncLifetime
     public async Task Import_writes_only_activity_and_emits_typed_import_with_batch_info()
     {
         var auditor = Build();
-        var detail = JsonSerializer.Serialize(new { batch_id = "b-99", import_mode = "bulk" });
+        string detail = JsonSerializer.Serialize(new { batch_id = "b-99", import_mode = "bulk" });
         await auditor.RecordAsync(Sample(auditAction: "import", auditDetail: detail),
             sha256: "ff00", existing: null, ct: default);
 
         // The invariant: import is per-version only; audit_log stays empty.
         Assert.Equal(0, await CountAsync("audit_log"));
         Assert.Equal(1, await CountAsync("activity"));
-
-        var act = (await ActivityRowsAsync()).Single();
-        Assert.Equal("import", act.EventType);
-        Assert.Equal(detail, act.Detail);
+        var (EventType, Detail, _, _) = (await ActivityRowsAsync()).Single();
+        Assert.Equal("import", EventType);
+        Assert.Equal(detail, Detail);
 
         var typed = Assert.Single(_emitter.Emitted);
         Assert.Equal(PackageEvents.TypeImport, typed.EventType);
@@ -185,7 +182,7 @@ public sealed class PublishAuditorTests : IAsyncLifetime
     {
         // Valid JSON but the two fields are numbers, not strings — the ValueKind guard returns defaults.
         var auditor = Build();
-        var detail = JsonSerializer.Serialize(new { batch_id = 7, import_mode = 9 });
+        string detail = JsonSerializer.Serialize(new { batch_id = 7, import_mode = 9 });
         await auditor.RecordAsync(Sample(auditAction: "import", auditDetail: detail),
             sha256: "33", existing: null, ct: default);
 
@@ -200,7 +197,7 @@ public sealed class PublishAuditorTests : IAsyncLifetime
     {
         // batch_id present, import_mode absent → mode defaults to "single".
         var auditor = Build();
-        var detail = JsonSerializer.Serialize(new { batch_id = "only-batch" });
+        string detail = JsonSerializer.Serialize(new { batch_id = "only-batch" });
         await auditor.RecordAsync(Sample(auditAction: "import", auditDetail: detail),
             sha256: "44", existing: null, ct: default);
 

@@ -4,7 +4,6 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using NSubstitute;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -32,7 +31,10 @@ public sealed class BootstrapControllerEndpointTests
 
         var ctx = new DefaultHttpContext();
         ctx.Request.Scheme = requestIsHttps ? "https" : "http";
-        if (tenant is not null) ctx.Items[TenantContext.HttpItemsKey] = tenant;
+        if (tenant is not null)
+        {
+            ctx.Items[TenantContext.HttpItemsKey] = tenant;
+        }
 
         return new BootstrapController(config, airGap, urls) { ControllerContext = new ControllerContext { HttpContext = ctx } };
     }

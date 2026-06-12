@@ -2,7 +2,6 @@ using Dapper;
 using Dependably.Api;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Mvc;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -70,11 +69,11 @@ public sealed class OrgAuthConfigControllerTests
         Assert.NotNull(ok.Value);
 
         // Verify response shape: defaults when no config row exists.
-        var enabled = (bool)ok.Value!.GetType().GetProperty("enabled")!.GetValue(ok.Value)!;
-        var formsLoginEnabled = (bool)ok.Value.GetType().GetProperty("formsLoginEnabled")!.GetValue(ok.Value)!;
-        var nameIdFormat = (string)ok.Value.GetType().GetProperty("nameIdFormat")!.GetValue(ok.Value)!;
-        var thumbprint = ok.Value.GetType().GetProperty("idpSigningCertThumbprint")!.GetValue(ok.Value);
-        var spInfo = ok.Value.GetType().GetProperty("spInfo")!.GetValue(ok.Value)!;
+        bool enabled = (bool)ok.Value!.GetType().GetProperty("enabled")!.GetValue(ok.Value)!;
+        bool formsLoginEnabled = (bool)ok.Value.GetType().GetProperty("formsLoginEnabled")!.GetValue(ok.Value)!;
+        string nameIdFormat = (string)ok.Value.GetType().GetProperty("nameIdFormat")!.GetValue(ok.Value)!;
+        object? thumbprint = ok.Value.GetType().GetProperty("idpSigningCertThumbprint")!.GetValue(ok.Value);
+        object spInfo = ok.Value.GetType().GetProperty("spInfo")!.GetValue(ok.Value)!;
 
         Assert.False(enabled);
         Assert.True(formsLoginEnabled);
@@ -117,9 +116,9 @@ public sealed class OrgAuthConfigControllerTests
 
         var ok = Assert.IsType<OkObjectResult>(
             await b.OrgAuthConfigController.Get(CancellationToken.None));
-        var enabled = (bool)ok.Value!.GetType().GetProperty("enabled")!.GetValue(ok.Value)!;
-        var idpEntityId = (string?)ok.Value.GetType().GetProperty("idpEntityId")!.GetValue(ok.Value);
-        var thumbprint = (string?)ok.Value.GetType().GetProperty("idpSigningCertThumbprint")!.GetValue(ok.Value);
+        bool enabled = (bool)ok.Value!.GetType().GetProperty("enabled")!.GetValue(ok.Value)!;
+        string? idpEntityId = (string?)ok.Value.GetType().GetProperty("idpEntityId")!.GetValue(ok.Value);
+        string? thumbprint = (string?)ok.Value.GetType().GetProperty("idpSigningCertThumbprint")!.GetValue(ok.Value);
 
         Assert.True(enabled);
         Assert.Equal("idp-entity", idpEntityId);
@@ -173,12 +172,12 @@ public sealed class OrgAuthConfigControllerTests
         Assert.IsType<NoContentResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var sp = await conn.ExecuteScalarAsync<string?>(
+        string? sp = await conn.ExecuteScalarAsync<string?>(
             "SELECT sp_entity_id FROM tenant_saml_config WHERE org_id = @o",
             new { o = b.PrimaryOrgId });
         Assert.Equal("https://sp.example.com", sp);
 
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'saml.config_updated' AND org_id = @o",
             new { o = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);
@@ -218,7 +217,7 @@ public sealed class OrgAuthConfigControllerTests
         Assert.IsType<NoContentResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var sp = await conn.ExecuteScalarAsync<string?>(
+        string? sp = await conn.ExecuteScalarAsync<string?>(
             "SELECT sp_entity_id FROM tenant_saml_config WHERE org_id = @o",
             new { o = b.PrimaryOrgId });
         Assert.Null(sp);
@@ -325,7 +324,7 @@ public sealed class OrgAuthConfigControllerTests
         await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var recent = DateTimeOffset.UtcNow.AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string recent = DateTimeOffset.UtcNow.AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using (var conn = await b.Db.OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -359,13 +358,13 @@ public sealed class OrgAuthConfigControllerTests
             new UploadSamlMetadataRequest(IdpMetadataXml()),
             CancellationToken.None);
         var ok = Assert.IsType<OkObjectResult>(result);
-        var entityId = (string)ok.Value!.GetType().GetProperty("idpEntityId")!.GetValue(ok.Value)!;
-        var thumbprint = (string?)ok.Value.GetType().GetProperty("idpSigningCertThumbprint")!.GetValue(ok.Value);
+        string entityId = (string)ok.Value!.GetType().GetProperty("idpEntityId")!.GetValue(ok.Value)!;
+        string? thumbprint = (string?)ok.Value.GetType().GetProperty("idpSigningCertThumbprint")!.GetValue(ok.Value);
         Assert.Equal("https://idp.example.com/entity", entityId);
         Assert.False(string.IsNullOrEmpty(thumbprint));
 
         await using var conn = await b.Db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'saml.metadata_uploaded' AND org_id = @o",
             new { o = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);
@@ -439,12 +438,12 @@ public sealed class OrgAuthConfigControllerTests
         Assert.IsType<NoContentResult>(result);
 
         await using var c2 = await b.Db.OpenAsync();
-        var remaining = await c2.ExecuteScalarAsync<long>(
+        long remaining = await c2.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM tenant_saml_config WHERE org_id = @o",
             new { o = b.PrimaryOrgId });
         Assert.Equal(0, remaining);
 
-        var auditCount = await c2.ExecuteScalarAsync<long>(
+        long auditCount = await c2.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'saml.config_deleted' AND org_id = @o",
             new { o = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);
@@ -539,7 +538,7 @@ public sealed class OrgAuthConfigControllerTests
         await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var userId = b.ActorUserId!;
+        string userId = b.ActorUserId!;
         b.OrgAuthConfigController.ControllerContext.HttpContext.User = new System.Security.Claims.ClaimsPrincipal(
             new System.Security.Claims.ClaimsIdentity(
             [
@@ -557,7 +556,7 @@ public sealed class OrgAuthConfigControllerTests
         Assert.IsType<OkObjectResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var actorId = await conn.ExecuteScalarAsync<string?>(
+        string? actorId = await conn.ExecuteScalarAsync<string?>(
             "SELECT actor_id FROM audit_log WHERE action = 'saml.metadata_uploaded' AND org_id = @o LIMIT 1",
             new { o = b.PrimaryOrgId });
         Assert.Equal(userId, actorId);
@@ -580,7 +579,7 @@ public sealed class OrgAuthConfigControllerTests
                 new { o = b.PrimaryOrgId });
         }
 
-        var userId = b.ActorUserId!;
+        string userId = b.ActorUserId!;
         b.OrgAuthConfigController.ControllerContext.HttpContext.User = new System.Security.Claims.ClaimsPrincipal(
             new System.Security.Claims.ClaimsIdentity(
             [
@@ -596,7 +595,7 @@ public sealed class OrgAuthConfigControllerTests
         Assert.IsType<NoContentResult>(result);
 
         await using var c2 = await b.Db.OpenAsync();
-        var actorId = await c2.ExecuteScalarAsync<string?>(
+        string? actorId = await c2.ExecuteScalarAsync<string?>(
             "SELECT actor_id FROM audit_log WHERE action = 'saml.config_deleted' AND org_id = @o LIMIT 1",
             new { o = b.PrimaryOrgId });
         Assert.Equal(userId, actorId);
@@ -624,7 +623,7 @@ public sealed class OrgAuthConfigControllerTests
 
         var ok = Assert.IsType<OkObjectResult>(
             await b.OrgAuthConfigController.Get(CancellationToken.None));
-        var thumbprint = ok.Value!.GetType().GetProperty("idpSigningCertThumbprint")!.GetValue(ok.Value);
+        object? thumbprint = ok.Value!.GetType().GetProperty("idpSigningCertThumbprint")!.GetValue(ok.Value);
         Assert.Null(thumbprint);
     }
 }

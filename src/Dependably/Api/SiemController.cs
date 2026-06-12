@@ -1,10 +1,9 @@
-using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
 using Dependably.Infrastructure;
 using Dependably.Security;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Api;
 
@@ -70,16 +69,24 @@ public sealed class SiemController : ControllerBase
     {
         var authResult = await AuthenticateAsync(ct);
         if (authResult.Error is not null)
+        {
             return authResult.Error;
+        }
 
-        var range = ParseAuthEventDateRange(since, until);
-        if (range.Error is not null) return range.Error;
+        var (Since, Until, Error) = ParseAuthEventDateRange(since, until);
+        if (Error is not null)
+        {
+            return Error;
+        }
 
         var (orgId, orgError) = await ResolveOrgFilterAsync(authResult, org, ct);
-        if (orgError is not null) return orgError;
+        if (orgError is not null)
+        {
+            return orgError;
+        }
 
         var (items, nextCursor) = await _audit.ListAuthEventsAsync(
-            range.Since, range.Until, orgId, action, Math.Clamp(limit, 1, 500), cursor, ct);
+            Since, Until, orgId, action, Math.Clamp(limit, 1, 500), cursor, ct);
 
         return RenderAuthEventsResponse(items, nextCursor);
     }
@@ -87,18 +94,33 @@ public sealed class SiemController : ControllerBase
     private (DateTimeOffset Since, DateTimeOffset Until, IActionResult? Error) ParseAuthEventDateRange(string? since, string? until)
     {
         var now = DateTimeOffset.UtcNow;
-        var maxLookbackDays = _config.GetValue<int>("SIEM_MAX_LOOKBACK_DAYS", 90);
+        int maxLookbackDays = _config.GetValue<int>("SIEM_MAX_LOOKBACK_DAYS", 90);
 
         if (!TryParseIso(since, now.AddDays(-1), out var sinceDto))
+        {
             return (default, default, BadRequest(new { detail = "Invalid 'since' date format. Use ISO 8601." }));
+        }
+
         if (!TryParseIso(until, now, out var untilDto))
+        {
             return (default, default, BadRequest(new { detail = "Invalid 'until' date format. Use ISO 8601." }));
+        }
 
         var earliest = now.AddDays(-maxLookbackDays);
-        if (sinceDto < earliest) sinceDto = earliest;
-        if (untilDto > now) untilDto = now;
+        if (sinceDto < earliest)
+        {
+            sinceDto = earliest;
+        }
+
+        if (untilDto > now)
+        {
+            untilDto = now;
+        }
+
         if (sinceDto >= untilDto)
+        {
             return (default, default, BadRequest(new { detail = "since must be before until." }));
+        }
 
         return (sinceDto, untilDto, null);
     }
@@ -112,21 +134,33 @@ public sealed class SiemController : ControllerBase
     private async Task<(string? OrgId, IActionResult? Error)> ResolveOrgFilterAsync(SiemAuthResult authResult, string? org, CancellationToken ct)
     {
         // Token callers are locked to their org; JWT callers may filter via ?org=
-        if (authResult.TokenOrgId is not null) return (authResult.TokenOrgId, null);
-        if (org is null) return (null, null); // instance_admin with no filter → all orgs
-        if (!authResult.IsInstanceAdmin) return (null, Forbid());
+        if (authResult.TokenOrgId is not null)
+        {
+            return (authResult.TokenOrgId, null);
+        }
+
+        if (org is null)
+        {
+            return (null, null); // instance_admin with no filter → all orgs
+        }
+
+        if (!authResult.IsInstanceAdmin)
+        {
+            return (null, Forbid());
+        }
+
         var orgRecord = await _orgs.GetBySlugAsync(org, ct: ct);
         return orgRecord is null ? (null, NotFound()) : (orgRecord.Id, null);
     }
 
     private IActionResult RenderAuthEventsResponse(IReadOnlyList<AuditEntry> items, string? nextCursor)
     {
-        var accept = Request.Headers.Accept.FirstOrDefault() ?? "";
-        if (accept.Contains("application/x-ndjson", StringComparison.OrdinalIgnoreCase))
-            return NdjsonResult(items, nextCursor);
-        if (accept.Contains("application/x-cef", StringComparison.OrdinalIgnoreCase))
-            return CefResult(items, nextCursor);
-        return Ok(new { items, next_cursor = nextCursor });
+        string accept = Request.Headers.Accept.FirstOrDefault() ?? "";
+        return accept.Contains("application/x-ndjson", StringComparison.OrdinalIgnoreCase)
+            ? NdjsonResult(items, nextCursor)
+            : accept.Contains("application/x-cef", StringComparison.OrdinalIgnoreCase)
+            ? CefResult(items, nextCursor)
+            : Ok(new { items, next_cursor = nextCursor });
     }
 
     /// <summary>
@@ -145,7 +179,9 @@ public sealed class SiemController : ControllerBase
     {
         var authResult = await AuthenticateAsync(ct);
         if (authResult.Error is not null)
+        {
             return authResult.Error;
+        }
 
         string? orgId = null;
         if (authResult.TokenOrgId is not null)
@@ -155,9 +191,16 @@ public sealed class SiemController : ControllerBase
         else if (org is not null)
         {
             if (!authResult.IsInstanceAdmin)
+            {
                 return Forbid();
+            }
+
             var orgRecord = await _orgs.GetBySlugAsync(org, ct: ct);
-            if (orgRecord is null) return NotFound();
+            if (orgRecord is null)
+            {
+                return NotFound();
+            }
+
             orgId = orgRecord.Id;
         }
 
@@ -168,9 +211,15 @@ public sealed class SiemController : ControllerBase
         foreach (var (eco, sev, count) in summary.Rows)
         {
             if (ecosystem is not null && !string.Equals(eco, ecosystem, StringComparison.OrdinalIgnoreCase))
+            {
                 continue;
+            }
+
             if (!bySeverity.TryGetValue(eco, out var sevMap))
+            {
                 bySeverity[eco] = sevMap = new Dictionary<string, long>();
+            }
+
             sevMap[sev ?? "unknown"] = count;
         }
 
@@ -202,7 +251,7 @@ public sealed class SiemController : ControllerBase
         // [RequireCapability] path on protocol routes.
         if (User.Identity?.IsAuthenticated == true)
         {
-            var role = User.FindFirst("role")?.Value;
+            string? role = User.FindFirst("role")?.Value;
             var granted = role == "system_admin"
                 ? Capabilities.ForPlatformAdmin()
                 : Capabilities.ForRole(role ?? "member");
@@ -210,31 +259,34 @@ public sealed class SiemController : ControllerBase
             // Authenticated-but-uncapped (e.g. tenant member) must not reach SIEM data —
             // there's a dedicated /api/v1/audit endpoint for tenant-scoped audit reads.
             if (!Capabilities.Grants(granted, Capabilities.ReadAudit))
+            {
                 return new SiemAuthResult(false, null,
                     new ObjectResult(new { detail = "read:audit capability required." })
                     { StatusCode = StatusCodes.Status403Forbidden });
+            }
 
             // Platform admin gets cross-tenant access. Everyone else (tenant admin/owner/
             // auditor with read:audit) is pinned to their own tenant by setting TokenOrgId
             // from the JWT — otherwise ResolveOrgFilterAsync's no-org-filter fallback would
             // leak rows across tenants via AuditRepository's `WHERE (@orgId IS NULL OR ...)`.
             if (Capabilities.Grants(granted, Capabilities.PlatformAll))
+            {
                 return new SiemAuthResult(true, null, null);
+            }
 
-            var jwtOrgId = User.FindFirst("org_id")?.Value ?? User.FindFirst("tid")?.Value;
-            if (string.IsNullOrEmpty(jwtOrgId))
-                return new SiemAuthResult(false, null,
+            string? jwtOrgId = User.FindFirst("org_id")?.Value ?? User.FindFirst("tid")?.Value;
+            return string.IsNullOrEmpty(jwtOrgId)
+                ? new SiemAuthResult(false, null,
                     new ObjectResult(new { detail = "JWT missing tenant claim." })
-                    { StatusCode = StatusCodes.Status401Unauthorized });
-            return new SiemAuthResult(false, jwtOrgId, null);
+                    { StatusCode = StatusCodes.Status401Unauthorized })
+                : new SiemAuthResult(false, jwtOrgId, null);
         }
 
         // Token path — Bearer carrying read:audit.
         var token = await Request.ResolveTokenAsync(_tokens, ct);
-        if (token is not null && token.HasCapability(Capabilities.ReadAudit))
-            return new SiemAuthResult(false, token.OrgId, null);
-
-        return new SiemAuthResult(false, null, Unauthorized(new { detail = "Authentication required. Provide a JWT or a Bearer token with read:audit capability." }));
+        return token is not null && token.HasCapability(Capabilities.ReadAudit)
+            ? new SiemAuthResult(false, token.OrgId, null)
+            : new SiemAuthResult(false, null, Unauthorized(new { detail = "Authentication required. Provide a JWT or a Bearer token with read:audit capability." }));
     }
 
     // ── Output formatters ────────────────────────────────────────────────────
@@ -244,9 +296,15 @@ public sealed class SiemController : ControllerBase
         var sb = new StringBuilder();
         var opts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
         foreach (var item in items)
+        {
             sb.AppendLine(JsonSerializer.Serialize(item, opts));
+        }
+
         if (nextCursor is not null)
+        {
             sb.AppendLine(JsonSerializer.Serialize(new { next_cursor = nextCursor }, opts));
+        }
+
         return Content(sb.ToString(), "application/x-ndjson", Encoding.UTF8);
     }
 
@@ -256,20 +314,43 @@ public sealed class SiemController : ControllerBase
         var sb = new StringBuilder();
         foreach (var item in items)
         {
-            var sig = CefEscape(item.Action);
-            var name = CefFriendlyName(item.Action);
-            var sev = CefSeverity(item.Action);
+            string sig = CefEscape(item.Action);
+            string name = CefFriendlyName(item.Action);
+            int sev = CefSeverity(item.Action);
             var ext = new StringBuilder();
             ext.Append($"rt={item.CreatedAt:yyyyMMddHHmmss.fffZ}");
-            if (item.ActorId is not null) ext.Append($" suid={CefEscape(item.ActorId)}");
-            if (item.OrgId is not null) ext.Append($" cs1={CefEscape(item.OrgId)} cs1Label=OrgId");
-            if (item.Ecosystem is not null) ext.Append($" cs2={CefEscape(item.Ecosystem)} cs2Label=Ecosystem");
-            if (item.Purl is not null) ext.Append($" cs3={CefEscape(item.Purl)} cs3Label=Purl");
-            if (item.Detail is not null) ext.Append($" msg={CefEscape(item.Detail)}");
+            if (item.ActorId is not null)
+            {
+                ext.Append($" suid={CefEscape(item.ActorId)}");
+            }
+
+            if (item.OrgId is not null)
+            {
+                ext.Append($" cs1={CefEscape(item.OrgId)} cs1Label=OrgId");
+            }
+
+            if (item.Ecosystem is not null)
+            {
+                ext.Append($" cs2={CefEscape(item.Ecosystem)} cs2Label=Ecosystem");
+            }
+
+            if (item.Purl is not null)
+            {
+                ext.Append($" cs3={CefEscape(item.Purl)} cs3Label=Purl");
+            }
+
+            if (item.Detail is not null)
+            {
+                ext.Append($" msg={CefEscape(item.Detail)}");
+            }
+
             sb.AppendLine($"CEF:0|Dependably|dependably|1.0|{sig}|{name}|{sev}|{ext}");
         }
         if (nextCursor is not null)
+        {
             sb.AppendLine($"# next_cursor={nextCursor}");
+        }
+
         return Content(sb.ToString(), "application/x-cef", Encoding.UTF8);
     }
 
@@ -278,24 +359,24 @@ public sealed class SiemController : ControllerBase
 
     private static string CefFriendlyName(string action) => action switch
     {
-        "login.success"      => "Login Success",
-        "login.failure"      => "Login Failure",
-        "lockout.triggered"  => "Account Lockout",
-        "token.created"      => "Token Created",
-        "token.revoked"      => "Token Revoked",
-        "rbac.role_changed"  => "Role Changed",
-        "rbac.member_added"  => "Member Added",
-        "rbac.member_removed"=> "Member Removed",
-        _                    => action,
+        "login.success" => "Login Success",
+        "login.failure" => "Login Failure",
+        "lockout.triggered" => "Account Lockout",
+        "token.created" => "Token Created",
+        "token.revoked" => "Token Revoked",
+        "rbac.role_changed" => "Role Changed",
+        "rbac.member_added" => "Member Added",
+        "rbac.member_removed" => "Member Removed",
+        _ => action,
     };
 
     private static int CefSeverity(string action) => action switch
     {
         "lockout.triggered" => 7,
-        "login.failure"     => 5,
-        "login.success"     => 3,
-        "token.revoked"     => 4,
+        "login.failure" => 5,
+        "login.success" => 3,
+        "token.revoked" => 4,
         "rbac.role_changed" => 6,
-        _                   => 3,
+        _ => 3,
     };
 }

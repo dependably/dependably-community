@@ -56,9 +56,9 @@ public sealed class HealthcheckPinger : BackgroundService
         _pingUrl = config["HEALTHCHECK_PING_URL"];
         _failUrl = config["HEALTHCHECK_PING_FAIL_URL"];
         _interval = TimeSpan.FromSeconds(
-            int.TryParse(config["HEALTHCHECK_PING_INTERVAL_SECONDS"], out var i) ? i : 60);
+            int.TryParse(config["HEALTHCHECK_PING_INTERVAL_SECONDS"], out int i) ? i : 60);
         _timeout = TimeSpan.FromSeconds(
-            int.TryParse(config["HEALTHCHECK_PING_TIMEOUT_SECONDS"], out var t) ? t : 10);
+            int.TryParse(config["HEALTHCHECK_PING_TIMEOUT_SECONDS"], out int t) ? t : 10);
         _usePost = string.Equals(config["HEALTHCHECK_PING_METHOD"], "POST", StringComparison.OrdinalIgnoreCase);
         _sendPayload = string.Equals(config["HEALTHCHECK_PING_PAYLOAD"], "status", StringComparison.OrdinalIgnoreCase);
         _leaderScope = string.Equals(config["HEALTHCHECK_PING_SCOPE"], "leader", StringComparison.OrdinalIgnoreCase);
@@ -69,7 +69,9 @@ public sealed class HealthcheckPinger : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (string.IsNullOrWhiteSpace(_pingUrl))
+        {
             return; // Feature disabled — silent exit.
+        }
 
         _logger.LogInformation(
             "HealthcheckPinger enabled: url={Url} interval={Interval}s scope={Scope}",
@@ -87,19 +89,24 @@ public sealed class HealthcheckPinger : BackgroundService
         // Air-gap gate: the heartbeat is an outbound request, so suppress it when the instance
         // is air-gapped (AIR_GAPPED) or this job is named in DISABLE_BACKGROUND_JOBS.
         if (_airGap.IsJobDisabled("healthcheck-pinger"))
+        {
             return;
+        }
 
         // In leader scope, only the elected leader pings.
         if (_leaderScope)
         {
             await using var handle = await _locks.TryAcquireAsync("healthcheck:leader-ping", _interval, ct);
-            if (handle is null) return;
+            if (handle is null)
+            {
+                return;
+            }
         }
 
         var checks = await _readiness.CheckAsync(ct);
-        var ready = checks.Values.All(v => v is null);
+        bool ready = checks.Values.All(v => v is null);
 
-        var targetUrl = ready ? _pingUrl! : (_failUrl ?? _pingUrl!);
+        string targetUrl = ready ? _pingUrl! : (_failUrl ?? _pingUrl!);
         var stopwatch = Stopwatch.StartNew();
 
         try
@@ -128,7 +135,7 @@ public sealed class HealthcheckPinger : BackgroundService
     {
         if (_usePost || _sendPayload)
         {
-            var uptime = (long)(DateTimeOffset.UtcNow - _startedAt).TotalSeconds;
+            long uptime = (long)(DateTimeOffset.UtcNow - _startedAt).TotalSeconds;
             var body = new
             {
                 instance_id = _instanceId,

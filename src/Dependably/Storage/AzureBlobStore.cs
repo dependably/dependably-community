@@ -31,6 +31,24 @@ public sealed class AzureBlobStore : IBlobStore
     public Task<Stream?> GetAsync(string key, CancellationToken ct = default)
         => _container.DownloadOrNullAsync(key, ct);
 
+    public async Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+    {
+        var (content, totalLength) = await _container.DownloadRangeOrNullAsync(key, from, to, ct);
+        if (content is null)
+        {
+            return null;
+        }
+
+        long effectiveTo = Math.Min(to, totalLength - 1);
+        if (from > effectiveTo || totalLength == 0)
+        {
+            // Range starts past end of blob — return sentinel for 416 handling.
+            return new RangedStream(Stream.Null, from, from - 1, totalLength);
+        }
+
+        return new RangedStream(content, from, effectiveTo, totalLength);
+    }
+
     public Task<bool> ExistsAsync(string key, CancellationToken ct = default)
         => _container.ExistsAsync(key, ct);
 
@@ -40,8 +58,11 @@ public sealed class AzureBlobStore : IBlobStore
     public async Task<long> GetTotalSizeAsync(CancellationToken ct = default)
     {
         long total = 0;
-        await foreach (var size in _container.EnumerateSizesAsync(ct))
+        await foreach (long size in _container.EnumerateSizesAsync(ct))
+        {
             total += size;
+        }
+
         return total;
     }
 

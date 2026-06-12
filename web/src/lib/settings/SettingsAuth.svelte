@@ -254,6 +254,20 @@
   <span class="spinner"></span>
 {:else}
   <div class="auth-tab">
+    {#if authConfig.samlIdpCert && authConfig.samlIdpCert.status !== 'ok'}
+      <div class="warning-box cert-expiry-warning" role="alert">
+        <strong>
+          {authConfig.samlIdpCert.status === 'expired'
+            ? $t('settings.auth.certExpiryExpiredTitle')
+            : $t('settings.auth.certExpiryWarningTitle')}
+        </strong>
+        <p>
+          {authConfig.samlIdpCert.status === 'expired'
+            ? $t('settings.auth.certExpiryExpiredBody', { values: { notAfter: authConfig.samlIdpCert.notAfter } })
+            : $t('settings.auth.certExpiryWarningBody', { values: { days: authConfig.samlIdpCert.daysRemaining, notAfter: authConfig.samlIdpCert.notAfter } })}
+        </p>
+      </div>
+    {/if}
     {#if authError}<div class="error-msg">{authError}</div>{/if}
     {#if authSuccess}<div class="text-success mb-3">{authSuccess}</div>{/if}
 
@@ -661,6 +675,16 @@
     font-size: 12px;
     cursor: pointer;
   }
+  .warning-box {
+    border-left: 4px solid var(--warning-border);
+    background: var(--warning-bg);
+    color: var(--text);
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+  }
+  .warning-box strong { display: block; margin-bottom: 4px; }
+  .warning-box p { margin: 0; font-size: 13px; }
   .reset-row { margin-top: 12px; }
   .reset-hint { margin-top: 6px; }
   .cert-override-spacing { margin-top: 12px; }

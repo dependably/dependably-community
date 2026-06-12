@@ -7,7 +7,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -46,7 +45,7 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
     {
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var hits = await conn.ExecuteScalarAsync<long>(
+        long hits = await conn.ExecuteScalarAsync<long>(
             """
             SELECT COUNT(*) FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
@@ -88,13 +87,13 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
     [Fact]
     public async Task Npm_ProxyFirstFetch_PackumentIntegrityMatches_Succeeds()
     {
-        var name = $"npmcok{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.0";
+        string name = $"npmcok{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
         var (bytes, _, integrity) = NpmFixtures.BuildTarball(name, version);
-        var filename = $"{name}-{version}.tgz";
-        var shasum = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
+        string filename = $"{name}-{version}.tgz";
+        string shasum = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
 
-        var packument = $$"""
+        string packument = $$"""
             {
               "name": "{{name}}",
               "versions": {
@@ -112,7 +111,7 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
@@ -129,15 +128,15 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
     [Fact]
     public async Task Npm_ProxyFirstFetch_PackumentIntegrityMismatch_502_NoVersionRow_AuditLogged()
     {
-        var name = $"npmbad{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.1.0";
+        string name = $"npmbad{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.1.0";
         var (bytes, _, _) = NpmFixtures.BuildTarball(name, version);
-        var filename = $"{name}-{version}.tgz";
+        string filename = $"{name}-{version}.tgz";
 
         // Integrity hash for *different* bytes — verification must reject the real tarball.
         var (_, _, wrongIntegrity) = NpmFixtures.BuildTarball(name, "9.9.9-poison");
 
-        var packument = $$"""
+        string packument = $$"""
             {
               "name": "{{name}}",
               "versions": {
@@ -155,8 +154,8 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var before = await ChecksumFailureAuditCountAsync();
-        var token = await _factory.CreateToken("pull");
+        long before = await ChecksumFailureAuditCountAsync();
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
@@ -168,13 +167,13 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
     [Fact]
     public async Task Npm_ProxyFirstFetch_PackumentMissingIntegrity_Succeeds()
     {
-        var name = $"npmnil{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.2.0";
+        string name = $"npmnil{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.2.0";
         var (bytes, _, _) = NpmFixtures.BuildTarball(name, version);
-        var filename = $"{name}-{version}.tgz";
+        string filename = $"{name}-{version}.tgz";
 
         // Packument carries no dist.integrity / shasum — fail-soft path: serve as before.
-        var packument = $$"""
+        string packument = $$"""
             {
               "name": "{{name}}",
               "versions": {
@@ -189,7 +188,7 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
@@ -207,14 +206,14 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
     [Fact]
     public async Task NuGet_ProxyFirstFetch_RegistrationPackageHashMatches_Succeeds()
     {
-        var id = $"NuGetCok{Guid.NewGuid():N}"[..18];
-        var version = "1.0.0";
-        var lowerId = id.ToLowerInvariant();
+        string id = $"NuGetCok{Guid.NewGuid():N}"[..18];
+        string version = "1.0.0";
+        string lowerId = id.ToLowerInvariant();
         var (bytes, _) = NuGetFixtures.BuildNupkg(id, version);
-        var filename = $"{lowerId}.{version}.nupkg";
-        var b64 = Convert.ToBase64String(SHA512.HashData(bytes));
+        string filename = $"{lowerId}.{version}.nupkg";
+        string b64 = Convert.ToBase64String(SHA512.HashData(bytes));
 
-        var leaf = $$"""{ "packageHash": "{{b64}}", "packageHashAlgorithm": "SHA512", "listed": true }""";
+        string leaf = $$"""{ "packageHash": "{{b64}}", "packageHashAlgorithm": "SHA512", "listed": true }""";
         _factory.MockUpstream.Given(Request.Create()
                 .WithPath($"/registration5-semver1/{lowerId}/{version}.json").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
@@ -224,7 +223,7 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
@@ -239,14 +238,14 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
     [Fact]
     public async Task NuGet_ProxyFirstFetch_RegistrationPackageHashMismatch_502_NoVersionRow_AuditLogged()
     {
-        var id = $"NuGetBad{Guid.NewGuid():N}"[..18];
-        var version = "1.1.0";
-        var lowerId = id.ToLowerInvariant();
+        string id = $"NuGetBad{Guid.NewGuid():N}"[..18];
+        string version = "1.1.0";
+        string lowerId = id.ToLowerInvariant();
         var (bytes, _) = NuGetFixtures.BuildNupkg(id, version);
-        var filename = $"{lowerId}.{version}.nupkg";
-        var wrongB64 = Convert.ToBase64String(SHA512.HashData(System.Text.Encoding.UTF8.GetBytes("not the bytes")));
+        string filename = $"{lowerId}.{version}.nupkg";
+        string wrongB64 = Convert.ToBase64String(SHA512.HashData(System.Text.Encoding.UTF8.GetBytes("not the bytes")));
 
-        var leaf = $$"""{ "packageHash": "{{wrongB64}}", "packageHashAlgorithm": "SHA512", "listed": true }""";
+        string leaf = $$"""{ "packageHash": "{{wrongB64}}", "packageHashAlgorithm": "SHA512", "listed": true }""";
         _factory.MockUpstream.Given(Request.Create()
                 .WithPath($"/registration5-semver1/{lowerId}/{version}.json").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
@@ -256,8 +255,8 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var before = await ChecksumFailureAuditCountAsync();
-        var token = await _factory.CreateToken("pull");
+        long before = await ChecksumFailureAuditCountAsync();
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
@@ -271,12 +270,12 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
     [Fact]
     public async Task PyPi_ProxyFirstFetch_SimpleIndexHashMatches_Succeeds()
     {
-        var name = $"pypicok{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.0";
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-{version}-py3-none-any.whl";
+        string name = $"pypicok{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-{version}-py3-none-any.whl";
         var (wheelBytes, sha256) = PyPiFixtures.BuildWheel(name, version);
-        var mockBase = _factory.MockUpstream.Urls[0];
+        string mockBase = _factory.MockUpstream.Urls[0];
 
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
@@ -288,7 +287,7 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(wheelBytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -302,12 +301,12 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
     [Fact]
     public async Task PyPi_ProxyFirstFetch_SimpleIndexHashMismatch_502_NoVersionRow_AuditLogged()
     {
-        var name = $"pypibad{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.1.0";
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-{version}-py3-none-any.whl";
+        string name = $"pypibad{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.1.0";
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-{version}-py3-none-any.whl";
         var (wheelBytes, _) = PyPiFixtures.BuildWheel(name, version);
-        var mockBase = _factory.MockUpstream.Urls[0];
+        string mockBase = _factory.MockUpstream.Urls[0];
         const string wrongHash = "0000000000000000000000000000000000000000000000000000000000000000";
 
         _factory.MockUpstream
@@ -320,8 +319,8 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(wheelBytes));
 
-        var before = await ChecksumFailureAuditCountAsync();
-        var token = await _factory.CreateToken("pull");
+        long before = await ChecksumFailureAuditCountAsync();
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.BadGateway, resp.StatusCode);
@@ -332,12 +331,12 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
     [Fact]
     public async Task PyPi_ProxyFirstFetch_SimpleIndexNoFragment_Succeeds()
     {
-        var name = $"pypinil{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.2.0";
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-{version}-py3-none-any.whl";
+        string name = $"pypinil{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.2.0";
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-{version}-py3-none-any.whl";
         var (wheelBytes, _) = PyPiFixtures.BuildWheel(name, version);
-        var mockBase = _factory.MockUpstream.Urls[0];
+        string mockBase = _factory.MockUpstream.Urls[0];
 
         // No #sha256= fragment — fail-soft path: serve without first-fetch verification.
         _factory.MockUpstream
@@ -350,7 +349,7 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(wheelBytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -362,8 +361,8 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
     [Fact]
     public async Task NpmPublish_PackumentEmitsCorrectShasum()
     {
-        var name = $"shasumok{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.0";
+        string name = $"shasumok{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
         await _factory.PushNpmPackage(name, version);
 
         // NpmFixtures.BuildTarball isn't byte-deterministic across calls (PAX mtime header),
@@ -384,15 +383,15 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
         Assert.False(string.IsNullOrEmpty(storedSha1), "publish should populate checksum_sha1 for npm");
         Assert.Matches("^[0-9a-f]{40}$", storedSha1);
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
         var resp = await client.GetAsync($"/npm/{name}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var json = await resp.Content.ReadAsStringAsync();
+        string json = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
         var dist = doc.RootElement.GetProperty("versions").GetProperty(version).GetProperty("dist");
-        var actualShasum = dist.GetProperty("shasum").GetString();
+        string? actualShasum = dist.GetProperty("shasum").GetString();
         Assert.Equal(storedSha1, actualShasum);
     }
 }

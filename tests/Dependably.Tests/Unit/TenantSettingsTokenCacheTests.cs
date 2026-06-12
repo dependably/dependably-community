@@ -3,7 +3,6 @@ using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -16,7 +15,7 @@ namespace Dependably.Tests.Unit;
 public sealed class TenantSettingsTokenCacheTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
-    private readonly MemoryCache _cache = new MemoryCache(new MemoryCacheOptions());
+    private readonly MemoryCache _cache = new(new MemoryCacheOptions());
 
     public async Task InitializeAsync()
     {
@@ -102,7 +101,7 @@ public sealed class TenantSettingsTokenCacheTests : IAsyncLifetime
         _ = await orgs.GetSettingsAsync("o1");
 
         // UpsertSettingsAsync writes a fresh row + must invalidate.
-        var instanceMax = (long?)null;
+        long? instanceMax = (long?)null;
         await settingsRepo.UpsertSettingsAsync(new OrgSettingsUpdate(
             OrgId: "o1",
             AnonymousPull: false,

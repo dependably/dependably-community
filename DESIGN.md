@@ -1,5 +1,22 @@
 # Dependably — Design Reference
 
+## Contents
+
+- [0. Principles](#0-principles)
+- [1. Brand mark](#1-brand-mark)
+- [2. Color tokens](#2-color-tokens)
+- [3. Typography](#3-typography)
+- [4. Layout](#4-layout)
+- [5. Components](#5-components)
+- [6. Iconography](#6-iconography)
+- [7. Voice & copy](#7-voice--copy)
+- [8. Accessibility](#8-accessibility)
+- [9. Dark mode](#9-dark-mode)
+- [10. Conventions](#10-conventions)
+- [11. Don'ts](#11-donts)
+
+---
+
 ## 0. Principles
 
 1. **Quiet, not loud.** Security UI earns trust by feeling considered.
@@ -21,8 +38,9 @@ The Dependably mark is a verified hub linked to three satellite nodes —
 literal dependency graph, trusted center.
 
 - Master files (committed): `web/public/favicon.svg`, plus
-  `web/src/assets/brand/dependably-mark.svg` (and `-mono.svg`,
-  `-inverse.svg`, `-lockup.svg` if needed)
+  `brand/dependably-mark.svg` (and `brand/dependably-mark-mono.svg`,
+  `brand/dependably-mark-inverse.svg`, `brand/dependably-lockup.svg`) —
+  see `brand/README.md`
 - Construction: 64-unit viewBox · 4-unit edge stroke · 9-unit hub
   radius · 5-unit satellite radius · 2.5-unit hub-check stroke
 - Variants: duo (default), `currentColor` mono, inverse for dark surfaces
@@ -37,7 +55,7 @@ literal dependency graph, trusted center.
 
 ## 2. Color tokens
 
-All colors live as CSS custom properties in `src/app.css`. **Never
+All colors live as CSS custom properties in `web/src/app.css`. **Never
 hardcode hex values in components — always use variables.**
 
 ### 2.1 Surface + text + accent
@@ -97,6 +115,9 @@ and are independent of the badge palette.
 | `--eco-pypi`  | `#3b82f6` | Donut segment + legend swatch |
 | `--eco-npm`   | `#f59e0b` | Donut segment + legend swatch |
 | `--eco-nuget` | `#8b5cf6` | Donut segment + legend swatch |
+| `--eco-maven` | `#ef4444` | Donut segment + legend swatch |
+| `--eco-rpm`   | `#14b8a6` | Donut segment + legend swatch |
+| `--eco-oci`   | `#0ea5e9` | Donut segment + legend swatch |
 
 ### 2.2 Badge palettes
 
@@ -214,7 +235,7 @@ org-scoped and instance-scoped navigation are visually distinct clusters.
 
 ## 5. Components
 
-All global classes live in `src/app.css`. Use them as-is; do not
+All global classes live in `web/src/app.css`. Use them as-is; do not
 redefine them in component `<style>` blocks.
 
 | Section | Class(es)                                                  | Purpose                                         | Used in                         |
@@ -441,9 +462,12 @@ same `--eco-{eco}` color the donut slice uses.
 .eco-bar.pypi  { background: var(--eco-pypi); }
 .eco-bar.npm   { background: var(--eco-npm); }
 .eco-bar.nuget { background: var(--eco-nuget); }
+.eco-bar.maven { background: var(--eco-maven); }
+.eco-bar.rpm   { background: var(--eco-rpm); }
+.eco-bar.oci   { background: var(--eco-oci); }
 ```
 
-**When adding a new ecosystem** (Maven, Cargo, etc.), three things must
+**When adding a new ecosystem** (Cargo, etc.), three things must
 be updated in lockstep: `--eco-{name}` token in all three theme blocks,
 `.badge.{name}` background/color rule, and `.eco-bar.{name}` background
 rule.
@@ -535,7 +559,7 @@ When a component has two independent tables (e.g. Users.svelte members and invit
 
 **Skip list**
 
-Dashboard.svelte's ecosystem table has three fixed rows (pypi, npm, nuget) — sort is meaningless, do not add sort controls.
+Dashboard.svelte's ecosystem table has one fixed row per ecosystem — sort is meaningless, do not add sort controls.
 
 ---
 
@@ -650,8 +674,6 @@ override OS preference. Adding a new themed token: write
 - Don't break the existing class API. New patterns are additive.
 - Don't define severity colors in component `<style>` blocks — use `.sev`
   and the `--sev-*` tokens.
-- Don't reference `--surface2` until it is declared in `app.css`. Until
-  then, use `--bg2` and file the token addition.
 - Don't pass severity through glyphs alone (`!` `▲` `●` `▼`). Always
   pair with `aria-label`.
 - Don't put the shadow on `.card` — `--shadow` is for elevated surfaces

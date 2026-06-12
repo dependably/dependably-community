@@ -1,6 +1,5 @@
 using Dependably.Storage;
 using NSubstitute;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Storage;
 
@@ -92,7 +91,9 @@ public sealed class AzureBlobStoreTests
 
         var collected = new List<BlobInfo>();
         await foreach (var b in Sut.ListAsync("prefix/"))
+        {
             collected.Add(b);
+        }
 
         Assert.Equal(entries, collected);
         _container.Received(1).EnumerateBlobsAsync("prefix/", Arg.Any<CancellationToken>());
@@ -104,8 +105,12 @@ public sealed class AzureBlobStoreTests
         _container.EnumerateBlobsAsync("empty/", Arg.Any<CancellationToken>())
             .Returns(AsyncBlobs());
 
-        var any = false;
-        await foreach (var _ in Sut.ListAsync("empty/")) any = true;
+        bool any = false;
+        await foreach (var _ in Sut.ListAsync("empty/"))
+        {
+            any = true;
+        }
+
         Assert.False(any);
     }
 
@@ -199,7 +204,7 @@ public sealed class AzureBlobStoreTests
 
     private static async IAsyncEnumerable<long> AsyncEnum(params long[] values)
     {
-        foreach (var v in values) { await Task.Yield(); yield return v; }
+        foreach (long v in values) { await Task.Yield(); yield return v; }
     }
 
     private static async IAsyncEnumerable<BlobInfo> AsyncBlobs(params BlobInfo[] values)

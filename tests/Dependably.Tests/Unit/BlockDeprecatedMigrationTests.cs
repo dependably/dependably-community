@@ -2,7 +2,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Data.Sqlite;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -32,7 +31,7 @@ public sealed class BlockDeprecatedMigrationTests : IAsyncLifetime
             "INSERT INTO org_settings (org_id, block_deprecated) VALUES ('o1', @mode)",
             new { mode });
 
-        var stored = await conn.ExecuteScalarAsync<string>(
+        string? stored = await conn.ExecuteScalarAsync<string>(
             "SELECT block_deprecated FROM org_settings WHERE org_id = 'o1'");
         Assert.Equal(mode, stored);
     }
@@ -73,7 +72,7 @@ public sealed class BlockDeprecatedMigrationTests : IAsyncLifetime
         await using var verify = await _db.OpenAsync();
 
         // Legacy 'block' row rewritten to 'block_all'.
-        var migrated = await verify.ExecuteScalarAsync<string>(
+        string? migrated = await verify.ExecuteScalarAsync<string>(
             "SELECT block_deprecated FROM org_settings WHERE org_id = 'o-legacy'");
         Assert.Equal("block_all", migrated);
 
@@ -81,7 +80,7 @@ public sealed class BlockDeprecatedMigrationTests : IAsyncLifetime
         await verify.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o2','two')");
         await verify.ExecuteAsync(
             "INSERT INTO org_settings (org_id, block_deprecated) VALUES ('o2', 'block_new')");
-        var stored = await verify.ExecuteScalarAsync<string>(
+        string? stored = await verify.ExecuteScalarAsync<string>(
             "SELECT block_deprecated FROM org_settings WHERE org_id = 'o2'");
         Assert.Equal("block_new", stored);
     }

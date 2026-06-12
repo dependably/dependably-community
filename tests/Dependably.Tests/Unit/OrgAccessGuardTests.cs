@@ -5,7 +5,6 @@ using Dependably.Security;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 

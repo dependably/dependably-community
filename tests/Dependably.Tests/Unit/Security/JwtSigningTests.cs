@@ -3,7 +3,6 @@ using System.Security.Cryptography;
 using System.Text;
 using Dependably.Infrastructure;
 using Microsoft.IdentityModel.Tokens;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Security;
 
@@ -33,7 +32,7 @@ public sealed class JwtSigningTests
     [Fact]
     public void Tenant_JWT_is_signed_with_HS256()
     {
-        var token = LoginService.IssueTenantJwt("user-id", "tenant-id", "member", FreshSecret());
+        string token = LoginService.IssueTenantJwt("user-id", "tenant-id", "member", FreshSecret());
         var parsed = new JwtSecurityTokenHandler().ReadJwtToken(token);
         Assert.Equal(SecurityAlgorithms.HmacSha256, parsed.Header.Alg);
     }
@@ -41,7 +40,7 @@ public sealed class JwtSigningTests
     [Fact]
     public void System_JWT_is_signed_with_HS256()
     {
-        var token = LoginService.IssueSystemJwt("sysadmin-id", FreshSecret());
+        string token = LoginService.IssueSystemJwt("sysadmin-id", FreshSecret());
         var parsed = new JwtSecurityTokenHandler().ReadJwtToken(token);
         Assert.Equal(SecurityAlgorithms.HmacSha256, parsed.Header.Alg);
     }
@@ -49,8 +48,8 @@ public sealed class JwtSigningTests
     [Fact]
     public void Valid_token_passes_production_validation()
     {
-        var secret = FreshSecret();
-        var token = LoginService.IssueTenantJwt("user-id", "tenant-id", "member", secret);
+        string secret = FreshSecret();
+        string token = LoginService.IssueTenantJwt("user-id", "tenant-id", "member", secret);
         var handler = new JwtSecurityTokenHandler();
         var principal = handler.ValidateToken(token, ProductionValidationParams(secret), out _);
         Assert.NotNull(principal);
@@ -59,16 +58,16 @@ public sealed class JwtSigningTests
     [Fact]
     public void Tampered_signature_is_rejected()
     {
-        var secret = FreshSecret();
-        var token = LoginService.IssueTenantJwt("user-id", "tenant-id", "member", secret);
+        string secret = FreshSecret();
+        string token = LoginService.IssueTenantJwt("user-id", "tenant-id", "member", secret);
 
         // JWT is header.payload.signature — flip a base64url-valid char in the
         // signature so decoding still succeeds but HMAC verification fails.
-        var parts = token.Split('.');
+        string[] parts = token.Split('.');
         Assert.Equal(3, parts.Length);
-        var sigChars = parts[2].ToCharArray();
+        char[] sigChars = parts[2].ToCharArray();
         sigChars[0] = sigChars[0] == 'A' ? 'B' : 'A';
-        var tampered = string.Join('.', parts[0], parts[1], new string(sigChars));
+        string tampered = string.Join('.', parts[0], parts[1], new string(sigChars));
 
         var handler = new JwtSecurityTokenHandler();
         Assert.ThrowsAny<SecurityTokenException>(() =>
@@ -78,9 +77,9 @@ public sealed class JwtSigningTests
     [Fact]
     public void Token_signed_with_different_secret_is_rejected()
     {
-        var attackerSecret = FreshSecret();
-        var serverSecret = FreshSecret();
-        var token = LoginService.IssueTenantJwt("user-id", "tenant-id", "member", attackerSecret);
+        string attackerSecret = FreshSecret();
+        string serverSecret = FreshSecret();
+        string token = LoginService.IssueTenantJwt("user-id", "tenant-id", "member", attackerSecret);
 
         var handler = new JwtSecurityTokenHandler();
         Assert.ThrowsAny<SecurityTokenException>(() =>
@@ -90,13 +89,13 @@ public sealed class JwtSigningTests
     [Fact]
     public void Unsigned_alg_none_token_is_rejected()
     {
-        var secret = FreshSecret();
+        string secret = FreshSecret();
         // Hand-craft an alg=none token with the same claims a legitimate one would carry.
-        var header = Base64UrlEncode("{\"alg\":\"none\",\"typ\":\"JWT\"}"u8);
-        var payload = Base64UrlEncode(Encoding.UTF8.GetBytes(
+        string header = Base64UrlEncode("{\"alg\":\"none\",\"typ\":\"JWT\"}"u8);
+        string payload = Base64UrlEncode(Encoding.UTF8.GetBytes(
             $"{{\"sub\":\"user-id\",\"tid\":\"tenant-id\",\"role\":\"member\",\"scope\":\"tenant\"," +
             $"\"exp\":{DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds()}}}"));
-        var unsigned = $"{header}.{payload}.";
+        string unsigned = $"{header}.{payload}.";
 
         var handler = new JwtSecurityTokenHandler();
         Assert.ThrowsAny<SecurityTokenException>(() =>
@@ -106,7 +105,7 @@ public sealed class JwtSigningTests
     [Fact]
     public void Expired_token_is_rejected_under_zero_clock_skew()
     {
-        var secret = FreshSecret();
+        string secret = FreshSecret();
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
         var pastIssued = DateTime.UtcNow.AddHours(-9);
@@ -121,7 +120,7 @@ public sealed class JwtSigningTests
             notBefore: pastIssued,
             expires: pastExpired,
             signingCredentials: creds);
-        var token = new JwtSecurityTokenHandler().WriteToken(expired);
+        string token = new JwtSecurityTokenHandler().WriteToken(expired);
 
         var handler = new JwtSecurityTokenHandler();
         Assert.Throws<SecurityTokenExpiredException>(() =>
@@ -133,9 +132,9 @@ public sealed class JwtSigningTests
     {
         // Mirrors FirstBootService.cs:62 — Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).
         // The decoded byte length is the actual entropy delivered to HMAC-SHA256.
-        var raw = RandomNumberGenerator.GetBytes(32);
-        var b64 = Convert.ToBase64String(raw);
-        var decoded = Convert.FromBase64String(b64);
+        byte[] raw = RandomNumberGenerator.GetBytes(32);
+        string b64 = Convert.ToBase64String(raw);
+        byte[] decoded = Convert.FromBase64String(b64);
         Assert.Equal(32, decoded.Length);
         Assert.Equal(raw, decoded);
     }

@@ -5,8 +5,13 @@ namespace Dependably.Infrastructure;
 public sealed class PackageRepository
 {
     private readonly IMetadataStore _db;
+    private readonly DownloadCountWriter? _downloadCountWriter;
 
-    public PackageRepository(IMetadataStore db) => _db = db;
+    public PackageRepository(IMetadataStore db, DownloadCountWriter? downloadCountWriter = null)
+    {
+        _db = db;
+        _downloadCountWriter = downloadCountWriter;
+    }
 
     /// <summary>
     /// Returns the trailing path segment of <paramref name="blobKey"/>. Surface-internal —
@@ -16,7 +21,7 @@ public sealed class PackageRepository
     /// </summary>
     internal static string DeriveFilename(string blobKey)
     {
-        var lastSlash = blobKey.LastIndexOf('/');
+        int lastSlash = blobKey.LastIndexOf('/');
         return lastSlash >= 0 ? blobKey[(lastSlash + 1)..] : blobKey;
     }
 
@@ -61,9 +66,11 @@ public sealed class PackageRepository
             new { orgId, ecosystem, purlName });
 
         if (existing is not null)
+        {
             return existing;
+        }
 
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             """
             INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy)
@@ -86,7 +93,7 @@ public sealed class PackageRepository
         string orgId, string ecosystem, string filename, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var row = await conn.QuerySingleOrDefaultAsync<(
+        var (PkgId, PkgOrgId, PkgEcosystem, PkgName, PkgPurlName, PkgIsProxy, PkgCreatedAt, VerId, VerPackageId, VerVersion, VerPurl, VerBlobKey, VerSizeBytes, VerChecksumSha256, VerYanked, VerYankReason, VerFirstFetch, VerCreatedAt, VerVulnCheckedAt, VerManualBlockState, VerDeprecated, VerOrigin, VerPublishedAt, VerChecksumSha1, VerUpstreamIntegrityValue, VerUpstreamIntegrityAlgorithm) = await conn.QuerySingleOrDefaultAsync<(
             string PkgId, string PkgOrgId, string PkgEcosystem, string PkgName, string PkgPurlName, bool PkgIsProxy, string PkgCreatedAt,
             string VerId, string VerPackageId, string VerVersion, string VerPurl, string VerBlobKey,
             long VerSizeBytes, string? VerChecksumSha256, bool VerYanked, string? VerYankReason,
@@ -107,28 +114,42 @@ public sealed class PackageRepository
             """,
             new { orgId, ecosystem, filename });
 
-        if (row.PkgId is null) return null;
+        if (PkgId is null)
+        {
+            return null;
+        }
 
         var pkg = new Package
         {
-            Id = row.PkgId, OrgId = row.PkgOrgId, Ecosystem = row.PkgEcosystem,
-            Name = row.PkgName, PurlName = row.PkgPurlName, IsProxy = row.PkgIsProxy,
-            CreatedAt = DateTimeOffset.Parse(row.PkgCreatedAt)
+            Id = PkgId,
+            OrgId = PkgOrgId,
+            Ecosystem = PkgEcosystem,
+            Name = PkgName,
+            PurlName = PkgPurlName,
+            IsProxy = PkgIsProxy,
+            CreatedAt = DateTimeOffset.Parse(PkgCreatedAt)
         };
         var ver = new PackageVersion
         {
-            Id = row.VerId, PackageId = row.VerPackageId, Version = row.VerVersion,
-            Purl = row.VerPurl, BlobKey = row.VerBlobKey, SizeBytes = row.VerSizeBytes,
-            ChecksumSha256 = row.VerChecksumSha256, Yanked = row.VerYanked, YankReason = row.VerYankReason,
-            FirstFetch = row.VerFirstFetch, CreatedAt = DateTimeOffset.Parse(row.VerCreatedAt),
-            VulnCheckedAt = row.VerVulnCheckedAt is not null ? DateTimeOffset.Parse(row.VerVulnCheckedAt) : null,
-            ManualBlockState = row.VerManualBlockState,
-            Deprecated = row.VerDeprecated,
-            Origin = row.VerOrigin,
-            PublishedAt = row.VerPublishedAt is not null ? DateTimeOffset.Parse(row.VerPublishedAt) : null,
-            ChecksumSha1 = row.VerChecksumSha1,
-            UpstreamIntegrityValue = row.VerUpstreamIntegrityValue,
-            UpstreamIntegrityAlgorithm = row.VerUpstreamIntegrityAlgorithm
+            Id = VerId,
+            PackageId = VerPackageId,
+            Version = VerVersion,
+            Purl = VerPurl,
+            BlobKey = VerBlobKey,
+            SizeBytes = VerSizeBytes,
+            ChecksumSha256 = VerChecksumSha256,
+            Yanked = VerYanked,
+            YankReason = VerYankReason,
+            FirstFetch = VerFirstFetch,
+            CreatedAt = DateTimeOffset.Parse(VerCreatedAt),
+            VulnCheckedAt = VerVulnCheckedAt is not null ? DateTimeOffset.Parse(VerVulnCheckedAt) : null,
+            ManualBlockState = VerManualBlockState,
+            Deprecated = VerDeprecated,
+            Origin = VerOrigin,
+            PublishedAt = VerPublishedAt is not null ? DateTimeOffset.Parse(VerPublishedAt) : null,
+            ChecksumSha1 = VerChecksumSha1,
+            UpstreamIntegrityValue = VerUpstreamIntegrityValue,
+            UpstreamIntegrityAlgorithm = VerUpstreamIntegrityAlgorithm
         };
         return (pkg, ver);
     }
@@ -197,10 +218,10 @@ public sealed class PackageRepository
         NewPackageVersion data, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         // Derive filename from blob_key's last path segment so download lookups can
         // hit idx_package_versions_filename instead of a leading-wildcard LIKE.
-        var filename = DeriveFilename(data.BlobKey);
+        string filename = DeriveFilename(data.BlobKey);
         // xtenant: INSERT pinned to a caller-supplied package_id (org-scoped via FK).
         await conn.ExecuteAsync(
             """
@@ -232,7 +253,7 @@ public sealed class PackageRepository
 
     public async Task TouchLastUsedAsync(string versionId, CancellationToken ct = default)
     {
-        var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE package_versions SET last_used = @now WHERE id = @id",
@@ -245,10 +266,22 @@ public sealed class PackageRepository
     /// freshness signal should advance). Called from every download-serve path — proxy first-fetch,
     /// protocol-client pulls, and UI downloads — so the counter matches the analytics download
     /// taxonomy ('download' + 'first_fetch').
+    ///
+    /// When a <see cref="DownloadCountWriter"/> is wired in, the increment is enqueued into the
+    /// bounded channel and returns immediately without touching the DB. The companion
+    /// <see cref="DownloadCountWriterHostedService"/> drains and aggregates the channel in batched
+    /// UPDATEs off the request path. Falls back to a synchronous UPDATE when no writer is present
+    /// (tests, embedded use-cases).
     /// </summary>
     public async Task IncrementDownloadCountAsync(string versionId, CancellationToken ct = default)
     {
-        var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        if (_downloadCountWriter is not null)
+        {
+            _downloadCountWriter.TryEnqueue(new DownloadCountRecord(VersionId: versionId, Purl: null));
+            return;
+        }
+
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE package_versions SET download_count = download_count + 1, last_used = @now WHERE id = @id",
@@ -259,10 +292,19 @@ public sealed class PackageRepository
     /// Same as <see cref="IncrementDownloadCountAsync(string,CancellationToken)"/> but keyed by the
     /// globally-unique <c>purl</c>, for download-serve paths (RPM proxy, OCI) that hold the purl but
     /// not the version id. A no-op if the purl has no row yet.
+    ///
+    /// When a <see cref="DownloadCountWriter"/> is wired in, the increment is enqueued off the
+    /// request path; otherwise falls back to a synchronous UPDATE.
     /// </summary>
     public async Task IncrementDownloadCountByPurlAsync(string purl, CancellationToken ct = default)
     {
-        var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        if (_downloadCountWriter is not null)
+        {
+            _downloadCountWriter.TryEnqueue(new DownloadCountRecord(VersionId: null, Purl: purl));
+            return;
+        }
+
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE package_versions SET download_count = download_count + 1, last_used = @now WHERE purl = @purl",
@@ -306,10 +348,10 @@ public sealed class PackageRepository
         PackageListQuery query, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var escapedSearch = query.Search?.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
-        var searchPattern = escapedSearch is not null ? $"%{escapedSearch}%" : null;
+        string? escapedSearch = query.Search?.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+        string? searchPattern = escapedSearch is not null ? $"%{escapedSearch}%" : null;
 
-        var total = await conn.ExecuteScalarAsync<int>(CountSql,
+        int total = await conn.ExecuteScalarAsync<int>(CountSql,
             new { orgId = query.OrgId, ecosystem = query.Ecosystem, searchPattern });
 
         var rows = await conn.QueryAsync<Package>(SelectSqlFor(query.SortBy, query.SortDir),
@@ -342,7 +384,18 @@ public sealed class PackageRepository
                    (SELECT COUNT(DISTINCT pvv.vuln_id) FROM package_versions pv2
                     JOIN package_version_vulns pvv ON pvv.package_version_id = pv2.id
                     JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'LOW'
-                    WHERE pv2.package_id = p.id) as LowCount
+                    WHERE pv2.package_id = p.id) as LowCount,
+                   (SELECT COALESCE(SUM(download_count), 0) FROM package_versions
+                    WHERE package_id = p.id) as TotalDownloads,
+                   p.upstream_latest_version as UpstreamLatestVersion,
+                   CASE
+                     WHEN p.upstream_latest_version IS NULL THEN 'unknown'
+                     WHEN EXISTS (SELECT 1 FROM package_versions pvl
+                                  WHERE pvl.package_id = p.id
+                                    AND pvl.version = p.upstream_latest_version
+                                    AND pvl.origin = 'proxy') THEN 'current'
+                     ELSE 'stale'
+                   END as LatestState
             FROM packages p WHERE p.org_id = @orgId
               AND (@ecosystem IS NULL OR p.ecosystem = @ecosystem)
               AND (@searchPattern IS NULL OR p.name LIKE @searchPattern ESCAPE '\')
@@ -355,17 +408,18 @@ public sealed class PackageRepository
     // Static (sortBy, sortDir) → ORDER BY clauses. Bounded whitelist; never composes user input.
     private static string SelectSqlFor(string sortBy, string sortDir)
     {
-        var desc = sortDir == "desc";
+        bool desc = sortDir == "desc";
         return sortBy switch
         {
-            "name"      => SelectSqlPrefix + (desc ? " name DESC"          : " name ASC")          + SelectSqlSuffix,
-            "purl"      => SelectSqlPrefix + (desc ? " PurlName DESC"      : " PurlName ASC")      + SelectSqlSuffix,
-            "vulns"     => SelectSqlPrefix + (desc
+            "name" => SelectSqlPrefix + (desc ? " name DESC" : " name ASC") + SelectSqlSuffix,
+            "purl" => SelectSqlPrefix + (desc ? " PurlName DESC" : " PurlName ASC") + SelectSqlSuffix,
+            "vulns" => SelectSqlPrefix + (desc
                 ? " (CriticalCount * 1000 + HighCount * 100 + MediumCount * 10 + LowCount) DESC"
                 : " (CriticalCount * 1000 + HighCount * 100 + MediumCount * 10 + LowCount) ASC") + SelectSqlSuffix,
-            "ecosystem" => SelectSqlPrefix + (desc ? " ecosystem DESC"     : " ecosystem ASC")     + SelectSqlSuffix,
-            "versions"  => SelectSqlPrefix + (desc ? " VersionCount DESC"  : " VersionCount ASC")  + SelectSqlSuffix,
-            _           => SelectSqlPrefix + (desc ? " CreatedAt DESC"     : " CreatedAt ASC")     + SelectSqlSuffix,
+            "ecosystem" => SelectSqlPrefix + (desc ? " ecosystem DESC" : " ecosystem ASC") + SelectSqlSuffix,
+            "versions" => SelectSqlPrefix + (desc ? " VersionCount DESC" : " VersionCount ASC") + SelectSqlSuffix,
+            "downloads" => SelectSqlPrefix + (desc ? " TotalDownloads DESC" : " TotalDownloads ASC") + SelectSqlSuffix,
+            _ => SelectSqlPrefix + (desc ? " CreatedAt DESC" : " CreatedAt ASC") + SelectSqlSuffix,
         };
     }
 
@@ -405,7 +459,7 @@ public sealed class PackageRepository
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: DELETE keyed by packages.id (a Guid issued by GetOrCreate under an
         // org-scoped lookup); the NOT EXISTS sub-select stays bound to that same id.
-        var affected = await conn.ExecuteAsync(
+        int affected = await conn.ExecuteAsync(
             """
             DELETE FROM packages
             WHERE id = @id
@@ -415,10 +469,40 @@ public sealed class PackageRepository
         return affected > 0;
     }
 
+    /// <summary>
+    /// Deletes a <c>package_versions</c> row and decrements the tenant's
+    /// <c>org_settings.storage_used_bytes</c> counter by the version's <c>size_bytes</c>.
+    /// The decrement uses the same MAX(0, …) clamp as the release path so counter underflow
+    /// (e.g. a row deleted before the counter column existed) cannot produce negative values.
+    /// </summary>
     public async Task DeleteVersionAsync(string versionId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // Resolve org and size before the delete so we can decrement the counter. If the
+        // join returns nothing (version already gone), the DELETE below is also a no-op.
+        // xtenant: keyed by version PK (pv.id), a globally unique surrogate; caller already
+        // verified org ownership before invoking this method.
+        var info = await conn.QuerySingleOrDefaultAsync<(string OrgId, long SizeBytes)>(
+            """
+            SELECT p.org_id AS OrgId, pv.size_bytes AS SizeBytes
+            FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE pv.id = @id
+            """,
+            new { id = versionId });
+
         await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = versionId });
+
+        if (info != default)
+        {
+            await conn.ExecuteAsync(
+                """
+                UPDATE org_settings
+                SET storage_used_bytes = MAX(0, storage_used_bytes - @delta)
+                WHERE org_id = @orgId
+                """,
+                new { orgId = info.OrgId, delta = info.SizeBytes });
+        }
     }
 
     /// <summary>
@@ -472,9 +556,13 @@ public sealed class PackageRepository
         var rows = await conn.QueryAsync<string>(
             "SELECT blob_key FROM package_versions",
             commandTimeout: 0);
-        foreach (var key in rows)
+        foreach (string key in rows)
         {
-            if (ct.IsCancellationRequested) yield break;
+            if (ct.IsCancellationRequested)
+            {
+                yield break;
+            }
+
             yield return key;
         }
     }
@@ -512,7 +600,7 @@ public sealed class PackageRepository
     /// </summary>
     public async Task UpdateDeprecationCheckedAtAsync(string versionId, CancellationToken ct = default)
     {
-        var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE package_versions SET deprecation_checked_at = @now WHERE id = @id",
@@ -525,11 +613,27 @@ public sealed class PackageRepository
     /// </summary>
     public async Task UpdateDeprecatedAndCheckedAsync(string versionId, string? deprecated, CancellationToken ct = default)
     {
-        var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE package_versions SET deprecated = @deprecated, deprecation_checked_at = @now WHERE id = @id",
             new { id = versionId, deprecated, now });
+    }
+
+    /// <summary>
+    /// Records upstream's declared latest version for a package and stamps the refresh time.
+    /// Called by DeprecationRefreshService on each upstream-metadata pass. A null
+    /// <paramref name="latestVersion"/> clears the baseline (upstream had no latest claim).
+    /// </summary>
+    // xtenant: UPDATE keyed by the package id (already org-scoped via FK); caller resolves the
+    // package within a single org's refresh pass.
+    public async Task UpdateUpstreamLatestAsync(string packageId, string? latestVersion, CancellationToken ct = default)
+    {
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE packages SET upstream_latest_version = @latestVersion, upstream_latest_checked_at = @now WHERE id = @id",
+            new { id = packageId, latestVersion, now });
     }
 
     /// <summary>
@@ -543,7 +647,7 @@ public sealed class PackageRepository
     public async Task<IReadOnlyList<(string PackageId, string Ecosystem, string PurlName, string OrgId)>>
         ListPackagesNeedingDeprecationRefreshAsync(int ageHours, int limit, CancellationToken ct = default)
     {
-        var threshold = DateTimeOffset.UtcNow.AddHours(-ageHours).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string threshold = DateTimeOffset.UtcNow.AddHours(-ageHours).ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<(string PackageId, string Ecosystem, string PurlName, string OrgId)>(
             """
@@ -562,6 +666,92 @@ public sealed class PackageRepository
             """,
             new { threshold, limit });
         return rows.ToList();
+    }
+
+    // ── Go module proxy helpers ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns a list of cached Go module versions for the given module path, ordered
+    /// newest-first by creation time. Used by the <c>/@v/list</c> endpoint.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ListVersionsForGoModuleAsync(
+        string orgId, string module, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var rows = await conn.QueryAsync<string>(
+            """
+            SELECT pv.version
+            FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.org_id = @orgId
+              AND p.ecosystem = 'golang'
+              AND p.purl_name = @module
+            ORDER BY pv.created_at DESC
+            """,
+            new { orgId, module });
+        return rows.ToList();
+    }
+
+    /// <summary>
+    /// Returns the most-recently-created cached version for the given Go module, or null
+    /// when nothing is cached. Used by the <c>/@latest</c> endpoint.
+    /// </summary>
+    public async Task<PackageVersion?> GetLatestGoVersionAsync(
+        string orgId, string module, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.QuerySingleOrDefaultAsync<PackageVersion>(
+            """
+            SELECT pv.id AS Id, pv.package_id AS PackageId,
+                   pv.version AS Version, pv.purl AS Purl,
+                   pv.blob_key AS BlobKey, pv.size_bytes AS SizeBytes,
+                   pv.checksum_sha256 AS ChecksumSha256,
+                   pv.created_at AS CreatedAt
+            FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.org_id = @orgId
+              AND p.ecosystem = 'golang'
+              AND p.purl_name = @module
+            ORDER BY pv.created_at DESC
+            LIMIT 1
+            """,
+            new { orgId, module });
+    }
+
+    /// <summary>
+    /// Gets or creates a <c>packages</c> row for the Go module, then inserts a
+    /// <c>package_versions</c> row for the given version. Idempotent via ON CONFLICT DO NOTHING
+    /// so concurrent first-fetches of the same version are safe.
+    /// </summary>
+    public async Task GetOrCreateGoVersionAsync(
+        string orgId, string module, string version, string purl, string blobKey,
+        string? userId, CancellationToken ct = default)
+    {
+        var pkg = await GetOrCreateAsync(
+            orgId, "golang", module, module, isProxy: true, ct);
+
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string filename = DeriveFilename(blobKey);
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: INSERT pinned to package_id resolved by GetOrCreateAsync under the caller's org.
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO package_versions
+                (id, package_id, version, purl, blob_key, filename, size_bytes, first_fetch, origin, created_at)
+            VALUES
+                (@id, @packageId, @version, @purl, @blobKey, @filename, 0, 1, 'proxy', @now)
+            ON CONFLICT DO NOTHING
+            """,
+            new
+            {
+                id = Guid.NewGuid().ToString("N"),
+                packageId = pkg.Id,
+                version,
+                purl,
+                blobKey,
+                filename,
+                now,
+            });
     }
 }
 

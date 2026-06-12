@@ -27,45 +27,45 @@ public static class Capabilities
     public const string ReadMetadata = "read:metadata";
     public const string ReadArtifact = "read:artifact";
     public const string ReadPackages = "read:packages";
-    public const string ReadClaims   = "read:claims";
-    public const string ReadAudit    = "read:audit";
-    public const string ReadTenant   = "read:tenant";
+    public const string ReadClaims = "read:claims";
+    public const string ReadAudit = "read:audit";
+    public const string ReadTenant = "read:tenant";
 
     // ── Publish (per-ecosystem and wildcard) ────────────────────────────────────
-    public const string PublishNpm   = "publish:npm";
-    public const string PublishPypi  = "publish:pypi";
+    public const string PublishNpm = "publish:npm";
+    public const string PublishPypi = "publish:pypi";
     public const string PublishNuget = "publish:nuget";
     public const string PublishMaven = "publish:maven";
-    public const string PublishRpm   = "publish:rpm";
-    public const string PublishOci   = "publish:oci";
-    public const string PublishAll   = "publish:*";
+    public const string PublishRpm = "publish:rpm";
+    public const string PublishOci = "publish:oci";
+    public const string PublishAll = "publish:*";
 
     // ── Import (per-ecosystem and wildcard) ─────────────────────────────────────
-    public const string ImportNpm    = "import:npm";
-    public const string ImportPypi   = "import:pypi";
-    public const string ImportNuget  = "import:nuget";
-    public const string ImportMaven  = "import:maven";
-    public const string ImportRpm    = "import:rpm";
-    public const string ImportOci    = "import:oci";
-    public const string ImportAll    = "import:*";
+    public const string ImportNpm = "import:npm";
+    public const string ImportPypi = "import:pypi";
+    public const string ImportNuget = "import:nuget";
+    public const string ImportMaven = "import:maven";
+    public const string ImportRpm = "import:rpm";
+    public const string ImportOci = "import:oci";
+    public const string ImportAll = "import:*";
 
     // OCI also needs a "pull" capability for the proxy path — pure read of a public-repo
     // image doesn't need publish. read:artifact already covers this for other ecosystems.
-    public const string PullOci      = "pull:oci";
+    public const string PullOci = "pull:oci";
 
     // ── Yank (per-ecosystem and wildcard) ───────────────────────────────────────
-    public const string YankNpm   = "yank:npm";
-    public const string YankPypi  = "yank:pypi";
+    public const string YankNpm = "yank:npm";
+    public const string YankPypi = "yank:pypi";
     public const string YankNuget = "yank:nuget";
     public const string YankMaven = "yank:maven";
-    public const string YankRpm   = "yank:rpm";
-    public const string YankOci   = "yank:oci";
-    public const string YankAll   = "yank:*";
+    public const string YankRpm = "yank:rpm";
+    public const string YankOci = "yank:oci";
+    public const string YankAll = "yank:*";
 
     // ── Manage ─────────────────────────────────────────────────────────────────
-    public const string ClaimManage     = "claim:manage";
+    public const string ClaimManage = "claim:manage";
     public const string TenantConfigure = "tenant:configure";
-    public const string TenantAdmin     = "tenant:admin";
+    public const string TenantAdmin = "tenant:admin";
     public const string ManageOwnTokens = "tokens:manage_own";
 
     // ── Platform (system_admin operator role) ───────────────────────────────────
@@ -124,10 +124,10 @@ public static class Capabilities
     /// </summary>
     public static IReadOnlySet<string> ForRole(string role) => role switch
     {
-        "member"   => ReaderCaps,
-        "admin"    => AdminCaps,
-        "owner"    => TenantAdminCaps,
-        "auditor"  => AuditorCaps,
+        "member" => ReaderCaps,
+        "admin" => AdminCaps,
+        "owner" => TenantAdminCaps,
+        "auditor" => AuditorCaps,
         _ => new HashSet<string>()
     };
 
@@ -145,12 +145,23 @@ public static class Capabilities
     /// </summary>
     public static bool Grants(IReadOnlySet<string> granted, string requested)
     {
-        if (granted.Contains(EverythingTheUserCanDo)) return true;
-        if (granted.Contains(requested)) return true;
+        if (granted.Contains(EverythingTheUserCanDo))
+        {
+            return true;
+        }
 
-        var colon = requested.IndexOf(':');
-        if (colon < 0) return false;
-        var family = string.Concat(requested.AsSpan(0, colon + 1), "*");
+        if (granted.Contains(requested))
+        {
+            return true;
+        }
+
+        int colon = requested.IndexOf(':');
+        if (colon < 0)
+        {
+            return false;
+        }
+
+        string family = string.Concat(requested.AsSpan(0, colon + 1), "*");
         return granted.Contains(family);
     }
 
@@ -207,7 +218,7 @@ public static class Capabilities
         }
 
         var entries = new List<string>(requested.Count);
-        foreach (var c in requested)
+        foreach (string c in requested)
         {
             if (string.IsNullOrWhiteSpace(c))
             {

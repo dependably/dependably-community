@@ -1,5 +1,4 @@
 using System.Net;
-using System.Net.Http.Headers;
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
@@ -41,7 +40,7 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
         var resp = await client.GetAsync("/npm/-/ping");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(body);
         Assert.Equal(JsonValueKind.Object, doc.RootElement.ValueKind);
         Assert.Empty(doc.RootElement.EnumerateObject());
@@ -55,7 +54,7 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
     [Fact]
     public async Task Ping_WithBearer_StillReturns200()
     {
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync("/npm/-/ping");
@@ -73,14 +72,14 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
     [Fact]
     public async Task WhoAmI_UserToken_ReturnsOwnerEmail()
     {
-        var raw = await _factory.CreateAdminToken();
-        var expectedEmail = await GetBootstrapOwnerEmailAsync();
+        string raw = await _factory.CreateAdminToken();
+        string expectedEmail = await GetBootstrapOwnerEmailAsync();
 
         using var client = _factory.CreateClientWithBearer(raw);
         var resp = await client.GetAsync("/npm/-/whoami");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(body);
         Assert.Equal(expectedEmail, doc.RootElement.GetProperty("username").GetString());
     }
@@ -93,8 +92,8 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
     public async Task WhoAmI_ServiceToken_ReturnsServicePrefixedName()
     {
         var tokens = _factory.Services.GetRequiredService<TokenRepository>();
-        var orgId = await DefaultOrgIdAsync();
-        var name = $"ci-whoami-{Guid.NewGuid():N}";
+        string orgId = await DefaultOrgIdAsync();
+        string name = $"ci-whoami-{Guid.NewGuid():N}";
 
         var (raw, _) = await tokens.CreateServiceTokenAsync(
             orgId, name,
@@ -105,7 +104,7 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
         var resp = await client.GetAsync("/npm/-/whoami");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(body);
         Assert.Equal($"service:{name}", doc.RootElement.GetProperty("username").GetString());
     }
@@ -155,8 +154,8 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
         var tokens = _factory.Services.GetRequiredService<TokenRepository>();
 
         await using var conn = await store.OpenAsync();
-        var otherOrgId = Guid.NewGuid().ToString("N");
-        var otherOrgSlug = $"other-whoami-{otherOrgId[..8]}";
+        string otherOrgId = Guid.NewGuid().ToString("N");
+        string otherOrgSlug = $"other-whoami-{otherOrgId[..8]}";
         await conn.ExecuteAsync(
             "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
             new { id = otherOrgId, slug = otherOrgSlug });
@@ -190,7 +189,7 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
     public async Task WhoAmI_ExpiredToken_Returns401()
     {
         var tokens = _factory.Services.GetRequiredService<TokenRepository>();
-        var orgId = await DefaultOrgIdAsync();
+        string orgId = await DefaultOrgIdAsync();
 
         var (raw, record) = await tokens.CreateServiceTokenAsync(
             orgId, $"expired-{Guid.NewGuid():N}",
@@ -228,7 +227,7 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
     {
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var orgId = await DefaultOrgIdAsync();
+        string orgId = await DefaultOrgIdAsync();
         return await conn.ExecuteScalarAsync<string>(
             "SELECT email FROM users WHERE tenant_id = @orgId AND role = 'owner' LIMIT 1",
             new { orgId })

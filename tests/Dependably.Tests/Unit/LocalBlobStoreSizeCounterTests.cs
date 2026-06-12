@@ -1,5 +1,4 @@
 using Dependably.Storage;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -21,7 +20,10 @@ public sealed class LocalBlobStoreSizeCounterTests : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
+        if (Directory.Exists(_root))
+        {
+            Directory.Delete(_root, recursive: true);
+        }
     }
 
     [Fact]
@@ -96,15 +98,20 @@ public sealed class LocalBlobStoreSizeCounterTests : IDisposable
         // The whole point: subsequent calls must NOT re-walk. We can't directly assert
         // "no syscalls" but we can prove the call returns instantly even with many files.
         var store = new LocalBlobStore(_root);
-        for (var i = 0; i < 200; i++)
+        for (int i = 0; i < 200; i++)
+        {
             await store.PutAsync($"f{i:000}", new MemoryStream(new byte[64]));
+        }
 
         // Warm up the counter.
         await store.GetTotalSizeAsync();
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        for (var i = 0; i < 1000; i++)
+        for (int i = 0; i < 1000; i++)
+        {
             await store.GetTotalSizeAsync();
+        }
+
         sw.Stop();
 
         // 1000 calls in well under 100ms on any reasonable machine — the old walk would have

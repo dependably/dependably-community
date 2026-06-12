@@ -4,7 +4,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Primitives;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -36,11 +35,24 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
             .AddInMemoryCollection(entries.Select(e => new KeyValuePair<string, string?>(e.Key, e.Value)))
             .Build();
 
-    private static DefaultHttpContext WithHost(string? host, string? forwardedHost = null)
+    // Simulates the Request.Host value *after* ForwardedHeadersMiddleware has run.
+    // When a trusted proxy is in front, the middleware rewrites Request.Host from
+    // X-Forwarded-Host; tests that exercise the post-rewrite state set Request.Host
+    // directly. The optional rawForwardedHost parameter places a raw header that the
+    // resolver must ignore (it reads Request.Host, not the raw header).
+    private static DefaultHttpContext WithHost(string? host, string? rawForwardedHost = null)
     {
         var ctx = new DefaultHttpContext();
-        if (host is not null) ctx.Request.Host = new HostString(host);
-        if (forwardedHost is not null) ctx.Request.Headers["X-Forwarded-Host"] = new StringValues(forwardedHost);
+        if (host is not null)
+        {
+            ctx.Request.Host = new HostString(host);
+        }
+
+        if (rawForwardedHost is not null)
+        {
+            ctx.Request.Headers["X-Forwarded-Host"] = new StringValues(rawForwardedHost);
+        }
+
         return ctx;
     }
 
@@ -112,17 +124,41 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ForwardedHostHeader_DrivesSlugLookup()
+    public async Task TrustedProxy_ForwardedHostRewritesRequestHost_DrivesTenantResolution()
     {
-        // Host header points at the apex; X-Forwarded-Host carries the real subdomain
-        // (typical reverse-proxy shape). The forwarded host wins.
+        // ForwardedHeadersMiddleware rewrites Request.Host from X-Forwarded-Host when the
+        // immediate peer appears in TRUSTED_PROXIES. This test simulates the post-rewrite
+        // state: Request.Host is set to the subdomain (as the middleware would have done),
+        // while a raw X-Forwarded-Host header is also present to confirm the resolver reads
+        // Request.Host and not the raw header directly.
         var r = new SubdomainTenantResolver(_db, Cfg(("APEX_HOST", "example.com")));
 
-        var t = await r.ResolveAsync(
-            WithHost("example.com", forwardedHost: "acme.example.com"));
+        // Request.Host = subdomain (post-ForwardedHeaders rewrite); raw header present but ignored.
+        var ctx = WithHost("acme.example.com", rawForwardedHost: "attacker.evil.com");
+        var t = await r.ResolveAsync(ctx);
 
         Assert.True(t.IsTenant);
         Assert.Equal("acme", t.TenantSlug);
+    }
+
+    [Fact]
+    public async Task UntrustedClient_RawForwardedHostIgnored_DoesNotChangeTenant()
+    {
+        // When the client is not a trusted proxy, ForwardedHeadersMiddleware leaves
+        // Request.Host unchanged. A raw X-Forwarded-Host from an untrusted client must
+        // not affect tenant resolution. The resolver reads Request.Host, which still
+        // points at the apex, so the result is Apex — not the tenant named in the header.
+        var r = new SubdomainTenantResolver(_db, Cfg(("APEX_HOST", "example.com")));
+
+        // Request.Host = apex (not rewritten); raw X-Forwarded-Host carries a tenant subdomain
+        // that an untrusted client is trying to inject. The resolver must ignore the raw header.
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Host = new HostString("example.com");
+        ctx.Request.Headers["X-Forwarded-Host"] = new StringValues("acme.example.com");
+
+        var t = await r.ResolveAsync(ctx);
+
+        Assert.True(t.IsApex);
     }
 
     [Fact]

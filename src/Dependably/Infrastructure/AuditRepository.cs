@@ -134,7 +134,7 @@ public sealed class AuditRepository
         string orgId, int limit, int offset, string? action = null, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var total = await conn.ExecuteScalarAsync<int>(
+        int total = await conn.ExecuteScalarAsync<int>(
             """
             SELECT COUNT(*) FROM audit_log
             WHERE org_id = @orgId AND scope = 'tenant'
@@ -193,15 +193,15 @@ public sealed class AuditRepository
         await using var conn = await _db.OpenAsync(ct);
 
         // ORDER BY is interpolated into the SQL — whitelist before use. Never trust raw input here.
-        var orderColumn = sortBy switch
+        string orderColumn = sortBy switch
         {
             "action" => "action",
             _ => "created_at",
         };
-        var orderDirection = string.Equals(sortDir, "asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
+        string orderDirection = string.Equals(sortDir, "asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
 
-        var searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
-        var actionFilter = string.IsNullOrWhiteSpace(action) ? null : action;
+        string? searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
+        string? actionFilter = string.IsNullOrWhiteSpace(action) ? null : action;
 
         // Two where clauses because the count query doesn't need the system_admins join — but
         // the list query does, so search can match on operator email and the result projection
@@ -227,13 +227,15 @@ public sealed class AuditRepository
                    OR lower(COALESCE(a.detail, '')) LIKE @searchPattern)
             """;
 
-        var total = await conn.ExecuteScalarAsync<int>(
+        // rawsql: countWhereClause is a const with only @param placeholders (see S2077 justification above).
+        int total = await conn.ExecuteScalarAsync<int>(
             $"SELECT COUNT(*) FROM audit_log WHERE {countWhereClause}",
             new { action = actionFilter, searchPattern });
 
         // LEFT JOIN system_admins (not users) — every scope='system' actor is a system_admin.
         // Unmatched actor_ids surface as NULL ActorEmail; the UI falls back to actor_id.
-        var listSql = $"""
+        // rawsql: only the whitelisted ORDER BY column/direction are interpolated (see S2077 justification above).
+        string listSql = $"""
             SELECT a.id, a.scope as Scope, a.org_id as OrgId, a.actor_id as ActorId,
                    sa.email as ActorEmail, a.action as Action,
                    a.ecosystem as Ecosystem, a.purl as Purl, a.detail as Detail,
@@ -278,8 +280,8 @@ public sealed class AuditRepository
         await using var conn = await _db.OpenAsync(ct);
 
         // Default: all security-relevant event categories
-        var defaultActions = new[] { "login.", "lockout.", "token.", "rbac." };
-        var patterns = actionFilter?.Count > 0
+        string[] defaultActions = new[] { "login.", "lockout.", "token.", "rbac." };
+        string[] patterns = actionFilter?.Count > 0
             ? actionFilter.Select(a => a.TrimEnd('.') + ".").ToArray()
             : defaultActions;
 
@@ -290,8 +292,8 @@ public sealed class AuditRepository
         {
             try
             {
-                var decoded = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(afterCursor));
-                var parts = decoded.Split('|', 2);
+                string decoded = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(afterCursor));
+                string[] parts = decoded.Split('|', 2);
                 if (parts.Length == 2) { cursorTs = parts[0]; cursorId = parts[1]; }
             }
             catch { /* invalid cursor — ignore, return first page */ }
@@ -299,7 +301,7 @@ public sealed class AuditRepository
 
         // Action prefix filter passed as JSON array; json_each unfolds it inline so the
         // SQL stays static regardless of how many prefixes the caller supplies.
-        var patternsJson = System.Text.Json.JsonSerializer.Serialize(patterns.Select(p => p + "%"));
+        string patternsJson = System.Text.Json.JsonSerializer.Serialize(patterns.Select(p => p + "%"));
 
         const string sql = """
             SELECT id, org_id as OrgId, actor_id as ActorId, action as Action,
@@ -342,7 +344,7 @@ public sealed class AuditRepository
         string orgId, int limit, int offset, string? eventType = null, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var total = await conn.ExecuteScalarAsync<int>(
+        int total = await conn.ExecuteScalarAsync<int>(
             """
             SELECT COUNT(*) FROM activity
             WHERE org_id = @orgId

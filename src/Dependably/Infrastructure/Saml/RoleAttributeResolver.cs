@@ -34,12 +34,21 @@ public static class RoleAttributeResolver
     /// no mapping matches.
     /// </summary>
     public static string Resolve(Saml2AuthnResponse response, TenantSamlConfig cfg)
+        => Resolve(response.ClaimsIdentity.Claims, cfg);
+
+    /// <summary>
+    /// Claims-based overload: resolves the role directly from assertion claims, decoupled
+    /// from the SAML2 response wrapper so the precedence/mapping logic is unit-testable.
+    /// </summary>
+    public static string Resolve(IEnumerable<Claim> claims, TenantSamlConfig cfg)
     {
         var mapping = ParseMapping(cfg.RoleMapping);
         if (mapping.Count == 0)
+        {
             return SanitizeRole(cfg.DefaultRole);
+        }
 
-        var idpValues = GetRoleValues(response.ClaimsIdentity.Claims, cfg.RoleAttribute);
+        var idpValues = GetRoleValues(claims, cfg.RoleAttribute);
         return BestMatch(idpValues, mapping) ?? SanitizeRole(cfg.DefaultRole);
     }
 
@@ -55,13 +64,16 @@ public static class RoleAttributeResolver
                 .ToList();
         }
         // Built-in list: first claim type that has any value wins.
-        foreach (var name in DefaultRoleClaimTypes)
+        foreach (string name in DefaultRoleClaimTypes)
         {
             var values = claimList
                 .Where(c => string.Equals(c.Type, name, StringComparison.OrdinalIgnoreCase))
                 .Select(c => c.Value)
                 .ToList();
-            if (values.Count > 0) return values;
+            if (values.Count > 0)
+            {
+                return values;
+            }
         }
         return Array.Empty<string>();
     }
@@ -70,11 +82,11 @@ public static class RoleAttributeResolver
     {
         string? best = null;
         int bestPrecedence = int.MaxValue;
-        foreach (var v in idpValues)
+        foreach (string v in idpValues)
         {
-            if (mapping.TryGetValue(v, out var mapped))
+            if (mapping.TryGetValue(v, out string? mapped))
             {
-                var idx = Array.IndexOf(ValidTenantRoles, mapped);
+                int idx = Array.IndexOf(ValidTenantRoles, mapped);
                 if (idx >= 0 && idx < bestPrecedence)
                 {
                     bestPrecedence = idx;
@@ -87,25 +99,32 @@ public static class RoleAttributeResolver
 
     private static string SanitizeRole(string? role)
     {
-        if (role is not null && Array.IndexOf(ValidTenantRoles, role) >= 0)
-            return role;
-        return "member";
+        return role is not null && Array.IndexOf(ValidTenantRoles, role) >= 0 ? role : "member";
     }
 
     private static Dictionary<string, string> ParseMapping(string? json)
     {
         var safe = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (string.IsNullOrWhiteSpace(json)) return safe;
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return safe;
+        }
+
         try
         {
             var raw = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
-            if (raw is null) return safe;
+            if (raw is null)
+            {
+                return safe;
+            }
             // Strip any attempt to assign system_admin.
             foreach (var (k, v) in raw)
             {
-                var role = v?.ToLowerInvariant();
+                string? role = v?.ToLowerInvariant();
                 if (Array.IndexOf(ValidTenantRoles, role) >= 0)
+                {
                     safe[k] = role!;
+                }
             }
             return safe;
         }

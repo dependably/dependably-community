@@ -40,7 +40,7 @@ public sealed class OrgRepository
     public async Task<Org?> GetBySlugAsync(string slug, bool includeDeleted = false, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var sql = includeDeleted
+        string sql = includeDeleted
             ? "SELECT id, slug, deleted_at as DeletedAt, status as Status, storage_quota_bytes as StorageQuotaBytes, created_at as CreatedAt FROM orgs WHERE slug = @slug"
             : "SELECT id, slug, deleted_at as DeletedAt, status as Status, storage_quota_bytes as StorageQuotaBytes, created_at as CreatedAt FROM orgs WHERE slug = @slug AND deleted_at IS NULL";
         return await conn.QuerySingleOrDefaultAsync<Org>(sql, new { slug });
@@ -48,9 +48,11 @@ public sealed class OrgRepository
 
     public async Task<OrgSettings?> GetSettingsAsync(string orgId, CancellationToken ct = default)
     {
-        var key = SettingsCacheKey(orgId);
+        string key = SettingsCacheKey(orgId);
         if (_cache is not null && _cache.TryGetValue(key, out OrgSettings? cached))
+        {
             return cached;
+        }
 
         await using var conn = await _db.OpenAsync(ct);
         var result = await conn.QuerySingleOrDefaultAsync<OrgSettings>(
@@ -72,16 +74,23 @@ public sealed class OrgRepository
                    COALESCE(default_language, 'en') as DefaultLanguage,
                    COALESCE(allow_version_overwrite, 0) as AllowVersionOverwrite,
                    COALESCE(air_gapped, 0) as AirGapped,
-                   COALESCE(block_deprecated, 'off') as BlockDeprecated
+                   COALESCE(block_deprecated, 'off') as BlockDeprecated,
+                   COALESCE(block_malicious, 'block') as BlockMalicious,
+                   COALESCE(block_kev, 'off') as BlockKev,
+                   max_epss_tolerance as MaxEpssTolerance,
+                   COALESCE(storage_used_bytes, 0) as StorageUsedBytes
             FROM org_settings WHERE org_id = @orgId
             """,
             new { orgId });
 
         // Cache both hit and miss so a non-existent org_id doesn't repeatedly hit the DB.
+        // Size = 1 counts as one logical slot against the global SizeLimit; the actual
+        // OrgSettings record is small (<1 KB) compared to the byte-array metadata entries.
         _cache?.Set(key, result, new MemoryCacheEntryOptions
         {
             SlidingExpiration = SettingsCacheTtl,
             AbsoluteExpirationRelativeToNow = SettingsCacheTtl,
+            Size = 1,
         });
         return result;
     }
@@ -110,7 +119,7 @@ public sealed class OrgRepository
     public async Task<(IReadOnlyList<OrgListItem> Items, int Total)> ListOrgsAsync(int limit, int offset, bool includeDeleted = true, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var includeDeletedFlag = includeDeleted ? 1 : 0;
+        int includeDeletedFlag = includeDeleted ? 1 : 0;
         const string countSql =
             "SELECT COUNT(*) FROM orgs WHERE (@includeDeleted = 1 OR deleted_at IS NULL)";
         const string listSql = """
@@ -138,7 +147,7 @@ public sealed class OrgRepository
             ORDER BY o.created_at ASC, o.id ASC
             LIMIT @limit OFFSET @offset
             """;
-        var total = await conn.ExecuteScalarAsync<int>(countSql, new { includeDeleted = includeDeletedFlag });
+        int total = await conn.ExecuteScalarAsync<int>(countSql, new { includeDeleted = includeDeletedFlag });
         var rows = await conn.QueryAsync<OrgListItem>(listSql, new { limit, offset, includeDeleted = includeDeletedFlag });
         return (rows.ToList(), total);
     }
@@ -182,9 +191,13 @@ public sealed class OrgRepository
     /// </summary>
     public async Task<bool> UpdateOrgStatusAsync(string orgId, string status, CancellationToken ct = default)
     {
-        if (status is not ("active" or "suspended")) return false;
+        if (status is not ("active" or "suspended"))
+        {
+            return false;
+        }
+
         await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.ExecuteAsync(
+        int rows = await conn.ExecuteAsync(
             "UPDATE orgs SET status = @status WHERE id = @orgId AND deleted_at IS NULL",
             new { orgId, status });
         return rows > 0;
@@ -203,7 +216,7 @@ public sealed class OrgRepository
     public async Task<bool> RestoreOrgAsync(string orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.ExecuteAsync(
+        int rows = await conn.ExecuteAsync(
             "UPDATE orgs SET deleted_at = NULL WHERE id = @orgId AND deleted_at IS NOT NULL",
             new { orgId });
         return rows > 0;
@@ -213,7 +226,7 @@ public sealed class OrgRepository
     public async Task<IReadOnlyList<string>> ListExpiredSoftDeletedOrgIdsAsync(int graceDays, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var cutoff = DateTimeOffset.UtcNow.AddDays(-graceDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = DateTimeOffset.UtcNow.AddDays(-graceDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
         var rows = await conn.QueryAsync<string>(
             "SELECT id FROM orgs WHERE deleted_at IS NOT NULL AND deleted_at < @cutoff",
             new { cutoff });
@@ -223,7 +236,7 @@ public sealed class OrgRepository
     public async Task<Org> CreateOrgAsync(string slug, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
             new { id, slug });
@@ -247,15 +260,13 @@ public sealed class OrgRepository
         // Enforce org limit <= instance limit at write time
         static long? Clamp(long? orgVal, long? instanceMax)
         {
-            if (orgVal is null) return null;
-            if (instanceMax is null) return orgVal;
-            return Math.Min(orgVal.Value, instanceMax.Value);
+            return orgVal is null ? null : instanceMax is null ? orgVal : Math.Min(orgVal.Value, instanceMax.Value);
         }
 
         await using var conn = await _db.OpenAsync(ct);
         // Treat null as "leave unchanged" so this method stays usable when callers don't carry
         // language (e.g. retention/proxy upserts at the controller layer don't touch it either).
-        var lang = string.IsNullOrWhiteSpace(update.DefaultLanguage) ? null : update.DefaultLanguage;
+        string? lang = string.IsNullOrWhiteSpace(update.DefaultLanguage) ? null : update.DefaultLanguage;
         await conn.ExecuteAsync(
             """
             INSERT INTO org_settings (org_id, anonymous_pull, allowlist_mode,
@@ -280,18 +291,18 @@ public sealed class OrgRepository
             """,
             new
             {
-                orgId         = update.OrgId,
-                anonPull      = update.AnonymousPull ? 1 : 0,
-                allowlist     = update.AllowlistMode ? 1 : 0,
-                maxBytes      = Clamp(update.MaxUploadBytes,      update.InstanceMaxUploadBytes),
-                maxBytesPyPi  = Clamp(update.MaxUploadBytesPyPi,  update.InstanceMaxUploadBytes),
-                maxBytesNpm   = Clamp(update.MaxUploadBytesNpm,   update.InstanceMaxUploadBytes),
+                orgId = update.OrgId,
+                anonPull = update.AnonymousPull ? 1 : 0,
+                allowlist = update.AllowlistMode ? 1 : 0,
+                maxBytes = Clamp(update.MaxUploadBytes, update.InstanceMaxUploadBytes),
+                maxBytesPyPi = Clamp(update.MaxUploadBytesPyPi, update.InstanceMaxUploadBytes),
+                maxBytesNpm = Clamp(update.MaxUploadBytesNpm, update.InstanceMaxUploadBytes),
                 maxBytesNuGet = Clamp(update.MaxUploadBytesNuGet, update.InstanceMaxUploadBytes),
                 maxBytesMaven = Clamp(update.MaxUploadBytesMaven, update.InstanceMaxUploadBytes),
-                maxBytesRpm   = Clamp(update.MaxUploadBytesRpm,   update.InstanceMaxUploadBytes),
-                maxBytesOci   = Clamp(update.MaxUploadBytesOci,   update.InstanceMaxUploadBytes),
+                maxBytesRpm = Clamp(update.MaxUploadBytesRpm, update.InstanceMaxUploadBytes),
+                maxBytesOci = Clamp(update.MaxUploadBytesOci, update.InstanceMaxUploadBytes),
                 lang,
-                overwrite     = ToOverwriteFlag(update.AllowVersionOverwrite),
+                overwrite = ToOverwriteFlag(update.AllowVersionOverwrite),
             });
     }
 
@@ -302,8 +313,7 @@ public sealed class OrgRepository
     /// </summary>
     private static int? ToOverwriteFlag(bool? value)
     {
-        if (value is null) return null;
-        return value.Value ? 1 : 0;
+        return value is null ? null : value.Value ? 1 : 0;
     }
 
     public async Task UpsertRetentionAsync(
@@ -383,34 +393,44 @@ public sealed class OrgRepository
     /// <param name="ecosystem">One of <c>pypi</c>, <c>npm</c>, <c>nuget</c>, <c>maven</c>, <c>rpm</c>, <c>oci</c> (case-insensitive).</param>
     public async Task<long> GetUploadLimitAsync(OrgSettings? settings, string ecosystem, CancellationToken ct = default)
     {
-        var eco = ecosystem.ToLowerInvariant();
-        var orgEco = eco switch
+        string eco = ecosystem.ToLowerInvariant();
+        long? orgEco = eco switch
         {
-            "pypi"  => settings?.MaxUploadBytesPyPi,
-            "npm"   => settings?.MaxUploadBytesNpm,
+            "pypi" => settings?.MaxUploadBytesPyPi,
+            "npm" => settings?.MaxUploadBytesNpm,
             "nuget" => settings?.MaxUploadBytesNuGet,
             "maven" => settings?.MaxUploadBytesMaven,
-            "rpm"   => settings?.MaxUploadBytesRpm,
-            "oci"   => settings?.MaxUploadBytesOci,
-            _       => null,
+            "rpm" => settings?.MaxUploadBytesRpm,
+            "oci" => settings?.MaxUploadBytesOci,
+            _ => null,
         };
-        if (orgEco is { } orgEcoLimit) return orgEcoLimit;
-        if (settings?.MaxUploadBytes is { } orgGlobal) return orgGlobal;
-
-        var instanceKey = eco switch
+        if (orgEco is { } orgEcoLimit)
         {
-            "pypi"  => "max_upload_bytes_pypi",
-            "npm"   => "max_upload_bytes_npm",
+            return orgEcoLimit;
+        }
+
+        if (settings?.MaxUploadBytes is { } orgGlobal)
+        {
+            return orgGlobal;
+        }
+
+        string? instanceKey = eco switch
+        {
+            "pypi" => "max_upload_bytes_pypi",
+            "npm" => "max_upload_bytes_npm",
             "nuget" => "max_upload_bytes_nuget",
             "maven" => "max_upload_bytes_maven",
-            "rpm"   => "max_upload_bytes_rpm",
-            "oci"   => "max_upload_bytes_oci",
-            _       => null,
+            "rpm" => "max_upload_bytes_rpm",
+            "oci" => "max_upload_bytes_oci",
+            _ => null,
         };
-        if (instanceKey is null) return long.MaxValue;
+        if (instanceKey is null)
+        {
+            return long.MaxValue;
+        }
 
-        var raw = await GetInstanceSettingAsync(instanceKey, ct);
-        return raw is not null && long.TryParse(raw, out var parsed) ? parsed : long.MaxValue;
+        string? raw = await GetInstanceSettingAsync(instanceKey, ct);
+        return raw is not null && long.TryParse(raw, out long parsed) ? parsed : long.MaxValue;
     }
 
     public async Task<IReadOnlyDictionary<string, string>> ListInstanceSettingsAsync(CancellationToken ct = default)
@@ -436,10 +456,13 @@ public sealed class OrgRepository
     public async Task<bool> SetUserAccountStatusAsync(
         string email, string tenantSlug, string accountStatus, CancellationToken ct = default)
     {
-        if (accountStatus is not ("active" or "locked" or "disabled")) return false;
+        if (accountStatus is not ("active" or "locked" or "disabled"))
+        {
+            return false;
+        }
 
         await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.ExecuteAsync(
+        int rows = await conn.ExecuteAsync(
             """
             UPDATE users SET account_status = @status
             WHERE id IN (
@@ -464,13 +487,13 @@ public sealed class OrgRepository
     public async Task<(string TemporaryPassword, DateTimeOffset IssuedAt)?> IssuePasswordResetAsync(
         string email, string tenantSlug, CancellationToken ct = default)
     {
-        var raw = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
-        var hash = BCrypt.Net.BCrypt.HashPassword(raw, workFactor: 12);
+        string raw = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        string hash = BCrypt.Net.BCrypt.HashPassword(raw, workFactor: 12);
         var now = DateTimeOffset.UtcNow;
-        var nowStr = now.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string nowStr = now.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.ExecuteAsync(
+        int rows = await conn.ExecuteAsync(
             """
             UPDATE users SET
                 password_hash = @hash,
@@ -495,7 +518,10 @@ public sealed class OrgRepository
     public async Task<IReadOnlyList<SystemUserLookupView>> LookupUsersAsync(
         string? email, string? tenantSlug, int limit, CancellationToken ct = default)
     {
-        if (email is null && tenantSlug is null) return Array.Empty<SystemUserLookupView>();
+        if (email is null && tenantSlug is null)
+        {
+            return Array.Empty<SystemUserLookupView>();
+        }
 
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<SystemUserLookupView>(
@@ -562,6 +588,129 @@ public sealed class OrgRepository
         await conn.ExecuteAsync(
             "DELETE FROM users WHERE id = @userId AND tenant_id = @orgId",
             new { orgId, userId });
+    }
+
+    /// <summary>
+    /// Resolves the effective storage quota for <paramref name="orgId"/>: the tenant's explicit
+    /// override takes precedence; when that is null, the instance-level
+    /// <c>default_storage_quota_bytes</c> setting applies. Returns null when neither is set,
+    /// meaning the tenant has no storage ceiling (unlimited).
+    /// </summary>
+    public async Task<long?> GetEffectiveStorageQuotaAsync(string orgId, CancellationToken ct = default)
+    {
+        var org = await GetByIdAsync(orgId, ct);
+        if (org?.StorageQuotaBytes is long tenantQuota)
+        {
+            return tenantQuota;
+        }
+
+        string? raw = await GetInstanceSettingAsync("default_storage_quota_bytes", ct);
+        return raw is not null && long.TryParse(raw, out long instanceDefault) && instanceDefault > 0
+            ? instanceDefault
+            : null;
+    }
+
+    /// <summary>
+    /// Atomically reserves <paramref name="delta"/> bytes against the tenant's quota counter.
+    /// Issues a single UPDATE that increments <c>storage_used_bytes</c> only when the result
+    /// would not exceed <paramref name="quota"/> (NULL = unlimited). Returns true when the
+    /// reservation succeeded; false when the quota would be exceeded (caller should return 413).
+    ///
+    /// SQLite's single-writer lock (busy_timeout=5000, DELETE journal) serialises concurrent
+    /// UPDATEs, so no two publishes can both pass the guard simultaneously. The backfill guard
+    /// (WHERE storage_used_bytes = 0 ... live SUM) runs first so a freshly-upgraded row with
+    /// counter = 0 gets the correct baseline before the first atomic reserve attempt.
+    /// </summary>
+    public async Task<bool> TryReserveStorageAsync(string orgId, long delta, long? quota, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+
+        // Ensure the org_settings row exists. CreateOrgAsync always creates one, but some
+        // code paths (unit test seeds, operator-managed orgs pre-dating this column) may
+        // omit it. ON CONFLICT DO NOTHING is a no-op when the row already exists.
+        await conn.ExecuteAsync(
+            "INSERT INTO org_settings (org_id) VALUES (@orgId) ON CONFLICT(org_id) DO NOTHING",
+            new { orgId });
+
+        // Backfill: if the counter is still 0 and the real sum is positive, set it from the
+        // live aggregate. WHERE storage_used_bytes = 0 makes this a no-op on rows that were
+        // already incremented by a prior publish, so concurrent callers racing the backfill
+        // can only inflate the counter, never set it to a stale-low value.
+        await conn.ExecuteAsync(
+            """
+            UPDATE org_settings
+            SET storage_used_bytes = (
+                SELECT COALESCE(SUM(pv.size_bytes), 0)
+                FROM package_versions pv
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.org_id = @orgId
+            )
+            WHERE org_id = @orgId AND storage_used_bytes = 0
+            """,
+            new { orgId });
+
+        // Atomic reserve: increment the counter only when the new value fits inside the quota.
+        // 0 rows affected means quota would be exceeded; caller treats that as 413.
+        int rows = await conn.ExecuteAsync(
+            """
+            UPDATE org_settings
+            SET storage_used_bytes = storage_used_bytes + @delta
+            WHERE org_id = @orgId
+              AND (@quota IS NULL OR storage_used_bytes + @delta <= @quota)
+            """,
+            new { orgId, delta, quota });
+
+        return rows > 0;
+    }
+
+    /// <summary>
+    /// Releases a previously reserved <paramref name="delta"/> back to the quota counter.
+    /// Called when a publish fails after the reservation, or when a version is deleted.
+    /// Clamps at 0 to guard against counter underflow from out-of-order releases.
+    /// </summary>
+    public async Task ReleaseStorageAsync(string orgId, long delta, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            UPDATE org_settings
+            SET storage_used_bytes = MAX(0, storage_used_bytes - @delta)
+            WHERE org_id = @orgId
+            """,
+            new { orgId, delta });
+    }
+
+    /// <summary>
+    /// Counts active (non-expired, non-revoked) tokens for the given org across both
+    /// <c>user_tokens</c> and <c>service_tokens</c>. Used by the token-cap enforcement in
+    /// <see cref="TokenRepository"/> before issuing a new token.
+    /// </summary>
+    public async Task<int> CountActiveTokensAsync(string orgId, CancellationToken ct = default)
+    {
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteScalarAsync<int>(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM user_tokens
+                 WHERE org_id = @orgId AND (expires_at IS NULL OR expires_at > @now)) +
+                (SELECT COUNT(*) FROM service_tokens
+                 WHERE org_id = @orgId AND (expires_at IS NULL OR expires_at > @now))
+            """,
+            new { orgId, now });
+    }
+
+    /// <summary>
+    /// Returns the maximum number of active tokens allowed per tenant. Reads
+    /// <c>instance_settings.max_active_tokens_per_tenant</c>, falling back to
+    /// <see cref="InstanceSettingDefaults.MaxActiveTokensPerTenant"/> when not set.
+    /// </summary>
+    public async Task<int> GetMaxActiveTokensPerTenantAsync(CancellationToken ct = default)
+    {
+        string? raw = await GetInstanceSettingAsync("max_active_tokens_per_tenant", ct);
+        return raw is not null && int.TryParse(raw, out int cap) && cap > 0
+            ? cap
+            : int.Parse(InstanceSettingDefaults.MaxActiveTokensPerTenant);
     }
 }
 

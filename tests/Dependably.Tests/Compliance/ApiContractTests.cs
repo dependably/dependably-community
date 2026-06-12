@@ -51,16 +51,16 @@ public sealed class ApiContractTests : IClassFixture<DependablyFactory>, IAsyncL
 
         var managementResp = await client.GetAsync("/openapi/management.json");
         managementResp.EnsureSuccessStatusCode();
-        var managementJson = await managementResp.Content.ReadAsStringAsync();
+        string managementJson = await managementResp.Content.ReadAsStringAsync();
 
         var protocolResp = await client.GetAsync("/openapi/protocol.json");
         protocolResp.EnsureSuccessStatusCode();
-        var protocolJson = await protocolResp.Content.ReadAsStringAsync();
+        string protocolJson = await protocolResp.Content.ReadAsStringAsync();
 
         var current = ContractProjector.ProjectMerged(managementJson, protocolJson);
-        var currentJson = ContractProjector.Serialize(current);
+        string currentJson = ContractProjector.Serialize(current);
 
-        var contractPath = LocateContract();
+        string contractPath = LocateContract();
 
         // Escape hatch: set UPDATE_API_CONTRACT=1 to overwrite the
         // committed contract instead of asserting. Use sparingly — the
@@ -72,11 +72,13 @@ public sealed class ApiContractTests : IClassFixture<DependablyFactory>, IAsyncL
         }
 
         if (!File.Exists(contractPath))
+        {
             Assert.Fail(
                 $"tests/Contracts/openapi.contract.json not found. Create it with:\n\n{currentJson}\n");
+        }
 
-        var committed = File.ReadAllText(contractPath).ReplaceLineEndings("\n").TrimEnd();
-        var normalized = currentJson.ReplaceLineEndings("\n").TrimEnd();
+        string committed = File.ReadAllText(contractPath).ReplaceLineEndings("\n").TrimEnd();
+        string normalized = currentJson.ReplaceLineEndings("\n").TrimEnd();
 
         Assert.True(normalized == committed,
             $"API contract is out of date. Replace tests/Contracts/openapi.contract.json with:\n\n{currentJson}\n");
@@ -86,10 +88,13 @@ public sealed class ApiContractTests : IClassFixture<DependablyFactory>, IAsyncL
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "Dependably.sln")))
+        {
             dir = dir.Parent;
-        if (dir is null)
-            throw new InvalidOperationException("Could not locate Dependably.sln from test base directory.");
-        return Path.Combine(dir.FullName, "tests", "Contracts", "openapi.contract.json");
+        }
+
+        return dir is null
+            ? throw new InvalidOperationException("Could not locate Dependably.sln from test base directory.")
+            : Path.Combine(dir.FullName, "tests", "Contracts", "openapi.contract.json");
     }
 }
 
@@ -120,15 +125,21 @@ internal static class ContractProjector
 
         var merged = new SortedDictionary<string, ContractPath>(StringComparer.Ordinal);
         foreach (var (k, v) in management.Paths)
+        {
             merged[k] = v;
+        }
+
         foreach (var (k, v) in protocol.Paths)
         {
             // The two documents must be path-disjoint by construction (see
             // OpenApiSplitTests.ManagementAndProtocol_AreSetDisjoint). Detect a regression
             // here loudly rather than silently letting one document overwrite the other.
             if (merged.ContainsKey(k))
+            {
                 throw new InvalidOperationException(
                     $"OpenAPI split regression: path '{k}' present in both management and protocol documents.");
+            }
+
             merged[k] = v;
         }
 
@@ -141,7 +152,9 @@ internal static class ContractProjector
 
         using var doc = JsonDocument.Parse(openApiJson);
         if (!doc.RootElement.TryGetProperty("paths", out var pathsEl))
+        {
             return new ApiContract("1", paths);
+        }
 
         foreach (var pathProp in pathsEl.EnumerateObject())
         {
@@ -153,16 +166,20 @@ internal static class ContractProjector
                 var httpMethods = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                     { "get", "post", "put", "delete", "patch", "head", "options", "trace" };
                 if (!httpMethods.Contains(opProp.Name))
+                {
                     continue;
+                }
 
                 var requiredParams = new List<string>();
                 if (opProp.Value.TryGetProperty("parameters", out var paramsEl))
                 {
                     foreach (var param in paramsEl.EnumerateArray())
                     {
-                        var isRequired = param.TryGetProperty("required", out var req) && req.GetBoolean();
+                        bool isRequired = param.TryGetProperty("required", out var req) && req.GetBoolean();
                         if (isRequired && param.TryGetProperty("name", out var name))
+                        {
                             requiredParams.Add(name.GetString() ?? "");
+                        }
                     }
                     requiredParams.Sort(StringComparer.Ordinal);
                 }
@@ -181,7 +198,9 @@ internal static class ContractProjector
             }
 
             if (operations.Count > 0)
+            {
                 paths[pathProp.Name] = new ContractPath(operations);
+            }
         }
 
         return new ApiContract("1", paths);

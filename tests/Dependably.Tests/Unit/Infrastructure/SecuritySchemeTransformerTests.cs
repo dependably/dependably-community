@@ -1,6 +1,3 @@
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
 using Dependably.Infrastructure.OpenApi;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
@@ -9,7 +6,6 @@ using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.OpenApi;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -39,6 +35,46 @@ public sealed class SecuritySchemeTransformerTests
         Assert.Contains(SecuritySchemeDocumentTransformer.BearerScheme, doc.Components.SecuritySchemes.Keys);
         Assert.Contains(SecuritySchemeDocumentTransformer.ApiTokenScheme, doc.Components.SecuritySchemes.Keys);
         Assert.Contains(SecuritySchemeDocumentTransformer.NuGetApiKeyScheme, doc.Components.SecuritySchemes.Keys);
+    }
+
+    // ── Document metadata transformer (title/description per document) ────────
+
+    [Fact]
+    public async Task MetadataTransformer_ManagementDocument_SetsManagementTitle()
+    {
+        var doc = new OpenApiDocument(); // Info is null
+        var transformer = new DocumentMetadataTransformer();
+
+        await transformer.TransformAsync(doc, BuildDocumentContext("management"), CancellationToken.None);
+
+        Assert.NotNull(doc.Info);
+        Assert.Equal("Dependably Management API", doc.Info!.Title);
+        Assert.Contains("/api/v1/", doc.Info.Description);
+    }
+
+    [Fact]
+    public async Task MetadataTransformer_ProtocolDocument_SetsProtocolTitle()
+    {
+        var doc = new OpenApiDocument();
+        var transformer = new DocumentMetadataTransformer();
+
+        await transformer.TransformAsync(doc, BuildDocumentContext("protocol"), CancellationToken.None);
+
+        Assert.Equal("Dependably Registry Protocols", doc.Info!.Title);
+        Assert.Contains("OCI", doc.Info.Description);
+    }
+
+    [Fact]
+    public async Task MetadataTransformer_UnknownDocument_LeavesTitleUnset()
+    {
+        var doc = new OpenApiDocument();
+        var transformer = new DocumentMetadataTransformer();
+
+        await transformer.TransformAsync(doc, BuildDocumentContext("v1"), CancellationToken.None);
+
+        // Info is initialized but the switch falls through — no title assigned.
+        Assert.NotNull(doc.Info);
+        Assert.True(string.IsNullOrEmpty(doc.Info!.Title));
     }
 
     [Fact]
@@ -139,7 +175,7 @@ public sealed class SecuritySchemeTransformerTests
     public async Task OperationTransformer_AllowAnonymous_BeatsAuthorize()
     {
         var op = new OpenApiOperation();
-        var metadata = new object[]
+        object[] metadata = new object[]
         {
             new AuthorizeAttribute(),
             new AllowAnonymousAttribute(),
@@ -334,7 +370,7 @@ public sealed class SecuritySchemeTransformerTests
 
         await new SecuritySchemeOperationTransformer().TransformAsync(op, ctx, CancellationToken.None);
 
-        var ids = SchemeIds(op.Security!);
+        string[] ids = SchemeIds(op.Security!);
         Assert.Contains(SecuritySchemeDocumentTransformer.BearerScheme, ids);
         Assert.Contains(SecuritySchemeDocumentTransformer.ApiTokenScheme, ids);
         Assert.DoesNotContain(SecuritySchemeDocumentTransformer.NuGetApiKeyScheme, ids);
@@ -354,7 +390,7 @@ public sealed class SecuritySchemeTransformerTests
 
         await new SecuritySchemeOperationTransformer().TransformAsync(op, ctx, CancellationToken.None);
 
-        var ids = SchemeIds(op.Security!);
+        string[] ids = SchemeIds(op.Security!);
         Assert.Contains(SecuritySchemeDocumentTransformer.ApiTokenScheme, ids);
         Assert.Contains(SecuritySchemeDocumentTransformer.BearerScheme, ids);
     }
@@ -374,7 +410,7 @@ public sealed class SecuritySchemeTransformerTests
 
         await new SecuritySchemeOperationTransformer().TransformAsync(op, ctx, CancellationToken.None);
 
-        var ids = SchemeIds(op.Security!);
+        string[] ids = SchemeIds(op.Security!);
         Assert.Contains(SecuritySchemeDocumentTransformer.BearerScheme, ids);
         Assert.Contains(SecuritySchemeDocumentTransformer.ApiTokenScheme, ids);
     }
@@ -386,7 +422,7 @@ public sealed class SecuritySchemeTransformerTests
         {
             Security = new List<OpenApiSecurityRequirement>
             {
-                new OpenApiSecurityRequirement(),
+                new(),
             },
         };
         var ctx = BuildOperationContext(
@@ -404,11 +440,11 @@ public sealed class SecuritySchemeTransformerTests
 
     private static IServiceProvider EmptyServices { get; } = new ServiceCollection().BuildServiceProvider();
 
-    private static OpenApiDocumentTransformerContext BuildDocumentContext()
+    private static OpenApiDocumentTransformerContext BuildDocumentContext(string documentName = "v1")
     {
         return new OpenApiDocumentTransformerContext
         {
-            DocumentName = "v1",
+            DocumentName = documentName,
             DescriptionGroups = new List<ApiDescriptionGroup>(),
             ApplicationServices = EmptyServices,
         };
@@ -459,7 +495,9 @@ public sealed class SecuritySchemeTransformerTests
             foreach (var key in requirement.Keys)
             {
                 if (key is OpenApiSecuritySchemeReference reference && reference.Reference?.Id is { } id)
+                {
                     ids.Add(id);
+                }
             }
         }
         return ids.ToArray();

@@ -24,6 +24,188 @@ indent_size = 2
 # noise of this rule outweighs its signal.
 dotnet_diagnostic.CA1873.severity = none
 
+# S3358 "Extract nested ternary into an independent statement": SonarAnalyzer's
+# nested-ternary rule directly contradicts this repo's documented house style,
+# which prefers conditional expressions over if/else (the IDE0045/IDE0046
+# dotnet_style_prefer_conditional_expression_over_* rules below, enforced as
+# warnings). Extracting a nested ternary to satisfy S3358 re-trips IDE0046 under
+# the warnings-as-errors gate, so the two standards pull in opposite directions.
+# This .editorconfig is the single source of truth for repo style, and the
+# build-integrated SonarScanner honours it — so deactivate S3358 here to align
+# Sonar with the chosen style. Genuinely unreadable deeply-nested chains are
+# addressed by reducing the method's cognitive complexity (S3776), not by
+# extraction into a re-flagged ternary.
+dotnet_diagnostic.S3358.severity = none
+
+# === C# code-style ruleset ===
+# These IDExxxx rules are enforced as warnings, which EnforceCodeStyleInBuild
+# (Directory.Build.props) surfaces during `dotnet build` — so with the CI
+# warnings-as-errors gate they fail the build, and the dotnet-format job /
+# pre-commit hook auto-fix the fixable ones. Gating (rather than suggestion) is
+# deliberate: it is the single source of truth for repo style, so SonarQube's
+# external-Roslyn import never disagrees with the build — compliant code emits
+# no diagnostics. Only a few inherently subjective rules (expression-bodied
+# methods/constructors/operators, expression-statement discards) stay at
+# suggestion/silent below, where they guide without gating.
+
+# -- this. qualification: never (private fields are _camelCase, so unambiguous) --
+dotnet_style_qualification_for_field = false:warning
+dotnet_style_qualification_for_property = false:warning
+dotnet_style_qualification_for_method = false:warning
+dotnet_style_qualification_for_event = false:warning
+
+# -- language keywords over BCL types (int, not Int32) --
+dotnet_style_predefined_type_for_locals_parameters_members = true:warning
+dotnet_style_predefined_type_for_member_access = true:warning
+
+# -- modifiers --
+dotnet_style_require_accessibility_modifiers = for_non_interface_members:warning
+csharp_preferred_modifier_order = public,private,protected,internal,file,static,extern,new,virtual,abstract,sealed,override,readonly,unsafe,required,volatile,async:warning
+dotnet_style_readonly_field = true:warning
+csharp_prefer_static_local_function = true:warning
+
+# -- expression-level preferences --
+dotnet_style_object_initializer = true:warning
+dotnet_style_collection_initializer = true:warning
+# Collection expressions (`[]`/`[..x]`) are NOT preferred. `[]` is less explicit
+# than an object initializer or target-typed `new()`: for empty Add-pattern
+# collections (`Dictionary<,> x = []`) and xUnit `TheoryData<T>` it obscures the
+# constructed type, and the lowering even tripped a CA1825 false positive. The
+# SDK defaults this rule on at suggestion level, which surfaced ~66 IDE0028
+# "collection initialization can be simplified" smells in SonarQube's
+# external-Roslyn import; setting it false disables the suggestion at the source
+# so Sonar imports nothing. `new()` / explicit initializers stay the house form.
+dotnet_style_prefer_collection_expression = false
+dotnet_style_prefer_auto_properties = true:warning
+dotnet_style_explicit_tuple_names = true:warning
+dotnet_style_coalesce_expression = true:warning
+dotnet_style_null_propagation = true:warning
+dotnet_style_prefer_is_null_check_over_reference_equality_method = true:warning
+dotnet_style_prefer_compound_assignment = true:warning
+dotnet_style_prefer_simplified_interpolation = true:warning
+dotnet_style_prefer_simplified_boolean_expressions = true:warning
+
+# -- unused parameters (IDE0060): flag private ones only. Public/protected
+#    signatures legitimately carry unused parameters — required route segments
+#    (e.g. a `{bucket}` the handler ignores) and optional API parameters kept for
+#    contract symmetry — so gating them would force breaking the public surface. --
+dotnet_code_quality_unused_parameters = non_public:warning
+# Conditional expressions (ternaries) are the preferred form over if/else for
+# simple assign/return — enforced repo-wide for a consistent style.
+dotnet_style_prefer_conditional_expression_over_assignment = true:warning
+dotnet_style_prefer_conditional_expression_over_return = true:warning
+
+# -- using placement (IDE0005 unused-using removal is left to the dotnet-format
+#    job: enabling it on build requires GenerateDocumentationFile, Roslyn #41640) --
+csharp_using_directive_placement = outside_namespace:warning
+dotnet_sort_system_directives_first = true
+
+# -- var: the codebase convention is explicit types for built-in primitives
+#    (int i, char c, bool flag) and var when the type is apparent / for complex
+#    types. Codify exactly that. --
+csharp_style_var_for_built_in_types = false:warning
+csharp_style_var_when_type_is_apparent = true:warning
+csharp_style_var_elsewhere = true:warning
+
+# -- expression-bodied members: enforce the low-friction ones only --
+csharp_style_expression_bodied_accessors = true:warning
+csharp_style_expression_bodied_properties = true:warning
+csharp_style_expression_bodied_indexers = true:warning
+csharp_style_expression_bodied_lambdas = true:warning
+csharp_style_expression_bodied_methods = when_on_single_line:silent
+csharp_style_expression_bodied_constructors = false:silent
+csharp_style_expression_bodied_operators = when_on_single_line:silent
+csharp_style_expression_bodied_local_functions = when_on_single_line:silent
+
+# -- pattern matching --
+csharp_style_pattern_matching_over_is_with_cast_check = true:warning
+csharp_style_pattern_matching_over_as_with_null_check = true:warning
+csharp_style_prefer_not_pattern = true:warning
+csharp_style_prefer_extended_property_pattern = true:warning
+csharp_style_prefer_switch_expression = true:suggestion
+csharp_style_prefer_pattern_matching = true:warning
+
+# -- null / delegate --
+csharp_style_throw_expression = true:warning
+csharp_style_conditional_delegate_call = true:warning
+
+# -- code block & modern syntax --
+csharp_prefer_braces = true:warning
+csharp_prefer_simple_using_statement = true:warning
+csharp_style_namespace_declarations = file_scoped:warning
+csharp_style_inlined_variable_declaration = true:warning
+csharp_prefer_simple_default_expression = true:warning
+csharp_style_prefer_index_operator = true:warning
+csharp_style_prefer_range_operator = true:warning
+csharp_style_prefer_tuple_swap = true:warning
+# Target-typed new() when the type is apparent, deconstructed declarations, and
+# discarding unused assignments are all enforced for a consistent style; the
+# fixer converts every flagged site.
+csharp_style_implicit_object_creation_when_type_is_apparent = true:warning
+csharp_style_deconstructed_variable_declaration = true:warning
+csharp_style_unused_value_assignment_preference = discard_variable:warning
+csharp_style_unused_value_expression_statement_preference = discard_variable:silent
+
+# === Naming conventions (IDE1006) ===
+# Not auto-fixable by `dotnet format` — the codebase already follows these, so
+# the per-rule severities below prevent drift. (No global IDE1006 severity here:
+# it would override the individual rule severities, forcing the deliberately
+# suggestion-level static-field rule back up to warning.)
+
+# Styles
+dotnet_naming_style.pascal_case.capitalization = pascal_case
+dotnet_naming_style.camel_case.capitalization = camel_case
+dotnet_naming_style.i_prefixed.capitalization = pascal_case
+dotnet_naming_style.i_prefixed.required_prefix = I
+dotnet_naming_style.underscore_camel.capitalization = camel_case
+dotnet_naming_style.underscore_camel.required_prefix = _
+
+# Interfaces → IPascalCase
+dotnet_naming_symbols.interfaces.applicable_kinds = interface
+dotnet_naming_symbols.interfaces.applicable_accessibilities = *
+dotnet_naming_rule.interfaces_i_prefixed.symbols = interfaces
+dotnet_naming_rule.interfaces_i_prefixed.style = i_prefixed
+dotnet_naming_rule.interfaces_i_prefixed.severity = warning
+
+# Types & namespaces → PascalCase
+dotnet_naming_symbols.types.applicable_kinds = class,struct,enum,delegate,namespace
+dotnet_naming_symbols.types.applicable_accessibilities = *
+dotnet_naming_rule.types_pascal.symbols = types
+dotnet_naming_rule.types_pascal.style = pascal_case
+dotnet_naming_rule.types_pascal.severity = warning
+
+# Non-field members → PascalCase
+dotnet_naming_symbols.non_field_members.applicable_kinds = method,property,event
+dotnet_naming_symbols.non_field_members.applicable_accessibilities = *
+dotnet_naming_rule.members_pascal.symbols = non_field_members
+dotnet_naming_rule.members_pascal.style = pascal_case
+dotnet_naming_rule.members_pascal.severity = warning
+
+# const fields → PascalCase (local consts are left to the author — not enforced).
+# Placed before the private-field rule so a private const matches here first.
+dotnet_naming_symbols.const_fields.applicable_kinds = field
+dotnet_naming_symbols.const_fields.required_modifiers = const
+dotnet_naming_rule.const_fields_pascal.symbols = const_fields
+dotnet_naming_rule.const_fields_pascal.style = pascal_case
+dotnet_naming_rule.const_fields_pascal.severity = warning
+
+# Static fields (incl. private static readonly) → PascalCase. Matched before the
+# private-field rule so statics aren't forced to the _ prefix. The codebase is
+# inconsistent here (most static fields are PascalCase, a few use _camelCase), so
+# this guides at suggestion rather than gating a pre-existing mix.
+dotnet_naming_symbols.static_fields.applicable_kinds = field
+dotnet_naming_symbols.static_fields.required_modifiers = static
+dotnet_naming_rule.static_fields_pascal.symbols = static_fields
+dotnet_naming_rule.static_fields_pascal.style = pascal_case
+dotnet_naming_rule.static_fields_pascal.severity = suggestion
+
+# Private instance fields → _camelCase
+dotnet_naming_symbols.private_fields.applicable_kinds = field
+dotnet_naming_symbols.private_fields.applicable_accessibilities = private
+dotnet_naming_rule.private_fields_underscore.symbols = private_fields
+dotnet_naming_rule.private_fields_underscore.style = underscore_camel
+dotnet_naming_rule.private_fields_underscore.severity = warning
+
 [tests/**/*.cs]
 # CA1861 "Prefer 'static readonly' fields over constant array arguments": tests
 # routinely build expected arrays inline (Assert.Equal(new[] { ... }, actual)).

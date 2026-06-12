@@ -6,7 +6,6 @@ using WireMock.Matchers;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Protocol;
 
@@ -35,7 +34,7 @@ public sealed class OsvClientTests : IDisposable
     [Fact]
     public async Task QueryAsync_SuccessfulResponseWithVulns_ReturnsHydrated()
     {
-        var vulnJson = """
+        string vulnJson = """
             {"vulns":[{"id":"GHSA-aaaa","summary":"hello"}]}
             """;
         _server.Given(Request.Create().WithPath("/query").UsingPost())
@@ -77,7 +76,7 @@ public sealed class OsvClientTests : IDisposable
     [Fact]
     public async Task QueryBatchAsync_SuccessfulBatch_HydratesPerVuln()
     {
-        var batchJson = """
+        string batchJson = """
             {"results":[
               {"vulns":[{"id":"GHSA-1","modified":"2026-01-01T00:00:00Z"}]},
               {"vulns":[]}
@@ -129,7 +128,7 @@ public sealed class OsvClientTests : IDisposable
     public async Task QueryBatchAsync_VulnWithoutId_IsSkippedFromHydration()
     {
         // string.IsNullOrEmpty(id) branch — and per-PURL fallback to stripped record
-        var batchJson = """
+        string batchJson = """
             {"results":[
               {"vulns":[{"modified":"2026-01-01T00:00:00Z"}]}
             ]}
@@ -148,7 +147,7 @@ public sealed class OsvClientTests : IDisposable
     public async Task QueryBatchAsync_HydrationFailure_FallsBackToStripped()
     {
         // FetchAdvisoryAsync non-success branch: 404 ⇒ null ⇒ stripped fallback.
-        var batchJson = """
+        string batchJson = """
             {"results":[
               {"vulns":[{"id":"GHSA-MISS","modified":"2026-01-01T00:00:00Z"}]}
             ]}
@@ -171,9 +170,11 @@ public sealed class OsvClientTests : IDisposable
         // uniqueIds.Count > MaxHydrationsPerBatch (500) branch — generate 600 distinct IDs.
         var vulnsArr = new List<object>();
         for (int i = 0; i < 600; i++)
+        {
             vulnsArr.Add(new { id = $"GHSA-{i:D4}", modified = "2026-01-01T00:00:00Z" });
+        }
 
-        var batchJson = JsonSerializer.Serialize(new
+        string batchJson = JsonSerializer.Serialize(new
         {
             results = new[] { new { vulns = vulnsArr.ToArray() } }
         });
@@ -191,8 +192,8 @@ public sealed class OsvClientTests : IDisposable
 
         Assert.Single(result);
         Assert.Equal(600, result[0].Count);
-        var hydratedCount = result[0].Count(a => a.IsHydrated);
-        var strippedCount = result[0].Count(a => !a.IsHydrated);
+        int hydratedCount = result[0].Count(a => a.IsHydrated);
+        int strippedCount = result[0].Count(a => !a.IsHydrated);
         Assert.Equal(500, hydratedCount);
         Assert.Equal(100, strippedCount);
     }
@@ -204,7 +205,7 @@ public sealed class OsvClientTests : IDisposable
     {
         // /query returns {"vulns":[…]}; each advisory must carry the raw JSON of its own
         // array element (not the whole envelope) for persistence into vulnerabilities.osv_json.
-        var vulnJson = """
+        string vulnJson = """
             {"vulns":[
               {"id":"GHSA-aaaa","summary":"hello","details":"# heading","references":[{"type":"WEB","url":"https://example.test"}]}
             ]}
@@ -227,7 +228,7 @@ public sealed class OsvClientTests : IDisposable
     [Fact]
     public async Task QueryBatchAsync_HydratedAdvisory_CapturesRawJsonFromVulnsEndpoint()
     {
-        var batchJson = """
+        string batchJson = """
             {"results":[
               {"vulns":[{"id":"GHSA-1","modified":"2026-01-01T00:00:00Z"}]}
             ]}
@@ -253,7 +254,7 @@ public sealed class OsvClientTests : IDisposable
     {
         // Hydration 404s ⇒ stripped record ⇒ IsHydrated false ⇒ RawJson null, so the upsert's
         // COALESCE can never clobber a previously-stored full advisory with this batch's stub.
-        var batchJson = """
+        string batchJson = """
             {"results":[
               {"vulns":[{"id":"GHSA-MISS","modified":"2026-01-01T00:00:00Z"}]}
             ]}
@@ -274,7 +275,7 @@ public sealed class OsvClientTests : IDisposable
     public async Task QueryBatchAsync_MixedHydration_CapturesRawJsonOnlyForHydrated()
     {
         // Mixed/partial batch: one advisory hydrates (RawJson set), the other 404s (RawJson null).
-        var batchJson = """
+        string batchJson = """
             {"results":[
               {"vulns":[{"id":"GHSA-OK","modified":"2026-01-01T00:00:00Z"}]},
               {"vulns":[{"id":"GHSA-FAIL","modified":"2026-01-01T00:00:00Z"}]}
@@ -307,7 +308,7 @@ public sealed class OsvClientTests : IDisposable
     {
         // First call 429 (with Retry-After=0 to keep the test fast), then 200.
         // Exercises the SendWithRetryAsync retry loop + the int.TryParse Retry-After branch.
-        var scenario = "rate-limit";
+        string scenario = "rate-limit";
         _server.Given(Request.Create().WithPath("/query").UsingPost())
             .InScenario(scenario).WillSetStateTo("retry")
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.TooManyRequests)
@@ -343,7 +344,7 @@ public sealed class OsvClientTests : IDisposable
     {
         // int.TryParse fails branch — Retry-After: "soon" — delay stays at default (1000ms).
         // Second attempt succeeds, so the retry path is taken without cancellation needed.
-        var scenario = "bad-retry-after";
+        string scenario = "bad-retry-after";
         _server.Given(Request.Create().WithPath("/query").UsingPost())
             .InScenario(scenario).WillSetStateTo("after-bad")
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.TooManyRequests)
@@ -360,6 +361,72 @@ public sealed class OsvClientTests : IDisposable
         Assert.Equal("GHSA-OK", result[0].Id);
     }
 
+    // ── Size-cap degradation ───────────────────────────────────────────────────
+
+    [Fact]
+    public async Task QueryAsync_OversizedResponse_DegradesgracefullyToEmpty()
+    {
+        // A response whose body exceeds MaxResponseContentBufferSize triggers
+        // HttpRequestException from ReadAsStringAsync. QueryAsync must return []
+        // with no exception escaping to the caller.
+        var cappedSut = new OsvClient(
+            new SizeCappedHandlerFactory(_server.Urls[0] + "/", maxBodyBytes: 10),
+            NullLogger<OsvClient>.Instance);
+
+        _server.Given(Request.Create().WithPath("/query").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithBody("""{"vulns":[{"id":"GHSA-big","summary":"hello world this is a long body exceeding the tiny cap"}]}"""));
+
+        var result = await cappedSut.QueryAsync("pkg:npm/foo@1.0.0");
+
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public async Task QueryBatchAsync_OversizedResponse_DegradesgracefullyToEmptyPerPurl()
+    {
+        // Oversized querybatch body => HttpRequestException => per-PURL empty lists returned,
+        // no exception escapes. Mirrors the HTTP-failure path shape (same return value).
+        var cappedSut = new OsvClient(
+            new SizeCappedHandlerFactory(_server.Urls[0] + "/", maxBodyBytes: 10),
+            NullLogger<OsvClient>.Instance);
+
+        _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithBody("""{"results":[{"vulns":[{"id":"GHSA-big","modified":"2026-01-01T00:00:00Z"}]},{"vulns":[]}]}"""));
+
+        var result = await cappedSut.QueryBatchAsync(new[] { "pkg:npm/a@1.0.0", "pkg:npm/b@1.0.0" });
+
+        Assert.Equal(2, result.Count);
+        Assert.All(result, Assert.Empty);
+    }
+
+    [Fact]
+    public async Task QueryBatchAsync_OversizedQueryBatchButHydrationOk_HydrationNotAttempted()
+    {
+        // When the /querybatch envelope itself is oversized, we never reach the hydration
+        // fan-out — the graceful empty return means no /vulns/{id} calls are issued.
+        // This is the mixed-failure scenario: batch body too large, individual hydrations
+        // would have succeeded if attempted. Confirms the cap fires before the hydration loop.
+        var cappedSut = new OsvClient(
+            new SizeCappedHandlerFactory(_server.Urls[0] + "/", maxBodyBytes: 10),
+            NullLogger<OsvClient>.Instance);
+
+        _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithBody("""{"results":[{"vulns":[{"id":"GHSA-big","modified":"2026-01-01T00:00:00Z"}]}]}"""));
+
+        // If a /vulns/ call were made (which it must not be), the server has no stub for it
+        // and WireMock would return 404 — but we assert no hydrated records appear.
+        var result = await cappedSut.QueryBatchAsync(new[] { "pkg:npm/a@1.0.0" });
+
+        Assert.Single(result);
+        Assert.Empty(result[0]);
+        // Confirm no hydration requests reached the server.
+        bool anyVulnsCall = _server.LogEntries.Any(e => e.RequestMessage?.Path?.StartsWith("/vulns/") == true);
+        Assert.False(anyVulnsCall);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -371,6 +438,22 @@ public sealed class OsvClientTests : IDisposable
         private readonly HttpClient _client;
         public SingleHandlerFactory(string baseUrl) =>
             _client = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        public HttpClient CreateClient(string name) => _client;
+    }
+
+    /// <summary>
+    /// IHttpClientFactory that applies a tiny MaxResponseContentBufferSize so tests can
+    /// exercise the size-cap degradation path without serving megabytes of data.
+    /// </summary>
+    private sealed class SizeCappedHandlerFactory : IHttpClientFactory
+    {
+        private readonly HttpClient _client;
+        public SizeCappedHandlerFactory(string baseUrl, long maxBodyBytes) =>
+            _client = new HttpClient
+            {
+                BaseAddress = new Uri(baseUrl),
+                MaxResponseContentBufferSize = maxBodyBytes,
+            };
         public HttpClient CreateClient(string name) => _client;
     }
 }

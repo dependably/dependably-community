@@ -1,7 +1,6 @@
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -20,8 +19,8 @@ public sealed class AuditRepositorySystemAuditTests : IClassFixture<InMemoryDbFi
     [Fact]
     public async Task ListSystemAuditAsync_ActionFilter_ExactMatch()
     {
-        await _repo.LogSystemAsync("tenant.created",        detail: "{\"slug\":\"alpha\"}");
-        await _repo.LogSystemAsync("tenant.deleted",        detail: "{\"slug\":\"beta\"}");
+        await _repo.LogSystemAsync("tenant.created", detail: "{\"slug\":\"alpha\"}");
+        await _repo.LogSystemAsync("tenant.deleted", detail: "{\"slug\":\"beta\"}");
         await _repo.LogSystemAsync("tenant.status_changed", detail: "{\"slug\":\"gamma\"}");
 
         var (items, total) = await _repo.ListSystemAuditAsync(
@@ -109,8 +108,8 @@ public sealed class AuditRepositorySystemAuditTests : IClassFixture<InMemoryDbFi
     [Fact]
     public async Task ListSystemAuditAsync_PopulatesActorEmail_FromSystemAdminsJoin()
     {
-        var email = $"op-{Guid.NewGuid():N}@example.test";
-        var adminId = await SystemAdminSeeder.InsertAsync(_fixture.Store, email);
+        string email = $"op-{Guid.NewGuid():N}@example.test";
+        string adminId = await SystemAdminSeeder.InsertAsync(_fixture.Store, email);
         await _repo.LogSystemAsync("tenant.status_changed", actorId: adminId,
             detail: $"{{\"slug\":\"join-test-{Guid.NewGuid():N}\"}}");
 
@@ -126,9 +125,9 @@ public sealed class AuditRepositorySystemAuditTests : IClassFixture<InMemoryDbFi
     {
         // Search must reach across the system_admins JOIN — operators expect to find their
         // own actions by email even though the audit_log row only stores actor_id.
-        var unique = Guid.NewGuid().ToString("N");
-        var email = $"search-{unique}@example.test";
-        var adminId = await SystemAdminSeeder.InsertAsync(_fixture.Store, email);
+        string unique = Guid.NewGuid().ToString("N");
+        string email = $"search-{unique}@example.test";
+        string adminId = await SystemAdminSeeder.InsertAsync(_fixture.Store, email);
         await _repo.LogSystemAsync("tenant.created", actorId: adminId, detail: "{}");
 
         var (items, _) = await _repo.ListSystemAuditAsync(

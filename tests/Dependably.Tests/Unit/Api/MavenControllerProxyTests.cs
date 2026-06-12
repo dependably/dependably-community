@@ -16,7 +16,6 @@ using NSubstitute;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -160,6 +159,7 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         var httpFactory = new StaticHttpClientFactory(new HttpClient(new WireMockHandler(_server)));
         var upstreamClient = new UpstreamClient(
             httpFactory, tiered, _audit, new AllowAllValidator(), new StubAirGapMode(false),
+            new Dependably.Infrastructure.DriveInfoStagingDiskInfo(Path.GetTempPath()),
             config, NullLogger<UpstreamClient>.Instance);
         var upstream = new MavenUpstreamFetcher(
             upstreamClient, tiered, _db, config, NullLogger<MavenUpstreamFetcher>.Instance);
@@ -171,7 +171,7 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             new StubAirGapMode(false),
             NullLogger<VulnerabilityScanService>.Instance);
         var proxyVersions = new ProxyVersionRecorder(_packages, _audit, licenses);
-        var blockGate = new BlockGateService(vulns, _audit);
+        var blockGate = new BlockGateService(vulns, _audit, new QuarantineRepository(_db), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance);
         var cacheRecorder = new CacheAccessRecorder(
             new CacheArtifactRepository(_db), new TenantArtifactAccessRepository(_db),
             NullLogger<CacheAccessRecorder>.Instance);
@@ -182,6 +182,9 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             Packages: _packages, Tokens: _tokens, Audit: _audit, Orgs: _orgs,
             Blobs: _blobs, Db: _db, Upstream: upstream, Config: config,
             ProxyFetch: proxyFetch, BlockGate: blockGate,
+            ReservedNamespaces: new ReservedNamespaceService(
+                _db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
             Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db)));
 
         return new MavenController(svc)
@@ -195,8 +198,8 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task ProxyMiss_VulnerableArtifactOverTolerance_Returns403_AndRecordsNoServeRow()
     {
-        var bytes = Encoding.UTF8.GetBytes("vulnerable-jar-payload");
-        var path = "com/example/vuln/1.0/vuln-1.0.jar";
+        byte[] bytes = Encoding.UTF8.GetBytes("vulnerable-jar-payload");
+        string path = "com/example/vuln/1.0/vuln-1.0.jar";
         StubArtifact(path, bytes);
         StubSidecar(path, Sha256Hex(bytes));
         await SetMaxOsvToleranceAsync(4.0);
@@ -210,7 +213,7 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         // row (scan target) but the controller left no maven_version_files serve-row, so a
         // later attempt re-fetches and re-gates rather than serving from cache.
         await using var conn = await _db.OpenAsync();
-        var fileRows = await conn.ExecuteScalarAsync<long>(
+        long fileRows = await conn.ExecuteScalarAsync<long>(
             """
             SELECT COUNT(*) FROM maven_version_files mvf
             JOIN package_versions pv ON pv.id = mvf.package_version_id
@@ -224,8 +227,8 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task ProxyMiss_VulnScoreWithinTolerance_Serves()
     {
-        var bytes = Encoding.UTF8.GetBytes("tolerable-jar-payload");
-        var path = "com/example/tolerable/1.0/tolerable-1.0.jar";
+        byte[] bytes = Encoding.UTF8.GetBytes("tolerable-jar-payload");
+        string path = "com/example/tolerable/1.0/tolerable-1.0.jar";
         StubArtifact(path, bytes);
         StubSidecar(path, Sha256Hex(bytes));
         await SetMaxOsvToleranceAsync(10.0);
@@ -240,8 +243,8 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task ProxyMiss_CleanArtifact_Serves_ThenSecondRequestIsCacheHit_NoSecondUpstreamFetch()
     {
-        var bytes = Encoding.UTF8.GetBytes("clean-jar-payload");
-        var path = "com/example/clean/1.0/clean-1.0.jar";
+        byte[] bytes = Encoding.UTF8.GetBytes("clean-jar-payload");
+        string path = "com/example/clean/1.0/clean-1.0.jar";
         StubArtifact(path, bytes);
         StubSidecar(path, Sha256Hex(bytes));
 
@@ -251,7 +254,7 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         Assert.Equal(bytes, file.FileContents);
         Assert.Equal("MISS", ctl1.Response.Headers["X-Cache"].ToString());
 
-        var artifactCallsAfterMiss = ArtifactGetCount("clean-1.0.jar");
+        long artifactCallsAfterMiss = ArtifactGetCount("clean-1.0.jar");
 
         // Second request resolves the recorded maven_version_files row → served from the blob
         // store as a cache HIT, with no further upstream artifact fetch.
@@ -294,10 +297,13 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken ct)
         {
-            var url = _server.Urls[0] + request.RequestUri!.PathAndQuery;
+            string url = _server.Urls[0] + request.RequestUri!.PathAndQuery;
             using var innerRequest = new HttpRequestMessage(request.Method, url);
             foreach (var h in request.Headers)
+            {
                 innerRequest.Headers.TryAddWithoutValidation(h.Key, h.Value);
+            }
+
             var inner = new HttpClient();
             return await inner.SendAsync(innerRequest, ct);
         }

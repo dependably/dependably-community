@@ -1,1 +1,29 @@
-cd web && npx lint-staged
+# Frontend: run lint-staged against staged web/ files (subshell keeps cwd at repo root).
+(cd web && npx lint-staged) || exit 1
+
+# Backend: when C# or build-config files are staged, build with warnings-as-errors so the
+# analyzer/compiler warnings that gate CI (TreatWarningsAsErrors when CI=true) also fail the
+# commit locally. NU1900 (offline vuln-data fetch noise) stays excluded via Directory.Build.props.
+staged_dotnet=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(cs|csproj|props|targets)$' || true)
+if [ -n "$staged_dotnet" ]; then
+  # Auto-format staged C# to the .editorconfig rules (same checks the CI dotnet-format job
+  # verifies), then re-stage so the commit matches what CI will accept. Scoped to staged .cs
+  # via --include so unrelated files are untouched. NOTE: re-staging adds the whole file, so
+  # avoid partial (`git add -p`) staging of a .cs file you don't want fully committed.
+  staged_cs=$(printf '%s\n' "$staged_dotnet" | grep -E '\.cs$' || true)
+  if [ -n "$staged_cs" ]; then
+    echo "Formatting staged C# (dotnet format whitespace + style)…"
+    # shellcheck disable=SC2086
+    dotnet format whitespace --include $staged_cs --no-restore || exit 1
+    # shellcheck disable=SC2086
+    dotnet format style --include $staged_cs || exit 1
+    # shellcheck disable=SC2086
+    git add $staged_cs
+  fi
+
+  echo "Building with warnings-as-errors…"
+  if ! dotnet build -c Debug -p:TreatWarningsAsErrors=true --nologo -v quiet; then
+    echo "✗ Build failed or emitted warnings. Fix them before committing (CI rejects warnings)."
+    exit 1
+  fi
+fi

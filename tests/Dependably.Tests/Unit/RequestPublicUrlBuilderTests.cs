@@ -1,7 +1,6 @@
 using Dependably.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -11,7 +10,11 @@ public class RequestPublicUrlBuilderTests
     private static IConfiguration Config(string? baseUrl = null)
     {
         var dict = new Dictionary<string, string?>();
-        if (baseUrl is not null) dict["BASE_URL"] = baseUrl;
+        if (baseUrl is not null)
+        {
+            dict["BASE_URL"] = baseUrl;
+        }
+
         return new ConfigurationBuilder().AddInMemoryCollection(dict).Build();
     }
 

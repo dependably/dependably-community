@@ -45,7 +45,7 @@ public sealed class MavenUpstreamFetcher
     // SHA-256 of the upstream path (first 32 hex chars) is the url_key.
     private static string UrlHash(string upstreamPath)
     {
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(upstreamPath));
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(upstreamPath));
         return Convert.ToHexString(hash).ToLowerInvariant()[..32];
     }
 
@@ -75,16 +75,20 @@ public sealed class MavenUpstreamFetcher
 
     public async Task<bool> IsNegativelyCachedAsync(string upstreamPath, CancellationToken ct)
     {
-        var key = UrlHash(upstreamPath);
+        string key = UrlHash(upstreamPath);
         await using var conn = await _db.OpenAsync(ct);
-        var fetchedAt = await conn.ExecuteScalarAsync<string?>(
+        string? fetchedAt = await conn.ExecuteScalarAsync<string?>(
             // xtenant: upstream_negative_cache is not tenant-scoped; ecosystem + url_key
             // uniquely identifies the upstream resource independent of tenant. Negative
             // cache entries are a per-instance concern (the upstream either has it or doesn't).
             "SELECT fetched_at FROM upstream_negative_cache WHERE ecosystem = 'maven' AND url_key = @key",
             new { key });
 
-        if (fetchedAt is null) return false;
+        if (fetchedAt is null)
+        {
+            return false;
+        }
+
         var age = DateTimeOffset.UtcNow - DateTimeOffset.Parse(fetchedAt,
             null, System.Globalization.DateTimeStyles.RoundtripKind);
         return age < NegativeCacheTtl;
@@ -92,7 +96,7 @@ public sealed class MavenUpstreamFetcher
 
     public async Task RecordNegativeAsync(string upstreamPath, CancellationToken ct)
     {
-        var key = UrlHash(upstreamPath);
+        string key = UrlHash(upstreamPath);
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: see IsNegativelyCachedAsync — instance-scoped, not tenant-scoped.
         await conn.ExecuteAsync(
@@ -126,9 +130,11 @@ public sealed class MavenUpstreamFetcher
         string? purl = null)
     {
         if (await IsNegativelyCachedAsync(upstreamPath, ct))
+        {
             return null; // negative cache hit
+        }
 
-        var upstreamUrl = $"{upstreamBase.TrimEnd('/')}/{upstreamPath.TrimStart('/')}";
+        string upstreamUrl = $"{upstreamBase.TrimEnd('/')}/{upstreamPath.TrimStart('/')}";
 
         // Optional sidecar pre-fetch for integrity verification. When present this becomes
         // the ChecksumSpec on the GetOrFetchStreamAsync call below.
@@ -153,7 +159,7 @@ public sealed class MavenUpstreamFetcher
             return await FetchThenHashAsync(upstreamBase, upstreamPath, upstreamUrl, ct);
         }
 
-        var blobKey = BlobKeys.Proxy(expectedSha256);
+        string blobKey = BlobKeys.Proxy(expectedSha256);
 
         try
         {
@@ -172,8 +178,8 @@ public sealed class MavenUpstreamFetcher
                 bytes = await ReadStreamAsync(body, ct);
             }
 
-            var sha1 = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
-            var md5 = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
+            string sha1 = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
+            string md5 = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
 
             return new MavenArtifactFetchResult(
                 Bytes: bytes,
@@ -221,7 +227,10 @@ public sealed class MavenUpstreamFetcher
         byte[] bytes;
         try
         {
-            var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, ct);
+            // Artifact bytes flow through the buffered path here, so the cap is the artifact
+            // limit, not the (much smaller) default metadata limit.
+            var resp = await _upstream.GetOrFetchMetadataAsync(
+                upstreamUrl, UpstreamClient.MaxUpstreamResponseBytes, ct);
             if (!resp.IsSuccessStatusCode)
             {
                 await RecordNegativeAsync(upstreamPath, ct);
@@ -241,9 +250,9 @@ public sealed class MavenUpstreamFetcher
             return null;
         }
 
-        var sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        var sha1 = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
-        var md5 = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
+        string sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string sha1 = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
+        string md5 = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
 
         // Verify the downloaded bytes against the checksum upstream ADVERTISES, before we
         // pass the artefact along. We already know .sha256 is absent here (the caller falls
@@ -253,11 +262,15 @@ public sealed class MavenUpstreamFetcher
         // and the artefact is never served or cached. The advertised digest is recorded as
         // provenance via the computed columns (computed == advertised once verified).
         if (VerifyWithUpstreamSha256)
+        {
             await VerifyAgainstSidecarsAsync(upstreamBase, upstreamPath, upstreamUrl, sha1, md5, ct);
+        }
 
-        var blobKey = BlobKeys.Proxy(sha256);
+        string blobKey = BlobKeys.Proxy(sha256);
         if (!await _blobs.ExistsAsync(blobKey, ct))
+        {
             await _blobs.PutAsync(blobKey, new MemoryStream(bytes), ct);
+        }
 
         return new MavenArtifactFetchResult(
             Bytes: bytes, BlobKey: blobKey, Sha256: sha256, Sha1: sha1, Md5: md5, IsFromCache: false);
@@ -272,21 +285,27 @@ public sealed class MavenUpstreamFetcher
         string upstreamBase, string upstreamPath, string upstreamUrl,
         string sha1, string md5, CancellationToken ct)
     {
-        var upstreamSha1 = await TryFetchSidecarAsync(upstreamBase, upstreamPath, "sha1", ct);
+        string? upstreamSha1 = await TryFetchSidecarAsync(upstreamBase, upstreamPath, "sha1", ct);
         if (upstreamSha1 is not null)
         {
             if (!string.Equals(upstreamSha1, sha1, StringComparison.OrdinalIgnoreCase))
+            {
                 throw new ChecksumException(
                     $"Upstream sha1 mismatch for {upstreamUrl} (advertised {upstreamSha1}, computed {sha1})");
+            }
+
             return;
         }
 
-        var upstreamMd5 = await TryFetchSidecarAsync(upstreamBase, upstreamPath, "md5", ct);
+        string? upstreamMd5 = await TryFetchSidecarAsync(upstreamBase, upstreamPath, "md5", ct);
         if (upstreamMd5 is not null)
         {
             if (!string.Equals(upstreamMd5, md5, StringComparison.OrdinalIgnoreCase))
+            {
                 throw new ChecksumException(
                     $"Upstream md5 mismatch for {upstreamUrl} (advertised {upstreamMd5}, computed {md5})");
+            }
+
             return;
         }
 
@@ -308,14 +327,17 @@ public sealed class MavenUpstreamFetcher
         string artifactPath,
         CancellationToken ct)
     {
-        var upstreamUrl = $"{upstreamBase.TrimEnd('/')}/{artifactPath.TrimStart('/')}/maven-metadata.xml";
+        string upstreamUrl = $"{upstreamBase.TrimEnd('/')}/{artifactPath.TrimStart('/')}/maven-metadata.xml";
 
         try
         {
             var response = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, ct);
-            if (!response.IsSuccessStatusCode) return null;
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
 
-            var xml = response.BodyAsString();
+            string xml = response.BodyAsString();
             return ParseVersionsFromMetadata(xml);
         }
         catch (AirGappedException)
@@ -356,8 +378,8 @@ public sealed class MavenUpstreamFetcher
         string algorithm,
         CancellationToken ct)
     {
-        var sidecarPath = $"{upstreamPath}.{algorithm}";
-        var sidecarUrl = $"{upstreamBase.TrimEnd('/')}/{sidecarPath.TrimStart('/')}";
+        string sidecarPath = $"{upstreamPath}.{algorithm}";
+        string sidecarUrl = $"{upstreamBase.TrimEnd('/')}/{sidecarPath.TrimStart('/')}";
         try
         {
             // Sidecars are tiny (64 hex chars) and ephemeral — single-flight is overkill
@@ -366,11 +388,19 @@ public sealed class MavenUpstreamFetcher
             // intentionally propagates so callers get a clean 503 from the middleware
             // rather than a silent null-then-404.
             using var response = await _upstream.GetMetadataAsync(sidecarUrl, ct);
-            if (!response.IsSuccessStatusCode) return null;
-            var text = await response.Content.ReadAsStringAsync(ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            // Capped read: a sidecar is 64 hex chars, but the body is upstream-controlled
+            // and the shared client auto-decompresses — never buffer it unbounded.
+            byte[] body = await UpstreamClient.ReadBodyCappedAsync(
+                response, UpstreamClient.MaxMetadataResponseBytes, sidecarUrl, ct);
+            string text = Encoding.UTF8.GetString(body);
             return ExtractHex(text.Trim());
         }
-        catch (Exception ex) when (ex is not OperationCanceledException && ex is not AirGappedException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not AirGappedException)
         {
             _logger.LogWarning(ex,
                 "ExceptionType={ExceptionType} Maven sidecar fetch failed for {Url}",
@@ -382,10 +412,16 @@ public sealed class MavenUpstreamFetcher
     private static string? ExtractHex(string input)
     {
         var sb = new StringBuilder();
-        foreach (var c in input)
+        foreach (char c in input)
         {
-            if (Uri.IsHexDigit(c)) sb.Append(c);
-            else if (sb.Length > 0) break;
+            if (Uri.IsHexDigit(c))
+            {
+                sb.Append(c);
+            }
+            else if (sb.Length > 0)
+            {
+                break;
+            }
         }
         return sb.Length > 0 ? sb.ToString().ToLowerInvariant() : null;
     }
@@ -394,12 +430,16 @@ public sealed class MavenUpstreamFetcher
     {
         if (stream.CanSeek && stream.Length > 0)
         {
-            var buf = new byte[stream.Length];
-            var total = 0;
+            byte[] buf = new byte[stream.Length];
+            int total = 0;
             while (total < buf.Length)
             {
-                var n = await stream.ReadAsync(buf.AsMemory(total), ct);
-                if (n == 0) break;
+                int n = await stream.ReadAsync(buf.AsMemory(total), ct);
+                if (n == 0)
+                {
+                    break;
+                }
+
                 total += n;
             }
             return total == buf.Length ? buf : buf.AsSpan(0, total).ToArray();

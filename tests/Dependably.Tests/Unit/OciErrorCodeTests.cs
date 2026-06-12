@@ -1,6 +1,5 @@
 using System.Text.Json;
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -31,7 +30,7 @@ public sealed class OciErrorCodeTests
         // The [JsonStringEnumConverter] on the enum forces the wire form to match the
         // member name exactly — that's the contract docker daemons depend on. A
         // rename / cammelCase shift here would break pull.
-        var json = JsonSerializer.Serialize(code);
+        string json = JsonSerializer.Serialize(code);
         Assert.Equal($"\"{expectedWire}\"", json);
     }
 
@@ -40,9 +39,9 @@ public sealed class OciErrorCodeTests
     {
         // Sanity-check the converter handles both directions — needed because we both
         // emit OCI errors (server → docker) and may parse remote upstream errors back.
-        foreach (OciErrorCode value in Enum.GetValues<OciErrorCode>())
+        foreach (var value in Enum.GetValues<OciErrorCode>())
         {
-            var json = JsonSerializer.Serialize(value);
+            string json = JsonSerializer.Serialize(value);
             var back = JsonSerializer.Deserialize<OciErrorCode>(json);
             Assert.Equal(value, back);
         }
@@ -53,7 +52,7 @@ public sealed class OciErrorCodeTests
     {
         // OCI Distribution Spec § Errors: { "code": "...", "message": "...", "detail": ... }.
         var err = new OciError(OciErrorCode.MANIFEST_UNKNOWN, "Manifest unknown: latest");
-        var json = JsonSerializer.Serialize(err);
+        string json = JsonSerializer.Serialize(err);
 
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -69,7 +68,7 @@ public sealed class OciErrorCodeTests
         // round-trip so clients can show it.
         var detail = new { hint = "use sha256: prefix" };
         var err = new OciError(OciErrorCode.DIGEST_INVALID, "Bad digest", detail);
-        var json = JsonSerializer.Serialize(err);
+        string json = JsonSerializer.Serialize(err);
 
         using var doc = JsonDocument.Parse(json);
         var d = doc.RootElement.GetProperty("detail");
@@ -88,7 +87,7 @@ public sealed class OciErrorCodeTests
             new OciError(OciErrorCode.MANIFEST_BLOB_UNKNOWN, "Manifest blob unknown."),
         });
 
-        var json = JsonSerializer.Serialize(body);
+        string json = JsonSerializer.Serialize(body);
         using var doc = JsonDocument.Parse(json);
         var arr = doc.RootElement.GetProperty("errors");
         Assert.Equal(JsonValueKind.Array, arr.ValueKind);

@@ -7,7 +7,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Abstractions;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.AspNetCore.Routing;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Security;
 
@@ -29,10 +28,14 @@ public sealed class RouteScopeFilterTests
         httpContext.Request.Path = path;
 
         if (user is not null)
+        {
             httpContext.User = user;
+        }
 
         if (tenantContext is not null)
+        {
             httpContext.Items[TenantContext.HttpItemsKey] = tenantContext;
+        }
 
         if (allowAnonymous is not null)
         {
@@ -294,9 +297,11 @@ public sealed class RouteScopeFilterTests
         // Exercises the `?? ""` null-coalesce branch of the path read. Empty path does not
         // start with /api/v1/ so the filter should pass through cleanly.
         var filter = new RouteScopeFilter();
-        var httpContext = new DefaultHttpContext();
-        // Do NOT set Path — leave as the default empty PathString whose .Value is null.
-        httpContext.User = AuthenticatedUser(new Claim("scope", "tenant"));
+        var httpContext = new DefaultHttpContext
+        {
+            // Do NOT set Path — leave as the default empty PathString whose .Value is null.
+            User = AuthenticatedUser(new Claim("scope", "tenant"))
+        };
 
         var actionContext = new ActionContext(httpContext, new RouteData(), new ActionDescriptor());
         var context = new AuthorizationFilterContext(actionContext, new List<IFilterMetadata>());

@@ -18,9 +18,9 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed class LeaderElectedScheduler : BackgroundService
 {
-    private static readonly TimeSpan LeaderTtl      = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan LeaderTtl = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RenewalInterval = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan FollowerPoll    = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan FollowerPoll = TimeSpan.FromSeconds(15);
 
     private readonly IDistributedLock _locks;
     private readonly ILogger<LeaderElectedScheduler> _logger;
@@ -99,7 +99,7 @@ public sealed class LeaderElectedScheduler : BackgroundService
             while (!ct.IsCancellationRequested)
             {
                 await Task.Delay(RenewalInterval, ct);
-                var extended = await handle.ExtendAsync(LeaderTtl, ct);
+                bool extended = await handle.ExtendAsync(LeaderTtl, ct);
                 if (!extended)
                 {
                     _logger.LogWarning("Scheduler: leader lock could not be extended — stepping down.");

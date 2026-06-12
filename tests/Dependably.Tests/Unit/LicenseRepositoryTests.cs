@@ -159,7 +159,7 @@ public class LicenseRepositoryTests : IAsyncLifetime
     {
         var repo = Repo();
         await repo.AddAllowlistAsync("org1", "MIT");
-        var removed = await repo.RemoveAllowlistAsync("org1", "MIT");
+        bool removed = await repo.RemoveAllowlistAsync("org1", "MIT");
         Assert.True(removed);
     }
 
@@ -167,7 +167,7 @@ public class LicenseRepositoryTests : IAsyncLifetime
     public async Task RemoveAllowlist_NonExistentEntry_ReturnsFalse()
     {
         var repo = Repo();
-        var removed = await repo.RemoveAllowlistAsync("org1", "MIT");
+        bool removed = await repo.RemoveAllowlistAsync("org1", "MIT");
         Assert.False(removed);
     }
 
@@ -187,7 +187,7 @@ public class LicenseRepositoryTests : IAsyncLifetime
     {
         var repo = Repo();
         await repo.AddBlocklistAsync("org1", "GPL-3.0");
-        var removed = await repo.RemoveBlocklistAsync("org1", "GPL-3.0");
+        bool removed = await repo.RemoveBlocklistAsync("org1", "GPL-3.0");
         Assert.True(removed);
     }
 

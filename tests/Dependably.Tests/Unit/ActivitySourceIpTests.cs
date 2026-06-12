@@ -1,7 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -33,7 +32,7 @@ public sealed class ActivitySourceIpTests : IAsyncLifetime
 
         Assert.Equal(2, total);
         var download = items.Single(i => i.EventType == "download");
-        var login    = items.Single(i => i.EventType == "login.failure");
+        var login = items.Single(i => i.EventType == "login.failure");
         Assert.Equal("10.1.2.3", download.SourceIp);
         Assert.Null(login.SourceIp);
     }

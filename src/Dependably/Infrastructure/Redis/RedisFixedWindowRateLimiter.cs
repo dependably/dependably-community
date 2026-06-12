@@ -57,8 +57,8 @@ public sealed class RedisFixedWindowRateLimiter : RateLimiter
     // No CancellationToken — StackExchange.Redis honors its own command timeout, not CTs.
     private async Task<RateLimitLease> AcquireAsync()
     {
-        var windowId = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / _windowSeconds;
-        var key = $"{_keyPrefix}ratelimit:{_scope}:{_bucket}:{windowId}";
+        long windowId = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / _windowSeconds;
+        string key = $"{_keyPrefix}ratelimit:{_scope}:{_bucket}:{windowId}";
 
         RedisResult result;
         try
@@ -75,11 +75,13 @@ public sealed class RedisFixedWindowRateLimiter : RateLimiter
         }
 
         var values = (RedisResult[])result!;
-        var count = (long)values[0];
-        var ttl = (long)values[1];
+        long count = (long)values[0];
+        long ttl = (long)values[1];
 
         if (count <= _permitLimit)
+        {
             return new SuccessLease();
+        }
 
         var retryAfter = ttl > 0 ? TimeSpan.FromSeconds(ttl) : TimeSpan.FromSeconds(_windowSeconds);
         return new RejectedLease(retryAfter);

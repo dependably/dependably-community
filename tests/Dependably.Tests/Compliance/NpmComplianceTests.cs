@@ -29,13 +29,13 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
     {
         await _factory.PushNpmPackage("meta-check", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync("/npm/meta-check");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var json = await resp.Content.ReadAsStringAsync();
+        string json = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
@@ -57,10 +57,10 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
     {
         await _factory.PushNpmPackage("idcheck", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
-        var json = await client.GetStringAsync("/npm/idcheck");
+        string json = await client.GetStringAsync("/npm/idcheck");
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
@@ -72,13 +72,13 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
     {
         await _factory.PushNpmPackage("tarball-url", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
-        var json = await client.GetStringAsync("/npm/tarball-url");
+        string json = await client.GetStringAsync("/npm/tarball-url");
         using var doc = JsonDocument.Parse(json);
 
-        var tarball = doc.RootElement
+        string tarball = doc.RootElement
             .GetProperty("versions")
             .GetProperty("1.0.0")
             .GetProperty("dist")
@@ -97,7 +97,7 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
     {
         await _factory.PushNpmPackage("@myorg/utils", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync("/npm/@myorg/utils");
@@ -109,13 +109,13 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
     {
         await _factory.PushNpmPackage("@scope/lib", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
-        var json = await client.GetStringAsync("/npm/@scope/lib");
+        string json = await client.GetStringAsync("/npm/@scope/lib");
         using var doc = JsonDocument.Parse(json);
 
-        var name = doc.RootElement.GetProperty("name").GetString();
+        string? name = doc.RootElement.GetProperty("name").GetString();
         Assert.Equal("@scope/lib", name);
     }
 
@@ -124,12 +124,12 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
     {
         await _factory.PushNpmPackage("@myorg/utils", "2.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
-        var json = await client.GetStringAsync("/npm/@myorg/utils");
+        string json = await client.GetStringAsync("/npm/@myorg/utils");
         using var doc = JsonDocument.Parse(json);
-        var tarballUrl = doc.RootElement
+        string tarballUrl = doc.RootElement
             .GetProperty("versions").GetProperty("2.0.0")
             .GetProperty("dist").GetProperty("tarball").GetString()!;
 
@@ -144,7 +144,7 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
     [Fact]
     public async Task NpmPush_NoToken_Returns401()
     {
-        var body = NpmFixtures.BuildPublishBody("noauth-pkg", "1.0.0");
+        string body = NpmFixtures.BuildPublishBody("noauth-pkg", "1.0.0");
         using var client = _factory.CreateClient();
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
 
@@ -156,8 +156,8 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
     [Fact]
     public async Task NpmPush_PullToken_Returns403()
     {
-        var token = await _factory.CreateToken("pull");
-        var body = NpmFixtures.BuildPublishBody("scope-check-npm", "1.0.0");
+        string token = await _factory.CreateToken("pull");
+        string body = NpmFixtures.BuildPublishBody("scope-check-npm", "1.0.0");
 
         using var client = _factory.CreateClientWithBearer(token);
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
@@ -172,8 +172,8 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
     {
         await _factory.PushNpmPackage("npm-dup", "1.0.0");
 
-        var token = await _factory.CreateToken("push");
-        var body = NpmFixtures.BuildPublishBody("npm-dup", "1.0.0");
+        string token = await _factory.CreateToken("push");
+        string body = NpmFixtures.BuildPublishBody("npm-dup", "1.0.0");
 
         using var client = _factory.CreateClientWithBearer(token);
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
@@ -186,9 +186,9 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
     [Fact]
     public async Task NpmPush_NameMismatch_Returns422()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         // Build body for "actual-name" but push to URL with "different-name"
-        var body = NpmFixtures.BuildPublishBody("actual-name", "1.0.0");
+        string body = NpmFixtures.BuildPublishBody("actual-name", "1.0.0");
 
         using var client = _factory.CreateClientWithBearer(token);
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
@@ -209,9 +209,9 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
     [Fact]
     public async Task HostedPublish_LicenseInTarball_NotInPackument_StoresSpdxRow()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         // Default fixture shape: tarball package.json has license="MIT"; packument has none.
-        var body = NpmFixtures.BuildPublishBody("hosted-lic-tarball", "1.0.0");
+        string body = NpmFixtures.BuildPublishBody("hosted-lic-tarball", "1.0.0");
 
         using var client = _factory.CreateClientWithBearer(token);
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
@@ -219,19 +219,19 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
         var licenses = await ReadStoredLicensesAsync("pkg:npm/hosted-lic-tarball@1.0.0");
-        var row = Assert.Single(licenses);
-        Assert.Equal("MIT", row.Spdx);
-        Assert.Equal("upstream", row.Source);
+        var (Spdx, Source) = Assert.Single(licenses);
+        Assert.Equal("MIT", Spdx);
+        Assert.Equal("upstream", Source);
     }
 
     [Fact]
     public async Task HostedPublish_LicenseOnlyInPackument_FallsBackAndStores()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         // Tarball package.json has NO license; packument carries it. The fallback
         // path inside PublishPackage should pick this up so we don't regress the
         // (rare) case where only the packument has a license.
-        var body = NpmFixtures.BuildPublishBody(
+        string body = NpmFixtures.BuildPublishBody(
             "hosted-lic-packument", "1.0.0",
             tarballLicense: null, packumentLicense: "Apache-2.0");
 
@@ -241,16 +241,16 @@ public sealed class NpmComplianceTests : IClassFixture<DependablyFactory>, IAsyn
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
         var licenses = await ReadStoredLicensesAsync("pkg:npm/hosted-lic-packument@1.0.0");
-        var row = Assert.Single(licenses);
-        Assert.Equal("Apache-2.0", row.Spdx);
-        Assert.Equal("upstream", row.Source);
+        var (Spdx, Source) = Assert.Single(licenses);
+        Assert.Equal("Apache-2.0", Spdx);
+        Assert.Equal("upstream", Source);
     }
 
     [Fact]
     public async Task HostedPublish_NoLicenseAnywhere_StoresNoRow()
     {
-        var token = await _factory.CreateToken("push");
-        var body = NpmFixtures.BuildPublishBody(
+        string token = await _factory.CreateToken("push");
+        string body = NpmFixtures.BuildPublishBody(
             "hosted-lic-missing", "1.0.0",
             tarballLicense: null, packumentLicense: null);
 

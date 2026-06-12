@@ -28,12 +28,14 @@ public sealed class TransparentInterceptMiddleware
     {
         if (!_map.IsEmpty)
         {
-            var prefix = _map.PrefixForHost(context.Request.Host.Host);
+            string? prefix = _map.PrefixForHost(context.Request.Host.Host);
             if (prefix is not null)
             {
-                var path = context.Request.Path.Value ?? "/";
+                string path = context.Request.Path.Value ?? "/";
                 if (!StartsWithSegment(path, prefix))
+                {
                     context.Request.Path = prefix + path;
+                }
             }
         }
         return _next(context);
@@ -41,7 +43,6 @@ public sealed class TransparentInterceptMiddleware
 
     private static bool StartsWithSegment(string path, string prefix)
     {
-        if (!path.StartsWith(prefix, StringComparison.Ordinal)) return false;
-        return path.Length == prefix.Length || path[prefix.Length] == '/';
+        return path.StartsWith(prefix, StringComparison.Ordinal) && (path.Length == prefix.Length || path[prefix.Length] == '/');
     }
 }

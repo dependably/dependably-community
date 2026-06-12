@@ -15,7 +15,10 @@ public sealed class SqliteMetadataStore : IMetadataStore
     {
         var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync(ct);
-        await new SqliteCommand("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000", conn).ExecuteNonQueryAsync(ct);
+        // cache_size = -20000 sets the page cache to ~20 MB (negative value = KiB).
+        // With WAL and private per-connection caches (Cache=Shared removed), each
+        // connection benefits from its own warm page cache without shared-cache locking.
+        await new SqliteCommand("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA cache_size = -20000", conn).ExecuteNonQueryAsync(ct);
         return conn;
     }
 }

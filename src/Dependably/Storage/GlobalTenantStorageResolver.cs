@@ -34,28 +34,33 @@ public sealed class GlobalTenantStorageResolver : ITenantStorageResolver
         // Gate 1: tenant lifecycle status. The CHECK constraint on orgs.status keeps this
         // bounded to active|suspended|archived|deleting; anything but 'active' refuses.
         // The query returns null when the org row is missing — that's also a refusal.
-        var status = await conn.QuerySingleOrDefaultAsync<string?>(
+        string status = await conn.QuerySingleOrDefaultAsync<string?>(
             "SELECT status FROM orgs WHERE id = @tenantId",
-            new { tenantId });
-        if (status is null)
-            throw new TenantNotReadyException(tenantId, TenantNotReadyReason.NotFound, "tenant not found");
+            new { tenantId }) ?? throw new TenantNotReadyException(tenantId, TenantNotReadyReason.NotFound, "tenant not found");
         if (status != "active")
+        {
             throw new TenantNotReadyException(tenantId, TenantNotReadyReason.StatusInactive, $"status='{status}'");
+        }
 
         // Gate 2: async provisioning state for the registry bucket. Absent row counts as
         // ready (community LocalBlobStore is synchronous; enterprise inserts a 'creating'
         // row at tenant create and the worker transitions it). A 'failed' row stays put
         // until the worker retries via UPDATE — no row deletion, no INSERT-on-retry.
-        var provisioningState = await conn.QuerySingleOrDefaultAsync<string?>(
+        string? provisioningState = await conn.QuerySingleOrDefaultAsync<string?>(
             "SELECT state FROM tenant_provisioning_jobs " +
             "WHERE org_id = @tenantId AND kind = 'registry_bucket_create'",
             new { tenantId });
         if (provisioningState == "creating")
+        {
             throw new TenantNotReadyException(tenantId, TenantNotReadyReason.ProvisioningPending,
                 "provisioning state='creating'");
+        }
+
         if (provisioningState == "failed")
+        {
             throw new TenantNotReadyException(tenantId, TenantNotReadyReason.ProvisioningFailed,
                 "provisioning state='failed'");
+        }
 
         // Community pool: all tenants share the singleton registry. Enterprise overrides
         // this to consult tenant_storage and return the tenant's silo bucket store.

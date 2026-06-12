@@ -39,9 +39,9 @@ public static partial class OciCoordinatesParser
 
     public static OciCoordinates? Parse(string name, string reference)
     {
-        if (!IsValidRepositoryName(name)) return null;
-        if (IsValidDigest(reference)) return new OciCoordinates(name, reference, IsDigest: true);
-        if (IsValidTag(reference)) return new OciCoordinates(name, reference, IsDigest: false);
-        return null;
+        return !IsValidRepositoryName(name) ? null
+            : IsValidDigest(reference) ? new OciCoordinates(name, reference, IsDigest: true)
+            : IsValidTag(reference) ? new OciCoordinates(name, reference, IsDigest: false)
+            : null;
     }
 }

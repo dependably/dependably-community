@@ -36,7 +36,7 @@ public sealed class LocalBlobStore : IBlobStore
 
     public async Task PutAsync(string key, Stream data, CancellationToken ct = default)
     {
-        var path = FullPath(key);
+        string path = FullPath(key);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
         // Overwrites are a real case (allow_version_overwrite flow). Subtract the prior
@@ -56,16 +56,51 @@ public sealed class LocalBlobStore : IBlobStore
         try { newSize = new FileInfo(path).Length; }
         catch { newSize = 0; } // race: file gone between write and stat
 
-        if (previousSize > 0) _sizeCounter.Subtract(previousSize);
-        if (newSize > 0) _sizeCounter.Add(newSize);
+        if (previousSize > 0)
+        {
+            _sizeCounter.Subtract(previousSize);
+        }
+
+        if (newSize > 0)
+        {
+            _sizeCounter.Add(newSize);
+        }
     }
 
     public Task<Stream?> GetAsync(string key, CancellationToken ct = default)
     {
-        var path = FullPath(key);
+        string path = FullPath(key);
+        return !File.Exists(path) ? Task.FromResult<Stream?>(null) : Task.FromResult<Stream?>(File.OpenRead(path));
+    }
+
+    public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+    {
+        string path = FullPath(key);
         if (!File.Exists(path))
-            return Task.FromResult<Stream?>(null);
-        return Task.FromResult<Stream?>(File.OpenRead(path));
+        {
+            return Task.FromResult<RangedStream?>(null);
+        }
+
+        var info = new FileInfo(path);
+        long totalLength = info.Length;
+
+        // Clamp the requested range to the actual file length.
+        long effectiveTo = Math.Min(to, totalLength - 1);
+        if (from > effectiveTo || totalLength == 0)
+        {
+            // Requested range starts past the end of the file — 416 territory.
+            // Return an empty range so the controller can emit the correct error.
+            return Task.FromResult<RangedStream?>(new RangedStream(Stream.Null, from, from - 1, totalLength));
+        }
+
+        // Open the file, seek to `from`, and wrap in a length-capped stream so the
+        // client receives exactly the bytes in [from, effectiveTo].
+        var fs = File.OpenRead(path);
+        fs.Seek(from, SeekOrigin.Begin);
+        long rangeLength = effectiveTo - from + 1;
+        // deepcode ignore PT: key is validated by BlobKeys before reaching this method; no user input.
+        var rangedContent = new RangeLimitedStream(fs, rangeLength);
+        return Task.FromResult<RangedStream?>(new RangedStream(rangedContent, from, effectiveTo, totalLength));
     }
 
     public Task<bool> ExistsAsync(string key, CancellationToken ct = default)
@@ -73,13 +108,16 @@ public sealed class LocalBlobStore : IBlobStore
 
     public Task DeleteAsync(string key, CancellationToken ct = default)
     {
-        var path = FullPath(key);
+        string path = FullPath(key);
         if (File.Exists(path))
         {
             long removedBytes = 0;
             try { removedBytes = new FileInfo(path).Length; } catch { /* ignore */ }
             File.Delete(path);
-            if (removedBytes > 0) _sizeCounter.Subtract(removedBytes);
+            if (removedBytes > 0)
+            {
+                _sizeCounter.Subtract(removedBytes);
+            }
         }
         return Task.CompletedTask;
     }
@@ -97,9 +135,11 @@ public sealed class LocalBlobStore : IBlobStore
     {
         // Resolve the prefix to its on-disk equivalent so a `hosted/` prefix scans only
         // the hosted subtree rather than walking the whole root and filtering after.
-        var prefixPath = Path.Combine(_root, prefix.Replace('/', Path.DirectorySeparatorChar));
+        string prefixPath = Path.Combine(_root, prefix.Replace('/', Path.DirectorySeparatorChar));
         if (!Directory.Exists(prefixPath))
+        {
             yield break;
+        }
 
         // Use enumerate-options to avoid materializing the full list before the first yield —
         // a hosted tier with millions of files would otherwise hold the whole listing in RAM.
@@ -108,16 +148,23 @@ public sealed class LocalBlobStore : IBlobStore
             RecurseSubdirectories = true,
             IgnoreInaccessible = true,
         };
-        foreach (var path in Directory.EnumerateFiles(prefixPath, "*", options))
+        foreach (string path in Directory.EnumerateFiles(prefixPath, "*", options))
         {
-            if (ct.IsCancellationRequested) yield break;
+            if (ct.IsCancellationRequested)
+            {
+                yield break;
+            }
+
             FileInfo info;
             try { info = new FileInfo(path); }
             catch { continue; }  // race: file deleted between enumerate and stat
-            if (!info.Exists) continue;
+            if (!info.Exists)
+            {
+                continue;
+            }
 
             // Reconstruct the logical key (forward slashes, relative to root).
-            var rel = Path.GetRelativePath(_root, path)
+            string rel = Path.GetRelativePath(_root, path)
                 .Replace(Path.DirectorySeparatorChar, '/');
             yield return new BlobInfo(rel, info.Length, new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero));
             await Task.Yield();

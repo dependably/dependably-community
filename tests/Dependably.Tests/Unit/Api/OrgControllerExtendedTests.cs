@@ -4,7 +4,6 @@ using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -46,7 +45,7 @@ public sealed class OrgControllerExtendedTests
         var b = await s.BuildAsync();
 
         var ok = Assert.IsType<OkObjectResult>(await b.OrgController.ListPackages(ecosystem: "pypi"));
-        var total = (int)ok.Value!.GetType().GetProperty("total")!.GetValue(ok.Value)!;
+        int total = (int)ok.Value!.GetType().GetProperty("total")!.GetValue(ok.Value)!;
         Assert.Equal(1, total);
     }
 
@@ -60,23 +59,23 @@ public sealed class OrgControllerExtendedTests
         var b = await s.BuildAsync();
 
         var ok = Assert.IsType<OkObjectResult>(await b.OrgController.ListPackages(search: "alph"));
-        var total = (int)ok.Value!.GetType().GetProperty("total")!.GetValue(ok.Value)!;
+        int total = (int)ok.Value!.GetType().GetProperty("total")!.GetValue(ok.Value)!;
         Assert.Equal(1, total);
     }
 
     [Theory]
-    [InlineData("name",      "asc")]
-    [InlineData("name",      "desc")]
-    [InlineData("purl",      "asc")]
-    [InlineData("purl",      "desc")]
-    [InlineData("vulns",     "asc")]
-    [InlineData("vulns",     "desc")]
+    [InlineData("name", "asc")]
+    [InlineData("name", "desc")]
+    [InlineData("purl", "asc")]
+    [InlineData("purl", "desc")]
+    [InlineData("vulns", "asc")]
+    [InlineData("vulns", "desc")]
     [InlineData("ecosystem", "asc")]
     [InlineData("ecosystem", "desc")]
-    [InlineData("versions",  "asc")]
-    [InlineData("versions",  "desc")]
-    [InlineData("created",   "desc")]
-    [InlineData("unknown",   "asc")]   // falls through to the default arm
+    [InlineData("versions", "asc")]
+    [InlineData("versions", "desc")]
+    [InlineData("created", "desc")]
+    [InlineData("unknown", "asc")]   // falls through to the default arm
     public async Task ListPackages_SortVariants_Return200(string sortBy, string sortDir)
     {
         await using var s = await ControllerScenario.CreateAsync();
@@ -100,9 +99,9 @@ public sealed class OrgControllerExtendedTests
         var ok = Assert.IsType<OkObjectResult>(
             await b.OrgController.ListPackages(limit: 9999, page: 0));
 
-        var value = ok.Value!;
-        var limit  = (int)value.GetType().GetProperty("limit")!.GetValue(value)!;
-        var offset = (int)value.GetType().GetProperty("offset")!.GetValue(value)!;
+        object value = ok.Value!;
+        int limit = (int)value.GetType().GetProperty("limit")!.GetValue(value)!;
+        int offset = (int)value.GetType().GetProperty("offset")!.GetValue(value)!;
         Assert.Equal(200, limit);
         Assert.Equal(0, offset);
     }
@@ -116,9 +115,9 @@ public sealed class OrgControllerExtendedTests
 
         var ok = Assert.IsType<OkObjectResult>(
             await b.OrgController.ListPackages(limit: 0, page: 3));
-        var value = ok.Value!;
-        var limit  = (int)value.GetType().GetProperty("limit")!.GetValue(value)!;
-        var offset = (int)value.GetType().GetProperty("offset")!.GetValue(value)!;
+        object value = ok.Value!;
+        int limit = (int)value.GetType().GetProperty("limit")!.GetValue(value)!;
+        int offset = (int)value.GetType().GetProperty("offset")!.GetValue(value)!;
         Assert.Equal(1, limit);
         Assert.Equal(2, offset); // (3-1)*1
     }
@@ -149,17 +148,32 @@ public sealed class OrgControllerExtendedTests
 
         var result = await b.OrgController.GetPackage("npm", "@scope%2fwidget", CancellationToken.None);
         // 200 if route decoding resolved the package; 404 means decoding mismatched.
-        var status = (result as IStatusCodeActionResult)?.StatusCode;
+        int? status = (result as IStatusCodeActionResult)?.StatusCode;
         Assert.True(result is OkObjectResult || status == StatusCodes.Status404NotFound);
     }
 
+    [Fact]
+    public async Task GetPackage_OciNamespacedName_DecodedThroughRouteHelper()
+    {
+        // OCI image names carry a namespace slash ("library/ubuntu"); the UI encodes it
+        // as "library%2Fubuntu" and ASP.NET keeps %2F encoded in the route value. AsPurlName
+        // must decode it for every ecosystem — not just npm — or the lookup 404s.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
+        await s.WithPackageAsync("library/ubuntu", ecosystem: "oci");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgController.GetPackage("oci", "library%2Fubuntu", CancellationToken.None);
+        Assert.IsType<OkObjectResult>(result);
+    }
+
     [Theory]
-    [InlineData("blocked", null,   "blocked")]   // manual block dominates
-    [InlineData(null,     null,   "unscanned")]  // never scanned, no manual state
-    [InlineData(null,     1.0,    "clean")]      // scanned, score below tolerance
-    [InlineData(null,     9.5,    "blocked")]    // scanned, score above tolerance → auto-block
-    [InlineData("allowed", 9.5,   "allowed")]    // manual allow overrides an auto-block
-    [InlineData("allowed", 1.0,   "clean")]      // manual allow with no auto-block reports clean
+    [InlineData("blocked", null, "blocked")]   // manual block dominates
+    [InlineData(null, null, "unscanned")]  // never scanned, no manual state
+    [InlineData(null, 1.0, "clean")]      // scanned, score below tolerance
+    [InlineData(null, 9.5, "blocked")]    // scanned, score above tolerance → auto-block
+    [InlineData("allowed", 9.5, "allowed")]    // manual allow overrides an auto-block
+    [InlineData("allowed", 1.0, "clean")]      // manual allow with no auto-block reports clean
     public async Task GetPackage_VersionStatus_CoversAllBranches(
         string? manualState, double? maxScore, string expectedStatus)
     {
@@ -188,9 +202,9 @@ public sealed class OrgControllerExtendedTests
             {
                 // Attach a real vuln row so GetMaxScoresForVersionsAsync sees the package
                 // version as "scanned" with the requested score. Stamp vuln_checked_at too.
-                var verId = await conn.ExecuteScalarAsync<string>(
+                string? verId = await conn.ExecuteScalarAsync<string>(
                     "SELECT id FROM package_versions WHERE version = '1.0.0' LIMIT 1");
-                var vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+                string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
                     b.Db, osvId: "GHSA-" + Guid.NewGuid().ToString("N")[..8], cvssScore: maxScore.Value);
                 await VulnerabilitySeeder.LinkAsync(b.Db, verId!, vulnId);
                 await conn.ExecuteAsync(
@@ -205,9 +219,9 @@ public sealed class OrgControllerExtendedTests
         // the first version's Status field to assert.
         var versions = (System.Collections.IEnumerable)ok.Value!.GetType().GetProperty("versions")!.GetValue(ok.Value)!;
         object? first = null;
-        foreach (var v in versions) { first = v; break; }
+        foreach (object? v in versions) { first = v; break; }
         Assert.NotNull(first);
-        var status = (string)first!.GetType().GetProperty("Status")!.GetValue(first)!;
+        string status = (string)first!.GetType().GetProperty("Status")!.GetValue(first)!;
         Assert.Equal(expectedStatus, status);
     }
 
@@ -216,8 +230,8 @@ public sealed class OrgControllerExtendedTests
     [Theory]
     [InlineData("block_all", "blocked")]    // block_all + deprecated (cached) → blocked
     [InlineData("block_new", "deprecated")] // block_new keeps serving cached versions → surfaced, not blocked
-    [InlineData("warn",      "deprecated")] // warn mode + deprecated → deprecated (surfaced, not blocked)
-    [InlineData("off",       "deprecated")] // off mode + deprecated → deprecated (same badge, no block)
+    [InlineData("warn", "deprecated")] // warn mode + deprecated → deprecated (surfaced, not blocked)
+    [InlineData("off", "deprecated")] // off mode + deprecated → deprecated (same badge, no block)
     public async Task GetPackage_DeprecatedVersion_StatusReflectsPolicy(string mode, string expectedStatus)
     {
         await using var s = await ControllerScenario.CreateAsync();
@@ -240,9 +254,9 @@ public sealed class OrgControllerExtendedTests
 
         var versions = (System.Collections.IEnumerable)ok.Value!.GetType().GetProperty("versions")!.GetValue(ok.Value)!;
         object? first = null;
-        foreach (var v in versions) { first = v; break; }
+        foreach (object? v in versions) { first = v; break; }
         Assert.NotNull(first);
-        var status = (string)first!.GetType().GetProperty("Status")!.GetValue(first)!;
+        string status = (string)first!.GetType().GetProperty("Status")!.GetValue(first)!;
         Assert.Equal(expectedStatus, status);
     }
 
@@ -269,9 +283,9 @@ public sealed class OrgControllerExtendedTests
 
         var versions = (System.Collections.IEnumerable)ok.Value!.GetType().GetProperty("versions")!.GetValue(ok.Value)!;
         object? first = null;
-        foreach (var v in versions) { first = v; break; }
+        foreach (object? v in versions) { first = v; break; }
         Assert.NotNull(first);
-        var status = (string)first!.GetType().GetProperty("Status")!.GetValue(first)!;
+        string status = (string)first!.GetType().GetProperty("Status")!.GetValue(first)!;
         Assert.Equal("unscanned", status);
     }
 
@@ -295,17 +309,17 @@ public sealed class OrgControllerExtendedTests
         await using var conn = await b.Db.OpenAsync();
 
         // The version row is gone…
-        var remainingVersions = await conn.ExecuteScalarAsync<long>(
+        long remainingVersions = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM package_versions WHERE version = '1.0.0'");
         Assert.Equal(0, remainingVersions);
 
         // …and the parent package was GC'd since this was its only version.
-        var remainingPackages = await conn.ExecuteScalarAsync<long>(
+        long remainingPackages = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM packages WHERE name = 'targetpkg'");
         Assert.Equal(0, remainingPackages);
 
         // Activity row was written (operator action — never dual-written to audit_log).
-        var activity = await conn.ExecuteScalarAsync<long>(
+        long activity = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM activity WHERE event_type = 'delete' AND ecosystem = @eco AND org_id = @org",
             new { eco = ecosystem, org = b.PrimaryOrgId });
         Assert.Equal(1, activity);
@@ -325,7 +339,7 @@ public sealed class OrgControllerExtendedTests
         Assert.IsType<NoContentResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var pkgCount = await conn.ExecuteScalarAsync<long>(
+        long pkgCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM packages WHERE name = 'multi'");
         Assert.Equal(1, pkgCount); // package row stays — still has 2.0.0
     }
@@ -340,7 +354,7 @@ public sealed class OrgControllerExtendedTests
         var b = await s.BuildAsync();
 
         var result = await b.OrgController.DeleteVersion("npm", "present", "9.9.9", CancellationToken.None);
-        var status = (result as IStatusCodeActionResult)?.StatusCode;
+        int? status = (result as IStatusCodeActionResult)?.StatusCode;
         Assert.Equal(StatusCodes.Status404NotFound, status);
     }
 
@@ -390,7 +404,7 @@ public sealed class OrgControllerExtendedTests
         b.OrgController.HttpContext.Request.Scheme = "http";
 
         var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("pypi", CancellationToken.None));
-        var snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
+        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
         Assert.Contains("--trusted-host", snippet);
     }
 
@@ -411,7 +425,7 @@ public sealed class OrgControllerExtendedTests
         }
 
         var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("pypi", CancellationToken.None));
-        var snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
+        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
         Assert.Contains("2000 bytes", snippet);
     }
 
@@ -431,7 +445,7 @@ public sealed class OrgControllerExtendedTests
         }
 
         var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("npm", CancellationToken.None));
-        var snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
+        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
         Assert.Contains("registry=", snippet);
         Assert.Contains("555 bytes", snippet);
     }
@@ -444,7 +458,7 @@ public sealed class OrgControllerExtendedTests
         var b = await s.BuildAsync();
 
         var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("nuget", CancellationToken.None));
-        var snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
+        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
         Assert.Contains("/nuget/v3/index.json", snippet);
         Assert.Contains("packageSources", snippet);
     }

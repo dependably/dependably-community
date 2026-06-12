@@ -27,11 +27,12 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
     [Fact]
     public async Task SoftDelete_MakesTenantSubdomainReturn404Immediately()
     {
-        var slug = "del-" + Guid.NewGuid().ToString("N")[..8];
+        string slug = "del-" + Guid.NewGuid().ToString("N")[..8];
         using var sys = await _factory.CreateSystemAdminClient();
         await sys.PostAsJsonAsync("/api/v1/system/tenants", new
         {
-            slug, ownerEmail = $"o-{Guid.NewGuid():N}@example.com",
+            slug,
+            ownerEmail = $"o-{Guid.NewGuid():N}@example.com",
         });
 
         // Pre-delete: bootstrap on the tenant subdomain returns mode=multi (resolver finds tenant).
@@ -49,7 +50,8 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
         using var postClient = _factory.CreateClientForHost($"{slug}.{DependablyMultiFactory.ApexHost}");
         var loginResp = await postClient.PostAsJsonAsync("/api/v1/auth/login", new
         {
-            email = "anyone@example.com", password = "irrelevant",
+            email = "anyone@example.com",
+            password = "irrelevant",
         });
         Assert.Equal(HttpStatusCode.NotFound, loginResp.StatusCode);
     }
@@ -57,11 +59,12 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
     [Fact]
     public async Task SoftDelete_TenantStillVisibleInSystemList_WithDeletedAt()
     {
-        var slug = "vis-" + Guid.NewGuid().ToString("N")[..8];
+        string slug = "vis-" + Guid.NewGuid().ToString("N")[..8];
         using var sys = await _factory.CreateSystemAdminClient();
         await sys.PostAsJsonAsync("/api/v1/system/tenants", new
         {
-            slug, ownerEmail = $"o-{Guid.NewGuid():N}@example.com",
+            slug,
+            ownerEmail = $"o-{Guid.NewGuid():N}@example.com",
         });
         await sys.DeleteAsync($"/api/v1/system/tenants/{slug}");
 
@@ -75,11 +78,12 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
     [Fact]
     public async Task Restore_ReactivatesSoftDeletedTenant()
     {
-        var slug = "res-" + Guid.NewGuid().ToString("N")[..8];
+        string slug = "res-" + Guid.NewGuid().ToString("N")[..8];
         using var sys = await _factory.CreateSystemAdminClient();
         await sys.PostAsJsonAsync("/api/v1/system/tenants", new
         {
-            slug, ownerEmail = $"o-{Guid.NewGuid():N}@example.com",
+            slug,
+            ownerEmail = $"o-{Guid.NewGuid():N}@example.com",
         });
         await sys.DeleteAsync($"/api/v1/system/tenants/{slug}");
 
@@ -95,11 +99,12 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
     [Fact]
     public async Task Restore_ActiveTenant_Returns409()
     {
-        var slug = "act-" + Guid.NewGuid().ToString("N")[..8];
+        string slug = "act-" + Guid.NewGuid().ToString("N")[..8];
         using var sys = await _factory.CreateSystemAdminClient();
         await sys.PostAsJsonAsync("/api/v1/system/tenants", new
         {
-            slug, ownerEmail = $"o-{Guid.NewGuid():N}@example.com",
+            slug,
+            ownerEmail = $"o-{Guid.NewGuid():N}@example.com",
         });
 
         var restoreResp = await sys.PatchAsync($"/api/v1/system/tenants/{slug}/restore", null);
@@ -109,20 +114,21 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
     [Fact]
     public async Task HardDeleteService_AfterGrace_CascadesAndAuditsScopeSystem()
     {
-        var slug = "hard-" + Guid.NewGuid().ToString("N")[..8];
+        string slug = "hard-" + Guid.NewGuid().ToString("N")[..8];
         using var sys = await _factory.CreateSystemAdminClient();
         var createResp = await sys.PostAsJsonAsync("/api/v1/system/tenants", new
         {
-            slug, ownerEmail = $"o-{Guid.NewGuid():N}@example.com",
+            slug,
+            ownerEmail = $"o-{Guid.NewGuid():N}@example.com",
         });
         var createDoc = JsonDocument.Parse(await createResp.Content.ReadAsStringAsync());
-        var orgId = createDoc.RootElement.GetProperty("tenant").GetProperty("id").GetString()!;
+        string orgId = createDoc.RootElement.GetProperty("tenant").GetProperty("id").GetString()!;
 
         // Force deleted_at to 31 days ago so the hard-delete service treats it as expired.
         var db = _factory.Services.GetRequiredService<IMetadataStore>();
         await using (var conn = await db.OpenAsync())
         {
-            var thirtyOneDaysAgo = DateTimeOffset.UtcNow.AddDays(-31).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string thirtyOneDaysAgo = DateTimeOffset.UtcNow.AddDays(-31).ToString("yyyy-MM-ddTHH:mm:ssZ");
             await conn.ExecuteAsync(
                 "UPDATE orgs SET deleted_at = @t WHERE id = @id",
                 new { id = orgId, t = thirtyOneDaysAgo });
@@ -136,12 +142,12 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
         // Verify cascade: orgs row is gone.
         await using (var conn = await db.OpenAsync())
         {
-            var stillThere = await conn.ExecuteScalarAsync<int>(
+            int stillThere = await conn.ExecuteScalarAsync<int>(
                 "SELECT COUNT(*) FROM orgs WHERE id = @id", new { id = orgId });
             Assert.Equal(0, stillThere);
 
             // Audit row written with scope=system.
-            var auditCount = await conn.ExecuteScalarAsync<int>(
+            int auditCount = await conn.ExecuteScalarAsync<int>(
                 "SELECT COUNT(*) FROM audit_log WHERE org_id = @id AND action = 'tenant.hard_deleted' AND scope = 'system'",
                 new { id = orgId });
             Assert.Equal(1, auditCount);
@@ -151,14 +157,15 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
     [Fact]
     public async Task HardDeleteService_WithinGrace_DoesNotDelete()
     {
-        var slug = "keep-" + Guid.NewGuid().ToString("N")[..8];
+        string slug = "keep-" + Guid.NewGuid().ToString("N")[..8];
         using var sys = await _factory.CreateSystemAdminClient();
         var createResp = await sys.PostAsJsonAsync("/api/v1/system/tenants", new
         {
-            slug, ownerEmail = $"o-{Guid.NewGuid():N}@example.com",
+            slug,
+            ownerEmail = $"o-{Guid.NewGuid():N}@example.com",
         });
         var createDoc = JsonDocument.Parse(await createResp.Content.ReadAsStringAsync());
-        var orgId = createDoc.RootElement.GetProperty("tenant").GetProperty("id").GetString()!;
+        string orgId = createDoc.RootElement.GetProperty("tenant").GetProperty("id").GetString()!;
         await sys.DeleteAsync($"/api/v1/system/tenants/{slug}");
 
         // Soft-delete just happened — well within the 30-day grace.
@@ -168,7 +175,7 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
 
         var db = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await db.OpenAsync();
-        var stillThere = await conn.ExecuteScalarAsync<int>(
+        int stillThere = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM orgs WHERE id = @id", new { id = orgId });
         Assert.Equal(1, stillThere);
     }

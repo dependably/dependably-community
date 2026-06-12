@@ -23,7 +23,7 @@ public sealed class WebhookSiemForwarder : ISiemForwarder
     public WebhookSiemForwarder(HttpClient http, IConfiguration config)
     {
         _http = http;
-        var url = config["SIEM_WEBHOOK_URL"]
+        string url = config["SIEM_WEBHOOK_URL"]
             ?? throw new InvalidOperationException("SIEM_WEBHOOK_URL is required for WebhookSiemForwarder.");
         _url = new Uri(url, UriKind.Absolute);
         _bearer = config["SIEM_WEBHOOK_BEARER"];
@@ -33,13 +33,15 @@ public sealed class WebhookSiemForwarder : ISiemForwarder
 
     public async Task SendAsync(SiemEvent ev, CancellationToken ct = default)
     {
-        var json = JsonSerializer.Serialize(ev, JsonOpts);
+        string json = JsonSerializer.Serialize(ev, JsonOpts);
         using var req = new HttpRequestMessage(HttpMethod.Post, _url)
         {
             Content = new StringContent(json + "\n", Encoding.UTF8, "application/x-ndjson")
         };
         if (!string.IsNullOrEmpty(_bearer))
+        {
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _bearer);
+        }
 
         using var resp = await _http.SendAsync(req, ct);
         resp.EnsureSuccessStatusCode();

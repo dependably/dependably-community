@@ -44,7 +44,7 @@ public sealed class ProxyVersionRecorder
             // Proxy DB blob keys embed the filename as a suffix: "proxy/{sha256}/{filename}".
             // The blob *store* key is content-addressed ("proxy/{sha256}"); the filename suffix
             // is metadata-only so the simple index / flatcontainer responses can recover it.
-            var dbBlobKey = $"{BlobKeys.Proxy(req.Sha256)}/{req.File}";
+            string dbBlobKey = $"{BlobKeys.Proxy(req.Sha256)}/{req.File}";
             var newVer = await _packages.CreateVersionAsync(
                 new NewPackageVersion(pkg.Id, req.Version, req.Purl, dbBlobKey, req.Blob.SizeBytes, req.Sha256,
                     FirstFetch: true, PublishedAt: req.PublishedAt, ChecksumSha1: req.Sha1Hex,
@@ -77,11 +77,15 @@ public sealed class ProxyVersionRecorder
                     extracted = LicenseExtractor.ExtractedMetadata.Empty;
                 }
                 if (extracted.Spdx.Count > 0)
+                {
                     await _licenses.SetLicensesAsync(newVer.Id, extracted.Spdx, "upstream", ct);
+                }
             }
 
             if (req.Deprecated is not null)
+            {
                 await _packages.UpdateDeprecatedAsync(newVer.Id, req.Deprecated, ct);
+            }
 
             return newVer.Id;
         }
@@ -90,7 +94,11 @@ public sealed class ProxyVersionRecorder
             // Concurrent first-fetch already recorded this version — look it up so the
             // caller can still gate / scan against the existing row.
             var pkg = await _packages.GetByPurlNameAsync(req.OrgId, req.Ecosystem, req.PurlName, ct);
-            if (pkg is null) return null;
+            if (pkg is null)
+            {
+                return null;
+            }
+
             var existing = await _packages.GetVersionAsync(pkg.Id, req.Version, ct);
             return existing?.Id;
         }

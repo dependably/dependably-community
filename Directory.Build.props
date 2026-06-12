@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <Version>0.1.13</Version>
+    <Version>0.1.14</Version>
     <!-- Reproducible restores: maintain packages.lock.json (pins transitive versions + hashes).
          Locked mode is enforced only in CI so a green pipeline proves the committed lockfile is
          exactly what restores; locally it stays off so developers can update dependencies.
@@ -11,5 +11,19 @@
          (non-RID) CI restore validates against. -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RestoreLockedMode Condition="'$(CI)' == 'true' and '$(RuntimeIdentifier)' == ''">true</RestoreLockedMode>
+
+    <!-- Warnings gate the build in CI only (same strict-in-CI/loose-locally split as
+         RestoreLockedMode above) so MR pipelines give agents blocking feedback on any
+         analyzer/compiler warning, while local dev stays unblocked. NU1900 (offline
+         vulnerability-data fetch failure) is restore noise, not a code defect, so it is
+         excluded from the error promotion. -->
+    <TreatWarningsAsErrors Condition="'$(CI)' == 'true'">true</TreatWarningsAsErrors>
+    <WarningsNotAsErrors>NU1900</WarningsNotAsErrors>
+
+    <!-- Run the IDExxxx code-style analyzers (the .editorconfig C# style ruleset) during
+         `dotnet build`, not just in the IDE / the dotnet-format job. Combined with the CI
+         warnings-as-errors gate above, a style violation that dotnet format cannot auto-fix
+         (notably naming, IDE1006) fails the build and the pre-commit hook. -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
   </PropertyGroup>
 </Project>

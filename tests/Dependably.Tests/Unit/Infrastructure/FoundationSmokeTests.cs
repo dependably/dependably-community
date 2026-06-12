@@ -1,13 +1,10 @@
 using System.Net;
 using Dapper;
-using Dependably.Api;
-using Dependably.Infrastructure;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.AspNetCore.Mvc;
 using NSubstitute;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -26,7 +23,7 @@ public sealed class FoundationSmokeTests
         await using var fixture = new InMemoryDbFixture();
         await fixture.InitializeAsync();
 
-        var orgId = await OrgSeeder.InsertAsync(fixture.Store, "acme");
+        string orgId = await OrgSeeder.InsertAsync(fixture.Store, "acme");
 
         await using var conn = await fixture.Store.OpenAsync();
         var (slug, settingsRows) = await conn.QuerySingleAsync<(string Slug, long SettingsRows)>(
@@ -124,13 +121,13 @@ public sealed class FoundationSmokeTests
         container.EnumerateSizesAsync(Arg.Any<CancellationToken>())
             .Returns(AsyncEnum(100L, 250L, 50L));
 
-        var total = await new AzureBlobStore(container).GetTotalSizeAsync();
+        long total = await new AzureBlobStore(container).GetTotalSizeAsync();
 
         Assert.Equal(400, total);
     }
 
     private static async IAsyncEnumerable<long> AsyncEnum(params long[] values)
     {
-        foreach (var v in values) { await Task.Yield(); yield return v; }
+        foreach (long v in values) { await Task.Yield(); yield return v; }
     }
 }

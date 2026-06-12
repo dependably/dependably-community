@@ -9,7 +9,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -38,11 +37,11 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     {
         // Service index responds at /nuget/v3/index.json AND /nuget/index.json. Both
         // must enumerate the full resource set and reuse BaseUrl() for @id construction.
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
-        var v3 = await client.GetStringAsync("/nuget/v3/index.json");
-        var unv = await client.GetStringAsync("/nuget/index.json");
+        string v3 = await client.GetStringAsync("/nuget/v3/index.json");
+        string unv = await client.GetStringAsync("/nuget/index.json");
 
         using var d1 = JsonDocument.Parse(v3);
         using var d2 = JsonDocument.Parse(unv);
@@ -55,7 +54,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         {
             foreach (var r in doc.RootElement.GetProperty("resources").EnumerateArray())
             {
-                var id = r.GetProperty("@id").GetString()!;
+                string id = r.GetProperty("@id").GetString()!;
                 Assert.StartsWith("http", id, StringComparison.OrdinalIgnoreCase);
                 Assert.Contains("/nuget/", id, StringComparison.OrdinalIgnoreCase);
             }
@@ -86,11 +85,11 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     [Fact]
     public async Task RegistrationIndex_PassthroughDisabled_NoLocal_Returns404()
     {
-        var unknownId = $"unknownreg{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string unknownId = $"unknownreg{Guid.NewGuid():N}"[..18].ToLowerInvariant();
 
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var orgId = await conn.ExecuteScalarAsync<string>(
+        string? orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")!;
         await conn.ExecuteAsync(
             "UPDATE org_settings SET proxy_passthrough_enabled = 0 WHERE org_id = @orgId",
@@ -98,7 +97,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
         try
         {
-            var token = await _factory.CreateToken("pull");
+            string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBasic(token);
             var resp = await client.GetAsync($"/nuget/registration/{unknownId}/");
             Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
@@ -118,8 +117,8 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     public async Task RegistrationIndex_SemVer1_UpstreamSucceedsNoLocal_ReturnsUpstreamPayload()
     {
         // Hits ProxyMergedRegistrationAsync path where upstreamJson != null and pkg is null.
-        var id = $"regupok{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
+        string id = $"regupok{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
             + "{\"@id\":\"x\",\"catalogEntry\":{\"id\":\"X\",\"version\":\"1.2.3\",\"listed\":true}}]}]}";
         _factory.MockUpstream.Given(
                 Request.Create()
@@ -128,12 +127,12 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(upstreamJson));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/registration/{id}/");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         Assert.Contains("\"1.2.3\"", body);
     }
 
@@ -141,8 +140,8 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     public async Task RegistrationIndexSemVer2_UpstreamSucceedsNoLocal_ReturnsUpstreamPayload()
     {
         // semVer2=true picks the registration5-gz-semver2 upstream variant.
-        var id = $"regsv2ok{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
+        string id = $"regsv2ok{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
             + "{\"@id\":\"x\",\"catalogEntry\":{\"id\":\"X\",\"version\":\"2.0.0-beta+meta\",\"listed\":true}}]}]}";
         _factory.MockUpstream.Given(
                 Request.Create()
@@ -151,12 +150,12 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(upstreamJson));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/registration5-semver2/{id}/");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         Assert.Contains("2.0.0-beta+meta", body);
     }
 
@@ -170,8 +169,8 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     [InlineData("registration5-gz-semver2", "registration5-gz-semver2")]  // SemVer2 base advertised in service index
     public async Task RegistrationIndex_IndexJsonSuffix_RoutesToHandler(string clientBase, string upstreamVariant)
     {
-        var id = $"regidx{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
+        string id = $"regidx{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
             + "{\"@id\":\"x\",\"catalogEntry\":{\"id\":\"X\",\"version\":\"6.2.0\",\"listed\":true}}]}]}";
         _factory.MockUpstream.Given(
                 Request.Create()
@@ -180,7 +179,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(upstreamJson));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/{clientBase}/{id}/index.json");
 
@@ -194,14 +193,14 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     public async Task RegistrationIndex_UpstreamReturns500_NoLocal_Returns404()
     {
         // Exercises the upstream non-success warning path AND the (pkg is null || count==0) → 404 path.
-        var id = $"reg500{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"reg500{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         _factory.MockUpstream.Given(
                 Request.Create()
                     .WithPath($"/registration5-semver1/{id}/index.json")
                     .UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.InternalServerError));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/registration/{id}/");
 
@@ -215,10 +214,12 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     {
         // Both branches present: upstreamJson != null AND localVersions.Count > 0.
         // MergeLocalIntoUpstreamRegistration appends a local page; verify the splice happened.
-        var id = $"regmerge{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"regmerge{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "9.9.9");
+        // Hosted names are implicit local_only; merging upstream needs the explicit operator opt-in.
+        await _factory.SeedMixedClaim("nuget", id);
 
-        var upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
+        string upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
             + "{\"@id\":\"x\",\"catalogEntry\":{\"id\":\"" + id + "\",\"version\":\"1.0.0\",\"listed\":true}}"
             + "]}]}";
         _factory.MockUpstream.Given(
@@ -228,12 +229,12 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(upstreamJson));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/registration/{id}/");
 
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(body);
         var versions = doc.RootElement.GetProperty("items").EnumerateArray()
             .SelectMany(p => p.GetProperty("items").EnumerateArray())
@@ -249,10 +250,10 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     public async Task RegistrationLeaf_LocalVersion_ServedFromLocalData()
     {
         // A version with a local row is served as a local leaf; packageContent points at our flatcontainer.
-        var id = $"leaflocal{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"leaflocal{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "9.9.9");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/registration/{id}/9.9.9.json");
 
@@ -268,8 +269,8 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     [InlineData("registration5-gz-semver2", "registration5-gz-semver2")]  // SemVer2 base
     public async Task RegistrationLeaf_NoLocal_ProxiesUpstreamLeaf(string clientBase, string upstreamVariant)
     {
-        var id = $"leafup{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var leafJson = "{\"@id\":\"x\",\"@type\":\"Package\","
+        string id = $"leafup{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string leafJson = "{\"@id\":\"x\",\"@type\":\"Package\","
             + "\"catalogEntry\":{\"id\":\"X\",\"version\":\"6.2.0\",\"listed\":true},"
             + "\"listed\":true,\"packageContent\":\"y\"}";
         _factory.MockUpstream.Given(
@@ -279,7 +280,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(leafJson));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/{clientBase}/{id}/6.2.0.json");
 
@@ -290,14 +291,14 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     [Fact]
     public async Task RegistrationLeaf_NoLocal_UpstreamMissing_Returns404()
     {
-        var id = $"leaf404{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"leaf404{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         _factory.MockUpstream.Given(
                 Request.Create()
                     .WithPath($"/registration5-semver1/{id}/1.2.3.json")
                     .UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/registration/{id}/1.2.3.json");
 
@@ -310,9 +311,9 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         // Route-precedence guard: the literal `index.json` segment must out-rank the `{version}.json`
         // leaf route, so `…/{id}/index.json` reaches the index handler (which merges the local 9.9.9
         // page). A mis-route to the leaf would proxy the bare upstream index and drop the local page.
-        var id = $"leafprec{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"leafprec{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "9.9.9");
-        var upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
+        string upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
             + "{\"@id\":\"x\",\"catalogEntry\":{\"id\":\"" + id + "\",\"version\":\"1.0.0\",\"listed\":true}}"
             + "]}]}";
         _factory.MockUpstream.Given(
@@ -322,7 +323,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(upstreamJson));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/registration/{id}/index.json");
 
@@ -342,8 +343,9 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     {
         // MergeUpstreamVersionsAsync catches JsonException, sets X-Upstream-Status=error,
         // logs warning. Local-only versions still returned.
-        var id = $"badjson{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"badjson{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "5.0.0");
+        await _factory.SeedMixedClaim("nuget", id);
 
         _factory.MockUpstream.Given(
                 Request.Create()
@@ -353,13 +355,13 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
                 .WithHeader("Content-Type", "application/json")
                 .WithBody("{not json"));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/flatcontainer/{id}/index.json");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         Assert.Equal("error", resp.Headers.GetValues("X-Upstream-Status").FirstOrDefault());
 
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         Assert.Contains("5.0.0", body);
     }
 
@@ -367,8 +369,9 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     public async Task FlatcontainerVersions_UpstreamSuccessMissingVersionsField_HeaderError()
     {
         // JSON parses, but 'versions' key is absent — controller logs warning, marks error.
-        var id = $"missingver{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"missingver{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "1.0.0");
+        await _factory.SeedMixedClaim("nuget", id);
 
         _factory.MockUpstream.Given(
                 Request.Create()
@@ -378,7 +381,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
                 .WithHeader("Content-Type", "application/json")
                 .WithBody("{\"otherkey\":[]}"));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/flatcontainer/{id}/index.json");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -388,8 +391,9 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     [Fact]
     public async Task FlatcontainerVersions_UpstreamSuccess_HeaderOk_MergesVersions()
     {
-        var id = $"upok{Guid.NewGuid():N}"[..16].ToLowerInvariant();
+        string id = $"upok{Guid.NewGuid():N}"[..16].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "7.0.0");
+        await _factory.SeedMixedClaim("nuget", id);
 
         _factory.MockUpstream.Given(
                 Request.Create()
@@ -399,7 +403,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
                 .WithHeader("Content-Type", "application/json")
                 .WithBody("{\"versions\":[\"1.0.0\",\"2.0.0\"]}"));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/flatcontainer/{id}/index.json");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -423,14 +427,14 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     {
         // Path: no local pkg, AnonymousPull allowed by token, passthrough enabled, proxy fetch
         // hits upstream 404 → returns NotFound (the upstream success branch is inverted).
-        var id = $"missupstream{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"missupstream{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         _factory.MockUpstream.Given(
                 Request.Create()
                     .WithPath($"/flatcontainer/{id}/1.0.0/{id}.1.0.0.nupkg")
                     .UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/flatcontainer/{id}/1.0.0/{id}.1.0.0.nupkg");
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
@@ -443,11 +447,11 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     {
         // Passthrough disabled means even with token, an unknown package → 404 (early NotFound
         // before any upstream call).
-        var id = $"passoff{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"passoff{Guid.NewGuid():N}"[..18].ToLowerInvariant();
 
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var orgId = await conn.ExecuteScalarAsync<string>(
+        string? orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")!;
         await conn.ExecuteAsync(
             "UPDATE org_settings SET proxy_passthrough_enabled = 0 WHERE org_id = @orgId",
@@ -455,7 +459,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
         try
         {
-            var token = await _factory.CreateToken("pull");
+            string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBasic(token);
             var resp = await client.GetAsync($"/nuget/flatcontainer/{id}/1.0.0/{id}.1.0.0.nupkg");
             Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
@@ -475,10 +479,10 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     public async Task Flatcontainer_Download_HostedVersion_TokenAuth_Succeeds()
     {
         // Verifies ServeHostedVersionAsync 200 path: token resolved, blob streamed, X-Cache HIT.
-        var id = $"hostdl{Guid.NewGuid():N}"[..16].ToLowerInvariant();
+        string id = $"hostdl{Guid.NewGuid():N}"[..16].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "3.4.5");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync(
             $"/nuget/flatcontainer/{id}/3.4.5/{id}.3.4.5.nupkg");
@@ -492,10 +496,10 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     {
         // Push 1.0.0.0 (stored as normalized "1.0.0"); request also as 1.0.0.0 to exercise
         // NormalizeNuGetVersion's parse-success branch.
-        var id = $"normver{Guid.NewGuid():N}"[..16].ToLowerInvariant();
+        string id = $"normver{Guid.NewGuid():N}"[..16].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "1.0.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/nuget/flatcontainer/{id}/1.0.0.0/{id}.1.0.0.nupkg");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -524,7 +528,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     [Fact]
     public async Task Push_NotAZip_Returns422()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
 
@@ -542,8 +546,8 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     [Fact]
     public async Task Push_ZipMissingNuspec_Returns422()
     {
-        var token = await _factory.CreateToken("push");
-        var bytes = BuildZip(("readme.txt", "hello"));
+        string token = await _factory.CreateToken("push");
+        byte[] bytes = BuildZip(("readme.txt", "hello"));
 
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
@@ -565,8 +569,8 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         await _factory.SetOrgLimit("default", "nuget", bytes: 100);
         try
         {
-            var token = await _factory.CreateToken("push");
-            var id = $"OverLimit{Guid.NewGuid():N}"[..18];
+            string token = await _factory.CreateToken("push");
+            string id = $"OverLimit{Guid.NewGuid():N}"[..18];
             var (bytes, _) = NuGetFixtures.BuildNupkg(id, "1.0.0");
             // Sanity: fixture is larger than 100 bytes (nuspec alone exceeds that).
             Assert.True(bytes.Length > 100, "Fixture nupkg should be larger than the 100-byte cap.");
@@ -599,12 +603,12 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         // doesn't reject as version_exists. Symbols and packages share the version row in
         // this controller's publish path, so coexistence on the same (id, version) would
         // produce 409 Conflict — that case is exercised by PushSymbols_SnupkgMissingPdb_*.
-        var id = $"SymPkg{Guid.NewGuid():N}"[..16];
+        string id = $"SymPkg{Guid.NewGuid():N}"[..16];
 
         // .snupkg = ZIP containing a .nuspec + at least one .pdb.
-        var snupkg = BuildSnupkg(id, "1.0.0");
+        byte[] snupkg = BuildSnupkg(id, "1.0.0");
 
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
 
@@ -622,10 +626,10 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     {
         // ParseNupkg(isSymbol:true) returns the "must contain at least one .pdb" failure when
         // the zip has a nuspec but no .pdb entry. Hits the symbol-specific validation branch.
-        var nuspec = NuspecXml("NoPdbSym", "1.0.0");
-        var bytes = BuildZip(("NoPdbSym.nuspec", nuspec));
+        string nuspec = NuspecXml("NoPdbSym", "1.0.0");
+        byte[] bytes = BuildZip(("NoPdbSym.nuspec", nuspec));
 
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
 
@@ -646,10 +650,10 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         // Unlist sets yanked=1. A second DELETE on the same coordinates also returns 204 —
         // the SQL UPDATE is a no-op on a yanked row but still finds it; the handler doesn't
         // care about prior state.
-        var id = $"ReUnlist{Guid.NewGuid():N}"[..16];
+        string id = $"ReUnlist{Guid.NewGuid():N}"[..16];
         await _factory.PushNuGetPackage(id, "1.0.0");
 
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
 
@@ -664,7 +668,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     public async Task Unlist_PackageNotFound_Returns404()
     {
         // Exercises the early `pkg is null` 404 branch.
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
 
@@ -677,10 +681,10 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     public async Task Unlist_VersionNotFound_Returns404()
     {
         // Package exists, but the requested version does not — second NotFound branch.
-        var id = $"VerMiss{Guid.NewGuid():N}"[..16];
+        string id = $"VerMiss{Guid.NewGuid():N}"[..16];
         await _factory.PushNuGetPackage(id, "1.0.0");
 
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
 
@@ -706,10 +710,10 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         // Push a fresh symbols package (no prior nupkg on this id to avoid version_exists),
         // then GET /nuget/symbols/{id}/{version}/{file}. The controller filters versions
         // whose BlobKey ends with .snupkg, so a symbols-only row still matches.
-        var id = $"GetSym{Guid.NewGuid():N}"[..16];
+        string id = $"GetSym{Guid.NewGuid():N}"[..16];
 
-        var snupkg = BuildSnupkg(id, "1.0.0");
-        var pushToken = await _factory.CreateToken("push");
+        byte[] snupkg = BuildSnupkg(id, "1.0.0");
+        string pushToken = await _factory.CreateToken("push");
         using (var pushClient = _factory.CreateClient())
         {
             pushClient.DefaultRequestHeaders.Add("X-NuGet-ApiKey", pushToken);
@@ -721,9 +725,9 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
             Assert.Equal(HttpStatusCode.Created, pushResp.StatusCode);
         }
 
-        var pullToken = await _factory.CreateToken("pull");
+        string pullToken = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(pullToken);
-        var lowerId = id.ToLowerInvariant();
+        string lowerId = id.ToLowerInvariant();
         var resp = await client.GetAsync(
             $"/nuget/symbols/{lowerId}/1.0.0/{lowerId}.1.0.0.snupkg");
 
@@ -738,10 +742,10 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     {
         // Push only a regular .nupkg (no symbols). GetSymbols filters versions whose BlobKey
         // ends with .snupkg — none exist, so the lookup yields no match → 404.
-        var id = $"NoSym{Guid.NewGuid():N}"[..16];
+        string id = $"NoSym{Guid.NewGuid():N}"[..16];
         await _factory.PushNuGetPackage(id, "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync(
             $"/nuget/symbols/{id.ToLowerInvariant()}/1.0.0/{id.ToLowerInvariant()}.1.0.0.snupkg");
@@ -761,9 +765,9 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     {
         // Privately-uploaded symbols (PDBs) must require a token even when AnonymousPull is on —
         // the .nupkg path enforces this, and the symbol path must match.
-        var id = $"PrivSym{Guid.NewGuid():N}"[..14];
-        var snupkg = BuildSnupkg(id, "1.0.0");
-        var pushToken = await _factory.CreateToken("push");
+        string id = $"PrivSym{Guid.NewGuid():N}"[..14];
+        byte[] snupkg = BuildSnupkg(id, "1.0.0");
+        string pushToken = await _factory.CreateToken("push");
         using (var pushClient = _factory.CreateClient())
         {
             pushClient.DefaultRequestHeaders.Add("X-NuGet-ApiKey", pushToken);
@@ -777,14 +781,14 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
 
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var orgId = await conn.ExecuteScalarAsync<string>(
+        string? orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")!;
         await conn.ExecuteAsync(
             "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId", new { orgId });
         _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
 
-        var lowerId = id.ToLowerInvariant();
-        var path = $"/nuget/symbols/{lowerId}/1.0.0/{lowerId}.1.0.0.snupkg";
+        string lowerId = id.ToLowerInvariant();
+        string path = $"/nuget/symbols/{lowerId}/1.0.0/{lowerId}.1.0.0.snupkg";
         try
         {
             // Anonymous: blocked despite AnonymousPull, because the symbol is uploaded-origin.
@@ -793,7 +797,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
             Assert.Equal(HttpStatusCode.Unauthorized, anonResp.StatusCode);
 
             // Authenticated: still served.
-            var pullToken = await _factory.CreateToken("pull");
+            string pullToken = await _factory.CreateToken("pull");
             using var authed = _factory.CreateClientWithBasic(pullToken);
             var authResp = await authed.GetAsync(path);
             Assert.Equal(HttpStatusCode.OK, authResp.StatusCode);
@@ -837,15 +841,21 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
 
     private static byte[] BuildSnupkg(string id, string version)
     {
-        var nuspec = NuspecXml(id, version);
+        string nuspec = NuspecXml(id, version);
         using var ms = new MemoryStream();
         using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
         {
             var nuspecEntry = zip.CreateEntry($"{id}.nuspec");
-            using (var w = new StreamWriter(nuspecEntry.Open(), Encoding.UTF8)) w.Write(nuspec);
+            using (var w = new StreamWriter(nuspecEntry.Open(), Encoding.UTF8))
+            {
+                w.Write(nuspec);
+            }
 
             var pdbEntry = zip.CreateEntry($"lib/netstandard2.0/{id}.pdb");
-            using (var w = new StreamWriter(pdbEntry.Open(), Encoding.UTF8)) w.Write("synthetic pdb bytes");
+            using (var w = new StreamWriter(pdbEntry.Open(), Encoding.UTF8))
+            {
+                w.Write("synthetic pdb bytes");
+            }
         }
         return ms.ToArray();
     }

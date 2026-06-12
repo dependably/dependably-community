@@ -2,7 +2,6 @@ using System.Net;
 using Dependably.Security;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -15,13 +14,21 @@ public class MetricsAccessMiddlewareTests
         string? enabled = null)
     {
         var dict = new Dictionary<string, string?>();
-        if (allowedIps is not null) dict["METRICS_ALLOWED_IPS"] = allowedIps;
-        if (enabled is not null) dict["METRICS_ENABLED"] = enabled;
+        if (allowedIps is not null)
+        {
+            dict["METRICS_ALLOWED_IPS"] = allowedIps;
+        }
+
+        if (enabled is not null)
+        {
+            dict["METRICS_ENABLED"] = enabled;
+        }
+
         var config = new ConfigurationBuilder().AddInMemoryCollection(dict).Build();
 
         // No-DB instance-setting reader: env vars cover the test cases here, so
         // the DB path is never exercised.
-        Task<string?> NoDb(string key, CancellationToken _) => Task.FromResult<string?>(null);
+        static Task<string?> NoDb(string key, CancellationToken _) => Task.FromResult<string?>(null);
 
         var accessConfig = new MetricsAccessConfig(NoDb, config);
         var diagnostics = new ScrapeDiagnostics();
@@ -39,7 +46,7 @@ public class MetricsAccessMiddlewareTests
     [Fact]
     public async Task InvokeAsync_LocalhostIp_Allows()
     {
-        var nextCalled = false;
+        bool nextCalled = false;
         RequestDelegate next = ctx => { nextCalled = true; return Task.CompletedTask; };
         var middleware = Build(next, allowedIps: "127.0.0.1");
 
@@ -52,7 +59,7 @@ public class MetricsAccessMiddlewareTests
     [Fact]
     public async Task InvokeAsync_NonMetricsPath_CallsNextRegardlessOfIp()
     {
-        var nextCalled = false;
+        bool nextCalled = false;
         RequestDelegate next = ctx => { nextCalled = true; return Task.CompletedTask; };
         var middleware = Build(next, allowedIps: "127.0.0.1");
 
@@ -68,7 +75,7 @@ public class MetricsAccessMiddlewareTests
     [Fact]
     public async Task InvokeAsync_NullRemoteIp_Returns403()
     {
-        var nextCalled = false;
+        bool nextCalled = false;
         RequestDelegate next = ctx => { nextCalled = true; return Task.CompletedTask; };
         var middleware = Build(next, allowedIps: "127.0.0.1");
 
@@ -82,7 +89,7 @@ public class MetricsAccessMiddlewareTests
     [Fact]
     public async Task InvokeAsync_IPv4MappedIPv6_AllowedAfterMapping()
     {
-        var nextCalled = false;
+        bool nextCalled = false;
         RequestDelegate next = ctx => { nextCalled = true; return Task.CompletedTask; };
         var middleware = Build(next, allowedIps: "127.0.0.1");
 
@@ -95,7 +102,7 @@ public class MetricsAccessMiddlewareTests
     [Fact]
     public async Task InvokeAsync_DisallowedIp_Returns403()
     {
-        var nextCalled = false;
+        bool nextCalled = false;
         RequestDelegate next = ctx => { nextCalled = true; return Task.CompletedTask; };
         var middleware = Build(next, allowedIps: "127.0.0.1");
 
@@ -109,7 +116,7 @@ public class MetricsAccessMiddlewareTests
     [Fact]
     public async Task InvokeAsync_ConfiguredCidrRange_AllowsMatchingIp()
     {
-        var nextCalled = false;
+        bool nextCalled = false;
         RequestDelegate next = ctx => { nextCalled = true; return Task.CompletedTask; };
         var middleware = Build(next, allowedIps: "10.0.0.0/8");
 
@@ -122,7 +129,7 @@ public class MetricsAccessMiddlewareTests
     [Fact]
     public async Task InvokeAsync_DisabledViaEnv_Returns404()
     {
-        var nextCalled = false;
+        bool nextCalled = false;
         RequestDelegate next = ctx => { nextCalled = true; return Task.CompletedTask; };
         var middleware = Build(next, allowedIps: "127.0.0.1", enabled: "0");
 
@@ -139,7 +146,7 @@ public class MetricsAccessMiddlewareTests
         // With no env vars set, MetricsAccessConfig falls back to the
         // hard-coded default of [127.0.0.1, ::1], so loopback callers
         // get through without any operator configuration.
-        var nextCalled = false;
+        bool nextCalled = false;
         RequestDelegate next = ctx => { nextCalled = true; return Task.CompletedTask; };
         var middleware = Build(next, allowedIps: null);
 
@@ -149,7 +156,7 @@ public class MetricsAccessMiddlewareTests
         Assert.True(nextCalled);
 
         // ::1 also default-allowed.
-        var nextCalled2 = false;
+        bool nextCalled2 = false;
         RequestDelegate next2 = ctx => { nextCalled2 = true; return Task.CompletedTask; };
         var middleware2 = Build(next2, allowedIps: null);
         var ctx2 = MetricsContext(IPAddress.IPv6Loopback);

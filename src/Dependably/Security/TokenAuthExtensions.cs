@@ -25,8 +25,7 @@ public static class TokenAuthExtensions
         CancellationToken ct = default)
     {
         var token = await request.ResolveTokenAsync(tokens, ct);
-        if (token is null) return null;
-        return token.OrgId == expectedOrgId ? token : null;
+        return token is null ? null : token.OrgId == expectedOrgId ? token : null;
     }
 
     /// <summary>
@@ -41,7 +40,7 @@ public static class TokenAuthExtensions
         TokenRepository tokens,
         CancellationToken ct = default)
     {
-        var auth = request.Headers.Authorization.FirstOrDefault();
+        string? auth = request.Headers.Authorization.FirstOrDefault();
         if (auth is null)
         {
             Dependably.Infrastructure.Observability.DependablyMeter.TokenAuthRequests.Add(
@@ -57,14 +56,16 @@ public static class TokenAuthExtensions
         }
         else if (auth.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
         {
-            var encoded = auth["Basic ".Length..].Trim();
+            string encoded = auth["Basic ".Length..].Trim();
             try
             {
-                var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+                string decoded = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
                 // format is user:token — take everything after the first colon as the token
-                var colonIdx = decoded.IndexOf(':');
+                int colonIdx = decoded.IndexOf(':');
                 if (colonIdx >= 0)
+                {
                     raw = decoded[(colonIdx + 1)..];
+                }
             }
             catch
             {

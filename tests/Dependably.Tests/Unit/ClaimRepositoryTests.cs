@@ -1,7 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -44,7 +43,7 @@ public class ClaimRepositoryTests : IAsyncLifetime
         Assert.Equal(ClaimStateMachine.LocalOnly, c!.State);
 
         await using var conn = await _db.OpenAsync();
-        var historyCount = await conn.ExecuteScalarAsync<long>(
+        long historyCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM claim_history WHERE claim_id = @id",
             new { id = tx.ClaimId });
         Assert.Equal(1, historyCount);
@@ -74,7 +73,7 @@ public class ClaimRepositoryTests : IAsyncLifetime
         Assert.Equal(ClaimStateMachine.Mixed, c!.State);
 
         await using var conn = await _db.OpenAsync();
-        var historyCount = await conn.ExecuteScalarAsync<long>(
+        long historyCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM claim_history WHERE claim_id = @id",
             new { id = create.ClaimId });
         Assert.Equal(2, historyCount);
@@ -103,7 +102,7 @@ public class ClaimRepositoryTests : IAsyncLifetime
         Assert.Null(await repo.GetAsync("o1", "npm", "lodash"));
 
         await using var conn = await _db.OpenAsync();
-        var historyCount = await conn.ExecuteScalarAsync<long>(
+        long historyCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM claim_history WHERE claim_id = @id",
             new { id = create.ClaimId });
         Assert.Equal(2, historyCount);
@@ -114,8 +113,8 @@ public class ClaimRepositoryTests : IAsyncLifetime
     {
         var repo = new ClaimRepository(_db);
         await repo.ApplyTransitionAsync(Create("o1", "npm", "lodash", ClaimStateMachine.LocalOnly, "n1"));
-        await repo.ApplyTransitionAsync(Create("o1", "npm", "react",  ClaimStateMachine.Mixed,     "n2"));
-        await repo.ApplyTransitionAsync(Create("o1", "pypi","numpy",  ClaimStateMachine.LocalOnly, "n3"));
+        await repo.ApplyTransitionAsync(Create("o1", "npm", "react", ClaimStateMachine.Mixed, "n2"));
+        await repo.ApplyTransitionAsync(Create("o1", "pypi", "numpy", ClaimStateMachine.LocalOnly, "n3"));
 
         var npmLocal = await repo.ListAsync("o1", ecosystem: "npm", state: ClaimStateMachine.LocalOnly);
         Assert.Single(npmLocal);

@@ -37,16 +37,28 @@ public sealed class OsvClient : IOsvSource
     /// <summary>Query OSV for advisories affecting a single PURL. Always hydrated.</summary>
     public async Task<List<OsvAdvisory>> QueryAsync(string purl, CancellationToken ct = default)
     {
-        var body = JsonSerializer.Serialize(new { package = new { purl } }, JsonOpts);
-        using var response = await PostWithRetryAsync("query", body, ct);
-        if (!response.IsSuccessStatusCode)
+        HttpResponseMessage response;
+        try
         {
-            _logger.LogWarning("OSV query returned {Status} for {Purl}", response.StatusCode, purl);
+            response = await PostWithRetryAsync("query", body: JsonSerializer.Serialize(new { package = new { purl } }, JsonOpts), ct);
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogWarning(ex, "OSV query fetch failed: {ExceptionType} for {Purl}", ex.GetType().Name, purl);
             return [];
         }
 
-        var json = await response.Content.ReadAsStringAsync(ct);
-        return ParseHydratedVulns(json);
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("OSV query returned {Status} for {Purl}", response.StatusCode, purl);
+                return [];
+            }
+
+            string json = await response.Content.ReadAsStringAsync(ct);
+            return ParseHydratedVulns(json);
+        }
     }
 
     /// <summary>
@@ -59,13 +71,19 @@ public sealed class OsvClient : IOsvSource
         using var doc = JsonDocument.Parse(json);
         if (!doc.RootElement.TryGetProperty("vulns", out var vulns)
             || vulns.ValueKind != JsonValueKind.Array)
+        {
             return [];
+        }
 
         var list = new List<OsvAdvisory>(vulns.GetArrayLength());
         foreach (var el in vulns.EnumerateArray())
         {
             var raw = el.Deserialize<OsvVulnRaw>(JsonOpts);
-            if (raw is null) continue;
+            if (raw is null)
+            {
+                continue;
+            }
+
             list.Add(ParseAdvisory(raw, isHydrated: true, rawJson: el.GetRawText()));
         }
         return list;
@@ -84,65 +102,81 @@ public sealed class OsvClient : IOsvSource
     public async Task<List<List<OsvAdvisory>>> QueryBatchAsync(IReadOnlyList<string> purls, CancellationToken ct = default)
     {
         var queries = purls.Select(p => new { package = new { purl = p } }).ToList();
-        var body = JsonSerializer.Serialize(new { queries }, JsonOpts);
-        using var response = await PostWithRetryAsync("querybatch", body, ct);
+        string requestBody = JsonSerializer.Serialize(new { queries }, JsonOpts);
 
-        if (!response.IsSuccessStatusCode)
+        HttpResponseMessage response;
+        try
         {
-            _logger.LogWarning("OSV querybatch returned {Status}", response.StatusCode);
+            response = await PostWithRetryAsync("querybatch", requestBody, ct);
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogWarning(ex, "OSV querybatch fetch failed: {ExceptionType}", ex.GetType().Name);
             return purls.Select(_ => new List<OsvAdvisory>()).ToList();
         }
 
-        var json = await response.Content.ReadAsStringAsync(ct);
-        var batchResult = JsonSerializer.Deserialize<OsvBatchResponse>(json, JsonOpts);
-        var perPurlRaw = batchResult?.Results?
-            .Select(r => r.Vulns?.ToList() ?? new List<OsvVulnRaw>())
-            .ToList()
-            ?? purls.Select(_ => new List<OsvVulnRaw>()).ToList();
-
-        // Dedup IDs across the entire batch — the same advisory often shows up under many PURLs.
-        var uniqueIds = perPurlRaw
-            .SelectMany(list => list)
-            .Select(v => v.Id)
-            .Where(id => !string.IsNullOrEmpty(id))
-            .Select(id => id!)
-            .Distinct()
-            .ToList();
-
-        // Cap per-call hydration; overflow IDs fall back to non-hydrated records.
-        var idsToHydrate = uniqueIds;
-        if (uniqueIds.Count > MaxHydrationsPerBatch)
+        using (response)
         {
-            _logger.LogWarning(
-                "OSV hydration capped at {Cap} of {Total} unique advisory IDs in this batch",
-                MaxHydrationsPerBatch, uniqueIds.Count);
-            idsToHydrate = uniqueIds.Take(MaxHydrationsPerBatch).ToList();
-        }
-
-        // Successful hydrations are stored here; failures are not, which gives us an
-        // implicit per-call negative cache (TryGetValue below falls back to stripped).
-        // Combined with Distinct() above, a failing ID is never retried within this batch.
-        var hydrated = new ConcurrentDictionary<string, OsvAdvisory>();
-        using var sem = new SemaphoreSlim(HydrationConcurrency);
-
-        await Task.WhenAll(idsToHydrate.Select(async id =>
-        {
-            await sem.WaitAsync(ct);
-            try
+            if (!response.IsSuccessStatusCode)
             {
-                var advisory = await FetchAdvisoryAsync(id, ct);
-                if (advisory is not null) hydrated[id] = advisory;
+                _logger.LogWarning("OSV querybatch returned {Status}", response.StatusCode);
+                return purls.Select(_ => new List<OsvAdvisory>()).ToList();
             }
-            finally { sem.Release(); }
-        }));
 
-        // Build per-PURL advisory lists. Use hydrated where available; fall back to
-        // stripped (IsHydrated=false) so the scan service can skip non-hydrated records.
-        return perPurlRaw.Select(list => list
-            .Select(raw => hydrated.TryGetValue(raw.Id ?? "", out var h)
-                ? h
-                : ParseAdvisory(raw, isHydrated: false))
-            .ToList()).ToList();
+            string json = await response.Content.ReadAsStringAsync(ct);
+            var batchResult = JsonSerializer.Deserialize<OsvBatchResponse>(json, JsonOpts);
+            var perPurlRaw = batchResult?.Results?
+                .Select(r => r.Vulns?.ToList() ?? new List<OsvVulnRaw>())
+                .ToList()
+                ?? purls.Select(_ => new List<OsvVulnRaw>()).ToList();
+
+            // Dedup IDs across the entire batch — the same advisory often shows up under many PURLs.
+            var uniqueIds = perPurlRaw
+                .SelectMany(list => list)
+                .Select(v => v.Id)
+                .Where(id => !string.IsNullOrEmpty(id))
+                .Select(id => id!)
+                .Distinct()
+                .ToList();
+
+            // Cap per-call hydration; overflow IDs fall back to non-hydrated records.
+            var idsToHydrate = uniqueIds;
+            if (uniqueIds.Count > MaxHydrationsPerBatch)
+            {
+                _logger.LogWarning(
+                    "OSV hydration capped at {Cap} of {Total} unique advisory IDs in this batch",
+                    MaxHydrationsPerBatch, uniqueIds.Count);
+                idsToHydrate = uniqueIds.Take(MaxHydrationsPerBatch).ToList();
+            }
+
+            // Successful hydrations are stored here; failures are not, which gives us an
+            // implicit per-call negative cache (TryGetValue below falls back to stripped).
+            // Combined with Distinct() above, a failing ID is never retried within this batch.
+            var hydrated = new ConcurrentDictionary<string, OsvAdvisory>();
+            using var sem = new SemaphoreSlim(HydrationConcurrency);
+
+            await Task.WhenAll(idsToHydrate.Select(async id =>
+            {
+                await sem.WaitAsync(ct);
+                try
+                {
+                    var advisory = await FetchAdvisoryAsync(id, ct);
+                    if (advisory is not null)
+                    {
+                        hydrated[id] = advisory;
+                    }
+                }
+                finally { sem.Release(); }
+            }));
+
+            // Build per-PURL advisory lists. Use hydrated where available; fall back to
+            // stripped (IsHydrated=false) so the scan service can skip non-hydrated records.
+            return perPurlRaw.Select(list => list
+                .Select(raw => hydrated.TryGetValue(raw.Id ?? "", out var h)
+                    ? h
+                    : ParseAdvisory(raw, isHydrated: false))
+                .ToList()).ToList();
+        } // using (response)
     }
 
     /// <summary>Fetch a single advisory's full details via GET /vulns/{id}. Returns null on any failure.</summary>
@@ -156,7 +190,7 @@ public sealed class OsvClient : IOsvSource
                 _logger.LogWarning("OSV vulns/{Id} returned {Status}", id, response.StatusCode);
                 return null;
             }
-            var json = await response.Content.ReadAsStringAsync(ct);
+            string json = await response.Content.ReadAsStringAsync(ct);
             var raw = JsonSerializer.Deserialize<OsvVulnRaw>(json, JsonOpts);
             // The whole /vulns/{id} body IS the advisory, so it is the raw JSON to persist.
             return raw is null ? null : ParseAdvisory(raw, isHydrated: true, rawJson: json);
@@ -189,15 +223,19 @@ public sealed class OsvClient : IOsvSource
             var response = await http.SendAsync(requestFactory(), ct);
 
             if (response.StatusCode != HttpStatusCode.TooManyRequests)
+            {
                 return response;
+            }
 
             // Read Retry-After before disposing the response.
-            var retryAfterHeader = response.Headers.TryGetValues("Retry-After", out var vals)
+            string? retryAfterHeader = response.Headers.TryGetValues("Retry-After", out var vals)
                 ? vals.FirstOrDefault() : null;
             response.Dispose();
 
-            if (retryAfterHeader is not null && int.TryParse(retryAfterHeader, out var retrySeconds))
+            if (retryAfterHeader is not null && int.TryParse(retryAfterHeader, out int retrySeconds))
+            {
                 delay = retrySeconds * 1000;
+            }
 
             _logger.LogWarning("OSV rate-limited; retrying in {Delay}ms (attempt {Attempt}/3)", delay, attempt + 1);
             try { await Task.Delay(delay, ct); } catch (OperationCanceledException) { break; }
@@ -226,11 +264,15 @@ public sealed class OsvClient : IOsvSource
         var cvssEntry = raw.Severity?.FirstOrDefault(s =>
             s.Type?.StartsWith("CVSS", StringComparison.OrdinalIgnoreCase) == true);
         if (cvssEntry?.Score is not null)
+        {
             cvssScore = OsvScoring.ParseCvssBaseScore(cvssEntry.Score, out severity);
+        }
 
         // Fall back to database_specific.severity for severity text
-        if (severity is null && raw.DatabaseSpecific?.TryGetValue("severity", out var dbSev) == true)
+        if (severity is null && raw.DatabaseSpecific?.TryGetValue("severity", out object? dbSev) == true)
+        {
             severity = dbSev?.ToString();
+        }
 
         return new OsvAdvisory(
             Id: raw.Id ?? "",

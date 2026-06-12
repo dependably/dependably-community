@@ -3,7 +3,6 @@ using System.IO.Compression;
 using System.Text;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -48,7 +47,7 @@ public sealed class EcosystemDetectorExtendedTests
     {
         // PK\x03\x04 satisfies ArchiveExtractor.Detect -> Zip, then ZipArchive ctor blows
         // up on the truncated central directory. Exercises the try/catch fallback in Detect.
-        var bytes = new byte[] { (byte)'P', (byte)'K', 0x03, 0x04, 0x00, 0x00, 0x00 };
+        byte[] bytes = new byte[] { (byte)'P', (byte)'K', 0x03, 0x04, 0x00, 0x00, 0x00 };
         var (ok, err) = EcosystemDetector.Detect("corrupt.zip", bytes);
 
         Assert.Null(ok);
@@ -63,7 +62,7 @@ public sealed class EcosystemDetectorExtendedTests
         // 1F 8B satisfies the gzip magic-byte check, but the body is junk so GZipStream
         // throws when the TarReader tries to advance. Catch block converts that into
         // unrecognised_format with the "Failed to inspect archive" prefix.
-        var bytes = new byte[] { 0x1F, 0x8B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        byte[] bytes = new byte[] { 0x1F, 0x8B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
         var (ok, err) = EcosystemDetector.Detect("corrupt.tgz", bytes);
 
         Assert.Null(ok);
@@ -80,7 +79,7 @@ public sealed class EcosystemDetectorExtendedTests
         // Root .nuspec gates into the NuGet branch, but the nuspec uses an unrecognised
         // XML namespace so NuGetNupkgValidator.Parse rejects it. Detector must surface
         // nupkg_invalid, not unrecognised_format, so the operator sees the real cause.
-        var bytes = BuildZipWithEntry("evil.nuspec", "<package xmlns=\"urn:bogus\"><metadata/></package>");
+        byte[] bytes = BuildZipWithEntry("evil.nuspec", "<package xmlns=\"urn:bogus\"><metadata/></package>");
         var (ok, err) = EcosystemDetector.Detect("evil.nupkg", bytes);
 
         Assert.Null(ok);
@@ -94,7 +93,7 @@ public sealed class EcosystemDetectorExtendedTests
         // .nuspec nested under a directory must NOT trigger the NuGet branch — detector
         // checks `!FullName.Contains('/')`. With no root nuspec, no dist-info METADATA, and no
         // EGG-INFO/PKG-INFO, we fall through to the ZIP "contains no ..." message.
-        var bytes = BuildZipWithEntry("subdir/inner.nuspec", "<package/>");
+        byte[] bytes = BuildZipWithEntry("subdir/inner.nuspec", "<package/>");
         var (ok, err) = EcosystemDetector.Detect("nested.nupkg", bytes);
 
         Assert.Null(ok);
@@ -110,7 +109,7 @@ public sealed class EcosystemDetectorExtendedTests
     {
         // dist-info/METADATA present but the METADATA body has no Name/Version headers.
         // ValidateWheel fails -> detector surfaces artifact_invalid.
-        var bytes = BuildZipWithEntry("pkg-1.0.0.dist-info/METADATA", "Metadata-Version: 2.1\nSummary: empty\n");
+        byte[] bytes = BuildZipWithEntry("pkg-1.0.0.dist-info/METADATA", "Metadata-Version: 2.1\nSummary: empty\n");
         var (ok, err) = EcosystemDetector.Detect("pkg-1.0.0-py3-none-any.whl", bytes);
 
         Assert.Null(ok);
@@ -125,7 +124,7 @@ public sealed class EcosystemDetectorExtendedTests
     {
         // Top-level package/package.json gates into the npm branch, but the JSON omits
         // "version" so NpmTarballValidator.Validate fails. Detector surfaces tarball_invalid.
-        var bytes = BuildGzippedTar(("package/package.json", "{\"name\":\"orphan\"}"));
+        byte[] bytes = BuildGzippedTar(("package/package.json", "{\"name\":\"orphan\"}"));
         var (ok, err) = EcosystemDetector.Detect("orphan-1.0.0.tgz", bytes);
 
         Assert.Null(ok);
@@ -140,7 +139,7 @@ public sealed class EcosystemDetectorExtendedTests
     {
         // Top-level {wrapper}/PKG-INFO gates into the sdist branch, but PKG-INFO lacks
         // Name and Version headers so ValidateSdist fails. Detector surfaces artifact_invalid.
-        var bytes = BuildGzippedTar(("badpkg-1.0.0/PKG-INFO", "Metadata-Version: 2.1\nSummary: nothing\n"));
+        byte[] bytes = BuildGzippedTar(("badpkg-1.0.0/PKG-INFO", "Metadata-Version: 2.1\nSummary: nothing\n"));
         var (ok, err) = EcosystemDetector.Detect("badpkg-1.0.0.tar.gz", bytes);
 
         Assert.Null(ok);
@@ -155,7 +154,7 @@ public sealed class EcosystemDetectorExtendedTests
         // Exercises the pyproject.toml arm of the slashCount==1 condition in ScanGzippedTar.
         // ValidateSdist will fail (no PKG-INFO), but we expect artifact_invalid (the PyPI branch)
         // rather than unrecognised_format — proving the pyproject branch was taken.
-        var bytes = BuildGzippedTar(("legacy-0.1.0/pyproject.toml", "[project]\nname = \"legacy\"\nversion = \"0.1.0\"\n"));
+        byte[] bytes = BuildGzippedTar(("legacy-0.1.0/pyproject.toml", "[project]\nname = \"legacy\"\nversion = \"0.1.0\"\n"));
         var (ok, err) = EcosystemDetector.Detect("legacy-0.1.0.tar.gz", bytes);
 
         Assert.Null(ok);
@@ -169,7 +168,7 @@ public sealed class EcosystemDetectorExtendedTests
         // PKG-INFO at slashCount>1 must NOT trigger the sdist branch — the depth check
         // requires exactly one slash. Falls through to the gzipped-tar "neither ... nor ..."
         // message.
-        var bytes = BuildGzippedTar(("a/b/PKG-INFO", "Metadata-Version: 2.1\nName: deep\nVersion: 1.0.0\n"));
+        byte[] bytes = BuildGzippedTar(("a/b/PKG-INFO", "Metadata-Version: 2.1\nName: deep\nVersion: 1.0.0\n"));
         var (ok, err) = EcosystemDetector.Detect("mystery.tar.gz", bytes);
 
         Assert.Null(ok);

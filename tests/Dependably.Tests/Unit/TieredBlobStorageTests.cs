@@ -1,6 +1,5 @@
 using Dependably.Storage;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -19,7 +18,7 @@ public sealed class TieredBlobStorageTests
     [Fact]
     public async Task DefaultBackend_BothTiersResolveToSamePath()
     {
-        var dir = Path.Combine(Path.GetTempPath(), "tiered_default_" + Guid.NewGuid().ToString("N"));
+        string dir = Path.Combine(Path.GetTempPath(), "tiered_default_" + Guid.NewGuid().ToString("N"));
         try
         {
             var cfg = Cfg(new Dictionary<string, string?>
@@ -39,15 +38,18 @@ public sealed class TieredBlobStorageTests
         }
         finally
         {
-            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
         }
     }
 
     [Fact]
     public async Task TierOverride_LocalPath_IsHonoured()
     {
-        var dirCache = Path.Combine(Path.GetTempPath(), "tiered_cache_" + Guid.NewGuid().ToString("N"));
-        var dirReg = Path.Combine(Path.GetTempPath(), "tiered_reg_" + Guid.NewGuid().ToString("N"));
+        string dirCache = Path.Combine(Path.GetTempPath(), "tiered_cache_" + Guid.NewGuid().ToString("N"));
+        string dirReg = Path.Combine(Path.GetTempPath(), "tiered_reg_" + Guid.NewGuid().ToString("N"));
         try
         {
             var cfg = Cfg(new Dictionary<string, string?>
@@ -72,8 +74,15 @@ public sealed class TieredBlobStorageTests
         }
         finally
         {
-            if (Directory.Exists(dirCache)) Directory.Delete(dirCache, recursive: true);
-            if (Directory.Exists(dirReg)) Directory.Delete(dirReg, recursive: true);
+            if (Directory.Exists(dirCache))
+            {
+                Directory.Delete(dirCache, recursive: true);
+            }
+
+            if (Directory.Exists(dirReg))
+            {
+                Directory.Delete(dirReg, recursive: true);
+            }
         }
     }
 
@@ -85,8 +94,8 @@ public sealed class TieredBlobStorageTests
         // proxy for "cache on local, registry on s3"; the cross-backend story is exercised
         // in deployment integration rather than unit tests because instantiating S3/Azure
         // clients pings the network.
-        var dirCache = Path.Combine(Path.GetTempPath(), "tiered_cache2_" + Guid.NewGuid().ToString("N"));
-        var dirReg = Path.Combine(Path.GetTempPath(), "tiered_reg2_" + Guid.NewGuid().ToString("N"));
+        string dirCache = Path.Combine(Path.GetTempPath(), "tiered_cache2_" + Guid.NewGuid().ToString("N"));
+        string dirReg = Path.Combine(Path.GetTempPath(), "tiered_reg2_" + Guid.NewGuid().ToString("N"));
         try
         {
             var cfg = Cfg(new Dictionary<string, string?>
@@ -107,8 +116,15 @@ public sealed class TieredBlobStorageTests
         }
         finally
         {
-            if (Directory.Exists(dirCache)) Directory.Delete(dirCache, recursive: true);
-            if (Directory.Exists(dirReg)) Directory.Delete(dirReg, recursive: true);
+            if (Directory.Exists(dirCache))
+            {
+                Directory.Delete(dirCache, recursive: true);
+            }
+
+            if (Directory.Exists(dirReg))
+            {
+                Directory.Delete(dirReg, recursive: true);
+            }
         }
     }
 

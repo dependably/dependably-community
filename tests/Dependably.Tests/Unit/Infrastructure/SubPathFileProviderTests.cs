@@ -2,7 +2,6 @@ using Dependably.Infrastructure;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Primitives;
 using NSubstitute;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -160,9 +159,9 @@ public sealed class SubPathFileProviderTests
         var dir = Directory.CreateTempSubdirectory();
         try
         {
-            var sub = Path.Combine(dir.FullName, "swagger");
+            string sub = Path.Combine(dir.FullName, "swagger");
             Directory.CreateDirectory(sub);
-            var file = Path.Combine(sub, "index.html");
+            string file = Path.Combine(sub, "index.html");
             File.WriteAllText(file, "<html/>");
 
             var inner = new PhysicalFileProvider(dir.FullName);

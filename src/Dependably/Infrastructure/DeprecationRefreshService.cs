@@ -13,7 +13,9 @@ namespace Dependably.Infrastructure;
 ///
 /// For each stale package, fetches the upstream packument (npm) or project JSON (PyPI) and
 /// updates <c>package_versions.deprecated</c> and <c>package_versions.deprecation_checked_at</c>
-/// for every version row under that package.
+/// for every version row under that package. The same fetch also records upstream's declared
+/// latest version (npm <c>dist-tags.latest</c> / PyPI <c>info.version</c>) on
+/// <c>packages.upstream_latest_version</c>, which drives the packages-list "Latest" indicator.
 /// </summary>
 public sealed class DeprecationRefreshService : BackgroundService
 {
@@ -51,9 +53,12 @@ public sealed class DeprecationRefreshService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             var next = schedule.GetNextOccurrence(DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
-            if (next is null) break;
+            if (next is null)
+            {
+                break;
+            }
 
-            var jitterMaxSeconds = int.TryParse(_config["DEPRECATION_REFRESH_JITTER_SECONDS"], out var j) && j >= 0 ? j : 3600;
+            int jitterMaxSeconds = int.TryParse(_config["DEPRECATION_REFRESH_JITTER_SECONDS"], out int j) && j >= 0 ? j : 3600;
             // SCS0005: load-spreading jitter, not a security boundary — weak RNG is intentional.
 #pragma warning disable SCS0005
             var jitter = jitterMaxSeconds > 0
@@ -67,7 +72,10 @@ public sealed class DeprecationRefreshService : BackgroundService
                 catch (OperationCanceledException) { break; }
             }
 
-            if (stoppingToken.IsCancellationRequested) break;
+            if (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
 
             await RunRefreshPassAsync(stoppingToken);
         }
@@ -96,9 +104,9 @@ public sealed class DeprecationRefreshService : BackgroundService
             return;
         }
 
-        var ageHours = int.TryParse(_config["DEPRECATION_REFRESH_AGE_HOURS"], out var h) && h > 0 ? h : 24;
-        var batchSize = int.TryParse(_config["DEPRECATION_REFRESH_BATCH_SIZE"], out var bs) && bs > 0 ? bs : 500;
-        var batchDelayMs = int.TryParse(_config["DEPRECATION_REFRESH_BATCH_DELAY_MS"], out var d) ? d : 500;
+        int ageHours = int.TryParse(_config["DEPRECATION_REFRESH_AGE_HOURS"], out int h) && h > 0 ? h : 24;
+        int batchSize = int.TryParse(_config["DEPRECATION_REFRESH_BATCH_SIZE"], out int bs) && bs > 0 ? bs : 500;
+        int batchDelayMs = int.TryParse(_config["DEPRECATION_REFRESH_BATCH_DELAY_MS"], out int d) ? d : 500;
 
         _logger.LogInformation(
             "Deprecation refresh pass starting (ageHours={AgeHours}, batchSize={BatchSize}).",
@@ -106,12 +114,15 @@ public sealed class DeprecationRefreshService : BackgroundService
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
         var packages = await _packages.ListPackagesNeedingDeprecationRefreshAsync(ageHours, batchSize, ct);
-        var totalChecked = 0;
-        var totalUpdated = 0;
+        int totalChecked = 0;
+        int totalUpdated = 0;
 
         foreach (var pkg in packages)
         {
-            if (ct.IsCancellationRequested) break;
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
 
             var (checked_, updated) = await ProcessPackageAsync(pkg, ct);
             totalChecked += checked_;
@@ -137,12 +148,15 @@ public sealed class DeprecationRefreshService : BackgroundService
         var (packageId, ecosystem, purlName, orgId) = pkg;
 
         if (!IsSupportedEcosystem(ecosystem))
+        {
             return (0, 0);
+        }
 
         Dictionary<string, string?> upstreamDeprecated;
+        string? upstreamLatest;
         try
         {
-            upstreamDeprecated = await FetchUpstreamDeprecationAsync(ecosystem, purlName, ct);
+            (upstreamDeprecated, upstreamLatest) = await FetchUpstreamMetadataAsync(ecosystem, purlName, ct);
         }
         catch (Exception ex)
         {
@@ -152,18 +166,29 @@ public sealed class DeprecationRefreshService : BackgroundService
             return (0, 0);
         }
 
+        // Record upstream's declared latest version for the packages-list "Latest" indicator.
+        // Null clears any stale baseline (upstream had no latest claim).
+        await _packages.UpdateUpstreamLatestAsync(packageId, upstreamLatest, ct);
+
         var versions = await _packages.GetVersionsAsync(packageId, ct);
-        var checked_ = 0;
-        var updated = 0;
+        int checked_ = 0;
+        int updated = 0;
 
         foreach (var ver in versions)
         {
-            if (ct.IsCancellationRequested) break;
-            if (ver.Origin != "proxy") continue;
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
+            if (ver.Origin != "proxy")
+            {
+                continue;
+            }
 
             // Look up the upstream deprecated value for this version.
             // If the version key isn't present in upstream metadata, treat as not deprecated.
-            upstreamDeprecated.TryGetValue(ver.Version, out var upstreamValue);
+            upstreamDeprecated.TryGetValue(ver.Version, out string? upstreamValue);
 
             checked_++;
             DependablyMeter.DeprecationRefreshChecked.Add(1,
@@ -209,39 +234,55 @@ public sealed class DeprecationRefreshService : BackgroundService
     private static bool IsSupportedEcosystem(string ecosystem) =>
         ecosystem is "npm" or "pypi";
 
-    private async Task<Dictionary<string, string?>> FetchUpstreamDeprecationAsync(
+    // Per-version deprecation map plus upstream's declared latest version (null when absent).
+    private async Task<(Dictionary<string, string?> Deprecated, string? Latest)> FetchUpstreamMetadataAsync(
         string ecosystem, string purlName, CancellationToken ct)
     {
         return ecosystem switch
         {
-            "npm" => await FetchNpmDeprecationAsync(purlName, ct),
-            "pypi" => await FetchPyPiDeprecationAsync(purlName, ct),
-            _ => new Dictionary<string, string?>()
+            "npm" => await FetchNpmMetadataAsync(purlName, ct),
+            "pypi" => await FetchPyPiMetadataAsync(purlName, ct),
+            _ => (new Dictionary<string, string?>(), null)
         };
     }
 
-    // Fetches the npm packument and extracts deprecated per version.
+    // Fetches the npm packument and extracts deprecated per version plus dist-tags.latest.
     // The packument is a JSON object with a "versions" property mapping version string → metadata.
-    // Within each version object, "deprecated" is a string (or absent) per npm spec.
-    private async Task<Dictionary<string, string?>> FetchNpmDeprecationAsync(string purlName, CancellationToken ct)
+    // Within each version object, "deprecated" is a string (or absent) per npm spec; the package's
+    // newest published version is "dist-tags".latest.
+    private async Task<(Dictionary<string, string?> Deprecated, string? Latest)> FetchNpmMetadataAsync(string purlName, CancellationToken ct)
     {
-        var upstream = _config["Npm:Upstream"] ?? "https://registry.npmjs.org";
+        string upstream = _config["Npm:Upstream"] ?? "https://registry.npmjs.org";
         // npm scoped packages have purlName encoded as %40scope%2Fpkg; the packument URL uses @scope/pkg.
-        var packageName = Uri.UnescapeDataString(purlName).Replace("%40", "@").Replace("%2F", "/");
-        var url = $"{upstream.TrimEnd('/')}/{packageName}";
+        string packageName = Uri.UnescapeDataString(purlName).Replace("%40", "@").Replace("%2F", "/");
+        string url = $"{upstream.TrimEnd('/')}/{packageName}";
 
         var response = await _upstream.GetOrFetchMetadataAsync(url, ct);
         if (!response.IsSuccessStatusCode)
         {
             _logger.LogWarning("npm packument fetch returned {StatusCode} for {Package}.", response.StatusCode, packageName);
-            return new Dictionary<string, string?>();
+            return (new Dictionary<string, string?>(), null);
         }
 
         using var doc = JsonDocument.Parse(response.Body);
         var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
+        string? latest = null;
+        if (doc.RootElement.TryGetProperty("dist-tags", out var distTags)
+            && distTags.TryGetProperty("latest", out var latestEl)
+            && latestEl.ValueKind == JsonValueKind.String)
+        {
+            latest = latestEl.GetString();
+            if (string.IsNullOrWhiteSpace(latest))
+            {
+                latest = null;
+            }
+        }
+
         if (!doc.RootElement.TryGetProperty("versions", out var versionsEl))
-            return result;
+        {
+            return (result, latest);
+        }
 
         foreach (var entry in versionsEl.EnumerateObject())
         {
@@ -251,38 +292,56 @@ public sealed class DeprecationRefreshService : BackgroundService
             {
                 deprecated = depEl.GetString();
                 if (string.IsNullOrWhiteSpace(deprecated))
+                {
                     deprecated = null;
+                }
             }
             result[entry.Name] = deprecated;
         }
-        return result;
+        return (result, latest);
     }
 
-    // Fetches the PyPI project JSON and extracts yanked status per release.
-    // A release is yanked if any of its distribution files has yanked=true.
-    // We map yanked releases to a deprecation message (yanked_reason or a default).
-    private async Task<Dictionary<string, string?>> FetchPyPiDeprecationAsync(string purlName, CancellationToken ct)
+    // Fetches the PyPI project JSON and extracts yanked status per release plus info.version.
+    // A release is yanked if any of its distribution files has yanked=true; we map yanked releases
+    // to a deprecation message (yanked_reason or a default). info.version is PyPI's latest release.
+    private async Task<(Dictionary<string, string?> Deprecated, string? Latest)> FetchPyPiMetadataAsync(string purlName, CancellationToken ct)
     {
-        var upstream = _config["PyPI:Upstream"] ?? "https://pypi.org";
-        var url = $"{upstream.TrimEnd('/')}/pypi/{purlName}/json";
+        string upstream = _config["PyPI:Upstream"] ?? "https://pypi.org";
+        string url = $"{upstream.TrimEnd('/')}/pypi/{purlName}/json";
 
         var response = await _upstream.GetOrFetchMetadataAsync(url, ct);
         if (!response.IsSuccessStatusCode)
         {
             _logger.LogWarning("PyPI project JSON fetch returned {StatusCode} for {Package}.", response.StatusCode, purlName);
-            return new Dictionary<string, string?>();
+            return (new Dictionary<string, string?>(), null);
         }
 
         using var doc = JsonDocument.Parse(response.Body);
         var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
+        string? latest = null;
+        if (doc.RootElement.TryGetProperty("info", out var info)
+            && info.TryGetProperty("version", out var versionEl)
+            && versionEl.ValueKind == JsonValueKind.String)
+        {
+            latest = versionEl.GetString();
+            if (string.IsNullOrWhiteSpace(latest))
+            {
+                latest = null;
+            }
+        }
+
         if (!doc.RootElement.TryGetProperty("releases", out var releasesEl))
-            return result;
+        {
+            return (result, latest);
+        }
 
         foreach (var release in releasesEl.EnumerateObject())
+        {
             result[release.Name] = ExtractYankedDeprecation(release.Value);
+        }
 
-        return result;
+        return (result, latest);
     }
 
     // A release is yanked if any of its distribution files has yanked=true; maps to the
@@ -292,9 +351,11 @@ public sealed class DeprecationRefreshService : BackgroundService
         foreach (var file in releaseFiles.EnumerateArray())
         {
             if (!file.TryGetProperty("yanked", out var yankedEl) || !yankedEl.GetBoolean())
+            {
                 continue;
+            }
 
-            var reason = file.TryGetProperty("yanked_reason", out var reasonEl)
+            string? reason = file.TryGetProperty("yanked_reason", out var reasonEl)
                 ? reasonEl.GetString()
                 : null;
             return string.IsNullOrWhiteSpace(reason) ? "yanked" : reason;

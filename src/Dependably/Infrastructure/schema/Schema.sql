@@ -70,7 +70,27 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- 'block_new' (refuse a deprecated version on cache miss — never fetch/cache/serve it — but
     -- keep serving already-cached versions), 'block_all' (block_new plus deny already-cached
     -- versions once deprecated). Both gates key on package_versions.deprecated being set.
-    block_deprecated          TEXT    NOT NULL DEFAULT 'off' CHECK (block_deprecated IN ('off', 'warn', 'block_new', 'block_all'))
+    block_deprecated          TEXT    NOT NULL DEFAULT 'off' CHECK (block_deprecated IN ('off', 'warn', 'block_new', 'block_all')),
+    -- Policy for versions carrying a malicious-package advisory (OSV MAL- ids, sourced from the
+    -- OpenSSF malicious-packages feed via the regular OSV scan). These advisories usually have
+    -- no CVSS score, so the max_osv_score_tolerance gate never sees them — this gate keys on the
+    -- advisory id prefix instead. 'block' (default) denies fetch and serve; 'warn' surfaces the
+    -- advisory in the UI only; 'off' disables the gate. A manual per-version allow override
+    -- still wins (false-positive escape hatch).
+    block_malicious           TEXT    NOT NULL DEFAULT 'block' CHECK (block_malicious IN ('off', 'warn', 'block')),
+    -- Policy for versions whose advisories alias a CVE in the CISA Known Exploited
+    -- Vulnerabilities catalog: exploited-in-the-wild, independent of CVSS score. 'off'
+    -- (default, back-compat) / 'warn' / 'block'. A manual per-version allow still wins.
+    block_kev                 TEXT    NOT NULL DEFAULT 'off' CHECK (block_kev IN ('off', 'warn', 'block')),
+    -- EPSS exploitation-probability ceiling (0.0–1.0). A version is blocked when the maximum
+    -- epss_score across its advisories exceeds this value. NULL = policy off (default).
+    max_epss_tolerance        REAL,
+    -- Running tally of hosted-artefact bytes for this tenant. Maintained atomically by the
+    -- publish path (reserve-before-write) and decremented on delete. Backfilled from
+    -- SUM(package_versions.size_bytes) on first access when the counter is 0 and the real
+    -- sum is positive. Used in place of a live aggregate query to close the TOCTOU race
+    -- in concurrent publish quota checks.
+    storage_used_bytes        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS instance_settings (
@@ -94,6 +114,9 @@ CREATE TABLE IF NOT EXISTS users (
     mfa_enabled INTEGER NOT NULL DEFAULT 0,
     password_reset_issued_at TEXT,
     language    TEXT,  -- NULL = inherit org_settings.default_language
+    -- Monotonic session-invalidation counter. Embedded in tenant JWTs as the `tver` claim
+    -- and bumped on password change so outstanding sessions go stale immediately.
+    token_version INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     UNIQUE (tenant_id, email)
 );
@@ -124,6 +147,10 @@ CREATE TABLE IF NOT EXISTS packages (
     purl_name   TEXT NOT NULL,   -- normalized per ecosystem
     is_proxy    INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    -- Upstream's declared latest version (npm dist-tags.latest / PyPI info.version), refreshed by
+    -- the background upstream-metadata pass. NULL when no upstream baseline is known.
+    upstream_latest_version    TEXT,
+    upstream_latest_checked_at TEXT,
     UNIQUE (org_id, ecosystem, purl_name)
 );
 
@@ -237,6 +264,47 @@ CREATE TABLE IF NOT EXISTS blocklist (
     UNIQUE (org_id, pattern)
 );
 
+-- Operator-reserved namespaces (dependency-confusion guard). A name matching a pattern for
+-- its ecosystem never consults upstream — no metadata merge, no proxy fetch. Patterns are
+-- exact names or trailing-`*` globs ('@acme/*', 'acme-*', 'Acme.*'); maven patterns use
+-- dot-boundary prefix semantics ('com.acme' also covers 'com.acme.*' groupIds).
+CREATE TABLE IF NOT EXISTS reserved_namespace (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem   TEXT NOT NULL,  -- 'npm' | 'pypi' | 'nuget' | 'maven'
+    pattern     TEXT NOT NULL,
+    created_by  TEXT REFERENCES users(id),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    UNIQUE (org_id, ecosystem, pattern)
+);
+
+-- Review queue for policy-gate blocks. Every automatic block (deprecated, release-age,
+-- malicious, KEV, EPSS, vuln-score — not manual blocks, which are already a human decision)
+-- upserts a pending row here while the request still returns 403, so an org admin can review
+-- and approve (sets the version's manual allow override) or deny (sets manual block).
+-- UNIQUE(org_id, purl) is the state machine: repeat blocks refresh the pending row via
+-- ON CONFLICT DO UPDATE ... WHERE state='pending' and never resurrect a decided one.
+-- package_version_id is NULL for first-fetch blocks where no version row exists yet; an
+-- approved version-less row unblocks the next first fetch of that purl.
+CREATE TABLE IF NOT EXISTS quarantine (
+    id                  TEXT PRIMARY KEY,
+    org_id              TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    package_version_id  TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
+    ecosystem           TEXT NOT NULL,
+    purl                TEXT NOT NULL,
+    gate                TEXT NOT NULL,  -- 'deprecated' | 'release_age' | 'malicious' | 'kev' | 'epss' | 'vuln_score'
+    detail              TEXT,           -- same JSON the blocked_* activity row carries
+    state               TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'approved', 'denied')),
+    decided_by          TEXT REFERENCES users(id),
+    decided_at          TEXT,
+    note                TEXT,           -- optional reviewer note recorded with the decision
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    UNIQUE (org_id, purl)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quarantine_org_state ON quarantine(org_id, state, updated_at DESC);
+
 -- Per-org upstream proxy registries. One ordered list per ecosystem; `position` ascending is
 -- priority (lowest tried first, falling through on miss/unreachable). An ecosystem with zero
 -- rows has proxying effectively disabled for that org. auth_type/username/secret are reserved
@@ -307,7 +375,16 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     osv_json        TEXT,           -- full OSV advisory JSON; source of truth for the rich detail panel
     published_at    TEXT,
     modified_at     TEXT,
-    fetched_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    fetched_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    -- Threat-feed enrichment, refreshed by ThreatFeedRefreshService against the advisory's CVE
+    -- aliases. is_kev = 1 when any alias is in the CISA Known Exploited Vulnerabilities catalog
+    -- (recomputed each pass, so catalog removals clear it). epss_score is the maximum FIRST.org
+    -- EPSS exploitation probability (0..1) across the aliases; NULL = no alias known to EPSS or
+    -- not yet checked. The *_checked_at stamps record the last refresh per feed.
+    is_kev          INTEGER NOT NULL DEFAULT 0,
+    kev_checked_at  TEXT,
+    epss_score      REAL,
+    epss_checked_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS package_version_vulns (
@@ -467,6 +544,23 @@ CREATE TABLE IF NOT EXISTS oci_tags (
 );
 CREATE INDEX IF NOT EXISTS idx_oci_tags_repository ON oci_tags(org_id, repository);
 
+-- In-progress OCI blob upload sessions (push). A `docker push` opens a session via
+-- POST /v2/{name}/blobs/uploads/, streams the blob via PATCH chunks, then finalizes with
+-- PUT ...?digest=. Blob bytes are staged on local disk (PROXY_STAGING_PATH) keyed by
+-- upload_id; this table carries the tenant binding (so a session can only be advanced by the
+-- org that opened it) and the running byte count used for cumulative upload-size enforcement.
+-- Rows are deleted on finalize or abort.
+CREATE TABLE IF NOT EXISTS oci_uploads (
+    upload_id      TEXT NOT NULL,
+    org_id         TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    repository     TEXT NOT NULL,
+    staging_path   TEXT NOT NULL,
+    received_bytes INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    PRIMARY KEY (upload_id, org_id)
+);
+CREATE INDEX IF NOT EXISTS idx_oci_uploads_org ON oci_uploads(org_id);
+
 -- SPDX license reference data. Seeded from an embedded JSON list (license-list-data) by
 -- SpdxLicenseSeeder on every boot when instance_settings.spdx_list_version differs from the
 -- embedded value. No FK from policy tables — admins must be able to allow/block identifiers
@@ -516,6 +610,14 @@ CREATE TABLE IF NOT EXISTS tenant_saml_config (
     role_attribute      TEXT,                          -- claim type to read roles from; NULL = built-in list
     role_mapping        TEXT,                          -- JSON object {"<idp value>": "owner|admin|member|auditor"}
     default_role        TEXT NOT NULL DEFAULT 'member', -- role when no mapping matches
+    -- Opt-in ceiling raise for IdP-driven role assignment: 0 = the IdP may auto-assign
+    -- member/auditor only; 1 = the IdP may also assign admin. 'owner' is never IdP-assignable.
+    idp_can_assign_admin INTEGER NOT NULL DEFAULT 0,
+    -- Stage of the last emitted cert-expiry alert for this tenant's effective IdP signing cert.
+    -- NULL = no alert emitted yet (or cert changed/cleared since the last alert). Tracks whether
+    -- the daily sweep needs to emit a new event for the current expiry window ('30','14','7','1',
+    -- 'expired'). Reset to NULL whenever the metadata cert or the override cert is replaced.
+    cert_expiry_alert_stage TEXT,
     updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 
@@ -532,6 +634,36 @@ CREATE TABLE IF NOT EXISTS saml_test_runs (
     consumed_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_saml_test_runs_expires ON saml_test_runs(expires_at);
+
+-- One-time-use store binding SP-initiated AuthnRequests to their responses. /saml/login inserts
+-- the AuthnRequest id; ACS consumes it by matching the response's InResponseTo. An unsolicited
+-- (IdP-initiated) or replayed response has no consumable pending row and is rejected — the SAML
+-- analogue of an OAuth state check. Rows expire after the request TTL and are pruned on write.
+CREATE TABLE IF NOT EXISTS saml_pending_requests (
+    request_id   TEXT PRIMARY KEY,
+    tenant_id    TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    issued_at    TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    consumed_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_saml_pending_requests_expires ON saml_pending_requests(expires_at);
+
+-- Replay guard for production SAML logins. ACS records each accepted assertion's signed ID
+-- (per tenant) the first time it is seen; presenting the same assertion again within its
+-- validity window finds the row already present and is rejected. expires_at tracks the
+-- assertion's NotOnOrAfter so the guard remembers it at least as long as it could be replayed;
+-- rows are pruned on write once expired. The key is (tenant_id, assertion_id): each tenant has
+-- exactly one IdP (tenant_saml_config is keyed by org_id), so idp_entity_id is recorded for
+-- audit but is intentionally not part of the key.
+CREATE TABLE IF NOT EXISTS saml_consumed_assertions (
+    tenant_id     TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    assertion_id  TEXT NOT NULL,
+    idp_entity_id TEXT,
+    consumed_at   TEXT NOT NULL,
+    expires_at    TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, assertion_id)
+);
+CREATE INDEX IF NOT EXISTS idx_saml_consumed_assertions_expires ON saml_consumed_assertions(expires_at);
 
 -- IdP-issued identities linked to local users. Identity is (idp_entity_id, nameid) — never
 -- email. NameID is the IdP's stable subject identifier; email can change in the IdP without
@@ -727,6 +859,46 @@ CREATE TABLE IF NOT EXISTS upstream_negative_cache (
     fetched_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     PRIMARY KEY (url_key, ecosystem)
 );
+
+-- Pre-computed dashboard aggregates, one row per org. The /api/v1/stats endpoint
+-- reads this snapshot instead of running the eight live aggregate queries in
+-- PackageAnalyticsRepository.GetOrgStatsAsync on every page load; StatsRefreshService
+-- recomputes it per org on a fixed interval. stats_json holds a serialized OrgStats.
+CREATE TABLE IF NOT EXISTS org_stats_snapshot (
+    org_id      TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    stats_json  TEXT NOT NULL,
+    computed_at TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL DEFAULT 0
+);
+
+-- npm dist-tag registry. One row per (package, tag); tag names are freeform strings
+-- npm sends on `npm publish --tag <tag>`. UNIQUE(package_id, tag) enforces one version
+-- per tag per package. org_id is denormalized from packages so org_id-scoped queries
+-- satisfy the OrgIdFiltering compliance gate without joining through packages.
+CREATE TABLE IF NOT EXISTS npm_dist_tags (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    package_id  TEXT NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+    tag         TEXT NOT NULL,
+    version     TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    UNIQUE (package_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_npm_dist_tags_org ON npm_dist_tags(org_id, package_id);
+
+-- Cargo sparse index metadata. One row per package_versions row carrying the full
+-- newline-delimited JSON index line for that version. The index line encodes deps,
+-- features, cksum, yanked, and links as defined by the Cargo sparse registry spec.
+-- Tenant-scoped via JOIN to packages.org_id; every query must join through package_versions
+-- → packages and filter on packages.org_id.
+CREATE TABLE IF NOT EXISTS cargo_metadata (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_id  TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    index_line  TEXT NOT NULL,  -- full JSON line for this version as served in the sparse index
+    UNIQUE(version_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cargo_metadata_version ON cargo_metadata(version_id);
 
 -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
 -- Those are no-ops on fresh installs (duplicate column error is swallowed / IF NOT EXISTS).

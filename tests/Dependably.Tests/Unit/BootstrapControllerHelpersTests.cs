@@ -1,6 +1,5 @@
 using Dependably.Api;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -24,6 +23,9 @@ public sealed class BootstrapControllerHelpersTests
     [InlineData("multi", "multi")]
     [InlineData("MULTI", "multi")]
     [InlineData(" multi ", "multi")]
+    [InlineData("header", "multi")]
+    [InlineData("HEADER", "multi")]
+    [InlineData(" header ", "multi")]
     [InlineData("single", "single")]
     [InlineData("anything-else", "single")]
     [InlineData("", "single")]
@@ -37,7 +39,7 @@ public sealed class BootstrapControllerHelpersTests
     [Fact]
     public void ResolveApexHost_PrefersApexHostOverBaseUrl()
     {
-        var apex = BootstrapController.ResolveApexHost(Cfg(
+        string? apex = BootstrapController.ResolveApexHost(Cfg(
             ("APEX_HOST", "Apex.Example.Com"),
             ("BASE_URL", "https://other.example.com")));
         Assert.Equal("apex.example.com", apex);
@@ -46,7 +48,7 @@ public sealed class BootstrapControllerHelpersTests
     [Fact]
     public void ResolveApexHost_FallsBackToBaseUrlHost()
     {
-        var apex = BootstrapController.ResolveApexHost(Cfg(("BASE_URL", "https://APEX.example.com:8443/")));
+        string? apex = BootstrapController.ResolveApexHost(Cfg(("BASE_URL", "https://APEX.example.com:8443/")));
         Assert.Equal("apex.example.com", apex);
     }
 
@@ -65,7 +67,7 @@ public sealed class BootstrapControllerHelpersTests
     [Fact]
     public void ResolveApexHost_BlankApexHost_FallsThroughToBaseUrl()
     {
-        var apex = BootstrapController.ResolveApexHost(Cfg(
+        string? apex = BootstrapController.ResolveApexHost(Cfg(
             ("APEX_HOST", "   "),
             ("BASE_URL", "https://fallback.example.com")));
         Assert.Equal("fallback.example.com", apex);

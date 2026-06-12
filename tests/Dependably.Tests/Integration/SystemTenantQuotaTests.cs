@@ -21,7 +21,7 @@ public sealed class SystemTenantQuotaTests : IClassFixture<DependablyMultiFactor
 
     private async Task<(HttpClient client, string slug)> CreateTenantAsync()
     {
-        var slug = "q-" + Guid.NewGuid().ToString("N")[..8];
+        string slug = "q-" + Guid.NewGuid().ToString("N")[..8];
         var client = await _factory.CreateSystemAdminClient();
         var resp = await client.PostAsJsonAsync("/api/v1/system/tenants", new
         {
@@ -115,7 +115,7 @@ public sealed class SystemTenantQuotaTests : IClassFixture<DependablyMultiFactor
         var resp = await tenantClient.PatchAsJsonAsync(
             $"/api/v1/system/tenants/{slug}/storage-quota", new { quotaBytes = 1_000L });
         Assert.True(
-            resp.StatusCode == HttpStatusCode.NotFound || resp.StatusCode == HttpStatusCode.Unauthorized,
+            resp.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Unauthorized,
             $"Unauthenticated tenant call to /system/tenants/.../storage-quota must NOT succeed; got {(int)resp.StatusCode}.");
     }
 }

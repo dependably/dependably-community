@@ -3,7 +3,6 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -21,7 +20,7 @@ public sealed class UpstreamRegistryApiTests : IClassFixture<DependablyFactory>
 
     private async Task<HttpClient> AdminClient()
     {
-        var jwt = await _factory.CreateAdminJwt();
+        string jwt = await _factory.CreateAdminJwt();
         var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         return c;
@@ -29,8 +28,8 @@ public sealed class UpstreamRegistryApiTests : IClassFixture<DependablyFactory>
 
     private async Task<HttpClient> MemberClient()
     {
-        var id = await _factory.CreateUser($"ur-{Guid.NewGuid():N}@example.com", "Password12345");
-        var jwt = await _factory.CreateUserJwt(id, "member");
+        string id = await _factory.CreateUser($"ur-{Guid.NewGuid():N}@example.com", "Password12345");
+        string jwt = await _factory.CreateUserJwt(id, "member");
         return _factory.CreateClientWithBearer(jwt);
     }
 
@@ -38,19 +37,19 @@ public sealed class UpstreamRegistryApiTests : IClassFixture<DependablyFactory>
     public async Task AddListReorderDelete_RoundTrip()
     {
         using var c = await AdminClient();
-        var urlA = $"https://mirror-a-{Guid.NewGuid():N}.example.com";
-        var urlB = $"https://mirror-b-{Guid.NewGuid():N}.example.com";
+        string urlA = $"https://mirror-a-{Guid.NewGuid():N}.example.com";
+        string urlB = $"https://mirror-b-{Guid.NewGuid():N}.example.com";
 
         var addA = await c.PostAsJsonAsync("/api/v1/upstream-registries",
             new { ecosystem = "pypi", url = urlA, name = "A" });
         Assert.Equal(HttpStatusCode.Created, addA.StatusCode);
-        var idA = (await JsonDocument.ParseAsync(await addA.Content.ReadAsStreamAsync()))
+        string? idA = (await JsonDocument.ParseAsync(await addA.Content.ReadAsStreamAsync()))
             .RootElement.GetProperty("id").GetString();
 
         var addB = await c.PostAsJsonAsync("/api/v1/upstream-registries",
             new { ecosystem = "pypi", url = urlB });
         Assert.Equal(HttpStatusCode.Created, addB.StatusCode);
-        var idB = (await JsonDocument.ParseAsync(await addB.Content.ReadAsStreamAsync()))
+        string? idB = (await JsonDocument.ParseAsync(await addB.Content.ReadAsStreamAsync()))
             .RootElement.GetProperty("id").GetString();
 
         // Reorder so B precedes A.
@@ -89,7 +88,7 @@ public sealed class UpstreamRegistryApiTests : IClassFixture<DependablyFactory>
     {
         using var c = await AdminClient();
         var resp = await c.PostAsJsonAsync("/api/v1/upstream-registries",
-            new { ecosystem = "cargo", url = "https://crates.io" });
+            new { ecosystem = "conan", url = "https://conan.io/center" });
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
     }
 

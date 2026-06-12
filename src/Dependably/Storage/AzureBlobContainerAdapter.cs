@@ -1,5 +1,7 @@
 using System.Runtime.CompilerServices;
+using Azure;
 using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Models;
 
 namespace Dependably.Storage;
 
@@ -27,9 +29,55 @@ public sealed class AzureBlobContainerAdapter : IAzureBlobContainer
     public async Task<Stream?> DownloadOrNullAsync(string key, CancellationToken ct)
     {
         var blob = _container.GetBlobClient(key);
-        if (!await blob.ExistsAsync(ct)) return null;
+        if (!await blob.ExistsAsync(ct))
+        {
+            return null;
+        }
+
         var response = await blob.DownloadStreamingAsync(cancellationToken: ct);
         return response.Value.Content;
+    }
+
+    public async Task<(Stream? Content, long TotalLength)> DownloadRangeOrNullAsync(
+        string key, long from, long to, CancellationToken ct)
+    {
+        var blob = _container.GetBlobClient(key);
+
+        // Fetch the blob properties first to get the total size for Content-Range.
+        Response<BlobProperties> propsResponse;
+        try
+        {
+            propsResponse = await blob.GetPropertiesAsync(cancellationToken: ct);
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return (null, 0);
+        }
+
+        long totalLength = propsResponse.Value.ContentLength;
+        long effectiveTo = Math.Min(to, totalLength - 1);
+
+        if (from > effectiveTo || totalLength == 0)
+        {
+            // Range starts past the end — caller will emit 416.
+            return (Stream.Null, totalLength);
+        }
+
+        // Azure HttpRange uses offset + length (not inclusive end).
+        long rangeLength = effectiveTo - from + 1;
+        var range = new HttpRange(from, rangeLength);
+
+        try
+        {
+            var response = await blob.DownloadStreamingAsync(
+                new BlobDownloadOptions { Range = range },
+                cancellationToken: ct);
+            return (response.Value.Content, totalLength);
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return (null, 0);
+        }
     }
 
     public async Task<bool> ExistsAsync(string key, CancellationToken ct)
@@ -42,7 +90,9 @@ public sealed class AzureBlobContainerAdapter : IAzureBlobContainer
         [EnumeratorCancellation] CancellationToken ct)
     {
         await foreach (var item in _container.GetBlobsAsync(cancellationToken: ct))
+        {
             yield return item.Properties.ContentLength ?? 0;
+        }
     }
 
     public async IAsyncEnumerable<BlobInfo> EnumerateBlobsAsync(

@@ -26,12 +26,16 @@ public sealed class RedisOptions
     public ConfigurationOptions BuildConfigurationOptions()
     {
         if (!IsConfigured)
+        {
             throw new InvalidOperationException("Redis is not configured (REDIS_CONNECTION_STRING is not set).");
+        }
 
         var opts = ConfigurationOptions.Parse(ConnectionString!);
 
         if (!string.IsNullOrWhiteSpace(Password))
+        {
             opts.Password = Password;
+        }
 
         opts.Ssl = Ssl;
         opts.DefaultDatabase = Database;

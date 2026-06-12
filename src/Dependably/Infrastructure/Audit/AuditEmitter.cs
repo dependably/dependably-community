@@ -76,14 +76,14 @@ public sealed class AuditEmitter : IAuditEmitter
             // SiemEvent shape; the typed payload travels in Detail, the forwarder formats
             // it (NDJSON / CEF / RFC5424).
             _siemQueue?.TryEnqueue(new SiemEvent(
-                Id:        ev.EventId,
-                Action:    ev.EventType,
-                Scope:     ev.OrgId is null ? "system" : "tenant",
-                OrgId:     ev.OrgId,
-                ActorId:   ev.ActorId,
+                Id: ev.EventId,
+                Action: ev.EventType,
+                Scope: ev.OrgId is null ? "system" : "tenant",
+                OrgId: ev.OrgId,
+                ActorId: ev.ActorId,
                 Ecosystem: null,
-                Purl:      null,
-                Detail:    ev.Payload,
+                Purl: null,
+                Detail: ev.Payload,
                 CreatedAt: ev.OccurredAt));
         }
         catch (Exception ex)
@@ -100,7 +100,6 @@ public sealed class AuditEmitter : IAuditEmitter
 
     private static string? Truncate(string? s, int max)
     {
-        if (s is null) return null;
-        return s.Length <= max ? s : s[..max];
+        return s is null ? null : s.Length <= max ? s : s[..max];
     }
 }

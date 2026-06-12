@@ -37,18 +37,22 @@ public sealed class SsrfConnectCallback
     {
         // IP literals need no DNS lookup; hostnames are resolved once and dialed from the
         // same result set, leaving no second resolution for a rebinding attacker to flip.
-        IPAddress[] candidates = IPAddress.TryParse(host, out var literal)
+        var candidates = IPAddress.TryParse(host, out var literal)
             ? [literal]
             : await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
 
         if (candidates.Length == 0)
+        {
             throw new SsrfBlockedException(host);
+        }
 
         // Validate EVERY candidate: a split-horizon / rebinding resolver returning one public
         // and one internal address must not be able to have the internal one dialed.
         var blocked = candidates.FirstOrDefault(_isBlocked);
         if (blocked is not null)
+        {
             throw new SsrfBlockedException($"{host} -> {blocked}");
+        }
 
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
         try

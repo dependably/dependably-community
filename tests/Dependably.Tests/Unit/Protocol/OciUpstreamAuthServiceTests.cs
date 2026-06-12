@@ -6,7 +6,6 @@ using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Protocol;
 
@@ -50,8 +49,8 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         string? password = null)
         => new()
         {
-            Name     = "test",
-            Host     = host,
+            Name = "test",
+            Host = host,
             AuthType = authType,
             Username = username,
             Password = password,
@@ -60,7 +59,7 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
 
     private static HttpResponseMessage JsonResponse(object body, HttpStatusCode status = HttpStatusCode.OK)
     {
-        var json = JsonSerializer.Serialize(body);
+        string json = JsonSerializer.Serialize(body);
         return new HttpResponseMessage(status)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json"),
@@ -78,7 +77,7 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         using var svc = Build();
         var upstream = MakeUpstream(OciAuthType.Anonymous, host: "ghcr.io");
 
-        var result = await svc.GetAuthorizationAsync(upstream, "owner/image", "pull", default);
+        string? result = await svc.GetAuthorizationAsync(upstream, "owner/image", "pull", default);
 
         Assert.Null(result);
     }
@@ -91,9 +90,9 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         using var svc = Build();
         var upstream = MakeUpstream(OciAuthType.Basic, username: "alice", password: "hunter2");
 
-        var result = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
+        string? result = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
 
-        var expected = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("alice:hunter2"));
+        string expected = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("alice:hunter2"));
         Assert.Equal(expected, result);
     }
 
@@ -116,7 +115,7 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         using var svc = Build();
         var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io");
 
-        var result = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
+        string? result = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
 
         Assert.Equal("Bearer " + tokenValue, result);
     }
@@ -135,8 +134,8 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         using var svc = Build();
         var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io");
 
-        var first  = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
-        var second = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
+        string? first = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
+        string? second = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
 
         Assert.Equal("Bearer cached-token", first);
         Assert.Equal("Bearer cached-token", second);
@@ -163,12 +162,12 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         using var svc = Build();
         var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io");
 
-        var first = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
+        string? first = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
         Assert.Equal("Bearer token-v1", first);
 
         svc.InvalidateToken(upstream, "library/ubuntu", "pull");
 
-        var second = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
+        string? second = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
         Assert.Equal("Bearer token-v2", second);
     }
 
@@ -182,7 +181,7 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         using var svc = Build();
         var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "internal.registry.local");
 
-        var result = await svc.GetAuthorizationAsync(upstream, "team/app", "pull", default);
+        string? result = await svc.GetAuthorizationAsync(upstream, "team/app", "pull", default);
 
         Assert.Null(result);
     }
@@ -213,14 +212,21 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
 
         public void Enqueue(params HttpResponseMessage[] responses)
         {
-            foreach (var r in responses) _queue.Enqueue(r);
+            foreach (var r in responses)
+            {
+                _queue.Enqueue(r);
+            }
         }
 
         public HttpClient CreateClient(string name) => new(new DequeueHandler(_queue));
 
         public void Dispose()
         {
-            foreach (var r in _queue) r.Dispose();
+            foreach (var r in _queue)
+            {
+                r.Dispose();
+            }
+
             _queue.Clear();
         }
 
@@ -232,10 +238,10 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
             protected override Task<HttpResponseMessage> SendAsync(
                 HttpRequestMessage request, CancellationToken cancellationToken)
             {
-                if (!_q.TryDequeue(out var resp))
-                    throw new InvalidOperationException(
-                        $"No more queued responses (unexpected request to {request.RequestUri})");
-                return Task.FromResult(resp);
+                return !_q.TryDequeue(out var resp)
+                    ? throw new InvalidOperationException(
+                        $"No more queued responses (unexpected request to {request.RequestUri})")
+                    : Task.FromResult(resp);
             }
         }
     }

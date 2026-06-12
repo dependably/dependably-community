@@ -1,8 +1,8 @@
 using System.IO.Compression;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
-using NuGet.Versioning;
 using Dependably.Security;
+using NuGet.Versioning;
 
 namespace Dependably.Protocol;
 
@@ -36,9 +36,11 @@ public static partial class NuGetNupkgValidator
 
             if (isSymbol)
             {
-                var hasPdb = zip.Entries.Any(e => e.Name.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase));
+                bool hasPdb = zip.Entries.Any(e => e.Name.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase));
                 if (!hasPdb)
+                {
                     return (ValidationResult.Fail("content", ".snupkg must contain at least one .pdb file"), null, null);
+                }
             }
 
             var nuspecEntry = zip.Entries.FirstOrDefault(e =>
@@ -46,36 +48,50 @@ public static partial class NuGetNupkgValidator
                 !e.FullName.Contains('/'));
 
             if (nuspecEntry is null)
+            {
                 return (ValidationResult.Fail("content", "No .nuspec found at ZIP root"), null, null);
+            }
 
             using var nuspecStream = nuspecEntry.Open();
             var doc = XDocument.Load(nuspecStream);
-            var ns = doc.Root?.Name.NamespaceName ?? "";
+            string ns = doc.Root?.Name.NamespaceName ?? "";
 
             if (!KnownNuspecNamespaces.Contains(ns))
+            {
                 return (ValidationResult.Fail("content", $"Unknown nuspec namespace: {ns}"), null, null);
+            }
 
             XNamespace xns = ns;
             var metadata = doc.Root?.Element(xns + "metadata");
-            var id = metadata?.Element(xns + "id")?.Value?.Trim();
-            var version = metadata?.Element(xns + "version")?.Value?.Trim();
-            var description = metadata?.Element(xns + "description")?.Value?.Trim();
-            var authors = metadata?.Element(xns + "authors")?.Value?.Trim();
+            string? id = metadata?.Element(xns + "id")?.Value?.Trim();
+            string? version = metadata?.Element(xns + "version")?.Value?.Trim();
+            string? description = metadata?.Element(xns + "description")?.Value?.Trim();
+            string? authors = metadata?.Element(xns + "authors")?.Value?.Trim();
 
             if (string.IsNullOrEmpty(id) || id.Length > 100)
+            {
                 return (ValidationResult.Fail("id", "id must be 1-100 characters"), null, null);
+            }
 
             if (!IdRegex().IsMatch(id))
+            {
                 return (ValidationResult.Fail("id", "id contains invalid characters"), null, null);
+            }
 
             if (!NuGetVersion.TryParse(version, out _))
+            {
                 return (ValidationResult.Fail("version", $"Invalid NuGet version: {version}"), null, null);
+            }
 
             if (string.IsNullOrEmpty(description))
+            {
                 return (ValidationResult.Fail("description", "description is required"), null, null);
+            }
 
             if (string.IsNullOrEmpty(authors))
+            {
                 return (ValidationResult.Fail("authors", "authors is required"), null, null);
+            }
 
             return (ValidationResult.Ok(), id, version);
         }

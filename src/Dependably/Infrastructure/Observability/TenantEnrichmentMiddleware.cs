@@ -43,15 +43,19 @@ public sealed class TenantEnrichmentMiddleware
                 pushes.Add(LogContext.PushProperty("TenantId", tenantId));
                 pushes.Add(LogContext.PushProperty("OrgId", tenantId));
                 if (tenant.TenantSlug is { } slug)
+                {
                     pushes.Add(LogContext.PushProperty("TenantSlug", slug));
+                }
             }
 
             await _next(context);
         }
         finally
         {
-            for (var i = pushes.Count - 1; i >= 0; i--)
+            for (int i = pushes.Count - 1; i >= 0; i--)
+            {
                 pushes[i].Dispose();
+            }
         }
     }
 }

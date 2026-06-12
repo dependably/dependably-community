@@ -18,12 +18,12 @@ public sealed class InviteRepository
     public async Task<(string RawToken, InviteRecord Record)> CreateAsync(
         string orgId, string email, string createdByUserId, string role = "member", CancellationToken ct = default)
     {
-        var raw = TokenGenerator.Generate();
-        var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
-        var hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
-        var id = Guid.NewGuid().ToString("N");
+        string raw = TokenGenerator.Generate();
+        byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
+        string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
+        string id = Guid.NewGuid().ToString("N");
         var expiresAt = DateTimeOffset.UtcNow.AddHours(24);
-        var expiresStr = expiresAt.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string expiresStr = expiresAt.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
@@ -35,8 +35,14 @@ public sealed class InviteRepository
 
         return (raw, new InviteRecord
         {
-            Id = id, OrgId = orgId, Email = email, Role = role, CreatedBy = createdByUserId,
-            CreatedAt = DateTimeOffset.UtcNow, ExpiresAt = expiresAt, AcceptedAt = null
+            Id = id,
+            OrgId = orgId,
+            Email = email,
+            Role = role,
+            CreatedBy = createdByUserId,
+            CreatedAt = DateTimeOffset.UtcNow,
+            ExpiresAt = expiresAt,
+            AcceptedAt = null
         });
     }
 
@@ -51,19 +57,30 @@ public sealed class InviteRepository
             new { orgId });
 
         return rows.Select(r => new InviteRecord
-            {
-                Id = r.Id, OrgId = r.OrgId, Email = r.Email, Role = r.Role, CreatedBy = r.CreatedBy,
-                CreatedAt = DateTimeOffset.Parse(r.CreatedAt),
-                ExpiresAt = DateTimeOffset.Parse(r.ExpiresAt),
-                AcceptedAt = r.AcceptedAt is not null ? DateTimeOffset.Parse(r.AcceptedAt) : null
-            })
+        {
+            Id = r.Id,
+            OrgId = r.OrgId,
+            Email = r.Email,
+            Role = r.Role,
+            CreatedBy = r.CreatedBy,
+            CreatedAt = DateTimeOffset.Parse(r.CreatedAt),
+            ExpiresAt = DateTimeOffset.Parse(r.ExpiresAt),
+            AcceptedAt = r.AcceptedAt is not null ? DateTimeOffset.Parse(r.AcceptedAt) : null
+        })
             .ToList();
     }
 
-    public async Task DeleteAsync(string inviteId, CancellationToken ct = default)
+    /// <summary>
+    /// Deletes a pending invite, scoped to <paramref name="orgId"/>. Returns the number of rows
+    /// removed (0 when the id belongs to another tenant or does not exist) so the caller can 404
+    /// without revealing cross-tenant existence. The id is a global PK, so the org_id predicate is
+    /// what enforces tenant isolation here.
+    /// </summary>
+    public async Task<int> DeleteAsync(string orgId, string inviteId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync("DELETE FROM invites WHERE id = @id", new { id = inviteId });
+        return await conn.ExecuteAsync(
+            "DELETE FROM invites WHERE id = @id AND org_id = @orgId", new { id = inviteId, orgId });
     }
 
     /// <summary>
@@ -72,30 +89,44 @@ public sealed class InviteRepository
     /// </summary>
     public async Task<InviteRecord?> AcceptAsync(string rawToken, CancellationToken ct = default)
     {
-        var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
-        var hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
+        byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
+        string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
 
         await using var conn = await _db.OpenAsync(ct);
-        var row = await conn.QuerySingleOrDefaultAsync<(string Id, string OrgId, string Email, string Role, string CreatedBy, string CreatedAt, string ExpiresAt, string? AcceptedAt)>(
+        var (Id, OrgId, Email, Role, CreatedBy, CreatedAt, ExpiresAt, AcceptedAt) = await conn.QuerySingleOrDefaultAsync<(string Id, string OrgId, string Email, string Role, string CreatedBy, string CreatedAt, string ExpiresAt, string? AcceptedAt)>(
             "SELECT id, org_id, email, role, created_by, created_at, expires_at, accepted_at FROM invites WHERE token_hash = @hash",
             new { hash });
 
-        if (row.Id is null) return null;
+        if (Id is null)
+        {
+            return null;
+        }
 
-        var expiresAt = DateTimeOffset.Parse(row.ExpiresAt);
-        if (expiresAt < DateTimeOffset.UtcNow) return null;
-        if (row.AcceptedAt is not null) return null;
+        var expiresAt = DateTimeOffset.Parse(ExpiresAt);
+        if (expiresAt < DateTimeOffset.UtcNow)
+        {
+            return null;
+        }
 
-        var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        if (AcceptedAt is not null)
+        {
+            return null;
+        }
+
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
         await conn.ExecuteAsync(
             "UPDATE invites SET accepted_at = @now WHERE id = @id",
-            new { now, id = row.Id });
+            new { now, id = Id });
 
         return new InviteRecord
         {
-            Id = row.Id, OrgId = row.OrgId, Email = row.Email, Role = row.Role,
-            CreatedBy = row.CreatedBy,
-            CreatedAt = DateTimeOffset.Parse(row.CreatedAt), ExpiresAt = expiresAt,
+            Id = Id,
+            OrgId = OrgId,
+            Email = Email,
+            Role = Role,
+            CreatedBy = CreatedBy,
+            CreatedAt = DateTimeOffset.Parse(CreatedAt),
+            ExpiresAt = expiresAt,
             AcceptedAt = DateTimeOffset.UtcNow
         };
     }

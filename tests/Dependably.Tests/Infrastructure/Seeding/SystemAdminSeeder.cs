@@ -8,8 +8,8 @@ public static class SystemAdminSeeder
     public static async Task<string> InsertAsync(
         IMetadataStore db, string email, string password = "Password12345", CancellationToken ct = default)
     {
-        var id = Guid.NewGuid().ToString("N");
-        var hash = BCrypt.Net.BCrypt.HashPassword(password, workFactor: 4);
+        string id = Guid.NewGuid().ToString("N");
+        string hash = BCrypt.Net.BCrypt.HashPassword(password, workFactor: 4);
         await using var conn = await db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "INSERT INTO system_admins (id, email, password_hash) VALUES (@id, @email, @hash)",

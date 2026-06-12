@@ -24,7 +24,7 @@ public sealed class AllowlistRepository
     public async Task<AllowlistEntry> AddAsync(
         string orgId, string purlPattern, CancellationToken ct = default)
     {
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
@@ -36,9 +36,16 @@ public sealed class AllowlistRepository
         return new AllowlistEntry { Id = id, OrgId = orgId, PurlPattern = purlPattern, CreatedAt = DateTimeOffset.UtcNow };
     }
 
-    public async Task DeleteAsync(string entryId, CancellationToken ct = default)
+    /// <summary>
+    /// Deletes an allowlist entry, scoped to <paramref name="orgId"/>. Returns the number of rows
+    /// removed (0 when the id belongs to another tenant or does not exist) so the caller can 404
+    /// without revealing cross-tenant existence. The id is a global PK, so the org_id predicate is
+    /// what enforces tenant isolation here.
+    /// </summary>
+    public async Task<int> DeleteAsync(string orgId, string entryId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync("DELETE FROM allowlist WHERE id = @id", new { id = entryId });
+        return await conn.ExecuteAsync(
+            "DELETE FROM allowlist WHERE id = @id AND org_id = @orgId", new { id = entryId, orgId });
     }
 }

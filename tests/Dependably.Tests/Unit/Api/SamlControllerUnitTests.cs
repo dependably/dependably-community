@@ -13,7 +13,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -86,13 +85,13 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
 
         if (cookies is not null)
         {
-            var raw = string.Join("; ", cookies.Select(kv => $"{kv.Key}={kv.Value}"));
+            string raw = string.Join("; ", cookies.Select(kv => $"{kv.Key}={kv.Value}"));
             http.Request.Headers.Cookie = raw;
         }
 
         if (queryParams is not null && queryParams.Count > 0)
         {
-            var qs = string.Join("&", queryParams.Select(kv =>
+            string qs = string.Join("&", queryParams.Select(kv =>
                 $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
             http.Request.QueryString = new QueryString("?" + qs);
         }
@@ -133,7 +132,10 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         var http = new DefaultHttpContext();
         http.Request.Scheme = "https";
         http.Request.Host = new HostString("apex.example.test");
-        if (tenant is not null) http.Items[TenantContext.HttpItemsKey] = tenant;
+        if (tenant is not null)
+        {
+            http.Items[TenantContext.HttpItemsKey] = tenant;
+        }
 
         return new SamlController(samlConfig, login, guard, _dataProtection,
             NullLogger<SamlController>.Instance, urls)
@@ -228,7 +230,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Metadata_TenantWithoutConfig_ReturnsXmlWithDefaultNameIdFormat()
     {
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         var sut = NewControllerForTenant(orgId, "acme");
 
         var result = await sut.Metadata(CancellationToken.None);
@@ -242,7 +244,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Metadata_TenantWithConfiguredNameIdFormat_EmitsConfiguredFormat()
     {
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, nameIdFormat: "urn:oasis:names:tc:SAML:2.0:nameid-format:transient");
         var sut = NewControllerForTenant(orgId, "acme");
 
@@ -264,7 +266,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         // No principal → guard should reject before any redirect happens. The exact failure
         // type isn't fixed (UnauthorizedResult / NotFoundResult depending on tenant context),
         // but the redirect path MUST NOT be taken — that would prove the guard ran.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: true);
         var sut = NewControllerForTenant(orgId, "acme",
             queryParams: new() { ["test"] = testValue });
@@ -282,7 +284,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     {
         // ?test=0 / ?test=false should NOT trigger test mode — the controller should fall
         // through to the Enabled gate. With enabled=false this produces a 404 Problem.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true);
         var sut = NewControllerForTenant(orgId, "acme",
             queryParams: new() { ["test"] = testValue });
@@ -296,7 +298,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     public async Task Login_NullTest_TreatedAsRealLogin()
     {
         // Default param value (null) is the real-login path.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true);
         var sut = NewControllerForTenant(orgId, "acme");
 
@@ -318,7 +320,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Login_NoConfigRow_ReturnsNotConfigured404()
     {
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         var sut = NewControllerForTenant(orgId, "acme");
 
         var result = await sut.Login(test: null, ct: CancellationToken.None);
@@ -333,7 +335,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     {
         // IsSamlConfigured requires entityId AND ssoUrl AND signing cert. Hits the
         // ssoUrl-missing predicate in the && chain.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await using (var conn = await _fixture.Store.OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -351,7 +353,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Login_ConfiguredButDisabled_NonTest_Returns404Disabled()
     {
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true);
         var sut = NewControllerForTenant(orgId, "acme");
 
@@ -365,7 +367,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Login_TestMode_Unauthenticated_GuardReturnsNotAuthorized()
     {
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: true);
         var sut = NewControllerForTenant(orgId, "acme");
 
@@ -378,9 +380,9 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     public async Task Login_TestMode_Member_GuardForbids()
     {
         // tenant:configure capability is owner/admin only — a 'member' principal is rejected.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: true);
-        var userId = await UserSeeder.InsertAsync(_fixture.Store, orgId,
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId,
             $"member-{Guid.NewGuid():N}@x.test", role: "member");
         var sut = NewControllerForTenant(orgId, "acme",
             user: BuildPrincipal(userId, orgId, role: "member"));
@@ -392,9 +394,9 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Login_TestMode_Owner_RedirectsToIdpAndIssuesTestRun()
     {
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true); // disabled but allowed in test
-        var userId = await UserSeeder.InsertAsync(_fixture.Store, orgId,
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId,
             $"owner-{Guid.NewGuid():N}@x.test", role: "owner");
         var sut = NewControllerForTenant(orgId, "acme",
             user: BuildPrincipal(userId, orgId, role: "owner"));
@@ -406,12 +408,12 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
 
         // A saml_test_runs row was issued — covers IssueTestRunAsync wiring + SetTestCookieAsync.
         await using var conn = await _fixture.Store.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM saml_test_runs WHERE tenant_id = @o", new { o = orgId });
         Assert.Equal(1, count);
 
         // Cookie also set (Set-Cookie header). dependably_saml_test cookie has a protected payload.
-        var setCookie = sut.ControllerContext.HttpContext.Response.Headers.SetCookie.ToString();
+        string setCookie = sut.ControllerContext.HttpContext.Response.Headers.SetCookie.ToString();
         Assert.Contains("dependably_saml_test=", setCookie);
     }
 
@@ -420,9 +422,9 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     {
         // Covers the User.FindFirst("sub") fallback in SetTestCookieAsync when
         // NameIdentifier is absent — the actor still resolves and Login returns a redirect.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: true);
-        var userId = await UserSeeder.InsertAsync(_fixture.Store, orgId,
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId,
             $"sub-{Guid.NewGuid():N}@x.test", role: "owner");
         var principal = new ClaimsPrincipal(new ClaimsIdentity(
             [
@@ -441,7 +443,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         Assert.IsType<RedirectResult>(result);
 
         await using var conn = await _fixture.Store.OpenAsync();
-        var actor = await conn.ExecuteScalarAsync<string?>(
+        string? actor = await conn.ExecuteScalarAsync<string?>(
             "SELECT actor_id FROM saml_test_runs WHERE tenant_id = @o", new { o = orgId });
         Assert.Equal(userId, actor);
     }
@@ -449,7 +451,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Login_NonTest_ConfiguredAndEnabled_RedirectsToIdpWithoutRelayState()
     {
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: true);
         var sut = NewControllerForTenant(orgId, "acme");
 
@@ -485,13 +487,13 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     {
         // Forge a test_runs row that's ALREADY been consumed. TryConsumeTestRunAsync
         // returns false → controller redirects with test_session_invalid.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true);
-        var cid = Guid.NewGuid().ToString("N");
+        string cid = Guid.NewGuid().ToString("N");
         await using (var conn = await _fixture.Store.OpenAsync())
         {
-            var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-            var expires = DateTimeOffset.UtcNow.AddMinutes(10).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string expires = DateTimeOffset.UtcNow.AddMinutes(10).ToString("yyyy-MM-ddTHH:mm:ssZ");
             await conn.ExecuteAsync(
                 "INSERT INTO saml_test_runs (cid, tenant_id, actor_id, issued_at, expires_at, consumed_at) " +
                 "VALUES (@cid, @tid, @actor, @issued, @expires, @consumed)",
@@ -519,9 +521,9 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     public async Task Acs_TestMode_RelayStateForExpiredCid_RedirectsTestSessionInvalid()
     {
         // expires_at in the past — UPDATE matches zero rows.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true);
-        var cid = Guid.NewGuid().ToString("N");
+        string cid = Guid.NewGuid().ToString("N");
         await using (var conn = await _fixture.Store.OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -548,11 +550,14 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Acs_TestMode_UnknownRelayCid_RedirectsTestSessionInvalid()
     {
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true);
         var sut = NewControllerForTenant(orgId, "acme",
-            queryParams: new() { ["RelayState"] = "test:" + Guid.NewGuid().ToString("N"),
-                                  ["SAMLResponse"] = "garbage" });
+            queryParams: new()
+            {
+                ["RelayState"] = "test:" + Guid.NewGuid().ToString("N"),
+                ["SAMLResponse"] = "garbage"
+            });
 
         var result = await sut.Acs(CancellationToken.None);
         var redirect = Assert.IsType<RedirectResult>(result);
@@ -565,11 +570,14 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         // RelayState that doesn't start with "test:" is a regular SP-initiated relay token —
         // isTest stays false. With saml enabled=false + SAMLResponse present, the early
         // shortcut redirects to test_session_lost.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true);
         var sut = NewControllerForTenant(orgId, "acme",
-            queryParams: new() { ["RelayState"] = "/some-deep-link",
-                                  ["SAMLResponse"] = "garbage" });
+            queryParams: new()
+            {
+                ["RelayState"] = "/some-deep-link",
+                ["SAMLResponse"] = "garbage"
+            });
 
         var result = await sut.Acs(CancellationToken.None);
         var redirect = Assert.IsType<RedirectResult>(result);
@@ -581,10 +589,10 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     {
         // Forge a valid cookie + matching saml_test_runs row. ResolveTestModeAsync should
         // (a) succeed, (b) call ClearTestCookie which sends a Set-Cookie deleting the test cookie.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true);
 
-        var cid = Guid.NewGuid().ToString("N");
+        string cid = Guid.NewGuid().ToString("N");
         await using (var conn = await _fixture.Store.OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -601,14 +609,14 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         }
 
         var protector = _dataProtection.CreateProtector("saml-test-marker.v1");
-        var payload = JsonSerializer.Serialize(new
+        string payload = JsonSerializer.Serialize(new
         {
             tid = orgId,
             actor = "actor",
             cid,
             exp = DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeSeconds(),
         });
-        var cookie = protector.Protect(payload);
+        string cookie = protector.Protect(payload);
 
         var sut = NewControllerForTenant(orgId, "acme",
             cookies: new() { ["dependably_saml_test"] = cookie },
@@ -621,7 +629,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         Assert.Contains("validation_failed", redirect.Url);
 
         // ClearTestCookie was called — Set-Cookie deleting the cookie is in the response.
-        var setCookies = sut.ControllerContext.HttpContext.Response.Headers.SetCookie.ToString();
+        string setCookies = sut.ControllerContext.HttpContext.Response.Headers.SetCookie.ToString();
         Assert.Contains("dependably_saml_test=", setCookies);
     }
 
@@ -630,7 +638,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Acs_NoConfig_NoSamlResponse_Returns404()
     {
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         var sut = NewControllerForTenant(orgId, "acme");
 
         var result = await sut.Acs(CancellationToken.None);
@@ -642,7 +650,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     public async Task Acs_DisabledNoTestMode_WithSamlResponseQuery_RedirectsTestSessionLost()
     {
         // SAMLResponse present in QUERY (not form) + saml disabled + no test mode → early redirect.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true);
         var sut = NewControllerForTenant(orgId, "acme",
             queryParams: new() { ["SAMLResponse"] = "garbage" });
@@ -657,7 +665,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     public async Task Acs_DisabledNoTestMode_WithSamlResponseForm_RedirectsTestSessionLost()
     {
         // Same as above but the SAMLResponse arrives via FORM body (POST binding).
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: false, withMetadata: true);
         var sut = NewControllerForTenant(orgId, "acme",
             method: "POST",
@@ -673,7 +681,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     {
         // cfg is null (no row at all) — the early shortcut still fires because cfg?.Enabled != true
         // is true for both "disabled" and "no row".
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         var sut = NewControllerForTenant(orgId, "acme",
             queryParams: new() { ["SAMLResponse"] = "garbage" });
 
@@ -687,7 +695,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     {
         // Hits ValidateSamlConfigured's IsSamlConfigured==false branch when SAML is "enabled"
         // (the early shortcut is skipped) but metadata is incomplete.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await using (var conn = await _fixture.Store.OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -707,7 +715,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     {
         // Real (non-test) ACS path: enabled config + non-parseable SAMLResponse → ParseSamlResponse
         // catch block returns SamlFailure(isTest=false, ...) which produces a 401 Problem.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: true);
         var sut = NewControllerForTenant(orgId, "acme",
             queryParams: new() { ["SAMLResponse"] = "garbage", ["SigAlg"] = "garbage", ["Signature"] = "garbage" });
@@ -721,7 +729,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
     public async Task Acs_EnabledFullConfig_GarbagePostResponse_Returns401Problem()
     {
         // Covers the HttpMethods.IsPost(Request.Method) ternary branch.
-        var orgId = await SeedTenantAsync("acme");
+        string orgId = await SeedTenantAsync("acme");
         await SeedSamlConfigAsync(orgId, enabled: true);
         var sut = NewControllerForTenant(orgId, "acme",
             method: "POST",

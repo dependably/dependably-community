@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 
 namespace Dependably.Infrastructure;
@@ -125,6 +126,32 @@ public class OrgSettings
     /// versions. Legacy 'block' rows are migrated to 'block_all'.
     /// </summary>
     public string BlockDeprecated { get; set; } = "off";
+    /// <summary>
+    /// Proxy gate for versions carrying a malicious-package advisory (OSV <c>MAL-</c> ids from
+    /// the OpenSSF malicious-packages feed). Those advisories usually have no CVSS score, so
+    /// <see cref="MaxOsvScoreTolerance"/> never sees them — this gate keys on the advisory id
+    /// prefix instead. 'block' (default) = deny fetch and serve; 'warn' = surface in UI only;
+    /// 'off' = gate disabled. A manual per-version allow override still wins.
+    /// </summary>
+    public string BlockMalicious { get; set; } = "block";
+    /// <summary>
+    /// Proxy gate for versions whose advisories alias a CVE in the CISA Known Exploited
+    /// Vulnerabilities catalog — exploited-in-the-wild, independent of CVSS score.
+    /// 'off' (default) / 'warn' / 'block'. A manual per-version allow override still wins.
+    /// </summary>
+    public string BlockKev { get; set; } = "off";
+    /// <summary>
+    /// EPSS exploitation-probability ceiling (0.0–1.0). A version is blocked when the maximum
+    /// <c>vulnerabilities.epss_score</c> across its advisories exceeds this value. NULL = off.
+    /// </summary>
+    public double? MaxEpssTolerance { get; set; }
+    /// <summary>
+    /// Running tally of hosted-artefact bytes for this tenant. Maintained atomically by the
+    /// publish path (reserve-before-write UPDATE) and decremented on delete. 0 on new rows
+    /// and on rows upgraded from a pre-counter schema version; the publish path backfills from
+    /// the real SUM on first access via a WHERE storage_used_bytes = 0 guard.
+    /// </summary>
+    public long StorageUsedBytes { get; set; }
 }
 
 public class Package
@@ -141,6 +168,13 @@ public class Package
     public int HighCount { get; set; }
     public int MediumCount { get; set; }
     public int LowCount { get; set; }
+    // Sum of download_count across every version under this package.
+    public long TotalDownloads { get; set; }
+    // Upstream's declared latest version, or null when no baseline is known.
+    public string? UpstreamLatestVersion { get; set; }
+    // Packages-list "Latest" indicator, computed in SQL: "current" (upstream latest is cached),
+    // "stale" (a newer upstream version exists but is not cached), or "unknown" (no baseline).
+    public string LatestState { get; set; } = "unknown";
 }
 
 public class PackageVersion
@@ -271,9 +305,6 @@ public enum TokenSource { User, Service }
 
 public class TokenRecord
 {
-    private string? _capabilitiesJson;
-    private IReadOnlySet<string>? _parsedCapabilities;
-
     public string Id { get; set; } = "";
     public string OrgId { get; set; } = "";
     public string? UserId { get; set; }
@@ -288,11 +319,11 @@ public class TokenRecord
     /// </summary>
     public string? Capabilities
     {
-        get => _capabilitiesJson;
+        get;
         set
         {
-            _capabilitiesJson = value;
-            _parsedCapabilities = null;
+            field = value;
+            CapabilitySet = null;
         }
     }
     /// <summary>
@@ -304,29 +335,48 @@ public class TokenRecord
     /// the previous inline parsers used.
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore]
+    [AllowNull]
     public IReadOnlySet<string> CapabilitySet
     {
         get
         {
-            if (_parsedCapabilities is not null) return _parsedCapabilities;
-            if (string.IsNullOrWhiteSpace(_capabilitiesJson))
-                return _parsedCapabilities = EmptyCapabilitySet;
+            if (field is not null)
+            {
+                return field;
+            }
+
+            if (string.IsNullOrWhiteSpace(Capabilities))
+            {
+                return field = EmptyCapabilitySet;
+            }
+
             try
             {
-                var list = System.Text.Json.JsonSerializer.Deserialize<string[]>(_capabilitiesJson);
+                string[]? list = System.Text.Json.JsonSerializer.Deserialize<string[]>(Capabilities);
                 if (list is null || list.Length == 0)
-                    return _parsedCapabilities = EmptyCapabilitySet;
+                {
+                    return field = EmptyCapabilitySet;
+                }
+
                 var set = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var c in list)
-                    if (!string.IsNullOrWhiteSpace(c)) set.Add(c);
-                return _parsedCapabilities = set;
+                foreach (string c in list)
+                {
+                    if (!string.IsNullOrWhiteSpace(c))
+                    {
+                        set.Add(c);
+                    }
+                }
+
+                return field = set;
             }
             catch (System.Text.Json.JsonException)
             {
                 // Malformed JSON: deny-all (matches the previous inline behaviour).
-                return _parsedCapabilities = EmptyCapabilitySet;
+                return field = EmptyCapabilitySet;
             }
         }
+
+        private set;
     }
 
     private static readonly IReadOnlySet<string> EmptyCapabilitySet = new HashSet<string>(StringComparer.Ordinal);
@@ -618,6 +668,18 @@ public class TenantSamlConfig
     public string? RoleMapping { get; set; }
     /// <summary>Fallback role when no mapping matches. Defaults to "member".</summary>
     public string DefaultRole { get; set; } = "member";
+    /// <summary>
+    /// Opt-in ceiling raise for IdP-driven role assignment: false (default) caps IdP-assignable
+    /// roles at member/auditor; true additionally permits admin. "owner" is never IdP-assignable.
+    /// </summary>
+    public bool IdpCanAssignAdmin { get; set; }
+    /// <summary>
+    /// Stage of the last cert-expiry audit event emitted for this tenant's effective IdP signing
+    /// cert. One of "30", "14", "7", "1", or "expired". NULL means no alert has been emitted yet
+    /// (or the cert was replaced since the last alert). The daily sweep compares this against the
+    /// current expiry window to decide whether a new audit event is needed.
+    /// </summary>
+    public string? CertExpiryAlertStage { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
 

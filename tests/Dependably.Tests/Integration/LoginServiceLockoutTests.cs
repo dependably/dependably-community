@@ -2,12 +2,10 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -37,7 +35,7 @@ public sealed class LoginServiceLockoutTests : IClassFixture<DependablyFactory>,
     [Fact]
     public async Task Login_WrongPassword_Returns401_AndAuditsFailure()
     {
-        var email = $"loginfail-{Guid.NewGuid():N}@example.com";
+        string email = $"loginfail-{Guid.NewGuid():N}@example.com";
         await _factory.CreateUser(email, "RealPassword12345");
 
         using var c = _factory.CreateClient();
@@ -47,7 +45,7 @@ public sealed class LoginServiceLockoutTests : IClassFixture<DependablyFactory>,
 
         // login.failure landed in audit_log.
         await using var conn = await Db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'login.failure'");
         Assert.True(count >= 1);
     }
@@ -61,7 +59,7 @@ public sealed class LoginServiceLockoutTests : IClassFixture<DependablyFactory>,
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
 
         // Detail must NOT carry a user-existence oracle.
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         Assert.DoesNotContain("not found", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("unknown", body, StringComparison.OrdinalIgnoreCase);
     }
@@ -69,8 +67,8 @@ public sealed class LoginServiceLockoutTests : IClassFixture<DependablyFactory>,
     [Fact]
     public async Task Login_DisabledAccount_RejectedAsInvalidCredentials()
     {
-        var email = $"disabled-{Guid.NewGuid():N}@example.com";
-        var userId = await _factory.CreateUser(email, "RealPassword12345");
+        string email = $"disabled-{Guid.NewGuid():N}@example.com";
+        string userId = await _factory.CreateUser(email, "RealPassword12345");
 
         await using (var conn = await Db.OpenAsync())
         {
@@ -92,22 +90,22 @@ public sealed class LoginServiceLockoutTests : IClassFixture<DependablyFactory>,
     {
         // The lockout threshold is 10 failed attempts within the lockout window.
         // Driving via the endpoint here keeps the full pipeline (audit + emitter) in scope.
-        var email = $"lockout-{Guid.NewGuid():N}@example.com";
+        string email = $"lockout-{Guid.NewGuid():N}@example.com";
         await _factory.CreateUser(email, "RealPassword12345");
 
         using var c = _factory.CreateClient();
 
-        for (var i = 0; i < 10; i++)
+        for (int i = 0; i < 10; i++)
         {
             var r = await c.PostAsJsonAsync("/api/v1/auth/login", new { email, password = "wrong" });
             Assert.Equal(HttpStatusCode.Unauthorized, r.StatusCode);
         }
 
         // Lockout row stamped with locked_until.
-        var emailHash = HashEmail(email);
+        string emailHash = HashEmail(email);
         await using (var conn = await Db.OpenAsync())
         {
-            var lockedUntil = await conn.ExecuteScalarAsync<string?>(
+            string? lockedUntil = await conn.ExecuteScalarAsync<string?>(
                 "SELECT locked_until FROM login_attempts WHERE email_hash = @hash LIMIT 1",
                 new { hash = emailHash });
             Assert.False(string.IsNullOrEmpty(lockedUntil));
@@ -121,14 +119,14 @@ public sealed class LoginServiceLockoutTests : IClassFixture<DependablyFactory>,
 
         // lockout.triggered audited.
         await using var verify = await Db.OpenAsync();
-        var lockoutAudit = await verify.ExecuteScalarAsync<long>(
+        long lockoutAudit = await verify.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'lockout.triggered'");
         Assert.True(lockoutAudit >= 1);
     }
 
     private static string HashEmail(string email)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(email.ToLowerInvariant()));
+        byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(email.ToLowerInvariant()));
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 }

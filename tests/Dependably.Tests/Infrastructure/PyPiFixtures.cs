@@ -13,17 +13,17 @@ public static class PyPiFixtures
     /// </summary>
     public static (byte[] Bytes, string Sha256Hex) BuildWheel(string name, string version)
     {
-        var normalized = name.ToLowerInvariant().Replace('-', '_').Replace('.', '_');
-        var distInfoDir = $"{normalized}-{version}.dist-info";
+        string normalized = name.ToLowerInvariant().Replace('-', '_').Replace('.', '_');
+        string distInfoDir = $"{normalized}-{version}.dist-info";
 
-        var metadata = $"""
+        string metadata = $"""
             Metadata-Version: 2.1
             Name: {name}
             Version: {version}
             Summary: Synthetic test package
             """;
 
-        var wheel = """
+        string wheel = """
             Wheel-Version: 1.0
             Generator: dependably-test
             Root-Is-Purelib: true
@@ -37,8 +37,8 @@ public static class PyPiFixtures
             WriteEntry(zip, $"{distInfoDir}/WHEEL", wheel);
         }
 
-        var bytes = ms.ToArray();
-        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        byte[] bytes = ms.ToArray();
+        string hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         return (bytes, hash);
     }
 
@@ -48,15 +48,15 @@ public static class PyPiFixtures
     /// </summary>
     public static (byte[] Bytes, string Sha256Hex) BuildSdist(string name, string version)
     {
-        var pkgInfo = $"""
+        string pkgInfo = $"""
             Metadata-Version: 2.1
             Name: {name}
             Version: {version}
             Summary: Synthetic test package
             """;
 
-        var pkgInfoBytes = Encoding.UTF8.GetBytes(pkgInfo);
-        var entryName = $"{name}-{version}/PKG-INFO";
+        byte[] pkgInfoBytes = Encoding.UTF8.GetBytes(pkgInfo);
+        string entryName = $"{name}-{version}/PKG-INFO";
 
         using var ms = new MemoryStream();
         using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
@@ -69,8 +69,8 @@ public static class PyPiFixtures
             tw.WriteEntry(entry);
         }
 
-        var bytes = ms.ToArray();
-        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        byte[] bytes = ms.ToArray();
+        string hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         return (bytes, hash);
     }
 
@@ -80,7 +80,7 @@ public static class PyPiFixtures
     /// </summary>
     public static (byte[] Bytes, string Sha256Hex) BuildEgg(string name, string version)
     {
-        var pkgInfo = $"""
+        string pkgInfo = $"""
             Metadata-Version: 1.0
             Name: {name}
             Version: {version}
@@ -93,8 +93,8 @@ public static class PyPiFixtures
             WriteEntry(zip, "EGG-INFO/PKG-INFO", pkgInfo);
         }
 
-        var bytes = ms.ToArray();
-        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        byte[] bytes = ms.ToArray();
+        string hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         return (bytes, hash);
     }
 
@@ -108,9 +108,9 @@ public static class PyPiFixtures
 
     private static (byte[], string) LoadFixture(string ecosystem, string filename)
     {
-        var path = Path.Combine(FixtureManifest.FixturesRoot, ecosystem, filename);
-        var bytes = File.ReadAllBytes(path);
-        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string path = Path.Combine(FixtureManifest.FixturesRoot, ecosystem, filename);
+        byte[] bytes = File.ReadAllBytes(path);
+        string hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         return (bytes, hash);
     }
 

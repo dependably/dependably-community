@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Dependably.Security;
 
 namespace Dependably.Protocol;
 
@@ -24,18 +25,46 @@ public static partial class RpmArtifactValidator
     {
         ArgumentNullException.ThrowIfNull(bytes);
         if (bytes.Length < MinimumValidSize)
+        {
             throw new RpmParseException("RPM bytes too short.");
+        }
 
         var info = RpmHeaderParser.Parse(bytes);
 
         if (!NameRegex.IsMatch(info.Name))
+        {
             throw new RpmParseException($"Invalid RPM name characters: '{info.Name}'");
+        }
         if (!NameRegex.IsMatch(info.Version))
+        {
             throw new RpmParseException($"Invalid RPM version characters: '{info.Version}'");
+        }
         if (!NameRegex.IsMatch(info.Release))
+        {
             throw new RpmParseException($"Invalid RPM release characters: '{info.Release}'");
+        }
         if (!NameRegex.IsMatch(info.Arch))
+        {
             throw new RpmParseException($"Invalid RPM arch characters: '{info.Arch}'");
+        }
+
+        // The charset regex alone permits values like ".." — these fields flow into
+        // BlobKeys.Hosted path segments, so they get the same path-safety gate as every
+        // other ecosystem's blob-key components.
+        foreach (var (value, field) in new[]
+        {
+            (info.Name, "name"),
+            (info.Version, "version"),
+            (info.Release, "release"),
+            (info.Arch, "arch"),
+        })
+        {
+            var safe = PathSafeValidator.Validate(value, field);
+            if (!safe.IsValid)
+            {
+                throw new RpmParseException($"Invalid RPM {field}: {safe.Message}");
+            }
+        }
 
         return info;
     }

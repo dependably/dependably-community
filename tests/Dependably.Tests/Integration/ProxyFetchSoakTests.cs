@@ -14,7 +14,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Http;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -60,23 +59,23 @@ public sealed class ProxyFetchSoakTests
     [Fact]
     public async Task MissPath_10Concurrent_StreamsResponses_NoDedupCollapse()
     {
-        var stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-soak-stage-{Guid.NewGuid():N}");
-        var blobDir = Path.Combine(Path.GetTempPath(), $"dependably-soak-blobs-{Guid.NewGuid():N}");
+        string stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-soak-stage-{Guid.NewGuid():N}");
+        string blobDir = Path.Combine(Path.GetTempPath(), $"dependably-soak-blobs-{Guid.NewGuid():N}");
         Directory.CreateDirectory(stagingDir);
         Directory.CreateDirectory(blobDir);
 
         var coords = new List<(string Name, string Filename, byte[] Bytes, string Sha256Hex)>();
-        for (var i = 0; i < ConcurrentRequests; i++)
+        for (int i = 0; i < ConcurrentRequests; i++)
         {
-            var name = $"soakpkg{Guid.NewGuid():N}".Substring(0, 18).ToLowerInvariant();
-            var version = "1.0.0";
-            var filename = $"{name}-{version}.tgz";
+            string name = $"soakpkg{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+            string version = "1.0.0";
+            string filename = $"{name}-{version}.tgz";
             // Smaller payload for the end-to-end test — the controller path still
             // buffers via GetOrFetchMetadataAsync + ProxyFetchService. Memory bound
             // for hash-and-stage is asserted in the focused
             // direct-streaming test below.
-            var bytes = RandomNumberGenerator.GetBytes(256 * 1024);
-            var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+            byte[] bytes = RandomNumberGenerator.GetBytes(256 * 1024);
+            string sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
             coords.Add((name, filename, bytes, sha));
         }
 
@@ -87,7 +86,7 @@ public sealed class ProxyFetchSoakTests
         {
             _ = await warmup.GetAsync("/healthz/live");
         }
-        var token = await factory.CreateToken("pull");
+        string token = await factory.CreateToken("pull");
 
         // Fire 10 concurrent GETs.
         var responseBodyLengths = new ConcurrentBag<long>();
@@ -101,7 +100,7 @@ public sealed class ProxyFetchSoakTests
                 HttpCompletionOption.ResponseHeadersRead);
             statusCodes.Add(resp.StatusCode);
 
-            var bodyBytes = await resp.Content.ReadAsByteArrayAsync();
+            byte[] bodyBytes = await resp.Content.ReadAsByteArrayAsync();
             responseBodyLengths.Add(bodyBytes.Length);
         }).ToArray();
 
@@ -136,14 +135,14 @@ public sealed class ProxyFetchSoakTests
         // HttpClient buffering) with a structural check that catches the exact
         // regression class — re-introducing `new MemoryStream(bytes)` on the
         // PutAsync side.
-        var stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-soak-stage-{Guid.NewGuid():N}");
-        var blobDir = Path.Combine(Path.GetTempPath(), $"dependably-soak-blobs-{Guid.NewGuid():N}");
+        string stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-soak-stage-{Guid.NewGuid():N}");
+        string blobDir = Path.Combine(Path.GetTempPath(), $"dependably-soak-blobs-{Guid.NewGuid():N}");
         Directory.CreateDirectory(stagingDir);
         Directory.CreateDirectory(blobDir);
 
         const int Size = 1 * 1024 * 1024; // 1 MB is enough — the assertion is on type, not size
-        var bytes = RandomNumberGenerator.GetBytes(Size);
-        var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        byte[] bytes = RandomNumberGenerator.GetBytes(Size);
+        string sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
         var inner = new LocalBlobStore(blobDir);
         var inspector = new StreamTypeInspectingBlobStore(inner);
@@ -162,20 +161,23 @@ public sealed class ProxyFetchSoakTests
             factory, tiered, audit,
             new PermissiveUpstreamUrlValidator(),
             new SoakNoAirGap(),
+            new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir),
             config,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<Protocol.UpstreamClient>.Instance);
 
-        var blobKey = BlobKeys.Proxy(sha);
+        string blobKey = BlobKeys.Proxy(sha);
         var spec = new Protocol.ChecksumSpec(Protocol.ChecksumAlgorithm.Sha256, sha);
         var (stream, _) = await client.GetOrFetchStreamAsync(
             blobKey, "http://upstream.invalid/pkg.tgz", spec, "npm");
         long total = 0;
         await using (stream.ConfigureAwait(false))
         {
-            var buf = new byte[81920];
+            byte[] buf = new byte[81920];
             int n;
             while ((n = await stream.ReadAsync(buf)) > 0)
+            {
                 total += n;
+            }
         }
 
         Assert.Equal(Size, total);
@@ -204,18 +206,18 @@ public sealed class ProxyFetchSoakTests
         // exercising the same code path under serial conditions so an environmental
         // hiccup on the burst test (e.g. xunit-parallel timing) doesn't mask a real
         // cleanup regression.
-        var stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-soak-stage-{Guid.NewGuid():N}");
-        var blobDir = Path.Combine(Path.GetTempPath(), $"dependably-soak-blobs-{Guid.NewGuid():N}");
+        string stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-soak-stage-{Guid.NewGuid():N}");
+        string blobDir = Path.Combine(Path.GetTempPath(), $"dependably-soak-blobs-{Guid.NewGuid():N}");
         Directory.CreateDirectory(stagingDir);
         Directory.CreateDirectory(blobDir);
 
         var coords = new List<(string Name, string Filename, byte[] Bytes, string Sha256Hex)>();
-        for (var i = 0; i < 5; i++)
+        for (int i = 0; i < 5; i++)
         {
-            var name = $"clean{Guid.NewGuid():N}".Substring(0, 16).ToLowerInvariant();
-            var filename = $"{name}-1.0.0.tgz";
-            var bytes = RandomNumberGenerator.GetBytes(64 * 1024); // small payload — speed
-            var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+            string name = $"clean{Guid.NewGuid():N}"[..16].ToLowerInvariant();
+            string filename = $"{name}-1.0.0.tgz";
+            byte[] bytes = RandomNumberGenerator.GetBytes(64 * 1024); // small payload — speed
+            string sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
             coords.Add((name, filename, bytes, sha));
         }
 
@@ -226,12 +228,12 @@ public sealed class ProxyFetchSoakTests
         {
             _ = await warmup.GetAsync("/healthz/live");
         }
-        var token = await factory.CreateToken("pull");
+        string token = await factory.CreateToken("pull");
 
-        foreach (var coord in coords)
+        foreach (var (Name, Filename, Bytes, Sha256Hex) in coords)
         {
             using var client = factory.CreateClientWithBearer(token);
-            using var resp = await client.GetAsync($"/npm/tarballs/{coord.Name}/{coord.Filename}");
+            using var resp = await client.GetAsync($"/npm/tarballs/{Name}/{Filename}");
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         }
 
@@ -284,14 +286,11 @@ public sealed class ProxyFetchSoakTests
 
             // Override the "upstream" HttpClient handler so we control the bytes that
             // flow into FetchAndStageAsync.
-            builder.Services.Configure<HttpClientFactoryOptions>("upstream", opts =>
-            {
-                opts.HttpMessageHandlerBuilderActions.Add(b =>
+            builder.Services.Configure<HttpClientFactoryOptions>("upstream", opts => opts.HttpMessageHandlerBuilderActions.Add(b =>
                 {
                     b.PrimaryHandler = _handler;
                     b.AdditionalHandlers.Clear();
-                });
-            });
+                }));
 
             builder.WebHost.UseTestServer();
             builder.WebHost.UseSetting("Npm:Upstream", "http://upstream.invalid");
@@ -324,7 +323,7 @@ public sealed class ProxyFetchSoakTests
             var orgs = Services.GetRequiredService<OrgRepository>();
             var orgRecord = await orgs.GetBySlugAsync(org)
                 ?? throw new InvalidOperationException($"Org '{org}' not found. Was the server started?");
-            var caps = kind == "push"
+            string caps = kind == "push"
                 ? """["publish:*","read:artifact","read:metadata","yank:*"]"""
                 : """["read:artifact","read:metadata"]""";
             var (raw, _) = await tokens.CreateServiceTokenAsync(
@@ -373,22 +372,27 @@ public sealed class ProxyFetchSoakTests
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            var url = request.RequestUri!.AbsoluteUri;
+            string url = request.RequestUri!.AbsoluteUri;
             // Match the npm tarball pattern: /{name}/-/{filename}
-            var dashIdx = url.IndexOf("/-/", StringComparison.Ordinal);
+            int dashIdx = url.IndexOf("/-/", StringComparison.Ordinal);
             if (dashIdx < 0)
             {
                 // npm packument / metadata fetches — return 404 so the controller falls
                 // back to "no upstream integrity" and proceeds with the tarball MISS.
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
             }
-            var filename = url[(dashIdx + 3)..];
+            string filename = url[(dashIdx + 3)..];
             // Strip any query string just in case.
-            var q = filename.IndexOf('?');
-            if (q >= 0) filename = filename[..q];
+            int q = filename.IndexOf('?');
+            if (q >= 0)
+            {
+                filename = filename[..q];
+            }
 
-            if (!_byFilename.TryGetValue(filename, out var bytes))
+            if (!_byFilename.TryGetValue(filename, out byte[]? bytes))
+            {
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+            }
 
             Interlocked.Increment(ref _callCount);
 
@@ -442,6 +446,8 @@ public sealed class ProxyFetchSoakTests
 
         public Task<Stream?> GetAsync(string key, CancellationToken ct = default)
             => _inner.GetAsync(key, ct);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+            => _inner.GetRangeAsync(key, from, to, ct);
         public Task<bool> ExistsAsync(string key, CancellationToken ct = default)
             => _inner.ExistsAsync(key, ct);
         public Task DeleteAsync(string key, CancellationToken ct = default)
@@ -524,12 +530,14 @@ public sealed class ProxyFetchSoakTests
 
         protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
         {
-            for (var offset = 0; offset < _bytes.Length; offset += _chunkSize)
+            for (int offset = 0; offset < _bytes.Length; offset += _chunkSize)
             {
-                var len = Math.Min(_chunkSize, _bytes.Length - offset);
+                int len = Math.Min(_chunkSize, _bytes.Length - offset);
                 await stream.WriteAsync(_bytes.AsMemory(offset, len));
                 if (_dripDelay > TimeSpan.Zero)
+                {
                     await Task.Delay(_dripDelay);
+                }
             }
         }
 

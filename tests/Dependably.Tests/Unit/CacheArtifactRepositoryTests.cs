@@ -1,7 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -67,7 +66,7 @@ public class CacheArtifactRepositoryTests : IAsyncLifetime
         var repo = new CacheArtifactRepository(_db);
         await repo.InsertAsync(Sample("1.0.0", DateTimeOffset.UtcNow));
         await repo.InsertAsync(Sample("2.0.0", DateTimeOffset.UtcNow));
-        var total = await repo.GetTotalSizeBytesAsync();
+        long total = await repo.GetTotalSizeBytesAsync();
         Assert.Equal(200, total);
     }
 

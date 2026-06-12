@@ -2,7 +2,6 @@ using System.Security.Claims;
 using Dependably.Api;
 using Dependably.Infrastructure;
 using Microsoft.AspNetCore.Http;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -41,7 +40,7 @@ public sealed class OrgScopedControllerBaseTests
         ctx.Items[TenantContext.HttpItemsKey] = TenantContext.ForTenant("tenant-123", "acme");
         var sut = NewController(ctx);
 
-        var result = sut.PublicCurrentTenantId();
+        string result = sut.PublicCurrentTenantId();
 
         Assert.Equal("tenant-123", result);
     }

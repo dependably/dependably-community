@@ -2,7 +2,6 @@ using System.IO.Compression;
 using System.Text;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -43,7 +42,7 @@ public sealed class NuGetNupkgValidatorTests
     [Fact]
     public void Parse_NoNuspec_FailsContent()
     {
-        var bytes = BuildZip(("readme.md", "no nuspec"));
+        byte[] bytes = BuildZip(("readme.md", "no nuspec"));
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.False(result.IsValid);
         Assert.Equal("content", result.FieldName);
@@ -53,8 +52,8 @@ public sealed class NuGetNupkgValidatorTests
     public void Parse_NuspecInSubfolder_NotRoot_Rejected()
     {
         // Only root-level .nuspec counts; nested ones are noise.
-        var nuspec = BuildNuspec("Acme", "1.0.0", "desc", "authors");
-        var bytes = BuildZip(("lib/acme.nuspec", nuspec));
+        string nuspec = BuildNuspec("Acme", "1.0.0", "desc", "authors");
+        byte[] bytes = BuildZip(("lib/acme.nuspec", nuspec));
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.False(result.IsValid);
         Assert.Equal("content", result.FieldName);
@@ -63,7 +62,7 @@ public sealed class NuGetNupkgValidatorTests
     [Fact]
     public void Parse_UnknownNamespace_FailsContent()
     {
-        var bytes = BuildZip(("acme.nuspec",
+        byte[] bytes = BuildZip(("acme.nuspec",
             """
             <?xml version="1.0"?>
             <package xmlns="https://attacker.example/nuspec.xsd">
@@ -85,7 +84,7 @@ public sealed class NuGetNupkgValidatorTests
     [InlineData("name/with/slashes")]
     public void Parse_InvalidId_Fails(string badId)
     {
-        var bytes = BuildZip(("a.nuspec", BuildNuspec(badId, "1.0.0", "desc", "authors")));
+        byte[] bytes = BuildZip(("a.nuspec", BuildNuspec(badId, "1.0.0", "desc", "authors")));
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.False(result.IsValid);
         Assert.Equal("id", result.FieldName);
@@ -94,8 +93,8 @@ public sealed class NuGetNupkgValidatorTests
     [Fact]
     public void Parse_TooLongId_Fails()
     {
-        var longId = new string('a', 101);
-        var bytes = BuildZip(("a.nuspec", BuildNuspec(longId, "1.0.0", "desc", "authors")));
+        string longId = new('a', 101);
+        byte[] bytes = BuildZip(("a.nuspec", BuildNuspec(longId, "1.0.0", "desc", "authors")));
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.False(result.IsValid);
         Assert.Equal("id", result.FieldName);
@@ -104,7 +103,7 @@ public sealed class NuGetNupkgValidatorTests
     [Fact]
     public void Parse_InvalidVersion_Fails()
     {
-        var bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "not.a.version!!!", "desc", "authors")));
+        byte[] bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "not.a.version!!!", "desc", "authors")));
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.False(result.IsValid);
         Assert.Equal("version", result.FieldName);
@@ -113,7 +112,7 @@ public sealed class NuGetNupkgValidatorTests
     [Fact]
     public void Parse_MissingDescription_Fails()
     {
-        var bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "1.0.0", description: "", authors: "x")));
+        byte[] bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "1.0.0", description: "", authors: "x")));
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.False(result.IsValid);
         Assert.Equal("description", result.FieldName);
@@ -122,7 +121,7 @@ public sealed class NuGetNupkgValidatorTests
     [Fact]
     public void Parse_MissingAuthors_Fails()
     {
-        var bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "1.0.0", description: "desc", authors: "")));
+        byte[] bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "1.0.0", description: "desc", authors: "")));
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.False(result.IsValid);
         Assert.Equal("authors", result.FieldName);
@@ -131,7 +130,7 @@ public sealed class NuGetNupkgValidatorTests
     [Fact]
     public void Parse_Symbol_WithoutPdb_FailsContent()
     {
-        var bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "1.0.0", "desc", "x")));
+        byte[] bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "1.0.0", "desc", "x")));
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: true);
         Assert.False(result.IsValid);
         Assert.Equal("content", result.FieldName);
@@ -141,7 +140,7 @@ public sealed class NuGetNupkgValidatorTests
     [Fact]
     public void Parse_Symbol_WithPdb_Succeeds()
     {
-        var bytes = BuildZip(
+        byte[] bytes = BuildZip(
             ("a.nuspec", BuildNuspec("Acme", "1.0.0", "desc", "x")),
             ("lib/Acme.pdb", "synthetic pdb"));
         var (result, id, version) = NuGetNupkgValidator.Parse(bytes, isSymbol: true);
@@ -157,7 +156,7 @@ public sealed class NuGetNupkgValidatorTests
     [InlineData("http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd")]
     public void Parse_AcceptsAllKnownNamespaces(string ns)
     {
-        var nuspec = $"""
+        string nuspec = $"""
             <?xml version="1.0"?>
             <package xmlns="{ns}">
               <metadata>
@@ -166,7 +165,7 @@ public sealed class NuGetNupkgValidatorTests
               </metadata>
             </package>
             """;
-        var bytes = BuildZip(("a.nuspec", nuspec));
+        byte[] bytes = BuildZip(("a.nuspec", nuspec));
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.True(result.IsValid);
     }

@@ -2,7 +2,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -29,8 +28,8 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task ListAsync_FiltersByOrgAndEcosystem_AndOrdersByPurlName()
     {
-        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orga-{Guid.NewGuid():N}");
-        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgb-{Guid.NewGuid():N}");
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orga-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgb-{Guid.NewGuid():N}");
         await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "zebra");
         await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "apple");
         await PackageSeeder.InsertAsync(_fixture.Store, orgA, "pypi", "should-not-appear");
@@ -46,7 +45,7 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task ListAsync_WrongOrg_ReturnsEmpty()
     {
-        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orga-{Guid.NewGuid():N}");
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orga-{Guid.NewGuid():N}");
         await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "pkg");
 
         var list = await _repo.ListAsync($"ghost-{Guid.NewGuid():N}", "npm");
@@ -58,7 +57,7 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task GetByPurlNameAsync_Missing_ReturnsNull()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
         Assert.Null(await _repo.GetByPurlNameAsync(orgId, "npm", "nope"));
     }
 
@@ -66,14 +65,14 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     public async Task GetOrCreateAsync_FirstCall_Inserts_SecondCall_Idempotent()
     {
         // Pinning idempotency — concurrency assumption in the plan.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var first  = await _repo.GetOrCreateAsync(orgId, "npm", "acme", "acme", isProxy: false);
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        var first = await _repo.GetOrCreateAsync(orgId, "npm", "acme", "acme", isProxy: false);
         var second = await _repo.GetOrCreateAsync(orgId, "npm", "acme", "acme", isProxy: false);
 
         Assert.Equal(first.Id, second.Id);
 
         await using var conn = await _fixture.Store.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM packages WHERE org_id = @orgId AND purl_name = 'acme'",
             new { orgId });
         Assert.Equal(1, count);
@@ -82,8 +81,8 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task GetOrCreateAsync_DifferentOrgs_AreDistinctEvenWithSameName()
     {
-        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orga-{Guid.NewGuid():N}");
-        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgb-{Guid.NewGuid():N}");
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orga-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgb-{Guid.NewGuid():N}");
         var a = await _repo.GetOrCreateAsync(orgA, "npm", "shared", "shared", isProxy: false);
         var b = await _repo.GetOrCreateAsync(orgB, "npm", "shared", "shared", isProxy: false);
 
@@ -95,8 +94,8 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task CreateVersionAsync_RoundTrip_PopulatesFields()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
 
         var v = await _repo.CreateVersionAsync(new NewPackageVersion(
             pkgId, "1.0.0", Purl(), "blob/key", 100, "sha256hex", FirstFetch: true, Origin: "uploaded"));
@@ -110,8 +109,8 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task CreateVersionAsync_UpstreamIntegrity_RoundTripsThroughGetVersions()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
 
         var created = await _repo.CreateVersionAsync(new NewPackageVersion(
             pkgId, "1.0.0", Purl(), "blob/key", 100, "sha256hex",
@@ -131,8 +130,8 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task CreateVersionAsync_ChecksumSha1_RoundTripsThroughGetVersions()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
 
         var created = await _repo.CreateVersionAsync(new NewPackageVersion(
             pkgId, "1.0.0", Purl(), "blob/key", 100, "sha256hex",
@@ -148,8 +147,8 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task CreateVersionAsync_PublishedAt_RoundTripsThroughGetVersions()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
         var publishedAt = new DateTimeOffset(2023, 9, 30, 14, 23, 31, TimeSpan.Zero);
 
         var created = await _repo.CreateVersionAsync(new NewPackageVersion(
@@ -169,8 +168,8 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task GetVersionsAsync_OrdersNewestFirst()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0"), blobKey: $"k1-{Guid.NewGuid():N}");
         await Task.Delay(1100);   // SQLite default created_at has 1-second resolution
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0"), blobKey: $"k2-{Guid.NewGuid():N}");
@@ -182,9 +181,9 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task GetVersionByBlobKeyAsync_FindsByExactKey()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
-        var blobKey = $"unique/path/{Guid.NewGuid():N}";
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string blobKey = $"unique/path/{Guid.NewGuid():N}";
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(), blobKey: blobKey);
 
         var v = await _repo.GetVersionByBlobKeyAsync(orgId, blobKey);
@@ -198,10 +197,10 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     {
         // Defence-in-depth: even though blob_key is globally unique today, the lookup must
         // refuse to return a row whose parent package belongs to a different tenant.
-        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
-        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "acme");
-        var blobKey = $"unique/path/{Guid.NewGuid():N}";
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "acme");
+        string blobKey = $"unique/path/{Guid.NewGuid():N}";
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(), blobKey: blobKey);
 
         Assert.NotNull(await _repo.GetVersionByBlobKeyAsync(orgA, blobKey));
@@ -211,10 +210,10 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task GetVersionByIdAsync_OrgMismatch_ReturnsNull()
     {
-        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
-        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "acme");
-        var verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl());
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl());
 
         Assert.NotNull(await _repo.GetVersionByIdAsync(orgA, verId));
         Assert.Null(await _repo.GetVersionByIdAsync(orgB, verId));
@@ -223,9 +222,9 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task UpdateDeprecatedAsync_SetsAndClears()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
-        var verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl());
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl());
 
         await _repo.UpdateDeprecatedAsync(verId, "moved to @scope/acme");
         Assert.Equal("moved to @scope/acme", (await _repo.GetVersionByIdAsync(orgId, verId))!.Deprecated);
@@ -237,9 +236,9 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task UpdateVersionForOverwriteAsync_RewritesArtifactFields_AndClearsVulnChecked()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
-        var verId = await PackageSeeder.InsertVersionAsync(
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(
             _fixture.Store, pkgId, "1.0.0", Purl(), blobKey: $"old-{Guid.NewGuid():N}", sizeBytes: 100, checksumSha256: "old-sha");
 
         await using (var conn = await _fixture.Store.OpenAsync())
@@ -266,7 +265,7 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     public async Task ListPaginatedAsync_Search_EscapesWildcards_AndOnlyMatchesLiteral()
     {
         // "ev_il" should be treated as the literal substring, not the SQL wildcard pattern.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
         await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "ev_il");
         await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "evxil");
 
@@ -281,12 +280,15 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task ListPaginatedAsync_OffsetAndLimit_RespectBoundaries()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        for (var i = 0; i < 5; i++) await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", $"pkg-{i:D2}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        for (int i = 0; i < 5; i++)
+        {
+            await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", $"pkg-{i:D2}");
+        }
 
-        var page1 = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 2, Offset: 0, Ecosystem: "npm", SortBy: "name", SortDir: "asc"));
-        Assert.Equal(5, page1.Total);
-        Assert.Equal(2, page1.Items.Count);
+        var (Items, Total) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 2, Offset: 0, Ecosystem: "npm", SortBy: "name", SortDir: "asc"));
+        Assert.Equal(5, Total);
+        Assert.Equal(2, Items.Count);
 
         var lastPage = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 2, Offset: 4, Ecosystem: "npm", SortBy: "name", SortDir: "asc"));
         Assert.Single(lastPage.Items);
@@ -302,16 +304,100 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [InlineData("ecosystem", "asc")]
     [InlineData("versions", "desc")]
     [InlineData("vulns", "desc")]
+    [InlineData("downloads", "desc")]
+    [InlineData("downloads", "asc")]
     [InlineData("unknown-sort-col", "asc")]    // falls through to created_at default
     public async Task ListPaginatedAsync_AllSortCombinationsExecute(string sortBy, string sortDir)
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
         await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "a");
         await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "b");
-
-        var result = await _repo.ListPaginatedAsync(new PackageListQuery(
+        var (_, Total) = await _repo.ListPaginatedAsync(new PackageListQuery(
             orgId, Limit: 10, Offset: 0, Ecosystem: "npm", SortBy: sortBy, SortDir: sortDir));
-        Assert.Equal(2, result.Total);
+        Assert.Equal(2, Total);
+    }
+
+    // ── TotalDownloads + LatestState aggregates ──────────────────────────────
+
+    [Fact]
+    public async Task ListPaginatedAsync_TotalDownloads_SumsAcrossAllVersions()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string v1 = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0"), origin: "proxy");
+        string v2 = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0"), origin: "uploaded");
+        await SetDownloadCountAsync(v1, 7);
+        await SetDownloadCountAsync(v2, 5);
+
+        var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+
+        Assert.Equal(12, Assert.Single(items).TotalDownloads);
+    }
+
+    [Fact]
+    public async Task ListPaginatedAsync_LatestState_UnknownWhenNoUpstreamBaseline()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme", isProxy: true);
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0"), origin: "proxy");
+
+        var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+
+        var pkg = Assert.Single(items);
+        Assert.Equal("unknown", pkg.LatestState);
+        Assert.Null(pkg.UpstreamLatestVersion);
+    }
+
+    [Fact]
+    public async Task ListPaginatedAsync_LatestState_CurrentWhenUpstreamLatestIsProxyCached()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme", isProxy: true);
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0"), origin: "proxy");
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0"), origin: "proxy");
+        await _repo.UpdateUpstreamLatestAsync(pkgId, "2.0.0");
+
+        var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+
+        var pkg = Assert.Single(items);
+        Assert.Equal("current", pkg.LatestState);
+        Assert.Equal("2.0.0", pkg.UpstreamLatestVersion);
+    }
+
+    [Fact]
+    public async Task ListPaginatedAsync_LatestState_StaleWhenUpstreamLatestNotCached()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme", isProxy: true);
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0"), origin: "proxy");
+        // Upstream's latest (3.0.0) is newer than anything cached locally.
+        await _repo.UpdateUpstreamLatestAsync(pkgId, "3.0.0");
+
+        var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+
+        Assert.Equal("stale", Assert.Single(items).LatestState);
+    }
+
+    [Fact]
+    public async Task ListPaginatedAsync_LatestState_StaleWhenUpstreamLatestExistsOnlyAsUploaded()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme", isProxy: true);
+        // A locally uploaded row at the upstream-latest version does NOT count as proxy-cached.
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0"), origin: "uploaded");
+        await _repo.UpdateUpstreamLatestAsync(pkgId, "2.0.0");
+
+        var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+
+        Assert.Equal("stale", Assert.Single(items).LatestState);
+    }
+
+    private async Task SetDownloadCountAsync(string versionId, long count)
+    {
+        await using var conn = await _fixture.Store.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE package_versions SET download_count = @count WHERE id = @id",
+            new { count, id = versionId });
     }
 
     // ── Delete + proxy-purge ─────────────────────────────────────────────────
@@ -319,15 +405,18 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task DeletePackageIfEmptyAsync_OnlyDeletes_WhenNoVersions()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl());
 
         Assert.False(await _repo.DeletePackageIfEmptyAsync(pkgId));   // version present → no-op
         Assert.NotNull(await _repo.GetByPurlNameAsync(orgId, "npm", "acme"));
 
         await using (var conn = await _fixture.Store.OpenAsync())
+        {
             await conn.ExecuteAsync("DELETE FROM package_versions WHERE package_id = @id", new { id = pkgId });
+        }
+
         Assert.True(await _repo.DeletePackageIfEmptyAsync(pkgId));
         Assert.Null(await _repo.GetByPurlNameAsync(orgId, "npm", "acme"));
     }
@@ -335,8 +424,8 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task DeleteProxyVersionsForNameAsync_TouchesOnlyProxyRows_ReturnsBlobKeys()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme", isProxy: true);
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme", isProxy: true);
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0"), origin: "proxy", blobKey: $"p1-{Guid.NewGuid():N}");
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0"), origin: "proxy", blobKey: $"p2-{Guid.NewGuid():N}");
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "3.0.0", Purl("3.0.0"), origin: "uploaded", blobKey: $"u1-{Guid.NewGuid():N}");

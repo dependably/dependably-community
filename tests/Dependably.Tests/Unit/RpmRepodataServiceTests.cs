@@ -2,7 +2,6 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Xml.Linq;
 using Dependably.Storage;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -31,10 +30,10 @@ public sealed class RpmRepodataServiceTests
     [Fact]
     public void BuildRepomd_EmitsSha256AndSizeMatchingInput()
     {
-        var payload = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
-        var expectedSha = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+        byte[] payload = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        string expectedSha = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
 
-        var xml = RpmRepodataService.BuildRepomd(payload);
+        string xml = RpmRepodataService.BuildRepomd(payload);
         var doc = XDocument.Parse(xml);
 
         Assert.Equal(Repo + "repomd", doc.Root!.Name);
@@ -56,15 +55,15 @@ public sealed class RpmRepodataServiceTests
     [Fact]
     public void BuildRepomd_RevisionAndTimestampArePopulatedFromUtcNow()
     {
-        var before = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var xml = RpmRepodataService.BuildRepomd(new byte[] { 0xAA });
-        var after = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        long before = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        string xml = RpmRepodataService.BuildRepomd(new byte[] { 0xAA });
+        long after = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var doc = XDocument.Parse(xml);
 
-        var revision = long.Parse(doc.Root!.Attribute("revision")!.Value);
+        long revision = long.Parse(doc.Root!.Attribute("revision")!.Value);
         Assert.InRange(revision, before, after);
 
-        var ts = long.Parse(doc.Root.Element(Repo + "data")!
+        long ts = long.Parse(doc.Root.Element(Repo + "data")!
             .Element(Repo + "timestamp")!.Value);
         Assert.InRange(ts, before, after);
     }
@@ -72,7 +71,7 @@ public sealed class RpmRepodataServiceTests
     [Fact]
     public void BuildRepomd_EmptyInput_StillProducesValidIndex()
     {
-        var xml = RpmRepodataService.BuildRepomd(Array.Empty<byte>());
+        string xml = RpmRepodataService.BuildRepomd(Array.Empty<byte>());
         var doc = XDocument.Parse(xml);
 
         // sha256 of empty is e3b0c442... — verify it lands in the document.
@@ -87,7 +86,7 @@ public sealed class RpmRepodataServiceTests
     [Fact]
     public void BuildRepomd_DeclaresXmlDeclarationAndRepoNamespace()
     {
-        var xml = RpmRepodataService.BuildRepomd(new byte[] { 0x01 });
+        string xml = RpmRepodataService.BuildRepomd(new byte[] { 0x01 });
         // Document starts with an XML declaration. (StringWriter forces utf-16 in the
         // declaration regardless of the XDeclaration set in code — that's a .NET-runtime
         // quirk of XDocument.Save(TextWriter); the controller serves UTF-8 bytes via
@@ -103,9 +102,9 @@ public sealed class RpmRepodataServiceTests
     {
         // Sanity-check that size attribute is a faithful int of the byte array length, not
         // some other count (e.g. string length, chars).
-        var payload = new byte[10_000];
+        byte[] payload = new byte[10_000];
         new Random(42).NextBytes(payload);
-        var xml = RpmRepodataService.BuildRepomd(payload);
+        string xml = RpmRepodataService.BuildRepomd(payload);
         var doc = XDocument.Parse(xml);
         Assert.Equal("10000", doc.Root!.Element(Repo + "data")!
             .Element(Repo + "size")!.Value);
@@ -116,9 +115,9 @@ public sealed class RpmRepodataServiceTests
     [Fact]
     public void Gzip_RoundTrips()
     {
-        var original = System.Text.Encoding.UTF8.GetBytes(
+        byte[] original = System.Text.Encoding.UTF8.GetBytes(
             "<metadata packages=\"0\"></metadata>");
-        var gz = RpmRepodataService.Gzip(original);
+        byte[] gz = RpmRepodataService.Gzip(original);
 
         // Magic bytes for gzip: 1f 8b.
         Assert.True(gz.Length >= 2);
@@ -150,9 +149,9 @@ public sealed class RpmRepodataServiceTests
         // A highly compressible payload should come out smaller than the input — confirms
         // CompressionLevel.Optimal is being applied rather than CompressionLevel.NoCompression
         // (which would just wrap the bytes in a gzip envelope and grow them).
-        var original = new byte[10_000];
+        byte[] original = new byte[10_000];
         Array.Fill(original, (byte)'a');
-        var gz = RpmRepodataService.Gzip(original);
+        byte[] gz = RpmRepodataService.Gzip(original);
         Assert.True(gz.Length < original.Length,
             $"expected gzip output <{original.Length} bytes, got {gz.Length}");
     }
@@ -160,9 +159,9 @@ public sealed class RpmRepodataServiceTests
     [Fact]
     public void Gzip_RoundTripsBinaryPayload()
     {
-        var original = new byte[1024];
+        byte[] original = new byte[1024];
         new Random(7).NextBytes(original);
-        var gz = RpmRepodataService.Gzip(original);
+        byte[] gz = RpmRepodataService.Gzip(original);
 
         using var ms = new MemoryStream(gz);
         using var gunzip = new GZipStream(ms, CompressionMode.Decompress);
@@ -178,10 +177,10 @@ public sealed class RpmRepodataServiceTests
     {
         // Mirrors RpmController: primary → gzip → repomd over the gzipped bytes. Any drift
         // in either helper is caught here.
-        var primary = System.Text.Encoding.UTF8.GetBytes(
+        byte[] primary = System.Text.Encoding.UTF8.GetBytes(
             "<metadata xmlns=\"http://linux.duke.edu/metadata/common\" packages=\"0\"/>");
-        var gz = RpmRepodataService.Gzip(primary);
-        var xml = RpmRepodataService.BuildRepomd(gz);
+        byte[] gz = RpmRepodataService.Gzip(primary);
+        string xml = RpmRepodataService.BuildRepomd(gz);
         var doc = XDocument.Parse(xml);
 
         var data = doc.Root!.Element(Repo + "data")!;

@@ -37,20 +37,17 @@ public static partial class PyPiArtifactValidator
     {
         name = null;
         version = null;
-        var lowered = filename.ToLowerInvariant();
+        string lowered = filename.ToLowerInvariant();
         try
         {
-            if (lowered.EndsWith(".whl", StringComparison.Ordinal))
-                return ValidateWheelStrict(filename, bytes, out name, out version);
-
-            if (lowered.EndsWith(".tar.gz", StringComparison.Ordinal)
-                || lowered.EndsWith(".tgz", StringComparison.Ordinal))
-                return ValidateSdist(bytes, out name, out version);
-
-            if (lowered.EndsWith(".egg", StringComparison.Ordinal))
-                return ValidateEggStrict(filename, bytes, out name, out version);
-
-            return ValidationResult.Fail("filename",
+            return lowered.EndsWith(".whl", StringComparison.Ordinal)
+                ? ValidateWheelStrict(filename, bytes, out name, out version)
+                : lowered.EndsWith(".tar.gz", StringComparison.Ordinal)
+                || lowered.EndsWith(".tgz", StringComparison.Ordinal)
+                ? ValidateSdist(bytes, out name, out version)
+                : lowered.EndsWith(".egg", StringComparison.Ordinal)
+                ? ValidateEggStrict(filename, bytes, out name, out version)
+                : ValidationResult.Fail("filename",
                 "Unrecognised PyPI artefact extension; expected .whl, .tar.gz/.tgz, or .egg.");
         }
         catch (Exception ex)
@@ -74,14 +71,18 @@ public static partial class PyPiArtifactValidator
             var metaEntry = zip.Entries.FirstOrDefault(e =>
                 e.FullName.EndsWith(".dist-info/METADATA", StringComparison.OrdinalIgnoreCase));
             if (metaEntry is null)
+            {
                 return ValidationResult.Fail("content", "Wheel is missing dist-info/METADATA.");
+            }
 
             using var stream = metaEntry.Open();
             using var reader = new StreamReader(stream);
             var (metaName, metaVersion) = ReadHeaders(reader, "Name", "Version");
 
-            if (!ValidateNameVersion(metaName, metaVersion, out var error))
+            if (!ValidateNameVersion(metaName, metaVersion, out string? error))
+            {
                 return ValidationResult.Fail("content", error);
+            }
 
             name = Normalize(metaName!);
             version = metaVersion;
@@ -103,23 +104,33 @@ public static partial class PyPiArtifactValidator
         version = null;
 
         // Filename per PEP 427: {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl
-        var stem = filename[..^4];
-        var parts = stem.Split('-');
+        string stem = filename[..^4];
+        string[] parts = stem.Split('-');
         if (parts.Length < 5)
+        {
             return ValidationResult.Fail("filename", "Wheel filename must have at least 5 dash-separated segments.");
+        }
 
-        var fileName = parts[0];
-        var fileVersion = parts[1];
+        string fileName = parts[0];
+        string fileVersion = parts[1];
 
-        var inner = ValidateWheel(bytes, out var metaNameNormalized, out var metaVersion);
-        if (!inner.IsValid) return inner;
+        var inner = ValidateWheel(bytes, out string? metaNameNormalized, out string? metaVersion);
+        if (!inner.IsValid)
+        {
+            return inner;
+        }
 
         if (!Normalize(fileName).Equals(metaNameNormalized!, StringComparison.Ordinal))
+        {
             return ValidationResult.Fail("content",
                 $"Wheel filename name '{fileName}' does not match METADATA Name.");
+        }
+
         if (fileVersion != metaVersion)
+        {
             return ValidationResult.Fail("content",
                 $"Wheel filename version '{fileVersion}' does not match METADATA Version '{metaVersion}'.");
+        }
 
         name = metaNameNormalized;
         version = metaVersion;
@@ -141,14 +152,18 @@ public static partial class PyPiArtifactValidator
             var metaEntry = zip.Entries.FirstOrDefault(e =>
                 e.FullName.EndsWith("EGG-INFO/PKG-INFO", StringComparison.OrdinalIgnoreCase));
             if (metaEntry is null)
+            {
                 return ValidationResult.Fail("content", "Egg is missing EGG-INFO/PKG-INFO.");
+            }
 
             using var stream = metaEntry.Open();
             using var reader = new StreamReader(stream);
             var (metaName, metaVersion) = ReadHeaders(reader, "Name", "Version");
 
-            if (!ValidateNameVersion(metaName, metaVersion, out var error))
+            if (!ValidateNameVersion(metaName, metaVersion, out string? error))
+            {
                 return ValidationResult.Fail("content", error);
+            }
 
             name = Normalize(metaName!);
             version = metaVersion;
@@ -172,17 +187,24 @@ public static partial class PyPiArtifactValidator
         version = null;
 
         // Filename per setuptools: {name}-{version}(-py{X.Y})?(-{platform})?.egg
-        var stem = filename[..^4];
-        var parts = stem.Split('-');
+        string stem = filename[..^4];
+        string[] parts = stem.Split('-');
         if (parts.Length < 2)
+        {
             return ValidationResult.Fail("filename", "Egg filename must have at least 2 dash-separated segments.");
+        }
 
-        var inner = ValidateEgg(bytes, out var metaNameNormalized, out var metaVersion);
-        if (!inner.IsValid) return inner;
+        var inner = ValidateEgg(bytes, out string? metaNameNormalized, out string? metaVersion);
+        if (!inner.IsValid)
+        {
+            return inner;
+        }
 
         if (!Normalize(parts[0]).Equals(metaNameNormalized!, StringComparison.Ordinal))
+        {
             return ValidationResult.Fail("content",
                 $"Egg filename name '{parts[0]}' does not match EGG-INFO/PKG-INFO Name.");
+        }
 
         name = metaNameNormalized;
         version = metaVersion;
@@ -200,7 +222,9 @@ public static partial class PyPiArtifactValidator
         version = null;
         try
         {
-            using var gzip = new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress);
+            using var gzip = new LimitedReadStream(
+                new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress),
+                ArchiveDecompressLimits.MaxDecompressedBytes, "Sdist");
             using var tar = new TarReader(gzip, leaveOpen: false);
 
             while (tar.GetNextEntry() is { } entry)
@@ -211,8 +235,11 @@ public static partial class PyPiArtifactValidator
                     using var stream = entry.DataStream!;
                     using var reader = new StreamReader(stream);
                     var (pkgName, pkgVersion) = ReadHeaders(reader, "Name", "Version");
-                    if (!ValidateNameVersion(pkgName, pkgVersion, out var error))
+                    if (!ValidateNameVersion(pkgName, pkgVersion, out string? error))
+                    {
                         return ValidationResult.Fail("content", error);
+                    }
+
                     name = Normalize(pkgName!);
                     version = pkgVersion;
 
@@ -220,9 +247,11 @@ public static partial class PyPiArtifactValidator
                     // the wrapper carries a PEP 440-shaped suffix it is authoritative for the
                     // version. For canonical sdists the wrapper matches PKG-INFO; for source
                     // archives whose PKG-INFO is stale across tags, the wrapper disambiguates.
-                    var wrapper = entry.Name[..entry.Name.IndexOf('/')];
-                    if (OuterVersionLabel.TryFromPyPiSdistWrapper(wrapper, out var labelled))
+                    string wrapper = entry.Name[..entry.Name.IndexOf('/')];
+                    if (OuterVersionLabel.TryFromPyPiSdistWrapper(wrapper, out string? labelled))
+                    {
                         version = labelled;
+                    }
 
                     return ValidationResult.Ok();
                 }
@@ -244,14 +273,32 @@ public static partial class PyPiArtifactValidator
         string? line;
         while ((line = reader.ReadLine()) != null)
         {
-            if (line.Length == 0) break;
-            var colon = line.IndexOf(':');
-            if (colon < 0) continue;
-            var key = line[..colon].Trim();
-            var value = line[(colon + 1)..].Trim();
-            if (key.Equals(nameHeader, StringComparison.OrdinalIgnoreCase)) name = value;
-            else if (key.Equals(versionHeader, StringComparison.OrdinalIgnoreCase)) version = value;
-            if (name is not null && version is not null) break;
+            if (line.Length == 0)
+            {
+                break;
+            }
+
+            int colon = line.IndexOf(':');
+            if (colon < 0)
+            {
+                continue;
+            }
+
+            string key = line[..colon].Trim();
+            string value = line[(colon + 1)..].Trim();
+            if (key.Equals(nameHeader, StringComparison.OrdinalIgnoreCase))
+            {
+                name = value;
+            }
+            else if (key.Equals(versionHeader, StringComparison.OrdinalIgnoreCase))
+            {
+                version = value;
+            }
+
+            if (name is not null && version is not null)
+            {
+                break;
+            }
         }
         return (name, version);
     }
@@ -289,18 +336,18 @@ public static partial class PyPiArtifactValidator
     {
         purlName = null;
         version = null;
-        if (string.IsNullOrEmpty(filename)) return false;
+        if (string.IsNullOrEmpty(filename))
+        {
+            return false;
+        }
 
-        var lowered = filename.ToLowerInvariant();
+        string lowered = filename.ToLowerInvariant();
 
-        if (lowered.EndsWith(".egg", StringComparison.Ordinal))
-            return TryParseEggFilename(filename, out purlName, out version);
-
-        if (!TryStripArchiveExtension(filename, lowered, out var stem, out var isWheel)) return false;
-
-        return isWheel
+        return lowered.EndsWith(".egg", StringComparison.Ordinal)
+            ? TryParseEggFilename(filename, out purlName, out version)
+            : TryStripArchiveExtension(filename, lowered, out string? stem, out bool isWheel) && (isWheel
             ? TryParseWheelStem(stem, out purlName, out version)
-            : TryParseSdistStem(stem, out purlName, out version);
+            : TryParseSdistStem(stem, out purlName, out version));
     }
 
     // setuptools egg: {name}-{version}(-py{X.Y})?(-{platform})?.egg. '-' inside the name/version
@@ -309,8 +356,12 @@ public static partial class PyPiArtifactValidator
     {
         purlName = null;
         version = null;
-        var eggParts = filename[..^4].Split('-');
-        if (eggParts.Length < 2 || !Pep440VersionRegex().IsMatch(eggParts[1])) return false;
+        string[] eggParts = filename[..^4].Split('-');
+        if (eggParts.Length < 2 || !Pep440VersionRegex().IsMatch(eggParts[1]))
+        {
+            return false;
+        }
+
         purlName = Normalize(eggParts[0]);
         version = eggParts[1];
         return true;
@@ -336,9 +387,17 @@ public static partial class PyPiArtifactValidator
     {
         purlName = null;
         version = null;
-        var parts = stem.Split('-');
-        if (parts.Length < 5) return false;
-        if (!Pep440VersionRegex().IsMatch(parts[1])) return false;
+        string[] parts = stem.Split('-');
+        if (parts.Length < 5)
+        {
+            return false;
+        }
+
+        if (!Pep440VersionRegex().IsMatch(parts[1]))
+        {
+            return false;
+        }
+
         purlName = Normalize(parts[0]);
         version = parts[1];
         return true;
@@ -350,9 +409,9 @@ public static partial class PyPiArtifactValidator
     {
         purlName = null;
         version = null;
-        for (var i = stem.LastIndexOf('-'); i > 0; i = stem.LastIndexOf('-', i - 1))
+        for (int i = stem.LastIndexOf('-'); i > 0; i = stem.LastIndexOf('-', i - 1))
         {
-            var candidate = stem[(i + 1)..];
+            string candidate = stem[(i + 1)..];
             if (Pep440VersionRegex().IsMatch(candidate))
             {
                 purlName = Normalize(stem[..i]);

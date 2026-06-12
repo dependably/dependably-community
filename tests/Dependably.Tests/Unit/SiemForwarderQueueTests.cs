@@ -1,7 +1,6 @@
 using Dependably.Infrastructure.Siem;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -55,9 +54,14 @@ public class SiemForwarderQueueTests
         var fwd = new CountingForwarder();
         var q = new SiemForwarderQueue(fwd, Cfg(capacity: 2), NullLogger<SiemForwarderQueue>.Instance);
 
-        var accepted = 0;
-        for (var i = 0; i < 5; i++)
-            if (q.TryEnqueue(Sample($"e{i}"))) accepted++;
+        int accepted = 0;
+        for (int i = 0; i < 5; i++)
+        {
+            if (q.TryEnqueue(Sample($"e{i}")))
+            {
+                accepted++;
+            }
+        }
 
         Assert.Equal(2, accepted);
         Assert.Equal(3, q.DroppedCount);
@@ -66,7 +70,7 @@ public class SiemForwarderQueueTests
     [Fact]
     public async Task TransientFailure_RetriesAndCounts()
     {
-        var attempts = 0;
+        int attempts = 0;
         var fwd = new CountingForwarder
         {
             Behavior = _ =>
@@ -94,7 +98,13 @@ public class SiemForwarderQueueTests
     {
         var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(2));
         while (!condition() && DateTimeOffset.UtcNow < deadline)
+        {
             await Task.Delay(20);
-        if (!condition()) throw new TimeoutException("Condition never satisfied.");
+        }
+
+        if (!condition())
+        {
+            throw new TimeoutException("Condition never satisfied.");
+        }
     }
 }

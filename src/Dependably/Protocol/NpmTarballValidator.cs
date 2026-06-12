@@ -25,32 +25,29 @@ public static class NpmTarballValidator
 
         try
         {
-            using var gzip = new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress);
+            // Zip-bomb guard: the compressed input is bounded by upload limits, but the
+            // decompressed size is attacker-controlled. Cap total decompressed bytes, the
+            // entry count, and the size of the package.json entry we parse into memory.
+            using var gzip = new LimitedReadStream(
+                new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress),
+                TarScanLimits.MaxTotalDecompressedBytes, "Tarball");
             using var tar = new TarReader(gzip, leaveOpen: false);
 
+            int entryCount = 0;
             while (tar.GetNextEntry() is { } entry)
             {
-                if (IsTopLevelPackageJson(entry.Name))
+                if (++entryCount > TarScanLimits.MaxEntries)
                 {
-                    using var entryStream = entry.DataStream!;
-                    var json = JsonNode.Parse(entryStream);
-                    name = json?["name"]?.GetValue<string>();
-                    version = json?["version"]?.GetValue<string>();
-
-                    if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(version))
-                        return ValidationResult.Fail("content", "package.json missing name or version");
-
-                    // Outer-label override: when the wrapper directory looks like
-                    // {anything}-{semver}/ (typical of GitHub source archives whose root
-                    // package.json may be stale across release tags), the wrapper's semver
-                    // is authoritative for the version. `npm pack`'s `package/` wrapper
-                    // carries no version, so this is a no-op for canonical npm publish.
-                    var wrapper = WrapperOf(entry.Name);
-                    if (OuterVersionLabel.TryFromNpmWrapper(wrapper, out var labelled))
-                        version = labelled;
-
-                    return ValidationResult.Ok();
+                    return ValidationResult.Fail("content",
+                        $"Tarball exceeds the {TarScanLimits.MaxEntries}-entry limit.");
                 }
+
+                if (!IsTopLevelPackageJson(entry.Name))
+                {
+                    continue;
+                }
+
+                return ParseManifestEntry(entry, out name, out version);
             }
 
             return ValidationResult.Fail("content", "Tarball is missing a top-level package.json");
@@ -61,13 +58,48 @@ public static class NpmTarballValidator
         }
     }
 
+    // Reads the package.json entry, validates the name and version fields, and applies the
+    // outer-label override for GitHub-style source archives.
+    private static ValidationResult ParseManifestEntry(TarEntry entry, out string? name, out string? version)
+    {
+        using var entryStream = new LimitedReadStream(
+            entry.DataStream!, TarScanLimits.MaxManifestBytes, "package.json");
+        var json = JsonNode.Parse(entryStream);
+        name = json?["name"]?.GetValue<string>();
+        version = json?["version"]?.GetValue<string>();
+
+        if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(version))
+        {
+            return ValidationResult.Fail("content", "package.json missing name or version");
+        }
+
+        // Name shape gate (same rules as the npm publish controller). The import
+        // path takes this name verbatim into blob-key construction, so slash-laden
+        // manifest names other than a single @scope/ prefix must be rejected here.
+        if (!NpmNameValidator.IsValidFullName(name))
+        {
+            return ValidationResult.Fail("content", $"Invalid npm package name: {name}");
+        }
+
+        // Outer-label override: when the wrapper directory looks like
+        // {anything}-{semver}/ (typical of GitHub source archives whose root
+        // package.json may be stale across release tags), the wrapper's semver
+        // is authoritative for the version. `npm pack`'s `package/` wrapper
+        // carries no version, so this is a no-op for canonical npm publish.
+        string wrapper = WrapperOf(entry.Name);
+        if (OuterVersionLabel.TryFromNpmWrapper(wrapper, out string? labelled))
+        {
+            version = labelled;
+        }
+
+        return ValidationResult.Ok();
+    }
+
     // Matches `package.json` at the root or inside exactly one wrapper directory of any name.
     // Single-slash check rejects deeper paths like `package/subdir/package.json`.
     internal static bool IsTopLevelPackageJson(string entryName)
     {
-        if (entryName.Equals("package.json", StringComparison.OrdinalIgnoreCase))
-            return true;
-        return entryName.EndsWith("/package.json", StringComparison.OrdinalIgnoreCase)
+        return entryName.Equals("package.json", StringComparison.OrdinalIgnoreCase) || entryName.EndsWith("/package.json", StringComparison.OrdinalIgnoreCase)
             && entryName.IndexOf('/') == entryName.LastIndexOf('/');
     }
 
@@ -75,7 +107,7 @@ public static class NpmTarballValidator
     // sits at the archive root (no wrapper).
     private static string WrapperOf(string entryName)
     {
-        var slash = entryName.IndexOf('/');
+        int slash = entryName.IndexOf('/');
         return slash < 0 ? string.Empty : entryName[..slash];
     }
 }

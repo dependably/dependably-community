@@ -1,7 +1,6 @@
 using Dependably.Protocol;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -20,7 +19,10 @@ public sealed class LocalOsvSourceExtendedTests : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(_dir)) Directory.Delete(_dir, recursive: true);
+        if (Directory.Exists(_dir))
+        {
+            Directory.Delete(_dir, recursive: true);
+        }
     }
 
     private LocalOsvSource Build() => new(_dir, NullLogger<LocalOsvSource>.Instance);
@@ -31,7 +33,7 @@ public sealed class LocalOsvSourceExtendedTests : IDisposable
         // OSV permits affected entries with ranges but no explicit Versions list. The local
         // source reports such advisories for every version of the named package — the scan
         // service decides what to do with them downstream.
-        var json = """
+        string json = """
             {
               "id": "GHSA-range",
               "summary": "range only",
@@ -50,7 +52,7 @@ public sealed class LocalOsvSourceExtendedTests : IDisposable
     public async Task DatabaseSpecific_Severity_UsedAsFallbackWhenNoCvssVector()
     {
         // No `severity[]` in the dump; database_specific.severity is consulted instead.
-        var json = """
+        string json = """
             {
               "id": "GHSA-dbsev",
               "summary": "db-specific severity",

@@ -1,6 +1,5 @@
 using System.Net;
 using Dependably.Security;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Security;
 
@@ -38,8 +37,10 @@ public sealed class ScrapeDiagnosticsTests
     public void Recent_RespectsN()
     {
         var d = new ScrapeDiagnostics();
-        for (var i = 0; i < 10; i++)
+        for (int i = 0; i < 10; i++)
+        {
             d.Record(IPAddress.Parse($"10.0.0.{i}"), ScrapeDiagnostics.Outcome.Allowed);
+        }
 
         Assert.Equal(3, d.Recent(3).Count);
         Assert.Equal(10, d.Recent(50).Count);
@@ -49,9 +50,11 @@ public sealed class ScrapeDiagnosticsTests
     public void Buffer_WrapsAtCapacity()
     {
         var d = new ScrapeDiagnostics();
-        var total = ScrapeDiagnostics.Capacity + 50;
-        for (var i = 0; i < total; i++)
+        int total = ScrapeDiagnostics.Capacity + 50;
+        for (int i = 0; i < total; i++)
+        {
             d.Record(IPAddress.Parse($"10.0.{i / 256}.{i % 256}"), ScrapeDiagnostics.Outcome.Allowed);
+        }
 
         // Even though we recorded 550 entries, only the last 500 are retained.
         var recent = d.Recent(ScrapeDiagnostics.Capacity);
@@ -66,12 +69,20 @@ public sealed class ScrapeDiagnosticsTests
     public void LifetimeCounts_TrackOutcomeSeparately()
     {
         var d = new ScrapeDiagnostics();
-        for (var i = 0; i < 5; i++)
+        for (int i = 0; i < 5; i++)
+        {
             d.Record(IPAddress.Loopback, ScrapeDiagnostics.Outcome.Allowed);
-        for (var i = 0; i < 3; i++)
+        }
+
+        for (int i = 0; i < 3; i++)
+        {
             d.Record(IPAddress.Loopback, ScrapeDiagnostics.Outcome.DeniedIp);
-        for (var i = 0; i < 2; i++)
+        }
+
+        for (int i = 0; i < 2; i++)
+        {
             d.Record(IPAddress.Loopback, ScrapeDiagnostics.Outcome.DeniedDisabled);
+        }
 
         var (allowed, deniedIp, deniedDisabled) = d.LifetimeCounts();
         Assert.Equal(5, allowed);

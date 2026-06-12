@@ -1,6 +1,7 @@
+using Dependably.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Dependably.Infrastructure;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Dependably.Api;
 
@@ -14,9 +15,13 @@ namespace Dependably.Api;
 /// responses *omit* <c>tenantSlug</c> on tenant subdomain hits — the slug is in the URL the
 /// caller already used; echoing it back to unauthenticated callers turns the endpoint into an
 /// existence oracle. The SPA infers tenant identity from <c>window.location.hostname</c>.
+///
+/// Both <c>multi</c> and <c>header</c> DEPLOYMENT_MODE values are reported as <c>multi</c>
+/// to the frontend — they share the same multi-tenant UI surface.
 /// </summary>
 [ApiController]
 [AllowAnonymous]
+[EnableRateLimiting("anon")]
 public sealed class BootstrapController : ControllerBase
 {
     private readonly IConfiguration _config;
@@ -33,19 +38,19 @@ public sealed class BootstrapController : ControllerBase
     [HttpGet("api/v1/bootstrap")]
     public IActionResult Get()
     {
-        var mode = ResolveMode(_config);
+        string mode = ResolveMode(_config);
         var ctx = HttpContext.Items[TenantContext.HttpItemsKey] as TenantContext;
-        var airGapped = _airGap.IsEnabled;
+        bool airGapped = _airGap.IsEnabled;
         // True only when both runtime and config agree the connection is plain HTTP.
         // Avoids false positives on legitimate reverse-proxy setups where Request.IsHttps=true
         // but BASE_URL hasn't been updated yet.
-        var insecureHttp = !HttpContext.Request.IsHttps && !_urls.IsHttpsDeployment;
+        bool insecureHttp = !HttpContext.Request.IsHttps && !_urls.IsHttpsDeployment;
 
         Response.Headers.CacheControl = "no-store";
 
         if (mode == "multi")
         {
-            var apexHost = ResolveApexHost(_config);
+            string? apexHost = ResolveApexHost(_config);
             if (ctx is not null && ctx.IsApex)
             {
                 return Ok(new
@@ -85,22 +90,22 @@ public sealed class BootstrapController : ControllerBase
 
     internal static string ResolveMode(IConfiguration config)
     {
-        var raw = (config["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
-        return raw == "multi" ? "multi" : "single";
+        string raw = (config["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
+        return raw is "multi" or "header" ? "multi" : "single";
     }
 
     internal static string? ResolveApexHost(IConfiguration config)
     {
-        var apex = config["APEX_HOST"];
-        if (!string.IsNullOrWhiteSpace(apex)) return apex.Trim().ToLowerInvariant();
-
-        var baseUrl = config["BASE_URL"];
-        if (!string.IsNullOrWhiteSpace(baseUrl) &&
-            Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
+        string? apex = config["APEX_HOST"];
+        if (!string.IsNullOrWhiteSpace(apex))
         {
-            return uri.Host.ToLowerInvariant();
+            return apex.Trim().ToLowerInvariant();
         }
 
-        return null;
+        string? baseUrl = config["BASE_URL"];
+        return !string.IsNullOrWhiteSpace(baseUrl) &&
+            Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)
+            ? uri.Host.ToLowerInvariant()
+            : null;
     }
 }

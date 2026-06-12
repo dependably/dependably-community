@@ -21,48 +21,48 @@ public static class OperationTagger
 {
     public static string? Map(string? route, string? method)
     {
-        if (route is null) return null;
+        return route is null
+            ? null
+            : (route, method) switch
+            {
+                // PyPI
+                ("/simple/", _) => "index.simple",
+                ("/simple/{package}/", _) => "index.simple",
+                ("/packages/{file}", _) => "package.download",
+                ("/pypi/legacy/", "POST") => "package.publish",
 
-        return (route, method) switch
-        {
-            // PyPI
-            ("/simple/", _) => "index.simple",
-            ("/simple/{package}/", _) => "index.simple",
-            ("/packages/{file}", _) => "package.download",
-            ("/pypi/legacy/", "POST") => "package.publish",
+                // npm
+                ("/npm/{package}", "GET") => "index.metadata",
+                ("/npm/@{scope}/{package}", "GET") => "index.metadata",
+                ("/npm/{package}/{version}", "GET") => "index.metadata",
+                ("/npm/{package}", "PUT") => "package.publish",
+                ("/npm/@{scope}/{package}", "PUT") => "package.publish",
+                ("/npm/tarballs/{pkg}/{file}", _) => "package.download",
+                ("/npm/tarballs/@{scope}/{pkg}/{file}", _) => "package.download",
+                ("/npm/{pkg}/-/{file}", _) => "package.download",
+                ("/npm/@{scope}/{pkg}/-/{file}", _) => "package.download",
 
-            // npm
-            ("/npm/{package}", "GET") => "index.metadata",
-            ("/npm/@{scope}/{package}", "GET") => "index.metadata",
-            ("/npm/{package}/{version}", "GET") => "index.metadata",
-            ("/npm/{package}", "PUT") => "package.publish",
-            ("/npm/@{scope}/{package}", "PUT") => "package.publish",
-            ("/npm/tarballs/{pkg}/{file}", _) => "package.download",
-            ("/npm/tarballs/@{scope}/{pkg}/{file}", _) => "package.download",
-            ("/npm/{pkg}/-/{file}", _) => "package.download",
-            ("/npm/@{scope}/{pkg}/-/{file}", _) => "package.download",
+                // NuGet
+                ("/nuget/v3/index.json", _) => "index.simple",
+                ("/nuget/index.json", _) => "index.simple",
+                ("/nuget/query", _) => "index.search",
+                ("/nuget/registration/{id}/", _) => "index.metadata",
+                ("/nuget/registration5-semver1/{id}/", _) => "index.metadata",
+                ("/nuget/registration5-gz-semver1/{id}/", _) => "index.metadata",
+                ("/nuget/registration5-semver2/{id}/", _) => "index.metadata",
+                ("/nuget/registration5-gz-semver2/{id}/", _) => "index.metadata",
+                ("/nuget/flatcontainer/{id}/index.json", _) => "index.metadata",
+                ("/nuget/flatcontainer/{id}/{version}/{file}", _) => "package.download",
+                ("/nuget/publish", "PUT") => "package.publish",
+                ("/nuget/symbols", "PUT") => "package.publish",
+                ("/nuget/publish/{id}/{version}", "DELETE") => "package.unlist",
+                ("/nuget/symbols/{id}/{version}/{file}", _) => "package.download",
 
-            // NuGet
-            ("/nuget/v3/index.json", _) => "index.simple",
-            ("/nuget/index.json", _) => "index.simple",
-            ("/nuget/query", _) => "index.search",
-            ("/nuget/registration/{id}/", _) => "index.metadata",
-            ("/nuget/registration5-semver1/{id}/", _) => "index.metadata",
-            ("/nuget/registration5-gz-semver1/{id}/", _) => "index.metadata",
-            ("/nuget/registration5-semver2/{id}/", _) => "index.metadata",
-            ("/nuget/registration5-gz-semver2/{id}/", _) => "index.metadata",
-            ("/nuget/flatcontainer/{id}/index.json", _) => "index.metadata",
-            ("/nuget/flatcontainer/{id}/{version}/{file}", _) => "package.download",
-            ("/nuget/publish", "PUT") => "package.publish",
-            ("/nuget/symbols", "PUT") => "package.publish",
-            ("/nuget/publish/{id}/{version}", "DELETE") => "package.unlist",
-            ("/nuget/symbols/{id}/{version}/{file}", _) => "package.download",
+                // Auth
+                ("api/v1/auth/login", "POST") => "auth.sso_signin",
+                ("login", "GET") => "auth.sso_signin",
 
-            // Auth
-            ("api/v1/auth/login", "POST") => "auth.sso_signin",
-            ("login", "GET") => "auth.sso_signin",
-
-            _ => null
-        };
+                _ => null
+            };
     }
 }

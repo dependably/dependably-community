@@ -7,7 +7,6 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Primitives;
 using NSubstitute;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -55,7 +54,7 @@ public sealed class ImportControllerExtendedTests
         // is a unit test over the controller, not the LicenseRepository. The license
         // extraction branch is exercised separately below.
         var (npmBytes, _, _) = NpmFixtures.BuildTarball("acme-ext-sums-ok", "1.0.0", tarballLicense: null);
-        var sidecar = $"{Sha256Hex(npmBytes)}  acme-ext-sums-ok-1.0.0.tgz\n";
+        string sidecar = $"{Sha256Hex(npmBytes)}  acme-ext-sums-ok-1.0.0.tgz\n";
 
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
@@ -99,8 +98,8 @@ public sealed class ImportControllerExtendedTests
     {
         var (npmBytes, _, _) = NpmFixtures.BuildTarball("acme-ext-mismatch", "1.0.0");
         // Different bytes → different digest.
-        var wrong = Sha256Hex(Encoding.UTF8.GetBytes("not-the-right-bytes"));
-        var sidecar = $"{wrong}  acme-ext-mismatch-1.0.0.tgz\n";
+        string wrong = Sha256Hex(Encoding.UTF8.GetBytes("not-the-right-bytes"));
+        string sidecar = $"{wrong}  acme-ext-mismatch-1.0.0.tgz\n";
 
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
@@ -123,7 +122,7 @@ public sealed class ImportControllerExtendedTests
         // Sidecar mentions file A; we upload file B. Unlisted-files rejects the batch.
         var (aBytes, _, _) = NpmFixtures.BuildTarball("acme-ext-listed", "1.0.0");
         var (bBytes, _, _) = NpmFixtures.BuildTarball("acme-ext-unlisted", "1.0.0");
-        var sidecar = $"{Sha256Hex(aBytes)}  acme-ext-listed-1.0.0.tgz\n";
+        string sidecar = $"{Sha256Hex(aBytes)}  acme-ext-listed-1.0.0.tgz\n";
 
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
@@ -223,8 +222,8 @@ public sealed class ImportControllerExtendedTests
 
         var result = await b.ImportController.Upload(dryRun: false, CancellationToken.None);
         var ok = Assert.IsType<OkObjectResult>(result);
-        var accepted = (int)ok.Value!.GetType().GetProperty("accepted")!.GetValue(ok.Value)!;
-        var rejected = (int)ok.Value!.GetType().GetProperty("rejected")!.GetValue(ok.Value)!;
+        int accepted = (int)ok.Value!.GetType().GetProperty("accepted")!.GetValue(ok.Value)!;
+        int rejected = (int)ok.Value!.GetType().GetProperty("rejected")!.GetValue(ok.Value)!;
         Assert.Equal(1, accepted);
         Assert.Equal(1, rejected);
     }
@@ -251,7 +250,7 @@ public sealed class ImportControllerExtendedTests
         var result = await b.ImportController.Upload(dryRun: false, CancellationToken.None);
         var ok = Assert.IsType<OkObjectResult>(result);
         var outcomes = (System.Collections.IEnumerable)ok.Value!.GetType().GetProperty("outcomes")!.GetValue(ok.Value)!;
-        var rejected = outcomes.Cast<object>().Single();
+        object rejected = outcomes.Cast<object>().Single();
         var t = rejected.GetType();
         Assert.Equal("claim_required", (string)t.GetProperty("Code")!.GetValue(rejected)!);
         Assert.Equal("npm", (string)t.GetProperty("Ecosystem")!.GetValue(rejected)!);
@@ -278,7 +277,7 @@ public sealed class ImportControllerExtendedTests
         var result = await b.ImportController.Upload(dryRun: false, CancellationToken.None);
         var ok = Assert.IsType<OkObjectResult>(result);
         var outcomes = (System.Collections.IEnumerable)ok.Value!.GetType().GetProperty("outcomes")!.GetValue(ok.Value)!;
-        var rejected = outcomes.Cast<object>().Single();
+        object rejected = outcomes.Cast<object>().Single();
         var t = rejected.GetType();
         Assert.Equal("size_limit_exceeded", (string)t.GetProperty("Code")!.GetValue(rejected)!);
         Assert.Equal("npm", (string)t.GetProperty("Ecosystem")!.GetValue(rejected)!);
@@ -302,7 +301,7 @@ public sealed class ImportControllerExtendedTests
         var result = await b.ImportController.Upload(dryRun: true, CancellationToken.None);
         var ok = Assert.IsType<OkObjectResult>(result);
         var outcomes = (System.Collections.IEnumerable)ok.Value!.GetType().GetProperty("outcomes")!.GetValue(ok.Value)!;
-        var first = outcomes.Cast<object>().Single();
+        object first = outcomes.Cast<object>().Single();
         Assert.Equal("would_accept", (string)first.GetType().GetProperty("Status")!.GetValue(first)!);
 
         await s.PublishService!.Received(1).ValidateAsync(Arg.Any<PublishRequest>(), Arg.Any<CancellationToken>());
@@ -315,7 +314,7 @@ public sealed class ImportControllerExtendedTests
     public async Task ImportManifest_HappyPath_AllAccepted()
     {
         var (npmBytes, _, _) = NpmFixtures.BuildTarball("acme-ext-mfst-happy", "1.0.0", tarballLicense: null);
-        var lockfile = """
+        string lockfile = """
             {
               "name": "test", "version": "1.0.0", "lockfileVersion": 3,
               "packages": {
@@ -348,7 +347,7 @@ public sealed class ImportControllerExtendedTests
     public async Task ImportManifest_DryRun_ReportsManifestBulkDryRun()
     {
         var (npmBytes, _, _) = NpmFixtures.BuildTarball("acme-ext-mfst-dry", "1.0.0", tarballLicense: null);
-        var lockfile = """
+        string lockfile = """
             {
               "name": "test", "version": "1.0.0", "lockfileVersion": 3,
               "packages": {
@@ -380,8 +379,8 @@ public sealed class ImportControllerExtendedTests
     {
         // requirements.txt declares a sha256 that won't match the wheel's actual hash.
         var (whlBytes, _) = PyPiFixtures.BuildWheel("acme_ext_mfst_hash", "1.0.0");
-        var bogus = new string('a', 64);
-        var requirements = $"acme-ext-mfst-hash==1.0.0 --hash=sha256:{bogus}\n";
+        string bogus = new('a', 64);
+        string requirements = $"acme-ext-mfst-hash==1.0.0 --hash=sha256:{bogus}\n";
 
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
@@ -396,7 +395,7 @@ public sealed class ImportControllerExtendedTests
 
         var result = await b.ImportController.ImportManifest(dryRun: false, CancellationToken.None);
         var unproc = Assert.IsType<UnprocessableEntityObjectResult>(result);
-        var v = unproc.Value!;
+        object v = unproc.Value!;
         var mismatches = (System.Collections.IEnumerable)v.GetType().GetProperty("hash_mismatches")!.GetValue(v)!;
         Assert.Single(mismatches.Cast<object>());
     }
@@ -407,7 +406,7 @@ public sealed class ImportControllerExtendedTests
         // Manifest declares two packages, only one artefact uploaded. Pre-validation rejects
         // and StoreAndRecordAsync is NOT called for the one that did upload.
         var (presentBytes, _, _) = NpmFixtures.BuildTarball("acme-ext-mfst-pres", "1.0.0", tarballLicense: null);
-        var lockfile = """
+        string lockfile = """
             {
               "name": "test", "version": "1.0.0", "lockfileVersion": 3,
               "packages": {
@@ -431,7 +430,7 @@ public sealed class ImportControllerExtendedTests
 
         var result = await b.ImportController.ImportManifest(dryRun: false, CancellationToken.None);
         var unproc = Assert.IsType<UnprocessableEntityObjectResult>(result);
-        var v = unproc.Value!;
+        object v = unproc.Value!;
         var missing = (System.Collections.IEnumerable)v.GetType().GetProperty("manifest_entries_without_files")!.GetValue(v)!;
         Assert.Single(missing.Cast<object>());
 
@@ -445,7 +444,7 @@ public sealed class ImportControllerExtendedTests
         // coverage error rather than being silently imported.
         var (declBytes, _, _) = NpmFixtures.BuildTarball("acme-ext-mfst-decl", "1.0.0");
         var (orphBytes, _, _) = NpmFixtures.BuildTarball("acme-ext-mfst-orph", "1.0.0");
-        var lockfile = """
+        string lockfile = """
             {
               "name": "test", "version": "1.0.0", "lockfileVersion": 3,
               "packages": {
@@ -469,7 +468,7 @@ public sealed class ImportControllerExtendedTests
 
         var result = await b.ImportController.ImportManifest(dryRun: false, CancellationToken.None);
         var unproc = Assert.IsType<UnprocessableEntityObjectResult>(result);
-        var v = unproc.Value!;
+        object v = unproc.Value!;
         var orphans = (System.Collections.IEnumerable)v.GetType().GetProperty("files_without_manifest_entries")!.GetValue(v)!;
         Assert.Single(orphans.Cast<object>());
     }
@@ -480,7 +479,7 @@ public sealed class ImportControllerExtendedTests
         // Manifest declares the package; uploaded "artefact" is garbage bytes that the
         // EcosystemDetector can't classify, so it lands in the Unparseable bucket and the
         // batch is rejected.
-        var lockfile = """
+        string lockfile = """
             {
               "name": "test", "version": "1.0.0", "lockfileVersion": 3,
               "packages": {
@@ -503,7 +502,7 @@ public sealed class ImportControllerExtendedTests
 
         var result = await b.ImportController.ImportManifest(dryRun: false, CancellationToken.None);
         var unproc = Assert.IsType<UnprocessableEntityObjectResult>(result);
-        var v = unproc.Value!;
+        object v = unproc.Value!;
         var unparseable = (System.Collections.IEnumerable)v.GetType().GetProperty("unparseable_files")!.GetValue(v)!;
         Assert.Single(unparseable.Cast<object>());
     }
@@ -513,7 +512,7 @@ public sealed class ImportControllerExtendedTests
     {
         // package-lock.json filename is recognised, but contents fail JsonDocument.Parse —
         // the controller's ParseManifestPartAsync catches the exception and returns 400.
-        var bogusLock = "{ this is not valid json";
+        string bogusLock = "{ this is not valid json";
 
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");

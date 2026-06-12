@@ -1,8 +1,6 @@
-using System.Net.Http;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Observability;
 using Dependably.Protocol;
-using Dependably.Security;
 
 namespace Dependably.Storage;
 
@@ -63,9 +61,9 @@ public sealed class ProxyFetchService
     public async Task<ProxyFetchResult> RecordAndScanAsync(
         ProxyFetchRequest request, CancellationToken ct = default)
     {
-        var sha256 = request.Blob.Sha256Hex;
-        var blobKey = request.Blob.BlobKey;
-        var sizeBytes = request.Blob.SizeBytes;
+        string sha256 = request.Blob.Sha256Hex;
+        string blobKey = request.Blob.BlobKey;
+        long sizeBytes = request.Blob.SizeBytes;
 
         // Fail-fast verification against the upstream-supplied integrity hash (PyPI
         // #sha256=, npm dist.integrity / dist.shasum, NuGet packageHash). The SHA-256
@@ -107,7 +105,9 @@ public sealed class ProxyFetchService
                     Deprecated: request.Deprecated,
                     BlockDeprecatedMode: request.BlockDeprecatedMode), ct);
             if (firstFetch == BlockDecision.Blocked)
+            {
                 return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey, VersionId: null);
+            }
         }
 
         // Cache-access record into cache_artifact + tenant_artifact_access. Best-effort: a recorder failure
@@ -118,7 +118,7 @@ public sealed class ProxyFetchService
             await _cacheRecorder.RecordAccessAsync(access with { Sha256 = sha256, BlobKey = blobKey, SizeBytes = sizeBytes }, ct);
         }
 
-        var scanVersionId = await _proxyVersions.RecordAsync(
+        string? scanVersionId = await _proxyVersions.RecordAsync(
             new ProxyVersionRequest(
                 OrgId: request.OrgId, Ecosystem: request.Ecosystem,
                 PackageName: request.PackageName, PurlName: request.PurlName,
@@ -153,7 +153,10 @@ public sealed class ProxyFetchService
                 PublishedAt: request.PublishedAt,
                 ActorKind: request.ActorKind,
                 Deprecated: existing?.Deprecated,
-                BlockDeprecatedMode: request.BlockDeprecatedMode), ct);
+                BlockDeprecatedMode: request.BlockDeprecatedMode,
+                BlockMaliciousMode: request.BlockMaliciousMode,
+                BlockKevMode: request.BlockKevMode,
+                MaxEpssTolerance: request.MaxEpssTolerance), ct);
 
         return new ProxyFetchResult(decision, sha256, blobKey, scanVersionId);
     }
@@ -277,7 +280,18 @@ public sealed record ProxyFetchRequest(
     /// </summary>
     string? Deprecated = null,
     /// <summary>Tenant policy from <c>org_settings.block_deprecated</c>: 'off' | 'warn' | 'block'.</summary>
-    string? BlockDeprecatedMode = null);
+    string? BlockDeprecatedMode = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.block_malicious</c>: 'off' | 'warn' | 'block'.
+    /// Evaluated by <see cref="Protocol.BlockGateService"/> right after the synchronous
+    /// first-fetch OSV scan, so a version with a malicious-package advisory is denied on
+    /// the very first fetch.
+    /// </summary>
+    string? BlockMaliciousMode = null,
+    /// <summary>Tenant policy from <c>org_settings.block_kev</c>: 'off' | 'warn' | 'block'.</summary>
+    string? BlockKevMode = null,
+    /// <summary>Tenant ceiling from <c>org_settings.max_epss_tolerance</c> (0.0–1.0); null = off.</summary>
+    double? MaxEpssTolerance = null);
 
 /// <summary>Outcome of <see cref="ProxyFetchService.RecordAndScanAsync"/>.</summary>
 public sealed record ProxyFetchResult(

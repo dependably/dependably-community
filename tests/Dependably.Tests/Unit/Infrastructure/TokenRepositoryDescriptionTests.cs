@@ -1,7 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -166,12 +165,12 @@ public sealed class TokenRepositoryDescriptionTests : IAsyncLifetime
         var (_, rec) = await _tokens.CreateUserTokenAsync("o1", "u1", "[\"read:metadata\"]", expiresAt: null);
 
         // A caller in another tenant cannot revoke o1's token.
-        var crossOrg = await _tokens.DeleteTokenAsync(rec.Id, "o2");
+        int crossOrg = await _tokens.DeleteTokenAsync(rec.Id, "o2");
         Assert.Equal(0, crossOrg);
         Assert.NotNull(await _tokens.GetTokenByIdAsync(rec.Id, "o1"));
 
         // The owning tenant can.
-        var sameOrg = await _tokens.DeleteTokenAsync(rec.Id, "o1");
+        int sameOrg = await _tokens.DeleteTokenAsync(rec.Id, "o1");
         Assert.Equal(1, sameOrg);
         Assert.Null(await _tokens.GetTokenByIdAsync(rec.Id, "o1"));
     }
@@ -181,11 +180,11 @@ public sealed class TokenRepositoryDescriptionTests : IAsyncLifetime
     {
         var (_, rec) = await _tokens.CreateServiceTokenAsync("o1", "ci", "[\"read:metadata\"]", expiresAt: null);
 
-        var crossOrg = await _tokens.DeleteServiceTokenAsync(rec.Id, "o2");
+        int crossOrg = await _tokens.DeleteServiceTokenAsync(rec.Id, "o2");
         Assert.Equal(0, crossOrg);
         Assert.Contains(await _tokens.ListServiceTokensAsync("o1"), t => t.Id == rec.Id);
 
-        var sameOrg = await _tokens.DeleteServiceTokenAsync(rec.Id, "o1");
+        int sameOrg = await _tokens.DeleteServiceTokenAsync(rec.Id, "o1");
         Assert.Equal(1, sameOrg);
         Assert.DoesNotContain(await _tokens.ListServiceTokensAsync("o1"), t => t.Id == rec.Id);
     }

@@ -2,7 +2,6 @@ using System.IO.Compression;
 using System.Text;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -113,7 +112,7 @@ public sealed class EcosystemDetectorTests
         // Some npm tarballs (git-archive, GitHub release assets) wrap files in {name}-{version}/
         // rather than package/. npm itself strips one leading dir on install, so the wrapper
         // name isn't significant — the detector must accept this shape.
-        var bytes = BuildGzippedTarWithPackageJson("acme-pkg-1.2.3/package.json", "acme-pkg", "1.2.3");
+        byte[] bytes = BuildGzippedTarWithPackageJson("acme-pkg-1.2.3/package.json", "acme-pkg", "1.2.3");
         var (ok, err) = EcosystemDetector.Detect("acme-pkg-1.2.3.tgz", bytes);
 
         Assert.Null(err);
@@ -128,7 +127,7 @@ public sealed class EcosystemDetectorTests
     {
         // Hand-rolled `tar -czf` from a project directory may put package.json at the archive
         // root with no wrapper directory. Accept this shape too.
-        var bytes = BuildGzippedTarWithPackageJson("package.json", "root-pkg", "0.1.0");
+        byte[] bytes = BuildGzippedTarWithPackageJson("package.json", "root-pkg", "0.1.0");
         var (ok, err) = EcosystemDetector.Detect("root-pkg-0.1.0.tgz", bytes);
 
         Assert.Null(err);
@@ -151,7 +150,7 @@ public sealed class EcosystemDetectorTests
     {
         // mermaid-style monorepo: workspace package.json claims 10.2.4 but the source archive
         // for tag v11.13.0 wraps everything in `<repo>-11.13.0/`. Use the wrapper version.
-        var bytes = BuildGzippedTarWithPackageJson("mermaid-mermaid-11.13.0/package.json",
+        byte[] bytes = BuildGzippedTarWithPackageJson("mermaid-mermaid-11.13.0/package.json",
             name: "mermaid-monorepo", version: "10.2.4");
         var (ok, err) = EcosystemDetector.Detect("mermaid-mermaid-11.13.0.tar.gz", bytes);
 
@@ -178,7 +177,7 @@ public sealed class EcosystemDetectorTests
     public void PyPi_Sdist_Wrapper_Dir_Overrides_Stale_PkgInfo_Version()
     {
         // Wrapper-dir says 2.0.0 but PKG-INFO inside says 1.0.0 (stale across release tags).
-        var bytes = BuildGzippedTarWithPkgInfo("myproj-2.0.0/PKG-INFO", name: "myproj", version: "1.0.0");
+        byte[] bytes = BuildGzippedTarWithPkgInfo("myproj-2.0.0/PKG-INFO", name: "myproj", version: "1.0.0");
         var (ok, err) = EcosystemDetector.Detect("myproj-2.0.0.tar.gz", bytes);
 
         Assert.Null(err);
@@ -220,7 +219,7 @@ public sealed class EcosystemDetectorTests
     {
         // ZIP that's neither a wheel nor a .nupkg — just a random ZIP. Detector should fail
         // cleanly rather than misclassify.
-        var bytes = BuildEmptyishZip();
+        byte[] bytes = BuildEmptyishZip();
         var (ok, err) = EcosystemDetector.Detect("mystery.zip", bytes);
 
         Assert.Null(ok);
@@ -232,7 +231,7 @@ public sealed class EcosystemDetectorTests
     public void Rejects_GzippedTar_With_No_Recognised_Manifest()
     {
         // gzip+tar with neither package/package.json nor */PKG-INFO at top level.
-        var bytes = BuildGzippedTarWithEntry("random/data.txt", "hello");
+        byte[] bytes = BuildGzippedTarWithEntry("random/data.txt", "hello");
         var (ok, err) = EcosystemDetector.Detect("mystery.tar.gz", bytes);
 
         Assert.Null(ok);
@@ -241,9 +240,70 @@ public sealed class EcosystemDetectorTests
     }
 
     [Fact]
+    public void Rejects_GzipBomb_TotalDecompressedBytesOverCap()
+    {
+        // The marker scan skips entry payloads, but skipping still decompresses them — a
+        // crafted high-ratio gzip must abort at the decompression budget, not spin through
+        // gigabytes. The bomb entry precedes the package.json marker so the scan has to
+        // cross it.
+        byte[] bytes = NpmFixtures.BuildBombTarball(
+            "package/blob.bin", TarScanLimits.MaxTotalDecompressedBytes + 1024 * 1024);
+
+        var (ok, err) = EcosystemDetector.Detect("bomb-1.0.0.tgz", bytes);
+
+        Assert.Null(ok);
+        Assert.NotNull(err);
+        Assert.Equal("unrecognised_format", err!.Code);
+        Assert.Contains("decompression limit", err.Message);
+    }
+
+    [Fact]
+    public void Rejects_GzippedTar_EntryCountOverCap()
+    {
+        byte[] bytes = NpmFixtures.BuildManyEntryTarball(TarScanLimits.MaxEntries + 1);
+
+        var (ok, err) = EcosystemDetector.Detect("many.tgz", bytes);
+
+        Assert.Null(ok);
+        Assert.NotNull(err);
+        Assert.Equal("unrecognised_format", err!.Code);
+        Assert.Contains("entry limit", err.Message);
+    }
+
+    [Fact]
+    public void Rejects_Npm_Tarball_With_SlashLaden_Manifest_Name()
+    {
+        // The manifest name lands in blob-key construction on the import path; a name with
+        // extra '/' segments must fail detection with the same shape rules npm publish uses.
+        byte[] bytes = BuildGzippedTarWithEntry(
+            "package/package.json", """{"name":"evil/../name","version":"1.0.0"}""");
+
+        var (ok, err) = EcosystemDetector.Detect("evil-1.0.0.tgz", bytes);
+
+        Assert.Null(ok);
+        Assert.NotNull(err);
+        Assert.Equal("tarball_invalid", err!.Code);
+        Assert.Contains("Invalid npm package name", err.Message);
+    }
+
+    [Fact]
+    public void Detects_Npm_Scoped_Name_Still_Accepted()
+    {
+        byte[] bytes = BuildGzippedTarWithEntry(
+            "package/package.json", """{"name":"@scope/name","version":"1.0.0"}""");
+
+        var (ok, err) = EcosystemDetector.Detect("scope-name-1.0.0.tgz", bytes);
+
+        Assert.Null(err);
+        Assert.NotNull(ok);
+        Assert.Equal("npm", ok!.Ecosystem);
+        Assert.Equal("@scope/name", ok.Name);
+    }
+
+    [Fact]
     public void Rejects_Random_Non_Archive_Bytes()
     {
-        var bytes = Encoding.UTF8.GetBytes("not an archive, just text");
+        byte[] bytes = Encoding.UTF8.GetBytes("not an archive, just text");
         var (ok, err) = EcosystemDetector.Detect("readme.txt", bytes);
 
         Assert.Null(ok);
@@ -265,19 +325,19 @@ public sealed class EcosystemDetectorTests
 
     private static byte[] BuildGzippedTarWithPackageJson(string entryPath, string name, string version)
     {
-        var json = $"{{\"name\":\"{name}\",\"version\":\"{version}\"}}";
+        string json = $"{{\"name\":\"{name}\",\"version\":\"{version}\"}}";
         return BuildGzippedTarWithEntry(entryPath, json);
     }
 
     private static byte[] BuildGzippedTarWithPkgInfo(string entryPath, string name, string version)
     {
-        var pkgInfo = $"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\nSummary: synthetic\n";
+        string pkgInfo = $"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\nSummary: synthetic\n";
         return BuildGzippedTarWithEntry(entryPath, pkgInfo);
     }
 
     private static byte[] BuildGzippedTarWithEntry(string entryName, string content)
     {
-        var contentBytes = Encoding.UTF8.GetBytes(content);
+        byte[] contentBytes = Encoding.UTF8.GetBytes(content);
         using var ms = new MemoryStream();
         using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
         using (var tw = new System.Formats.Tar.TarWriter(gz, leaveOpen: true))

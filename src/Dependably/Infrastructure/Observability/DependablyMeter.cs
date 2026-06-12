@@ -123,6 +123,17 @@ public static class DependablyMeter
             "dependably.activity_writer.dropped",
             description: "Activity records dropped because the async writer channel was full.");
 
+    /// <summary>
+    /// Download-count increments dropped because the async writer channel was full.
+    /// Dropped increments mean the durable counter is slightly understated — acceptable
+    /// under extreme load. Operators should watch this counter to detect sustained
+    /// writer backpressure.
+    /// </summary>
+    public static readonly Counter<long> DownloadCountWriterDropped =
+        Meter.CreateCounter<long>(
+            "dependably.download_count_writer.dropped",
+            description: "Download-count increments dropped because the async writer channel was full.");
+
     public static readonly Counter<long> ScanFindings =
         Meter.CreateCounter<long>(
             "dependably.scan.findings",
@@ -166,6 +177,34 @@ public static class DependablyMeter
             "dependably.security.deprecated_blocks",
             description: "Downloads blocked by the block_deprecated proxy policy. Attributes: ecosystem.");
 
+    /// <summary>
+    /// Downloads blocked because the version carries an OSV malicious-package advisory
+    /// (<c>MAL-</c> id) and the tenant's <c>block_malicious</c> policy is 'block'.
+    /// Attributes: <c>ecosystem</c>.
+    /// </summary>
+    public static readonly Counter<long> MaliciousBlocks =
+        Meter.CreateCounter<long>(
+            "dependably.security.malicious_blocks",
+            description: "Downloads blocked by the block_malicious proxy policy. Attributes: ecosystem.");
+
+    /// <summary>
+    /// Downloads blocked because an advisory aliases a CISA-KEV-listed CVE and the tenant's
+    /// <c>block_kev</c> policy is 'block'. Attributes: <c>ecosystem</c>.
+    /// </summary>
+    public static readonly Counter<long> KevBlocks =
+        Meter.CreateCounter<long>(
+            "dependably.security.kev_blocks",
+            description: "Downloads blocked by the block_kev proxy policy. Attributes: ecosystem.");
+
+    /// <summary>
+    /// Downloads blocked because the version's maximum EPSS exploitation probability exceeds
+    /// the tenant's <c>max_epss_tolerance</c> ceiling. Attributes: <c>ecosystem</c>.
+    /// </summary>
+    public static readonly Counter<long> EpssBlocks =
+        Meter.CreateCounter<long>(
+            "dependably.security.epss_blocks",
+            description: "Downloads blocked by the max_epss_tolerance proxy policy. Attributes: ecosystem.");
+
     // ── Observable gauges — values pushed from elsewhere, read on scrape ────
 
     /// <summary>Background-job last-success unix timestamps, keyed by job_name.</summary>
@@ -176,6 +215,12 @@ public static class DependablyMeter
 
     /// <summary>Active (non-soft-deleted) tenant count; written by TenantCountPoller.</summary>
     private static long _tenantCount;
+
+    /// <summary>Available free bytes on the staging volume; written by StagingDiskMonitor.</summary>
+    private static long _stagingDiskAvailableBytes;
+
+    /// <summary>Bytes used by files in the staging directory; written by StagingDiskMonitor.</summary>
+    private static long _stagingDiskUsedBytes;
 
     static DependablyMeter()
     {
@@ -201,6 +246,18 @@ public static class DependablyMeter
             "dependably.tenants.count",
             observeValue: () => Interlocked.Read(ref _tenantCount),
             description: "Active (non-soft-deleted) tenant count. Updated by TenantCountPoller.");
+
+        Meter.CreateObservableGauge(
+            "dependably.staging.disk.available_bytes",
+            observeValue: () => Interlocked.Read(ref _stagingDiskAvailableBytes),
+            unit: "By",
+            description: "Available free bytes on the staging volume. Updated by StagingDiskMonitor.");
+
+        Meter.CreateObservableGauge(
+            "dependably.staging.disk.used_bytes",
+            observeValue: () => Interlocked.Read(ref _stagingDiskUsedBytes),
+            unit: "By",
+            description: "Bytes used by files currently present in the staging directory. Updated by StagingDiskMonitor.");
     }
 
     /// <summary>
@@ -225,6 +282,22 @@ public static class DependablyMeter
     /// </summary>
     public static void RecordTenantCount(long count)
         => Interlocked.Exchange(ref _tenantCount, count);
+
+    /// <summary>
+    /// Records available bytes on the staging volume for the observable gauge
+    /// <c>dependably.staging.disk.available_bytes</c>. Called by
+    /// <c>StagingDiskMonitor</c>; values are stale up to the poll interval.
+    /// </summary>
+    public static void RecordStagingDiskAvailable(long bytes)
+        => Interlocked.Exchange(ref _stagingDiskAvailableBytes, bytes);
+
+    /// <summary>
+    /// Records bytes used by files in the staging directory for the observable gauge
+    /// <c>dependably.staging.disk.used_bytes</c>. Called by
+    /// <c>StagingDiskMonitor</c>; values are stale up to the poll interval.
+    /// </summary>
+    public static void RecordStagingDiskUsed(long bytes)
+        => Interlocked.Exchange(ref _stagingDiskUsedBytes, bytes);
 
     // ── Read accessors for the in-app snapshot page ────────────────────────
     //

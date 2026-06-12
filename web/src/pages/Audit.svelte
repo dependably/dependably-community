@@ -6,14 +6,28 @@
   import { formatDate } from '../lib/format.js'
   import DataTable from '../lib/DataTable.svelte'
   import Pagination from '../lib/Pagination.svelte'
+  import { readQuery, writeQuery } from '../lib/tableState.js'
+
+  // Tab + filter state lives in the URL query string so it survives route changes,
+  // reloads, and copied links. Lifecycle keys: type/page/limit; admin keys: action/apage/alimit.
+  const DEFAULTS = { tab: 'lifecycle', type: '', page: 1, limit: 50, action: '', apage: 1, alimit: 50 }
+  const init = readQuery(DEFAULTS)
+
+  function sync() {
+    writeQuery({
+      tab: activeTab,
+      type: lcFilterType, page: lcPage, limit: lcLimit,
+      action: adFilterAction, apage: adPage, alimit: adLimit,
+    }, DEFAULTS)
+  }
 
   // Tab state — Lifecycle (activity feed) is the default; Admin actions (audit_log) loads when its tab is selected.
-  let activeTab = 'lifecycle'
+  let activeTab = init.tab
 
   // ── Lifecycle tab (activity) ─────────────────────────────────────────────
   let lcItems = [], lcLoading = true, lcError = ''
-  let lcFilterType = ''
-  let lcPage = 1, lcLimit = 50, lcTotal = 0
+  let lcFilterType = init.type
+  let lcPage = init.page, lcLimit = init.limit, lcTotal = 0
 
   $: lcColumns = [
     { key: 'createdAt',  label: $t('activity.columns.time'),   sortable: true, defaultDir: 'desc', width: '150px' },
@@ -36,9 +50,9 @@
     finally { lcLoading = false }
   }
 
-  function lcOnPageChange(e) { lcPage = e.detail.page; loadLifecycle() }
-  function lcOnLimitChange(e) { lcLimit = e.detail.limit; lcPage = 1; loadLifecycle() }
-  function lcOnFilterChange() { lcPage = 1; loadLifecycle() }
+  function lcOnPageChange(e) { lcPage = e.detail.page; sync(); loadLifecycle() }
+  function lcOnLimitChange(e) { lcLimit = e.detail.limit; lcPage = 1; sync(); loadLifecycle() }
+  function lcOnFilterChange() { lcPage = 1; sync(); loadLifecycle() }
 
   async function lcExport() {
     try {
@@ -74,8 +88,8 @@
 
   // ── Admin actions tab (audit_log scope='tenant') ─────────────────────────
   let adItems = [], adLoading = false, adError = ''
-  let adFilterAction = ''
-  let adPage = 1, adLimit = 50, adTotal = 0
+  let adFilterAction = init.action
+  let adPage = init.apage, adLimit = init.alimit, adTotal = 0
 
   // Tenant audit actions, grouped for the filter dropdown. Backend uses exact-match
   // filtering on the action column at scope='tenant'; system-scope actions
@@ -115,12 +129,13 @@
     finally { adLoading = false }
   }
 
-  function adOnPageChange(e) { adPage = e.detail.page; loadAdmin() }
-  function adOnLimitChange(e) { adLimit = e.detail.limit; adPage = 1; loadAdmin() }
-  function adOnFilterChange() { adPage = 1; loadAdmin() }
+  function adOnPageChange(e) { adPage = e.detail.page; sync(); loadAdmin() }
+  function adOnLimitChange(e) { adLimit = e.detail.limit; adPage = 1; sync(); loadAdmin() }
+  function adOnFilterChange() { adPage = 1; sync(); loadAdmin() }
 
   function selectTab(tab) {
     activeTab = tab
+    sync()
     if (tab === 'admin') loadAdmin()
   }
 

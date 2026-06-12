@@ -1,9 +1,9 @@
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit;
-using Dependably.Protocol;
 using Dependably.Security;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Api;
 
@@ -49,9 +49,12 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     public async Task<IActionResult> GetOrgSettings(CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadTenant, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         var settings = await _settings.GetSettingsAsync(orgId, ct);
 
         // Serialize the settings model verbatim (camelCase, all fields the UI reads) and add
@@ -69,23 +72,29 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
     /// <summary>PUT /api/v1/orgs/{org}/settings</summary>
     [HttpPut("api/v1/settings")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> UpdateOrgSettings([FromBody] UpdateOrgSettingsRequest req, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
         if (req.DefaultLanguage is { } lang && !LanguageCodes.IsSupported(lang))
+        {
             return BadRequest(new { detail = $"Unsupported language code '{lang}'. Allowed: {string.Join(", ", LanguageCodes.Supported)}." });
+        }
 
-        var orgId = CurrentTenantId();
-        var instanceMax = _config["MAX_UPLOAD_BYTES"] is { } s && long.TryParse(s, out var v) ? (long?)v : null;
+        string orgId = CurrentTenantId();
+        long? instanceMax = _config["MAX_UPLOAD_BYTES"] is { } s && long.TryParse(s, out long v) ? (long?)v : null;
 
         // Capture prior allow_version_overwrite + air_gapped so the targeted
         // tenant.setting.change events can carry before/after when a toggle moves — that's the
         // supply-chain-shaped surface audit reviewers grep for.
         var prior = await _settings.GetSettingsAsync(orgId, ct);
-        var priorOverwrite = prior?.AllowVersionOverwrite ?? false;
-        var priorAirGapped = prior?.AirGapped ?? false;
+        bool priorOverwrite = prior?.AllowVersionOverwrite ?? false;
+        bool priorAirGapped = prior?.AirGapped ?? false;
 
         await _settings.UpsertSettingsAsync(new OrgSettingsUpdate(
             orgId,
@@ -99,9 +108,9 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             req.DefaultLanguage,
             req.AllowVersionOverwrite,
             MaxUploadBytesMaven: req.MaxUploadBytesMaven,
-            MaxUploadBytesRpm:   req.MaxUploadBytesRpm,
-            MaxUploadBytesOci:   req.MaxUploadBytesOci,
-            AirGapped:           req.AirGapped), ct);
+            MaxUploadBytesRpm: req.MaxUploadBytesRpm,
+            MaxUploadBytesOci: req.MaxUploadBytesOci,
+            AirGapped: req.AirGapped), ct);
 
         await _audit.LogAsync("org_settings_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -160,9 +169,12 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     public async Task<IActionResult> GetRetention(CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadTenant, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         var settings = await _settings.GetSettingsAsync(orgId, ct);
         return Ok(new
         {
@@ -174,12 +186,16 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
     /// <summary>PUT /api/v1/orgs/{org}/retention</summary>
     [HttpPut("api/v1/retention")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> UpdateRetention([FromBody] UpdateRetentionRequest req, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         await _settings.UpsertRetentionAsync(orgId, req.KeepVersions, req.KeepDays, req.ActivityRetentionDays, ct);
 
         await _audit.LogAsync("retention_updated", orgId, GetUserId(),
@@ -198,16 +214,22 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     public async Task<IActionResult> GetProxySettings(CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadTenant, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         var settings = await _settings.GetSettingsAsync(orgId, ct);
         return Ok(new
         {
             proxy_passthrough_enabled = settings?.ProxyPassthroughEnabled ?? true,
-            max_osv_score_tolerance   = settings?.MaxOsvScoreTolerance   ?? 10.0,
-            min_release_age_hours     = settings?.MinReleaseAgeHours,
-            block_deprecated          = settings?.BlockDeprecated ?? "off",
+            max_osv_score_tolerance = settings?.MaxOsvScoreTolerance ?? 10.0,
+            min_release_age_hours = settings?.MinReleaseAgeHours,
+            block_deprecated = settings?.BlockDeprecated ?? "off",
+            block_malicious = settings?.BlockMalicious ?? "block",
+            block_kev = settings?.BlockKev ?? "off",
+            max_epss_tolerance = settings?.MaxEpssTolerance,
         });
     }
 
@@ -217,30 +239,71 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
     /// <summary>PUT /api/v1/orgs/{org}/proxy-settings</summary>
     [HttpPut("api/v1/proxy-settings")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> UpdateProxySettings([FromBody] UpdateProxySettingsRequest req, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
         if (req.MaxOsvScoreTolerance is < 0.0 or > 10.0)
+        {
             return _problems.ValidationErrorAction("max_osv_score_tolerance", "Must be between 0.0 and 10.0.");
+        }
 
         if (req.MinReleaseAgeHours is { } age && (age < 0 || age > MaxReleaseAgeHours))
+        {
             return _problems.ValidationErrorAction(
                 "min_release_age_hours",
                 $"Must be between 0 and {MaxReleaseAgeHours} hours (1 year), or null to disable.");
+        }
 
         // Normalize the retired 'block' value (deny-everything) to its successor 'block_all' so
         // existing automation keeps working after the new/all split.
-        var blockDeprecated = req.BlockDeprecated ?? "off";
-        if (blockDeprecated == "block") blockDeprecated = "block_all";
+        string blockDeprecated = req.BlockDeprecated ?? "off";
+        if (blockDeprecated == "block")
+        {
+            blockDeprecated = "block_all";
+        }
+
         if (blockDeprecated is not ("off" or "warn" or "block_new" or "block_all"))
+        {
             return _problems.ValidationErrorAction(
                 "block_deprecated", "Must be 'off', 'warn', 'block_new', or 'block_all'.");
+        }
 
-        var orgId = CurrentTenantId();
+        // Absent field keeps the secure default — a client still sending the pre-gate payload
+        // shape must not silently disable malware blocking.
+        string blockMalicious = req.BlockMalicious ?? "block";
+        if (blockMalicious is not ("off" or "warn" or "block"))
+        {
+            return _problems.ValidationErrorAction(
+                "block_malicious", "Must be 'off', 'warn', or 'block'.");
+        }
+
+        // Absent = off, matching the column default — both KEV and EPSS are opt-in policies.
+        string blockKev = req.BlockKev ?? "off";
+        if (blockKev is not ("off" or "warn" or "block"))
+        {
+            return _problems.ValidationErrorAction(
+                "block_kev", "Must be 'off', 'warn', or 'block'.");
+        }
+
+        if (req.MaxEpssTolerance is < 0.0 or > 1.0)
+        {
+            return _problems.ValidationErrorAction(
+                "max_epss_tolerance", "Must be between 0.0 and 1.0 (EPSS probability), or null to disable.");
+        }
+
+        string orgId = CurrentTenantId();
         await _settings.UpsertProxySettingsAsync(
-            orgId, req.ProxyPassthroughEnabled, req.MaxOsvScoreTolerance, req.MinReleaseAgeHours, blockDeprecated, ct);
+            orgId,
+            new ProxyPolicySettings(
+                req.ProxyPassthroughEnabled, req.MaxOsvScoreTolerance, req.MinReleaseAgeHours,
+                blockDeprecated, blockMalicious, blockKev, req.MaxEpssTolerance),
+            ct);
 
         await _audit.LogAsync("proxy_settings_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -249,6 +312,9 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 max_osv_score_tolerance = req.MaxOsvScoreTolerance,
                 min_release_age_hours = req.MinReleaseAgeHours,
                 block_deprecated = blockDeprecated,
+                block_malicious = blockMalicious,
+                block_kev = blockKev,
+                max_epss_tolerance = req.MaxEpssTolerance,
             }), ct: ct);
 
         return NoContent();

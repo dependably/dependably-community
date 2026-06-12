@@ -4,7 +4,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -57,16 +56,16 @@ public sealed class CacheAccessRecorderTests : IAsyncLifetime
 
         await using var conn = await _db.OpenAsync();
 
-        var artifactCount = await conn.ExecuteScalarAsync<long>(
+        long artifactCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'npm' AND name = 'lodash' AND version = '4.17.21'");
         Assert.Equal(1, artifactCount);
 
-        var tenantCount = await conn.ExecuteScalarAsync<long>(
+        long tenantCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM tenant_artifact_access WHERE org_id = @orgId",
             new { orgId = _orgId });
         Assert.Equal(1, tenantCount);
 
-        var accessCount = await conn.ExecuteScalarAsync<long>(
+        long accessCount = await conn.ExecuteScalarAsync<long>(
             """
             SELECT taa.access_count
             FROM tenant_artifact_access taa
@@ -90,12 +89,12 @@ public sealed class CacheAccessRecorderTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
 
         // Only one cache_artifact row for the coordinate.
-        var artifactCount = await conn.ExecuteScalarAsync<long>(
+        long artifactCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'npm' AND name = 'lodash' AND version = '4.17.21'");
         Assert.Equal(1, artifactCount);
 
         // access_count must be 2 after two calls for the same org+artifact.
-        var accessCount = await conn.ExecuteScalarAsync<long>(
+        long accessCount = await conn.ExecuteScalarAsync<long>(
             """
             SELECT taa.access_count
             FROM tenant_artifact_access taa

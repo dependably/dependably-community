@@ -1,10 +1,14 @@
 version: v1.25.0
-# Snyk Code (SAST) suppressions. Inline `// deepcode ignore` markers cover
-# production-code findings (with rationale at each site). This file handles
-# bulk-suppressible test-fixture noise that doesn't warrant per-site comments.
+# Snyk Code (SAST) file-level exclusions — the only per-path suppression Snyk
+# Code honours via .snyk. These drop whole test-fixture files whose findings are
+# test-only noise (seed credentials, intentionally non-Secure cookies in i18n
+# tests, Playwright e2e fixtures).
 #
-# All entries are tracked against gitlab issue #106; rescan + retriage when
-# adding new ones.
+# Production-code false positives are NOT handled here: Snyk Code has no
+# per-finding .snyk ignore, and excluding whole production files would hide real
+# bugs. Those are suppressed by fingerprint baseline — ci/snyk-code-baseline.json
+# + ci/snyk-code-scan.sh (see CONTRIBUTING.md > Static analysis (Snyk Code)).
+# Inline // deepcode ignore markers at each site keep the IDE/MR view quiet.
 
 exclude:
   code:
@@ -16,6 +20,10 @@ exclude:
     - tests/Dependably.Tests/Infrastructure/Seeding/UserSeeder.cs
     - tests/Dependably.Tests/Integration/PasswordChangeTests.cs
     - tests/Dependably.Tests/Integration/SystemSupportFlowsTests.cs
+    # OCI push round-trip reuses upload-session Location headers as the next
+    # request URL against the in-process TestServer — flagged as SSRF, but the
+    # "remote" is the test host itself. Test-only mechanics, no production path.
+    - tests/Dependably.Tests/Integration/OciPushTests.cs
     - tests/Dependably.Tests/Storage/LocalBlobStoreExtendedTests.cs
     - tests/Dependably.Tests/Unit/Api/SystemControllerUnitTests.cs
     - tests/Dependably.Tests/Unit/OrgAccessGuardTests.cs

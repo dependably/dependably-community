@@ -10,7 +10,7 @@ public static partial class PurlNormalizer
 
     public static string PyPi(string name, string version)
     {
-        var normalized = PyPiSeparatorRegex().Replace(name, "-").ToLowerInvariant();
+        string normalized = PyPiSeparatorRegex().Replace(name, "-").ToLowerInvariant();
         return $"pkg:pypi/{normalized}@{version}";
     }
 
@@ -32,9 +32,9 @@ public static partial class PurlNormalizer
     /// </summary>
     public static string Rpm(string name, string version, string release, string arch, int epoch = 0)
     {
-        var normalizedName = name.ToLowerInvariant();
-        var versionRelease = $"{version}-{release}";
-        var qualifiers = epoch != 0
+        string normalizedName = name.ToLowerInvariant();
+        string versionRelease = $"{version}-{release}";
+        string qualifiers = epoch != 0
             ? $"arch={arch}&epoch={epoch}"
             : $"arch={arch}";
         return $"pkg:rpm/{normalizedName}@{versionRelease}?{qualifiers}";
@@ -52,22 +52,41 @@ public static partial class PurlNormalizer
     /// </summary>
     public static string Oci(string repository, string digest, string? tag = null)
     {
-        var slash = repository.LastIndexOf('/');
-        var name = (slash >= 0 ? repository[(slash + 1)..] : repository).ToLowerInvariant();
-        var encodedDigest = digest.Replace(":", "%3A");
-        var qualifiers = $"repository_url={repository}";
+        int slash = repository.LastIndexOf('/');
+        string name = (slash >= 0 ? repository[(slash + 1)..] : repository).ToLowerInvariant();
+        string encodedDigest = digest.Replace(":", "%3A");
+        string qualifiers = $"repository_url={repository}";
         if (!string.IsNullOrEmpty(tag))
+        {
             qualifiers += $"&tag={tag}";
+        }
+
         return $"pkg:oci/{name}@{encodedDigest}?{qualifiers}";
     }
 
+    /// <summary>
+    /// Canonical Cargo PURL: <c>pkg:cargo/{name}@{version}</c>.
+    /// Cargo crate names are case-sensitive in the index but conventionally lowercase.
+    /// Names are stored as-published; no case normalisation is applied here.
+    /// </summary>
+    public static string Cargo(string name, string version)
+        => $"pkg:cargo/{name}@{version}";
+
     public static string NuGet(string id, string version)
     {
-        var normalized = NuGetVersion.TryParse(version, out var parsed)
+        string normalized = NuGetVersion.TryParse(version, out var parsed)
             ? NormalizeNuGetVersion(parsed)
             : version;
         return $"pkg:nuget/{id}@{normalized}";
     }
+
+    /// <summary>
+    /// Canonical Go module PURL: <c>pkg:golang/{module}@{version}</c>.
+    /// Module paths are stored as-is (Go module paths are case-sensitive);
+    /// versions carry the leading <c>v</c> prefix as Go clients use it on the wire.
+    /// </summary>
+    public static string Golang(string module, string version)
+        => $"pkg:golang/{module}@{version}";
 
     public static string NormalizeNuGetVersionString(string version)
     {
@@ -79,8 +98,8 @@ public static partial class PurlNormalizer
     private static string NormalizeNuGetVersion(NuGetVersion v)
     {
         // Collapse 4-part version with zero revision to 3-part: 1.0.0.0 → 1.0.0
-        if (v.Revision == 0 && !v.IsPrerelease && string.IsNullOrEmpty(v.Metadata))
-            return $"{v.Major}.{v.Minor}.{v.Patch}";
-        return v.ToNormalizedString();
+        return v.Revision == 0 && !v.IsPrerelease && string.IsNullOrEmpty(v.Metadata)
+            ? $"{v.Major}.{v.Minor}.{v.Patch}"
+            : v.ToNormalizedString();
     }
 }

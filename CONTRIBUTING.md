@@ -125,11 +125,12 @@ The endpoint and tuning knobs are job variables on the `.ai-review` template in 
 | Variable | Default | Purpose |
 |---|---|---|
 | `OLLAMA_URL` | `http://192.168.2.25:11434` | Ollama base URL (`/api/chat` is appended) |
-| `OLLAMA_MODEL` | `qwen3-coder-30b` | Model name — must be pulled on the Ollama host |
+| `OLLAMA_MODEL` | `gemma4:12b-it-qat` | Model name — must be pulled on the Ollama host |
 | `AI_REVIEW_MAX_DIFF_BYTES` | `120000` | Diff is truncated to this many bytes before review |
 | `AI_REVIEW_DIFF_CONTEXT` | `10` | `git diff -U` context lines — more lets the model verify a hunk instead of speculating, but grows the diff toward the byte/context caps |
-| `AI_REVIEW_NUM_CTX` | `16384` | Model context window |
+| `AI_REVIEW_NUM_CTX` | `49152` | Model context window — must hold the persona + capped diff (~3.45 bytes/token, so a 120000-byte diff ≈ 35K tokens) **and** leave room to generate; too small and the prompt fills the window, leaving no room for output (empty/near-empty review) |
 | `AI_REVIEW_NUM_PREDICT` | `1500` | Hard cap on response length (backstops runaway generation) |
+| `AI_REVIEW_THINK` | `false` | Model "thinking". Reasoning models split output into `thinking` + `content`, and thinking burns the `NUM_PREDICT` budget — on a real diff it exhausts the budget before writing any `content`, which we read as "no content". Kept off; set `true` only with a much larger `NUM_PREDICT` |
 | `AI_REVIEW_TEMPERATURE` | `0.3` | Sampling temperature — a small non-zero value avoids greedy repetition loops |
 | `AI_REVIEW_REPEAT_PENALTY` | `1.1` | Repetition penalty — kept modest; values ≳1.2 cause incoherent word-salad |
 | `AI_REVIEW_MIN_P` | `0.05` | Min-p tail cut — drops improbable tokens; the robust guard against word-salad |
@@ -143,6 +144,39 @@ The endpoint and tuning knobs are job variables on the `.ai-review` template in 
 **MR comments require a secret.** Set `AI_REVIEW_GITLAB_TOKEN` — a **masked, unprotected** CI/CD variable — to a project or group access token with **`api`** scope and at least the **Reporter** role. Without it the jobs still run and produce artifacts and job-log output; they just skip commenting. (`CI_JOB_TOKEN` can't create MR notes, hence the dedicated token.)
 
 The runner must be able to reach `OLLAMA_URL`. Comment posting goes over the GitLab API and automatically falls back from `http` to `https` if the configured `CI_API_V4_URL` route-misses — some instances serve the v4 API only over https.
+
+---
+
+## Static analysis (Snyk Code)
+
+Snyk Code (SAST) runs against the source. Most of its findings on this repo are **already-triaged false positives** — each carries an inline `// deepcode ignore <Rule>: <reason>` at the site (e.g. parameterized-Dapper "SQLi" in `OciController`, protocol-mandated SHA1/MD5 checksum hashes in `MavenController`, structured-logging "log forging" across the controllers).
+
+The catch: inline `deepcode ignore` markers are honoured by Snyk's **IDE plugin and merge-request integration**, but **not** by the `snyk code test` CLI — and therefore not by the MCP `snyk_code_scan` or any CI invocation. Snyk Code also has **no per-finding `.snyk` ignore** (`.snyk` only excludes whole files via `exclude.code`, which would blind production controllers to real future bugs). So the CLI re-reports every false positive, drowning genuinely new findings.
+
+To keep the CLI/CI signal clean **without weakening detection**, [`ci/snyk-code-scan.sh`](ci/snyk-code-scan.sh) runs the scan and diffs it against [`ci/snyk-code-baseline.json`](ci/snyk-code-baseline.json) — a committed set of content **fingerprints** for the known false positives. It fails only on findings **not** on the baseline; a new finding in any file (including a real bug in a file that also hosts a baselined FP) still surfaces.
+
+```bash
+ci/snyk-code-scan.sh            # exit 1 if any finding is not on the baseline
+ci/snyk-code-scan.sh --update   # re-triage: regenerate the baseline (review the diff)
+```
+
+When a new finding appears: if it's **real**, fix it; if it's a **false positive**, add an inline `// deepcode ignore <Rule>: <reason>` at the site (keeps the IDE/MR view quiet) and run `--update`, committing the baseline change in the same MR. Whole-file, test-only noise stays in `.snyk` `exclude.code` instead.
+
+> The raw `snyk code test` / MCP `snyk_code_scan` output still lists all findings — the CLI cannot suppress them. `ci/snyk-code-baseline.json` is the source of truth for which are known false positives; `ci/snyk-code-scan.sh` is the pass/fail check.
+
+**CI job.** The `snyk-code` job (stage `test` in `.gitlab-ci.yml`) runs `ci/snyk-code-scan.sh` on every merge request. It is **gating** (`allow_failure: false`): a finding not on the baseline fails the pipeline and blocks the merge. (If a Snyk outage or result drift ever causes a spurious failure, drop it back to `allow_failure: true` to make it advisory again.)
+
+`SNYK_TOKEN` **must be an unprotected, masked** CI/CD variable — merge-request pipelines run on unprotected branches, so a protected token would be absent there and the scan would error on every MR. (`snyk code test` reads `SNYK_TOKEN` from the environment; no `snyk auth` step is needed.)
+
+**Upgrade path.** Snyk's first-party way to make per-finding ignores CLI-honoured is platform **consistent ignores**: monitor the project, run `snyk code test --report --remote-repo-url=…`, and approve ignores in the Snyk UI/API with a service account that has *View Project Ignores*. That makes the baseline file redundant; it is deferred here because it requires Snyk-platform setup and a service account rather than a repo file.
+
+---
+
+## SonarQube (CI)
+
+The `sonarqube-check` job (stage `test`, post-merge on `main` and tags) runs `dotnet sonarscanner` and uploads coverage. It authenticates via the **`SONAR_TOKEN` environment variable** — SonarScanner for .NET (6+) picks it up directly, so the token is never interpolated onto the scanner command line and never appears in the job trace.
+
+`SONAR_TOKEN` **must be a masked** CI/CD variable regardless: any future script change that echoes the environment (or passes the token as an argument) would otherwise print it verbatim into the job log. `SONAR_HOST_URL` and `SONAR_PROJECT_KEY` are not secrets and are passed as normal variables.
 
 ---
 
@@ -211,32 +245,209 @@ docker build --build-arg VERSION=0.x.y-rc1 -t dependably:rc .
 
 ## Environment variables
 
+This table is the canonical reference — other docs (including `CLAUDE.md`) link here rather than duplicating it.
+
+> **Naming:** variables written `Section__Key` (double underscore) are the environment-variable form of the `Section:Key` configuration keys used in `appsettings.json` and code. Both spellings refer to the same setting.
+
+### Core
+
 | Variable | Default | Description |
 |---|---|---|
 | `BASE_URL` | `http://localhost:8080` | Public base URL — used in NuGet service index and npm tarball URLs |
 | `DB_PATH` | `/data/dependably.db` | SQLite database file path |
+| `DB_PROVIDER` | `sqlite` | Database backend: `sqlite` (default, uses `DB_PATH`) or `postgres` (requires `DB_CONNECTION_STRING`). |
+| `DB_CONNECTION_STRING` | — | Postgres connection string. Required when `DB_PROVIDER=postgres`; ignored for SQLite. |
 | `DEFAULT_ORG_SLUG` | `default` | Slug of the org created on first boot |
+| `DEPLOYMENT_MODE` | `single` | Tenancy mode: `single` or `multi`. `multi` requires a usable `APEX_HOST` (or a non-localhost `BASE_URL`). `bound` pins every request to `BOUND_TENANT_SLUG` regardless of host (single-tenant intercept mode). |
+| `BOUND_TENANT_SLUG` | — | Required when `DEPLOYMENT_MODE=bound`. Every request resolves to this tenant slug; the request host is ignored. |
+| `APEX_HOST` | — | Apex domain for subdomain-routed tenancy when `DEPLOYMENT_MODE=multi` |
+| `RESERVED_SUBDOMAINS` | — | Comma-separated slugs to add to the built-in reserved list (e.g. `api,status,docs`). Prevents those subdomains from being claimed as tenant slugs in multi-tenant mode. |
+| `DEPENDABLY_DEPLOYMENT_MODE` | `standalone` | Set to `ha` to require Redis and enable distributed locking |
+| `DEPENDABLY_INSTANCE_ROLE` | `single` | Attached to OTel resource attributes as `dependably.instance.role`. Use to distinguish control-plane vs data-plane replicas in distributed traces. |
+| `DEPLOYMENT_ENVIRONMENT` | `unknown` | Attached to OTel resource attributes as `deployment.environment` (e.g. `production`, `staging`). |
+| `REDIS_CONNECTION_STRING` | — | Required when `DEPENDABLY_DEPLOYMENT_MODE=ha` |
+| `REDIS_PASSWORD` | — | Password for the Redis connection. Applied on top of `REDIS_CONNECTION_STRING` when set. |
+| `REDIS_SSL` | `false` | Set `true` to require TLS for the Redis connection. |
+| `REDIS_DATABASE` | `0` | Redis logical database index. |
+| `REDIS_KEY_PREFIX` | `dependably:` | Prefix for all Redis keys written by Dependably. Change when sharing a Redis instance with other applications. |
+| `TRUSTED_PROXIES` | — (trust all forwarders) | Comma-separated IPs/CIDRs allowed to set `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` (e.g. `10.0.0.0/8,172.18.0.1`). When unset, all three forwarded headers are accepted from any client and a startup warning is logged. **Consequences of leaving this unset in production:** the `/metrics` and `/version` IP allowlist can be bypassed by forging `X-Forwarded-For`; rate-limit buckets are keyed on the spoofable client IP so per-IP throttling is ineffective; audit `source_ip` records the attacker-supplied value; in `DEPLOYMENT_MODE=multi`, `X-Forwarded-Host` can be forged to spoof tenant resolution. Set this to your reverse proxy's address(es) in any internet-facing deployment. In production, also pin `AllowedHosts` in `appsettings.json` (or via `ASPNETCORE_ALLOWEDHOSTS`) to your apex domain rather than leaving it as `*` to prevent Host header injection. |
+| `HOST_ROUTING` | — | Comma-separated `host=ecosystem` pairs that map incoming `Host` headers to an ecosystem prefix (e.g. `registry.npmjs.org=npm,pypi.org=pypi`). When set, requests whose `Host` matches an entry are treated as if the ecosystem path prefix were present, enabling clients that hardcode ecosystem registry hostnames to work without path rewriting. |
+| `TENANT_HEADER_NAME` | `X-Dependably-Tenant` | Header name used by `HeaderTenantResolver` to identify the tenant in reverse-proxy deployments that inject a trusted tenant slug. |
+| `CLAIM_ENFORCEMENT` | `off` | Set `on` to require packages to carry an upstream-provenance claim before publish is accepted. `off` (default) disables the gate; `on` enforces it on every push handler. |
+| `AIR_GAPPED` | `false` | Set `true` (or `1`) to declare the instance air-gapped. Skips all outbound network calls (OSV queries, deprecation refresh, threat-feed, healthcheck pings) and logs a warning if any network-dependent setting is configured. Also see `OSV_MODE=local`. |
+| `DISABLE_BACKGROUND_JOBS` | — | Comma-separated list of background job names to disable without fully air-gapping the instance (e.g. `vuln-scan,deprecation-refresh`). Known names are logged on startup. `AIR_GAPPED=true` disables all background jobs and takes precedence. |
+| `SHUTDOWN_GRACE_PERIOD` | `30` | Seconds the host waits for in-flight requests to drain after SIGTERM before forcefully exiting. Passed to ASP.NET Core's `ShutdownTimeout`. |
+| `SHUTDOWN_PRESTOP_DELAY` | `10` | Seconds to sleep after SIGTERM and before draining. Gives load balancers time to remove this replica from rotation before the server stops accepting new connections. |
+
+### First boot
+
+These variables are consumed once, on the very first startup (when the `orgs` table is empty), to seed the initial admin account. They have no effect on subsequent starts.
+
+| Variable | Default | Description |
+|---|---|---|
+| `FIRST_BOOT_ADMIN_EMAIL` | `admin@dependably.local` | Email address for the initial admin user created on first boot. |
+| `FIRST_BOOT_ADMIN_PASSWORD` | random (logged) | Password for the initial admin user. When unset a random password is generated and printed to the startup log. Set this to skip the log-scrape step in automated deployments. |
+| `FIRST_BOOT_SYSTEM_ADMIN_EMAIL` | `system@dependably.local` | Email for the `system_admin` operator account created on first boot (multi-tenant mode). Falls back to `FIRST_BOOT_ADMIN_EMAIL` when unset. |
+| `FIRST_BOOT_SYSTEM_ADMIN_PASSWORD` | — | Password for the `system_admin` account. Falls back to `FIRST_BOOT_ADMIN_PASSWORD` when unset. |
+
+### Blob storage
+
+Storage has two tiers: **cache** (proxy artefacts, eviction-friendly) and **registry** (published artefacts, durable, never auto-evicted). Every storage variable below also accepts `_CACHE` / `_REGISTRY` suffixed variants for per-tier overrides; the unsuffixed value applies to both tiers.
+
+| Variable | Default | Description |
+|---|---|---|
 | `STORAGE_BACKEND` | `local` | Blob storage backend: `local`, `s3`, or `azure` |
 | `LOCAL_STORAGE_PATH` | `/data/blobs` | Root directory for local blob storage |
 | `S3_BUCKET` | — | S3 bucket name (required when `STORAGE_BACKEND=s3`) |
 | `S3_REGION` | — | AWS region (required when `STORAGE_BACKEND=s3`) |
 | `AZURE_CONNECTION_STRING` | — | Azure Storage connection string (required when `STORAGE_BACKEND=azure`) |
 | `AZURE_CONTAINER` | — | Azure blob container name (required when `STORAGE_BACKEND=azure`) |
+| `PROXY_STAGING_PATH` | OS temp dir | Hash-and-stage directory for the proxy-fetch MISS path. Container deployments expecting large artefacts should set this to a disk-backed volume (e.g. `/data/staging`) — `/tmp` is often tmpfs (RAM-backed), which defeats the memory-bounding goal. |
+| `STAGING_DISK_WARN_THRESHOLD_PERCENT` | `10` | Serilog `Warning` is emitted when available space on the staging volume falls below this percentage of total volume size. Set `0` to disable the warning. |
+| `STAGING_DISK_FLOOR_BYTES` | `536870912` (512 MiB) | Hard floor: proxy fetches are rejected with 507 Insufficient Storage when available staging disk space falls below this value. When `Content-Length` is present the effective floor is `max(STAGING_DISK_FLOOR_BYTES, 2 × Content-Length)`. Set to `0` to disable (not recommended). |
+| `DOTNET_GCHeapHardLimit` | — | Hex byte count; caps the .NET GC heap to protect the host from GC death-spiral on memory-constrained hosts (Raspberry Pi, small containers). Set to ~75 % of the container `mem_limit`, e.g. `0xC0000000` (3 GiB) for a 4 GiB host. This is a runtime hint — no code reads it; it is consumed by the .NET runtime at process start. |
+| `CACHE_EVICT_SCHEDULE` | `0 * * * *` | Cron schedule (standard 5-field) for the cache eviction pass. Defaults to hourly. The job is a no-op when none of `CACHE_MAX_AGE_DAYS`, `CACHE_MAX_SIZE_BYTES`, or `CACHE_MAX_ARTIFACTS` are set. |
+| `CACHE_MAX_AGE_DAYS` | — (no limit) | Evict proxy-cache artefacts not accessed within this many days. Unset means no age-based eviction. |
+| `CACHE_MAX_SIZE_BYTES` | — (no limit) | Evict oldest-accessed proxy-cache artefacts until total cache size is at or below this byte count. |
+| `CACHE_MAX_ARTIFACTS` | — (no limit) | Evict oldest-accessed proxy-cache artefacts until the row count is at or below this value. |
+| `BLOB_STORE_SIZE_POLL_INTERVAL_SECONDS` | `300` | How often the blob-store size metric is refreshed. Set `0` to disable the background poller. |
+
+### Uploads
+
+| Variable | Default | Description |
+|---|---|---|
 | `MAX_UPLOAD_BYTES` | unlimited | Instance-wide upload size limit (bytes) |
 | `MAX_UPLOAD_BYTES_PYPI` | — | PyPI-specific upload size limit (bytes) |
 | `MAX_UPLOAD_BYTES_NPM` | — | npm-specific upload size limit (bytes) |
 | `MAX_UPLOAD_BYTES_NUGET` | — | NuGet-specific upload size limit (bytes) |
+
+### Upstream proxies
+
+| Variable | Default | Description |
+|---|---|---|
 | `PyPI__Upstream` | `https://pypi.org` | Upstream PyPI registry for proxy cache |
 | `Npm__Upstream` | `https://registry.npmjs.org` | Upstream npm registry for proxy cache |
 | `NuGet__Upstream` | `https://api.nuget.org/v3` | Upstream NuGet registry for proxy cache |
 | `Maven__Upstream` | `https://repo1.maven.org/maven2` | Upstream Maven registry (Maven Central) for proxy cache |
-| `Rpm__Upstream` | — (no default URL) | Upstream RPM repo base URL. Proxy passthrough is enabled by default per-org (`ProxyPassthroughEnabled`), like every ecosystem — RPM is not disabled by default. It just has **no built-in default upstream** (RPM repos are distro/release-specific), so set this to give RPM a fetch target. Pair with `Rpm__UpstreamMode=passthrough`. |
-| `Oci__Upstreams` | Docker Hub | Upstream OCI registries (prefix-routed). Set via `appsettings.json` `Oci:Upstreams`, not a flat env var. |
-| `DEPENDABLY_DEPLOYMENT_MODE` | `standalone` | Set to `ha` to require Redis and enable distributed locking |
-| `REDIS_CONNECTION_STRING` | — | Required when `DEPENDABLY_DEPLOYMENT_MODE=ha` |
+| `Maven__NegativeCacheTtl` | `01:00:00` | TTL (`TimeSpan` format) for negative (not-found) cache entries in the Maven proxy |
+| `Maven__VerifyWithUpstreamSha256` | `true` | Verify Maven artifacts against the upstream-published `.sha256` sidecar |
+| `Rpm__Upstream` | — (no default URL) | Upstream RPM repo base URL. Proxy passthrough is enabled by default per-org (`ProxyPassthroughEnabled`), like every ecosystem — RPM is not disabled by default. It just has **no built-in default upstream** (RPM repos are distro/release-specific), so set this to give RPM a fetch target. |
+| `Rpm__UpstreamMode` | `passthrough` | `passthrough` forwards upstream repodata verbatim and refuses hosted publish (a local package would shadow upstream); `merged` serves a combined `repomd.xml`/`primary.xml.gz` (local ∪ upstream, local shadows on NEVRA collision) and allows hosted publish alongside proxying. |
+| `Rpm__GpgKey` | — (verification off) | Operator-pinned trust anchor for the RPM proxy: an inline ASCII-armored OpenPGP public key block, or a file path / `file:` URL the operator trusts out of band. When set, the proxy verifies `repomd.xml`'s detached signature (`repomd.xml.asc`) before trusting upstream metadata; on failure it refuses to resolve (fail closed). When unset, verification is skipped and a startup warning is logged. The anchor must be operator-provided — the upstream-fetched GPG key is not used as the trust root (circular against a MITM). |
+| `Rpm__VerifyRepomdSignature` | derived | Force RPM signature verification on/off. When unset, verification is enabled iff `Rpm__GpgKey` is set. Setting `true` with no parseable key fails every resolution closed. |
+| `Oci__Upstreams` | Docker Hub (`registry-1.docker.io`) | Array of upstream OCI registries (prefix-routed, per-registry auth). Set via `appsettings.json` `Oci:Upstreams`, not a flat env var. |
+
+### Observability
+
+| Variable | Default | Description |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP collector endpoint for metrics and traces push (e.g. `http://otel-collector:4317`). When unset, only the Prometheus scrape endpoint is active; no traces are exported. |
+| `OTEL_SERVICE_NAME` | `dependably` | OTel `service.name` resource attribute. Override when running multiple Dependably instances in the same trace backend. |
+| `OTEL_TRACES_SAMPLER_ARG` | `0.1` | Head-sampling ratio passed to `TraceIdRatioBasedSampler` (0.0–1.0). `1.0` records every trace; `0.0` disables tracing. |
+| `TENANT_COUNT_POLL_INTERVAL_SECONDS` | `60` | How often the tenant-count metric is refreshed. Set `0` to disable the background poller. |
+
+### Vulnerability scanning and stats
+
+| Variable | Default | Description |
+|---|---|---|
+| `OSV_BASE_URL` | `https://api.osv.dev/v1` | OSV API base URL |
+| `OSV_MODE` | — (online) | Set `local` to query a sideloaded offline OSV database instead of the live API. Requires `OSV_LOCAL_PATH`. Recommended when `AIR_GAPPED=true`. |
+| `OSV_LOCAL_PATH` | — | Directory containing the sideloaded OSV database files. Required when `OSV_MODE=local`. |
+| `OSV_LOCAL_REFRESH_MINUTES` | `60` | How often (minutes) the local OSV database is re-read from `OSV_LOCAL_PATH`. |
 | `VULN_SCAN_SCHEDULE` | `0 4 * * *` | Cron for the vulnerability scan + rescan passes |
+| `VULN_SCAN_JITTER_SECONDS` | `3600` | Random offset (0..N seconds) added to each scheduled scan to avoid a thundering herd against OSV. Set `0` to disable. |
 | `VULN_RESCAN_AGE_HOURS` | `24` | Re-query OSV for previously-scanned versions older than this |
 | `VULN_SCAN_BATCH_DELAY_MS` | `500` | Delay between OSV `/querybatch` calls |
+| `THREAT_FEED_SCHEDULE` | `0 5 * * *` | Cron for the threat-feed refresh pass (CISA KEV membership + FIRST.org EPSS scores onto `vulnerabilities.is_kev` / `epss_score`, joined via CVE aliases) |
+| `THREAT_FEED_JITTER_SECONDS` | `3600` | Random offset (0..N seconds) added to each scheduled threat-feed pass. Set `0` to disable. |
+| `KEV_FEED_URL` | CISA catalog URL | Override the KEV catalog JSON endpoint (mirrors, tests) |
+| `EPSS_API_URL` | `https://api.first.org/data/v1/epss` | Override the EPSS API endpoint (mirrors, tests) |
+| `STATS_REFRESH_INTERVAL_SECONDS` | `300` | How often `StatsRefreshService` recomputes the per-org dashboard snapshot (`org_stats_snapshot`). The `/api/v1/stats` endpoint reads this snapshot instead of running live aggregate queries on every page load. |
+
+### Retention and GC
+
+| Variable | Default | Description |
+|---|---|---|
+| `GC_SCHEDULE` | `0 3 * * *` | Cron schedule for the retention GC pass (per-org version limits, proxy eviction, activity pruning). |
+| `AUDIT_EVENT_RETENTION_DAYS` | `365` | Delete `audit_event` rows older than this many days. The GC pass enforces this on each run. |
+| `TENANT_HARD_DELETE_GRACE_DAYS` | `30` | Days after a tenant is marked for deletion before its data is permanently removed. During the grace period the deletion can be cancelled. |
+| `TENANT_HARD_DELETE_SCHEDULE` | `0 4 * * *` | Cron schedule for the tenant hard-delete sweep. |
+| `ORPHAN_RECONCILE_SCHEDULE` | `0 4 * * *` | Cron schedule for the orphan-blob reconciliation pass. Lists the `hosted/` prefix in the registry tier and deletes blobs with no matching `package_versions` row. Set to a non-parseable value to disable. |
+| `ORPHAN_RECONCILE_GRACE_MINUTES` | `30` | Blobs modified more recently than this many minutes are skipped by the orphan reconciler, protecting in-flight publish operations that have written the blob but not yet committed the metadata row. |
+
+### Deprecation refresh
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEPRECATION_REFRESH_SCHEDULE` | `0 5 * * *` | Cron schedule for the upstream deprecation refresh pass (npm and PyPI; NuGet/Maven/RPM/OCI are skipped). |
+| `DEPRECATION_REFRESH_JITTER_SECONDS` | `3600` | Random offset (0..N seconds) added to each scheduled deprecation refresh to spread load. Set `0` to disable. |
+| `DEPRECATION_REFRESH_AGE_HOURS` | `24` | Re-fetch upstream deprecation metadata for versions not checked within this many hours. |
+| `DEPRECATION_REFRESH_BATCH_SIZE` | `500` | Maximum number of packages to refresh per pass. |
+| `DEPRECATION_REFRESH_BATCH_DELAY_MS` | `500` | Delay (ms) between batches within one pass. |
+
+### SIEM forwarding
+
+Dependably can forward audit events to an external SIEM collector in real time. Configure either the webhook or the syslog forwarder (not both). When neither is configured the SIEM queue is not started and `SIEM_QUEUE_CAPACITY` has no effect.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SIEM_MAX_LOOKBACK_DAYS` | `90` | Maximum look-back window (days) for the `/api/v1/siem` pull endpoint. Requests beyond this window are rejected. Also seeds `instance_settings.siem_max_lookback_days` on first boot. |
+| `SIEM_WEBHOOK_URL` | — | HTTPS endpoint to POST audit events to as NDJSON. Activates the webhook forwarder. |
+| `SIEM_WEBHOOK_BEARER` | — | Bearer token added to the `Authorization` header of each webhook POST. |
+| `SIEM_WEBHOOK_ALLOW_PRIVATE` | `true` | When `true`, RFC 1918 addresses (10/8, 172.16/12, 192.168/16) are allowed in `SIEM_WEBHOOK_URL` so self-hosted collectors on private networks are reachable. Loopback, link-local (169.254/16), and cloud-metadata addresses remain blocked regardless. Set to `false` to require a public IP or hostname. |
+| `SIEM_SYSLOG_HOST` | — | Hostname of the syslog receiver. Required to activate the syslog forwarder. |
+| `SIEM_SYSLOG_PORT` | `514` | Port of the syslog receiver. |
+| `SIEM_SYSLOG_PROTO` | `udp` | Transport: `udp`, `tcp`, or `tls`. |
+| `SIEM_SYSLOG_FORMAT` | `cef` | Message format: `cef` (ArcSight Common Event Format) or `rfc5424`. |
+| `SIEM_QUEUE_CAPACITY` | `1024` | In-memory queue depth for outbound SIEM events. Events are dropped (with a metric) when the queue is full. Increase for high-audit-volume deployments or a slow collector. |
+
+### Healthcheck pinging
+
+Silent unless `HEALTHCHECK_PING_URL` is set. When configured, the instance sends periodic pings to an external dead-man's-switch monitor (Healthchecks.io, Better Uptime, Cronitor, etc.).
+
+| Variable | Default | Description |
+|---|---|---|
+| `HEALTHCHECK_PING_URL` | — | URL to GET (or POST) on every interval. Required to enable pinging. |
+| `HEALTHCHECK_PING_INTERVAL_SECONDS` | `60` | How often (seconds) to ping. |
+| `HEALTHCHECK_PING_TIMEOUT_SECONDS` | `10` | HTTP request timeout (seconds) for each ping. |
+| `HEALTHCHECK_PING_METHOD` | `GET` | HTTP method: `GET` or `POST`. |
+| `HEALTHCHECK_PING_PAYLOAD` | — | Set `status` to include a JSON readiness payload in POST pings. Has no effect with `GET`. |
+| `HEALTHCHECK_PING_INSTANCE_ID` | hostname | Instance identifier included in `status` payloads. Defaults to `Environment.MachineName`. |
+| `HEALTHCHECK_PING_FAIL_URL` | — | Optional URL to call when the local readiness check fails. |
+| `HEALTHCHECK_PING_SCOPE` | `replica` | `replica` pings on every replica; `leader` restricts pings to the leader node (requires Redis distributed lock). |
+
+### Invite email delivery (SMTP)
+
+Org invite emails are sent when `SMTP_HOST` is set. When absent, the invite link is returned in the API response body for manual delivery. On send failure the endpoint falls back to returning the link and logs a Warning.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SMTP_HOST` | — (email delivery disabled) | SMTP relay hostname. When unset, invite links are returned in the API response instead of emailed. |
+| `SMTP_PORT` | `587` | SMTP relay port |
+| `SMTP_USERNAME` | — | SMTP auth username (optional) |
+| `SMTP_PASSWORD` | — | SMTP auth password (optional, never logged) |
+| `SMTP_FROM` | — (required when `SMTP_HOST` set) | Envelope From address for invite emails (e.g. `invites@example.com`) |
+| `SMTP_STARTTLS` | `true` | Enable STARTTLS. Set `false` to disable (e.g. for port 465 implicit TLS via a relay wrapper) |
+
+### Metrics endpoint access
+
+| Variable | Default | Description |
+|---|---|---|
+| `METRICS_ENABLED` | `true` | Whether the `/metrics` Prometheus endpoint is enabled. Env var overrides the DB `instance_settings.metrics_enabled` value. Setting this locks out the API from changing the value — the system controller returns `409 Conflict` when this env var is set. Accepted values: `true`/`1`/`yes` or `false`/`0`/`no`. |
+| `METRICS_ALLOWED_IPS` | `127.0.0.1,::1` | Comma-separated IPs/CIDRs allowed to scrape `/metrics`. Env var overrides the DB allowlist and locks out the API from changing the value. When empty the endpoint is unreachable from any address. |
+
+### Rate limiting
+
+All limiters are per-token (download/push) or per-source-IP (login/anonymous). Defaults are sized for a single developer's worst burst; increase for larger fleets or stricter abuse budgets.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DOWNLOAD_RATE_LIMIT_PERMITS` | `1000` | Sliding-window permits per second per token/IP for package downloads. |
+| `DOWNLOAD_RATE_LIMIT_QUEUE` | `500` | Queue depth for the download limiter. Requests that exceed the window are queued up to this depth before returning `429`. |
+| `PUSH_RATE_LIMIT_PERMITS` | `20` | Sliding-window permits per second per token for package publish. Queue depth is `0` (no queuing — burst is rejected immediately). |
+| `LOGIN_RATE_LIMIT_PERMITS` | `10` | Fixed-window permits per minute per IP for the login endpoint. |
+| `TOKEN_CREATE_RATE_LIMIT_PERMITS` | `60` | Fixed-window permits per hour per IP for token-creation endpoints. |
+| `ANON_RATE_LIMIT_PERMITS` | `120` | Fixed-window permits per minute per IP for unauthenticated probe endpoints (`/health`, `/ready`, `/version`, `/api/v1/bootstrap`, `/api/v1/auth/methods`, `/api/v1/licenses`). |
 
 ---
 
@@ -283,7 +494,7 @@ Both support `pull` and `push` scopes. `push` implies `pull`. Tokens are stored 
 
 Each org has independent package namespaces, its own member list with roles (`admin`, `member`), per-ecosystem upload size limits, optional anonymous pull, and an optional PURL allowlist to restrict proxied packages.
 
-Org routes: `/o/{slug}/simple/`, `/o/{slug}/npm/`, `/o/{slug}/nuget/`
+Registry URLs are ecosystem-path-only: `/simple/`, `/npm/`, `/nuget/v3/index.json`, `/maven/`, `/rpm/`. Tenancy is host-resolved — in `DEPLOYMENT_MODE=single` (default) the bare host serves the one org; in `DEPLOYMENT_MODE=multi` each org is a subdomain of the apex host (`my-org.apex/simple/` etc.). OCI is at `/v2/` per the Distribution Spec.
 
 ---
 
@@ -295,6 +506,26 @@ Upstreams can be configured per org from the web UI, or globally via environment
 
 ---
 
+## High-availability deployment
+
+Multi-replica deployments require Redis (`DEPENDABLY_DEPLOYMENT_MODE=ha`, `REDIS_CONNECTION_STRING`). Redis backs distributed locking, rate-limit state (login / invite / token-create limiters), and ASP.NET Core Data Protection key sharing.
+
+### OCI chunked uploads — session affinity required
+
+OCI clients push image layers via a two-step chunked upload: a `POST /v2/{name}/blobs/uploads/` creates a session UUID, then one or more `PATCH` requests append data to a local staging file on the replica that owns the session. **If a subsequent PATCH is routed to a different replica, that replica has no staging file and returns 404.**
+
+Configure your load balancer to pin `/v2/*/blobs/uploads/*` requests to the replica that issued the session UUID:
+
+- **nginx**: use the `sticky` module with `hash $uri consistent;` or sticky-route on the UUID path segment.
+- **Traefik**: use a sticky session with `rule: PathPrefix(`/v2/`) && PathRegexp(`/blobs/uploads/`)` and `sticky.cookie`.
+- **HAProxy**: `balance uri depth 6` or `stick on path_sub(/blobs/uploads/) table …`
+
+The affinity key is the upload UUID, which is the last path segment of the `Location` header returned by the initial `POST`. Manifest pushes (`PUT /v2/{name}/manifests/{tag}`) and blob pulls (`GET /v2/{name}/blobs/{digest}`) are stateless and need no affinity.
+
+Set `REPLICA_HINT=true` (or `INSTANCE_ROLE=replica`) on each replica instance; Dependably logs a startup warning reminding operators that session affinity is required.
+
+---
+
 ## Security model
 
 - **OWASP API Security Top 10** alignment: BOLA/IDOR protection, SSRF protection with DNS rebinding re-validation, path traversal rejection, CRLF injection prevention
@@ -302,7 +533,8 @@ Upstreams can be configured per org from the web UI, or globally via environment
 - **Scope enforcement**: `pull` and `push` scopes enforced at the HTTP handler level; scope mismatch returns 403, not 401
 - **Account lockout**: 10 failed login attempts → 15-minute lockout with `Retry-After` header
 - **Security headers**: `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Content-Security-Policy` (management API), `Strict-Transport-Security` (when behind HTTPS proxy)
-- **Schema**: idempotent `CREATE TABLE IF NOT EXISTS` applied on startup — no migration history table
+- **Trusted proxy / host hardening**: `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` are all gated by the `TRUSTED_PROXIES` allowlist (see environment variable reference above). In production, set `TRUSTED_PROXIES` to your reverse proxy's addresses and pin `AllowedHosts` in `appsettings.json` (or via `ASPNETCORE_ALLOWEDHOSTS`) to your apex domain rather than `*`.
+- **Schema**: idempotent `CREATE TABLE IF NOT EXISTS` applied on startup; one-shot data migrations are recorded in the `_applied_migrations` ledger (see [src/Dependably/Infrastructure/schema/schema-migrations.md](src/Dependably/Infrastructure/schema/schema-migrations.md))
 
 ---
 

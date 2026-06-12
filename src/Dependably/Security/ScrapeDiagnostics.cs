@@ -37,7 +37,7 @@ public sealed class ScrapeDiagnostics
     public void Record(IPAddress? remoteIp, Outcome outcome)
     {
         var entry = new Entry(DateTimeOffset.UtcNow, remoteIp?.ToString(), outcome);
-        var index = Interlocked.Increment(ref _writeIndex) - 1;
+        long index = Interlocked.Increment(ref _writeIndex) - 1;
         _buffer[index % Capacity] = entry;
 
         switch (outcome)
@@ -54,16 +54,22 @@ public sealed class ScrapeDiagnostics
     /// </summary>
     public IReadOnlyList<Entry> Recent(int n = 50)
     {
-        var write = Interlocked.Read(ref _writeIndex);
-        var count = (int)Math.Min(write, n);
-        if (count == 0) return Array.Empty<Entry>();
+        long write = Interlocked.Read(ref _writeIndex);
+        int count = (int)Math.Min(write, n);
+        if (count == 0)
+        {
+            return Array.Empty<Entry>();
+        }
 
-        var start = write - count;
+        long start = write - count;
         var result = new List<Entry>(count);
-        for (var i = start; i < write; i++)
+        for (long i = start; i < write; i++)
         {
             var entry = _buffer[i % Capacity];
-            if (entry is not null) result.Add(entry);
+            if (entry is not null)
+            {
+                result.Add(entry);
+            }
         }
         result.Reverse();
         return result;

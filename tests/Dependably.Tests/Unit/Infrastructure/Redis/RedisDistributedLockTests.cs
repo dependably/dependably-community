@@ -1,7 +1,6 @@
 using Dependably.Infrastructure.Redis;
 using NSubstitute;
 using StackExchange.Redis;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure.Redis;
 
@@ -35,7 +34,7 @@ public sealed class RedisDistributedLockTests
 
         var sut = new RedisDistributedLock(_redis);
 
-        var first  = await sut.TryAcquireAsync("a-lock", TimeSpan.FromSeconds(5));
+        var first = await sut.TryAcquireAsync("a-lock", TimeSpan.FromSeconds(5));
         var second = await sut.TryAcquireAsync("a-lock", TimeSpan.FromSeconds(5));
 
         Assert.NotNull(first);

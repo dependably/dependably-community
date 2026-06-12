@@ -66,7 +66,7 @@ public sealed class OpenApiSplitTests : IClassFixture<DependablyFactory>, IAsync
         Assert.Equal(HttpStatusCode.OK, protocolResp.StatusCode);
         var protocolPaths = await ReadPathsAsync(protocolResp);
 
-        var overlap = managementPaths
+        string[] overlap = managementPaths
             .Intersect(protocolPaths, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
@@ -96,7 +96,7 @@ public sealed class OpenApiSplitTests : IClassFixture<DependablyFactory>, IAsync
 
     private static async Task<IReadOnlyList<string>> ReadPathsAsync(HttpResponseMessage resp)
     {
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(body);
         if (!doc.RootElement.TryGetProperty("paths", out var pathsElement)
             || pathsElement.ValueKind != JsonValueKind.Object)

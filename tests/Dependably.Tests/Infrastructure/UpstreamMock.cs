@@ -1,7 +1,5 @@
-using System.IO.Compression;
 using System.Net;
 using System.Security.Cryptography;
-using System.Text;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
@@ -22,11 +20,11 @@ public static class UpstreamMock
     public static WireMockServer StubPyPiSimpleIndex(
         this WireMockServer mock, string name, string version, byte[] wheelBytes)
     {
-        var normalized = name.ToLowerInvariant().Replace('_', '-').Replace('.', '-');
-        var filename = $"{name.Replace('-', '_')}-{version}-py3-none-any.whl";
-        var hash = Convert.ToHexString(SHA256.HashData(wheelBytes)).ToLowerInvariant();
+        string normalized = name.ToLowerInvariant().Replace('_', '-').Replace('.', '-');
+        string filename = $"{name.Replace('-', '_')}-{version}-py3-none-any.whl";
+        string hash = Convert.ToHexString(SHA256.HashData(wheelBytes)).ToLowerInvariant();
 
-        var html = $"""
+        string html = $"""
             <!DOCTYPE html><html><body>
             <a href="/packages/{filename}#sha256={hash}" data-requires-python="">{filename}</a>
             </body></html>
@@ -57,11 +55,11 @@ public static class UpstreamMock
     public static WireMockServer StubPyPiSimpleIndexTamperedHash(
         this WireMockServer mock, string name, string version, byte[] wheelBytes)
     {
-        var normalized = name.ToLowerInvariant().Replace('_', '-').Replace('.', '-');
-        var filename = $"{name.Replace('-', '_')}-{version}-py3-none-any.whl";
+        string normalized = name.ToLowerInvariant().Replace('_', '-').Replace('.', '-');
+        string filename = $"{name.Replace('-', '_')}-{version}-py3-none-any.whl";
         const string badHash = "0000000000000000000000000000000000000000000000000000000000000000";
 
-        var html = $"""
+        string html = $"""
             <!DOCTYPE html><html><body>
             <a href="/packages/{filename}#sha256={badHash}">{filename}</a>
             </body></html>
@@ -93,10 +91,10 @@ public static class UpstreamMock
     public static WireMockServer StubNpmMetadata(
         this WireMockServer mock, string name, string version, byte[] tarballBytes, string baseUrl)
     {
-        var filename = $"{name}-{version}.tgz";
-        var sri = $"sha512-{Convert.ToBase64String(SHA512.HashData(tarballBytes))}";
+        string filename = $"{name}-{version}.tgz";
+        string sri = $"sha512-{Convert.ToBase64String(SHA512.HashData(tarballBytes))}";
 
-        var json = $$"""
+        string json = $$"""
             {
               "name": "{{name}}",
               "versions": {
@@ -139,8 +137,8 @@ public static class UpstreamMock
     /// </summary>
     public static WireMockServer StubNuGetServiceIndex(this WireMockServer mock)
     {
-        var baseUrl = mock.Urls[0];
-        var json = $$"""
+        string baseUrl = mock.Urls[0];
+        string json = $$"""
             {
               "version": "3.0.0",
               "resources": [
@@ -168,11 +166,11 @@ public static class UpstreamMock
     public static WireMockServer StubNuGetPackage(
         this WireMockServer mock, string id, string version, byte[] nupkgBytes)
     {
-        var baseUrl = mock.Urls[0];
-        var lowerId = id.ToLowerInvariant();
-        var lowerVersion = version.ToLowerInvariant();
+        string baseUrl = mock.Urls[0];
+        string lowerId = id.ToLowerInvariant();
+        string lowerVersion = version.ToLowerInvariant();
 
-        var registration = $$"""
+        string registration = $$"""
             {
               "count": 1,
               "items": [{

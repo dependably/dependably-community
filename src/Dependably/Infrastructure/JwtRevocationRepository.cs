@@ -48,19 +48,27 @@ public sealed class JwtRevocationRepository
     public async Task<bool> IsRevokedAsync(string jti, CancellationToken ct = default)
     {
         if (_cache is not null && _cache.TryGetValue(CacheKey(jti), out bool cached))
+        {
             return cached;
+        }
 
         await using var conn = await _db.OpenAsync(ct);
-        var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-        var count = await conn.ExecuteScalarAsync<int>(
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        int count = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM jwt_revocations WHERE jti = @jti AND expires_at > @now",
             new { jti, now });
-        var revoked = count > 0;
+        bool revoked = count > 0;
 
         // Only cache the negative answer. A positive (revoked) result is rare and
         // persistent — no need to cache it; let the DB carry the truth.
         if (!revoked)
-            _cache?.Set(CacheKey(jti), false, NegativeCacheTtl);
+        {
+            _cache?.Set(CacheKey(jti), false, new MemoryCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = NegativeCacheTtl,
+                Size = 1,
+            });
+        }
 
         return revoked;
     }
@@ -69,7 +77,7 @@ public sealed class JwtRevocationRepository
     public async Task PruneExpiredAsync(CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
         await conn.ExecuteAsync("DELETE FROM jwt_revocations WHERE expires_at <= @now", new { now });
     }
 }

@@ -1,10 +1,11 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -27,7 +28,7 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
 
     private async Task<HttpClient> AdminClient()
     {
-        var jwt = await _factory.CreateAdminJwt();
+        string jwt = await _factory.CreateAdminJwt();
         var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         return c;
@@ -37,8 +38,10 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
     {
         var part = new ByteArrayContent(bytes);
         part.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-        var content = new MultipartFormDataContent();
-        content.Add(part, "files", name);
+        var content = new MultipartFormDataContent
+        {
+            { part, "files", name }
+        };
         return content;
     }
 
@@ -54,12 +57,12 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
     private async Task<byte[]> SeedProxyVersion(string name, string version)
     {
         var (bytes, _, _) = NpmFixtures.BuildTarball(name, version);
-        var filename = $"{name}-{version}.tgz";
+        string filename = $"{name}-{version}.tgz";
         _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}/-/{filename}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -70,7 +73,7 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
     public async Task DownloadUploadedVersion_Returns200_WithBytesAndAttachment()
     {
         using var c = await AdminClient();
-        var name = $"dl-uploaded";
+        string name = $"dl-uploaded";
         var (bytes, _, _) = NpmFixtures.BuildTarball(name, "1.0.0");
         using var content = OneFile(bytes, $"{name}-1.0.0.tgz");
         (await c.PostAsync("/api/v1/admin/upload", content)).EnsureSuccessStatusCode();
@@ -87,8 +90,8 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
     [Fact]
     public async Task DownloadProxyVersion_Returns200_FromCacheTier()
     {
-        var name = $"dlproxy{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var bytes = await SeedProxyVersion(name, "1.0.0");
+        string name = $"dlproxy{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        byte[] bytes = await SeedProxyVersion(name, "1.0.0");
 
         using var c = await AdminClient();
         var resp = await c.GetAsync($"/api/v1/packages/npm/{name}/1.0.0/download");
@@ -123,8 +126,8 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
         using var admin = await AdminClient();
         await UploadNpm(admin, "dl-member", "1.0.0");
 
-        var userId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "pw", "member");
-        var jwt = await _factory.CreateUserJwt(userId, "member");
+        string userId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "pw", "member");
+        string jwt = await _factory.CreateUserJwt(userId, "member");
         using var member = _factory.CreateClient();
         member.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
 
@@ -151,16 +154,26 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
         resp.EnsureSuccessStatusCode();
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         foreach (var v in doc.RootElement.GetProperty("versions").EnumerateArray())
+        {
             if (v.GetProperty("version").GetString() == version)
+            {
                 return v.GetProperty("downloadCount").GetInt64();
+            }
+        }
+
         throw new Xunit.Sdk.XunitException($"version {version} not found in GetPackage response");
     }
+
+    // Download counts are written asynchronously via DownloadCountWriterHostedService.
+    // Call this before asserting on download_count so the drainer has flushed.
+    private Task WaitForDownloadFlushAsync() =>
+        _factory.Services.GetRequiredService<DownloadCountWriterHostedService>().WaitForIdleAsync();
 
     [Fact]
     public async Task UiDownload_IncrementsDownloadCount_SurfacedInGetPackage()
     {
         using var c = await AdminClient();
-        var name = "dl-count-ui";
+        string name = "dl-count-ui";
         await UploadNpm(c, name, "1.0.0");
 
         // Fresh upload has never been downloaded.
@@ -168,6 +181,7 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
 
         (await c.GetAsync($"/api/v1/packages/npm/{name}/1.0.0/download")).EnsureSuccessStatusCode();
         (await c.GetAsync($"/api/v1/packages/npm/{name}/1.0.0/download")).EnsureSuccessStatusCode();
+        await WaitForDownloadFlushAsync();
 
         Assert.Equal(2, await DownloadCountAsync(c, "npm", name, "1.0.0"));
     }
@@ -175,17 +189,19 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
     [Fact]
     public async Task ProxyPull_FirstFetchThenCacheHit_EachCountAsADownload()
     {
-        var name = $"dlcount{Guid.NewGuid():N}"[..16].ToLowerInvariant();
+        string name = $"dlcount{Guid.NewGuid():N}"[..16].ToLowerInvariant();
         // SeedProxyVersion drives one cache-MISS pull → first_fetch, which is itself a download.
         await SeedProxyVersion(name, "1.0.0");
+        await WaitForDownloadFlushAsync();
 
         using var c = await AdminClient();
         Assert.Equal(1, await DownloadCountAsync(c, "npm", name, "1.0.0"));
 
         // A second protocol pull is a cache HIT — also a download.
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var puller = _factory.CreateClientWithBearer(token);
         (await puller.GetAsync($"/npm/tarballs/{name}/{name}-1.0.0.tgz")).EnsureSuccessStatusCode();
+        await WaitForDownloadFlushAsync();
 
         Assert.Equal(2, await DownloadCountAsync(c, "npm", name, "1.0.0"));
     }
@@ -193,7 +209,11 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
     [Fact]
     public async Task MixedOriginPackage_EachVersionServedFromCorrectTier()
     {
-        var name = $"dlmixed{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"dlmixed{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+
+        // The uploaded version makes the name implicit local_only; the later proxy leg
+        // (SeedProxyVersion) needs the explicit mixed opt-in to fetch upstream.
+        await _factory.SeedMixedClaim("npm", name);
 
         using var c = await AdminClient();
         var (uploadedBytes, _, _) = NpmFixtures.BuildTarball(name, "1.0.0");
@@ -201,7 +221,7 @@ public sealed class DownloadVersionTests : IClassFixture<DependablyFactory>
         (await c.PostAsync("/api/v1/admin/upload", content)).EnsureSuccessStatusCode();
 
         // A second version of the SAME name fetched from upstream lands as a proxy version.
-        var proxyBytes = await SeedProxyVersion(name, "2.0.0");
+        byte[] proxyBytes = await SeedProxyVersion(name, "2.0.0");
 
         var uploaded = await c.GetAsync($"/api/v1/packages/npm/{name}/1.0.0/download");
         Assert.Equal(HttpStatusCode.OK, uploaded.StatusCode);

@@ -2,7 +2,6 @@ using System.Threading.RateLimiting;
 using Dependably.Infrastructure.Redis;
 using NSubstitute;
 using StackExchange.Redis;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure.Redis;
 
@@ -54,7 +53,7 @@ public sealed class RedisFixedWindowRateLimiterTests
 
         using var lease = await NewSut(permitLimit: 5).AcquireAsync();
         Assert.False(lease.IsAcquired);
-        Assert.True(lease.TryGetMetadata(MetadataName.RetryAfter.Name, out var meta));
+        Assert.True(lease.TryGetMetadata(MetadataName.RetryAfter.Name, out object? meta));
         Assert.Equal(TimeSpan.FromSeconds(42), Assert.IsType<TimeSpan>(meta));
     }
 
@@ -66,7 +65,7 @@ public sealed class RedisFixedWindowRateLimiterTests
             .Returns(Pair(count: 7, ttl: 0));
 
         using var lease = await NewSut(permitLimit: 5, windowSeconds: 90).AcquireAsync();
-        Assert.True(lease.TryGetMetadata(MetadataName.RetryAfter.Name, out var meta));
+        Assert.True(lease.TryGetMetadata(MetadataName.RetryAfter.Name, out object? meta));
         Assert.Equal(TimeSpan.FromSeconds(90), Assert.IsType<TimeSpan>(meta));
     }
 
@@ -146,7 +145,7 @@ public sealed class RedisFixedWindowRateLimiterTests
 
         using var lease = await NewSut(permitLimit: 5).AcquireAsync();
         Assert.False(lease.IsAcquired);
-        var found = lease.TryGetMetadata("unknown_key", out var meta);
+        bool found = lease.TryGetMetadata("unknown_key", out object? meta);
         Assert.False(found);
         Assert.Null(meta);
     }

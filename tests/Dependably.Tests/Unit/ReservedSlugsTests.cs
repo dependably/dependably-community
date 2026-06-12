@@ -1,5 +1,4 @@
 using Dependably.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -84,7 +83,7 @@ public class ReservedSlugsTests
     [Fact]
     public void Normalize_AtMaxLength_Accepted()
     {
-        var max = new string('a', 63);
+        string max = new('a', 63);
         Assert.Equal(max, ReservedSlugs.Normalize(max));
     }
 

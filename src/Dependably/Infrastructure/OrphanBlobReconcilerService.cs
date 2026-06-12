@@ -42,7 +42,7 @@ public sealed class OrphanBlobReconcilerService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var scheduleText = _config["ORPHAN_RECONCILE_SCHEDULE"] ?? "0 4 * * *";
+        string scheduleText = _config["ORPHAN_RECONCILE_SCHEDULE"] ?? "0 4 * * *";
         CronExpression schedule;
         try { schedule = CronExpression.Parse(scheduleText, CronFormat.Standard); }
         catch (CronFormatException)
@@ -56,7 +56,10 @@ public sealed class OrphanBlobReconcilerService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             var next = schedule.GetNextOccurrence(DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
-            if (next is null) break;
+            if (next is null)
+            {
+                break;
+            }
 
             var delay = next.Value - DateTimeOffset.UtcNow;
             if (delay > TimeSpan.Zero)
@@ -64,7 +67,10 @@ public sealed class OrphanBlobReconcilerService : BackgroundService
                 try { await Task.Delay(delay, stoppingToken); }
                 catch (OperationCanceledException) { break; }
             }
-            if (stoppingToken.IsCancellationRequested) break;
+            if (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
 
             using var scope = Dependably.Infrastructure.Observability.BackgroundJobScope.Begin(
                 "orphan-reconciler", "blob_store.reconcile");
@@ -87,7 +93,7 @@ public sealed class OrphanBlobReconcilerService : BackgroundService
     /// </summary>
     public async Task<ReconcileSummary> RunOnceAsync(CancellationToken ct = default)
     {
-        var graceMinutes = int.TryParse(_config["ORPHAN_RECONCILE_GRACE_MINUTES"], out var g) && g > 0
+        int graceMinutes = int.TryParse(_config["ORPHAN_RECONCILE_GRACE_MINUTES"], out int g) && g > 0
             ? g : 30;
         var cutoff = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(graceMinutes);
 
@@ -96,8 +102,10 @@ public sealed class OrphanBlobReconcilerService : BackgroundService
         // scale it's fine. If this becomes a constraint the approach to swap to is
         // "stream blobs in batches of N, query EXISTS for each batch."
         var referenced = new HashSet<string>(StringComparer.Ordinal);
-        await foreach (var key in _packages.StreamAllBlobKeysAsync(ct))
+        await foreach (string key in _packages.StreamAllBlobKeysAsync(ct))
+        {
             referenced.Add(key);
+        }
 
         long orphansDeleted = 0;
         long bytesFreed = 0;
@@ -106,9 +114,20 @@ public sealed class OrphanBlobReconcilerService : BackgroundService
 
         await foreach (var blob in registry.ListAsync("hosted/", ct))
         {
-            if (ct.IsCancellationRequested) break;
-            if (referenced.Contains(blob.Key)) continue;
-            if (blob.LastModified > cutoff) continue;  // inside grace window
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
+            if (referenced.Contains(blob.Key))
+            {
+                continue;
+            }
+
+            if (blob.LastModified > cutoff)
+            {
+                continue;  // inside grace window
+            }
 
             try
             {

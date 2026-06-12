@@ -3,7 +3,6 @@ using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -31,7 +30,11 @@ public class HeaderTenantResolverTests : IAsyncLifetime
     private static DefaultHttpContext WithHeader(string name, string? value)
     {
         var ctx = new DefaultHttpContext();
-        if (value is not null) ctx.Request.Headers[name] = value;
+        if (value is not null)
+        {
+            ctx.Request.Headers[name] = value;
+        }
+
         return ctx;
     }
 

@@ -1,5 +1,4 @@
 using System.Net;
-using System.Net.Http.Headers;
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
@@ -7,7 +6,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -47,26 +45,26 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
     {
         // Push two packages with distinct names so we can filter them.
         await _factory.PushNuGetPackage($"FilterMatchPkg{Guid.NewGuid():N}"[..20], "1.0.0");
-        var matchId = $"SearchTarget{Guid.NewGuid():N}"[..20];
+        string matchId = $"SearchTarget{Guid.NewGuid():N}"[..20];
         await _factory.PushNuGetPackage(matchId, "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
         // Use a prefix that exists only in the target package name.
         var resp = await client.GetAsync($"/nuget/query?q=SearchTarget");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var json = await resp.Content.ReadAsStringAsync();
+        string json = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
 
-        var totalHits = doc.RootElement.GetProperty("totalHits").GetInt32();
+        int totalHits = doc.RootElement.GetProperty("totalHits").GetInt32();
         Assert.True(totalHits >= 1, "Expected at least one hit for the matching package.");
 
         // Every returned package must contain the search term in its id.
         foreach (var item in doc.RootElement.GetProperty("data").EnumerateArray())
         {
-            var id = item.GetProperty("id").GetString()!;
+            string id = item.GetProperty("id").GetString()!;
             Assert.Contains("SearchTarget", id, StringComparison.OrdinalIgnoreCase);
         }
     }
@@ -75,7 +73,7 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
     public async Task Search_OversizedTakeAndNegativeSkip_AreClampedNot500()
     {
         await _factory.PushNuGetPackage($"ClampPkg{Guid.NewGuid():N}"[..18], "1.0.0");
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
         // Oversized take is clamped, not errored.
@@ -93,14 +91,14 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
     public async Task FlatcontainerVersions_NoLocalVersions_UpstreamReturns404_Returns404()
     {
         // Stub the upstream so requests for this package's version list return 404.
-        var unknownId = $"NoLocalNoUpstreamPkg{Guid.NewGuid():N}"[..28].ToLowerInvariant();
+        string unknownId = $"NoLocalNoUpstreamPkg{Guid.NewGuid():N}"[..28].ToLowerInvariant();
         _factory.MockUpstream.Given(
                 Request.Create()
                     .WithPath($"/flatcontainer/{unknownId}/index.json")
                     .UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{unknownId}/index.json");
@@ -114,7 +112,7 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
     public async Task Flatcontainer_HostedPackage_WithoutToken_Returns401()
     {
         // Push a non-proxy (hosted) package so IsProxy=false in the DB.
-        var id = $"HostedAuthPkg{Guid.NewGuid():N}"[..20];
+        string id = $"HostedAuthPkg{Guid.NewGuid():N}"[..20];
         await _factory.PushNuGetPackage(id, "1.0.0");
 
         // Request the .nupkg without any auth. ServeHostedNupkgAsync returns 401
@@ -131,7 +129,7 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
     [Fact]
     public async Task Push_NoFormData_Returns400()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
 
@@ -147,7 +145,7 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
     [Fact]
     public async Task Push_EmptyMultipart_Returns422()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
 
@@ -165,7 +163,7 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
     public async Task Unlist_TokenOrgMismatch_Returns401()
     {
         // Push a package to the default org.
-        var id = $"UnlistMismatch{Guid.NewGuid():N}"[..22];
+        string id = $"UnlistMismatch{Guid.NewGuid():N}"[..22];
         await _factory.PushNuGetPackage(id, "1.0.0");
 
         // Create a second real org so the FK on service_tokens.org_id is satisfied.
@@ -174,8 +172,8 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
         var orgRepo = _factory.Services.GetRequiredService<OrgRepository>();
         var secondOrg = await orgRepo.CreateOrgAsync($"other-{Guid.NewGuid():N}"[..16]);
 
-        var rawToken = Dependably.Security.TokenGenerator.Generate();
-        var hash = TokenRepository.HashToken(rawToken);
+        string rawToken = Dependably.Security.TokenGenerator.Generate();
+        string hash = TokenRepository.HashToken(rawToken);
 
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
@@ -205,7 +203,7 @@ public sealed class NuGetControllerTests : IClassFixture<DependablyFactory>, IAs
     [Fact]
     public async Task GetSymbols_PackageNotFound_Returns404()
     {
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
         var resp = await client.GetAsync(

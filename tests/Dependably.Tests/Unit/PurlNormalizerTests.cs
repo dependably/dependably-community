@@ -1,5 +1,4 @@
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -21,7 +20,7 @@ public class PurlNormalizerTests
     [Fact]
     public void NuGet_UnparseableVersion_ReturnsOriginalString()
     {
-        var purl = PurlNormalizer.NuGet("SomeLib", "not-a-version!!");
+        string purl = PurlNormalizer.NuGet("SomeLib", "not-a-version!!");
         Assert.Equal("pkg:nuget/SomeLib@not-a-version!!", purl);
     }
 
@@ -45,7 +44,7 @@ public class PurlNormalizerTests
     // npm — scoped (@scope/name) — @ is NOT percent-encoded in the PURL
     [Theory]
     [InlineData("@angular/core", "15.0.0", "pkg:npm/@angular/core@15.0.0")]
-    [InlineData("@types/node",   "18.0.0", "pkg:npm/@types/node@18.0.0")]
+    [InlineData("@types/node", "18.0.0", "pkg:npm/@types/node@18.0.0")]
     public void Npm_Scoped_NormalizesCorrectly(string name, string version, string expected)
         => Assert.Equal(expected, PurlNormalizer.Npm(name, version));
 
@@ -61,7 +60,7 @@ public class PurlNormalizerTests
     [Fact]
     public void NuGet_PreservesIdCasing()
     {
-        var purl = PurlNormalizer.NuGet("Newtonsoft.Json", "13.0.3");
+        string purl = PurlNormalizer.NuGet("Newtonsoft.Json", "13.0.3");
         Assert.Contains("Newtonsoft.Json", purl);
     }
 }
@@ -70,22 +69,22 @@ public class PurlNormalizerTests
 public class NpmRouteHelperTests
 {
     [Theory]
-    [InlineData("lodash",          "lodash")]       // unscoped — unchanged
-    [InlineData("@scope%2Fpkg",    "@scope/pkg")]   // %2F decoded
-    [InlineData("%40scope%2Fpkg",  "@scope/pkg")]   // %40 + %2F both decoded
-    [InlineData("@scope%2fpkg",    "@scope/pkg")]   // lowercase %2f
-    [InlineData("@scope/pkg",      "@scope/pkg")]   // already clean
+    [InlineData("lodash", "lodash")]       // unscoped — unchanged
+    [InlineData("@scope%2Fpkg", "@scope/pkg")]   // %2F decoded
+    [InlineData("%40scope%2Fpkg", "@scope/pkg")]   // %40 + %2F both decoded
+    [InlineData("@scope%2fpkg", "@scope/pkg")]   // lowercase %2f
+    [InlineData("@scope/pkg", "@scope/pkg")]   // already clean
     public void DecodeRouteName_NormalizesEncodedChars(string input, string expected)
         => Assert.Equal(expected, NpmRouteHelper.DecodeRouteName(input));
 
     [Theory]
-    [InlineData("npm",   "@babel%2Fcore",  "@babel/core")]  // npm: decode
-    [InlineData("npm",   "%40babel%2Fcore","@babel/core")]  // npm: decode %40 too
-    [InlineData("pypi",  "my%2Fpkg",       "my%2Fpkg")]     // non-npm: pass through
-    [InlineData("nuget", "Some%2FPkg",     "Some%2FPkg")]   // non-npm: pass through
+    [InlineData("npm", "@babel%2Fcore", "@babel/core")]  // npm: decode
+    [InlineData("npm", "%40babel%2Fcore", "@babel/core")]  // npm: decode %40 too
+    [InlineData("pypi", "my%2Fpkg", "my%2Fpkg")]     // non-npm: pass through
+    [InlineData("nuget", "Some%2FPkg", "Some%2FPkg")]   // non-npm: pass through
     public void AsPurlName_OnlyDecodesNpm(string ecosystem, string input, string expected)
     {
-        var result = ecosystem == "npm" ? NpmRouteHelper.DecodeRouteName(input) : input;
+        string result = ecosystem == "npm" ? NpmRouteHelper.DecodeRouteName(input) : input;
         Assert.Equal(expected, result);
     }
 }
@@ -122,7 +121,7 @@ public class PurlParserTests
     [Fact]
     public void RoundTrip_PyPi()
     {
-        var original = PurlNormalizer.PyPi("My_Package", "1.0.0");
+        string original = PurlNormalizer.PyPi("My_Package", "1.0.0");
         var parsed = PurlParser.TryParse(original);
         Assert.NotNull(parsed);
         Assert.Equal("pypi", parsed.Ecosystem);
@@ -133,7 +132,7 @@ public class PurlParserTests
     [Fact]
     public void RoundTrip_Npm_Scoped()
     {
-        var original = PurlNormalizer.Npm("@angular/core", "15.0.0");
+        string original = PurlNormalizer.Npm("@angular/core", "15.0.0");
         var parsed = PurlParser.TryParse(original);
         Assert.NotNull(parsed);
         Assert.Equal("npm", parsed.Ecosystem);

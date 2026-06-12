@@ -19,6 +19,9 @@ stages:
   - dast
   - release
 
+# All job images are pinned by digest; bump tag+digest together.
+# No container image is built in CI (deploy builds locally via docker compose), so no image-scanning job exists by design.
+
 # Release-tag predicate. Single source of truth — referenced from
 # .runs-on-ci{,-main} so branch and tag execution share entry conditions,
 # and from validate-release-tag / release-gate / release-to-github so the
@@ -35,9 +38,10 @@ stages:
     - if: $CI_COMMIT_BRANCH == "main"
     - *release-tag-rule
 
-# Post-merge heavy jobs (side effects on real systems: DT publish, deployed
-# DAST). Release-tag inclusion stays — removing it silently weakens the
-# release gate by skipping required jobs on tag pipelines.
+# Post-merge-only jobs: side effects on real systems (DT publish) and scans
+# scoped to main to avoid per-MR noise (sonarqube-check). Release-tag inclusion
+# stays — removing it silently weakens the release gate by skipping required
+# jobs on tag pipelines.
 .runs-on-ci-main:
   rules:
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
@@ -70,6 +74,7 @@ stages:
   - { job: lockfile-registry-guard, artifacts: false }
   - { job: build,                  artifacts: false }
   - { job: lint,                   artifacts: false }
+  - { job: dotnet-format,          artifacts: false }
   - { job: csp-inline-style-guard, artifacts: false }
   - { job: chrome-emoji-guard,     artifacts: false }
   - { job: secret-scan,            artifacts: false }
@@ -84,6 +89,11 @@ stages:
   - { job: sbom-frontend,          artifacts: false }
   - { job: dt-publish,             artifacts: false }
   - { job: zap-baseline,           artifacts: false }
+  - { job: zap-full,               artifacts: false }
+  - { job: zap-api-management,     artifacts: false }
+  - { job: zap-api-protocol,       artifacts: false }
+  - { job: sca-backend,            artifacts: false }
+  - { job: sca-frontend,           artifacts: false }
 
 # Wires `REGISTRY_URL` + `REGISTRY_KEY` (set as unprotected project CI variables) into npm +
 # NuGet so restores route through the private Dependably instance. HARD-FAILS when either var
@@ -311,7 +321,7 @@ build-web:
   stage: build
   # Not in .release-required: gated transitively via `build`'s `needs:`.
   extends: [.private-registry-setup, .runs-on-ci]
-  image: node:22-slim
+  image: node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
   script:
     - cd web && npm ci && npm run build
   artifacts:
@@ -322,7 +332,7 @@ build-web:
 build:
   stage: build
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0
+  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   needs: [build-web]
   # Heavy job + produces the linux-x64 artifact consumed by e2e/zap. Pin to amd64
   # runners so the publish happens natively (faster, and avoids qemu surprises).
@@ -342,14 +352,27 @@ build:
 lint:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: node:22-slim
+  image: node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
   script:
     - cd web && npm ci && npm run lint && npm run lint:css && npm run check
+
+# C# style/whitespace gate. `dotnet format --verify-no-changes` fails (non-zero) when any
+# file deviates from the .editorconfig rules, so an unformatted commit blocks the MR instead
+# of drifting in. Both subcommands are run explicitly (matching the local pre-commit hook):
+# whitespace is syntactic; style runs the IDExxxx code-style analyzers against the .editorconfig.
+dotnet-format:
+  stage: test
+  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  tags: [amd64]
+  script:
+    - dotnet format whitespace --verify-no-changes
+    - dotnet format style --verify-no-changes
 
 csp-inline-style-guard:
   stage: test
   extends: [.runs-on-ci, .release-required]
-  image: alpine:3
+  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
     - apk add --no-cache grep
     - |
@@ -361,7 +384,7 @@ csp-inline-style-guard:
 chrome-emoji-guard:
   stage: test
   extends: [.runs-on-ci, .release-required]
-  image: alpine:3
+  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
     - apk add --no-cache grep
     - |
@@ -374,18 +397,22 @@ secret-scan:
   stage: test
   extends: [.runs-on-ci, .release-required]
   image:
-    name: trufflesecurity/trufflehog:3.95.3
+    name: trufflesecurity/trufflehog:3.95.3@sha256:9cc33bb080cac0efbbf228a17667172875b529eeeab01efcc4697adfb55f568a
     entrypoint: [""]
   variables:
     GIT_DEPTH: 0
   script:
     - trufflehog git file://. --since-commit "${CI_COMMIT_BEFORE_SHA:-HEAD~1}" --only-verified --fail
 
+# Full-history, all-detectors sweep (no --since-commit, no --only-verified) —
+# the thorough counterpart to secret-scan's fast incremental verified-only gate.
+# Runs on every MR (it is fast here) and gates the release. A false positive in
+# history is silenced via .trufflehog-exclude; a real finding fails the pipeline.
 secret-scan-deep:
   stage: test
   extends: [.runs-on-ci, .release-required]
   image:
-    name: trufflesecurity/trufflehog:3.95.3
+    name: trufflesecurity/trufflehog:3.95.3@sha256:9cc33bb080cac0efbbf228a17667172875b529eeeab01efcc4697adfb55f568a
     entrypoint: [""]
   variables:
     GIT_DEPTH: 0
@@ -395,7 +422,7 @@ secret-scan-deep:
 unit-tests:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0
+  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
     # No --collect:"XPlat Code Coverage" here on purpose. The coverage it would produce is
@@ -415,7 +442,7 @@ unit-tests:
 api-contract:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0
+  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
     - dotnet test --filter "Category=ApiContract" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/contract.xml"
@@ -428,7 +455,7 @@ api-contract:
 integration-tests:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0
+  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
     - dotnet test --filter "Category=Integration" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/integration.xml"
@@ -451,10 +478,10 @@ integration-tests:
 schema-integrity:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0
+  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   services:
-    - name: postgres:16-alpine
+    - name: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
       alias: postgres
   variables:
     POSTGRES_DB: dependably_test
@@ -472,7 +499,7 @@ schema-integrity:
 frontend-tests:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: node:22-slim
+  image: node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
   script:
     - cd web
     - npm ci
@@ -482,11 +509,82 @@ frontend-tests:
     expire_in: 7 days
     paths:
       - web/coverage/
+    reports:
+      junit: web/test-results/junit.xml
+
+# SCA vulnerability gate for NuGet dependencies. Vulnerability data comes from
+# <auditSources> in nuget.config — the --source flag applies only to package
+# downloads, not advisory lookups. A minimal nuget.config with api.nuget.org as
+# both the package source and the audit source is written here so that restore
+# and advisory queries both reach the public feed. The private registry is not
+# used: SCA requires advisory data from nuget.org, which Dependably does not serve.
+sca-backend:
+  stage: test
+  extends: [.runs-on-ci, .release-required]
+  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  tags: [amd64]
+  script:
+    - |
+      # Write a nuget.config with api.nuget.org as both the package source and the
+      # auditSource so `dotnet list package --vulnerable` can reach advisory data.
+      # The private feed is intentionally absent: advisory data lives only on
+      # nuget.org and the restore here is solely to satisfy the list command's
+      # precondition (not to produce build artifacts consumed by other jobs).
+      cat > nuget.config <<'NUGETCFG'
+      <?xml version="1.0" encoding="utf-8"?>
+      <configuration>
+        <packageSources>
+          <clear />
+          <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+        </packageSources>
+        <auditSources>
+          <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+        </auditSources>
+      </configuration>
+      NUGETCFG
+    - apt-get update -qq && apt-get install -y -qq jq > /dev/null
+    - dotnet restore
+    - dotnet list package --vulnerable --include-transitive --format json > sca-backend.json
+    - |
+      cat sca-backend.json
+      BAD=$(jq '[.projects[].frameworks[]? | (.topLevelPackages[]?, .transitivePackages[]?) | select(.vulnerabilities != null) | .vulnerabilities[] | select(.severity == "High" or .severity == "Critical")] | length' sca-backend.json)
+      if [ "$BAD" -gt 0 ]; then
+        echo "ERROR: $BAD High/Critical vulnerable NuGet package reference(s) — see sca-backend.json above." >&2
+        exit 1
+      fi
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths: [sca-backend.json]
+
+# SCA vulnerability gate for npm dependencies. Uses the public npm audit advisory endpoint
+# (--registry flag) for vulnerability data — the private proxy does not implement
+# the /-/npm/v1/security/advisories/bulk endpoint that npm audit requires.
+sca-frontend:
+  stage: test
+  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  image: node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  script:
+    - cd web
+    - npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+
+# Dockerfile style/hygiene gate. Not release-required — lint issues are advisory
+# until the operator chooses to enforce them. DL3018 (pin apk versions) is
+# intentionally ignored: the runtime base is already digest-pinned, so the
+# package version granularity adds no supply-chain value at build time.
+docker-lint:
+  stage: test
+  extends: .runs-on-ci
+  image:
+    name: hadolint/hadolint:latest-alpine@sha256:7aba693c1442eb31c0b015c129697cb3b6cb7da589d85c7562f9deb435a6657c
+    entrypoint: [""]
+  script:
+    - hadolint Dockerfile
 
 e2e:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/playwright:v1.59.1-noble
+  image: mcr.microsoft.com/playwright:v1.59.1-noble@sha256:b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53
   needs: [build]
   # Playwright image is amd64-only; on Pi runners it ran under qemu and the slow
   # emulation caused intermittent timing flakes. Pin to native amd64.
@@ -517,7 +615,7 @@ e2e:
 sonarqube-check:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci-main]
-  image: mcr.microsoft.com/dotnet/sdk:10.0
+  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   needs: [frontend-tests]
   tags: [amd64]
   variables:
@@ -532,6 +630,13 @@ sonarqube-check:
     - apt-get install --yes --no-install-recommends openjdk-17-jre-headless nodejs
     - dotnet tool install --global dotnet-sonarscanner
     - export PATH="$PATH:$HOME/.dotnet/tools"
+    # The token is passed explicitly via /d:sonar.token — the SONAR_TOKEN environment
+    # variable alone is NOT honored by the scanner's begin step against this SonarQube
+    # 9.9 server (pre-processing fails with "Authentication with the server has failed").
+    # This is safe for the job trace: GitLab echoes script lines unexpanded (the literal
+    # text $SONAR_TOKEN), so the value never appears in the log regardless of variable
+    # masking. SONAR_TOKEN must still be a masked CI/CD variable (see CONTRIBUTING >
+    # SonarQube (CI)).
     # SonarQube 9.9 LTS's C# plugin v8.51 does NOT trigger the "C# Tests Coverage Report
     # Import" sensor on `sonar.cs.cobertura.reportsPaths` in this stack — last scan log
     # showed the cobertura file present + path-correct + the property set, yet the sensor
@@ -549,6 +654,9 @@ sonarqube-check:
       /d:sonar.coverage.exclusions="src/Dependably/Program.cs,src/Dependably/Infrastructure/Schema*.sql,src/Dependably/Infrastructure/Redis/**/*.cs,src/Dependably/Infrastructure/RedisLockoutStore.cs,src/Dependably/Infrastructure/NpgsqlMetadataStore.cs,src/Dependably/Storage/AzureBlobContainerAdapter.cs,src/Dependably/Infrastructure/SpdxLicenseRepository.cs,web/src/main.js,web/src/App.svelte,web/src/locales/**,web/.stylelintrc.cjs,web/svelte.config.js,web/vite.config.js,web/vitest.config.js,web/eslint.config.js,build/extract-notices.mjs,i18n/scripts/i18n-validate.js"
       /d:sonar.exclusions="web/e2e/**"
       /d:sonar.test.inclusions="**/*Tests.cs,**/*.test.js,**/*.spec.js,**/*.spec.ts"
+      /d:sonar.issue.ignore.multicriteria="e1"
+      /d:sonar.issue.ignore.multicriteria.e1.ruleKey="csharpsquid:S5332"
+      /d:sonar.issue.ignore.multicriteria.e1.resourceKey="**/RpmRepodataService.cs"
     - dotnet build
     - dotnet test --filter "Category!=Integration&Category!=ApiContract&Category!=SchemaPostgres" --settings coverlet.runsettings --collect:"XPlat Code Coverage" --logger "trx;LogFileName=tests.trx" --results-directory ./test-results
     # coverlet.collector now emits opencover (per coverlet.runsettings <Format>opencover</Format>)
@@ -562,12 +670,30 @@ sonarqube-check:
     - dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
   allow_failure: true
 
+snyk-code:
+  # Snyk Code (SAST) gate: fails only on findings absent from ci/snyk-code-baseline.json
+  # (see CONTRIBUTING > Static analysis (Snyk Code)). Gating (allow_failure: false): a finding
+  # not on the baseline fails the pipeline and blocks the merge. A genuine new FP gets an inline
+  # // deepcode ignore at the site + ci/snyk-code-scan.sh --update committed in the same MR.
+  # SNYK_TOKEN must be an UNPROTECTED, masked CI/CD variable — merge-request pipelines run on
+  # unprotected branches, so a protected token would be absent there and every MR scan errors.
+  stage: test
+  extends: [.runs-on-ci]
+  image:
+    name: snyk/snyk:linux@sha256:aeb296d943659dccbc7464340bb8741f6e11999cd99644dc92e6d315d6eda3f4
+    entrypoint: [""]
+  before_script:
+    - command -v jq >/dev/null 2>&1 || { apt-get update && apt-get install -y --no-install-recommends jq; }
+  script:
+    - ci/snyk-code-scan.sh
+  allow_failure: false
+
 # === sbom ===
 
 sbom-backend:
   stage: sbom
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0
+  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   script:
     - dotnet tool restore
     - dotnet CycloneDX src/Dependably/Dependably.csproj -o . -fn sbom-backend.json -F json -spv 1.6 --exclude-dev
@@ -579,7 +705,7 @@ sbom-backend:
 sbom-frontend:
   stage: sbom
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: node:22-slim
+  image: node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
   script:
     - cd web && npm ci && npm run sbom
   artifacts:
@@ -590,7 +716,7 @@ sbom-frontend:
 dt-publish:
   stage: sbom
   extends: [.runs-on-ci-main, .release-required]
-  image: alpine:3
+  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   needs:
     - job: sbom-backend
       artifacts: true
@@ -661,10 +787,15 @@ dt-publish:
   variables:
     # Defaults; override via project CI/CD variables without editing YAML.
     OLLAMA_URL: "http://192.168.2.25:11434"
-    OLLAMA_MODEL: "qwen3-coder-30b"
+    OLLAMA_MODEL: "gemma4:12b-it-qat"
     GIT_DEPTH: "20"
     AI_REVIEW_MAX_DIFF_BYTES: "120000"
-    AI_REVIEW_NUM_CTX: "16384"
+    # Must hold the ~35K-token prompt a 120000-byte diff produces plus generation
+    # room; at 16384 the prompt filled the window and the model returned no content.
+    AI_REVIEW_NUM_CTX: "49152"
+    # gemma4:* is a reasoning model; thinking burns the generation budget before any
+    # answer is written. Off => the model writes the review straight to content.
+    AI_REVIEW_THINK: "false"
   allow_failure: true
   before_script:
     - apk add --no-cache bash curl jq git
@@ -706,12 +837,10 @@ ai-review-docs:
 
 # === dast ===
 
-# ZAP baseline (passive only) — runs against the published binary booted on :8080.
-# Mirrors the Playwright CI webServer pattern in web/e2e/playwright.config.ts: same
-# binary path, same env-var shape, same /ready gate. -I keeps the job green on WARN
-# findings so the initial introduction doesn't turn the pipeline red — we tighten
-# this by dropping -I and listing accepted rules in .zap/baseline.conf once the
-# initial noise is triaged.
+# Shared app-boot for every DAST job: copies the published binary, boots it on
+# :8080 with a throwaway DB/blob store, and waits on /ready (aborting if the
+# process dies). Mirrors the Playwright CI webServer pattern in
+# web/e2e/playwright.config.ts: same binary path, same env-var shape, same gate.
 .zap_app_boot: &zap_app_boot |
   mkdir -p /tmp/dast/blobs
   export DB_PATH=/tmp/dast/dependably.db
@@ -739,11 +868,16 @@ ai-review-docs:
   done
   curl -fsS http://localhost:8080/ready || { echo "App not ready after 60s — log follows:" >&2; cat app.log >&2; exit 1; }
 
+# Passive-only baseline scan — fast enough to gate every MR, and the one DAST
+# job in the release contract (.release-required). Accepted passive noise is
+# enumerated in .zap/baseline.conf; -I is NOT passed, so a new, unaccepted
+# finding (a dropped security header, a real passive vuln) turns the pipeline
+# red. Triage a genuine new finding into .zap/baseline.conf to re-green.
 zap-baseline:
   stage: dast
   extends: [.runs-on-ci, .release-required]
   image:
-    name: zaproxy/zap-stable:2.17.0
+    name: zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]
   needs: [build]
   # ZAP image is multi-arch; on a Pi runner Docker pulls the native arm64 variant
@@ -757,7 +891,7 @@ zap-baseline:
     # Symlink it to $PWD so .zap/*.conf is in place and -J/-r land in the build
     # dir where GitLab picks them up as artifacts.
     - ln -sfn "$PWD" /zap/wrk
-    - zap-baseline.py -t http://localhost:8080 -c .zap/baseline.conf -J zap-baseline.json -r zap-baseline.html -I
+    - zap-baseline.py -t http://localhost:8080 -c .zap/baseline.conf -J zap-baseline.json -r zap-baseline.html
   after_script:
     - echo "=== dependably app log ==="; cat app.log || true
   artifacts:
@@ -768,20 +902,24 @@ zap-baseline:
       - zap-baseline.json
       - app.log
 
-# Signal-only — not in release-gate.needs. allow_failure: true is intentional;
-# active scan results inform DAST review but don't gate the release.
+# Full active attack scan — gates every MR and the release. -I is dropped and
+# accepted noise lives in .zap/full.conf, so a new active finding (a real
+# injection/XSS an agent introduces) reds the pipeline and blocks the merge.
+# interruptible so a re-push cancels an in-flight scan instead of stacking work
+# on the single amd64 runner it shares with the other gating jobs.
 zap-full:
   stage: dast
-  extends: .runs-on-ci-main
+  extends: [.runs-on-ci, .release-required]
   image:
-    name: zaproxy/zap-stable:2.17.0
+    name: zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]
   needs: [build]
   tags: [amd64]
+  interruptible: true
   script:
     - *zap_app_boot
     - ln -sfn "$PWD" /zap/wrk
-    - zap-full-scan.py -t http://localhost:8080 -c .zap/full.conf -J zap-full.json -r zap-full.html -I
+    - zap-full-scan.py -t http://localhost:8080 -c .zap/full.conf -J zap-full.json -r zap-full.html
   after_script:
     - echo "=== dependably app log ==="; cat app.log || true
   artifacts:
@@ -791,7 +929,82 @@ zap-full:
       - zap-full.html
       - zap-full.json
       - app.log
-  allow_failure: true
+
+# Authenticated API scan of the management surface (/api/v1/...). Imports the
+# generated OpenAPI document so ZAP exercises every documented route instead of
+# relying on a spider that can't crawl an API. ci/zap-dast-auth.sh logs in,
+# clears the first-boot password-rotation flag, and emits a session cookie that
+# ZAP's replacer add-on injects on every request. -I is dropped: accepted noise
+# is enumerated in .zap/api-management.conf, so the scan goes green when clean
+# and red when a new, unaccepted finding appears. Gates every MR and the release
+# (.release-required): a new authenticated-API finding blocks the merge so it
+# gets fixed in-context. interruptible so a re-push cancels it rather than
+# queueing on the single amd64 runner. Management routes accept only the session
+# JWT, not a dpd_ token.
+zap-api-management:
+  stage: dast
+  extends: [.runs-on-ci, .release-required]
+  image:
+    name: zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
+    entrypoint: [""]
+  needs: [build]
+  tags: [amd64]
+  interruptible: true
+  script:
+    - *zap_app_boot
+    - sh ci/zap-dast-auth.sh
+    - . ./zap-creds.env
+    - ln -sfn "$PWD" /zap/wrk
+    - >
+      ZAP_AUTH_HEADER=Cookie ZAP_AUTH_HEADER_VALUE="$ZAP_SESSION_COOKIE"
+      zap-api-scan.py -t http://localhost:8080/openapi/management.json
+      -f openapi -O http://localhost:8080
+      -c .zap/api-management.conf
+      -J zap-api-management.json -r zap-api-management.html
+  after_script:
+    - echo "=== dependably app log ==="; cat app.log || true
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - zap-api-management.html
+      - zap-api-management.json
+      - app.log
+
+# Authenticated API scan of the protocol surfaces (npm/PyPI/NuGet/…). Same
+# OpenAPI import; auth is the dpd_ token as a Bearer header — TokenAuthentication
+# accepts Bearer for every ecosystem, so one token covers all protocol routes
+# (NuGet push via X-NuGet-ApiKey is the one documented gap). -I dropped, gates
+# every MR and the release, interruptible — same rationale as zap-api-management.
+zap-api-protocol:
+  stage: dast
+  extends: [.runs-on-ci, .release-required]
+  image:
+    name: zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
+    entrypoint: [""]
+  needs: [build]
+  tags: [amd64]
+  interruptible: true
+  script:
+    - *zap_app_boot
+    - sh ci/zap-dast-auth.sh
+    - . ./zap-creds.env
+    - ln -sfn "$PWD" /zap/wrk
+    - >
+      ZAP_AUTH_HEADER_VALUE="Bearer $ZAP_API_TOKEN"
+      zap-api-scan.py -t http://localhost:8080/openapi/protocol.json
+      -f openapi -O http://localhost:8080
+      -c .zap/api-protocol.conf
+      -J zap-api-protocol.json -r zap-api-protocol.html
+  after_script:
+    - echo "=== dependably app log ==="; cat app.log || true
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - zap-api-protocol.html
+      - zap-api-protocol.json
+      - app.log
 
 # Single release contract. needs: is the YAML alias *release-required-jobs;
 # release-contract-lint reconciles that alias against the set of jobs that

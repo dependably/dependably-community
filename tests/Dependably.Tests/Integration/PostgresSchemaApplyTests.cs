@@ -1,8 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
-using Npgsql;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -54,7 +52,7 @@ public sealed class PostgresSchemaApplyTests
         Assert.Null(ex);
 
         await using var conn = await store.OpenAsync();
-        var ledger = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM _applied_migrations");
+        long ledger = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM _applied_migrations");
         Assert.True(ledger > 0, "one-time migrations did not record themselves in _applied_migrations");
     }
 
@@ -71,20 +69,97 @@ public sealed class PostgresSchemaApplyTests
         var sqliteShape = await SqliteShapeAsync(sqliteStore);
 
         var violations = new List<string>();
-        foreach (var t in pgShape.Keys.Except(sqliteShape.Keys, StringComparer.OrdinalIgnoreCase))
-            violations.Add($"table `{t}` exists in live Postgres but not in SQLite");
-        foreach (var t in sqliteShape.Keys.Except(pgShape.Keys, StringComparer.OrdinalIgnoreCase))
-            violations.Add($"table `{t}` exists in SQLite but not in live Postgres");
-        foreach (var table in pgShape.Keys.Intersect(sqliteShape.Keys, StringComparer.OrdinalIgnoreCase))
+        foreach (string? t in pgShape.Keys.Except(sqliteShape.Keys, StringComparer.OrdinalIgnoreCase))
         {
-            foreach (var c in pgShape[table].Except(sqliteShape[table], StringComparer.OrdinalIgnoreCase))
+            violations.Add($"table `{t}` exists in live Postgres but not in SQLite");
+        }
+
+        foreach (string? t in sqliteShape.Keys.Except(pgShape.Keys, StringComparer.OrdinalIgnoreCase))
+        {
+            violations.Add($"table `{t}` exists in SQLite but not in live Postgres");
+        }
+
+        foreach (string? table in pgShape.Keys.Intersect(sqliteShape.Keys, StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (string? c in pgShape[table].Except(sqliteShape[table], StringComparer.OrdinalIgnoreCase))
+            {
                 violations.Add($"{table}.{c}: in live Postgres, missing from SQLite");
-            foreach (var c in sqliteShape[table].Except(pgShape[table], StringComparer.OrdinalIgnoreCase))
+            }
+
+            foreach (string? c in sqliteShape[table].Except(pgShape[table], StringComparer.OrdinalIgnoreCase))
+            {
                 violations.Add($"{table}.{c}: in SQLite, missing from live Postgres");
+            }
         }
 
         Assert.True(violations.Count == 0,
             "Live Postgres / SQLite schema shape mismatch:\n" + string.Join("\n", violations));
+    }
+
+    // ── SAML replay-guard semantics on live Postgres ─────────────────────────
+    // SamlReplayGuardTests proves the one-shot/replay/tenant-isolation semantics on SQLite; these
+    // re-run the security-critical paths through the production NpgsqlMetadataStore so the
+    // INSERT ... ON CONFLICT DO NOTHING (rows==1-only-on-insert) and the atomic
+    // UPDATE ... WHERE consumed_at IS NULL one-shot are proven on the engine enterprise deploys on,
+    // not just SQLite. Kept in this class so they share the serialized live-Postgres lifecycle.
+
+    private static async Task<NpgsqlMetadataStore> InitializedPostgresAsync()
+    {
+        var store = await FreshPostgresAsync();
+        await new SchemaInitializer(store).InitializeAsync();
+        return store;
+    }
+
+    private static async Task<string> SeedOrgAsync(NpgsqlMetadataStore store)
+    {
+        string id = Guid.NewGuid().ToString("N");
+        await using var conn = await store.OpenAsync();
+        await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
+            new { id, slug = "pg-replay-" + id[..8] });
+        return id;
+    }
+
+    [Fact]
+    public async Task AssertionReplayGuard_OnLivePostgres_FirstAccepts_ReplayRejected()
+    {
+        var store = await InitializedPostgresAsync();
+        var repo = new SamlConfigRepository(store);
+        string org = await SeedOrgAsync(store);
+        string assertionId = "_" + Guid.NewGuid().ToString("N");
+        var expiry = DateTimeOffset.UtcNow.AddMinutes(5);
+
+        // ON CONFLICT DO NOTHING must report rows==1 on first insert, rows==0 on the replay.
+        Assert.True(await repo.TryConsumeAssertionAsync(org, "https://idp/x", assertionId, expiry));
+        Assert.False(await repo.TryConsumeAssertionAsync(org, "https://idp/x", assertionId, expiry));
+    }
+
+    [Fact]
+    public async Task AssertionReplayGuard_OnLivePostgres_SameIdDistinctTenants_Independent()
+    {
+        var store = await InitializedPostgresAsync();
+        var repo = new SamlConfigRepository(store);
+        string orgA = await SeedOrgAsync(store);
+        string orgB = await SeedOrgAsync(store);
+        string assertionId = "_" + Guid.NewGuid().ToString("N");
+        var expiry = DateTimeOffset.UtcNow.AddMinutes(5);
+
+        Assert.True(await repo.TryConsumeAssertionAsync(orgA, "idp", assertionId, expiry));
+        Assert.True(await repo.TryConsumeAssertionAsync(orgB, "idp", assertionId, expiry)); // different PK
+        Assert.False(await repo.TryConsumeAssertionAsync(orgA, "idp", assertionId, expiry)); // still one-shot
+    }
+
+    [Fact]
+    public async Task PendingRequest_OnLivePostgres_ConsumedExactlyOnce()
+    {
+        var store = await InitializedPostgresAsync();
+        var repo = new SamlConfigRepository(store);
+        string org = await SeedOrgAsync(store);
+        string reqId = "_" + Guid.NewGuid().ToString("N");
+        await repo.IssuePendingRequestAsync(reqId, org, DateTimeOffset.UtcNow.AddMinutes(10));
+
+        // Atomic UPDATE...WHERE consumed_at IS NULL must return rows==1 once, then rows==0.
+        Assert.True(await repo.TryConsumePendingRequestAsync(reqId, org));
+        Assert.False(await repo.TryConsumePendingRequestAsync(reqId, org));
     }
 
     private static async Task<Dictionary<string, HashSet<string>>> PostgresShapeAsync(NpgsqlMetadataStore store)
@@ -105,9 +180,14 @@ public sealed class PostgresSchemaApplyTests
         var tables = (await conn.QueryAsync<string>(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")).ToList();
         var rows = new List<(string Table, string Column)>();
-        foreach (var table in tables)
-            foreach (var col in await conn.QueryAsync<string>("SELECT name FROM pragma_table_info(@table)", new { table }))
+        foreach (string? table in tables)
+        {
+            foreach (string col in await conn.QueryAsync<string>("SELECT name FROM pragma_table_info(@table)", new { table }))
+            {
                 rows.Add((table, col));
+            }
+        }
+
         return Group(rows);
     }
 
@@ -117,7 +197,10 @@ public sealed class PostgresSchemaApplyTests
         foreach (var (table, column) in rows)
         {
             if (!shape.TryGetValue(table, out var cols))
+            {
                 shape[table] = cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+
             cols.Add(column);
         }
         return shape;

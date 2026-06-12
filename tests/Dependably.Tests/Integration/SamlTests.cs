@@ -64,7 +64,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     {
         await ResetSamlConfigAsync();
 
-        var memberJwt = await IssueJwtAsync(role: "member");
+        string memberJwt = await IssueJwtAsync(role: "member");
         using var memberClient = _factory.CreateClientWithBearer(memberJwt);
         var resp = await memberClient.GetAsync("/api/v1/auth-config");
         Assert.True(resp.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.NotFound,
@@ -157,7 +157,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         var resp = await client.GetAsync("/saml/metadata");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var xml = await resp.Content.ReadAsStringAsync();
+        string xml = await resp.Content.ReadAsStringAsync();
         Assert.Contains("EntityDescriptor", xml);
         Assert.Contains("AssertionConsumerService", xml);
         Assert.Contains("/saml/acs", xml);
@@ -198,7 +198,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     [Fact]
     public void IdpMetadataParser_MissingDescriptor_Throws()
     {
-        var bad = "<EntityDescriptor xmlns=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"x\"></EntityDescriptor>";
+        string bad = "<EntityDescriptor xmlns=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"x\"></EntityDescriptor>";
         Assert.ThrowsAny<InvalidOperationException>(() => Dependably.Api.IdpMetadataParser.Parse(bad));
     }
 
@@ -208,7 +208,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     public async Task LoginSaml_NewUser_ProvisionsMemberAndIssuesJwt()
     {
         var login = _factory.Services.GetRequiredService<LoginService>();
-        var orgId = await GetDefaultOrgIdAsync();
+        string orgId = await GetDefaultOrgIdAsync();
 
         var result = await login.LoginSamlAsync(
             tenantId: orgId,
@@ -221,11 +221,11 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         Assert.Equal("member", result.Role);
 
         await using var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
-        var role = await conn.ExecuteScalarAsync<string>(
+        string? role = await conn.ExecuteScalarAsync<string>(
             "SELECT role FROM users WHERE email = 'saml-user-1@example.com'");
         Assert.Equal("member", role);
 
-        var linked = await conn.ExecuteScalarAsync<int>(
+        int linked = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM external_identities WHERE org_id = @o AND idp_entity_id = @e AND nameid = @n",
             new { o = orgId, e = "https://idp.example.com/entity", n = "saml-user-1" });
         Assert.Equal(1, linked);
@@ -235,8 +235,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     public async Task LoginSaml_ExistingFormsUser_LinksAndPreservesAdminRole()
     {
         var login = _factory.Services.GetRequiredService<LoginService>();
-        var orgId = await GetDefaultOrgIdAsync();
-        var email = $"admin-{Guid.NewGuid():N}@example.com";
+        string orgId = await GetDefaultOrgIdAsync();
+        string email = $"admin-{Guid.NewGuid():N}@example.com";
         await _factory.CreateUser(email, "doesntmatter12", role: "admin");
 
         var result = await login.LoginSamlAsync(
@@ -254,7 +254,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     public async Task LoginSaml_ReturningSamlUser_UpdatesEmailAndKeepsRole()
     {
         var login = _factory.Services.GetRequiredService<LoginService>();
-        var orgId = await GetDefaultOrgIdAsync();
+        string orgId = await GetDefaultOrgIdAsync();
 
         // First login: provision via JIT
         await login.LoginSamlAsync(orgId, "https://idp.example.com/entity", "saml-rotate-1", "old@example.com");
@@ -266,7 +266,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         Assert.False(result.Linked);
 
         await using var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
-        var rowEmail = await conn.ExecuteScalarAsync<string>(
+        string? rowEmail = await conn.ExecuteScalarAsync<string>(
             "SELECT email FROM users WHERE id = (SELECT user_id FROM external_identities WHERE nameid = 'saml-rotate-1' LIMIT 1)");
         Assert.Equal("new@example.com", rowEmail);
     }
@@ -275,12 +275,12 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     public async Task LoginSaml_DifferentIdpSameEmail_DoesNotCollide()
     {
         var login = _factory.Services.GetRequiredService<LoginService>();
-        var orgId = await GetDefaultOrgIdAsync();
-        var sharedEmail = $"shared-{Guid.NewGuid():N}@example.com";
+        string orgId = await GetDefaultOrgIdAsync();
+        string sharedEmail = $"shared-{Guid.NewGuid():N}@example.com";
 
         var first = await login.LoginSamlAsync(orgId, "https://idp1.example.com", "alice", sharedEmail);
         // Link by email path will reuse the first user. Use distinct emails to truly test "no collision".
-        var distinctEmail = $"distinct-{Guid.NewGuid():N}@example.com";
+        string distinctEmail = $"distinct-{Guid.NewGuid():N}@example.com";
         var second = await login.LoginSamlAsync(orgId, "https://idp2.example.com", "alice", distinctEmail);
 
         Assert.NotNull(first.Token);
@@ -288,9 +288,9 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         Assert.NotEqual(first.UserId, second.UserId);
 
         await using var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
-        var idp1Count = await conn.ExecuteScalarAsync<int>(
+        int idp1Count = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM external_identities WHERE idp_entity_id = 'https://idp1.example.com'");
-        var idp2Count = await conn.ExecuteScalarAsync<int>(
+        int idp2Count = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM external_identities WHERE idp_entity_id = 'https://idp2.example.com'");
         Assert.Equal(1, idp1Count);
         Assert.Equal(1, idp2Count);
@@ -300,9 +300,9 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     public async Task LoginSaml_DisabledAccount_Returns401()
     {
         var login = _factory.Services.GetRequiredService<LoginService>();
-        var orgId = await GetDefaultOrgIdAsync();
-        var email = $"locked-{Guid.NewGuid():N}@example.com";
-        var userId = await _factory.CreateUser(email, "doesntmatter12", role: "member");
+        string orgId = await GetDefaultOrgIdAsync();
+        string email = $"locked-{Guid.NewGuid():N}@example.com";
+        string userId = await _factory.CreateUser(email, "doesntmatter12", role: "member");
 
         await using var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
         await conn.ExecuteAsync("UPDATE users SET account_status = 'disabled' WHERE id = @id", new { id = userId });
@@ -322,13 +322,13 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         // metadata only, so an unpublished config can be validated end-to-end first.
         await SeedFakeSamlConfigAsync(enabled: false, formsLoginEnabled: true, withMetadata: true);
 
-        var adminJwt = await _factory.CreateAdminJwt();
+        string adminJwt = await _factory.CreateAdminJwt();
         using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminJwt);
         var resp = await client.GetAsync("/saml/login?test=1");
 
         Assert.Equal(HttpStatusCode.Redirect, resp.StatusCode);
-        var location = resp.Headers.Location?.OriginalString ?? "";
+        string location = resp.Headers.Location?.OriginalString ?? "";
         Assert.Contains("idp.example.com/sso", location);
     }
 
@@ -344,7 +344,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         var resp = await client.GetAsync("/saml/login");
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         Assert.Contains("not enabled", body, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -357,7 +357,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         // is that we no longer 404 on Enabled=false — the failure mode changed from "gated
         // out" to "validation failed", proving the bypass works.
         await SeedFakeSamlConfigAsync(enabled: false, formsLoginEnabled: true, withMetadata: true);
-        var orgId = await GetDefaultOrgIdAsync();
+        string orgId = await GetDefaultOrgIdAsync();
 
         var (cookie, _) = await ForgeTestCookieAsync(orgId);
 
@@ -366,7 +366,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         var resp = await client.GetAsync("/saml/acs?SAMLResponse=garbage&SigAlg=garbage&Signature=garbage");
 
         Assert.Equal(HttpStatusCode.Redirect, resp.StatusCode);
-        var location = resp.Headers.Location?.OriginalString ?? "";
+        string location = resp.Headers.Location?.OriginalString ?? "";
         Assert.Contains("/saml-test-result", location);
         Assert.Contains("error=validation_failed", location);
     }
@@ -379,23 +379,23 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         // mode even without the cookie.
         await SeedFakeSamlConfigAsync(enabled: false, formsLoginEnabled: true, withMetadata: true);
 
-        var adminJwt = await _factory.CreateAdminJwt();
+        string adminJwt = await _factory.CreateAdminJwt();
         using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminJwt);
         var resp = await client.GetAsync("/saml/login?test=1");
 
         Assert.Equal(HttpStatusCode.Redirect, resp.StatusCode);
-        var location = resp.Headers.Location?.OriginalString ?? "";
+        string location = resp.Headers.Location?.OriginalString ?? "";
 
         // ITfoxtec URL-encodes the relay state in the redirect; extract and decode it.
         var redirectUri = new Uri(location);
         var qs = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(redirectUri.Query);
         Assert.True(qs.TryGetValue("RelayState", out var relayValues), "RelayState should be present");
-        var relayState = relayValues.FirstOrDefault() ?? "";
+        string relayState = relayValues.FirstOrDefault() ?? "";
         Assert.StartsWith("test:", relayState, StringComparison.Ordinal);
 
         // The suffix should be a 32-character hex cid
-        var cid = relayState["test:".Length..];
+        string cid = relayState["test:".Length..];
         Assert.Equal(32, cid.Length);
         Assert.All(cid, c => Assert.True(char.IsAsciiHexDigit(c), $"'{c}' is not a hex digit"));
     }
@@ -409,10 +409,10 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         // overwrites the admin's session in the shared cookie jar and redirecting to /.
         // The fix: ACS reads the cid from RelayState when the cookie is absent.
         await SeedFakeSamlConfigAsync(enabled: false, formsLoginEnabled: true, withMetadata: true);
-        var orgId = await GetDefaultOrgIdAsync();
+        string orgId = await GetDefaultOrgIdAsync();
 
         // Create a test run row directly (no cookie set — simulates the cross-site POST path)
-        var cid = Guid.NewGuid().ToString("N");
+        string cid = Guid.NewGuid().ToString("N");
         var samlRepo = _factory.Services.GetRequiredService<SamlConfigRepository>();
         await samlRepo.IssueTestRunAsync(cid, orgId, actorId: "test-actor",
             expiresAt: DateTimeOffset.UtcNow.AddMinutes(10));
@@ -423,7 +423,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
             $"/saml/acs?SAMLResponse=garbage&SigAlg=garbage&Signature=garbage&RelayState=test%3A{cid}");
 
         Assert.Equal(HttpStatusCode.Redirect, resp.StatusCode);
-        var location = resp.Headers.Location?.OriginalString ?? "";
+        string location = resp.Headers.Location?.OriginalString ?? "";
         // "validation_failed" proves test mode was detected and SAML validation ran,
         // rather than falling through to normal login (which would redirect to /).
         Assert.Contains("/saml-test-result", location);
@@ -444,7 +444,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         var resp = await client.GetAsync("/saml/acs?SAMLResponse=garbage&SigAlg=garbage&Signature=garbage");
 
         Assert.Equal(HttpStatusCode.Redirect, resp.StatusCode);
-        var location = resp.Headers.Location?.OriginalString ?? "";
+        string location = resp.Headers.Location?.OriginalString ?? "";
         Assert.Contains("/saml-test-result", location);
         Assert.Contains("error=test_session_lost", location);
     }
@@ -455,9 +455,9 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         // In test mode (relay state path), no session cookie must be issued.
         // Without this guarantee, the IdP's cross-site POST would replace the admin's session.
         await SeedFakeSamlConfigAsync(enabled: true, formsLoginEnabled: true, withMetadata: true);
-        var orgId = await GetDefaultOrgIdAsync();
+        string orgId = await GetDefaultOrgIdAsync();
 
-        var cid = Guid.NewGuid().ToString("N");
+        string cid = Guid.NewGuid().ToString("N");
         var samlRepo = _factory.Services.GetRequiredService<SamlConfigRepository>();
         await samlRepo.IssueTestRunAsync(cid, orgId, actorId: "test-actor",
             expiresAt: DateTimeOffset.UtcNow.AddMinutes(10));
@@ -481,7 +481,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         // consumed_at is stamped atomically on first use. Replaying the same cookie is rejected
         // even though the cookie itself is still cryptographically valid and within TTL.
         await SeedFakeSamlConfigAsync(enabled: false, formsLoginEnabled: true, withMetadata: true);
-        var orgId = await GetDefaultOrgIdAsync();
+        string orgId = await GetDefaultOrgIdAsync();
 
         var (cookie, cid) = await ForgeTestCookieAsync(orgId);
 
@@ -495,7 +495,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
 
         await using (var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync())
         {
-            var consumed = await conn.ExecuteScalarAsync<string?>(
+            string? consumed = await conn.ExecuteScalarAsync<string?>(
                 "SELECT consumed_at FROM saml_test_runs WHERE cid = @cid", new { cid });
             Assert.False(string.IsNullOrEmpty(consumed));
         }
@@ -504,7 +504,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         // redirect explaining the test session is no longer valid.
         var second = await client.GetAsync("/saml/acs?SAMLResponse=garbage&SigAlg=garbage&Signature=garbage");
         Assert.Equal(HttpStatusCode.Redirect, second.StatusCode);
-        var secondLoc = second.Headers.Location?.OriginalString ?? "";
+        string secondLoc = second.Headers.Location?.OriginalString ?? "";
         Assert.Contains("/saml-test-result", secondLoc);
         Assert.Contains("error=test_session_invalid", secondLoc);
     }
@@ -518,14 +518,14 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     /// </summary>
     private async Task<(string Cookie, string Cid)> ForgeTestCookieAsync(string tenantId)
     {
-        var cid = Guid.NewGuid().ToString("N");
+        string cid = Guid.NewGuid().ToString("N");
         var samlRepo = _factory.Services.GetRequiredService<SamlConfigRepository>();
         await samlRepo.IssueTestRunAsync(cid, tenantId, actorId: "test-actor",
             expiresAt: DateTimeOffset.UtcNow.AddMinutes(10));
 
         var protector = _factory.Services.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector("saml-test-marker.v1");
-        var payload = JsonSerializer.Serialize(new
+        string payload = JsonSerializer.Serialize(new
         {
             tid = tenantId,
             actor = "test-actor",
@@ -555,7 +555,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         bool enabled, bool formsLoginEnabled, bool withMetadata, DateTimeOffset? lastTestAt = null)
     {
         await ResetSamlConfigAsync();
-        var orgId = await GetDefaultOrgIdAsync();
+        string orgId = await GetDefaultOrgIdAsync();
         await using var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
         await conn.ExecuteAsync(
             """
@@ -579,13 +579,13 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
 
     private async Task<string> IssueJwtAsync(string role)
     {
-        var email = $"role-{role}-{Guid.NewGuid():N}@example.com";
-        var userId = await _factory.CreateUser(email, "doesntmatter12", role);
+        string email = $"role-{role}-{Guid.NewGuid():N}@example.com";
+        string userId = await _factory.CreateUser(email, "doesntmatter12", role);
 
         // Mint a JWT for that user. Reuses CreateAdminJwt's wiring but with the seeded role.
         await using var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
-        var orgId = await GetDefaultOrgIdAsync();
-        var jwtSecret = await conn.ExecuteScalarAsync<string>(
+        string orgId = await GetDefaultOrgIdAsync();
+        string? jwtSecret = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret'")!;
 
         var key = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(System.Text.Encoding.UTF8.GetBytes(jwtSecret!));

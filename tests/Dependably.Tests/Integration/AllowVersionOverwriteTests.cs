@@ -6,7 +6,6 @@ using System.Text.Json;
 using Dapper;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -20,7 +19,7 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
 
     private async Task<HttpClient> AdminJwtClient()
     {
-        var jwt = await _factory.CreateAdminJwt();
+        string jwt = await _factory.CreateAdminJwt();
         var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         return c;
@@ -32,7 +31,8 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
         using var client = await AdminJwtClient();
         var resp = await client.PutAsJsonAsync("/api/v1/settings", new
         {
-            anonymousPull = true, allowlistMode = false,
+            anonymousPull = true,
+            allowlistMode = false,
             allowVersionOverwrite = true,
         });
         Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
@@ -64,18 +64,19 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
         {
             var settingsResp = await admin.PutAsJsonAsync("/api/v1/settings", new
             {
-                anonymousPull = false, allowlistMode = false,
+                anonymousPull = false,
+                allowlistMode = false,
                 allowVersionOverwrite = false,
             });
             settingsResp.EnsureSuccessStatusCode();
         }
 
         await _factory.PushNpmPackage("acme-overwrite-off", "1.0.0");
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        var body = NpmFixtures.BuildPublishBody("acme-overwrite-off", "1.0.0");
+        string body = NpmFixtures.BuildPublishBody("acme-overwrite-off", "1.0.0");
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
         var resp = await client.PutAsync("/npm/acme-overwrite-off", content);
         Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
@@ -89,7 +90,8 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
         {
             var settingsResp = await admin.PutAsJsonAsync("/api/v1/settings", new
             {
-                anonymousPull = false, allowlistMode = false,
+                anonymousPull = false,
+                allowlistMode = false,
                 allowVersionOverwrite = true,
             });
             settingsResp.EnsureSuccessStatusCode();
@@ -101,7 +103,7 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
         // Capture the original sha from package_versions for comparison.
         var db = _factory.Services.GetRequiredService<Dependably.Infrastructure.IMetadataStore>();
         await using var conn = await db.OpenAsync();
-        var firstSha = await conn.ExecuteScalarAsync<string>(
+        string? firstSha = await conn.ExecuteScalarAsync<string>(
             """
             SELECT pv.checksum_sha256 FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
@@ -112,10 +114,10 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
         // Re-publish — same coordinate, fresh tarball (BuildPublishBody bakes a tarball whose
         // bytes are deterministic-but-different across calls because the Date-Time fields in
         // the tar header differ). Even if they're identical, the API path runs cleanly.
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        var body = NpmFixtures.BuildPublishBody("acme-overwrite-on", "1.0.0");
+        string body = NpmFixtures.BuildPublishBody("acme-overwrite-on", "1.0.0");
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
         var resp = await client.PutAsync("/npm/acme-overwrite-on", content);
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);

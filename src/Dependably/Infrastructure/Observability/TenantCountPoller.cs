@@ -21,7 +21,7 @@ public sealed class TenantCountPoller : BackgroundService
     {
         _db = db;
         _logger = logger;
-        var seconds = int.TryParse(config["TENANT_COUNT_POLL_INTERVAL_SECONDS"], out var s) && s > 0
+        int seconds = int.TryParse(config["TENANT_COUNT_POLL_INTERVAL_SECONDS"], out int s) && s > 0
             ? s
             : 60;
         _interval = TimeSpan.FromSeconds(seconds);
@@ -47,7 +47,7 @@ public sealed class TenantCountPoller : BackgroundService
         try
         {
             await using var conn = await _db.OpenAsync(ct);
-            var count = await conn.ExecuteScalarAsync<long>(
+            long count = await conn.ExecuteScalarAsync<long>(
                 "SELECT COUNT(*) FROM orgs WHERE deleted_at IS NULL");
             DependablyMeter.RecordTenantCount(count);
         }

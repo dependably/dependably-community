@@ -16,12 +16,12 @@ public sealed class TokenRepository
     /// </summary>
     public async Task<TokenRecord?> ResolveAsync(string rawToken, CancellationToken ct = default)
     {
-        var incomingHashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
-        var incomingHex = Convert.ToHexString(incomingHashBytes).ToLowerInvariant();
+        byte[] incomingHashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
+        string incomingHex = Convert.ToHexString(incomingHashBytes).ToLowerInvariant();
 
         await using var conn = await _db.OpenAsync(ct);
 
-        var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         // Single UNION ALL query collapses the previous two-round-trip lookup
         // (user_tokens THEN service_tokens) into one. token_hash is SHA-256 of a
@@ -29,14 +29,24 @@ public sealed class TokenRepository
         // most one branch matches. The `source` literal column lets us route the result
         // back to the right TokenSource without a second query. Both branches stay
         // indexed via idx_user_tokens_hash / idx_service_tokens_hash.
-        var row = await conn.QuerySingleOrDefaultAsync<(
+        //
+        // User tokens are credentials *of a user*: the INNER JOIN ties each token to an
+        // owner row that still exists in the token's tenant (u.tenant_id = t.org_id) and
+        // is account_status = 'active'. Locking or disabling an account therefore cuts off
+        // its API tokens immediately — the rows stay in user_tokens (inert) and resume
+        // working only if an operator re-activates the account. Removing the user deletes
+        // the rows outright via the user_id ON DELETE CASCADE.
+        var (Id, OrgId, UserId, Capabilities, Description, CreatedAt, ExpiresAt, LastUsedAt, Source) = await conn.QuerySingleOrDefaultAsync<(
             string Id, string OrgId, string? UserId, string? Capabilities,
             string? Description, string CreatedAt, string? ExpiresAt, string? LastUsedAt,
             string Source)>(
             """
-            SELECT id, org_id, user_id, capabilities, description, created_at, expires_at, last_used_at, 'user' AS source
-            FROM user_tokens
-            WHERE token_hash = @hash AND (expires_at IS NULL OR expires_at > @now)
+            SELECT t.id, t.org_id, t.user_id, t.capabilities, t.description, t.created_at, t.expires_at, t.last_used_at, 'user' AS source
+            FROM user_tokens t
+            JOIN users u ON u.id = t.user_id AND u.tenant_id = t.org_id
+            WHERE t.token_hash = @hash
+              AND (t.expires_at IS NULL OR t.expires_at > @now)
+              AND u.account_status = 'active'
             UNION ALL
             SELECT id, org_id, NULL AS user_id, capabilities, description, created_at, expires_at, last_used_at, 'service' AS source
             FROM service_tokens
@@ -45,25 +55,25 @@ public sealed class TokenRepository
             """,
             new { hash = incomingHex, now });
 
-        if (row.Id is null) return null;
-
-        return new TokenRecord
-        {
-            Id = row.Id,
-            OrgId = row.OrgId,
-            UserId = row.UserId,
-            Capabilities = row.Capabilities,
-            Description = row.Description,
-            CreatedAt = DateTimeOffset.Parse(row.CreatedAt),
-            ExpiresAt = row.ExpiresAt is not null ? DateTimeOffset.Parse(row.ExpiresAt) : null,
-            LastUsedAt = row.LastUsedAt is not null ? DateTimeOffset.Parse(row.LastUsedAt) : null,
-            Source = row.Source == "service" ? TokenSource.Service : TokenSource.User,
-        };
+        return Id is null
+            ? null
+            : new TokenRecord
+            {
+                Id = Id,
+                OrgId = OrgId,
+                UserId = UserId,
+                Capabilities = Capabilities,
+                Description = Description,
+                CreatedAt = DateTimeOffset.Parse(CreatedAt),
+                ExpiresAt = ExpiresAt is not null ? DateTimeOffset.Parse(ExpiresAt) : null,
+                LastUsedAt = LastUsedAt is not null ? DateTimeOffset.Parse(LastUsedAt) : null,
+                Source = Source == "service" ? TokenSource.Service : TokenSource.User,
+            };
     }
 
     public static string HashToken(string rawToken)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
+        byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
@@ -76,10 +86,10 @@ public sealed class TokenRepository
         string orgId, string userId, string capabilities,
         DateTimeOffset? expiresAt, string? description = null, CancellationToken ct = default)
     {
-        var raw = Security.TokenGenerator.Generate();
-        var hash = HashToken(raw);
-        var id = Guid.NewGuid().ToString("N");
-        var expiresStr = expiresAt?.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string raw = Security.TokenGenerator.Generate();
+        string hash = HashToken(raw);
+        string id = Guid.NewGuid().ToString("N");
+        string? expiresStr = expiresAt?.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
@@ -88,9 +98,13 @@ public sealed class TokenRepository
 
         return (raw, new TokenRecord
         {
-            Id = id, OrgId = orgId, UserId = userId, Capabilities = capabilities,
+            Id = id,
+            OrgId = orgId,
+            UserId = userId,
+            Capabilities = capabilities,
             Description = description,
-            CreatedAt = DateTimeOffset.UtcNow, ExpiresAt = expiresAt,
+            CreatedAt = DateTimeOffset.UtcNow,
+            ExpiresAt = expiresAt,
             Source = TokenSource.User
         });
     }
@@ -98,19 +112,23 @@ public sealed class TokenRepository
     public async Task<TokenRecord?> GetTokenByIdAsync(string tokenId, string orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var row = await conn.QuerySingleOrDefaultAsync<(string Id, string OrgId, string UserId, string? Capabilities, string? Description, string CreatedAt, string? ExpiresAt, string? LastUsedAt)>(
+        var (Id, OrgId, UserId, Capabilities, Description, CreatedAt, ExpiresAt, LastUsedAt) = await conn.QuerySingleOrDefaultAsync<(string Id, string OrgId, string UserId, string? Capabilities, string? Description, string CreatedAt, string? ExpiresAt, string? LastUsedAt)>(
             "SELECT id, org_id, user_id, capabilities, description, created_at, expires_at, last_used_at FROM user_tokens WHERE id = @id AND org_id = @orgId",
             new { id = tokenId, orgId });
-        if (row.Id is null) return null;
-        return new TokenRecord
-        {
-            Id = row.Id, OrgId = row.OrgId, UserId = row.UserId, Capabilities = row.Capabilities,
-            Description = row.Description,
-            CreatedAt = DateTimeOffset.Parse(row.CreatedAt),
-            ExpiresAt = row.ExpiresAt is not null ? DateTimeOffset.Parse(row.ExpiresAt) : null,
-            LastUsedAt = row.LastUsedAt is not null ? DateTimeOffset.Parse(row.LastUsedAt) : null,
-            Source = TokenSource.User
-        };
+        return Id is null
+            ? null
+            : new TokenRecord
+            {
+                Id = Id,
+                OrgId = OrgId,
+                UserId = UserId,
+                Capabilities = Capabilities,
+                Description = Description,
+                CreatedAt = DateTimeOffset.Parse(CreatedAt),
+                ExpiresAt = ExpiresAt is not null ? DateTimeOffset.Parse(ExpiresAt) : null,
+                LastUsedAt = LastUsedAt is not null ? DateTimeOffset.Parse(LastUsedAt) : null,
+                Source = TokenSource.User
+            };
     }
 
     /// <summary>
@@ -131,14 +149,17 @@ public sealed class TokenRepository
             "SELECT id, org_id, user_id, capabilities, description, created_at, expires_at, last_used_at FROM user_tokens WHERE org_id = @orgId AND user_id = @userId ORDER BY created_at DESC",
             new { orgId, userId });
         return rows.Select(t => new TokenRecord
-            {
-                Id = t.Id, OrgId = t.OrgId, UserId = t.UserId, Capabilities = t.Capabilities,
-                Description = t.Description,
-                CreatedAt = DateTimeOffset.Parse(t.CreatedAt),
-                ExpiresAt = t.ExpiresAt is not null ? DateTimeOffset.Parse(t.ExpiresAt) : null,
-                LastUsedAt = t.LastUsedAt is not null ? DateTimeOffset.Parse(t.LastUsedAt) : null,
-                Source = TokenSource.User
-            })
+        {
+            Id = t.Id,
+            OrgId = t.OrgId,
+            UserId = t.UserId,
+            Capabilities = t.Capabilities,
+            Description = t.Description,
+            CreatedAt = DateTimeOffset.Parse(t.CreatedAt),
+            ExpiresAt = t.ExpiresAt is not null ? DateTimeOffset.Parse(t.ExpiresAt) : null,
+            LastUsedAt = t.LastUsedAt is not null ? DateTimeOffset.Parse(t.LastUsedAt) : null,
+            Source = TokenSource.User
+        })
             .ToList();
     }
 
@@ -150,10 +171,10 @@ public sealed class TokenRepository
         string orgId, string name, string capabilities,
         DateTimeOffset? expiresAt, string? description = null, CancellationToken ct = default)
     {
-        var raw = Security.TokenGenerator.Generate();
-        var hash = HashToken(raw);
-        var id = Guid.NewGuid().ToString("N");
-        var expiresStr = expiresAt?.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string raw = Security.TokenGenerator.Generate();
+        string hash = HashToken(raw);
+        string id = Guid.NewGuid().ToString("N");
+        string? expiresStr = expiresAt?.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
@@ -162,9 +183,13 @@ public sealed class TokenRepository
 
         return (raw, new ServiceTokenRecord
         {
-            Id = id, OrgId = orgId, Name = name, Capabilities = capabilities,
+            Id = id,
+            OrgId = orgId,
+            Name = name,
+            Capabilities = capabilities,
             Description = description,
-            CreatedAt = DateTimeOffset.UtcNow, ExpiresAt = expiresAt
+            CreatedAt = DateTimeOffset.UtcNow,
+            ExpiresAt = expiresAt
         });
     }
 
@@ -186,13 +211,16 @@ public sealed class TokenRepository
             "SELECT id, org_id, name, capabilities, description, created_at, expires_at, last_used_at FROM service_tokens WHERE org_id = @orgId ORDER BY created_at DESC",
             new { orgId });
         return rows.Select(t => new ServiceTokenRecord
-            {
-                Id = t.Id, OrgId = t.OrgId, Name = t.Name, Capabilities = t.Capabilities,
-                Description = t.Description,
-                CreatedAt = DateTimeOffset.Parse(t.CreatedAt),
-                ExpiresAt = t.ExpiresAt is not null ? DateTimeOffset.Parse(t.ExpiresAt) : null,
-                LastUsedAt = t.LastUsedAt is not null ? DateTimeOffset.Parse(t.LastUsedAt) : null,
-            })
+        {
+            Id = t.Id,
+            OrgId = t.OrgId,
+            Name = t.Name,
+            Capabilities = t.Capabilities,
+            Description = t.Description,
+            CreatedAt = DateTimeOffset.Parse(t.CreatedAt),
+            ExpiresAt = t.ExpiresAt is not null ? DateTimeOffset.Parse(t.ExpiresAt) : null,
+            LastUsedAt = t.LastUsedAt is not null ? DateTimeOffset.Parse(t.LastUsedAt) : null,
+        })
             .ToList();
     }
 
@@ -211,13 +239,14 @@ public sealed class TokenRepository
         await using var conn = await _db.OpenAsync(ct);
         if (token.Source == TokenSource.User)
         {
-            if (token.UserId is null) return null;
-            return await conn.ExecuteScalarAsync<string?>(
+            return token.UserId is null
+                ? null
+                : await conn.ExecuteScalarAsync<string?>(
                 "SELECT email FROM users WHERE id = @userId AND tenant_id = @orgId",
                 new { userId = token.UserId, orgId = token.OrgId });
         }
 
-        var name = await conn.ExecuteScalarAsync<string?>(
+        string? name = await conn.ExecuteScalarAsync<string?>(
             "SELECT name FROM service_tokens WHERE id = @id AND org_id = @orgId",
             new { id = token.Id, orgId = token.OrgId });
         return name is null ? null : $"service:{name}";
@@ -243,7 +272,7 @@ public sealed class TokenRepository
         const string updateService =
             "UPDATE service_tokens SET last_used_at = @now WHERE id = @id AND (last_used_at IS NULL OR last_used_at < @threshold)";
 
-        var sql = source switch
+        string sql = source switch
         {
             TokenSource.User => updateUser,
             TokenSource.Service => updateService,
@@ -251,8 +280,8 @@ public sealed class TokenRepository
         };
 
         var nowDto = DateTimeOffset.UtcNow;
-        var now = nowDto.ToString("yyyy-MM-ddTHH:mm:ssZ");
-        var threshold = nowDto.AddSeconds(-minIntervalSeconds).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = nowDto.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string threshold = nowDto.AddSeconds(-minIntervalSeconds).ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(sql, new { id = tokenId, now, threshold });

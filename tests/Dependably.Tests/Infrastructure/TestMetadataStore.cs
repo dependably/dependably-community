@@ -1,6 +1,6 @@
 using System.Data.Common;
-using Microsoft.Data.Sqlite;
 using Dependably.Infrastructure;
+using Microsoft.Data.Sqlite;
 
 namespace Dependably.Tests.Infrastructure;
 
@@ -16,7 +16,7 @@ public sealed class TestMetadataStore : IMetadataStore, IAsyncDisposable
 
     public TestMetadataStore()
     {
-        var dbName = $"dependably_test_{Guid.NewGuid():N}";
+        string dbName = $"dependably_test_{Guid.NewGuid():N}";
         _connectionString = $"Data Source={dbName};Mode=Memory;Cache=Shared";
         _anchor = new SqliteConnection(_connectionString);
         _anchor.Open();

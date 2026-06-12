@@ -2,7 +2,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -35,10 +34,10 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task FindVersionByBlobKeySuffixAsync_Match_ReturnsPackageAndVersion()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "pypi", "acme");
-        var blobKey = $"pypi/acme/{Guid.NewGuid():N}/acme-1.2.3.tar.gz";
-        var verId = await PackageSeeder.InsertVersionAsync(
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "pypi", "acme");
+        string blobKey = $"pypi/acme/{Guid.NewGuid():N}/acme-1.2.3.tar.gz";
+        string verId = await PackageSeeder.InsertVersionAsync(
             _fixture.Store, pkgId, "1.2.3", Purl("1.2.3"), blobKey: blobKey);
 
         // Populate VulnCheckedAt so the non-null parse branch executes.
@@ -62,8 +61,8 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task FindVersionByBlobKeySuffixAsync_NoMatch_ReturnsNull()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "pypi", "acme");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "pypi", "acme");
         await PackageSeeder.InsertVersionAsync(
             _fixture.Store, pkgId, "1.0.0", Purl(), blobKey: $"pypi/acme/{Guid.NewGuid():N}/acme-1.0.0.tar.gz");
 
@@ -75,10 +74,10 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task FindVersionByBlobKeySuffixAsync_WrongOrg_ReturnsNull()
     {
-        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
-        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "pypi", "acme");
-        var filename = $"acme-1.0.0-{Guid.NewGuid():N}.tar.gz";
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "pypi", "acme");
+        string filename = $"acme-1.0.0-{Guid.NewGuid():N}.tar.gz";
         await PackageSeeder.InsertVersionAsync(
             _fixture.Store, pkgId, "1.0.0", Purl(), blobKey: $"pypi/acme/x/{filename}");
 
@@ -91,8 +90,8 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task GetVersionAsync_Found_AndMissing()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.2.3", Purl("1.2.3"),
             blobKey: $"k-{Guid.NewGuid():N}");
 
@@ -109,14 +108,14 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task TouchLastUsedAsync_SetsLastUsedTimestamp()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
-        var verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
             blobKey: $"k-{Guid.NewGuid():N}");
 
         await using (var conn = await _fixture.Store.OpenAsync())
         {
-            var before = await conn.ExecuteScalarAsync<string?>(
+            string? before = await conn.ExecuteScalarAsync<string?>(
                 "SELECT last_used FROM package_versions WHERE id = @id", new { id = verId });
             Assert.Null(before);
         }
@@ -125,7 +124,7 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
 
         await using (var conn = await _fixture.Store.OpenAsync())
         {
-            var after = await conn.ExecuteScalarAsync<string?>(
+            string? after = await conn.ExecuteScalarAsync<string?>(
                 "SELECT last_used FROM package_versions WHERE id = @id", new { id = verId });
             Assert.False(string.IsNullOrEmpty(after));
         }
@@ -136,9 +135,9 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task IncrementDownloadCountAsync_AccumulatesAndStampsLastUsed()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
-        var verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
             blobKey: $"k-{Guid.NewGuid():N}");
 
         // Fresh row starts at 0 and surfaces through the read model.
@@ -154,7 +153,7 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
 
         // The download is also the moment last_used advances.
         await using var conn = await _fixture.Store.OpenAsync();
-        var lastUsed = await conn.ExecuteScalarAsync<string?>(
+        string? lastUsed = await conn.ExecuteScalarAsync<string?>(
             "SELECT last_used FROM package_versions WHERE id = @id", new { id = verId });
         Assert.False(string.IsNullOrEmpty(lastUsed));
     }
@@ -162,9 +161,9 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task IncrementDownloadCountByPurlAsync_BumpsTheMatchingRow()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "rpm", "acme");
-        var purl = Purl();
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "rpm", "acme");
+        string purl = Purl();
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", purl,
             blobKey: $"k-{Guid.NewGuid():N}");
 
@@ -183,9 +182,9 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task DeleteVersionAsync_RemovesRow()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
-        var verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
             blobKey: $"k-{Guid.NewGuid():N}");
 
         Assert.NotNull(await _repo.GetVersionAsync(pkgId, "1.0.0"));
@@ -198,9 +197,9 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task SetManualBlockStateAsync_SetsAndClears()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
-        var verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
             blobKey: $"k-{Guid.NewGuid():N}");
 
         await _repo.SetManualBlockStateAsync(verId, "blocked");
@@ -216,17 +215,17 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     public async Task GetTotalSizeBytesAsync_NoRows_ReturnsZero()
     {
         // Org with zero packages exercises the COALESCE/?? 0L fallback.
-        var emptyOrg = await OrgSeeder.InsertAsync(_fixture.Store, $"empty-{Guid.NewGuid():N}");
+        string emptyOrg = await OrgSeeder.InsertAsync(_fixture.Store, $"empty-{Guid.NewGuid():N}");
         Assert.Equal(0L, await _repo.GetTotalSizeBytesAsync(emptyOrg));
     }
 
     [Fact]
     public async Task GetTotalSizeBytesAsync_SumsAcrossOrgVersionsOnly()
     {
-        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
-        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
-        var pkgA = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "acme");
-        var pkgB = await PackageSeeder.InsertAsync(_fixture.Store, orgB, "npm", "acme");
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
+        string pkgA = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "acme");
+        string pkgB = await PackageSeeder.InsertAsync(_fixture.Store, orgB, "npm", "acme");
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgA, "1.0.0", Purl("1.0.0"),
             blobKey: $"a1-{Guid.NewGuid():N}", sizeBytes: 100);
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgA, "2.0.0", Purl("2.0.0"),
@@ -243,16 +242,18 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task StreamAllBlobKeysAsync_YieldsEveryReferencedKey()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
-        var k1 = $"stream-{Guid.NewGuid():N}/a";
-        var k2 = $"stream-{Guid.NewGuid():N}/b";
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string k1 = $"stream-{Guid.NewGuid():N}/a";
+        string k2 = $"stream-{Guid.NewGuid():N}/b";
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0"), blobKey: k1);
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0"), blobKey: k2);
 
         var collected = new List<string>();
-        await foreach (var key in _repo.StreamAllBlobKeysAsync())
+        await foreach (string key in _repo.StreamAllBlobKeysAsync())
+        {
             collected.Add(key);
+        }
 
         Assert.Contains(k1, collected);
         Assert.Contains(k2, collected);
@@ -261,10 +262,10 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task StreamAllBlobKeysAsync_CancelledMidStream_StopsEarly()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
         // Multiple versions so we have rows in the iterator we can short-circuit out of.
-        for (var i = 0; i < 4; i++)
+        for (int i = 0; i < 4; i++)
         {
             await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, $"{i}.0.0", Purl($"{i}.0.0"),
                 blobKey: $"cancel-{Guid.NewGuid():N}/{i}");
@@ -274,7 +275,7 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
         // branch inside the foreach yield loop is the one that exits.
         using var cts = new CancellationTokenSource();
         var collected = new List<string>();
-        await foreach (var key in _repo.StreamAllBlobKeysAsync(cts.Token))
+        await foreach (string key in _repo.StreamAllBlobKeysAsync(cts.Token))
         {
             collected.Add(key);
             cts.Cancel();   // next iteration hits the `if (ct.IsCancellationRequested) yield break;` branch
@@ -291,8 +292,8 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     {
         // Only an 'uploaded' version exists — the conditional DELETE inside the repo must NOT run,
         // and the returned list must be empty.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
         await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl(),
             origin: "uploaded", blobKey: $"u1-{Guid.NewGuid():N}");
 
@@ -310,7 +311,7 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     {
         // Nothing inserted for this purl_name → first SELECT comes back empty,
         // branch `blobKeys.Count > 0` is false, DELETE is skipped.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
         var result = await _repo.DeleteProxyVersionsForNameAsync(orgId, "npm", "never-existed");
         Assert.Empty(result);
     }

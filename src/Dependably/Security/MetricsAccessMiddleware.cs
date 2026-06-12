@@ -1,4 +1,3 @@
-using System.Linq;
 using System.Net;
 
 namespace Dependably.Security;
@@ -54,7 +53,7 @@ public sealed class MetricsAccessMiddleware
             return;
         }
 
-        if (remote is null || !IsAllowed(remote, resolved.Allowed))
+        if (remote is null || !IsIpAllowed(remote, resolved.Allowed))
         {
             _diagnostics.Record(remote, ScrapeDiagnostics.Outcome.DeniedIp);
             ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -66,7 +65,12 @@ public sealed class MetricsAccessMiddleware
         await _next(ctx);
     }
 
-    private static bool IsAllowed(IPAddress ip, IReadOnlyList<NetTools.IPAddressRange> allowed)
+    /// <summary>
+    /// Allowlist membership check shared with the <c>/version</c> endpoint, which gates
+    /// on the same resolved metrics allowlist. IPv4-mapped IPv6 addresses (dual-stack
+    /// sockets) are collapsed to dotted-quad before matching.
+    /// </summary>
+    internal static bool IsIpAllowed(IPAddress ip, IReadOnlyList<NetTools.IPAddressRange> allowed)
     {
         var mapped = ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip;
         return allowed.Any(range => range.Contains(mapped));

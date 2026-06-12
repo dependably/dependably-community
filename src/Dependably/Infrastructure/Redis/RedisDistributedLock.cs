@@ -34,14 +34,12 @@ public sealed class RedisDistributedLock : IDistributedLock
 
     public async Task<ILockHandle?> TryAcquireAsync(string name, TimeSpan ttl, CancellationToken ct = default)
     {
-        var key = _redis.ApplyPrefix($"lock:{name}");
-        var token = Guid.NewGuid().ToString("N");
+        string key = _redis.ApplyPrefix($"lock:{name}");
+        string token = Guid.NewGuid().ToString("N");
         var db = _redis.GetDatabase();
 
-        var acquired = await db.StringSetAsync(key, token, ttl, When.NotExists);
-        if (!acquired) return null;
-
-        return new LockHandle(db, key, token, name, ReleaseScript, ExtendScript);
+        bool acquired = await db.StringSetAsync(key, token, ttl, When.NotExists);
+        return !acquired ? null : (ILockHandle)new LockHandle(db, key, token, name, ReleaseScript, ExtendScript);
     }
 
     public async Task<ILockHandle> AcquireAsync(
@@ -52,10 +50,15 @@ public sealed class RedisDistributedLock : IDistributedLock
         {
             ct.ThrowIfCancellationRequested();
             var handle = await TryAcquireAsync(name, ttl, ct);
-            if (handle is not null) return handle;
+            if (handle is not null)
+            {
+                return handle;
+            }
 
             if (DateTimeOffset.UtcNow >= deadline)
+            {
                 throw new TimeoutException($"Could not acquire distributed lock '{name}' within {wait}.");
+            }
 
             await Task.Delay(retryInterval, ct);
         }
@@ -86,8 +89,12 @@ public sealed class RedisDistributedLock : IDistributedLock
 
         public async Task<bool> ExtendAsync(TimeSpan additional, CancellationToken ct = default)
         {
-            if (_released) return false;
-            var result = (long)await _db.ScriptEvaluateAsync(
+            if (_released)
+            {
+                return false;
+            }
+
+            long result = (long)await _db.ScriptEvaluateAsync(
                 _extendScript.Script,
                 new RedisKey[] { _key },
                 new RedisValue[] { _token, (long)additional.TotalMilliseconds });
@@ -96,7 +103,11 @@ public sealed class RedisDistributedLock : IDistributedLock
 
         public async ValueTask DisposeAsync()
         {
-            if (_released) return;
+            if (_released)
+            {
+                return;
+            }
+
             _released = true;
             try
             {

@@ -34,17 +34,22 @@ public sealed class TenantNotReadyExceptionMiddleware
         catch (TenantNotReadyException ex)
         {
             if (context.Response.HasStarted)
+            {
                 throw;
+            }
 
             var (status, title, retryAfter) = Map(ex.Reason);
 
             context.Response.Clear();
             context.Response.StatusCode = status;
             if (retryAfter is not null)
+            {
                 context.Response.Headers.RetryAfter = retryAfter;
+            }
+
             context.Response.ContentType = "application/problem+json";
 
-            var payload = JsonSerializer.Serialize(new
+            string payload = JsonSerializer.Serialize(new
             {
                 type = "about:blank",
                 title,

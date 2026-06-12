@@ -27,9 +27,9 @@ public sealed class SystemDashboardTests : IClassFixture<DependablyMultiFactory>
         var baseline = await GetDashboardAsync(client);
 
         // Seed one tenant in each lifecycle state.
-        var activeSlug    = "dash-active-" + Guid.NewGuid().ToString("N")[..6];
-        var suspendedSlug = "dash-susp-"   + Guid.NewGuid().ToString("N")[..6];
-        var deletedSlug   = "dash-del-"    + Guid.NewGuid().ToString("N")[..6];
+        string activeSlug = "dash-active-" + Guid.NewGuid().ToString("N")[..6];
+        string suspendedSlug = "dash-susp-" + Guid.NewGuid().ToString("N")[..6];
+        string deletedSlug = "dash-del-" + Guid.NewGuid().ToString("N")[..6];
 
         await CreateTenant(client, activeSlug);
         await CreateTenant(client, suspendedSlug);
@@ -42,7 +42,7 @@ public sealed class SystemDashboardTests : IClassFixture<DependablyMultiFactory>
         // xUnit process. (BackgroundJobScope.Dispose's fire-and-forget capture of `Services`
         // would otherwise route the write to whichever factory most recently set the hook.)
         var repo = _factory.Services.GetRequiredService<BackgroundJobRunRepository>();
-        var jobName = "dashboard-test-" + Guid.NewGuid().ToString("N")[..6];
+        string jobName = "dashboard-test-" + Guid.NewGuid().ToString("N")[..6];
         var startedAt = DateTimeOffset.UtcNow;
         await repo.RecordAsync(new BackgroundJobRunRecord(
             Id: Guid.NewGuid().ToString("N"),
@@ -90,7 +90,7 @@ public sealed class SystemDashboardTests : IClassFixture<DependablyMultiFactory>
         using var tenantClient = _factory.CreateClient();
         var resp = await tenantClient.GetAsync("/api/v1/system/dashboard");
         Assert.True(
-            resp.StatusCode == HttpStatusCode.NotFound || resp.StatusCode == HttpStatusCode.Unauthorized,
+            resp.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Unauthorized,
             $"Unauthenticated tenant call must not succeed; got {(int)resp.StatusCode}.");
     }
 

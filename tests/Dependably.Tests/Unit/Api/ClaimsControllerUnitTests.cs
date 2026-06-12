@@ -4,7 +4,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -42,7 +41,7 @@ public sealed class ClaimsControllerUnitTests
         var ok = Assert.IsType<OkObjectResult>(result);
         Assert.NotNull(ok.Value);
         // Shape: { state, isImplicit, ... } — pin the isImplicit=true contract.
-        var isImplicit = (bool)ok.Value!.GetType().GetProperty("isImplicit")!.GetValue(ok.Value)!;
+        bool isImplicit = (bool)ok.Value!.GetType().GetProperty("isImplicit")!.GetValue(ok.Value)!;
         Assert.True(isImplicit);
     }
 
@@ -129,7 +128,7 @@ public sealed class ClaimsControllerUnitTests
         Assert.NotNull(created.Value);
 
         await using var conn = await b.Db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'claim.create' AND org_id = @org",
             new { org = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);
@@ -142,7 +141,7 @@ public sealed class ClaimsControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var name = $"dup-{Guid.NewGuid():N}";
+        string name = $"dup-{Guid.NewGuid():N}";
         var first = await b.ClaimsController.Create(
             new CreateClaimRequest("npm", name, "local_only", "init"), CancellationToken.None);
         Assert.IsType<CreatedResult>(first);
@@ -163,7 +162,7 @@ public sealed class ClaimsControllerUnitTests
 
         var result = await b.ClaimsController.Transition("npm", "ghost",
             new TransitionClaimRequest("mixed", "x"), CancellationToken.None);
-        var status = (result as IStatusCodeActionResult)?.StatusCode;
+        int? status = (result as IStatusCodeActionResult)?.StatusCode;
         Assert.Equal(StatusCodes.Status404NotFound, status);
     }
 
@@ -173,7 +172,7 @@ public sealed class ClaimsControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
-        var name = $"trans-{Guid.NewGuid():N}";
+        string name = $"trans-{Guid.NewGuid():N}";
 
         var created = await b.ClaimsController.Create(
             new CreateClaimRequest("npm", name, "local_only", "init"), CancellationToken.None);
@@ -184,7 +183,7 @@ public sealed class ClaimsControllerUnitTests
         Assert.IsType<OkObjectResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'claim.transition' AND org_id = @org",
             new { org = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);
@@ -196,7 +195,7 @@ public sealed class ClaimsControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
-        var name = $"missing-reason-{Guid.NewGuid():N}";
+        string name = $"missing-reason-{Guid.NewGuid():N}";
         await b.ClaimsController.Create(
             new CreateClaimRequest("npm", name, "local_only", "init"), CancellationToken.None);
 
@@ -213,7 +212,7 @@ public sealed class ClaimsControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
-        var name = $"rel-{Guid.NewGuid():N}";
+        string name = $"rel-{Guid.NewGuid():N}";
         await b.ClaimsController.Create(
             new CreateClaimRequest("npm", name, "local_only", "init"), CancellationToken.None);
 
@@ -221,7 +220,7 @@ public sealed class ClaimsControllerUnitTests
         Assert.IsType<NoContentResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'claim.release' AND org_id = @org",
             new { org = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);
@@ -235,7 +234,7 @@ public sealed class ClaimsControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = await b.ClaimsController.Release("npm", "never", "x", CancellationToken.None);
-        var status = (result as IStatusCodeActionResult)?.StatusCode;
+        int? status = (result as IStatusCodeActionResult)?.StatusCode;
         Assert.Equal(StatusCodes.Status404NotFound, status);
     }
 

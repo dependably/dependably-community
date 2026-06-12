@@ -3,7 +3,7 @@
 # plus a matching annotated tag, and emit SLSA-L2-style provenance.json.
 # Invoked by the `release-to-github` job in .gitlab-ci.yml on every `vX.Y.Z`
 # tag push. CI owns tag identity (validate-release-tag); this script owns
-# publishing only. See plan §4 for the boundary.
+# publishing only.
 set -euo pipefail
 
 : "${GITHUB_TOKEN:?GITHUB_TOKEN must be set (masked CI/CD variable)}"
@@ -19,9 +19,12 @@ echo "Mirroring release $TAG (version $VERSION) to GitHub"
 git config user.email "ci@dependably"
 git config user.name  "Dependably Release Bot"
 
-# Pin the authenticated GitHub remote once; never re-embed the token afterwards.
+# Configure the GitHub remote without embedding the token in the URL (which would
+# appear in process listings and git's own remote-tracking ref storage). The token
+# is passed as an HTTP Authorization header via git's extraHeader config instead.
 git remote remove github 2>/dev/null || true
-git remote add github "https://oauth2:${GITHUB_TOKEN}@github.com/${EXPECTED_REPO}.git"
+git remote add github "https://github.com/${EXPECTED_REPO}.git"
+AUTH_HEADER="AUTHORIZATION: basic $(printf 'oauth2:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
 
 # Paranoia: confirm the remote URL still matches the expected repo slug.
 # This guards against a misconfigured CI variable swapping the destination
@@ -41,7 +44,7 @@ git fetch origin --tags --force --quiet
 # repository. The GH HEAD's GitLab-Source trailer is the deterministic
 # baseline anchor — see baseline resolution below.
 GH_HEAD=""
-if git fetch --no-tags github main 2>/dev/null; then
+if git -c "http.extraHeader=$AUTH_HEADER" fetch --no-tags github main 2>/dev/null; then
   GH_HEAD=$(git rev-parse FETCH_HEAD)
   echo "GitHub main HEAD: $GH_HEAD"
 else
@@ -139,11 +142,11 @@ git tag -af "$TAG" "$SQUASH_SHA" -m "$TAG"
 # Atomic push of branch + tag together. Atomic is the protocol-level guard
 # against a split-state outcome; the ls-remote below is the verification
 # that catches any residual partial-push / auth-failure case.
-git push --atomic github "$SQUASH_SHA:refs/heads/main" "refs/tags/$TAG"
+git -c "http.extraHeader=$AUTH_HEADER" push --atomic github "$SQUASH_SHA:refs/heads/main" "refs/tags/$TAG"
 
 # Post-push verification — identity is asserted by provenance.json (below);
 # this only catches silent partial-push / auth failures.
-git ls-remote --exit-code github "refs/tags/${TAG}" >/dev/null \
+git -c "http.extraHeader=$AUTH_HEADER" ls-remote --exit-code github "refs/tags/${TAG}" >/dev/null \
   || { echo "ERROR: post-push: tag ${TAG} not visible on GitHub" >&2; exit 1; }
 
 echo "Mirror complete: $TAG -> github/main"

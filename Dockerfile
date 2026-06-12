@@ -1,17 +1,29 @@
+# syntax=docker/dockerfile:1
+# Private-registry credentials enter the build only as a BuildKit secret
+# (id=registry_key) mounted at /run/secrets/registry_key for the duration of the
+# RUN steps that need them — never as an ARG, which would persist in layer
+# metadata/history and builder cache. The non-secret REGISTRY_URL stays an ARG.
+
 # Frontend build stage
 FROM node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920 AS frontend
 WORKDIR /web
 COPY web/package*.json ./
 ARG REGISTRY_URL=
-ARG REGISTRY_KEY=
-RUN if [ -n "$REGISTRY_URL" ] && [ -n "$REGISTRY_KEY" ]; then \
+# .npmrc (containing the auth token) is written, used, and removed within a single
+# RUN so no layer ever contains the credential.
+# hadolint ignore=DL4006
+RUN --mount=type=secret,id=registry_key \
+    if [ -n "$REGISTRY_URL" ] && [ -s /run/secrets/registry_key ]; then \
       HOST=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^https?://||; s|/.*||'); \
       printf 'registry=%s/npm/\n//%s/npm/:_authToken=%s\nfund=false\n' \
-        "$REGISTRY_URL" "$HOST" "$REGISTRY_KEY" > /root/.npmrc; \
-    fi
-RUN npm ci
+        "$REGISTRY_URL" "$HOST" "$(cat /run/secrets/registry_key)" > /root/.npmrc; \
+    fi && \
+    npm ci && \
+    rm -f /root/.npmrc
 COPY web/ ./
+# hadolint ignore=DL3059
 RUN npm run sbom:prod
+# hadolint ignore=DL3059
 RUN npm run build
 
 # Backend build stage — restore, generate backend SBOM, publish
@@ -24,8 +36,10 @@ COPY src/Dependably/Dependably.csproj src/Dependably/
 ARG TARGETARCH
 ARG VERSION=0.1.0
 ARG REGISTRY_URL=
-ARG REGISTRY_KEY=
-RUN if [ -n "$REGISTRY_URL" ] && [ -n "$REGISTRY_KEY" ]; then \
+# NuGet.Config carries only the (non-secret) source URL. The feed credential is
+# surfaced per-step via NuGet's NuGetPackageSourceCredentials_<source> environment
+# convention from the secret mount, so it exists only inside each RUN that restores.
+RUN if [ -n "$REGISTRY_URL" ]; then \
       { \
         echo '<?xml version="1.0" encoding="utf-8"?>'; \
         echo '<configuration>'; \
@@ -33,32 +47,43 @@ RUN if [ -n "$REGISTRY_URL" ] && [ -n "$REGISTRY_KEY" ]; then \
         echo '    <clear />'; \
         echo "    <add key=\"dependably\" value=\"${REGISTRY_URL}/nuget/v3/index.json\" />"; \
         echo '  </packageSources>'; \
-        echo '  <packageSourceCredentials>'; \
-        echo '    <dependably>'; \
-        echo '      <add key="Username" value="ci" />'; \
-        echo "      <add key=\"ClearTextPassword\" value=\"${REGISTRY_KEY}\" />"; \
-        echo '    </dependably>'; \
-        echo '  </packageSourceCredentials>'; \
         echo '</configuration>'; \
       } > /src/NuGet.Config; \
     fi
-RUN case "$TARGETARCH" in \
+RUN --mount=type=secret,id=registry_key \
+    if [ -s /run/secrets/registry_key ]; then \
+      NUGET_CREDS="Username=ci;Password=$(cat /run/secrets/registry_key)"; \
+      export NuGetPackageSourceCredentials_dependably="$NUGET_CREDS"; \
+    fi && \
+    case "$TARGETARCH" in \
       amd64) echo linux-musl-x64 ;; \
       *) echo linux-musl-arm64 ;; \
     esac > /tmp/rid && \
-    dotnet restore src/Dependably/Dependably.csproj -r $(cat /tmp/rid)
-RUN dotnet tool install CycloneDX --tool-path /tools \
- && /tools/dotnet-CycloneDX src/Dependably/Dependably.csproj \
+    RID=$(cat /tmp/rid) && \
+    dotnet restore src/Dependably/Dependably.csproj -r "$RID"
+RUN --mount=type=secret,id=registry_key \
+    if [ -s /run/secrets/registry_key ]; then \
+      NUGET_CREDS="Username=ci;Password=$(cat /run/secrets/registry_key)"; \
+      export NuGetPackageSourceCredentials_dependably="$NUGET_CREDS"; \
+    fi && \
+    dotnet tool install CycloneDX --tool-path /tools && \
+    /tools/dotnet-CycloneDX src/Dependably/Dependably.csproj \
         -o /sboms -fn sbom-backend.json -F json -spv 1.6 \
         --exclude-dev
 
 COPY src/Dependably/ src/Dependably/
 COPY --from=frontend /src/Dependably/wwwroot/ src/Dependably/wwwroot/
-RUN dotnet publish src/Dependably/Dependably.csproj \
+RUN --mount=type=secret,id=registry_key \
+    if [ -s /run/secrets/registry_key ]; then \
+      NUGET_CREDS="Username=ci;Password=$(cat /run/secrets/registry_key)"; \
+      export NuGetPackageSourceCredentials_dependably="$NUGET_CREDS"; \
+    fi && \
+    RID=$(cat /tmp/rid) && \
+    dotnet publish src/Dependably/Dependably.csproj \
     -c Release \
-    -r $(cat /tmp/rid) \
+    -r "$RID" \
     --self-contained true \
-    -p:Version=${VERSION} \
+    -p:Version="${VERSION}" \
     -o /app/publish
 
 # Notices stage — combines both CycloneDX SBOMs into a curated attribution file
@@ -73,6 +98,7 @@ RUN node extract-notices.mjs sbom-backend.json sbom-frontend-prod.json > notices
 FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine@sha256:f276c0256ffca8fe816d48ba261962b54fea1b0e6f870b6a60b3b705c89e78ac AS final
 WORKDIR /app
 
+# hadolint ignore=DL3018
 RUN apk add --no-cache sqlite-libs icu-libs && \
     addgroup -S dependably && adduser -S dependably -G dependably && \
     mkdir -p /data && chown dependably:dependably /data

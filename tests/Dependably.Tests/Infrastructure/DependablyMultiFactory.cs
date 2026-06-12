@@ -3,6 +3,8 @@ using System.Net.Http.Headers;
 using System.Security.Claims;
 using System.Text;
 using Dapper;
+using Dependably.Infrastructure;
+using Dependably.Storage;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -11,8 +13,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.IdentityModel.Tokens;
-using Dependably.Infrastructure;
-using Dependably.Storage;
 
 namespace Dependably.Tests.Infrastructure;
 
@@ -58,6 +58,11 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
 
         builder.WebHost.UseTestServer();
         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
+        // TestServer requests share one "unknown" rate-limit partition (no remote IP);
+        // keep shared-fixture tests out of each other's login/anon/management budgets.
+        builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
+        builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
+        builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
 
         var app = builder.Build();
         Program.ConfigureApp(app);
@@ -94,14 +99,14 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     public async Task<string> CreateSystemAdminJwt()
     {
         await using var conn = await _metadataStore.OpenAsync();
-        var sysId = await conn.ExecuteScalarAsync<string>(
+        string sysId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM system_admins LIMIT 1")
             ?? throw new InvalidOperationException("system_admin not found. Was first-boot run?");
         // Onboarded-admin session: clear the first-boot must_change_password flag so
         // PasswordRotationGuard doesn't 403 non-allowlisted /api/v1/system calls.
         await conn.ExecuteAsync(
             "UPDATE system_admins SET must_change_password = 0 WHERE id = @sysId", new { sysId });
-        var jwtSecret = await conn.ExecuteScalarAsync<string>(
+        string jwtSecret = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret'")
             ?? throw new InvalidOperationException("jwt_secret missing");
 
@@ -128,7 +133,7 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     public async Task<string> CreateTenantJwt(string userId, string tenantId, string role = "owner")
     {
         await using var conn = await _metadataStore.OpenAsync();
-        var jwtSecret = await conn.ExecuteScalarAsync<string>(
+        string jwtSecret = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret'")
             ?? throw new InvalidOperationException("jwt_secret missing");
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
@@ -155,7 +160,7 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     /// </summary>
     public async Task<HttpClient> CreateSystemAdminClient()
     {
-        var jwt = await CreateSystemAdminJwt();
+        string jwt = await CreateSystemAdminJwt();
         var client = CreateClientForHost(ApexHost);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         return client;

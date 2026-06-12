@@ -3,7 +3,6 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -21,7 +20,7 @@ public sealed class OrgAllowBlockListTests : IClassFixture<DependablyFactory>, I
 
     private async Task<HttpClient> AdminClient()
     {
-        var jwt = await _factory.CreateAdminJwt();
+        string jwt = await _factory.CreateAdminJwt();
         var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         return c;
@@ -29,8 +28,8 @@ public sealed class OrgAllowBlockListTests : IClassFixture<DependablyFactory>, I
 
     private async Task<HttpClient> MemberClient()
     {
-        var id = await _factory.CreateUser($"oabl-{Guid.NewGuid():N}@example.com", "Password12345");
-        var jwt = await _factory.CreateUserJwt(id, "member");
+        string id = await _factory.CreateUser($"oabl-{Guid.NewGuid():N}@example.com", "Password12345");
+        string jwt = await _factory.CreateUserJwt(id, "member");
         return _factory.CreateClientWithBearer(jwt);
     }
 
@@ -68,14 +67,14 @@ public sealed class OrgAllowBlockListTests : IClassFixture<DependablyFactory>, I
     public async Task Allowlist_AddListDelete_RoundTrip()
     {
         using var c = await AdminClient();
-        var pattern = $"pkg:npm/awesome-{Guid.NewGuid():N}";
+        string pattern = $"pkg:npm/awesome-{Guid.NewGuid():N}";
 
         var add = await c.PostAsJsonAsync("/api/v1/allowlist",
             new { purlPattern = pattern });
         Assert.Equal(HttpStatusCode.Created, add.StatusCode);
 
         var doc = await JsonDocument.ParseAsync(await add.Content.ReadAsStreamAsync());
-        var id = doc.RootElement.GetProperty("id").GetString();
+        string? id = doc.RootElement.GetProperty("id").GetString();
         Assert.False(string.IsNullOrEmpty(id));
 
         var list = await c.GetAsync("/api/v1/allowlist");
@@ -114,12 +113,12 @@ public sealed class OrgAllowBlockListTests : IClassFixture<DependablyFactory>, I
     public async Task Blocklist_AddListDelete_RoundTrip()
     {
         using var c = await AdminClient();
-        var pattern = $"pkg:npm/sketchy-{Guid.NewGuid():N}";
+        string pattern = $"pkg:npm/sketchy-{Guid.NewGuid():N}";
 
         var add = await c.PostAsJsonAsync("/api/v1/blocklist",
             new { pattern });
         Assert.Equal(HttpStatusCode.Created, add.StatusCode);
-        var id = (await JsonDocument.ParseAsync(await add.Content.ReadAsStreamAsync()))
+        string? id = (await JsonDocument.ParseAsync(await add.Content.ReadAsStreamAsync()))
             .RootElement.GetProperty("id").GetString();
 
         var list = await c.GetAsync("/api/v1/blocklist");

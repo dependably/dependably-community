@@ -30,10 +30,10 @@ public static class ClaimStateMachine
     /// </summary>
     public static ClaimTransitionResult ValidateCreate(string targetState)
     {
-        if (targetState is not (LocalOnly or Mixed))
-            return ClaimTransitionResult.Reject(
-                $"Cannot create claim with state '{targetState}'. Use 'local_only' or 'mixed'.");
-        return ClaimTransitionResult.Allow(purgesProxy: targetState == LocalOnly);
+        return targetState is not (LocalOnly or Mixed)
+            ? ClaimTransitionResult.Reject(
+                $"Cannot create claim with state '{targetState}'. Use 'local_only' or 'mixed'.")
+            : ClaimTransitionResult.Allow(purgesProxy: targetState == LocalOnly);
     }
 
     /// <summary>
@@ -41,16 +41,15 @@ public static class ClaimStateMachine
     /// </summary>
     public static ClaimTransitionResult ValidateChange(string from, string to)
     {
-        if (from == to)
-            return ClaimTransitionResult.Reject("Claim is already in that state.");
-
-        return (from, to) switch
-        {
-            (LocalOnly, Mixed) => ClaimTransitionResult.Allow(purgesProxy: false),
-            (Mixed, LocalOnly) => ClaimTransitionResult.Allow(purgesProxy: true),
-            _ => ClaimTransitionResult.Reject(
-                $"Transition '{from}' → '{to}' is not supported. Allowed: local_only ↔ mixed; release via DELETE.")
-        };
+        return from == to
+            ? ClaimTransitionResult.Reject("Claim is already in that state.")
+            : (from, to) switch
+            {
+                (LocalOnly, Mixed) => ClaimTransitionResult.Allow(purgesProxy: false),
+                (Mixed, LocalOnly) => ClaimTransitionResult.Allow(purgesProxy: true),
+                _ => ClaimTransitionResult.Reject(
+                    $"Transition '{from}' → '{to}' is not supported. Allowed: local_only ↔ mixed; release via DELETE.")
+            };
     }
 
     /// <summary>
@@ -58,11 +57,11 @@ public static class ClaimStateMachine
     /// </summary>
     public static ClaimTransitionResult ValidateRelease(string from, int localVersionCount)
     {
-        if (localVersionCount > 0)
-            return ClaimTransitionResult.Reject(
+        return localVersionCount > 0
+            ? ClaimTransitionResult.Reject(
                 $"Cannot release: {localVersionCount} local version(s) still exist for this name. " +
-                "Delete them first.");
-        return ClaimTransitionResult.Allow(purgesProxy: false);
+                "Delete them first.")
+            : ClaimTransitionResult.Allow(purgesProxy: false);
     }
 }
 

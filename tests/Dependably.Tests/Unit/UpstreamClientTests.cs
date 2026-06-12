@@ -5,10 +5,10 @@ using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -50,11 +50,11 @@ public class UpstreamClientTests : IAsyncLifetime
         var tiered = new TieredBlobStorage(store, store);
         // Staging path: route to a fresh temp dir per test so MISS-path artefacts
         // don't collide across parallel xunit runs.
-        var stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-test-{Guid.NewGuid():N}");
+        string stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-test-{Guid.NewGuid():N}");
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["PROXY_STAGING_PATH"] = stagingDir })
             .Build();
-        var client = new UpstreamClient(factory, tiered, audit, validator, airGap, config, log);
+        var client = new UpstreamClient(factory, tiered, audit, validator, airGap, new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir), config, log);
         return (client, handler);
     }
 
@@ -68,7 +68,7 @@ public class UpstreamClientTests : IAsyncLifetime
 
     private static byte[] RandomBytes(int length = 64)
     {
-        var b = new byte[length];
+        byte[] b = new byte[length];
         Random.Shared.NextBytes(b);
         return b;
     }
@@ -91,7 +91,7 @@ public class UpstreamClientTests : IAsyncLifetime
     [Fact]
     public async Task GetOrFetchStreamAsync_CacheHit_ReturnsBytesWithoutUpstreamCall()
     {
-        var data = RandomBytes();
+        byte[] data = RandomBytes();
         var store = new InMemoryBlobStore();
         await store.PutAsync("blobs/test-key", new MemoryStream(data));
 
@@ -110,7 +110,7 @@ public class UpstreamClientTests : IAsyncLifetime
     [Fact]
     public async Task GetOrFetchStreamAsync_CacheMiss_FetchesAndCachesBlob()
     {
-        var data = RandomBytes();
+        byte[] data = RandomBytes();
         var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(data));
         var store = new InMemoryBlobStore();
         var (client, handler) = BuildClient(new AllowAllValidator(), store);
@@ -136,7 +136,7 @@ public class UpstreamClientTests : IAsyncLifetime
     [Fact]
     public async Task GetOrFetchStreamAsync_ChecksumMismatch_ThrowsChecksumException()
     {
-        var data = RandomBytes();
+        byte[] data = RandomBytes();
         var wrongSpec = new ChecksumSpec(ChecksumAlgorithm.Sha256,
             "0000000000000000000000000000000000000000000000000000000000000000");
         var store = new InMemoryBlobStore();
@@ -183,7 +183,7 @@ public class UpstreamClientTests : IAsyncLifetime
     public async Task GetMetadataAsync_Allowed_ReturnsUpstreamResponse()
     {
         var (client, handler) = BuildClient(new AllowAllValidator());
-        var body = """{"version":"3.0.0"}"""u8.ToArray();
+        byte[] body = """{"version":"3.0.0"}"""u8.ToArray();
         handler.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new ByteArrayContent(body)
@@ -219,7 +219,7 @@ public class UpstreamClientTests : IAsyncLifetime
     {
         // Air-gap must not block reads of artefacts already imported into the cache —
         // that would break running deployments. Only the upstream-fetch path is gated.
-        var data = RandomBytes();
+        byte[] data = RandomBytes();
         var store = new InMemoryBlobStore();
         await store.PutAsync("blobs/cached-key", new MemoryStream(data));
         var (client, handler) = BuildClient(new AllowAllValidator(), store, airGapped: true);
@@ -257,6 +257,104 @@ public class UpstreamClientTests : IAsyncLifetime
             client.GetMetadataAsync("http://upstream.test/simple/lodash/"));
         Assert.Contains("simple/lodash", ex.Resource);
         Assert.Equal(0, handler.CallCount);
+    }
+
+    // ── Staging disk full: sub-floor disk rejects fetch before GET ───────────────
+
+    private static (UpstreamClient Client, FakeHttpHandler Handler) BuildClientWithDisk(
+        IStagingDiskInfo diskInfo,
+        IUpstreamUrlValidator? validator = null,
+        long stagingFloorBytes = 512L * 1024 * 1024)
+    {
+        var handler = new FakeHttpHandler();
+        var factory = new FakeHttpClientFactory(handler);
+        var store = new InMemoryBlobStore();
+        var audit = new AuditRepository(new NullMetadataStore());
+        var tiered = new TieredBlobStorage(store, store);
+        string stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-test-{Guid.NewGuid():N}");
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["PROXY_STAGING_PATH"] = stagingDir,
+                ["STAGING_DISK_FLOOR_BYTES"] = stagingFloorBytes.ToString(),
+            })
+            .Build();
+        var airGap = new StubAirGapMode(false);
+        var v = validator ?? new AllowAllValidator();
+        var client = new UpstreamClient(factory, tiered, audit, v, airGap, diskInfo, config, NullLogger<UpstreamClient>.Instance);
+        return (client, handler);
+    }
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_SubFloorDisk_ThrowsStagingDiskFullExceptionBeforeGet()
+    {
+        // Disk reports 0 bytes available — well below the default 512 MiB floor.
+        // The fetch must be rejected before any upstream HTTP call is made.
+        var diskInfo = new FakeDiskInfo(available: 0, total: 10L * 1024 * 1024 * 1024);
+        var (client, handler) = BuildClientWithDisk(diskInfo);
+        handler.NextResponse = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(RandomBytes())
+        };
+
+        var ex = await Assert.ThrowsAsync<StagingDiskFullException>(() =>
+            client.GetOrFetchStreamAsync(
+                "blobs/disk-full-key", "http://upstream.test/pkg", null, "npm"));
+
+        Assert.Equal(0L, ex.AvailableBytes);
+        Assert.True(ex.FloorBytes > 0);
+        // Upstream must never be contacted — the guard fires before the HTTP GET.
+        Assert.Equal(0, handler.CallCount);
+    }
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_DiskProbeFails_FailsClosedWithStagingDiskFullException()
+    {
+        // When GetAvailableBytes() throws, Phase 1 must fail closed rather than
+        // proceeding with the fetch — a failing disk probe may indicate the volume is full.
+        var faultyDisk = new FaultyDiskInfo();
+        var (client, handler) = BuildClientWithDisk(faultyDisk);
+        handler.NextResponse = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(RandomBytes())
+        };
+
+        await Assert.ThrowsAsync<StagingDiskFullException>(() =>
+            client.GetOrFetchStreamAsync(
+                "blobs/probe-fail-key", "http://upstream.test/pkg", null, "pypi"));
+
+        Assert.Equal(0, handler.CallCount);
+    }
+
+    [Fact]
+    public async Task StagingDiskFullMiddleware_TranslatesStagingDiskFullExceptionTo507()
+    {
+        // The 507 middleware must translate StagingDiskFullException to a 507 response
+        // and must not include available_bytes or floor_bytes in the body.
+        var logger = new Microsoft.Extensions.Logging.Abstractions.NullLogger<StagingDiskFullExceptionMiddleware>();
+        bool nextCalled = false;
+        var middleware = new StagingDiskFullExceptionMiddleware(
+            _ =>
+            {
+                nextCalled = true;
+                throw new StagingDiskFullException(0, 512L * 1024 * 1024);
+            },
+            logger);
+
+        var httpContext = new DefaultHttpContext();
+        httpContext.Response.Body = new MemoryStream();
+
+        await middleware.InvokeAsync(httpContext);
+
+        Assert.True(nextCalled);
+        Assert.Equal(507, httpContext.Response.StatusCode);
+        Assert.Equal("application/problem+json", httpContext.Response.ContentType);
+
+        httpContext.Response.Body.Seek(0, SeekOrigin.Begin);
+        string body = new System.IO.StreamReader(httpContext.Response.Body).ReadToEnd();
+        Assert.DoesNotContain("available_bytes", body);
+        Assert.DoesNotContain("floor_bytes", body);
+        Assert.Contains("Insufficient storage", body);
     }
 
     // ── Transient upstream failure logs a structured Warning ──────────────────
@@ -324,8 +422,7 @@ internal sealed class FakeHttpHandler : HttpMessageHandler
         HttpRequestMessage request, CancellationToken cancellationToken)
     {
         CallCount++;
-        if (NextException is not null) throw NextException;
-        return Task.FromResult(NextResponse);
+        return NextException is not null ? throw NextException : Task.FromResult(NextResponse);
     }
 }
 
@@ -347,7 +444,10 @@ file sealed class CapturingLogger<T> : ILogger<T>
         var props = new Dictionary<string, object?>();
         if (state is IEnumerable<KeyValuePair<string, object?>> kvs)
         {
-            foreach (var kv in kvs) props[kv.Key] = kv.Value;
+            foreach (var kv in kvs)
+            {
+                props[kv.Key] = kv.Value;
+            }
         }
         Records.Add(new LogRecord(logLevel, formatter(state, exception), exception, props));
     }
@@ -357,6 +457,22 @@ file sealed class CapturingLogger<T> : ILogger<T>
         string Message,
         Exception? Exception,
         IReadOnlyDictionary<string, object?> Properties);
+}
+
+/// <summary>Controllable IStagingDiskInfo for unit tests.</summary>
+file sealed class FakeDiskInfo(long available, long total) : IStagingDiskInfo
+{
+    public long GetAvailableBytes() => available;
+    public long GetTotalBytes() => total;
+    public long GetStagingDirectoryUsedBytes() => 0;
+}
+
+/// <summary>IStagingDiskInfo that always throws — simulates a broken staging volume probe.</summary>
+file sealed class FaultyDiskInfo : IStagingDiskInfo
+{
+    public long GetAvailableBytes() => throw new IOException("disk probe failed");
+    public long GetTotalBytes() => throw new IOException("disk probe failed");
+    public long GetStagingDirectoryUsedBytes() => throw new IOException("disk probe failed");
 }
 
 /// <summary>IHttpClientFactory that always returns a client backed by FakeHttpHandler.</summary>

@@ -7,7 +7,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -27,7 +26,7 @@ public sealed class UploadEndpointTests : IClassFixture<DependablyFactory>, IAsy
 
     private async Task<HttpClient> AdminClient()
     {
-        var jwt = await _factory.CreateAdminJwt();
+        string jwt = await _factory.CreateAdminJwt();
         var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         return c;
@@ -76,8 +75,8 @@ public sealed class UploadEndpointTests : IClassFixture<DependablyFactory>, IAsy
         var outcomes = doc.GetProperty("outcomes").EnumerateArray().ToList();
         // The ecosystem badge is populated per-file from server-side detection.
         var byFilename = outcomes.ToDictionary(o => o.GetProperty("filename").GetString()!);
-        Assert.Equal("npm",   byFilename["acme-up-mixnpm-1.0.0.tgz"].GetProperty("ecosystem").GetString());
-        Assert.Equal("pypi",  byFilename["acme_up_mixpypi-1.0.0-py3-none-any.whl"].GetProperty("ecosystem").GetString());
+        Assert.Equal("npm", byFilename["acme-up-mixnpm-1.0.0.tgz"].GetProperty("ecosystem").GetString());
+        Assert.Equal("pypi", byFilename["acme_up_mixpypi-1.0.0-py3-none-any.whl"].GetProperty("ecosystem").GetString());
         Assert.Equal("nuget", byFilename["Acme.Up.MixNuGet.1.0.0.nupkg"].GetProperty("ecosystem").GetString());
     }
 
@@ -108,6 +107,59 @@ public sealed class UploadEndpointTests : IClassFixture<DependablyFactory>, IAsy
         var junk = outcomes.Single(o => o.GetProperty("filename").GetString() == "junk.tgz");
         Assert.Equal("rejected", junk.GetProperty("status").GetString());
         Assert.Equal("unrecognised_format", junk.GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task PartialFailure_SlashLadenManifestName_RejectedWhileValidSiblingAccepted()
+    {
+        // A crafted package.json name with extra '/' segments would otherwise flow verbatim
+        // into hosted blob-key construction. The batch must reject that file with the npm
+        // name-shape error while the well-formed sibling still lands (mixed pass/fail rule).
+        using var client = await AdminClient();
+        var (goodBytes, _, _) = NpmFixtures.BuildTarball("acme-up-goodname", "1.0.0");
+        var (evilBytes, _, _) = NpmFixtures.BuildTarball("evil/../acme-up-escape", "1.0.0");
+        var (slashBytes, _, _) = NpmFixtures.BuildTarball("a/b", "1.0.0");
+
+        using var content = new MultipartFormDataContent();
+        content.Add(File(goodBytes), "files", "acme-up-goodname-1.0.0.tgz");
+        content.Add(File(evilBytes), "files", "evil-name-1.0.0.tgz");
+        content.Add(File(slashBytes), "files", "slash-name-1.0.0.tgz");
+
+        var resp = await client.PostAsync("/api/v1/admin/upload", content);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(1, doc.GetProperty("accepted").GetInt32());
+        Assert.Equal(2, doc.GetProperty("rejected").GetInt32());
+
+        var outcomes = doc.GetProperty("outcomes").EnumerateArray().ToList();
+        var good = outcomes.Single(o => o.GetProperty("filename").GetString() == "acme-up-goodname-1.0.0.tgz");
+        Assert.Equal("accepted", good.GetProperty("status").GetString());
+        foreach (string rejectedFile in new[] { "evil-name-1.0.0.tgz", "slash-name-1.0.0.tgz" })
+        {
+            var rejected = outcomes.Single(o => o.GetProperty("filename").GetString() == rejectedFile);
+            Assert.Equal("rejected", rejected.GetProperty("status").GetString());
+            Assert.Equal("tarball_invalid", rejected.GetProperty("code").GetString());
+            Assert.Contains("Invalid npm package name", rejected.GetProperty("message").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task Import_ScopedNpmName_StillAccepted()
+    {
+        // The slash gate must keep the one legitimate slash shape working: @scope/name.
+        using var client = await AdminClient();
+        var (bytes, _, _) = NpmFixtures.BuildTarball("@acme/up-scoped-ok", "1.0.0");
+
+        using var content = new MultipartFormDataContent();
+        content.Add(File(bytes), "files", "acme-up-scoped-ok-1.0.0.tgz");
+
+        var resp = await client.PostAsync("/api/v1/admin/upload", content);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(1, doc.GetProperty("accepted").GetInt32());
+        Assert.Equal(0, doc.GetProperty("rejected").GetInt32());
     }
 
     [Fact]
@@ -152,7 +204,7 @@ public sealed class UploadEndpointTests : IClassFixture<DependablyFactory>, IAsy
         // Inspect the row directly — origin must be 'uploaded', never 'imported' or 'private'.
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var origin = await conn.ExecuteScalarAsync<string>(
+        string? origin = await conn.ExecuteScalarAsync<string>(
             "SELECT origin FROM package_versions WHERE version = '9.9.9'");
         Assert.Equal("uploaded", origin);
     }
@@ -174,18 +226,18 @@ public sealed class UploadEndpointTests : IClassFixture<DependablyFactory>, IAsy
 
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var defaultOrgId = await conn.ExecuteScalarAsync<string>(
+        string? defaultOrgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1");
         Assert.False(string.IsNullOrEmpty(defaultOrgId));
 
-        var row = await conn.QuerySingleAsync<(string OrgId, string BlobKey)>("""
+        var (OrgId, BlobKey) = await conn.QuerySingleAsync<(string OrgId, string BlobKey)>("""
             SELECT p.org_id AS OrgId, pv.blob_key AS BlobKey
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE p.name = 'acme-up-tenantcheck' AND pv.version = '1.0.0'
             """);
-        Assert.Equal(defaultOrgId, row.OrgId);
-        Assert.StartsWith($"hosted/{defaultOrgId}/", row.BlobKey);
+        Assert.Equal(defaultOrgId, OrgId);
+        Assert.StartsWith($"hosted/{defaultOrgId}/", BlobKey);
     }
 
     [Fact]
@@ -291,7 +343,7 @@ public sealed class UploadEndpointTests : IClassFixture<DependablyFactory>, IAsy
     {
         using var client = await AdminClient();
         var (bytes, sha, _) = NpmFixtures.BuildTarball("acme-up-sumsok", "1.0.0");
-        var sidecarText = $"{sha}  acme-up-sumsok-1.0.0.tgz\n";
+        string sidecarText = $"{sha}  acme-up-sumsok-1.0.0.tgz\n";
 
         using var content = new MultipartFormDataContent();
         content.Add(File(bytes), "files", "acme-up-sumsok-1.0.0.tgz");
@@ -308,8 +360,8 @@ public sealed class UploadEndpointTests : IClassFixture<DependablyFactory>, IAsy
     {
         using var client = await AdminClient();
         var (bytes, _, _) = NpmFixtures.BuildTarball("acme-up-sumsmiss", "1.0.0");
-        var bogus = new string('0', 64);
-        var sidecarText = $"{bogus}  acme-up-sumsmiss-1.0.0.tgz\n";
+        string bogus = new('0', 64);
+        string sidecarText = $"{bogus}  acme-up-sumsmiss-1.0.0.tgz\n";
 
         using var content = new MultipartFormDataContent();
         content.Add(File(bytes), "files", "acme-up-sumsmiss-1.0.0.tgz");
@@ -329,18 +381,18 @@ public sealed class UploadEndpointTests : IClassFixture<DependablyFactory>, IAsy
         using var client = await AdminClient();
 
         // ── npm: same embedded `mermaid-monorepo@10.2.4`, two source-archive wrappers ──
-        var npmA = BuildNpmTarballWithWrapper(
+        byte[] npmA = BuildNpmTarballWithWrapper(
             wrapperDir: "mermaid-mermaid-10.2.4",
             name: "mermaid-monorepo-test-a", version: "10.2.4");
-        var npmB = BuildNpmTarballWithWrapper(
+        byte[] npmB = BuildNpmTarballWithWrapper(
             wrapperDir: "mermaid-mermaid-11.13.0",
             name: "mermaid-monorepo-test-a", version: "10.2.4");
 
         // ── PyPI sdist: same embedded `pypi-mono@1.0.0`, two source-archive wrappers ──
-        var sdistA = BuildPyPiSdistWithWrapper(
+        byte[] sdistA = BuildPyPiSdistWithWrapper(
             wrapperDir: "pypi-mono-test-b-1.0.0",
             name: "pypi-mono-test-b", version: "1.0.0");
-        var sdistB = BuildPyPiSdistWithWrapper(
+        byte[] sdistB = BuildPyPiSdistWithWrapper(
             wrapperDir: "pypi-mono-test-b-2.0.0",
             name: "pypi-mono-test-b", version: "1.0.0");
 
@@ -385,13 +437,13 @@ public sealed class UploadEndpointTests : IClassFixture<DependablyFactory>, IAsy
 
     private static byte[] BuildNpmTarballWithWrapper(string wrapperDir, string name, string version)
     {
-        var json = $"{{\"name\":\"{name}\",\"version\":\"{version}\"}}";
+        string json = $"{{\"name\":\"{name}\",\"version\":\"{version}\"}}";
         return BuildGzippedTarWithEntry($"{wrapperDir}/package.json", Encoding.UTF8.GetBytes(json));
     }
 
     private static byte[] BuildPyPiSdistWithWrapper(string wrapperDir, string name, string version)
     {
-        var pkgInfo = $"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\nSummary: synthetic\n";
+        string pkgInfo = $"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\nSummary: synthetic\n";
         return BuildGzippedTarWithEntry($"{wrapperDir}/PKG-INFO", Encoding.UTF8.GetBytes(pkgInfo));
     }
 

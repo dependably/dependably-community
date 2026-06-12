@@ -57,7 +57,12 @@ export function navigate(page, params = {}, { replace = false, preserveSearch = 
   const next = { page, params }
   const sameRoute = routesEqual(get(route), next)
   const basePath = pathFor(page, params)
-  const url = (preserveSearch && typeof window !== 'undefined')
+  // Re-navigating to the page already shown replaceStates in place without remounting
+  // the component, so the query string (list pages keep table state there) must ride
+  // along — otherwise the URL would say "defaults" while the live component keeps its
+  // filters. A fresh navigation to a different page gets a clean URL = default state.
+  const keepSearch = preserveSearch || (sameRoute && !replace)
+  const url = (keepSearch && typeof window !== 'undefined')
     ? basePath + window.location.search
     : basePath
   if (typeof window !== 'undefined' && window.history) {

@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Protocol;
 
@@ -26,7 +25,7 @@ public sealed class OciDigestVerifyStreamTests
     [Fact]
     public async Task ComputedDigest_AfterReadingAllBytes_MatchesSha256()
     {
-        var payload = "hello OCI world"u8.ToArray();
+        byte[] payload = "hello OCI world"u8.ToArray();
         await using var inner = new MemoryStream(payload);
         await using var stream = new OciDigestVerifyStream(inner);
 
@@ -38,7 +37,7 @@ public sealed class OciDigestVerifyStreamTests
     [Fact]
     public async Task BytesWritten_EqualsActualBytesRead()
     {
-        var payload = new byte[1024];
+        byte[] payload = new byte[1024];
         Random.Shared.NextBytes(payload);
 
         await using var inner = new MemoryStream(payload);
@@ -65,16 +64,16 @@ public sealed class OciDigestVerifyStreamTests
     [Fact]
     public async Task ComputedDigest_MultiplePartialReads_AccumulatesCorrectly()
     {
-        var part1 = "first-chunk"u8.ToArray();
-        var part2 = "second-chunk"u8.ToArray();
-        var combined = part1.Concat(part2).ToArray();
+        byte[] part1 = "first-chunk"u8.ToArray();
+        byte[] part2 = "second-chunk"u8.ToArray();
+        byte[] combined = part1.Concat(part2).ToArray();
 
         await using var inner = new MemoryStream(combined);
         await using var stream = new OciDigestVerifyStream(inner);
 
         // Read in two chunks.
-        var buf1 = new byte[part1.Length];
-        var buf2 = new byte[part2.Length];
+        byte[] buf1 = new byte[part1.Length];
+        byte[] buf2 = new byte[part2.Length];
         _ = await stream.ReadAsync(buf1);
         _ = await stream.ReadAsync(buf2);
 
@@ -87,17 +86,21 @@ public sealed class OciDigestVerifyStreamTests
     [Fact]
     public async Task ReadAsync_MemoryOverload_AccumulatesHash()
     {
-        var payload = "memory overload test"u8.ToArray();
+        byte[] payload = "memory overload test"u8.ToArray();
         await using var inner = new MemoryStream(payload);
         await using var stream = new OciDigestVerifyStream(inner);
 
         // Read all bytes through the Memory<byte> overload.
-        var buf = new byte[payload.Length];
-        var totalRead = 0;
+        byte[] buf = new byte[payload.Length];
+        int totalRead = 0;
         while (totalRead < payload.Length)
         {
-            var n = await stream.ReadAsync(buf.AsMemory(totalRead));
-            if (n == 0) break;
+            int n = await stream.ReadAsync(buf.AsMemory(totalRead));
+            if (n == 0)
+            {
+                break;
+            }
+
             totalRead += n;
         }
 
@@ -109,11 +112,11 @@ public sealed class OciDigestVerifyStreamTests
     [Fact]
     public void Read_SynchronousOverload_AccumulatesHash()
     {
-        var payload = "sync read test"u8.ToArray();
+        byte[] payload = "sync read test"u8.ToArray();
         using var inner = new MemoryStream(payload);
         using var stream = new OciDigestVerifyStream(inner);
 
-        var buf = new byte[payload.Length];
+        byte[] buf = new byte[payload.Length];
         _ = stream.Read(buf, 0, buf.Length);
 
         Assert.Equal(Sha256Hex(payload), stream.ComputedDigest);

@@ -1,5 +1,4 @@
 using System.Net;
-using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using Dapper;
@@ -55,7 +54,7 @@ public sealed class NpmControllerTests : IClassFixture<DependablyFactory>, IAsyn
     {
         await _factory.PushNpmPackage("version-404-pkg", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync("/npm/version-404-pkg/99.0.0");
@@ -74,13 +73,13 @@ public sealed class NpmControllerTests : IClassFixture<DependablyFactory>, IAsyn
     {
         await _factory.PushNpmPackage("hosted-tarball-ok", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         // Resolve tarball URL from the metadata response.
-        var json = await client.GetStringAsync("/npm/hosted-tarball-ok");
+        string json = await client.GetStringAsync("/npm/hosted-tarball-ok");
         using var doc = JsonDocument.Parse(json);
-        var tarballUrl = doc.RootElement
+        string tarballUrl = doc.RootElement
             .GetProperty("versions").GetProperty("1.0.0")
             .GetProperty("dist").GetProperty("tarball").GetString()!;
 
@@ -99,12 +98,12 @@ public sealed class NpmControllerTests : IClassFixture<DependablyFactory>, IAsyn
         await _factory.PushNpmPackage("hosted-tarball-noauth", "1.0.0");
 
         // Need a token to read the metadata (hosted auth gate), then drop auth for tarball.
-        var readToken = await _factory.CreateToken("pull");
+        string readToken = await _factory.CreateToken("pull");
         using var authClient = _factory.CreateClientWithBearer(readToken);
 
-        var json = await authClient.GetStringAsync("/npm/hosted-tarball-noauth");
+        string json = await authClient.GetStringAsync("/npm/hosted-tarball-noauth");
         using var doc = JsonDocument.Parse(json);
-        var tarballUrl = doc.RootElement
+        string tarballUrl = doc.RootElement
             .GetProperty("versions").GetProperty("1.0.0")
             .GetProperty("dist").GetProperty("tarball").GetString()!;
 
@@ -129,7 +128,7 @@ public sealed class NpmControllerTests : IClassFixture<DependablyFactory>, IAsyn
         // Disable proxy passthrough via direct DB write (mirrors UpsertProxySettingsAsync).
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var orgId = await conn.ExecuteScalarAsync<string>(
+        string orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
             ?? throw new InvalidOperationException("Default org not found.");
 
@@ -144,7 +143,7 @@ public sealed class NpmControllerTests : IClassFixture<DependablyFactory>, IAsyn
 
         try
         {
-            var token = await _factory.CreateToken("pull");
+            string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBearer(token);
 
             var resp = await client.GetAsync("/npm/tarballs/never-pushed-pkg/never-pushed-pkg-1.0.0.tgz");
@@ -175,8 +174,8 @@ public sealed class NpmControllerTests : IClassFixture<DependablyFactory>, IAsyn
         var tokens = _factory.Services.GetRequiredService<TokenRepository>();
 
         await using var conn = await store.OpenAsync();
-        var otherOrgId = Guid.NewGuid().ToString("N");
-        var otherOrgSlug = $"other-org-{otherOrgId[..8]}";
+        string otherOrgId = Guid.NewGuid().ToString("N");
+        string otherOrgSlug = $"other-org-{otherOrgId[..8]}";
         await conn.ExecuteAsync(
             "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
             new { id = otherOrgId, slug = otherOrgSlug });
@@ -192,7 +191,7 @@ public sealed class NpmControllerTests : IClassFixture<DependablyFactory>, IAsyn
             """["publish:*","read:artifact","read:metadata","yank:*"]""",
             expiresAt: null);
 
-        var body = NpmFixtures.BuildPublishBody("cross-org-pkg", "1.0.0");
+        string body = NpmFixtures.BuildPublishBody("cross-org-pkg", "1.0.0");
         using var client = _factory.CreateClientWithBearer(rawToken);
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
 

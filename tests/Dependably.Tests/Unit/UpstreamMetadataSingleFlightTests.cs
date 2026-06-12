@@ -3,10 +3,8 @@ using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
-using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -107,7 +105,7 @@ public sealed class UpstreamMetadataSingleFlightTests
         var audit = new AuditRepository(new InMemoryMetadataStore());
         var airGap = new AirGap(airGapped);
         var tiered = new TieredBlobStorage(blobs, blobs);
-        var stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-test-{Guid.NewGuid():N}");
+        string stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-test-{Guid.NewGuid():N}");
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["PROXY_STAGING_PATH"] = stagingDir })
             .Build();
@@ -117,6 +115,7 @@ public sealed class UpstreamMetadataSingleFlightTests
             audit,
             validator ?? new AllowEverythingValidator(),
             airGap,
+            new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir),
             config,
             NullLogger<UpstreamClient>.Instance);
         return (client, handler);

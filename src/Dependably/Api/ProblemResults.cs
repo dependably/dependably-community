@@ -1,6 +1,6 @@
+using Dependably.Resources;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
-using Dependably.Resources;
 
 namespace Dependably.Api;
 
@@ -23,7 +23,10 @@ public sealed class ProblemResults
             Detail = detail,
         };
         if (field is not null)
+        {
             problem.Extensions["field"] = field;
+        }
+
         return Results.Json(problem, statusCode: 422);
     }
 
@@ -107,7 +110,11 @@ public sealed class ProblemResults
             Title = _localizer["error.conflict.title"],
             Detail = detail,
         };
-        if (reason is not null) problem.Extensions["reason"] = reason;
+        if (reason is not null)
+        {
+            problem.Extensions["reason"] = reason;
+        }
+
         return new ObjectResult(problem) { StatusCode = 409 };
     }
 
@@ -119,7 +126,11 @@ public sealed class ProblemResults
             Title = _localizer["error.forbidden.title"],
             Detail = detail,
         };
-        if (reason is not null) problem.Extensions["reason"] = reason;
+        if (reason is not null)
+        {
+            problem.Extensions["reason"] = reason;
+        }
+
         return new ObjectResult(problem) { StatusCode = 403 };
     }
 }

@@ -1,8 +1,7 @@
+using Dependably.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
-using Dependably.Infrastructure;
 
 namespace Dependably.Security;
 
@@ -43,23 +42,38 @@ public sealed class PasswordRotationGuard : IAsyncAuthorizationFilter
     public async Task OnAuthorizationAsync(AuthorizationFilterContext context)
     {
         var endpoint = context.HttpContext.GetEndpoint();
-        if (endpoint?.Metadata.GetMetadata<IAllowAnonymous>() is not null) return;
+        if (endpoint?.Metadata.GetMetadata<IAllowAnonymous>() is not null)
+        {
+            return;
+        }
 
-        var path = context.HttpContext.Request.Path.Value ?? "";
-        if (!path.StartsWith("/api/v1/", StringComparison.OrdinalIgnoreCase)) return;
+        string path = context.HttpContext.Request.Path.Value ?? "";
+        if (!path.StartsWith("/api/v1/", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
 
-        if (AllowedPaths.Any(allowed => path.Equals(allowed, StringComparison.OrdinalIgnoreCase))) return;
+        if (AllowedPaths.Any(allowed => path.Equals(allowed, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
 
         var user = context.HttpContext.User;
-        if (user.Identity?.IsAuthenticated != true) return;
+        if (user.Identity?.IsAuthenticated != true)
+        {
+            return;
+        }
 
-        var sub = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+        string? sub = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
             ?? user.FindFirst("sub")?.Value;
-        if (sub is null) return;
+        if (sub is null)
+        {
+            return;
+        }
 
         var ct = context.HttpContext.RequestAborted;
         // System-admin principals live in system_admins; everyone else in users.
-        var mustChange = user.FindFirst("scope")?.Value == "system"
+        bool mustChange = user.FindFirst("scope")?.Value == "system"
             ? await _admins.IsPasswordChangeRequiredAsync(sub, ct)
             : await _users.IsPasswordChangeRequiredAsync(sub, ct);
 

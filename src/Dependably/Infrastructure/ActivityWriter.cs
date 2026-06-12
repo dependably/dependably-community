@@ -1,5 +1,4 @@
 using System.Threading.Channels;
-using Dapper;
 using Dependably.Infrastructure.Observability;
 
 namespace Dependably.Infrastructure;

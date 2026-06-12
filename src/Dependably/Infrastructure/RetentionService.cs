@@ -17,14 +17,16 @@ public sealed class RetentionService : BackgroundService
     private readonly IMetadataStore _db;
     private readonly IBlobStore _blobs;
     private readonly JwtRevocationRepository _jwtRevocations;
+    private readonly SamlConfigRepository _samlConfig;
     private readonly IConfiguration _config;
     private readonly ILogger<RetentionService> _logger;
 
-    public RetentionService(IMetadataStore db, IBlobStore blobs, JwtRevocationRepository jwtRevocations, IConfiguration config, ILogger<RetentionService> logger)
+    public RetentionService(IMetadataStore db, IBlobStore blobs, JwtRevocationRepository jwtRevocations, SamlConfigRepository samlConfig, IConfiguration config, ILogger<RetentionService> logger)
     {
         _db = db;
         _blobs = blobs;
         _jwtRevocations = jwtRevocations;
+        _samlConfig = samlConfig;
         _config = config;
         _logger = logger;
     }
@@ -38,7 +40,10 @@ public sealed class RetentionService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             var next = schedule.GetNextOccurrence(DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
-            if (next is null) break;
+            if (next is null)
+            {
+                break;
+            }
 
             var delay = next.Value - DateTimeOffset.UtcNow;
             if (delay > TimeSpan.Zero)
@@ -47,7 +52,10 @@ public sealed class RetentionService : BackgroundService
                 catch (OperationCanceledException) { break; }
             }
 
-            if (stoppingToken.IsCancellationRequested) break;
+            if (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
 
             using var scope = Dependably.Infrastructure.Observability.BackgroundJobScope.Begin(
                 "retention", "retention.gc");
@@ -81,18 +89,27 @@ public sealed class RetentionService : BackgroundService
               AND (s.keep_versions IS NOT NULL OR s.keep_days IS NOT NULL OR s.activity_retention_days IS NOT NULL)
             """);
 
-        foreach (var org in orgs)
+        foreach (var (OrgId, KeepVersions, KeepDays, ActivityRetentionDays) in orgs)
         {
-            if (ct.IsCancellationRequested) break;
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
 
-            if (org.KeepVersions.HasValue)
-                await EnforceVersionLimitAsync(conn, org.OrgId, org.KeepVersions.Value, ct);
+            if (KeepVersions.HasValue)
+            {
+                await EnforceVersionLimitAsync(conn, OrgId, KeepVersions.Value, ct);
+            }
 
-            if (org.KeepDays.HasValue)
-                await EvictStaleBlobsAsync(conn, org.OrgId, org.KeepDays.Value, ct);
+            if (KeepDays.HasValue)
+            {
+                await EvictStaleBlobsAsync(conn, OrgId, KeepDays.Value, ct);
+            }
 
-            if (org.ActivityRetentionDays.HasValue)
-                await PruneActivityAsync(conn, org.OrgId, org.ActivityRetentionDays.Value, ct);
+            if (ActivityRetentionDays.HasValue)
+            {
+                await PruneActivityAsync(conn, OrgId, ActivityRetentionDays.Value, ct);
+            }
         }
 
         // Prune expired JWT revocations (global — not org-scoped)
@@ -104,26 +121,32 @@ public sealed class RetentionService : BackgroundService
         // reaper will write to cold storage first.
         await PruneAuditEventsAsync(conn, ct);
 
+        // Reclaim expired SAML one-shot rows (pending requests, consumed assertions, test runs).
+        // These prune on write too; this sweep bounds them when a tenant goes idle.
+        await _samlConfig.PurgeExpiredSamlAsync(ct);
+
         _logger.LogInformation("Retention GC pass complete.");
     }
 
     internal async Task PruneAuditEventsAsync(System.Data.Common.DbConnection conn, CancellationToken ct)
     {
-        var retentionDays = int.TryParse(_config["AUDIT_EVENT_RETENTION_DAYS"], out var d) && d > 0
+        int retentionDays = int.TryParse(_config["AUDIT_EVENT_RETENTION_DAYS"], out int d) && d > 0
             ? d : 365;
-        var cutoff = DateTimeOffset.UtcNow.AddDays(-retentionDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = DateTimeOffset.UtcNow.AddDays(-retentionDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         // Hard-delete is the right shape today: there's no archive destination yet (decision
         // deferred per cross-cutting-decisions.md). When archive lands, this becomes a copy
         // followed by a delete behind a single transaction.
-        var deleted = await conn.ExecuteAsync(new CommandDefinition(
+        int deleted = await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM audit_event WHERE occurred_at < @cutoff",
             new { cutoff },
             cancellationToken: ct));
 
         if (deleted > 0)
+        {
             _logger.LogInformation("Audit reaper: pruned {Count} audit_event rows older than {Days} days.",
                 deleted, retentionDays);
+        }
     }
 
     private async Task EnforceVersionLimitAsync(
@@ -145,19 +168,23 @@ public sealed class RetentionService : BackgroundService
             """,
             new { orgId, keepVersions });
 
-        foreach (var v in toDelete)
+        foreach (var (VersionId, BlobKey) in toDelete)
         {
-            if (ct.IsCancellationRequested) break;
-            await _blobs.DeleteAsync(BlobKeys.StoreKey(v.BlobKey), ct);
-            await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = v.VersionId });
-            _logger.LogDebug("GC: deleted version {Id} (blob {Key})", v.VersionId, v.BlobKey);
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
+            await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
+            await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = VersionId });
+            _logger.LogDebug("GC: deleted version {Id} (blob {Key})", VersionId, BlobKey);
         }
     }
 
     private async Task EvictStaleBlobsAsync(
         System.Data.Common.DbConnection conn, string orgId, int keepDays, CancellationToken ct)
     {
-        var cutoff = DateTimeOffset.UtcNow.AddDays(-keepDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = DateTimeOffset.UtcNow.AddDays(-keepDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         var stale = await conn.QueryAsync<(string VersionId, string BlobKey)>(
             """
@@ -169,18 +196,22 @@ public sealed class RetentionService : BackgroundService
             """,
             new { orgId, cutoff });
 
-        foreach (var v in stale)
+        foreach (var (VersionId, BlobKey) in stale)
         {
-            if (ct.IsCancellationRequested) break;
-            await _blobs.DeleteAsync(BlobKeys.StoreKey(v.BlobKey), ct);
-            await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = v.VersionId });
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
+            await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
+            await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = VersionId });
         }
     }
 
     private static async Task PruneActivityAsync(
         System.Data.Common.DbConnection conn, string orgId, int retentionDays, CancellationToken ct)
     {
-        var cutoff = DateTimeOffset.UtcNow.AddDays(-retentionDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = DateTimeOffset.UtcNow.AddDays(-retentionDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
         await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM activity WHERE org_id = @orgId AND created_at < @cutoff",
             new { orgId, cutoff },

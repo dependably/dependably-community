@@ -1,5 +1,4 @@
 using System.Net;
-using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using Dapper;
@@ -48,7 +47,7 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     {
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var orgId = await DefaultOrgIdAsync();
+        string orgId = await DefaultOrgIdAsync();
         await conn.ExecuteAsync(
             """
             INSERT INTO org_settings (org_id, anonymous_pull)
@@ -66,13 +65,13 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     {
         await _factory.PushNpmPackage("known-version-pkg", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync("/npm/known-version-pkg/1.0.0");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var json = await resp.Content.ReadAsStringAsync();
+        string json = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
         Assert.Equal("known-version-pkg", doc.RootElement.GetProperty("name").GetString());
         Assert.Equal("1.0.0", doc.RootElement.GetProperty("version").GetString());
@@ -85,13 +84,13 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     {
         await _factory.PushNpmPackage("@xtended/scoped-meta", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync("/npm/@xtended/scoped-meta");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var json = await resp.Content.ReadAsStringAsync();
+        string json = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
         Assert.Equal("@xtended/scoped-meta", doc.RootElement.GetProperty("name").GetString());
         Assert.True(doc.RootElement.GetProperty("versions").TryGetProperty("1.0.0", out _));
@@ -102,8 +101,8 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task GetPackage_AnonymousPull_NoLocalPackage_ProxyMetadataReturned()
     {
-        var name = $"proxyonlyanon{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var upstreamJson = $$"""
+        string name = $"proxyonlyanon{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string upstreamJson = $$"""
             {
               "name": "{{name}}",
               "dist-tags": {"latest":"1.0.0"},
@@ -127,9 +126,9 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
             var resp = await anon.GetAsync($"/npm/{name}");
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-            var json = await resp.Content.ReadAsStringAsync();
+            string json = await resp.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(json);
-            var tarball = doc.RootElement.GetProperty("versions").GetProperty("1.0.0")
+            string tarball = doc.RootElement.GetProperty("versions").GetProperty("1.0.0")
                 .GetProperty("dist").GetProperty("tarball").GetString()!;
             // Rewritten to host-local tarball path
             Assert.Contains("/npm/tarballs/", tarball);
@@ -146,7 +145,7 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task GetPackage_ProxyPassthroughOn_AnonymousPullOff_NoToken_Returns401()
     {
-        var name = $"proxyauth{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"proxyauth{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         // Upstream isn't even hit because the auth gate fires before ProxyNpmMetadata.
         using var anon = _factory.CreateClient();
         var resp = await anon.GetAsync($"/npm/{name}");
@@ -159,11 +158,11 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task GetPackage_UpstreamReturns404_NoLocalPkg_Returns404()
     {
-        var name = $"upstreammiss{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"upstreammiss{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/{name}");
@@ -175,16 +174,16 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task GetTarball_CacheMiss_FetchesFromUpstream()
     {
-        var name = $"tarmiss{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.0";
+        string name = $"tarmiss{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
         var (bytes, _, _) = NpmFixtures.BuildTarball(name, version);
-        var filename = $"{name}-{version}.tgz";
+        string filename = $"{name}-{version}.tgz";
 
         _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}/-/{filename}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
@@ -198,13 +197,13 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task GetTarball_UpstreamReturns404_Returns404()
     {
-        var name = $"tar404{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var filename = $"{name}-1.0.0.tgz";
+        string name = $"tar404{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string filename = $"{name}-1.0.0.tgz";
 
         _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}/-/{filename}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
@@ -218,7 +217,7 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     {
         await _factory.PushNpmPackage("@ext/scoped-tar", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync("/npm/tarballs/@ext/scoped-tar/scoped-tar-1.0.0.tgz");
@@ -232,11 +231,11 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     public async Task GetTarball_PackageInBlocklist_Returns403()
     {
         var blocklist = _factory.Services.GetRequiredService<BlocklistRepository>();
-        var orgId = await DefaultOrgIdAsync();
-        var name = $"blockednpm{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string orgId = await DefaultOrgIdAsync();
+        string name = $"blockednpm{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await blocklist.AddAsync(orgId, $"^pkg:npm/{name}$");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{name}-1.0.0.tgz");
@@ -248,7 +247,7 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task GetTarball_AllowlistModeOn_NotAllowed_Returns403()
     {
-        var orgId = await DefaultOrgIdAsync();
+        string orgId = await DefaultOrgIdAsync();
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
         await conn.ExecuteAsync(
@@ -262,9 +261,9 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
 
         try
         {
-            var token = await _factory.CreateToken("pull");
+            string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBearer(token);
-            var name = $"notallowed{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+            string name = $"notallowed{Guid.NewGuid():N}"[..18].ToLowerInvariant();
             var resp = await client.GetAsync($"/npm/tarballs/{name}/{name}-1.0.0.tgz");
             Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
         }
@@ -285,8 +284,8 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
         await _factory.SetOrgLimit("default", "npm", 10);
         try
         {
-            var token = await _factory.CreateToken("push");
-            var body = NpmFixtures.BuildPublishBody("orglimit-pkg", "1.0.0");
+            string token = await _factory.CreateToken("push");
+            string body = NpmFixtures.BuildPublishBody("orglimit-pkg", "1.0.0");
 
             using var client = _factory.CreateClientWithBearer(token);
             using var content = new StringContent(body, Encoding.UTF8, "application/json");
@@ -305,7 +304,7 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task Publish_InvalidJson_Returns422()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClientWithBearer(token);
         using var content = new StringContent("{not-json", Encoding.UTF8, "application/json");
 
@@ -318,8 +317,8 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task Publish_NoAttachments_Returns422()
     {
-        var token = await _factory.CreateToken("push");
-        var body = JsonSerializer.Serialize(new
+        string token = await _factory.CreateToken("push");
+        string body = JsonSerializer.Serialize(new
         {
             name = "noattach-pkg",
             versions = new Dictionary<string, object>
@@ -341,8 +340,8 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task Publish_AttachmentMissingData_Returns422()
     {
-        var token = await _factory.CreateToken("push");
-        var body = JsonSerializer.Serialize(new
+        string token = await _factory.CreateToken("push");
+        string body = JsonSerializer.Serialize(new
         {
             name = "nodata-pkg",
             versions = new Dictionary<string, object>
@@ -367,8 +366,8 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task Publish_AttachmentBadBase64_Returns422()
     {
-        var token = await _factory.CreateToken("push");
-        var body = JsonSerializer.Serialize(new
+        string token = await _factory.CreateToken("push");
+        string body = JsonSerializer.Serialize(new
         {
             name = "badb64-pkg",
             versions = new Dictionary<string, object>
@@ -398,11 +397,11 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task Publish_AttachmentLengthMismatch_Returns422()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         var (tarball, _, _) = NpmFixtures.BuildTarball("lenmismatch-pkg", "1.0.0");
-        var base64 = Convert.ToBase64String(tarball);
+        string base64 = Convert.ToBase64String(tarball);
 
-        var body = JsonSerializer.Serialize(new
+        string body = JsonSerializer.Serialize(new
         {
             name = "lenmismatch-pkg",
             versions = new Dictionary<string, object>
@@ -432,12 +431,12 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task Publish_VersionsKeyAbsent_Returns422()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         var (tarball, _, _) = NpmFixtures.BuildTarball("missing-versions", "1.0.0");
-        var base64 = Convert.ToBase64String(tarball);
+        string base64 = Convert.ToBase64String(tarball);
 
         // No "versions" field at all → ValidateBodyMatch's "versionKey is null" branch fires.
-        var body = JsonSerializer.Serialize(new
+        string body = JsonSerializer.Serialize(new
         {
             name = "missing-versions",
             _attachments = new Dictionary<string, object>
@@ -463,12 +462,12 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task Publish_TarballInnerVersionMismatch_Returns422()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         // Tarball says version 1.0.0; declared version is 2.0.0.
         var (tarball, _, _) = NpmFixtures.BuildTarball("ver-mismatch", "1.0.0");
-        var base64 = Convert.ToBase64String(tarball);
+        string base64 = Convert.ToBase64String(tarball);
 
-        var body = JsonSerializer.Serialize(new
+        string body = JsonSerializer.Serialize(new
         {
             name = "ver-mismatch",
             versions = new Dictionary<string, object>
@@ -498,9 +497,9 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task Publish_InvalidNpmName_Returns422()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         // Body name == URL name but it's invalid (uppercase letters not allowed in npm names).
-        var body = JsonSerializer.Serialize(new
+        string body = JsonSerializer.Serialize(new
         {
             name = "Bad-Name",
             versions = new Dictionary<string, object>
@@ -531,12 +530,12 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task Publish_ScopedWithDeprecated_StoresDeprecationFlag()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         var (tarball, _, _) = NpmFixtures.BuildTarball("@dep/scoped-deprecated", "1.0.0");
-        var base64 = Convert.ToBase64String(tarball);
-        var filename = "@dep/scoped-deprecated-1.0.0.tgz";
+        string base64 = Convert.ToBase64String(tarball);
+        string filename = "@dep/scoped-deprecated-1.0.0.tgz";
 
-        var body = JsonSerializer.Serialize(new
+        string body = JsonSerializer.Serialize(new
         {
             name = "@dep/scoped-deprecated",
             versions = new Dictionary<string, object>
@@ -568,7 +567,7 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
         // Confirm deprecation persisted via UpdateDeprecatedAsync branch.
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var deprecated = await conn.ExecuteScalarAsync<string?>(
+        string? deprecated = await conn.ExecuteScalarAsync<string?>(
             """
             SELECT pv.deprecated FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
@@ -584,11 +583,154 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
     {
         await _factory.PushNpmPackage("just-one-version", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         // Request a version that exists but with different casing of suffix
         var resp = await client.GetAsync("/npm/just-one-version/0.0.0-missing");
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    // ── Publish body cap — oversized body without Content-Length → 413 ────────
+
+    /// <summary>
+    /// When an npm publish body exceeds the configured limit and is sent without a
+    /// Content-Length header (chunked / unknown-length stream), the middleware cannot
+    /// pre-screen it. The LimitedReadStream in ParsePublishBodyAsync catches it and
+    /// returns 413 — the body-streaming cap that closes the gap when Content-Length
+    /// is absent.
+    /// </summary>
+    [Fact]
+    public async Task Publish_OversizedBodyWithoutContentLength_Returns413FromBodyCap()
+    {
+        // Use a small limit so the synthetic body (a few KB) crosses it.
+        const long smallCap = 512;
+        await _factory.SetOrgLimit("default", "npm", smallCap);
+        try
+        {
+            string token = await _factory.CreateToken("push");
+            string body = NpmFixtures.BuildPublishBody("bodycap-chunked-pkg", "1.0.0");
+            // Body is several KB — well above 512 bytes.
+            Assert.True(Encoding.UTF8.GetByteCount(body) > smallCap);
+
+            using var client = _factory.CreateClientWithBearer(token);
+            // Wrap in a non-seekable stream so HttpClient cannot compute Content-Length
+            // and must send chunked transfer — the middleware's pre-screen is skipped.
+            byte[] bodyBytes = Encoding.UTF8.GetBytes(body);
+            using var nonSeekable = new NonSeekableStream(new MemoryStream(bodyBytes));
+            using var content = new StreamContent(nonSeekable);
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+
+            var resp = await client.PutAsync("/npm/bodycap-chunked-pkg", content);
+            Assert.Equal(HttpStatusCode.RequestEntityTooLarge, resp.StatusCode);
+        }
+        finally
+        {
+            await _factory.SetOrgLimit("default", "npm", long.MaxValue);
+        }
+    }
+
+    // Non-seekable stream wrapper — forces chunked transfer by hiding the content length.
+    private sealed class NonSeekableStream(Stream inner) : Stream
+    {
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() => inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct) => inner.ReadAsync(buffer, offset, count, ct);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default) => inner.ReadAsync(buffer, ct);
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                inner.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    // ── Publish attachment pre-check — oversized declared length → 413 before decode ──
+
+    /// <summary>
+    /// When the attachment's declared decoded length exceeds the configured npm limit,
+    /// the controller must reject with 413 before calling Convert.FromBase64String —
+    /// avoiding the byte[] allocation for the oversized attachment.
+    /// </summary>
+    [Fact]
+    public async Task Publish_OversizedDeclaredAttachmentLength_Returns413BeforeDecode()
+    {
+        // Use a small limit that is still large enough for the JSON scaffolding but smaller
+        // than the declared attachment length we will inject.
+        const long smallCap = 2048;
+        await _factory.SetOrgLimit("default", "npm", smallCap);
+        try
+        {
+            string token = await _factory.CreateToken("push");
+            var (tarball, _, _) = NpmFixtures.BuildTarball("attach-precap-pkg", "1.0.0");
+            string base64 = Convert.ToBase64String(tarball);
+
+            // Declare a decoded length well above the cap — the actual base64 decodes to
+            // tarball.Length bytes, which is small, but the declared value is huge.
+            long oversizedDeclaredLength = smallCap + 100_000;
+
+            string body = JsonSerializer.Serialize(new
+            {
+                name = "attach-precap-pkg",
+                versions = new Dictionary<string, object>
+                {
+                    ["1.0.0"] = new { name = "attach-precap-pkg", version = "1.0.0" }
+                },
+                _attachments = new Dictionary<string, object>
+                {
+                    ["attach-precap-pkg-1.0.0.tgz"] = new
+                    {
+                        content_type = "application/octet-stream",
+                        data = base64,
+                        length = oversizedDeclaredLength
+                    }
+                }
+            });
+
+            using var client = _factory.CreateClientWithBearer(token);
+            using var content = new StringContent(body, Encoding.UTF8, "application/json");
+            var resp = await client.PutAsync("/npm/attach-precap-pkg", content);
+            Assert.Equal(HttpStatusCode.RequestEntityTooLarge, resp.StatusCode);
+        }
+        finally
+        {
+            await _factory.SetOrgLimit("default", "npm", long.MaxValue);
+        }
+    }
+
+    // ── Publish — normal publish works with no npm limit configured ──────────
+
+    /// <summary>
+    /// When no org-level npm limit is configured the publish succeeds, confirming the
+    /// fallback to the route hard ceiling does not block a legitimate small publish.
+    /// </summary>
+    [Fact]
+    public async Task Publish_NoLimitConfigured_NormalPublishSucceeds()
+    {
+        // Ensure no npm limit is set (null = fall back to route ceiling).
+        await _factory.SetOrgLimit("default", "npm", null);
+        try
+        {
+            string token = await _factory.CreateToken("push");
+            string body = NpmFixtures.BuildPublishBody("nolimit-pub-pkg", "1.0.0");
+            using var client = _factory.CreateClientWithBearer(token);
+            using var content = new StringContent(body, Encoding.UTF8, "application/json");
+            var resp = await client.PutAsync("/npm/nolimit-pub-pkg", content);
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        }
+        finally
+        {
+            await _factory.SetOrgLimit("default", "npm", long.MaxValue);
+        }
     }
 }

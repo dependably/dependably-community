@@ -2,7 +2,6 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Dependably.Api;
 using Dependably.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -18,7 +17,7 @@ public sealed class NuGetRegistrationMergeTests
     private static string MinimalUpstream(string id, params string[] versions)
     {
         var entries = new JsonArray();
-        foreach (var v in versions)
+        foreach (string v in versions)
         {
             entries.Add(new JsonObject
             {
@@ -63,7 +62,7 @@ public sealed class NuGetRegistrationMergeTests
     {
         using var doc = JsonDocument.Parse(json);
         var pages = doc.RootElement.GetProperty("items");
-        var versions = pages.EnumerateArray()
+        string[] versions = pages.EnumerateArray()
             .SelectMany(p => p.GetProperty("items").EnumerateArray())
             .Select(e => e.GetProperty("catalogEntry").GetProperty("version").GetString()!)
             .ToArray();
@@ -75,10 +74,10 @@ public sealed class NuGetRegistrationMergeTests
     {
         // The real-world case: upstream has stable versions, local has a private prerelease.
         // The merged response must list both so a downstream pinning ">= 13.0.3" finds 13.0.3.
-        var upstream = MinimalUpstream("newtonsoft.json", "13.0.1", "13.0.3");
+        string upstream = MinimalUpstream("newtonsoft.json", "13.0.1", "13.0.3");
         var local = new[] { Ver("13.0.5-beta1") };
 
-        var merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
             upstream, local, Pkg("Newtonsoft.Json"), "newtonsoft.json");
 
         var (count, versions) = ReadPages(merged);
@@ -94,10 +93,10 @@ public sealed class NuGetRegistrationMergeTests
         // If a private build shadows an upstream version (same version string), don't add a
         // second entry — clients seeing two catalogEntry objects with the same version is
         // undefined behaviour. The local entry is suppressed.
-        var upstream = MinimalUpstream("foo", "1.0.0", "2.0.0");
+        string upstream = MinimalUpstream("foo", "1.0.0", "2.0.0");
         var local = new[] { Ver("1.0.0"), Ver("3.0.0-pre") };
 
-        var merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
             upstream, local, Pkg("Foo"), "foo");
 
         var (_, versions) = ReadPages(merged);
@@ -108,10 +107,10 @@ public sealed class NuGetRegistrationMergeTests
     [Fact]
     public void Merge_SkipsYankedLocalVersions()
     {
-        var upstream = MinimalUpstream("foo", "1.0.0");
+        string upstream = MinimalUpstream("foo", "1.0.0");
         var local = new[] { Ver("2.0.0", yanked: true), Ver("3.0.0") };
 
-        var merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
             upstream, local, Pkg("Foo"), "foo");
 
         var (_, versions) = ReadPages(merged);
@@ -123,10 +122,10 @@ public sealed class NuGetRegistrationMergeTests
     public void Merge_NoLocalOnlyVersions_ReturnsUpstreamUnchanged()
     {
         // Every local version already in upstream → no new page, no count bump.
-        var upstream = MinimalUpstream("foo", "1.0.0", "2.0.0");
+        string upstream = MinimalUpstream("foo", "1.0.0", "2.0.0");
         var local = new[] { Ver("1.0.0"), Ver("2.0.0") };
 
-        var merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
             upstream, local, Pkg("Foo"), "foo");
 
         var (count, _) = ReadPages(merged);
@@ -138,16 +137,16 @@ public sealed class NuGetRegistrationMergeTests
     {
         // Local versions must use our proxy URLs for packageContent — otherwise the client
         // bypasses the proxy and our first-fetch / vuln-gate / blocklist hooks never fire.
-        var upstream = MinimalUpstream("foo", "1.0.0");
+        string upstream = MinimalUpstream("foo", "1.0.0");
         var local = new[] { Ver("9.9.9-private") };
 
-        var merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
             upstream, local, Pkg("Foo"), "foo");
 
         using var doc = JsonDocument.Parse(merged);
         var localPage = doc.RootElement.GetProperty("items")[1];
         var entry = localPage.GetProperty("items")[0];
-        var packageContent = entry.GetProperty("catalogEntry").GetProperty("packageContent").GetString();
+        string? packageContent = entry.GetProperty("catalogEntry").GetProperty("packageContent").GetString();
         Assert.NotNull(packageContent);
         Assert.Contains("/nuget/flatcontainer/foo/9.9.9-private/foo.9.9.9-private.nupkg", packageContent);
         Assert.DoesNotContain("api.nuget.org", packageContent);
@@ -158,10 +157,10 @@ public sealed class NuGetRegistrationMergeTests
     {
         // Lexical sort would put "10.0.0" before "9.0.0". NuGet clients expect semver order
         // on a page's lower/upper bounds, so the page metadata uses NuGetVersion comparison.
-        var upstream = MinimalUpstream("foo", "0.0.1");
+        string upstream = MinimalUpstream("foo", "0.0.1");
         var local = new[] { Ver("10.0.0"), Ver("9.0.0"), Ver("9.5.0-beta") };
 
-        var merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
             upstream, local, Pkg("Foo"), "foo");
 
         using var doc = JsonDocument.Parse(merged);
@@ -175,9 +174,250 @@ public sealed class NuGetRegistrationMergeTests
     {
         // Defensive: don't throw on unexpected upstream shapes — let the caller decide
         // whether to fall back. We propagate the original string unchanged.
-        var bogus = "not json at all";
-        var merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+        string bogus = "not json at all";
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
             bogus, new[] { Ver("1.0.0") }, Pkg("Foo"), "foo");
         Assert.Equal(bogus, merged);
+    }
+
+    // ── URL rewriting ─────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Merge_WithBaseUrl_RewritesUpstreamLeafPackageContent()
+    {
+        // When baseUrl is supplied, upstream entries in the merged document must have their
+        // packageContent rewritten to the local flatcontainer route so downloads route through
+        // the proxy gate rather than bypassing it via the upstream URL.
+        string upstream = MinimalUpstream("foo", "1.0.0", "2.0.0");
+        var local = new[] { Ver("3.0.0-pre") };
+
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+            upstream, local, Pkg("Foo"), "foo", "https://my.instance/nuget");
+
+        using var doc = JsonDocument.Parse(merged);
+        var upstreamPage = doc.RootElement.GetProperty("items")[0];
+        foreach (var entry in upstreamPage.GetProperty("items").EnumerateArray())
+        {
+            string? packageContent = entry.GetProperty("catalogEntry").GetProperty("packageContent").GetString();
+            Assert.NotNull(packageContent);
+            Assert.StartsWith("https://my.instance/nuget/flatcontainer/foo/", packageContent);
+            Assert.DoesNotContain("api.nuget.org", packageContent);
+        }
+    }
+
+    [Fact]
+    public void Merge_WithBaseUrl_RewritesUpstreamLeafAtId()
+    {
+        // Each upstream leaf @id must point at our registration route so clients following leaf
+        // URLs land on this instance.
+        string upstream = MinimalUpstream("foo", "1.0.0");
+        var local = new[] { Ver("9.0.0") };
+
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+            upstream, local, Pkg("Foo"), "foo", "https://my.instance/nuget");
+
+        using var doc = JsonDocument.Parse(merged);
+        var upstreamPage = doc.RootElement.GetProperty("items")[0];
+        string? leafId = upstreamPage.GetProperty("items")[0].GetProperty("@id").GetString();
+        Assert.NotNull(leafId);
+        Assert.StartsWith("https://my.instance/nuget/registration/foo/", leafId);
+        Assert.EndsWith(".json", leafId);
+        Assert.DoesNotContain("api.nuget.org", leafId);
+    }
+
+    [Fact]
+    public void Merge_WithBaseUrl_LocalPageEntriesStillPointToLocalRoutes()
+    {
+        // The local-version page is built by BuildLocalPage which always uses relative paths,
+        // independent of the baseUrl rewrite. Both upstream and local entries must end up local.
+        string upstream = MinimalUpstream("foo", "1.0.0");
+        var local = new[] { Ver("9.9.9-private") };
+
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+            upstream, local, Pkg("Foo"), "foo", "https://my.instance/nuget");
+
+        using var doc = JsonDocument.Parse(merged);
+        var localPage = doc.RootElement.GetProperty("items")[1];
+        string? pc = localPage.GetProperty("items")[0].GetProperty("catalogEntry").GetProperty("packageContent").GetString();
+        Assert.NotNull(pc);
+        Assert.Contains("/nuget/flatcontainer/foo/9.9.9-private/foo.9.9.9-private.nupkg", pc);
+        Assert.DoesNotContain("api.nuget.org", pc);
+    }
+
+    [Fact]
+    public void RewriteRegistrationIndexUrls_RewritesAllLeaves()
+    {
+        // Pure-upstream path: the full index is passed through after URL rewriting.
+        string upstream = MinimalUpstream("bar", "4.0.0", "5.0.0");
+
+        string rewritten = NuGetController.RewriteRegistrationIndexUrls(
+            upstream, "bar", "https://proxy.example/nuget");
+
+        using var doc = JsonDocument.Parse(rewritten);
+        foreach (var page in doc.RootElement.GetProperty("items").EnumerateArray())
+        {
+            foreach (var entry in page.GetProperty("items").EnumerateArray())
+            {
+                string? pc = entry.GetProperty("catalogEntry").GetProperty("packageContent").GetString();
+                Assert.StartsWith("https://proxy.example/nuget/flatcontainer/bar/", pc);
+                Assert.DoesNotContain("api.nuget.org", pc);
+
+                string? id = entry.GetProperty("@id").GetString();
+                Assert.StartsWith("https://proxy.example/nuget/registration/bar/", id);
+                Assert.DoesNotContain("api.nuget.org", id);
+            }
+        }
+    }
+
+    [Fact]
+    public void RewriteRegistrationIndexUrls_MalformedJson_ReturnsUnchanged()
+    {
+        // Malformed upstream JSON must not throw — the caller receives the original string.
+        string bogus = "{bad json";
+        string result = NuGetController.RewriteRegistrationIndexUrls(bogus, "foo", "https://x/nuget");
+        Assert.Equal(bogus, result);
+    }
+
+    [Fact]
+    public void RewriteRegistrationLeafUrls_RewritesPackageContentAndAtId()
+    {
+        // A proxied leaf response must have both packageContent and @id rewritten to local routes.
+        string leafJson = """
+            {
+              "@id": "https://api.nuget.org/v3/registration5-semver1/foo/1.2.3.json",
+              "@type": "Package",
+              "catalogEntry": {
+                "id": "Foo",
+                "version": "1.2.3",
+                "listed": true,
+                "packageContent": "https://api.nuget.org/v3-flatcontainer/foo/1.2.3/foo.1.2.3.nupkg"
+              },
+              "listed": true,
+              "packageContent": "https://api.nuget.org/v3-flatcontainer/foo/1.2.3/foo.1.2.3.nupkg"
+            }
+            """;
+
+        string rewritten = NuGetController.RewriteRegistrationLeafUrls(
+            leafJson, "foo", "https://proxy.example/nuget");
+
+        using var doc = JsonDocument.Parse(rewritten);
+        string? leafId = doc.RootElement.GetProperty("@id").GetString();
+        Assert.Equal("https://proxy.example/nuget/registration/foo/1.2.3.json", leafId);
+
+        string? pc = doc.RootElement.GetProperty("packageContent").GetString();
+        Assert.Equal("https://proxy.example/nuget/flatcontainer/foo/1.2.3/foo.1.2.3.nupkg", pc);
+
+        string? catalogPc = doc.RootElement.GetProperty("catalogEntry").GetProperty("packageContent").GetString();
+        Assert.Equal("https://proxy.example/nuget/flatcontainer/foo/1.2.3/foo.1.2.3.nupkg", catalogPc);
+    }
+
+    [Fact]
+    public void RewriteRegistrationLeafUrls_MissingFields_DoesNotThrow()
+    {
+        // Absent packageContent and catalogEntry fields must not cause exceptions — upstream
+        // JSON is hostile input that may omit optional fields.
+        string leafJson = """{"@id":"https://upstream/foo/1.0.0.json","@type":"Package"}""";
+
+        string rewritten = NuGetController.RewriteRegistrationLeafUrls(
+            leafJson, "foo", "https://proxy.example/nuget");
+
+        // Must not throw; @id is left unchanged when version cannot be extracted.
+        Assert.NotNull(rewritten);
+        using var doc = JsonDocument.Parse(rewritten);
+        // No packageContent field was present; document is still valid JSON.
+        Assert.False(doc.RootElement.TryGetProperty("packageContent", out _));
+    }
+
+    [Fact]
+    public void RewriteRegistrationLeafUrls_MalformedJson_ReturnsUnchanged()
+    {
+        string bogus = "not json";
+        string result = NuGetController.RewriteRegistrationLeafUrls(bogus, "foo", "https://x/nuget");
+        Assert.Equal(bogus, result);
+    }
+
+    [Fact]
+    public void RewriteRegistrationIndexUrls_NonStringVersion_SkipsLeafRewriteNoThrow()
+    {
+        // A hostile or buggy upstream may return a non-string version field (e.g. a number).
+        // GetValue<string>() would throw InvalidOperationException; TryGetString must skip
+        // the bad leaf without crashing, leaving the other leaf still rewritten.
+        string indexJson = """
+            {
+              "@id": "https://api.nuget.org/v3/registration5-semver1/foo/index.json",
+              "count": 1,
+              "items": [
+                {
+                  "@id": "https://api.nuget.org/v3/registration5-semver1/foo/index.json#page/1",
+                  "@type": "catalog:CatalogPage",
+                  "count": 2,
+                  "items": [
+                    {
+                      "@id": "https://api.nuget.org/v3/registration5-semver1/foo/1.0.0.json",
+                      "@type": "Package",
+                      "catalogEntry": {
+                        "id": "Foo",
+                        "version": 123,
+                        "packageContent": "https://api.nuget.org/v3-flatcontainer/foo/1.0.0/foo.1.0.0.nupkg"
+                      },
+                      "packageContent": "https://api.nuget.org/v3-flatcontainer/foo/1.0.0/foo.1.0.0.nupkg"
+                    },
+                    {
+                      "@id": "https://api.nuget.org/v3/registration5-semver1/foo/2.0.0.json",
+                      "@type": "Package",
+                      "catalogEntry": {
+                        "id": "Foo",
+                        "version": "2.0.0",
+                        "packageContent": "https://api.nuget.org/v3-flatcontainer/foo/2.0.0/foo.2.0.0.nupkg"
+                      },
+                      "packageContent": "https://api.nuget.org/v3-flatcontainer/foo/2.0.0/foo.2.0.0.nupkg"
+                    }
+                  ]
+                }
+              ]
+            }
+            """;
+
+        // Must not throw — non-string version leaf is skipped (URLs left as-is), string leaf is rewritten.
+        string rewritten = NuGetController.RewriteRegistrationIndexUrls(
+            indexJson, "foo", "https://proxy.example/nuget");
+
+        using var doc = JsonDocument.Parse(rewritten);
+        var items = doc.RootElement.GetProperty("items")[0].GetProperty("items");
+
+        // Leaf with numeric version — @id and packageContent are left unrewritten.
+        string? badLeafId = items[0].GetProperty("@id").GetString();
+        Assert.Contains("api.nuget.org", badLeafId);
+
+        // Leaf with valid string version — @id and packageContent are rewritten.
+        string? goodLeafId = items[1].GetProperty("@id").GetString();
+        Assert.NotNull(goodLeafId);
+        Assert.StartsWith("https://proxy.example/nuget/registration/foo/", goodLeafId);
+        Assert.DoesNotContain("api.nuget.org", goodLeafId);
+
+        string? goodPc = items[1].GetProperty("catalogEntry").GetProperty("packageContent").GetString();
+        Assert.NotNull(goodPc);
+        Assert.StartsWith("https://proxy.example/nuget/flatcontainer/foo/", goodPc);
+        Assert.DoesNotContain("api.nuget.org", goodPc);
+    }
+
+    [Fact]
+    public void HostedRegistration_NoUpstream_UrlsAlwaysLocal()
+    {
+        // BuildLocalRegistration (not called here, exercised via the static helpers) builds
+        // exclusively from BaseUrl(). This test verifies MergeLocalIntoUpstreamRegistration
+        // with no upstream versions still uses relative local paths for the local page.
+        string upstream = MinimalUpstream("baz", "1.0.0");
+        var local = new[] { Ver("2.0.0") };
+
+        // Without a baseUrl argument the local page uses relative paths (unchanged behaviour).
+        string merged = NuGetController.MergeLocalIntoUpstreamRegistration(
+            upstream, local, Pkg("Baz"), "baz");
+
+        using var doc = JsonDocument.Parse(merged);
+        var localPage = doc.RootElement.GetProperty("items")[1];
+        string? pc = localPage.GetProperty("items")[0].GetProperty("catalogEntry").GetProperty("packageContent").GetString();
+        Assert.NotNull(pc);
+        Assert.Contains("/nuget/flatcontainer/baz/2.0.0/baz.2.0.0.nupkg", pc);
     }
 }

@@ -18,11 +18,16 @@ public static class UpstreamRegistrySeeder
     // (ecosystem, config key, hard-coded fallback URL or null when there is no sensible default).
     private static readonly (string Ecosystem, string ConfigKey, string? Default)[] DefaultSources =
     [
-        ("pypi",  "PyPI:Upstream",  "https://pypi.org"),
-        ("npm",   "Npm:Upstream",   "https://registry.npmjs.org"),
-        ("nuget", "NuGet:Upstream", "https://api.nuget.org/v3"),
-        ("maven", "Maven:Upstream", "https://repo1.maven.org/maven2"),
-        ("rpm",   "Rpm:Upstream",   null),
+        ("pypi",   "PyPI:Upstream",  "https://pypi.org"),
+        ("npm",    "Npm:Upstream",   "https://registry.npmjs.org"),
+        ("nuget",  "NuGet:Upstream", "https://api.nuget.org/v3"),
+        ("maven",  "Maven:Upstream", "https://repo1.maven.org/maven2"),
+        ("golang", "Go:Upstream",    "https://proxy.golang.org"),
+        ("rpm",    "Rpm:Upstream",   null),
+        // Cargo sparse index. crates.io switched to sparse (https://index.crates.io) as of
+        // Rust 1.68. The legacy git index at github.com/rust-lang/crates.io-index is still
+        // maintained but clients prefer the sparse protocol; this is the canonical default.
+        ("cargo",  "Cargo:Upstream", "https://index.crates.io"),
     ];
 
     /// <summary>The (ecosystem, url) defaults to seed, honouring config overrides; skips ecosystems
@@ -32,9 +37,11 @@ public static class UpstreamRegistrySeeder
         var list = new List<(string, string)>();
         foreach (var (eco, key, def) in DefaultSources)
         {
-            var url = config?[key] ?? def;
+            string? url = config?[key] ?? def;
             if (!string.IsNullOrWhiteSpace(url))
+            {
                 list.Add((eco, url.Trim()));
+            }
         }
         return list;
     }

@@ -4,7 +4,6 @@ using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -28,7 +27,7 @@ public class CacheEvictionServiceTests : IAsyncLifetime
 
     private static string ShaSentinelFor(string version)
     {
-        var bytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(version));
+        byte[] bytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(version));
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
@@ -37,7 +36,7 @@ public class CacheEvictionServiceTests : IAsyncLifetime
         // Insert blob first so eviction's blob-delete step has something to remove.
         // BlobKeys.Proxy requires 64-char lowercase hex (hardened to reject non-hex input); derive a
         // deterministic-but-valid sentinel from the version.
-        var blobKey = BlobKeys.Proxy(ShaSentinelFor(version));
+        string blobKey = BlobKeys.Proxy(ShaSentinelFor(version));
         await _blobs.PutAsync(blobKey, new MemoryStream(new byte[size]));
 
         var repo = new CacheArtifactRepository(_db);
@@ -128,7 +127,7 @@ public class CacheEvictionServiceTests : IAsyncLifetime
         await svc.RunOnceAsync();
 
         await using var conn = await _db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = @id",
             new { id = a.Id });
         Assert.Equal(0, count);

@@ -39,7 +39,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var (_, _, versionId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "left-pad", version: "1.0.0", origin: "proxy", deprecated: null);
 
-        var packument = NpmPackument("left-pad", new Dictionary<string, string?>
+        string packument = NpmPackument("left-pad", new Dictionary<string, string?>
         {
             ["1.0.0"] = "use pad-left instead"
         });
@@ -61,7 +61,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             ecosystem: "npm", name: "old-pkg", version: "2.0.0", origin: "proxy",
             deprecated: "was deprecated");
 
-        var packument = NpmPackument("old-pkg", new Dictionary<string, string?>
+        string packument = NpmPackument("old-pkg", new Dictionary<string, string?>
         {
             ["2.0.0"] = null // no longer deprecated
         });
@@ -83,7 +83,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             ecosystem: "npm", name: "stable-pkg", version: "3.0.0", origin: "proxy",
             deprecated: "still deprecated");
 
-        var packument = NpmPackument("stable-pkg", new Dictionary<string, string?>
+        string packument = NpmPackument("stable-pkg", new Dictionary<string, string?>
         {
             ["3.0.0"] = "still deprecated"
         });
@@ -91,7 +91,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 
         // Record the deprecated value before the pass
         await using var connBefore = await _db.OpenAsync();
-        var depBefore = await connBefore.QuerySingleAsync<string?>(
+        string? depBefore = await connBefore.QuerySingleAsync<string?>(
             "SELECT deprecated FROM package_versions WHERE id = @id", new { id = versionId });
 
         await service.RunRefreshPassAsync(CancellationToken.None);
@@ -111,7 +111,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var (_, _, versionId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "my-pkg", version: "1.0.0", origin: "uploaded", deprecated: null);
 
-        var packument = NpmPackument("my-pkg", new Dictionary<string, string?>
+        string packument = NpmPackument("my-pkg", new Dictionary<string, string?>
         {
             ["1.0.0"] = "deprecated"
         });
@@ -119,10 +119,27 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await service.RunRefreshPassAsync(CancellationToken.None);
 
         await using var conn = await _db.OpenAsync();
-        var checkedAt = await conn.QuerySingleAsync<string?>(
+        string? checkedAt = await conn.QuerySingleAsync<string?>(
             "SELECT deprecation_checked_at FROM package_versions WHERE id = @id", new { id = versionId });
         // uploaded version is skipped entirely — no deprecation_checked_at stamp
         Assert.Null(checkedAt);
+    }
+
+    [Fact]
+    public async Task NpmPackage_RefreshPass_RecordsUpstreamLatestVersion()
+    {
+        var (_, packageId, _, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "left-pad", version: "1.0.0", origin: "proxy", deprecated: null);
+
+        string packument = NpmPackument("left-pad",
+            new Dictionary<string, string?> { ["1.0.0"] = null }, latest: "2.5.0");
+        var service = BuildService(packument);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? latest = await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId });
+        Assert.Equal("2.5.0", latest);
     }
 
     // ── PyPI tests ─────────────────────────────────────────────────────────────
@@ -133,7 +150,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var (_, _, versionId, _) = await SeedVersionAsync(
             ecosystem: "pypi", name: "evil-lib", version: "0.1.0", origin: "proxy", deprecated: null);
 
-        var pypiJson = PyPiJson("evil-lib", new Dictionary<string, (bool Yanked, string? Reason)>
+        string pypiJson = PyPiJson("evil-lib", new Dictionary<string, (bool Yanked, string? Reason)>
         {
             ["0.1.0"] = (true, "security vulnerability")
         });
@@ -154,7 +171,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var (_, _, versionId, _) = await SeedVersionAsync(
             ecosystem: "pypi", name: "bad-lib", version: "1.0.0", origin: "proxy", deprecated: null);
 
-        var pypiJson = PyPiJson("bad-lib", new Dictionary<string, (bool Yanked, string? Reason)>
+        string pypiJson = PyPiJson("bad-lib", new Dictionary<string, (bool Yanked, string? Reason)>
         {
             ["1.0.0"] = (true, null)
         });
@@ -162,7 +179,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await service.RunRefreshPassAsync(CancellationToken.None);
 
         await using var conn = await _db.OpenAsync();
-        var dep = await conn.QuerySingleAsync<string?>(
+        string? dep = await conn.QuerySingleAsync<string?>(
             "SELECT deprecated FROM package_versions WHERE id = @id", new { id = versionId });
         Assert.Equal("yanked", dep);
     }
@@ -173,7 +190,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var (_, _, versionId, _) = await SeedVersionAsync(
             ecosystem: "pypi", name: "good-lib", version: "2.0.0", origin: "proxy", deprecated: null);
 
-        var pypiJson = PyPiJson("good-lib", new Dictionary<string, (bool Yanked, string? Reason)>
+        string pypiJson = PyPiJson("good-lib", new Dictionary<string, (bool Yanked, string? Reason)>
         {
             ["2.0.0"] = (false, null)
         });
@@ -186,6 +203,24 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             new { id = versionId });
         Assert.Null(dep);
         Assert.NotNull(checkedAt);
+    }
+
+    [Fact]
+    public async Task PyPiPackage_RefreshPass_RecordsUpstreamLatestVersion()
+    {
+        var (_, packageId, _, _) = await SeedVersionAsync(
+            ecosystem: "pypi", name: "good-lib", version: "1.0.0", origin: "proxy", deprecated: null);
+
+        string pypiJson = PyPiJson("good-lib",
+            new Dictionary<string, (bool Yanked, string? Reason)> { ["1.0.0"] = (false, null) },
+            latest: "3.1.4");
+        var service = BuildService(pypiJson);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? latest = await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId });
+        Assert.Equal("3.1.4", latest);
     }
 
     // ── Unsupported ecosystem tests ────────────────────────────────────────────
@@ -204,7 +239,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await service.RunRefreshPassAsync(CancellationToken.None);
 
         await using var conn = await _db.OpenAsync();
-        var checkedAt = await conn.QuerySingleAsync<string?>(
+        string? checkedAt = await conn.QuerySingleAsync<string?>(
             "SELECT deprecation_checked_at FROM package_versions WHERE id = @id", new { id = versionId });
         Assert.Null(checkedAt);
     }
@@ -221,7 +256,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await service.RunRefreshPassAsync(CancellationToken.None);
 
         await using var conn = await _db.OpenAsync();
-        var checkedAt = await conn.QuerySingleAsync<string?>(
+        string? checkedAt = await conn.QuerySingleAsync<string?>(
             "SELECT deprecation_checked_at FROM package_versions WHERE id = @id", new { id = versionId });
         Assert.Null(checkedAt);
     }
@@ -244,7 +279,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             ecosystem: "npm", name: "airgap-pkg-b", version: "1.0.0", origin: "proxy", deprecated: null);
         await SetAirGappedAsync(orgA, true);
 
-        var packument = NpmPackument("airgap-pkg", new Dictionary<string, string?>
+        string packument = NpmPackument("airgap-pkg", new Dictionary<string, string?>
         {
             ["1.0.0"] = "use something else"
         });
@@ -284,7 +319,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task ListPackagesNeedingDeprecationRefresh_FreshRow_NotReturned()
     {
-        var freshAt = DateTimeOffset.UtcNow.AddMinutes(-30).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string freshAt = DateTimeOffset.UtcNow.AddMinutes(-30).ToString("yyyy-MM-ddTHH:mm:ssZ");
         await SeedVersionAsync(ecosystem: "npm", name: "fresh-pkg", version: "1.0.0",
             origin: "proxy", deprecated: null, deprecationCheckedAt: freshAt);
 
@@ -297,7 +332,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task ListPackagesNeedingDeprecationRefresh_StaleRow_Returned()
     {
-        var staleAt = DateTimeOffset.UtcNow.AddHours(-48).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string staleAt = DateTimeOffset.UtcNow.AddHours(-48).ToString("yyyy-MM-ddTHH:mm:ssZ");
         await SeedVersionAsync(ecosystem: "npm", name: "stale-pkg2", version: "1.0.0",
             origin: "proxy", deprecated: null, deprecationCheckedAt: staleAt);
 
@@ -329,7 +364,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await repo.UpdateDeprecationCheckedAtAsync(versionId);
 
         await using var conn = await _db.OpenAsync();
-        var checkedAt = await conn.QuerySingleAsync<string?>(
+        string? checkedAt = await conn.QuerySingleAsync<string?>(
             "SELECT deprecation_checked_at FROM package_versions WHERE id = @id", new { id = versionId });
         Assert.NotNull(checkedAt);
     }
@@ -361,7 +396,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await repo.UpdateDeprecatedAndCheckedAsync(versionId, null);
 
         await using var conn = await _db.OpenAsync();
-        var dep = await conn.QuerySingleAsync<string?>(
+        string? dep = await conn.QuerySingleAsync<string?>(
             "SELECT deprecated FROM package_versions WHERE id = @id", new { id = versionId });
         Assert.Null(dep);
     }
@@ -378,7 +413,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var tiered = new TieredBlobStorage(blobs, blobs);
         var audit = new AuditRepository(_db);
         var validator = new AllowAllValidator();
-        var stagingDir = Path.Combine(Path.GetTempPath(), $"dep-refresh-test-{Guid.NewGuid():N}");
+        string stagingDir = Path.Combine(Path.GetTempPath(), $"dep-refresh-test-{Guid.NewGuid():N}");
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -392,7 +427,9 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             .Build();
         var airGap = new StubAirGap(airGapped);
         var upstream = new UpstreamClient(
-            factory, tiered, new AuditRepository(_db), validator, airGap, config,
+            factory, tiered, new AuditRepository(_db), validator, airGap,
+            new Dependably.Infrastructure.DriveInfoStagingDiskInfo(Path.GetTempPath()),
+            config,
             NullLogger<UpstreamClient>.Instance);
         var packages = new PackageRepository(_db);
         return new DeprecationRefreshService(
@@ -409,19 +446,19 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         string? deprecationCheckedAt = null)
     {
         await using var conn = await _db.OpenAsync();
-        var orgId = Guid.NewGuid().ToString("N");
+        string orgId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
             new { id = orgId, slug = $"org-{orgId[..6]}" });
         await conn.ExecuteAsync("INSERT INTO org_settings (org_id) VALUES (@orgId)", new { orgId });
 
-        var packageId = Guid.NewGuid().ToString("N");
+        string packageId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES (@id, @orgId, @eco, @name, @name, 1)",
             new { id = packageId, orgId, eco = ecosystem, name });
 
-        var versionId = Guid.NewGuid().ToString("N");
-        var purl = $"pkg:{ecosystem}/{name}@{version}";
+        string versionId = Guid.NewGuid().ToString("N");
+        string purl = $"pkg:{ecosystem}/{name}@{version}";
         await conn.ExecuteAsync(
             """
             INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin, deprecated, deprecation_checked_at)
@@ -439,22 +476,34 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             new { orgId, flag = airGapped ? 1 : 0 });
     }
 
-    // Builds an npm packument JSON with controlled deprecated values per version.
-    private static string NpmPackument(string name, Dictionary<string, string?> deprecatedByVersion)
+    // Builds an npm packument JSON with controlled deprecated values per version and an optional
+    // dist-tags.latest claim.
+    private static string NpmPackument(string name, Dictionary<string, string?> deprecatedByVersion, string? latest = null)
     {
         var versions = new Dictionary<string, object>();
         foreach (var (ver, dep) in deprecatedByVersion)
         {
             if (dep is not null)
+            {
                 versions[ver] = new { deprecated = dep, name, version = ver };
+            }
             else
+            {
                 versions[ver] = new { name, version = ver };
+            }
         }
-        return JsonSerializer.Serialize(new { name, versions });
+        var root = new Dictionary<string, object?> { ["name"] = name, ["versions"] = versions };
+        if (latest is not null)
+        {
+            root["dist-tags"] = new Dictionary<string, object?> { ["latest"] = latest };
+        }
+
+        return JsonSerializer.Serialize(root);
     }
 
-    // Builds a PyPI project JSON with controlled yanked state per release.
-    private static string PyPiJson(string name, Dictionary<string, (bool Yanked, string? Reason)> releases)
+    // Builds a PyPI project JSON with controlled yanked state per release and an optional
+    // info.version (PyPI's latest release) claim.
+    private static string PyPiJson(string name, Dictionary<string, (bool Yanked, string? Reason)> releases, string? latest = null)
     {
         var releaseMap = new Dictionary<string, object[]>();
         foreach (var (ver, (yanked, reason)) in releases)
@@ -469,7 +518,13 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
                 }
             };
         }
-        return JsonSerializer.Serialize(new { info = new { name }, releases = releaseMap });
+        var info = new Dictionary<string, object?> { ["name"] = name };
+        if (latest is not null)
+        {
+            info["version"] = latest;
+        }
+
+        return JsonSerializer.Serialize(new { info, releases = releaseMap });
     }
 
     private sealed class FixedResponseHandler : HttpMessageHandler

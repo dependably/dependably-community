@@ -3,7 +3,7 @@ using Dapper;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
-using Xunit;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Tests.Unit.Storage;
 
@@ -24,10 +24,10 @@ public sealed class RpmRepodataServicePrimaryTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task BuildPrimaryAsync_NoRows_ReturnsEmptyMetadataDocument()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
-        var svc = new RpmRepodataService(_fixture.Store);
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance);
 
-        var xml = await svc.BuildPrimaryAsync(orgId, CancellationToken.None);
+        string xml = await svc.BuildPrimaryAsync(orgId, CancellationToken.None);
 
         var doc = XDocument.Parse(xml);
         XNamespace common = "http://linux.duke.edu/metadata/common";
@@ -40,11 +40,11 @@ public sealed class RpmRepodataServicePrimaryTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task BuildPrimaryAsync_WithRow_RendersPackageWithIntegerFields()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
-        var pkgId = await PackageSeeder.InsertAsync(
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(
             _fixture.Store, orgId, "rpm", "hello",
             purlName: "hello");
-        var pvId = await PackageSeeder.InsertVersionAsync(
+        string pvId = await PackageSeeder.InsertVersionAsync(
             _fixture.Store, pkgId,
             version: "2.10-1.el9",
             purl: "pkg:rpm/hello@2.10-1.el9?arch=x86_64",
@@ -54,9 +54,9 @@ public sealed class RpmRepodataServicePrimaryTests : IClassFixture<InMemoryDbFix
 
         await InsertRpmMetadataAsync(pvId);
 
-        var svc = new RpmRepodataService(_fixture.Store);
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance);
 
-        var xml = await svc.BuildPrimaryAsync(orgId, CancellationToken.None);
+        string xml = await svc.BuildPrimaryAsync(orgId, CancellationToken.None);
 
         XNamespace common = "http://linux.duke.edu/metadata/common";
         XNamespace rpm = "http://linux.duke.edu/metadata/rpm";
@@ -89,24 +89,24 @@ public sealed class RpmRepodataServicePrimaryTests : IClassFixture<InMemoryDbFix
     [Fact]
     public async Task BuildPrimaryAsync_FiltersByTenant()
     {
-        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"a-{Guid.NewGuid():N}");
-        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"a-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
 
-        var pkgB = await PackageSeeder.InsertAsync(_fixture.Store, orgB, "rpm", "from-b", purlName: "from-b");
-        var pvB = await PackageSeeder.InsertVersionAsync(
+        string pkgB = await PackageSeeder.InsertAsync(_fixture.Store, orgB, "rpm", "from-b", purlName: "from-b");
+        string pvB = await PackageSeeder.InsertVersionAsync(
             _fixture.Store, pkgB,
             version: "1.0-1.el9",
             purl: "pkg:rpm/from-b@1.0-1.el9?arch=noarch",
             blobKey: "rpm/registry/from-b-1.0-1.el9.noarch.rpm");
         await InsertRpmMetadataAsync(pvB, name: "from-b", arch: "noarch");
 
-        var svc = new RpmRepodataService(_fixture.Store);
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance);
 
-        var xmlA = await svc.BuildPrimaryAsync(orgA, CancellationToken.None);
+        string xmlA = await svc.BuildPrimaryAsync(orgA, CancellationToken.None);
         var docA = XDocument.Parse(xmlA);
         Assert.Equal("0", docA.Root!.Attribute("packages")!.Value);
 
-        var xmlB = await svc.BuildPrimaryAsync(orgB, CancellationToken.None);
+        string xmlB = await svc.BuildPrimaryAsync(orgB, CancellationToken.None);
         var docB = XDocument.Parse(xmlB);
         Assert.Equal("1", docB.Root!.Attribute("packages")!.Value);
     }

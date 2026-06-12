@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using Microsoft.Extensions.DependencyInjection;
 using Serilog;
 using Serilog.Context;
 
@@ -78,7 +77,9 @@ public sealed class BackgroundJobScope : IDisposable
         _activity?.SetTag("dependably.outcome", outcome);
         _activity?.SetStatus(ActivityStatusCode.Ok);
         if (outcome == "success")
+        {
             DependablyMeter.RecordBackgroundJobSuccess(JobName);
+        }
     }
 
     public void Fail(Exception? exception = null, string outcome = "server_error")
@@ -88,14 +89,16 @@ public sealed class BackgroundJobScope : IDisposable
         _activity?.SetTag("dependably.outcome", outcome);
         _activity?.SetStatus(ActivityStatusCode.Error, exception?.Message);
         if (exception is not null)
+        {
             _activity?.AddException(exception);
+        }
     }
 
     public void Dispose()
     {
         _stopwatch.Stop();
         var finishedAt = DateTimeOffset.UtcNow;
-        var durationMs = _stopwatch.ElapsedMilliseconds;
+        long durationMs = _stopwatch.ElapsedMilliseconds;
 
         DependablyMeter.BackgroundJobDuration.Record(
             _stopwatch.Elapsed.TotalSeconds,
@@ -107,12 +110,12 @@ public sealed class BackgroundJobScope : IDisposable
         var services = Services;
         if (services is not null)
         {
-            var jobName = JobName;
-            var operation = Operation;
-            var runId = JobRunId;
+            string jobName = JobName;
+            string operation = Operation;
+            string runId = JobRunId;
             var startedAt = _startedAt;
-            var outcome = _outcome;
-            var errorMessage = _errorMessage;
+            string outcome = _outcome;
+            string? errorMessage = _errorMessage;
 
             _ = Task.Run(async () =>
             {
@@ -120,7 +123,11 @@ public sealed class BackgroundJobScope : IDisposable
                 {
                     using var scope = services.CreateScope();
                     var repo = scope.ServiceProvider.GetService<BackgroundJobRunRepository>();
-                    if (repo is null) return;
+                    if (repo is null)
+                    {
+                        return;
+                    }
+
                     await repo.RecordAsync(new BackgroundJobRunRecord(
                         Id: Guid.NewGuid().ToString("N"),
                         JobName: jobName,

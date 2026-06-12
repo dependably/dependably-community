@@ -8,7 +8,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -133,6 +132,39 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         Assert.IsType<PublishResult.Accepted>(result);
     }
 
+    [Theory]
+    [InlineData("a/b")]            // unscoped npm name with a slash
+    [InlineData("@scope/a/b")]     // scoped shape with an extra segment
+    [InlineData("@/name")]         // empty scope
+    [InlineData("@scope/")]        // empty plain segment
+    [InlineData(@"a\b")]           // backslash separator
+    public async Task NpmName_NonScopedSeparator_RejectedWith422(string badName)
+    {
+        // Only the single leading '@scope/' shape may carry a slash; anything else would
+        // inject extra segments into the hosted blob key.
+        var svc = Build();
+        var rej = Assert.IsType<PublishResult.Rejected>(
+            await svc.StoreAndRecordAsync(Sample(name: badName)));
+        Assert.Equal(422, rej.HttpStatus);
+        Assert.Equal("path_unsafe", rej.Code);
+    }
+
+    [Theory]
+    [InlineData("pypi")]
+    [InlineData("nuget")]
+    [InlineData("rpm")]
+    [InlineData("maven")]
+    public async Task NonNpmName_WithSlash_RejectedWith422(string ecosystem)
+    {
+        // The '@scope/' allowance is npm-only; every other ecosystem's name is a single
+        // blob-key segment, so any separator rejects — including the scoped-looking shape.
+        var svc = Build();
+        var req = Sample(name: "@scope/name") with { Ecosystem = ecosystem };
+        var rej = Assert.IsType<PublishResult.Rejected>(await svc.StoreAndRecordAsync(req));
+        Assert.Equal(422, rej.HttpStatus);
+        Assert.Equal("path_unsafe", rej.Code);
+    }
+
     [Fact]
     public async Task FilenameWithSlash_RejectedWith422()
     {
@@ -190,10 +222,10 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         var svc = Build();
         var first = Sample(version: "1.0.0");
         var firstResult = (PublishResult.Accepted)await svc.StoreAndRecordAsync(first);
-        var firstHash = firstResult.Sha256;
+        string firstHash = firstResult.Sha256;
 
         // Different bytes → different hash → real overwrite.
-        var second = first with { ArtifactBytes = new byte[]{ 1, 2, 3, 4, 5 }, AllowOverwrite = true };
+        var second = first with { ArtifactBytes = new byte[] { 1, 2, 3, 4, 5 }, AllowOverwrite = true };
         var secondResult = await svc.StoreAndRecordAsync(second);
         var accepted = Assert.IsType<PublishResult.Accepted>(secondResult);
 
@@ -220,7 +252,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(req));
 
         await using var conn = await _db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE org_id = 'o1' AND action = 'package.replace' AND purl LIKE '%fresh-pkg%'");
         Assert.Equal(0, count);
     }
@@ -235,7 +267,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         await svc.StoreAndRecordAsync(Sample(version: "10.0.0") with { AuditAction = "import", AuditDetail = "{\"batch_id\":\"b1\"}" });
 
         await using var conn = await _db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE org_id = 'o1' AND action = 'import' AND purl LIKE 'pkg:npm/lodash@10.%'");
         Assert.Equal(0, auditCount);
 
@@ -259,7 +291,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         Assert.Contains("pkg:npm/internal-thing@0.0.1", _osv.QueriedPurls);
 
         await using var conn = await _db.OpenAsync();
-        var checkedAt = await conn.ExecuteScalarAsync<string?>(
+        string? checkedAt = await conn.ExecuteScalarAsync<string?>(
             "SELECT vuln_checked_at FROM package_versions WHERE id = @id", new { id = result.VersionId });
         Assert.NotNull(checkedAt);
     }
@@ -294,7 +326,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
 
         // No version row must have been written.
         await using var conn = await _db.OpenAsync();
-        var versionCount = await conn.ExecuteScalarAsync<long>(
+        long versionCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM package_versions WHERE purl = 'pkg:npm/lodash@1.0.0'");
         Assert.Equal(0, versionCount);
     }
@@ -313,7 +345,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
 
         // No package version row should have been written.
         await using var conn = await _db.OpenAsync();
-        var versionCount = await conn.ExecuteScalarAsync<long>(
+        long versionCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM package_versions");
         Assert.Equal(0, versionCount);
     }
@@ -406,6 +438,53 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         Assert.Equal("tenant_quota_exceeded", rej.Code);
     }
 
+    [Fact]
+    public async Task Quota_InstanceDefault_AppliesWhenTenantHasNoOverride()
+    {
+        // Instance-level default_storage_quota_bytes blocks a tenant with no explicit cap
+        // when the combined usage would exceed the instance default.
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO instance_settings (key, value) VALUES ('default_storage_quota_bytes', '1000') ON CONFLICT(key) DO UPDATE SET value = '1000'");
+
+        var svc = Build();
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(Sample(name: "a", version: "1.0.0", size: 600)));
+        var second = await svc.StoreAndRecordAsync(Sample(name: "b", version: "1.0.0", size: 600));
+
+        var rej = Assert.IsType<PublishResult.Rejected>(second);
+        Assert.Equal(413, rej.HttpStatus);
+        Assert.Equal("tenant_quota_exceeded", rej.Code);
+    }
+
+    [Fact]
+    public async Task Quota_TenantExplicitOverridesInstanceDefault()
+    {
+        // Tenant-set quota takes precedence: tenant is 5000 bytes while instance default is
+        // only 200. The publish must use the tenant-specific cap.
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO instance_settings (key, value) VALUES ('default_storage_quota_bytes', '200') ON CONFLICT(key) DO UPDATE SET value = '200'");
+
+        var orgs = new OrgRepository(_db);
+        await orgs.SetStorageQuotaBytesAsync("o1", 5_000);
+
+        var svc = Build();
+        // 3 × 600-byte publishes = 1800 bytes — over the 200-byte instance default but
+        // under the 5000-byte tenant override. All three must be accepted.
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(Sample(name: "a", version: "1.0.0", size: 600)));
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(Sample(name: "b", version: "1.0.0", size: 600)));
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(Sample(name: "c", version: "1.0.0", size: 600)));
+    }
+
+    [Fact]
+    public async Task Quota_NoInstanceDefault_UnlimitedWhenTenantAlsoUnset()
+    {
+        // Neither instance nor tenant quota set — must remain unlimited (back-compat).
+        var svc = Build();
+        var result = await svc.StoreAndRecordAsync(Sample(version: "1.0.0", size: 50_000_000));
+        Assert.IsType<PublishResult.Accepted>(result);
+    }
+
     // ── Transactional compensation on metadata failure ──────────────────────────
 
     // ── Path-safety branches inside Name / PurlName ─────────────────────────────
@@ -468,7 +547,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
 
         // The version row for 2.0.0 must NOT have been created.
         await using var conn = await _db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM package_versions WHERE purl = 'pkg:npm/lodash@2.0.0'");
         Assert.Equal(0, count);
     }
@@ -556,7 +635,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         }
 
         var svc = Build();
-        var blobKey = BlobKeys.Hosted("o1", "npm", "lodash", "1.0.0", "lodash-1.0.0.tgz");
+        string blobKey = BlobKeys.Hosted("o1", "npm", "lodash", "1.0.0", "lodash-1.0.0.tgz");
 
         await Assert.ThrowsAnyAsync<Exception>(() => svc.StoreAndRecordAsync(Sample()));
 
@@ -608,6 +687,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         public DeleteThrowingBlobStore(IBlobStore inner) { _inner = inner; }
         public Task PutAsync(string key, Stream data, CancellationToken ct = default) => _inner.PutAsync(key, data, ct);
         public Task<Stream?> GetAsync(string key, CancellationToken ct = default) => _inner.GetAsync(key, ct);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default) => _inner.GetRangeAsync(key, from, to, ct);
         public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => _inner.ExistsAsync(key, ct);
         public Task DeleteAsync(string key, CancellationToken ct = default)
         {
@@ -647,6 +727,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             await _inner.PutAsync(key, data, ct);
         }
         public Task<Stream?> GetAsync(string key, CancellationToken ct = default) => _inner.GetAsync(key, ct);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default) => _inner.GetRangeAsync(key, from, to, ct);
         public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => _inner.ExistsAsync(key, ct);
         public Task DeleteAsync(string key, CancellationToken ct = default)
         {

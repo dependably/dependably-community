@@ -19,6 +19,7 @@
   import Setup from './pages/Setup.svelte'
   import Upload from './pages/Upload.svelte'
   import Vulnerabilities from './pages/Vulnerabilities.svelte'
+  import Quarantine from './pages/Quarantine.svelte'
   import LicensePolicy from './pages/LicensePolicy.svelte'
   import Dashboard from './pages/Dashboard.svelte'
   import Profile from './pages/Profile.svelte'
@@ -95,9 +96,11 @@
     }
 
     // Single replacing navigate seats URL + state + store with no flicker, no extra entry.
-    // saml-test-result: preserve the backend's query params (?email, ?nameid, ?error, ?detail)
-    // because SamlTestResult.svelte reads them from window.location.search on mount.
-    navigate(finalPage, finalParams, { replace: true, preserveSearch: finalPage === 'saml-test-result' })
+    // The query string is preserved whenever the user lands on the page they asked for:
+    // list pages hydrate their table state from it, and saml-test-result/join read their
+    // params from window.location.search on mount. Redirected landings (login bounce,
+    // dashboard fallback) get a clean URL.
+    navigate(finalPage, finalParams, { replace: true, preserveSearch: finalPage === intended.page })
 
     // popstate: read state if present (set by our own pushState/replaceState calls); fall back
     // to URL-derived route when state is null (hard reloads, manual URL entry, some cross-origin
@@ -164,6 +167,7 @@
           <button class="nav-link" class:active={$route.page === 'license-policy'} on:click={() => navigate('license-policy')}>{$t('nav.licensePolicy')}</button>
           <button class="nav-link" class:active={$route.page === 'tokens'} on:click={() => navigate('tokens')}>{$t('nav.tokens')}</button>
           {#if $user?.role === 'admin' || $user?.role === 'owner'}
+            <button class="nav-link" class:active={$route.page === 'quarantine'} on:click={() => navigate('quarantine')}>{$t('nav.quarantine')}</button>
             <button class="nav-link" class:active={$route.page === 'users'} on:click={() => navigate('users')}>{$t('nav.users')}</button>
             <button class="nav-link" class:active={$route.page === 'audit'} on:click={() => navigate('audit')}>{$t('nav.audit')}</button>
             <button class="nav-link" class:active={$route.page === 'upload'} on:click={() => navigate('upload')}>{$t('nav.upload')}</button>
@@ -213,6 +217,8 @@
         <Upload />
       {:else if $route.page === 'vulnerabilities'}
         <Vulnerabilities />
+      {:else if $route.page === 'quarantine'}
+        <Quarantine />
       {:else if $route.page === 'license-policy'}
         <LicensePolicy />
       {:else if $route.page === 'profile'}

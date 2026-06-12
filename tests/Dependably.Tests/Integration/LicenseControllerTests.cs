@@ -6,7 +6,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -20,7 +19,7 @@ public sealed class LicenseControllerTests : IClassFixture<DependablyFactory>, I
 
     private async Task<HttpClient> AdminClient()
     {
-        var jwt = await _factory.CreateAdminJwt();
+        string jwt = await _factory.CreateAdminJwt();
         var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         return c;
@@ -29,8 +28,8 @@ public sealed class LicenseControllerTests : IClassFixture<DependablyFactory>, I
     private async Task<HttpClient> MemberClient()
     {
         // Members can read policy + lists, but cannot write.
-        var id = await _factory.CreateUser($"licm-{Guid.NewGuid():N}@example.com", "Password12345");
-        var jwt = await _factory.CreateUserJwt(id, "member");
+        string id = await _factory.CreateUser($"licm-{Guid.NewGuid():N}@example.com", "Password12345");
+        string jwt = await _factory.CreateUserJwt(id, "member");
         return _factory.CreateClientWithBearer(jwt);
     }
 
@@ -84,7 +83,7 @@ public sealed class LicenseControllerTests : IClassFixture<DependablyFactory>, I
         // Audit row written.
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'license_policy_mode_changed'");
         Assert.True(count >= 1);
     }
@@ -111,7 +110,7 @@ public sealed class LicenseControllerTests : IClassFixture<DependablyFactory>, I
     public async Task Allowlist_AddListRemove_RoundTrip()
     {
         using var c = await AdminClient();
-        var spdx = $"MIT-{Guid.NewGuid():N}".Substring(0, 12);
+        string spdx = $"MIT-{Guid.NewGuid():N}"[..12];
 
         var add = await c.PostAsJsonAsync("/api/v1/license-policy/allowlist", new { licenseSpdx = spdx });
         Assert.Equal(HttpStatusCode.Created, add.StatusCode);
@@ -134,7 +133,7 @@ public sealed class LicenseControllerTests : IClassFixture<DependablyFactory>, I
     public async Task Allowlist_AddDuplicate_Returns409()
     {
         using var c = await AdminClient();
-        var spdx = $"Apache-{Guid.NewGuid():N}".Substring(0, 15);
+        string spdx = $"Apache-{Guid.NewGuid():N}"[..15];
 
         var first = await c.PostAsJsonAsync("/api/v1/license-policy/allowlist", new { licenseSpdx = spdx });
         first.EnsureSuccessStatusCode();
@@ -164,7 +163,7 @@ public sealed class LicenseControllerTests : IClassFixture<DependablyFactory>, I
     public async Task Blocklist_AddListRemove_RoundTrip()
     {
         using var c = await AdminClient();
-        var spdx = $"WTFPL-{Guid.NewGuid():N}".Substring(0, 12);
+        string spdx = $"WTFPL-{Guid.NewGuid():N}"[..12];
 
         var add = await c.PostAsJsonAsync("/api/v1/license-policy/blocklist", new { licenseSpdx = spdx });
         Assert.Equal(HttpStatusCode.Created, add.StatusCode);
@@ -183,7 +182,7 @@ public sealed class LicenseControllerTests : IClassFixture<DependablyFactory>, I
     public async Task Blocklist_AddDuplicate_Returns409()
     {
         using var c = await AdminClient();
-        var spdx = $"BSD-{Guid.NewGuid():N}".Substring(0, 10);
+        string spdx = $"BSD-{Guid.NewGuid():N}"[..10];
         var first = await c.PostAsJsonAsync("/api/v1/license-policy/blocklist", new { licenseSpdx = spdx });
         first.EnsureSuccessStatusCode();
         var second = await c.PostAsJsonAsync("/api/v1/license-policy/blocklist", new { licenseSpdx = spdx });
@@ -203,8 +202,8 @@ public sealed class LicenseControllerTests : IClassFixture<DependablyFactory>, I
     {
         // After a write, GET /license-policy includes the new rows in the aggregated view.
         using var c = await AdminClient();
-        var allow = $"ZLIB-{Guid.NewGuid():N}".Substring(0, 12);
-        var block = $"AGPL-{Guid.NewGuid():N}".Substring(0, 12);
+        string allow = $"ZLIB-{Guid.NewGuid():N}"[..12];
+        string block = $"AGPL-{Guid.NewGuid():N}"[..12];
 
         (await c.PostAsJsonAsync("/api/v1/license-policy/allowlist", new { licenseSpdx = allow })).EnsureSuccessStatusCode();
         (await c.PostAsJsonAsync("/api/v1/license-policy/blocklist", new { licenseSpdx = block })).EnsureSuccessStatusCode();

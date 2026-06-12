@@ -4,7 +4,6 @@ using Dependably.Infrastructure;
 using Dependably.Security;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -32,7 +31,10 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
     {
         var ctx = new DefaultHttpContext();
         if (authHeader is not null)
+        {
             ctx.Request.Headers.Authorization = authHeader;
+        }
+
         return ctx.Request;
     }
 
@@ -89,7 +91,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
     {
         // Base64 decodes cleanly but the decoded payload has no ':' separator —
         // colonIdx is -1, raw stays null, IsNullOrEmpty returns null.
-        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes("nocolonhere"));
+        string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes("nocolonhere"));
         var req = RequestWithAuth($"Basic {encoded}");
         var result = await req.ResolveTokenAsync(_tokens);
         Assert.Null(result);
@@ -100,7 +102,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
     {
         // "user:" decodes to a present colon at index 4 but raw substring is "" —
         // IsNullOrEmpty trips and we return null without a repo call.
-        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes("user:"));
+        string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes("user:"));
         var req = RequestWithAuth($"Basic {encoded}");
         var result = await req.ResolveTokenAsync(_tokens);
         Assert.Null(result);
@@ -110,7 +112,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
     public async Task ResolveTokenAsync_BasicCaseInsensitiveSchemePrefix_ParsesCorrectly()
     {
         // "basic" lowercase must still parse — StringComparison.OrdinalIgnoreCase.
-        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes("user:unknown-token-xyz"));
+        string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes("user:unknown-token-xyz"));
         var req = RequestWithAuth($"basic {encoded}");
         var result = await req.ResolveTokenAsync(_tokens);
         Assert.Null(result); // repo returns null for unknown token, but the scheme parsed
@@ -123,8 +125,8 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
         // confirm the repo lookup returns it. Exercises the final
         // `await tokens.ResolveAsync(raw, ct)` line.
         const string rawToken = "raw-user-token-abcdef";
-        var hash = TokenRepository.HashToken(rawToken);
-        var tokenId = Guid.NewGuid().ToString("N");
+        string hash = TokenRepository.HashToken(rawToken);
+        string tokenId = Guid.NewGuid().ToString("N");
         await using (var conn = await _db.OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -163,7 +165,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
         // different tenant — the "cross-tenant token presented" branch. We seed for
         // org-unit and ask for org-other.
         const string rawToken = "raw-cross-tenant-token";
-        var hash = TokenRepository.HashToken(rawToken);
+        string hash = TokenRepository.HashToken(rawToken);
         await using (var conn = await _db.OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -208,8 +210,8 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
         // /tokens UI can show operators when each token was last actually used. Failure
         // paths (covered above) must NOT touch the row.
         const string rawToken = "raw-touch-token";
-        var hash = TokenRepository.HashToken(rawToken);
-        var tokenId = Guid.NewGuid().ToString("N");
+        string hash = TokenRepository.HashToken(rawToken);
+        string tokenId = Guid.NewGuid().ToString("N");
         await using (var conn = await _db.OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -224,7 +226,10 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
                 """,
                 new
                 {
-                    id = tokenId, org = "org-touch", user = "user-touch", hash,
+                    id = tokenId,
+                    org = "org-touch",
+                    user = "user-touch",
+                    hash,
                     caps = """["read:metadata"]""",
                     createdAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 });
@@ -256,8 +261,8 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
     {
         // The positive branch of the org check — token resolves AND OrgId matches.
         const string rawToken = "raw-org-match-token";
-        var hash = TokenRepository.HashToken(rawToken);
-        var tokenId = Guid.NewGuid().ToString("N");
+        string hash = TokenRepository.HashToken(rawToken);
+        string tokenId = Guid.NewGuid().ToString("N");
         await using (var conn = await _db.OpenAsync())
         {
             await conn.ExecuteAsync(

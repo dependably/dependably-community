@@ -1,4 +1,3 @@
-using System.Net;
 using System.Text.Json;
 using NetTools;
 
@@ -56,13 +55,17 @@ public sealed class MetricsAccessConfig
     public async Task<ResolvedConfig> ResolveAsync(CancellationToken ct = default)
     {
         if (_cached is not null && DateTimeOffset.UtcNow < _expiry)
+        {
             return _cached;
+        }
 
         await _lock.WaitAsync(ct);
         try
         {
             if (_cached is not null && DateTimeOffset.UtcNow < _expiry)
+            {
                 return _cached;
+            }
 
             var resolved = await ResolveFromSourcesAsync(ct);
             _cached = resolved;
@@ -88,8 +91,8 @@ public sealed class MetricsAccessConfig
 
     private async Task<ResolvedConfig> ResolveFromSourcesAsync(CancellationToken ct)
     {
-        var envEnabled = _config["METRICS_ENABLED"];
-        var envAllowlist = _config["METRICS_ALLOWED_IPS"];
+        string? envEnabled = _config["METRICS_ENABLED"];
+        string? envAllowlist = _config["METRICS_ALLOWED_IPS"];
 
         bool enabled;
         Source enabledSource;
@@ -100,7 +103,7 @@ public sealed class MetricsAccessConfig
         }
         else
         {
-            var dbEnabled = await _instanceSettingReader("metrics_enabled", ct);
+            string? dbEnabled = await _instanceSettingReader("metrics_enabled", ct);
             if (dbEnabled is not null)
             {
                 enabled = ParseBool(dbEnabled, fallback: true);
@@ -122,7 +125,7 @@ public sealed class MetricsAccessConfig
         }
         else
         {
-            var dbAllowlist = await _instanceSettingReader("metrics_allowed_ips", ct);
+            string? dbAllowlist = await _instanceSettingReader("metrics_allowed_ips", ct);
             if (dbAllowlist is not null && TryParseJsonArray(dbAllowlist, out var parsed))
             {
                 rawList = parsed;
@@ -140,10 +143,12 @@ public sealed class MetricsAccessConfig
         // (which rejects malformed CIDRs before they reach the DB) to
         // keep the source data clean.
         var parsedRanges = new List<IPAddressRange>(rawList.Count);
-        foreach (var raw in rawList)
+        foreach (string raw in rawList)
         {
             if (IPAddressRange.TryParse(raw, out var range))
+            {
                 parsedRanges.Add(range);
+            }
         }
 
         return new ResolvedConfig(
@@ -170,7 +175,7 @@ public sealed class MetricsAccessConfig
     {
         try
         {
-            var arr = JsonSerializer.Deserialize<string[]>(json);
+            string[]? arr = JsonSerializer.Deserialize<string[]>(json);
             if (arr is null)
             {
                 values = Array.Empty<string>();

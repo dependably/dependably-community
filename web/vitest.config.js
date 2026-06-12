@@ -20,6 +20,12 @@ export default defineConfig({
         '../build/extract-notices.mjs',
         '../i18n/scripts/i18n-validate.js',
       ],
+      thresholds: {
+        lines: 50,
+        branches: 50,
+        functions: 50,
+        statements: 50,
+      },
     },
   },
 })

@@ -3,7 +3,6 @@ using Dependably.Api;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Mvc;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 

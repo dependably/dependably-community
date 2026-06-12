@@ -2,7 +2,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -38,8 +37,10 @@ public sealed class ActivityWriterTests : IAsyncLifetime
     public void TryEnqueue_AtCapacity_DropsRecord_ReturnsFalse()
     {
         var writer = new ActivityWriter();
-        for (var i = 0; i < ActivityWriter.ChannelCapacity; i++)
+        for (int i = 0; i < ActivityWriter.ChannelCapacity; i++)
+        {
             Assert.True(writer.TryEnqueue(Record($"event-{i}")));
+        }
 
         Assert.False(writer.TryEnqueue(Record("overflow")));
     }
@@ -54,7 +55,7 @@ public sealed class ActivityWriterTests : IAsyncLifetime
 
         // Row should not be in the DB yet — the writer holds it until the drainer flushes.
         await using var conn = await _db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM activity");
+        int count = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM activity");
         Assert.Equal(0, count);
     }
 
@@ -67,7 +68,7 @@ public sealed class ActivityWriterTests : IAsyncLifetime
         await repo.LogActivityAsync("o1", "pypi", "pkg:pypi/foo@1", "download");
 
         await using var conn = await _db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM activity");
+        int count = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM activity");
         Assert.Equal(1, count);
     }
 
@@ -79,13 +80,15 @@ public sealed class ActivityWriterTests : IAsyncLifetime
         var service = new ActivityWriterHostedService(writer, _db,
             NullLogger<ActivityWriterHostedService>.Instance);
 
-        for (var i = 0; i < 50; i++)
+        for (int i = 0; i < 50; i++)
+        {
             await repo.LogActivityAsync("o1", "pypi", $"pkg:pypi/foo@{i}", "download");
+        }
 
         await service.DrainPendingAsync();
 
         await using var conn = await _db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM activity");
+        int count = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM activity");
         Assert.Equal(50, count);
     }
 
@@ -99,13 +102,15 @@ public sealed class ActivityWriterTests : IAsyncLifetime
         var service = new ActivityWriterHostedService(writer, _db,
             NullLogger<ActivityWriterHostedService>.Instance);
 
-        for (var i = 0; i < 250; i++)
+        for (int i = 0; i < 250; i++)
+        {
             await repo.LogActivityAsync("o1", "pypi", $"pkg:pypi/foo@{i}", "download");
+        }
 
         await service.DrainPendingAsync();
 
         await using var conn = await _db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM activity");
+        int count = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM activity");
         Assert.Equal(250, count);
     }
 

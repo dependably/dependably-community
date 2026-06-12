@@ -1,5 +1,4 @@
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -21,7 +20,7 @@ public sealed class Sha256SumsParserTests
     [Fact]
     public void TwoSpaceSeparator_CanonicalForm()
     {
-        var text = """
+        string text = """
             abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789  acme-1.0.0.tgz
             0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  bravo-2.0.0.tar.gz
             """;
@@ -36,7 +35,7 @@ public sealed class Sha256SumsParserTests
     [Fact]
     public void TabSeparator_AlsoAccepted()
     {
-        var text = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\tacme.nupkg";
+        string text = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\tacme.nupkg";
         var map = Sha256SumsParser.Parse(text);
         Assert.Equal("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
             map["acme.nupkg"]);
@@ -45,7 +44,7 @@ public sealed class Sha256SumsParserTests
     [Fact]
     public void FilenameWithSpaces_PreservedAfterFirstSeparator()
     {
-        var text = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789  weird name.whl";
+        string text = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789  weird name.whl";
         var map = Sha256SumsParser.Parse(text);
         Assert.Equal("weird name.whl", map.Keys.Single());
     }
@@ -53,7 +52,7 @@ public sealed class Sha256SumsParserTests
     [Fact]
     public void CommentLines_Skipped()
     {
-        var text = """
+        string text = """
             # this is a comment
             abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789  acme.tgz
             # another comment
@@ -65,7 +64,7 @@ public sealed class Sha256SumsParserTests
     [Fact]
     public void DigestLowercased()
     {
-        var text = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789  upper.tgz";
+        string text = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789  upper.tgz";
         var map = Sha256SumsParser.Parse(text);
         Assert.Equal("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
             map["upper.tgz"]);

@@ -8,7 +8,8 @@ using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Xunit;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -46,9 +47,10 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
         var packages = new PackageRepository(_db);
         var audit = new AuditRepository(_db);
         var orgs = new OrgRepository(_db);
-        var repodata = new RpmRepodataService(_db);
+        var repodata = new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance);
         var svc = new RpmControllerServices(packages, _tokens, audit, orgs, new TieredBlobStorage(_blobs, _blobs), _db, repodata,
-            new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db)));
+            new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db)),
+            new MemoryCache(new MemoryCacheOptions()));
         _controller = new RpmController(svc)
         {
             ControllerContext = BuildContext(_orgId),
@@ -68,8 +70,8 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
         // The happy path: a syntactically-valid RPM uploaded with a Bearer token whose
         // OrgId matches the tenant binding. Drives the full insert pipeline:
         // packages → package_versions → rpm_metadata → rpm_repodata_state (dirty).
-        var raw = await SeedUserTokenAsync(_orgId);
-        var bytes = BuildRpm(name: "zlib", version: "1.2.11", release: "39.el9", arch: "x86_64");
+        string raw = await SeedUserTokenAsync(_orgId);
+        byte[] bytes = BuildRpm(name: "zlib", version: "1.2.11", release: "39.el9", arch: "x86_64");
         SetBody(bytes, $"Bearer {raw}");
 
         var result = await _controller.Upload(CancellationToken.None);
@@ -80,15 +82,15 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
             _controller.Response.Headers["X-Dependably-PURL"]);
 
         await using var conn = await _db.OpenAsync();
-        var pv = await conn.ExecuteScalarAsync<long>(
+        long pv = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM package_versions WHERE version = @v",
             new { v = "1.2.11-39.el9" });
         Assert.Equal(1, pv);
-        var rpm = await conn.ExecuteScalarAsync<long>(
+        long rpm = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM rpm_metadata WHERE rpm_name = @n",
             new { n = "zlib" });
         Assert.Equal(1, rpm);
-        var dirty = await conn.ExecuteScalarAsync<long>(
+        long dirty = await conn.ExecuteScalarAsync<long>(
             "SELECT dirty FROM rpm_repodata_state WHERE org_id = @o AND arch = 'x86_64'",
             new { o = _orgId });
         Assert.Equal(1, dirty);
@@ -97,7 +99,7 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
     [Fact]
     public async Task Upload_NoToken_Returns401AndWwwAuthenticate()
     {
-        var bytes = BuildRpm("foo", "1.0", "1", "x86_64");
+        byte[] bytes = BuildRpm("foo", "1.0", "1", "x86_64");
         SetBody(bytes, authHeader: null);
 
         var result = await _controller.Upload(CancellationToken.None);
@@ -112,14 +114,14 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
         // Cross-tenant token presented: ResolveTokenAsync(orgId, ...) returns null when
         // the token's OrgId doesn't match — the controller treats that as no auth and
         // returns 401 with the WWW-Authenticate hint.
-        var otherOrgId = Guid.NewGuid().ToString("N");
+        string otherOrgId = Guid.NewGuid().ToString("N");
         await using (var conn = await _db.OpenAsync())
         {
             await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES (@id, 'other-rpm')",
                 new { id = otherOrgId });
         }
-        var raw = await SeedUserTokenAsync(otherOrgId);
-        var bytes = BuildRpm("foo", "1.0", "1", "x86_64");
+        string raw = await SeedUserTokenAsync(otherOrgId);
+        byte[] bytes = BuildRpm("foo", "1.0", "1", "x86_64");
         SetBody(bytes, $"Bearer {raw}");
 
         var result = await _controller.Upload(CancellationToken.None);
@@ -132,7 +134,7 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
     {
         // Body smaller than RpmArtifactValidator.MinimumValidSize is rejected at the
         // explicit size guard — no parse exception ever fires.
-        var raw = await SeedUserTokenAsync(_orgId);
+        string raw = await SeedUserTokenAsync(_orgId);
         SetBody(new byte[10], $"Bearer {raw}");
 
         var result = await _controller.Upload(CancellationToken.None);
@@ -145,7 +147,7 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
     {
         // Body is large enough to pass the size gate but the parser rejects it for bad
         // lead-magic — the controller surfaces the RpmParseException message as 400.
-        var raw = await SeedUserTokenAsync(_orgId);
+        string raw = await SeedUserTokenAsync(_orgId);
         SetBody(new byte[256], $"Bearer {raw}");
 
         var result = await _controller.Upload(CancellationToken.None);
@@ -163,8 +165,8 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
                 "UPDATE org_settings SET max_upload_bytes_rpm = 50 WHERE org_id = @o",
                 new { o = _orgId });
         }
-        var raw = await SeedUserTokenAsync(_orgId);
-        var bytes = BuildRpm("foo", "1.0", "1", "x86_64");
+        string raw = await SeedUserTokenAsync(_orgId);
+        byte[] bytes = BuildRpm("foo", "1.0", "1", "x86_64");
         SetBody(bytes, $"Bearer {raw}");
 
         var result = await _controller.Upload(CancellationToken.None);
@@ -178,8 +180,8 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
     {
         // The second upload binds to the existing package_versions row via the
         // SELECT id check; rpm_metadata uses ON CONFLICT(package_version_id) DO UPDATE.
-        var raw = await SeedUserTokenAsync(_orgId);
-        var bytes = BuildRpm("zlib", "1.2.11", "39.el9", "x86_64");
+        string raw = await SeedUserTokenAsync(_orgId);
+        byte[] bytes = BuildRpm("zlib", "1.2.11", "39.el9", "x86_64");
         SetBody(bytes, $"Bearer {raw}");
         var first = await _controller.Upload(CancellationToken.None);
         Assert.Equal(201, ((StatusCodeResult)first).StatusCode);
@@ -193,7 +195,7 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
         Assert.Equal(201, ((StatusCodeResult)second).StatusCode);
 
         await using var conn = await _db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM package_versions WHERE version = '1.2.11-39.el9'");
         Assert.Equal(1, count);
     }
@@ -266,7 +268,7 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
         // Round-trip: stash the bytes under the same blob_key we seeded the version with
         // and confirm the FileStreamResult carries the right content type + filename.
         const string filename = "zlib-1.2.11-39.el9.x86_64.rpm";
-        var blobKey = await SeedPackageVersionAsync(filename);
+        string blobKey = await SeedPackageVersionAsync(filename);
         await _blobs.PutAsync(BlobKeys.StoreKey(blobKey), new MemoryStream(new byte[] { 0xED, 0xAB }), CancellationToken.None);
         SetEmptyRequest();
 
@@ -303,11 +305,21 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Repodata_UnknownFile_Returns404()
+    public async Task Repodata_FilelistsXmlGz_Returns200WithGzipContent()
     {
-        // Anything outside repomd.xml / primary.xml.gz is not served (yet).
+        // filelists.xml.gz is now generated and served locally.
         SetEmptyRequest();
         var result = await _controller.Repodata("filelists.xml.gz", CancellationToken.None);
+        var file = Assert.IsType<FileContentResult>(result);
+        Assert.Equal("application/x-gzip", file.ContentType);
+    }
+
+    [Fact]
+    public async Task Repodata_UnknownFile_Returns404()
+    {
+        // Files outside the known repodata set are not served.
+        SetEmptyRequest();
+        var result = await _controller.Repodata("modules.yaml.gz", CancellationToken.None);
         Assert.IsType<NotFoundResult>(result);
     }
 
@@ -328,7 +340,10 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
         var req = _controller.Request;
         req.Body = new MemoryStream(bytes);
         req.ContentLength = bytes.Length;
-        if (authHeader is not null) req.Headers.Authorization = authHeader;
+        if (authHeader is not null)
+        {
+            req.Headers.Authorization = authHeader;
+        }
     }
 
     private void SetEmptyRequest()
@@ -338,9 +353,9 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
 
     private async Task<string> SeedUserTokenAsync(string orgId)
     {
-        var raw = $"raw-{Guid.NewGuid():N}";
-        var hash = TokenRepository.HashToken(raw);
-        var userId = Guid.NewGuid().ToString("N");
+        string raw = $"raw-{Guid.NewGuid():N}";
+        string hash = TokenRepository.HashToken(raw);
+        string userId = Guid.NewGuid().ToString("N");
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
             "INSERT INTO users (id, tenant_id, email, password_hash, role) VALUES (@id, @t, @e, 'x', 'owner')",
@@ -365,10 +380,10 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
     {
         // Builds the same package + version a real upload would, so the controller's
         // FindVersionByBlobKeySuffixAsync(file=...) hits a real row.
-        var pkgId = Guid.NewGuid().ToString("N");
-        var verId = Guid.NewGuid().ToString("N");
-        var blobKey = BlobKeys.Hosted(_orgId, "rpm", "zlib", "1.2.11-39.el9", filename);
-        var purl = $"pkg:rpm/zlib@1.2.11-39.el9?arch=x86_64";
+        string pkgId = Guid.NewGuid().ToString("N");
+        string verId = Guid.NewGuid().ToString("N");
+        string blobKey = BlobKeys.Hosted(_orgId, "rpm", "zlib", "1.2.11-39.el9", filename);
+        string purl = $"pkg:rpm/zlib@1.2.11-39.el9?arch=x86_64";
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync("""
             INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy)
@@ -394,20 +409,20 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
             RpmTagWrite.String(1022, arch),
             RpmTagWrite.Int32(1003, 0),
         };
-        var lead = new byte[96];
+        byte[] lead = new byte[96];
         lead[0] = 0xED; lead[1] = 0xAB; lead[2] = 0xEE; lead[3] = 0xDB;
         lead[4] = 3;
-        var sig = BuildHeaderIntro(0, 0);
-        var sigEnd = 96 + sig.Length;
-        var pad = new byte[(8 - (sigEnd % 8)) % 8];
+        byte[] sig = BuildHeaderIntro(0, 0);
+        int sigEnd = 96 + sig.Length;
+        byte[] pad = new byte[(8 - (sigEnd % 8)) % 8];
         var (index, store) = BuildHeader(tags);
-        var intro = BuildHeaderIntro(tags.Count, store.Length);
-        return [..lead, ..sig, ..pad, ..intro, ..index, ..store];
+        byte[] intro = BuildHeaderIntro(tags.Count, store.Length);
+        return [.. lead, .. sig, .. pad, .. intro, .. index, .. store];
     }
 
     private static byte[] BuildHeaderIntro(int nindex, int hsize)
     {
-        var b = new byte[16];
+        byte[] b = new byte[16];
         b[0] = 0x8E; b[1] = 0xAD; b[2] = 0xE8; b[3] = 0x01;
         BinaryPrimitives.WriteInt32BigEndian(b.AsSpan(8, 4), nindex);
         BinaryPrimitives.WriteInt32BigEndian(b.AsSpan(12, 4), hsize);
@@ -420,8 +435,8 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
         var store = new List<byte>();
         foreach (var t in tags)
         {
-            var offset = store.Count;
-            var b = new byte[16];
+            int offset = store.Count;
+            byte[] b = new byte[16];
             BinaryPrimitives.WriteInt32BigEndian(b.AsSpan(0, 4), t.Tag);
             BinaryPrimitives.WriteInt32BigEndian(b.AsSpan(4, 4), t.Type);
             BinaryPrimitives.WriteInt32BigEndian(b.AsSpan(8, 4), offset);
@@ -436,15 +451,15 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
     {
         public static RpmTagWrite String(int tag, string value)
         {
-            var bytes = Encoding.UTF8.GetBytes(value);
-            var withNul = new byte[bytes.Length + 1];
+            byte[] bytes = Encoding.UTF8.GetBytes(value);
+            byte[] withNul = new byte[bytes.Length + 1];
             Array.Copy(bytes, withNul, bytes.Length);
             return new RpmTagWrite(tag, 6, 1, withNul);
         }
 
         public static RpmTagWrite Int32(int tag, int value)
         {
-            var bytes = new byte[4];
+            byte[] bytes = new byte[4];
             BinaryPrimitives.WriteInt32BigEndian(bytes, value);
             return new RpmTagWrite(tag, 4, 1, bytes);
         }

@@ -1,4 +1,6 @@
 using System.Net;
+using Dependably.Infrastructure;
+using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -7,13 +9,8 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
-using Dependably.Infrastructure;
-using Dependably.Security;
-using Dependably.Storage;
-using Xunit;
-
-using IStartupFilter = Microsoft.AspNetCore.Hosting.IStartupFilter;
 using IApplicationBuilder = Microsoft.AspNetCore.Builder.IApplicationBuilder;
+using IStartupFilter = Microsoft.AspNetCore.Hosting.IStartupFilter;
 
 namespace Dependably.Tests.Integration;
 
@@ -57,7 +54,7 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
         var resp = await client.GetAsync("/metrics");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         // Prometheus exposition is `# HELP`/`# TYPE` lines followed by samples.
         // The exporter emits at least the process / GC metrics out of the box,
         // so the body must not be empty.
@@ -122,7 +119,7 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
         // is constructed, and DI does not register one as a hosted service.
         // Resolving the factory's services and confirming no OTLP exporter
         // is in the service collection covers the contract.
-        var hasOtlp = _factory.Services
+        bool hasOtlp = _factory.Services
             .GetServices<object>()
             .Any(s => s?.GetType().FullName?.Contains("Otlp", StringComparison.Ordinal) == true);
 

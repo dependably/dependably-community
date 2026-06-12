@@ -3,13 +3,29 @@
   import { t } from 'svelte-i18n'
   import { systemApi } from '../lib/api.js'
   import DataTable from '../lib/DataTable.svelte'
+  import SearchInput from '../lib/SearchInput.svelte'
+  import { readQuery, writeQuery } from '../lib/tableState.js'
+
+  // Tab + filter state lives in the URL query string so it survives route changes,
+  // reloads, and copied links. Events keys: q/action/page/limit; jobs keys: jq/job/out/jpage/jlimit.
+  const DEFAULTS = { tab: 'events', q: '', action: '', page: 1, limit: 50, jq: '', job: '', out: '', jpage: 1, jlimit: 50 }
+  const init = readQuery(DEFAULTS)
+
+  function sync() {
+    writeQuery({
+      tab: activeTab,
+      q: search, action: actionFilter, page, limit,
+      jq: jobsSearch, job: jobNameFilter, out: outcomeFilter, jpage: jobsPage, jlimit: jobsLimit,
+    }, DEFAULTS)
+  }
 
   // ── Tabs ─────────────────────────────────────────────────────────────────
-  let activeTab = 'events'                          // 'events' | 'jobs'
+  let activeTab = init.tab                          // 'events' | 'jobs'
   let jobsLoaded = false                            // lazy-load on first selection
 
   function selectTab(tab) {
     activeTab = tab
+    sync()
     if (tab === 'jobs' && !jobsLoaded) {
       jobsLoaded = true
       void loadJobs()
@@ -19,15 +35,14 @@
 
   // ── Audit Events tab ─────────────────────────────────────────────────────
   let items = [], total = 0, loading = true, error = ''
-  let page = 1
-  const limit = 50
+  let page = init.page
+  const limit = init.limit
 
-  let search = ''
-  let actionFilter = ''
+  let search = init.q
+  let actionFilter = init.action
   let sortBy = 'createdAt'
   let sortDir = 'desc'
   let actions = []                                  // distinct action values for the dropdown
-  let searchDebounce = null
 
   async function loadEvents() {
     loading = true
@@ -52,35 +67,32 @@
     } catch { /* dropdown is non-essential; leave empty on failure */ }
   }
 
-  function onSearchInput() {
-    clearTimeout(searchDebounce)
-    searchDebounce = setTimeout(() => { page = 1; loadEvents() }, 300)
-  }
+  function onSearch() { page = 1; sync(); loadEvents() }
 
-  function onFilterChange() { page = 1; loadEvents() }
+  function onFilterChange() { page = 1; sync(); loadEvents() }
 
   function onSortChangeEvents(e) {
     sortBy = e.detail.col
     sortDir = e.detail.dir
     page = 1
+    sync()
     loadEvents()
   }
 
-  function prev() { if (page > 1) { page--; loadEvents() } }
-  function next() { if (page * limit < total) { page++; loadEvents() } }
+  function prev() { if (page > 1) { page--; sync(); loadEvents() } }
+  function next() { if (page * limit < total) { page++; sync(); loadEvents() } }
 
   // ── Background Jobs tab ──────────────────────────────────────────────────
   let jobsItems = [], jobsTotal = 0, jobsLoading = false, jobsError = ''
-  let jobsPage = 1
-  const jobsLimit = 50
+  let jobsPage = init.jpage
+  const jobsLimit = init.jlimit
 
-  let jobsSearch = ''
-  let jobNameFilter = ''
-  let outcomeFilter = ''
+  let jobsSearch = init.jq
+  let jobNameFilter = init.job
+  let outcomeFilter = init.out
   let jobsSortBy = 'startedAt'
   let jobsSortDir = 'desc'
   let jobNames = [], outcomes = []
-  let jobsSearchDebounce = null
   let expandedErrorId = null
 
   async function loadJobs() {
@@ -108,22 +120,20 @@
     } catch { /* non-essential */ }
   }
 
-  function onJobsSearchInput() {
-    clearTimeout(jobsSearchDebounce)
-    jobsSearchDebounce = setTimeout(() => { jobsPage = 1; loadJobs() }, 300)
-  }
+  function onJobsSearch() { jobsPage = 1; sync(); loadJobs() }
 
-  function onJobsFilterChange() { jobsPage = 1; loadJobs() }
+  function onJobsFilterChange() { jobsPage = 1; sync(); loadJobs() }
 
   function onSortChangeJobs(e) {
     jobsSortBy = e.detail.col
     jobsSortDir = e.detail.dir
     jobsPage = 1
+    sync()
     loadJobs()
   }
 
-  function jobsPrev() { if (jobsPage > 1) { jobsPage--; loadJobs() } }
-  function jobsNext() { if (jobsPage * jobsLimit < jobsTotal) { jobsPage++; loadJobs() } }
+  function jobsPrev() { if (jobsPage > 1) { jobsPage--; sync(); loadJobs() } }
+  function jobsNext() { if (jobsPage * jobsLimit < jobsTotal) { jobsPage++; sync(); loadJobs() } }
 
   function toggleError(id) {
     expandedErrorId = expandedErrorId === id ? null : id
@@ -155,6 +165,11 @@
   onMount(() => {
     loadEvents()
     loadActions()
+    if (activeTab === 'jobs' && !jobsLoaded) {
+      jobsLoaded = true
+      void loadJobs()
+      void loadJobFacets()
+    }
   })
 
   // Server returns rows already sorted; comparators below are no-ops because the
@@ -196,13 +211,12 @@
     {#if error}<div class="page-error">{error}</div>{/if}
 
     <div class="toolbar">
-      <input
-        type="search"
+      <SearchInput
         class="table-search"
         placeholder={$t('system.audit.searchPlaceholder')}
+        ariaLabel={$t('system.audit.searchPlaceholder')}
         bind:value={search}
-        on:input={onSearchInput}
-        aria-label={$t('system.audit.searchPlaceholder')}
+        on:search={onSearch}
       />
       <select bind:value={actionFilter} on:change={onFilterChange} class="filter-select"
               aria-label={$t('system.audit.filterAction')}>
@@ -242,13 +256,12 @@
     {#if jobsError}<div class="page-error">{jobsError}</div>{/if}
 
     <div class="toolbar">
-      <input
-        type="search"
+      <SearchInput
         class="table-search"
         placeholder={$t('system.backgroundJobs.searchPlaceholder')}
+        ariaLabel={$t('system.backgroundJobs.searchPlaceholder')}
         bind:value={jobsSearch}
-        on:input={onJobsSearchInput}
-        aria-label={$t('system.backgroundJobs.searchPlaceholder')}
+        on:search={onJobsSearch}
       />
       <select bind:value={jobNameFilter} on:change={onJobsFilterChange} class="filter-select"
               aria-label={$t('system.backgroundJobs.filterJob')}>
@@ -314,15 +327,10 @@
   /* Toolbar proportions: the global `input, select, textarea { width: 100% }` rule makes flex
      children fight for the whole track. Search grows but is capped; selects size to their content. */
   .toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
-  .table-search {
+  .toolbar :global(.table-search) {
     flex: 1 1 240px; min-width: 200px; max-width: 360px;
-    padding: 6px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg);
-    color: var(--text);
-    font-size: 13px;
   }
+  .toolbar :global(.table-search input) { font-size: 13px; }
   .filter-select {
     flex: 0 0 auto; width: auto; min-width: 200px;
     padding: 6px 10px;

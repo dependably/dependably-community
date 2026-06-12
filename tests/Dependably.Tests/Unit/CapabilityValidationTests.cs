@@ -1,6 +1,5 @@
 using System.Text.Json;
 using Dependably.Security;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -14,8 +13,8 @@ public class CapabilityValidationTests
     [Fact]
     public void Null_Rejected()
     {
-        var ok = Capabilities.TryNormalizeAndAuthorize(
-            null, OwnerGrants, out _, out _, out var error, out var field);
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
+            null, OwnerGrants, out _, out _, out string? error, out string? field);
         Assert.False(ok);
         Assert.Equal("capabilities", field);
         Assert.Contains("required", error, StringComparison.OrdinalIgnoreCase);
@@ -24,8 +23,8 @@ public class CapabilityValidationTests
     [Fact]
     public void Empty_Rejected()
     {
-        var ok = Capabilities.TryNormalizeAndAuthorize(
-            Array.Empty<string>(), OwnerGrants, out _, out _, out var error, out var field);
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
+            Array.Empty<string>(), OwnerGrants, out _, out _, out string? error, out string? field);
         Assert.False(ok);
         Assert.Equal("capabilities", field);
         Assert.Contains("required", error, StringComparison.OrdinalIgnoreCase);
@@ -34,7 +33,7 @@ public class CapabilityValidationTests
     [Fact]
     public void Blank_Entry_Rejected()
     {
-        var ok = Capabilities.TryNormalizeAndAuthorize(
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
             new[] { "  " }, OwnerGrants, out _, out _, out _, out _);
         Assert.False(ok);
     }
@@ -42,9 +41,9 @@ public class CapabilityValidationTests
     [Fact]
     public void Unknown_Capability_Rejected()
     {
-        var ok = Capabilities.TryNormalizeAndAuthorize(
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
             new[] { "publish:npm", "wat:dance" }, OwnerGrants,
-            out _, out _, out var error, out var field);
+            out _, out _, out string? error, out string? field);
         Assert.False(ok);
         Assert.Equal("capabilities", field);
         Assert.Contains("wat:dance", error);
@@ -53,9 +52,9 @@ public class CapabilityValidationTests
     [Fact]
     public void Duplicate_Rejected()
     {
-        var ok = Capabilities.TryNormalizeAndAuthorize(
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
             new[] { "publish:npm", "publish:npm" }, OwnerGrants,
-            out _, out _, out var error, out var field);
+            out _, out _, out string? error, out string? field);
         Assert.False(ok);
         Assert.Equal("capabilities", field);
         Assert.Contains("Duplicate", error);
@@ -64,9 +63,9 @@ public class CapabilityValidationTests
     [Fact]
     public void Member_Cannot_Mint_Publish()
     {
-        var ok = Capabilities.TryNormalizeAndAuthorize(
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
             new[] { "publish:npm" }, MemberGrants,
-            out _, out _, out var error, out var field);
+            out _, out _, out string? error, out string? field);
         Assert.False(ok);
         Assert.Equal("capabilities", field);
         Assert.Contains("exceed your role", error);
@@ -75,12 +74,12 @@ public class CapabilityValidationTests
     [Fact]
     public void Admin_Can_Mint_Publish_But_Not_TenantAdmin()
     {
-        var ok = Capabilities.TryNormalizeAndAuthorize(
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
             new[] { "publish:npm" }, AdminGrants,
             out _, out _, out _, out _);
         Assert.True(ok);
 
-        var ok2 = Capabilities.TryNormalizeAndAuthorize(
+        bool ok2 = Capabilities.TryNormalizeAndAuthorize(
             new[] { "tenant:admin" }, AdminGrants,
             out _, out _, out _, out _);
         Assert.False(ok2);
@@ -89,9 +88,9 @@ public class CapabilityValidationTests
     [Fact]
     public void Canonical_Json_Is_Sorted()
     {
-        var ok = Capabilities.TryNormalizeAndAuthorize(
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
             new[] { "publish:npm", "read:metadata", "publish:pypi" }, OwnerGrants,
-            out var canonicalJson, out var caps, out _, out _);
+            out string? canonicalJson, out string[]? caps, out _, out _);
         Assert.True(ok);
         // Sorted ordinal: publish:npm, publish:pypi, read:metadata
         Assert.Equal(new[] { "publish:npm", "publish:pypi", "read:metadata" }, caps);
@@ -101,11 +100,11 @@ public class CapabilityValidationTests
     [Fact]
     public void Canonical_Json_Matches_Structured_Array()
     {
-        var ok = Capabilities.TryNormalizeAndAuthorize(
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
             new[] { "read:audit", "tokens:manage_own" }, OwnerGrants,
-            out var canonicalJson, out var caps, out _, out _);
+            out string? canonicalJson, out string[]? caps, out _, out _);
         Assert.True(ok);
-        var roundTrip = JsonSerializer.Deserialize<string[]>(canonicalJson);
+        string[]? roundTrip = JsonSerializer.Deserialize<string[]>(canonicalJson);
         Assert.Equal(caps, roundTrip);
     }
 
@@ -114,9 +113,9 @@ public class CapabilityValidationTests
     {
         // Even owners cannot mint a global "*" token via the request boundary; that wildcard
         // is system-internal.
-        var ok = Capabilities.TryNormalizeAndAuthorize(
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
             new[] { "*" }, OwnerGrants,
-            out _, out _, out var error, out _);
+            out _, out _, out string? error, out _);
         Assert.False(ok);
         Assert.Contains("Unknown", error);
     }
@@ -124,9 +123,9 @@ public class CapabilityValidationTests
     [Fact]
     public void Platform_Wildcard_Not_Requestable()
     {
-        var ok = Capabilities.TryNormalizeAndAuthorize(
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
             new[] { "platform:*" }, OwnerGrants,
-            out _, out _, out var error, out _);
+            out _, out _, out string? error, out _);
         Assert.False(ok);
         Assert.Contains("Unknown", error);
     }

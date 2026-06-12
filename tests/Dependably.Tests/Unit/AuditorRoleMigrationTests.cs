@@ -2,7 +2,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Data.Sqlite;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -31,7 +30,7 @@ public sealed class AuditorRoleMigrationTests : IAsyncLifetime
             VALUES ('u1', 'o1', 'a@example.com', '', 'auditor')
             """);
 
-        var role = await conn.ExecuteScalarAsync<string>(
+        string? role = await conn.ExecuteScalarAsync<string>(
             "SELECT role FROM users WHERE id = 'u1'");
         Assert.Equal("auditor", role);
     }
@@ -53,7 +52,7 @@ public sealed class AuditorRoleMigrationTests : IAsyncLifetime
                     datetime('now','+7 days'))
             """);
 
-        var role = await conn.ExecuteScalarAsync<string>(
+        string? role = await conn.ExecuteScalarAsync<string>(
             "SELECT role FROM invites WHERE id = 'i1'");
         Assert.Equal("auditor", role);
     }
@@ -111,7 +110,7 @@ public sealed class AuditorRoleMigrationTests : IAsyncLifetime
             INSERT INTO users (id, email, password_hash, role)
             VALUES ('u-after','b@example.com','','auditor')
             """);
-        var role = await verify.ExecuteScalarAsync<string>(
+        string? role = await verify.ExecuteScalarAsync<string>(
             "SELECT role FROM users WHERE id = 'u-after'");
         Assert.Equal("auditor", role);
     }

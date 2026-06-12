@@ -1,7 +1,6 @@
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -20,14 +19,14 @@ public sealed class SamlConfigRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task GetAsync_NoConfig_ReturnsNull()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         Assert.Null(await _repo.GetAsync(orgId));
     }
 
     [Fact]
     public async Task UpsertSettingsAsync_FirstCall_Inserts_SecondCall_Updates_AndDoesNotTouchIdpMetadata()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
 
         // Seed metadata first.
         await _repo.UpsertMetadataAsync(orgId, "idp-1", "https://idp/sso", "cert-base64", "<EntityDescriptor/>");
@@ -50,7 +49,7 @@ public sealed class SamlConfigRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task UpsertMetadataAsync_OnConflict_UpdatesAllMetadataFields()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
 
         await _repo.UpsertMetadataAsync(orgId, "idp-1", "https://old/sso", "cert-1", "<v1/>");
         await _repo.UpsertMetadataAsync(orgId, "idp-2", "https://new/sso", "cert-2", "<v2/>");
@@ -66,8 +65,8 @@ public sealed class SamlConfigRepositoryTests : IClassFixture<InMemoryDbFixture>
     public async Task RecordTestSuccessAsync_OnlyUpdatesExistingRow()
     {
         // Existing row case: rows updated to last_test_*; absent case is silently no-op.
-        var withConfig = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
-        var withoutConfig = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string withConfig = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string withoutConfig = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
 
         await _repo.UpsertMetadataAsync(withConfig, "idp", "https://idp", "c", "<x/>");
         await _repo.RecordTestSuccessAsync(withConfig, "admin@example.com", claimsJson: null);
@@ -83,8 +82,8 @@ public sealed class SamlConfigRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task TestRun_IssueThenConsume_OneShot()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
-        var cid = Guid.NewGuid().ToString("N");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string cid = Guid.NewGuid().ToString("N");
 
         await _repo.IssueTestRunAsync(cid, orgId, actorId: "actor-1",
             expiresAt: DateTimeOffset.UtcNow.AddMinutes(10));
@@ -96,9 +95,9 @@ public sealed class SamlConfigRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task TestRun_ExpiredOrWrongTenant_ConsumeFails()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
-        var otherOrgId = await OrgSeeder.InsertAsync(_fixture.Store, $"other-{Guid.NewGuid():N}");
-        var cid = Guid.NewGuid().ToString("N");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string otherOrgId = await OrgSeeder.InsertAsync(_fixture.Store, $"other-{Guid.NewGuid():N}");
+        string cid = Guid.NewGuid().ToString("N");
 
         await _repo.IssueTestRunAsync(cid, orgId, null, expiresAt: DateTimeOffset.UtcNow.AddMinutes(-1));
         Assert.False(await _repo.TryConsumeTestRunAsync(cid, orgId));      // expired
@@ -108,7 +107,7 @@ public sealed class SamlConfigRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task DeleteAsync_Idempotent()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         await _repo.UpsertMetadataAsync(orgId, "i", "https://i", "c", "<x/>");
         await _repo.DeleteAsync(orgId);
         await _repo.DeleteAsync(orgId);   // no throw on absent row

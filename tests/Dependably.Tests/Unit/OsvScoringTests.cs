@@ -1,5 +1,4 @@
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -24,9 +23,9 @@ public class OsvScoringTests
     [Theory]
     [InlineData("critical", "CRITICAL")]
     [InlineData("MODERATE", "MEDIUM")]
-    [InlineData("Medium",   "MEDIUM")]
-    [InlineData(null,       null)]
-    [InlineData("",         "")]
+    [InlineData("Medium", "MEDIUM")]
+    [InlineData(null, null)]
+    [InlineData("", "")]
     public void NormalizeSeverity_KnownAndUnknown(string? input, string? expected)
     {
         Assert.Equal(expected, OsvScoring.NormalizeSeverity(input));
@@ -35,7 +34,7 @@ public class OsvScoringTests
     [Fact]
     public void ParseCvssBaseScore_AppendedNumeric_PrefersIt()
     {
-        var s = OsvScoring.ParseCvssBaseScore("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H 9.8", out var sev);
+        double? s = OsvScoring.ParseCvssBaseScore("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H 9.8", out string? sev);
         Assert.Equal(9.8, s);
         Assert.Equal("CRITICAL", sev);
     }
@@ -44,16 +43,16 @@ public class OsvScoringTests
     public void ParseCvssBaseScore_VectorOnly_Computes()
     {
         // High-severity worst-case 3.1 vector → 9.8
-        var s = OsvScoring.ParseCvssBaseScore("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", out var sev);
+        double? s = OsvScoring.ParseCvssBaseScore("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", out string? sev);
         Assert.NotNull(s);
-        Assert.True(s >= 9.0 && s <= 10.0);
+        Assert.True(s is >= 9.0 and <= 10.0);
         Assert.Equal("CRITICAL", sev);
     }
 
     [Fact]
     public void ParseCvssBaseScore_BadVector_ReturnsNull()
     {
-        var s = OsvScoring.ParseCvssBaseScore("not a real vector", out var sev);
+        double? s = OsvScoring.ParseCvssBaseScore("not a real vector", out string? sev);
         Assert.Null(s);
         Assert.Null(sev);
     }

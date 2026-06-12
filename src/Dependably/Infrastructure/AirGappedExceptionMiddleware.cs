@@ -27,14 +27,16 @@ public sealed class AirGappedExceptionMiddleware
         catch (AirGappedException ex)
         {
             if (context.Response.HasStarted)
+            {
                 throw;
+            }
 
             context.Response.Clear();
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             context.Response.Headers.RetryAfter = "0";
             context.Response.ContentType = "application/problem+json";
 
-            var payload = JsonSerializer.Serialize(new
+            string payload = JsonSerializer.Serialize(new
             {
                 type = "about:blank",
                 title = "Cache disabled in air-gapped mode",

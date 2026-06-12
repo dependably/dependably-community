@@ -1,6 +1,5 @@
 using System.Xml.Linq;
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -10,7 +9,7 @@ public sealed class MavenMetadataBuilderTests
     [Fact]
     public void Build_SingleVersion_EmitsLatestReleaseAndVersions()
     {
-        var xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0" });
+        string xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0" });
         var doc = XDocument.Parse(xml);
 
         Assert.Equal("com.example", doc.Root!.Element("groupId")!.Value);
@@ -25,7 +24,7 @@ public sealed class MavenMetadataBuilderTests
     [Fact]
     public void Build_MultipleVersions_LatestIsTheLast()
     {
-        var xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0", "2.0", "3.0" });
+        string xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0", "2.0", "3.0" });
         var doc = XDocument.Parse(xml);
         var versioning = doc.Root!.Element("versioning")!;
 
@@ -40,7 +39,7 @@ public sealed class MavenMetadataBuilderTests
         // "latest" tracks the most recent publish (including SNAPSHOTs); "release" must
         // skip SNAPSHOTs so dependency resolvers asking for the latest stable build don't
         // accidentally land on an in-flight prerelease.
-        var xml = MavenMetadataBuilder.Build("com.example", "mylib",
+        string xml = MavenMetadataBuilder.Build("com.example", "mylib",
             new[] { "1.0", "2.0", "2.1-SNAPSHOT" });
         var doc = XDocument.Parse(xml);
         var versioning = doc.Root!.Element("versioning")!;
@@ -52,7 +51,7 @@ public sealed class MavenMetadataBuilderTests
     [Fact]
     public void Build_AllSnapshots_NoReleaseElement()
     {
-        var xml = MavenMetadataBuilder.Build("com.example", "mylib",
+        string xml = MavenMetadataBuilder.Build("com.example", "mylib",
             new[] { "1.0-SNAPSHOT", "1.1-SNAPSHOT" });
         var doc = XDocument.Parse(xml);
         var versioning = doc.Root!.Element("versioning")!;
@@ -64,9 +63,9 @@ public sealed class MavenMetadataBuilderTests
     [Fact]
     public void Build_EmitsLastUpdatedAsTimestamp()
     {
-        var xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0" });
+        string xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0" });
         var doc = XDocument.Parse(xml);
-        var lu = doc.Root!.Element("versioning")!.Element("lastUpdated")!.Value;
+        string lu = doc.Root!.Element("versioning")!.Element("lastUpdated")!.Value;
         // yyyyMMddHHmmss → 14 digits.
         Assert.Equal(14, lu.Length);
         Assert.True(lu.All(char.IsDigit));

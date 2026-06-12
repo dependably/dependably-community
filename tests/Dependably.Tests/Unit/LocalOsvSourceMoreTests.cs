@@ -1,7 +1,6 @@
 using Dependably.Protocol;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -23,7 +22,10 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(_dir)) Directory.Delete(_dir, recursive: true);
+        if (Directory.Exists(_dir))
+        {
+            Directory.Delete(_dir, recursive: true);
+        }
     }
 
     private LocalOsvSource Build() => new(_dir, NullLogger<LocalOsvSource>.Instance);
@@ -116,7 +118,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
         // Package has a name but no ecosystem → TryIndexFileAsync's `pkg.Ecosystem is null`
         // continue path skips indexing this entry. The advisory itself is not registered
         // under any key, so queries find nothing.
-        var json = """
+        string json = """
             {
               "id": "GHSA-noeco",
               "affected": [{ "package": { "name": "ghost" }, "versions": ["1.0.0"] }]
@@ -131,7 +133,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
     [Fact]
     public async Task AffectedPackage_MissingName_SkippedFromIndex()
     {
-        var json = """
+        string json = """
             {
               "id": "GHSA-noname",
               "affected": [{ "package": { "ecosystem": "npm" }, "versions": ["1.0.0"] }]
@@ -175,7 +177,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
     {
         // Covers `raw.Affected?` null short-circuit and the resulting `[]` fallback.
         // The file is loaded but produces no index keys.
-        var json = """
+        string json = """
             {
               "id": "GHSA-empty",
               "summary": "no affected list"
@@ -201,7 +203,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
     public async Task Advisory_AffectedEntryWithoutPackageObject_FilteredOut()
     {
         // Covers BuildAdvisory's `a.Package is not null` filter (the `Where` clause).
-        var json = """
+        string json = """
             {
               "id": "GHSA-nopkg",
               "affected": [{ "versions": ["1.0.0"] },
@@ -220,7 +222,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
     public async Task Advisory_MultipleAffectedPackages_AllIndexed()
     {
         // One advisory referencing two distinct packages — both keys must resolve to it.
-        var json = """
+        string json = """
             {
               "id": "GHSA-multi",
               "affected": [
@@ -246,7 +248,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
     public async Task Advisory_DuplicateVersions_DistinctOnLoad()
     {
         // Covers the `.Distinct()` call inside BuildAdvisory's projection.
-        var json = """
+        string json = """
             {
               "id": "GHSA-dupver",
               "affected": [{ "package": { "ecosystem": "npm", "name": "dupver" },
@@ -265,7 +267,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
     public async Task Advisory_WithAliases_PreservedOnAdvisory()
     {
         // Covers `raw.Aliases?.ToArray()` non-null branch.
-        var json = """
+        string json = """
             {
               "id": "GHSA-aliased",
               "aliases": ["CVE-2026-0001", "CVE-2026-0002"],
@@ -286,7 +288,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
     public async Task Advisory_WithoutId_DefaultsToEmptyString()
     {
         // Covers `raw.Id ?? ""` fallback.
-        var json = """
+        string json = """
             {
               "summary": "no id",
               "affected": [{ "package": { "ecosystem": "npm", "name": "noid" },
@@ -307,7 +309,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
         // The severity[] entry has a type that doesn't start with "CVSS" — FirstOrDefault
         // returns null, so cvssScore stays null and severity falls back to
         // database_specific.severity (the second branch of the fallback chain).
-        var json = """
+        string json = """
             {
               "id": "GHSA-noncvss",
               "severity": [{ "type": "CUSTOM", "score": "ignored" }],
@@ -330,7 +332,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
     {
         // database_specific exists but doesn't contain a "severity" key — TryGetValue
         // returns false and severity stays null.
-        var json = """
+        string json = """
             {
               "id": "GHSA-dbother",
               "affected": [{ "package": { "ecosystem": "npm", "name": "dbother" },
@@ -350,7 +352,7 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
     public async Task Severity_DatabaseSpecificSeverityNull_StaysNull()
     {
         // database_specific.severity exists but is explicitly null — `dbSev?.ToString()` is null.
-        var json = """
+        string json = """
             {
               "id": "GHSA-dbnull",
               "affected": [{ "package": { "ecosystem": "npm", "name": "dbnull" },
@@ -389,18 +391,19 @@ public sealed class LocalOsvSourceMoreTests : IDisposable
     public async Task ParsePurl_NormalizesUnknownEcosystem_Lowercased()
     {
         // The `var other => other` arm of NormalizeEcosystem (lowercase passthrough).
-        // Index it under lowercase to match the lookup.
+        // Uses a fictional ecosystem so the case-normalisation arm is exercised rather
+        // than a named mapping (e.g. "cargo" maps to "crates.io").
         File.WriteAllText(Path.Combine(_dir, "exotic.json"), """
             {
               "id": "GHSA-exotic",
-              "affected": [{ "package": { "ecosystem": "cargo", "name": "exotic" },
+              "affected": [{ "package": { "ecosystem": "conan", "name": "exotic" },
                              "versions": ["1.0.0"] }]
             }
             """);
         var src = Build();
 
-        // Mixed-case ecosystem in the PURL must lowercase to "cargo".
-        var hits = await src.QueryAsync("pkg:CARGO/exotic@1.0.0");
+        // Mixed-case ecosystem in the PURL must lowercase to "conan".
+        var hits = await src.QueryAsync("pkg:CONAN/exotic@1.0.0");
         Assert.Single(hits);
     }
 

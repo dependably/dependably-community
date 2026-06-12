@@ -1,7 +1,13 @@
 using System.Globalization;
 using System.Reflection;
 using System.Threading.RateLimiting;
-using Dapper;
+using Dependably.Api;
+using Dependably.Infrastructure;
+using Dependably.Infrastructure.Health;
+using Dependably.Infrastructure.Redis;
+using Dependably.Protocol;
+using Dependably.Security;
+using Dependably.Storage;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
@@ -14,13 +20,6 @@ using Microsoft.IdentityModel.Tokens;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
-using Dependably.Api;
-using Dependably.Infrastructure;
-using Dependably.Infrastructure.Health;
-using Dependably.Infrastructure.Redis;
-using Dependably.Protocol;
-using Dependably.Security;
-using Dependably.Storage;
 using Serilog;
 using Serilog.Formatting.Compact;
 using StackExchange.Redis;
@@ -111,7 +110,10 @@ public partial class Program
         builder.Services.AddSingleton<ReadinessAggregator>();
         builder.Services.AddHostedService<HealthcheckPinger>();
 
-        builder.Services.AddMemoryCache();
+        // SizeLimit bounds total in-process metadata response bytes (npm packuments, PyPI
+        // simple indices, NuGet registration pages). Each entry sets Size = bytes.Length.
+        // 50 MB covers hundreds of typical packuments/indices with headroom for large ones.
+        builder.Services.AddMemoryCache(o => o.SizeLimit = 50 * 1024 * 1024);
 
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddDependablyRepositories();
@@ -130,6 +132,17 @@ public partial class Program
         builder.Services.AddHostedService<Dependably.Infrastructure.Observability.BlobStoreSizePoller>();
         builder.Services.AddHostedService<Dependably.Infrastructure.Observability.TenantCountPoller>();
 
+        // Staging disk space monitoring. IStagingDiskInfo reads DriveInfo for the
+        // staging volume; StagingDiskMonitor samples it on a 60 s timer and emits
+        // OTel gauges + a Serilog warning when free space falls below the threshold.
+        string? configuredStagingPath = builder.Configuration["PROXY_STAGING_PATH"];
+        string resolvedStagingPath = string.IsNullOrWhiteSpace(configuredStagingPath)
+            ? Path.GetTempPath()
+            : configuredStagingPath;
+        builder.Services.AddSingleton<Dependably.Infrastructure.IStagingDiskInfo>(
+            new Dependably.Infrastructure.DriveInfoStagingDiskInfo(resolvedStagingPath));
+        builder.Services.AddHostedService<Dependably.Infrastructure.Observability.StagingDiskMonitor>();
+
         builder.Services.AddSingleton<Dependably.Security.MetricsAccessConfig>(sp =>
         {
             var orgs = sp.GetRequiredService<OrgRepository>();
@@ -145,8 +158,26 @@ public partial class Program
         builder.Services.AddSingleton<Dependably.Security.PublishGate>();
 
         // Admin bulk import. One service record so the controller ctor stays
-        // under S107; same shape as the protocol controllers.
-        builder.Services.AddScoped<Dependably.Api.ImportControllerServices>();
+        // under S107; same shape as the protocol controllers. The factory captures
+        // PROXY_STAGING_PATH once at registration time (resolved from configuration)
+        // so the scoped record carries a plain string rather than an IConfiguration dep.
+        builder.Services.AddScoped<Dependably.Api.ImportControllerServices>(sp =>
+        {
+            string? configuredStaging = builder.Configuration["PROXY_STAGING_PATH"];
+            string stagingPath = string.IsNullOrWhiteSpace(configuredStaging)
+                ? Path.GetTempPath()
+                : configuredStaging;
+            return new Dependably.Api.ImportControllerServices(
+                Guard: sp.GetRequiredService<Dependably.Security.OrgAccessGuard>(),
+                PublishGate: sp.GetRequiredService<Dependably.Security.PublishGate>(),
+                Orgs: sp.GetRequiredService<Dependably.Infrastructure.OrgRepository>(),
+                Publish: sp.GetRequiredService<Dependably.Infrastructure.Publish.IPackagePublishService>(),
+                ClaimResolver: sp.GetRequiredService<Dependably.Infrastructure.ClaimResolver>(),
+                Licenses: sp.GetRequiredService<Dependably.Infrastructure.LicenseRepository>(),
+                LimitResolver: sp.GetRequiredService<Dependably.Protocol.IUploadLimitResolver>(),
+                StagingPath: stagingPath,
+                Cache: sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>());
+        });
 
         // Shared publish-flow tail (path safety, claim gate, dedup, blob put, version create,
         // audit). Used by NpmController/PyPiController/NuGetController publish handlers and
@@ -162,6 +193,10 @@ public partial class Program
         // SIEM push (opt-in via env vars). Webhook and syslog both sit behind
         // ISiemForwarder; webhook wins when both are set. No-op when neither is configured.
         builder.Services.AddDependablySiemForwarding(builder.Configuration);
+
+        // Invite email delivery (opt-in via SMTP_HOST). No-op when SMTP_HOST is absent —
+        // the controller falls back to returning the invite link in the response body.
+        builder.Services.AddDependablyInviteMailer(builder.Configuration);
 
         // Protocol services
         builder.Services.AddSingleton<UpstreamClient>();
@@ -189,6 +224,7 @@ public partial class Program
             Dependably.Configuration.OciOptionsValidator>();
         builder.Services.AddSingleton<Dependably.Protocol.OciUpstreamAuthService>();
         builder.Services.AddSingleton<Dependably.Protocol.OciUpstreamResolver>();
+        builder.Services.AddSingleton<Dependably.Protocol.OciUploadService>();
 
         // Vulnerability scanning — OSV source branches (remote vs local) live inside the helper.
         // VulnerabilityScanService is registered as a singleton AND a hosted service so on-demand
@@ -197,23 +233,29 @@ public partial class Program
             builder.Configuration,
             builder.Configuration["OSV_BASE_URL"] ?? DefaultOsvBaseUrl);
 
+        // Threat-feed enrichment (CISA KEV + FIRST.org EPSS) over the advisories the scan
+        // ingests; the block gate reads the resulting is_kev / epss_score columns.
+        builder.Services.AddDependablyThreatFeeds();
+
         // Other background services
         builder.Services.AddHostedService<RetentionService>();
         builder.Services.AddHostedService<Dependably.Background.TenantHardDeleteService>();
         builder.Services.AddHostedService<DeprecationRefreshService>();
+        builder.Services.AddHostedService<StatsRefreshService>();
+        builder.Services.AddHostedService<SamlCertExpiryCheckService>();
 
         // Auth services
         builder.Services.AddSingleton<LoginService>();
         builder.Services.AddSingleton<OrgAccessGuard>();
         builder.Services.AddSingleton<Dependably.Security.PasswordPolicy>();
 
-        // Tenant resolution (Phase 1 of strict-multi-tenancy rollout)
+        // Tenant resolution — strategy selected by DEPLOYMENT_MODE at startup.
         // DEPLOYMENT_MODE=single (default) → SingleTenantResolver (ignores Host, returns the one tenant)
         // DEPLOYMENT_MODE=multi          → SubdomainTenantResolver (Host → tenant slug → orgs row)
         // DEPLOYMENT_MODE=header         → HeaderTenantResolver (X-Dependably-Tenant header → orgs row; intercept mode behind trusted edge proxy)
         // DEPLOYMENT_MODE=bound          → DeploymentBoundTenantResolver (BOUND_TENANT_SLUG, ignores request; intercept mode for single-tenant enterprise)
         // Scoped lifetime so per-request DB queries don't bleed across requests.
-        var tenancyMode = (builder.Configuration["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
+        string tenancyMode = (builder.Configuration["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
         switch (tenancyMode)
         {
             case "multi":
@@ -227,11 +269,14 @@ public partial class Program
                 // per-tenant login methods (forms, SAML) never render. Warn so the misconfig is
                 // visible instead of silently hiding the login page.
                 if (!HasUsableApexHost(builder.Configuration))
+                {
                     Log.Warning(
                         "DEPLOYMENT_MODE=multi but no usable APEX_HOST (and BASE_URL is unset or localhost). "
                         + "Tenants are reached at slug.apexhost; non-subdomain hosts resolve to apex/uninitialized "
                         + "and per-tenant login methods such as SAML will not appear. Set APEX_HOST, or use "
                         + "DEPLOYMENT_MODE=single for a single-tenant appliance.");
+                }
+
                 break;
             case "header":
                 builder.Services.AddScoped<ITenantResolver, HeaderTenantResolver>();
@@ -272,7 +317,7 @@ public partial class Program
 
         // CORS — management API only allows BASE_URL origin. PublicBaseUrl() strips any
         // trailing slash: a CORS origin with one never matches the browser-sent Origin header.
-        var baseUrl = builder.Configuration.PublicBaseUrl() ?? DefaultBaseUrl;
+        string baseUrl = builder.Configuration.PublicBaseUrl() ?? DefaultBaseUrl;
         builder.Services.AddCors(o => o.AddPolicy("ManagementApi", policy =>
             policy.WithOrigins(baseUrl)
                   .AllowCredentials()
@@ -281,10 +326,7 @@ public partial class Program
 
         // Named HTTP client for upstream proxy requests
         // ConnectTimeout=30s, total timeout=5min, max 3 redirects, max 10 connections/server
-        builder.Services.AddHttpClient("upstream", client =>
-        {
-            client.Timeout = TimeSpan.FromMinutes(5);
-        })
+        builder.Services.AddHttpClient("upstream", client => client.Timeout = TimeSpan.FromMinutes(5))
         .ConfigurePrimaryHttpMessageHandler(sp => new System.Net.Http.SocketsHttpHandler
         {
             ConnectTimeout = TimeSpan.FromSeconds(30),
@@ -314,14 +356,14 @@ public partial class Program
         })
         .ConfigurePrimaryHttpMessageHandler(sp => new System.Net.Http.SocketsHttpHandler
         {
-            ConnectTimeout          = TimeSpan.FromSeconds(30),
+            ConnectTimeout = TimeSpan.FromSeconds(30),
             MaxConnectionsPerServer = 20,
             MaxAutomaticRedirections = 5,
-            AllowAutoRedirect       = true,
-            ResponseDrainTimeout    = TimeSpan.FromSeconds(30),
+            AllowAutoRedirect = true,
+            ResponseDrainTimeout = TimeSpan.FromSeconds(30),
             // Do NOT decompress: OCI layer blobs are raw compressed tarballs.
             // Decompressing would corrupt the digest (the digest is over the compressed bytes).
-            AutomaticDecompression  = System.Net.DecompressionMethods.None,
+            AutomaticDecompression = System.Net.DecompressionMethods.None,
             // SSRF gate: OciUpstreamResolver does no URL pre-check, so the connect callback
             // is the sole gate here — it validates the dialed IP on every hop.
             ConnectCallback = sp.GetRequiredService<SsrfConnectCallback>().ConnectAsync,
@@ -331,15 +373,16 @@ public partial class Program
         builder.Services.AddHttpClient();
 
         // Named client for outbound healthcheck pinger — no redirects, no auth, short timeout
-        builder.Services.AddHttpClient("healthcheck-pinger", client =>
-        {
-            client.Timeout = TimeSpan.FromSeconds(
-                int.TryParse(builder.Configuration["HEALTHCHECK_PING_TIMEOUT_SECONDS"], out var t) ? t : 10);
-        })
-        .ConfigurePrimaryHttpMessageHandler(() => new System.Net.Http.SocketsHttpHandler
+        builder.Services.AddHttpClient("healthcheck-pinger", client => client.Timeout = TimeSpan.FromSeconds(
+                int.TryParse(builder.Configuration["HEALTHCHECK_PING_TIMEOUT_SECONDS"], out int t) ? t : 10))
+        .ConfigurePrimaryHttpMessageHandler(sp => new System.Net.Http.SocketsHttpHandler
         {
             AllowAutoRedirect = false,
             ConnectTimeout = TimeSpan.FromSeconds(5),
+            // SSRF defense-in-depth: HEALTHCHECK_PING_URL is operator-supplied, but a
+            // misconfigured or over-trusted value must not reach private/link-local
+            // ranges — same shared gate as the upstream proxy clients.
+            ConnectCallback = sp.GetRequiredService<SsrfConnectCallback>().ConnectAsync,
         });
 
         // Upload limit resolver
@@ -376,6 +419,8 @@ public partial class Program
         builder.Services.AddSingleton<Dependably.Storage.RpmRepodataService>();
         builder.Services.AddScoped<OciControllerServices>();
         builder.Services.AddScoped<OrgControllerServices>();
+        builder.Services.AddSingleton<Dependably.Api.GoLatestFetchCoordinator>();
+        builder.Services.AddScoped<GoControllerServices>();
 
         // Controllers + OpenAPI
         // Explicit application part ensures controllers are found even when ConfigureBuilder
@@ -389,14 +434,12 @@ public partial class Program
             .AddApplicationPart(typeof(Program).Assembly)
             .AddDataAnnotationsLocalization()
             .AddJsonOptions(o =>
-            {
                 // Strict API stance — unknown JSON fields fail binding with a 400. Prevents
                 // silent intent loss (e.g. callers misspelling a field name or sending a
                 // retired field), and complements the explicit retired-field guards in
                 // controller actions.
                 o.JsonSerializerOptions.UnmappedMemberHandling =
-                    System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow;
-            });
+                    System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow);
         // Two named OpenAPI documents — split by route prefix so the management API
         // (versioned, /api/v1/…) and the registry protocol surfaces (canonical roots
         // mandated by each upstream spec: /v2/ OCI, /simple/ PyPI, /npm/, /nuget/v3/, …)
@@ -434,24 +477,34 @@ public partial class Program
         });
     }
 
-    // Forwarded headers — honour X-Forwarded-Proto/For so Request.IsHttps reflects the
-    // client-facing scheme behind a TLS-terminating reverse proxy. When TRUSTED_PROXIES is
-    // set, only those source IPs/networks may set X-Forwarded-*; otherwise forwarded headers
-    // are accepted from any immediate forwarder (back-compat for existing self-hosted
-    // deployments behind varied proxies — StartupService warns that this is spoofable).
+    // Forwarded headers — honour X-Forwarded-For/Proto/Host so Request.IsHttps and Request.Host
+    // reflect the client-facing values behind a TLS-terminating reverse proxy. When TRUSTED_PROXIES
+    // is set, only those source IPs/networks may set X-Forwarded-*; otherwise forwarded headers are
+    // accepted from any immediate forwarder (back-compat for existing self-hosted deployments behind
+    // varied proxies — StartupService warns that this is spoofable). X-Forwarded-Host is included so
+    // SubdomainTenantResolver reads the rewritten Request.Host instead of the raw header directly,
+    // ensuring proxy allowlist validation applies equally to tenant resolution.
     private static void ConfigureForwardedHeaders(WebApplicationBuilder builder)
     {
         builder.Services.Configure<ForwardedHeadersOptions>(options =>
         {
-            options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+            options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost;
             options.KnownIPNetworks.Clear();
             options.KnownProxies.Clear();
 
             var (networks, proxies) = Dependably.Infrastructure.ConfigurationExtensions.ParseTrustedProxies(builder.Configuration["TRUSTED_PROXIES"]);
             if (networks.Count > 0 || proxies.Count > 0)
             {
-                foreach (var n in networks) options.KnownIPNetworks.Add(n);
-                foreach (var p in proxies) options.KnownProxies.Add(p);
+                foreach (var n in networks)
+                {
+                    options.KnownIPNetworks.Add(n);
+                }
+
+                foreach (var p in proxies)
+                {
+                    options.KnownProxies.Add(p);
+                }
+
                 options.ForwardLimit = null; // walk the chain to the first untrusted hop
             }
         });
@@ -473,17 +526,9 @@ public partial class Program
                         ctx.Token = ctx.Request.Cookies["dependably_session"];
                         return Task.CompletedTask;
                     },
-                    // Reject revoked tokens (logged-out sessions)
-                    OnTokenValidated = async ctx =>
-                    {
-                        var jti = ctx.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
-                        if (jti is not null)
-                        {
-                            var revocations = ctx.HttpContext.RequestServices.GetRequiredService<JwtRevocationRepository>();
-                            if (await revocations.IsRevokedAsync(jti))
-                                ctx.Fail("Token has been revoked.");
-                        }
-                    }
+                    // Reject revoked tokens (logged-out sessions) and tenant sessions whose
+                    // token_version is stale (invalidated by a password change).
+                    OnTokenValidated = OnJwtTokenValidatedAsync,
                 };
                 // Keep JWT claim names as-is (role, sub, org_id) without mapping to ClaimTypes URIs
                 options.MapInboundClaims = false;
@@ -495,6 +540,8 @@ public partial class Program
                     ValidateLifetime = true,
                     ClockSkew = TimeSpan.Zero,
                     ValidateIssuerSigningKey = true,
+                    // Explicit algorithm allow-list so only HS256 tokens are accepted, matching issuance in LoginService
+                    ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
                     // Placeholder — replaced after first-boot with actual secret
                     IssuerSigningKey = new SymmetricSecurityKey(new byte[32])
                 };
@@ -509,6 +556,46 @@ public partial class Program
                 TokenAuthenticationDefaults.Scheme, _ => { });
     }
 
+    // Validates a JWT after signature verification: checks the jti against the revocation
+    // store, then for tenant-scope sessions verifies the token_version claim hasn't been
+    // superseded by a password change. System-scope JWTs (scope != "tenant") skip the
+    // version check — they reference system_admins, not the per-tenant users table.
+    private static async Task OnJwtTokenValidatedAsync(TokenValidatedContext ctx)
+    {
+        string? jti = ctx.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
+        if (jti is not null)
+        {
+            var revocations = ctx.HttpContext.RequestServices.GetRequiredService<JwtRevocationRepository>();
+            if (await revocations.IsRevokedAsync(jti))
+            {
+                ctx.Fail("Token has been revoked.");
+                return;
+            }
+        }
+
+        // Tenant sessions snapshot users.token_version at issuance (`tver` claim,
+        // absent = 1 to match the column default). A password change bumps the stored
+        // version, staling every previously issued session.
+        if (ctx.Principal?.FindFirst("scope")?.Value != "tenant")
+        {
+            return;
+        }
+
+        string? sub = ctx.Principal.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+        if (sub is null)
+        {
+            return;
+        }
+
+        long claimVersion = long.TryParse(ctx.Principal.FindFirst("tver")?.Value, out long v) ? v : 1;
+        var versions = ctx.HttpContext.RequestServices.GetRequiredService<UserTokenVersionStore>();
+        long? current = await versions.GetCurrentVersionAsync(sub);
+        if (current is null || claimVersion < current.Value)
+        {
+            ctx.Fail("Session has been invalidated.");
+        }
+    }
+
     // Serilog — structured JSON logging with sensitive field redaction.
     // Optional OTel logs bridge (Serilog.Sinks.OpenTelemetry) ships log records via
     // OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set. Air-gap deployments leave it unset
@@ -521,9 +608,10 @@ public partial class Program
                .ReadFrom.Services(services)
                .Enrich.FromLogContext()
                .Enrich.With<SensitivePropertyEnricher>()
+               .Destructure.With<LogSanitizingDestructuringPolicy>()
                .WriteTo.Console(new RenderedCompactJsonFormatter());
 
-            var otlpEndpoint = ctx.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
+            string? otlpEndpoint = ctx.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
             if (!string.IsNullOrWhiteSpace(otlpEndpoint))
             {
                 cfg.WriteTo.OpenTelemetry(o =>
@@ -548,10 +636,10 @@ public partial class Program
     // See docs/observability/metrics.md and docs/observability/traces.md.
     private static void ConfigureOpenTelemetry(WebApplicationBuilder builder)
     {
-        var otlpEndpoint = builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
-        var sampleRatio = double.TryParse(
+        string? otlpEndpoint = builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
+        double sampleRatio = double.TryParse(
             builder.Configuration["OTEL_TRACES_SAMPLER_ARG"],
-            out var ratio) ? ratio : 0.1;
+            out double ratio) ? ratio : 0.1;
 
         builder.Services.AddSingleton<Dependably.Infrastructure.Observability.TenantSpanEnricher>();
 
@@ -579,38 +667,42 @@ public partial class Program
                   .AddPrometheusExporter();
 
                 if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+                {
                     mb.AddOtlpExporter();
+                }
             })
             .WithTracing(tb =>
             {
                 tb.AddAspNetCoreInstrumentation(opts =>
-                {
                     // Stamp dependably.operation on framework-emitted server spans
                     // using the route→operation map. EnrichWithHttpResponse runs
                     // after routing, so http.route is already set on the activity.
                     opts.EnrichWithHttpResponse = (activity, _) =>
                     {
-                        var route = activity.GetTagItem("http.route") as string;
-                        var method = activity.GetTagItem("http.request.method") as string;
-                        var op = Dependably.Infrastructure.Observability.OperationTagger.Map(route, method);
+                        string? route = activity.GetTagItem("http.route") as string;
+                        string? method = activity.GetTagItem("http.request.method") as string;
+                        string? op = Dependably.Infrastructure.Observability.OperationTagger.Map(route, method);
                         if (op is not null)
+                        {
                             activity.SetTag("dependably.operation", op);
-                    };
-                })
+                        }
+                    })
                   .AddHttpClientInstrumentation()
                   .AddSource(Dependably.Infrastructure.Observability.DependablyActivitySource.SourceName)
                   .AddProcessor<Dependably.Infrastructure.Observability.TenantSpanEnricher>()
                   .SetSampler(new ParentBasedSampler(new TraceIdRatioBasedSampler(sampleRatio)));
 
                 if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+                {
                     tb.AddOtlpExporter();
+                }
             });
     }
 
     // Graceful shutdown — configurable pre-stop delay + drain period
     private static void ConfigureGracefulShutdown(WebApplicationBuilder builder)
     {
-        var gracePeriod = int.TryParse(builder.Configuration["SHUTDOWN_GRACE_PERIOD"], out var gp) ? gp : 30;
+        int gracePeriod = int.TryParse(builder.Configuration["SHUTDOWN_GRACE_PERIOD"], out int gp) ? gp : 30;
         builder.Host.ConfigureHostOptions(o => o.ShutdownTimeout = TimeSpan.FromSeconds(gracePeriod));
         builder.Services.AddSingleton<ShutdownState>();
         builder.Services.AddHostedService<ShutdownOrchestrator>();
@@ -618,15 +710,18 @@ public partial class Program
 
     private static void ConfigureMetadataStore(WebApplicationBuilder builder)
     {
-        var dbProvider = (builder.Configuration["DB_PROVIDER"] ?? "sqlite").ToLowerInvariant();
-        var dbConnStr = builder.Configuration["DB_CONNECTION_STRING"];
-        var dbPath = builder.Configuration["DB_PATH"] ?? "/data/dependably.db";
+        string dbProvider = (builder.Configuration["DB_PROVIDER"] ?? "sqlite").ToLowerInvariant();
+        string? dbConnStr = builder.Configuration["DB_CONNECTION_STRING"];
+        string dbPath = builder.Configuration["DB_PATH"] ?? "/data/dependably.db";
 
         IMetadataStore metadataStore = dbProvider switch
         {
             "postgres" => new NpgsqlMetadataStore(
                 dbConnStr ?? throw new InvalidOperationException("DB_CONNECTION_STRING required for DB_PROVIDER=postgres")),
-            _ => new SqliteMetadataStore($"Data Source={dbPath};Mode=ReadWriteCreate;Cache=Shared")
+            // Cache=Shared is the legacy SQLite shared-cache mode that introduces
+            // table-level locking and reduces WAL read concurrency. WAL with private
+            // per-connection caches is the recommended configuration.
+            _ => new SqliteMetadataStore($"Data Source={dbPath};Mode=ReadWriteCreate")
         };
         builder.Services.AddSingleton<IMetadataStore>(metadataStore);
         builder.Services.AddSingleton<SchemaInitializer>();
@@ -689,18 +784,20 @@ public partial class Program
         builder.Services.Configure<RedisOptions>(opts =>
         {
             opts.ConnectionString = builder.Configuration["REDIS_CONNECTION_STRING"];
-            opts.Password         = builder.Configuration["REDIS_PASSWORD"];
-            opts.Ssl              = bool.TryParse(builder.Configuration["REDIS_SSL"], out var ssl) && ssl;
-            opts.Database         = int.TryParse(builder.Configuration["REDIS_DATABASE"], out var db) ? db : 0;
-            opts.KeyPrefix        = builder.Configuration["REDIS_KEY_PREFIX"] ?? "dependably:";
+            opts.Password = builder.Configuration["REDIS_PASSWORD"];
+            opts.Ssl = bool.TryParse(builder.Configuration["REDIS_SSL"], out bool ssl) && ssl;
+            opts.Database = int.TryParse(builder.Configuration["REDIS_DATABASE"], out int db) ? db : 0;
+            opts.KeyPrefix = builder.Configuration["REDIS_KEY_PREFIX"] ?? "dependably:";
         });
 
-        var deploymentMode = (builder.Configuration["DEPENDABLY_DEPLOYMENT_MODE"] ?? "standalone").ToLowerInvariant();
-        var redisConnStr = builder.Configuration["REDIS_CONNECTION_STRING"];
+        string deploymentMode = (builder.Configuration["DEPENDABLY_DEPLOYMENT_MODE"] ?? "standalone").ToLowerInvariant();
+        string? redisConnStr = builder.Configuration["REDIS_CONNECTION_STRING"];
 
         if (deploymentMode == "ha" && string.IsNullOrWhiteSpace(redisConnStr))
+        {
             throw new InvalidOperationException(
                 "DEPENDABLY_DEPLOYMENT_MODE=ha requires REDIS_CONNECTION_STRING to be set.");
+        }
 
         if (string.IsNullOrWhiteSpace(redisConnStr))
         {
@@ -739,7 +836,7 @@ public partial class Program
     // Rate limiting — Redis-backed when REDIS_CONNECTION_STRING is set; in-process otherwise.
     private static void ConfigureRateLimiter(WebApplicationBuilder builder)
     {
-        var useRedis = !string.IsNullOrWhiteSpace(builder.Configuration["REDIS_CONNECTION_STRING"]);
+        bool useRedis = !string.IsNullOrWhiteSpace(builder.Configuration["REDIS_CONNECTION_STRING"]);
         builder.Services.AddRateLimiter(o =>
         {
             o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -754,10 +851,10 @@ public partial class Program
                 // [EnableRateLimiting("…")]; partition prefix lets operators identify which
                 // token (12-hex SHA prefix) or IP is being rate-locked without leaking the
                 // full hash on the cardinality budget.
-                var policy = ctx.HttpContext.GetEndpoint()
+                string policy = ctx.HttpContext.GetEndpoint()
                     ?.Metadata.GetMetadata<EnableRateLimitingAttribute>()
                     ?.PolicyName ?? "unknown";
-                var partition = Dependably.Security.RateLimitPartitions.GetMetricLabel(ctx.HttpContext);
+                string partition = Dependably.Security.RateLimitPartitions.GetMetricLabel(ctx.HttpContext);
                 Dependably.Infrastructure.Observability.DependablyMeter.RateLimitRejected.Add(1,
                     new KeyValuePair<string, object?>("policy", policy),
                     new KeyValuePair<string, object?>("partition", partition));
@@ -781,6 +878,19 @@ public partial class Program
                 AddInProcessLimiters(builder.Configuration, o);
                 AddDownloadPushLimiters(builder.Configuration, o);
             }
+
+            // The anonymous-probe limiter is in-process in both modes: liveness /
+            // bootstrap endpoints are polled per replica, so per-replica state is the
+            // correct scope and Redis round-trips would add latency to health probes.
+            AddAnonymousProbeLimiter(builder.Configuration, o);
+
+            // Global default covers authenticated management endpoints (/api/v1/*) that
+            // carry no endpoint-specific policy. The SPA and CI tooling hit /api/v1 at
+            // human-interactive rates; 300 requests/min per principal handles normal bursts
+            // (package-list pagination, audit log queries, settings reads) without 429s.
+            // Paths outside /api/v1/ and /api/v1/docs/* get NoLimiter — protocol surfaces,
+            // health probes, and Swagger UI assets are guarded by their own policies.
+            AddManagementApiLimiter(builder.Configuration, o);
         });
     }
 
@@ -802,28 +912,28 @@ public partial class Program
         // The cap + queue together still bound sustained abuse: once the queue fills,
         // additional requests get 429 with Retry-After (emitted by OnRejected above)
         // and a well-behaved client backs off.
-        var downloadLimit = int.TryParse(cfg["DOWNLOAD_RATE_LIMIT_PERMITS"], out var dp) ? dp : 1000;
-        var downloadQueue = int.TryParse(cfg["DOWNLOAD_RATE_LIMIT_QUEUE"],   out var dq) ? dq :  500;
+        int downloadLimit = int.TryParse(cfg["DOWNLOAD_RATE_LIMIT_PERMITS"], out int dp) ? dp : 1000;
+        int downloadQueue = int.TryParse(cfg["DOWNLOAD_RATE_LIMIT_QUEUE"], out int dq) ? dq : 500;
         o.AddPolicy("download", httpContext =>
         {
-            var key = Dependably.Security.RateLimitPartitions.GetPartitionKey(httpContext);
+            string key = Dependably.Security.RateLimitPartitions.GetPartitionKey(httpContext);
             return RateLimitPartition.GetSlidingWindowLimiter(key,
                 _ => new SlidingWindowRateLimiterOptions
                 {
-                    PermitLimit          = downloadLimit,
-                    Window               = TimeSpan.FromSeconds(1),
-                    SegmentsPerWindow    = 4,
-                    QueueLimit           = downloadQueue,
+                    PermitLimit = downloadLimit,
+                    Window = TimeSpan.FromSeconds(1),
+                    SegmentsPerWindow = 4,
+                    QueueLimit = downloadQueue,
                     QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                 });
         });
 
         // Push is rarer; a much lower ceiling protects the writer queue from a malformed
         // publish loop. 20 req/s burst per token.
-        var pushLimit = int.TryParse(cfg["PUSH_RATE_LIMIT_PERMITS"], out var pp) ? pp : 20;
+        int pushLimit = int.TryParse(cfg["PUSH_RATE_LIMIT_PERMITS"], out int pp) ? pp : 20;
         o.AddPolicy("push", httpContext =>
         {
-            var key = Dependably.Security.RateLimitPartitions.GetPartitionKey(httpContext);
+            string key = Dependably.Security.RateLimitPartitions.GetPartitionKey(httpContext);
             return RateLimitPartition.GetSlidingWindowLimiter(key,
                 _ => new SlidingWindowRateLimiterOptions
                 {
@@ -833,27 +943,107 @@ public partial class Program
                     QueueLimit = 0,
                 });
         });
+
+        // Bulk import is the most resource-intensive write path: every request reads N
+        // artefacts, runs ecosystem detection, stages to disk, and writes to blob store.
+        // 5 requests per minute per token is generous for legitimate operator workflows
+        // (a CI import script that fires more than 5 bulk batches per minute is unusual)
+        // while preventing a malicious or runaway client from saturating the staging I/O
+        // and writer queue. Configurable via IMPORT_RATE_LIMIT_PERMITS.
+        int importLimit = int.TryParse(cfg["IMPORT_RATE_LIMIT_PERMITS"], out int ip) ? ip : 5;
+        o.AddPolicy("import", httpContext =>
+        {
+            string key = Dependably.Security.RateLimitPartitions.GetPartitionKey(httpContext);
+            return RateLimitPartition.GetSlidingWindowLimiter(key,
+                _ => new SlidingWindowRateLimiterOptions
+                {
+                    PermitLimit = importLimit,
+                    Window = TimeSpan.FromMinutes(1),
+                    SegmentsPerWindow = 4,
+                    QueueLimit = 0,
+                });
+        });
     }
 
+    // In-process login / invite / token-create limiters. Partitioned per client IP —
+    // mirroring the Redis path's `{ip}:{policy}` buckets — so one attacker exhausting
+    // its own window cannot lock out every other client instance-wide. The key is the
+    // normalized remote IP (not the token-preferring download/push key): these endpoints
+    // are hit before credentials are validated, and an attacker-supplied Authorization
+    // header must not buy a fresh partition per attempt.
     private static void AddInProcessLimiters(ConfigurationManager cfg, Microsoft.AspNetCore.RateLimiting.RateLimiterOptions o)
     {
-        o.AddFixedWindowLimiter("login", opts =>
+        int loginLimit = int.TryParse(cfg["LOGIN_RATE_LIMIT_PERMITS"], out int p) ? p : 10;
+        AddPerIpFixedWindowLimiter(o, "login", loginLimit, TimeSpan.FromMinutes(1));
+
+        AddPerIpFixedWindowLimiter(o, "invite", 20, TimeSpan.FromHours(1));
+
+        int tokenCreateLimit = int.TryParse(cfg["TOKEN_CREATE_RATE_LIMIT_PERMITS"], out int t) ? t : 60;
+        AddPerIpFixedWindowLimiter(o, "token-create", tokenCreateLimit, TimeSpan.FromHours(1));
+    }
+
+    // Per-IP cap for the unauthenticated probe surface (/health, /ready, /version,
+    // /api/v1/bootstrap, /api/v1/auth/methods, /api/v1/licenses). /ready fans out to
+    // DB + blob store + Redis per call, so an anonymous flood amplifies load onto the
+    // backing stores. The default budget is generous: orchestrator health probes run a
+    // few requests per minute per prober, far below 120/min per source IP.
+    private static void AddAnonymousProbeLimiter(ConfigurationManager cfg, Microsoft.AspNetCore.RateLimiting.RateLimiterOptions o)
+    {
+        int anonLimit = int.TryParse(cfg["ANON_RATE_LIMIT_PERMITS"], out int a) ? a : 120;
+        AddPerIpFixedWindowLimiter(o, "anon", anonLimit, TimeSpan.FromMinutes(1));
+    }
+
+    // Default guard for the authenticated management surface (/api/v1/*). Partitions by
+    // the principal identity — API-token hash first, then authenticated user (sub claim
+    // from the cookie session), then client IP for anonymous requests — so a misbehaving
+    // automation client or a NAT'd-office burst can't starve other principals.
+    // /api/v1/docs/* is exempt: Swagger UI assets are IP-allowlisted, not API traffic,
+    // and should not consume API budget.
+    // Non-management paths receive NoLimiter; endpoint-specific policies (login, push,
+    // download, …) stack on top.
+    // QueueLimit=0: management callers receive 429 immediately and should back off
+    // exponentially; the SPA handles this at the fetch layer.
+    private static void AddManagementApiLimiter(ConfigurationManager cfg, Microsoft.AspNetCore.RateLimiting.RateLimiterOptions o)
+    {
+        int permitLimit = int.TryParse(cfg["MANAGEMENT_RATE_LIMIT_PERMITS"], out int m) ? m : 300;
+        o.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
         {
-            opts.PermitLimit = int.TryParse(cfg["LOGIN_RATE_LIMIT_PERMITS"], out var p) ? p : 10;
-            opts.Window = TimeSpan.FromMinutes(1);
-            opts.QueueLimit = 0;
+            string? path = ctx.Request.Path.Value;
+            if (path is null
+                || !path.StartsWith("/api/v1/", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith("/api/v1/docs/", StringComparison.OrdinalIgnoreCase)
+                || path.Equals("/api/v1/docs", StringComparison.OrdinalIgnoreCase))
+            {
+                return RateLimitPartition.GetNoLimiter<string>("none");
+            }
+
+            string key = Dependably.Security.RateLimitPartitions.GetManagementPartitionKey(ctx);
+            return RateLimitPartition.GetSlidingWindowLimiter(key,
+                _ => new SlidingWindowRateLimiterOptions
+                {
+                    PermitLimit = permitLimit,
+                    Window = TimeSpan.FromMinutes(1),
+                    SegmentsPerWindow = 6,
+                    QueueLimit = 0,
+                });
         });
-        o.AddFixedWindowLimiter("invite", opts =>
+    }
+
+    // Requests with no resolvable remote IP (in-process probes) share one "unknown"
+    // bucket rather than bypassing the limiter entirely.
+    private static void AddPerIpFixedWindowLimiter(
+        Microsoft.AspNetCore.RateLimiting.RateLimiterOptions o, string policyName, int permitLimit, TimeSpan window)
+    {
+        o.AddPolicy(policyName, httpContext =>
         {
-            opts.PermitLimit = 20;
-            opts.Window = TimeSpan.FromHours(1);
-            opts.QueueLimit = 0;
-        });
-        o.AddFixedWindowLimiter("token-create", opts =>
-        {
-            opts.PermitLimit = int.TryParse(cfg["TOKEN_CREATE_RATE_LIMIT_PERMITS"], out var t) ? t : 60;
-            opts.Window = TimeSpan.FromHours(1);
-            opts.QueueLimit = 0;
+            string key = httpContext.GetNormalizedRemoteIp() ?? "unknown";
+            return RateLimitPartition.GetFixedWindowLimiter(key,
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = permitLimit,
+                    Window = window,
+                    QueueLimit = 0,
+                });
         });
     }
 
@@ -868,7 +1058,7 @@ public partial class Program
         // Maven:MetadataTtl — removed when Maven metadata caching moved into
         // UpstreamClient.GetOrFetchMetadataAsync (single-flight, no TTL). Operators
         // who set this in env / Helm / Terraform need to know it has no effect.
-        var mavenMetadataTtl = configuration["Maven:MetadataTtl"];
+        string? mavenMetadataTtl = configuration["Maven:MetadataTtl"];
         if (!string.IsNullOrWhiteSpace(mavenMetadataTtl))
         {
             Log.Warning(
@@ -885,15 +1075,18 @@ public partial class Program
     /// </summary>
     private static bool HasUsableApexHost(ConfigurationManager configuration)
     {
-        var apex = configuration["APEX_HOST"];
-        if (!string.IsNullOrWhiteSpace(apex)) return true;
+        string? apex = configuration["APEX_HOST"];
+        if (!string.IsNullOrWhiteSpace(apex))
+        {
+            return true;
+        }
 
-        var baseUrl = configuration["BASE_URL"];
+        string? baseUrl = configuration["BASE_URL"];
         if (!string.IsNullOrWhiteSpace(baseUrl)
             && Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
         {
-            var host = uri.Host.ToLowerInvariant();
-            return host != "localhost" && host != "127.0.0.1" && host != "[::1]";
+            string host = uri.Host.ToLowerInvariant();
+            return host is not "localhost" and not "127.0.0.1" and not "[::1]";
         }
 
         return false;
@@ -901,46 +1094,67 @@ public partial class Program
 
     private static void WarnOnAirGapContradictions(IConfiguration configuration)
     {
-        var airGapped = string.Equals(configuration["AIR_GAPPED"], "true", StringComparison.OrdinalIgnoreCase)
+        bool airGapped = string.Equals(configuration["AIR_GAPPED"], "true", StringComparison.OrdinalIgnoreCase)
                      || string.Equals(configuration["AIR_GAPPED"], "1", StringComparison.OrdinalIgnoreCase);
-        if (!airGapped) return;
+        if (!airGapped)
+        {
+            return;
+        }
 
-        var osvMode = configuration["OSV_MODE"];
+        string? osvMode = configuration["OSV_MODE"];
         if (!string.Equals(osvMode, "local", StringComparison.OrdinalIgnoreCase))
+        {
             Log.Warning(
                 "AIR_GAPPED=true but OSV_MODE is not 'local' (current: '{OsvMode}'). " +
                 "Vulnerability scans will fail or silently skip. Set OSV_MODE=local.",
                 string.IsNullOrWhiteSpace(osvMode) ? "(not set)" : osvMode);
+        }
 
-        var pingUrl = configuration["HEALTHCHECK_PING_URL"];
+        string? pingUrl = configuration["HEALTHCHECK_PING_URL"];
         if (!string.IsNullOrWhiteSpace(pingUrl))
+        {
             Log.Warning(
                 "AIR_GAPPED=true but HEALTHCHECK_PING_URL is set ({PingUrl}). " +
                 "Healthcheck pings will fail in an air-gapped environment.",
                 pingUrl);
+        }
 
-        var siemWebhook = configuration["SIEM_WEBHOOK_URL"];
+        string? siemWebhook = configuration["SIEM_WEBHOOK_URL"];
         if (!string.IsNullOrWhiteSpace(siemWebhook))
+        {
             Log.Information(
                 "AIR_GAPPED=true and SIEM_WEBHOOK_URL is configured. " +
                 "SIEM webhook delivery will fail if the endpoint is unreachable from this host.");
+        }
 
-        var otlpEndpoint = configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
+        string? otlpEndpoint = configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
         if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+        {
             Log.Information(
                 "AIR_GAPPED=true and OTEL_EXPORTER_OTLP_ENDPOINT is configured. " +
                 "OTLP telemetry export will fail if the collector is unreachable from this host.");
+        }
 
-        var syslogHost = configuration["SIEM_SYSLOG_HOST"];
+        string? syslogHost = configuration["SIEM_SYSLOG_HOST"];
         if (!string.IsNullOrWhiteSpace(syslogHost))
+        {
             Log.Information(
                 "AIR_GAPPED=true and SIEM_SYSLOG_HOST is configured. " +
                 "Syslog SIEM delivery will fail if the host is unreachable.");
+        }
     }
 
     public static void ConfigureApp(WebApplication app)
     {
         // ── Middleware pipeline (order matters) ─────────────────────────────────
+
+        // Forwarded headers run first so every downstream consumer of
+        // Connection.RemoteIpAddress and Request.IsHttps — the /metrics IP allowlist,
+        // rate-limit partition keys, audit source_ip, HSTS emission, cookie Secure
+        // decisions — sees the client-facing values rewritten from X-Forwarded-For /
+        // X-Forwarded-Proto (subject to TRUSTED_PROXIES). Nothing in the pipeline
+        // needs the raw proxy-connection values.
+        app.UseForwardedHeaders();
 
         // Strict-multi-tenancy: populate HttpContext.Items["TenantContext"] from the configured
         // ITenantResolver (single mode → SingleTenantResolver; multi mode → SubdomainTenantResolver).
@@ -961,7 +1175,10 @@ public partial class Program
         // middleware: when the map is empty (default deployment) it is a no-op pass-through.
         app.UseMiddleware<Dependably.Infrastructure.TransparentInterceptMiddleware>();
 
-        // Upload size limits — must be before routing so body size is set before the body is read
+        // Upload size limits — reads the TenantContext resolved above (so it must sit after
+        // SubdomainTenantMiddleware) and the ecosystem path prefix (so it must sit after
+        // TransparentInterceptMiddleware's host→prefix rewrite), and must run before routing
+        // so the max body size is set before the body is read.
         app.UseMiddleware<Dependably.Security.UploadSizeLimitMiddleware>();
 
         // Security headers — must be first after upload limit
@@ -975,6 +1192,11 @@ public partial class Program
         // from any controller / protocol path that hits the upstream client.
         app.UseMiddleware<Dependably.Infrastructure.AirGappedExceptionMiddleware>();
 
+        // Translate StagingDiskFullException into 507 Insufficient Storage problem-JSON.
+        // Sits adjacent to the air-gap handler so all storage-layer exception mappings
+        // live together in the pipeline.
+        app.UseMiddleware<Dependably.Infrastructure.StagingDiskFullExceptionMiddleware>();
+
         // Translate TenantNotReadyException raised by ITenantStorageResolver.GetRegistryAsync
         // into 404 / 423 / 503 problem-JSON responses instead of letting it bubble to a 500.
         // Sits adjacent to the air-gap handler so all storage-layer exception mappings live
@@ -982,29 +1204,41 @@ public partial class Program
         app.UseMiddleware<Dependably.Infrastructure.TenantNotReadyExceptionMiddleware>();
 
         app.UseResponseCompression();
-        app.UseSerilogRequestLogging(opts =>
-        {
-            opts.GetLevel = SerilogRequestLogLevel;
-        });
+        app.UseSerilogRequestLogging(opts => opts.GetLevel = SerilogRequestLogLevel);
 
         app.UseCors("ManagementApi");
         app.UseRequestLocalization();
-        // Must run before UseCookiePolicy so Request.IsHttps reflects the client-facing scheme
-        // (X-Forwarded-Proto from a TLS-terminating reverse proxy) when the cookie policy
-        // decides whether to mark cookies Secure.
-        app.UseForwardedHeaders();
         app.UseCookiePolicy();
         app.UseAuthentication();
         app.UseAuthorization();
 
-        // Liveness / readiness probes
-        app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
-        var version = typeof(Program).Assembly
+        // CSRF defense-in-depth for management API cookie sessions. Checks Sec-Fetch-Site
+        // (modern browsers) then falls back to Origin. Runs after auth so the cookie has
+        // already been validated; skips requests with an Authorization header (API token /
+        // protocol clients) and the SAML ACS path (cross-site IdP POST by design).
+        app.UseMiddleware<Dependably.Security.CsrfDefenseMiddleware>();
+
+        // Liveness / readiness probes. All carry the per-IP "anon" rate-limit policy:
+        // generous enough for orchestrator probes, but an unauthenticated flood can no
+        // longer amplify load onto the backing stores via /ready's fan-out checks.
+        app.MapGet("/health", () => Results.Ok(new { status = "ok" })).RequireRateLimiting("anon");
+        string version = typeof(Program).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
             ?? typeof(Program).Assembly.GetName().Version?.ToString()
             ?? "unknown";
-        app.MapGet("/version", () => Results.Ok(new { version }));
-        app.MapGet("/ready", BuildReadyHandler());
+        // /version is an operator/monitoring surface (the SPA never calls it), so it sits
+        // behind the same IP allowlist as /metrics — anonymous internet callers can't
+        // fingerprint the deployed build for CVE matching. The default allowlist permits
+        // loopback, so local `curl /version` checks keep working.
+        app.MapGet("/version", async (HttpContext ctx, MetricsAccessConfig metricsAccess) =>
+        {
+            var resolved = await metricsAccess.ResolveAsync(ctx.RequestAborted);
+            var remote = ctx.Connection.RemoteIpAddress;
+            return remote is null || !MetricsAccessMiddleware.IsIpAllowed(remote, resolved.Allowed)
+                ? Results.StatusCode(StatusCodes.Status403Forbidden)
+                : Results.Ok(new { version });
+        }).RequireRateLimiting("anon");
+        app.MapGet("/ready", BuildReadyHandler()).RequireRateLimiting("anon");
 
         app.UseRateLimiter();
 
@@ -1017,7 +1251,7 @@ public partial class Program
         }
         catch (InvalidOperationException)
         {
-            var wwwrootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot");
+            string wwwrootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot");
             embeddedProvider = Directory.Exists(wwwrootPath)
                 ? new Microsoft.Extensions.FileProviders.PhysicalFileProvider(wwwrootPath)
                 : new Microsoft.Extensions.FileProviders.NullFileProvider();
@@ -1057,8 +1291,8 @@ public partial class Program
         // endpoint matching, so there's no ambiguity.
         app.Use(async (ctx, next) =>
         {
-            var path = ctx.Request.Path.Value;
-            if (path == "/api/v1/docs" || path == "/docs")
+            string? path = ctx.Request.Path.Value;
+            if (path is "/api/v1/docs" or "/docs")
             {
                 ctx.Response.StatusCode = StatusCodes.Status308PermanentRedirect;
                 ctx.Response.Headers.Location = path + "/" + ctx.Request.QueryString.Value;
@@ -1081,6 +1315,8 @@ public partial class Program
         // AddAspNetCoreInstrumentation in ConfigureOpenTelemetry. The IP
         // allowlist on /metrics is preserved by MetricsAccessMiddleware
         // earlier in the pipeline. See docs/observability/metrics.md.
+        // Deliberately outside the OpenAPI inventory (management and protocol documents):
+        // operator-only scrape endpoint, IP-allowlisted, documented in docs/observability.
         app.MapPrometheusScrapingEndpoint("/metrics");
 
         // OpenAPI specs — named-document pattern serves both /openapi/management.json
@@ -1109,18 +1345,18 @@ public partial class Program
     private static Serilog.Events.LogEventLevel SerilogRequestLogLevel(
         HttpContext ctx, double elapsed, Exception? ex)
     {
-        if (ex is not null) return Serilog.Events.LogEventLevel.Error;
-        if (ctx.Request.Path.StartsWithSegments("/ready") || ctx.Request.Path.StartsWithSegments("/health"))
-            return Serilog.Events.LogEventLevel.Verbose;
-        if (elapsed > SlowRequestThresholdMs) return Serilog.Events.LogEventLevel.Warning;
-        return Serilog.Events.LogEventLevel.Information;
+        return ex is not null
+            ? Serilog.Events.LogEventLevel.Error
+            : ctx.Request.Path.StartsWithSegments("/ready") || ctx.Request.Path.StartsWithSegments("/health")
+            ? Serilog.Events.LogEventLevel.Verbose
+            : elapsed > SlowRequestThresholdMs ? Serilog.Events.LogEventLevel.Warning : Serilog.Events.LogEventLevel.Information;
     }
 
     private static readonly string[] NonSpaPathPrefixes =
         ["/api/", "/simple/", "/npm/", "/nuget/", "/packages/", "/pypi/", "/maven/", "/rpm/", "/v2/", "/saml/",
-         "/docs/", "/openapi/"];
+         "/docs/", "/openapi/", "/cargo/"];
 
-    private static readonly string[] NonSpaExactPaths = ["/health", "/ready", "/metrics", "/docs"];
+    private static readonly string[] NonSpaExactPaths = ["/health", "/ready", "/metrics", "/docs", "/cargo/config.json"];
 
     private static bool IsNonSpaPath(string path) =>
         NonSpaPathPrefixes.Any(p => path.StartsWith(p, StringComparison.Ordinal))
@@ -1129,7 +1365,7 @@ public partial class Program
     private static Func<HttpContext, Task> BuildSpaFallback(Microsoft.Extensions.FileProviders.IFileProvider embeddedProvider) =>
         async ctx =>
         {
-            var path = ctx.Request.Path.Value ?? "";
+            string path = ctx.Request.Path.Value ?? "";
             if (IsNonSpaPath(path))
             {
                 ctx.Response.StatusCode = 404;
@@ -1147,16 +1383,20 @@ public partial class Program
         async (aggregator, shutdown, ct) =>
         {
             if (shutdown.IsShuttingDown)
+            {
                 return Results.Json(new { status = "draining" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             var checks = await aggregator.CheckAsync(ct);
-            var allOk = checks.Values.All(v => v is null);
+            bool allOk = checks.Values.All(v => v is null);
 
+            // Per-check ok/error only. Raw failure detail (file paths, Redis endpoints,
+            // driver error text) is logged server-side by ReadinessAggregator and never
+            // returned to the anonymous caller.
             var body = new
             {
                 status = allOk ? "ready" : "degraded",
                 checks = checks.ToDictionary(kv => kv.Key, kv => kv.Value is null ? "ok" : "error"),
-                errors = checks.Where(kv => kv.Value is not null).ToDictionary(kv => kv.Key, kv => kv.Value!),
             };
 
             return allOk

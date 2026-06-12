@@ -44,6 +44,15 @@ public sealed class OciUpstreamRegistryOptions
     /// <summary>Basic/token exchange password or personal access token.</summary>
     public string? Password { get; set; }
 
+    /// <summary>
+    /// Operator-pinned token-exchange endpoint (AuthType=DockerHubTokenExchange). The
+    /// <c>Www-Authenticate</c> realm presented by the upstream must be HTTPS and live on the
+    /// upstream's own host or registrable domain before credentials are attached; set this to
+    /// the exact realm URL (e.g. <c>https://auth.example.net/token</c>) to allow a registry
+    /// whose auth realm is hosted on an unrelated domain.
+    /// </summary>
+    public string? TokenEndpoint { get; set; }
+
     /// <summary>AWS region for ECR (AuthType=AwsEcr).</summary>
     public string? AwsRegion { get; set; }
 
@@ -86,8 +95,10 @@ public sealed class OciOptionsValidator : IValidateOptions<OciOptions>
     {
         var errors = new List<string>();
         ValidateTimeSpans(options, errors);
-        for (var i = 0; i < options.Upstreams.Count; i++)
+        for (int i = 0; i < options.Upstreams.Count; i++)
+        {
             ValidateUpstream(options.Upstreams[i], i, errors);
+        }
 
         return errors.Count > 0
             ? ValidateOptionsResult.Fail(errors)
@@ -97,30 +108,54 @@ public sealed class OciOptionsValidator : IValidateOptions<OciOptions>
     private static void ValidateTimeSpans(OciOptions options, List<string> errors)
     {
         if (options.ManifestTagTtl <= TimeSpan.Zero)
+        {
             errors.Add("Oci:ManifestTagTtl must be positive.");
+        }
+
         if (options.TokenCacheDuration <= TimeSpan.Zero)
+        {
             errors.Add("Oci:TokenCacheDuration must be positive.");
+        }
+
         if (options.UpstreamHttpTimeout <= TimeSpan.Zero)
+        {
             errors.Add("Oci:UpstreamHttpTimeout must be positive.");
+        }
     }
 
     private static void ValidateUpstream(OciUpstreamRegistryOptions u, int i, List<string> errors)
     {
         if (string.IsNullOrWhiteSpace(u.Name))
+        {
             errors.Add($"Oci:Upstreams[{i}].Name is required.");
+        }
+
         if (string.IsNullOrWhiteSpace(u.Host))
+        {
             errors.Add($"Oci:Upstreams[{i}].Host is required.");
+        }
+
         if (u.AuthType == OciAuthType.Basic)
+        {
             ValidateBasicAuth(u, i, errors);
+        }
+
         if (u.AuthType == OciAuthType.AwsEcr && string.IsNullOrWhiteSpace(u.AwsRegion))
+        {
             errors.Add($"Oci:Upstreams[{i}] AuthType=AwsEcr requires AwsRegion.");
+        }
     }
 
     private static void ValidateBasicAuth(OciUpstreamRegistryOptions u, int i, List<string> errors)
     {
         if (string.IsNullOrWhiteSpace(u.Username))
+        {
             errors.Add($"Oci:Upstreams[{i}] AuthType=Basic requires Username.");
+        }
+
         if (string.IsNullOrWhiteSpace(u.Password))
+        {
             errors.Add($"Oci:Upstreams[{i}] AuthType=Basic requires Password.");
+        }
     }
 }

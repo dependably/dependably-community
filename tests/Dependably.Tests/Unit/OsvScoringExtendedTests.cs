@@ -1,5 +1,4 @@
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -47,8 +46,8 @@ public sealed class OsvScoringExtendedTests
         // Same metrics with S:U vs S:C must produce different scores — the changed-scope
         // path uses the alternate ISC + raw formulas. Don't over-specify the exact value
         // (the CVSS 3.1 spec is the source of truth; this test guards branch coverage).
-        var unchanged = OsvScoring.ComputeCvss3Score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N");
-        var changed   = OsvScoring.ComputeCvss3Score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N");
+        double? unchanged = OsvScoring.ComputeCvss3Score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N");
+        double? changed = OsvScoring.ComputeCvss3Score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N");
         Assert.NotNull(unchanged);
         Assert.NotNull(changed);
         Assert.NotEqual(unchanged, changed);
@@ -83,7 +82,7 @@ public sealed class OsvScoringExtendedTests
     public void ComputeCvss3Score_AllNoneImpact_ReturnsZero()
     {
         // When confidentiality/integrity/availability are all None, ISC <= 0 → returns 0.
-        var s = OsvScoring.ComputeCvss3Score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N");
+        double? s = OsvScoring.ComputeCvss3Score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N");
         Assert.Equal(0.0, s);
     }
 
@@ -91,7 +90,7 @@ public sealed class OsvScoringExtendedTests
     public void ComputeCvss3Score_Cvss30_AlsoAccepted()
     {
         // The "CVSS:3." prefix accepts both 3.0 and 3.1.
-        var s = OsvScoring.ComputeCvss3Score("CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H");
+        double? s = OsvScoring.ComputeCvss3Score("CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H");
         Assert.NotNull(s);
         Assert.True(s >= 9.0);
     }
@@ -101,7 +100,7 @@ public sealed class OsvScoringExtendedTests
     [Fact]
     public void ParseCvssBaseScore_AppendedScore_MapsToSeverityBand()
     {
-        var s = OsvScoring.ParseCvssBaseScore("CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:L 3.5", out var sev);
+        double? s = OsvScoring.ParseCvssBaseScore("CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:L 3.5", out string? sev);
         Assert.Equal(3.5, s);
         Assert.Equal("LOW", sev);
     }
@@ -110,7 +109,7 @@ public sealed class OsvScoringExtendedTests
     public void ParseCvssBaseScore_VectorOnly_Medium_BandIsMedium()
     {
         // Pick a vector that lands in the MEDIUM 4.0..6.9 band.
-        var s = OsvScoring.ParseCvssBaseScore("CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N", out var sev);
+        double? s = OsvScoring.ParseCvssBaseScore("CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N", out string? sev);
         Assert.NotNull(s);
         Assert.Equal("MEDIUM", sev);
     }

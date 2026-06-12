@@ -1,5 +1,4 @@
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -31,8 +30,8 @@ public sealed class MavenPathParserTests
     }
 
     [Theory]
-    [InlineData("com/example/mylib/1.0/mylib-1.0.jar.sha1",   "sha1")]
-    [InlineData("com/example/mylib/1.0/mylib-1.0.jar.md5",    "md5")]
+    [InlineData("com/example/mylib/1.0/mylib-1.0.jar.sha1", "sha1")]
+    [InlineData("com/example/mylib/1.0/mylib-1.0.jar.md5", "md5")]
     [InlineData("com/example/mylib/1.0/mylib-1.0.jar.sha256", "sha256")]
     [InlineData("com/example/mylib/1.0/mylib-1.0.jar.sha512", "sha512")]
     public void Parse_ChecksumSidecars_DetectAlgorithm(string path, string algo)

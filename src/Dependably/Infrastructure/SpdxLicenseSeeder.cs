@@ -40,7 +40,7 @@ public sealed class SpdxLicenseSeeder
         var (licenses, embeddedVersion) = LoadLicensesFromResource();
         var copyleftByIdentifier = LoadCopyleftOverlay();
 
-        var storedVersion = await conn.ExecuteScalarAsync<string?>(
+        string? storedVersion = await conn.ExecuteScalarAsync<string?>(
             "SELECT value FROM instance_settings WHERE key = @key",
             new { key = VersionKey });
 
@@ -63,7 +63,7 @@ public sealed class SpdxLicenseSeeder
 
             foreach (var lic in licenses)
             {
-                copyleftByIdentifier.TryGetValue(lic.Identifier, out var copyleft);
+                copyleftByIdentifier.TryGetValue(lic.Identifier, out string? copyleft);
                 copyleft ??= "unclassified";
                 await conn.ExecuteAsync(
                     """
@@ -103,20 +103,23 @@ public sealed class SpdxLicenseSeeder
 
     private static (List<LicenseRow> Rows, string Version) LoadLicensesFromResource()
     {
-        var json = ReadEmbedded(LicensesResourceLeaf);
+        string json = ReadEmbedded(LicensesResourceLeaf);
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        var version = root.GetProperty("licenseListVersion").GetString()
+        string version = root.GetProperty("licenseListVersion").GetString()
             ?? throw new InvalidOperationException("SPDX JSON missing 'licenseListVersion'.");
 
         var arr = root.GetProperty("licenses");
         var rows = new List<LicenseRow>(arr.GetArrayLength());
         foreach (var el in arr.EnumerateArray())
         {
-            var id = el.GetProperty("licenseId").GetString();
-            var name = el.GetProperty("name").GetString();
-            if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(name)) continue;
+            string? id = el.GetProperty("licenseId").GetString();
+            string? name = el.GetProperty("name").GetString();
+            if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(name))
+            {
+                continue;
+            }
 
             rows.Add(new LicenseRow(
                 Identifier: id,
@@ -131,24 +134,33 @@ public sealed class SpdxLicenseSeeder
 
     private static Dictionary<string, string> LoadCopyleftOverlay()
     {
-        var json = ReadEmbedded(CopyleftResourceLeaf);
+        string json = ReadEmbedded(CopyleftResourceLeaf);
         using var doc = JsonDocument.Parse(json);
         var categories = doc.RootElement.GetProperty("categories");
         var map = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var cat in categories.EnumerateObject())
         {
             if (!ValidCopyleft.Contains(cat.Name))
+            {
                 throw new InvalidOperationException(
                     $"Copyleft overlay contains unknown category '{cat.Name}'. " +
                     $"Allowed: {string.Join(", ", ValidCopyleft)}.");
+            }
 
             foreach (var idEl in cat.Value.EnumerateArray())
             {
-                var id = idEl.GetString();
-                if (string.IsNullOrEmpty(id)) continue;
+                string? id = idEl.GetString();
+                if (string.IsNullOrEmpty(id))
+                {
+                    continue;
+                }
+
                 if (map.ContainsKey(id))
+                {
                     throw new InvalidOperationException(
                         $"SPDX identifier '{id}' appears in multiple copyleft categories.");
+                }
+
                 map[id] = cat.Name;
             }
         }
@@ -158,7 +170,7 @@ public sealed class SpdxLicenseSeeder
     private static string ReadEmbedded(string leafName)
     {
         var assembly = typeof(SpdxLicenseSeeder).Assembly;
-        var name = assembly.GetManifestResourceNames().SingleOrDefault(n => n.EndsWith(leafName, StringComparison.Ordinal))
+        string name = assembly.GetManifestResourceNames().SingleOrDefault(n => n.EndsWith(leafName, StringComparison.Ordinal))
             ?? throw new InvalidOperationException($"Embedded resource '{leafName}' not found.");
         using var stream = assembly.GetManifestResourceStream(name)!;
         using var reader = new StreamReader(stream);

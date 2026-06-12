@@ -1,6 +1,5 @@
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Observability;
 
@@ -21,6 +20,8 @@ public sealed partial class OutcomeValueTests
     {
         // Lifecycle (most operations)
         "success", "client_error", "server_error", "upstream_error", "blocked", "cancelled",
+        // Storage guard (staging volume full — proxy fetch rejected before hitting network)
+        "staging_disk_full",
         // Cache-result (dependably.cache.lookups only)
         "hit", "miss",
         // Auth-resolution (dependably.token_auth.requests only)
@@ -40,27 +41,32 @@ public sealed partial class OutcomeValueTests
     [Fact]
     public void NoOutcomeValueOutsideClosedEnum()
     {
-        var srcDir = GetSourceDir();
+        string srcDir = GetSourceDir();
         Assert.True(Directory.Exists(srcDir), $"Source directory not found: {srcDir}");
 
         var violations = new List<string>();
 
-        foreach (var file in Directory.EnumerateFiles(srcDir, "*.cs", SearchOption.AllDirectories))
+        foreach (string file in Directory.EnumerateFiles(srcDir, "*.cs", SearchOption.AllDirectories))
         {
             if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            {
                 continue;
+            }
 
-            var content = File.ReadAllText(file);
+            string content = File.ReadAllText(file);
 
             foreach (var pattern in new[] { AttributePattern(), AssignmentPattern() })
             {
                 foreach (Match m in pattern.Matches(content))
                 {
-                    var value = m.Groups[1].Value;
-                    if (Allowed.Contains(value)) continue;
+                    string value = m.Groups[1].Value;
+                    if (Allowed.Contains(value))
+                    {
+                        continue;
+                    }
 
-                    var line = content.AsSpan(0, m.Index).Count('\n') + 1;
-                    var rel = Path.GetRelativePath(srcDir, file);
+                    int line = content.AsSpan(0, m.Index).Count('\n') + 1;
+                    string rel = Path.GetRelativePath(srcDir, file);
                     violations.Add($"{rel}:{line}  outcome value \"{value}\" not in the closed enum");
                 }
             }
@@ -74,8 +80,8 @@ public sealed partial class OutcomeValueTests
 
     private static string GetSourceDir([CallerFilePath] string callerFilePath = "")
     {
-        var dir = Path.GetDirectoryName(callerFilePath)!;
-        var repoRoot = Path.GetFullPath(Path.Combine(dir, "..", "..", "..", ".."));
+        string dir = Path.GetDirectoryName(callerFilePath)!;
+        string repoRoot = Path.GetFullPath(Path.Combine(dir, "..", "..", "..", ".."));
         return Path.Combine(repoRoot, "src", "Dependably");
     }
 }

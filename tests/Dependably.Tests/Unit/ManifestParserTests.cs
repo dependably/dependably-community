@@ -1,5 +1,4 @@
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -60,7 +59,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNpm_V2_ReadsPackagesMap_AndSkipsRoot()
     {
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "packages": {
@@ -81,7 +80,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNpm_V2_ExtractsLeafFromNestedNodeModules()
     {
-        var json = """
+        string json = """
         {
           "lockfileVersion": 3,
           "packages": {
@@ -100,7 +99,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNpm_V2_SkipsNonNodeModulesPath()
     {
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "packages": {
@@ -119,7 +118,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNpm_V2_SkipsEntriesWithoutVersion()
     {
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "packages": {
@@ -139,7 +138,7 @@ public sealed class ManifestParserTests
     public void ParseNpm_IntegritySha256_DecodedToHex()
     {
         // base64("hello") = "aGVsbG8=" → hex = "68656c6c6f"
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "packages": {
@@ -157,7 +156,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNpm_IntegritySha512_NotRecorded()
     {
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "packages": {
@@ -174,7 +173,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNpm_IntegrityInvalidBase64_Null()
     {
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "packages": {
@@ -193,7 +192,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNpm_V1_WalksNestedTree_AndDedupes()
     {
-        var json = """
+        string json = """
         {
           "lockfileVersion": 1,
           "dependencies": {
@@ -219,7 +218,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNpm_NoLockfileVersion_TreatedAsV1()
     {
-        var json = """
+        string json = """
         {
           "dependencies": {
             "x": { "version": "1.0.0" }
@@ -237,7 +236,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePip_StrictEqualsOnly()
     {
-        var content = "django==4.0\nflask>=2.0\nrequests~=2.28\n";
+        string content = "django==4.0\nflask>=2.0\nrequests~=2.28\n";
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.PipRequirements, content);
 
         Assert.Single(entries);
@@ -248,7 +247,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePip_SkipsBlankCommentAndOptionLines()
     {
-        var content = """
+        string content = """
         # comment
         --index-url https://pypi.org
 
@@ -262,7 +261,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePip_StripsInlineCommentAndEnvMarker()
     {
-        var content = "django==4.0 ; python_version >= '3.8'  # latest LTS\n";
+        string content = "django==4.0 ; python_version >= '3.8'  # latest LTS\n";
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.PipRequirements, content);
 
         Assert.Single(entries);
@@ -272,7 +271,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePip_NormalizesNameToPep503()
     {
-        var content = "My_Package==1.0\n";
+        string content = "My_Package==1.0\n";
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.PipRequirements, content);
 
         Assert.Single(entries);
@@ -283,8 +282,8 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePip_StitchesLineContinuations_AndExtractsSha256Hash()
     {
-        var hash = new string('a', 64);
-        var content = $"django==4.0 \\\n  --hash=sha256:{hash}\n";
+        string hash = new('a', 64);
+        string content = $"django==4.0 \\\n  --hash=sha256:{hash}\n";
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.PipRequirements, content);
 
         Assert.Single(entries);
@@ -294,7 +293,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePip_NonSha256HashIsIgnored()
     {
-        var content = "django==4.0 --hash=md5:abc123\n";
+        string content = "django==4.0 --hash=md5:abc123\n";
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.PipRequirements, content);
 
         Assert.Single(entries);
@@ -306,7 +305,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNuGet_ReadsResolvedAndContentHash_AcrossFrameworks_Deduped()
     {
-        var json = """
+        string json = """
         {
           "version": 1,
           "dependencies": {
@@ -332,7 +331,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNuGet_SkipsEntriesWithoutResolved()
     {
-        var json = """
+        string json = """
         {
           "dependencies": {
             "net8.0": {
@@ -415,7 +414,7 @@ public sealed class ManifestParserTests
     public void ParseNpm_V2_MissingPackagesMap_FallsBackToV1Dependencies()
     {
         // lockfileVersion >= 2 but no "packages" — the v1 walk fires instead.
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "dependencies": {
@@ -435,7 +434,7 @@ public sealed class ManifestParserTests
     public void ParseNpm_V2_PackagesNotAnObject_FallsBackToV1()
     {
         // packages is an array (non-object) — v2 walk skipped, v1 walk fires.
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "packages": [],
@@ -455,7 +454,7 @@ public sealed class ManifestParserTests
     public void ParseNpm_V2_NoPackagesAndNoDependencies_Empty()
     {
         // lockfileVersion >= 2 but neither key — both branches skipped, result empty.
-        var json = """{"lockfileVersion": 3}""";
+        string json = """{"lockfileVersion": 3}""";
 
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.NpmPackageLock, json);
 
@@ -466,7 +465,7 @@ public sealed class ManifestParserTests
     public void ParseNpm_LockfileVersionNonNumber_TreatedAsV1()
     {
         // lockfileVersion is a string, not a number — LockfileVersion helper returns 1.
-        var json = """
+        string json = """
         {
           "lockfileVersion": "two",
           "dependencies": {
@@ -485,7 +484,7 @@ public sealed class ManifestParserTests
     public void ParseNpm_V2_VersionNonString_Skipped()
     {
         // version field present but a number, not a string — entry skipped.
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "packages": {
@@ -505,7 +504,7 @@ public sealed class ManifestParserTests
     public void ParseNpm_V2_IntegrityNonString_NullSha()
     {
         // integrity present but non-string — falls through to null sha.
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "packages": {
@@ -524,7 +523,7 @@ public sealed class ManifestParserTests
     public void ParseNpm_V2_BarePathExactlyNodeModulesSlash_Skipped()
     {
         // "node_modules/" yields rest.Length == 0 → name extraction returns null.
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "packages": {
@@ -543,7 +542,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNpm_V1_VersionNonString_Skipped()
     {
-        var json = """
+        string json = """
         {
           "lockfileVersion": 1,
           "dependencies": {
@@ -562,7 +561,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNpm_V1_IntegrityNonString_NullSha()
     {
-        var json = """
+        string json = """
         {
           "lockfileVersion": 1,
           "dependencies": {
@@ -580,7 +579,7 @@ public sealed class ManifestParserTests
     public void ParseNpm_V1_NestedDependenciesNotObject_StopsWalkButKeepsParent()
     {
         // Nested "dependencies" is an array — recursion skipped, parent still recorded.
-        var json = """
+        string json = """
         {
           "lockfileVersion": 1,
           "dependencies": {
@@ -599,7 +598,7 @@ public sealed class ManifestParserTests
     public void ParseNpm_V1_TopDependenciesNotObject_Empty()
     {
         // No lockfileVersion (v1 default) and dependencies is not an object — empty result.
-        var json = """{"dependencies": []}""";
+        string json = """{"dependencies": []}""";
 
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.NpmPackageLock, json);
 
@@ -610,7 +609,7 @@ public sealed class ManifestParserTests
     public void ParseNpm_IntegrityEmptyString_Null()
     {
         // integrity is an empty string — ParseIntegrity short-circuits to null.
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "packages": {
@@ -627,7 +626,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNpm_UnicodeScopedPackageName_Preserved()
     {
-        var json = """
+        string json = """
         {
           "lockfileVersion": 2,
           "packages": {
@@ -645,8 +644,8 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePip_LongVersionString_Preserved()
     {
-        var longVer = new string('9', 200);
-        var content = $"pkg=={longVer}\n";
+        string longVer = new('9', 200);
+        string content = $"pkg=={longVer}\n";
 
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.PipRequirements, content);
 
@@ -657,8 +656,8 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePip_LineContinuationCrLf_Stitched()
     {
-        var hash = new string('b', 64);
-        var content = $"django==4.0 \\\r\n  --hash=sha256:{hash}\r\n";
+        string hash = new('b', 64);
+        string content = $"django==4.0 \\\r\n  --hash=sha256:{hash}\r\n";
 
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.PipRequirements, content);
 
@@ -670,8 +669,8 @@ public sealed class ManifestParserTests
     public void ParsePip_HashFollowedByAnotherHashFlag_TerminatesAtDash()
     {
         // Two hashes on one line — ExtractFirstSha256Hash should stop at the second flag's dash.
-        var hash = new string('c', 64);
-        var content = $"django==4.0 --hash=sha256:{hash} --hash=sha256:deadbeef\n";
+        string hash = new('c', 64);
+        string content = $"django==4.0 --hash=sha256:{hash} --hash=sha256:deadbeef\n";
 
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.PipRequirements, content);
 
@@ -683,8 +682,8 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePip_HashTerminatedByTab()
     {
-        var hash = new string('d', 64);
-        var content = $"django==4.0 --hash=sha256:{hash}\tmore\n";
+        string hash = new('d', 64);
+        string content = $"django==4.0 --hash=sha256:{hash}\tmore\n";
 
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.PipRequirements, content);
 
@@ -695,7 +694,7 @@ public sealed class ManifestParserTests
     public void ParsePip_VersionTerminatedByTab()
     {
         // RHS contains a tab — version trimmed at tab boundary.
-        var content = "pkg==1.2.3\tsome trailing\n";
+        string content = "pkg==1.2.3\tsome trailing\n";
 
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.PipRequirements, content);
 
@@ -706,7 +705,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePip_LineWithoutEquals_Skipped()
     {
-        var content = "no-pin-here\nstill-no-pin\n";
+        string content = "no-pin-here\nstill-no-pin\n";
 
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.PipRequirements, content);
 
@@ -718,7 +717,7 @@ public sealed class ManifestParserTests
     {
         // "net8.0" maps to an array — filtered out by the Where clause; only the valid framework
         // contributes entries.
-        var json = """
+        string json = """
         {
           "version": 1,
           "dependencies": {
@@ -740,7 +739,7 @@ public sealed class ManifestParserTests
     public void ParseNuGet_PackageValueNonObject_Skipped()
     {
         // The package entry's value is a string, not an object — TryReadNuGetPackageEntry returns null.
-        var json = """
+        string json = """
         {
           "dependencies": {
             "net8.0": {
@@ -760,7 +759,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNuGet_ResolvedNonString_Skipped()
     {
-        var json = """
+        string json = """
         {
           "dependencies": {
             "net8.0": {
@@ -780,7 +779,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParseNuGet_ContentHashNonString_NullSha()
     {
-        var json = """
+        string json = """
         {
           "dependencies": {
             "net8.0": {
@@ -800,7 +799,7 @@ public sealed class ManifestParserTests
     public void ParseNuGet_DependenciesNotObject_Empty()
     {
         // Top-level dependencies is an array, not an object — early return with empty list.
-        var json = """{"dependencies": []}""";
+        string json = """{"dependencies": []}""";
 
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.NuGetPackagesLock, json);
 
@@ -848,8 +847,8 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePipfile_ReadsDefaultAndDevelop_StripsEquals_ExtractsSha256()
     {
-        var hash = new string('a', 64);
-        var json = $$"""
+        string hash = new('a', 64);
+        string json = $$"""
         {
           "_meta": { "hash": { "sha256": "deadbeef" } },
           "default": {
@@ -876,7 +875,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePipfile_NormalizesNameToPep503()
     {
-        var json = """{"default": {"My_Package": {"version": "==1.0"}}}""";
+        string json = """{"default": {"My_Package": {"version": "==1.0"}}}""";
 
         var entries = ManifestParser.Parse(ManifestParser.ManifestType.PipfileLock, json);
 
@@ -887,7 +886,7 @@ public sealed class ManifestParserTests
     public void ParsePipfile_SkipsNonExactPins_AndMissingVersion()
     {
         // A mixed lockfile: one valid pin, one range specifier, one vcs entry without a version.
-        var json = """
+        string json = """
         {
           "default": {
             "good": { "version": "==1.0.0" },
@@ -905,7 +904,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePipfile_DedupesAcrossDefaultAndDevelop()
     {
-        var json = """
+        string json = """
         {
           "default": { "shared": { "version": "==1.0.0" } },
           "develop": { "shared": { "version": "==1.0.0" } }
@@ -922,7 +921,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePoetry_ReadsPackageTables_NullHash()
     {
-        var toml = """
+        string toml = """
         # This file is automatically generated by Poetry and should not be changed by hand.
 
         [[package]]
@@ -954,7 +953,7 @@ public sealed class ManifestParserTests
     public void ParsePoetry_SkipsSourceDepsWithoutPep440Version()
     {
         // Mixed lockfile: a normal release plus a vcs dep whose version isn't PEP 440-shaped.
-        var toml = """
+        string toml = """
         [[package]]
         name = "good"
         version = "1.2.3"
@@ -972,7 +971,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePoetry_NoPackageArray_Empty()
     {
-        var toml = """
+        string toml = """
         [metadata]
         lock-version = "2.0"
         """;
@@ -983,7 +982,7 @@ public sealed class ManifestParserTests
     [Fact]
     public void ParsePoetry_DedupesRepeatedCoordinate()
     {
-        var toml = """
+        string toml = """
         [[package]]
         name = "dup"
         version = "1.0.0"

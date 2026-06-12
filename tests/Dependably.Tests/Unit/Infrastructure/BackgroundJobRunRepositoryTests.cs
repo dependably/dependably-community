@@ -1,6 +1,5 @@
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -24,7 +23,7 @@ public sealed class BackgroundJobRunRepositoryTests : IClassFixture<InMemoryDbFi
         DateTimeOffset? startedAt = null,
         long durationMs = 42)
     {
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         var start = startedAt ?? DateTimeOffset.UtcNow;
         await _repo.RecordAsync(new BackgroundJobRunRecord(
             Id: id, JobName: jobName, Operation: operation, RunId: Guid.NewGuid().ToString("N"),
@@ -37,7 +36,7 @@ public sealed class BackgroundJobRunRepositoryTests : IClassFixture<InMemoryDbFi
     public async Task RecordAsync_PersistsAllColumns()
     {
         var started = DateTimeOffset.UtcNow.AddSeconds(-5);
-        var id = await SeedAsync(
+        string id = await SeedAsync(
             jobName: "vuln-scan", operation: "scheduled",
             outcome: "server_error", errorMessage: "OSV 500",
             startedAt: started, durationMs: 1234);
@@ -58,7 +57,7 @@ public sealed class BackgroundJobRunRepositoryTests : IClassFixture<InMemoryDbFi
     {
         await SeedAsync(jobName: "cache-eviction", outcome: "success");
         await SeedAsync(jobName: "cache-eviction", outcome: "server_error");
-        await SeedAsync(jobName: "retention",      outcome: "success");
+        await SeedAsync(jobName: "retention", outcome: "success");
 
         var (cacheErrors, _) = await _repo.ListAsync(new BackgroundJobRunQuery(
             JobName: "cache-eviction", Outcome: "server_error", Limit: 50, Offset: 0));
@@ -72,7 +71,7 @@ public sealed class BackgroundJobRunRepositoryTests : IClassFixture<InMemoryDbFi
     public async Task ListAsync_SearchMatchesErrorMessage_CaseInsensitive()
     {
         await SeedAsync(jobName: "retention", outcome: "server_error", errorMessage: "Timeout reaching upstream");
-        await SeedAsync(jobName: "retention", outcome: "success",       errorMessage: null);
+        await SeedAsync(jobName: "retention", outcome: "success", errorMessage: null);
 
         var (items, _) = await _repo.ListAsync(new BackgroundJobRunQuery(
             Search: "TIMEOUT", Limit: 50, Offset: 0));
@@ -85,9 +84,9 @@ public sealed class BackgroundJobRunRepositoryTests : IClassFixture<InMemoryDbFi
     public async Task ListAsync_SortByDurationDesc_PutsLongestFirst()
     {
         var t = DateTimeOffset.UtcNow.AddMinutes(-1);
-        await SeedAsync(jobName: "sort-a", startedAt: t,                 durationMs: 100);
-        await SeedAsync(jobName: "sort-a", startedAt: t.AddSeconds(1),   durationMs: 9000);
-        await SeedAsync(jobName: "sort-a", startedAt: t.AddSeconds(2),   durationMs: 2500);
+        await SeedAsync(jobName: "sort-a", startedAt: t, durationMs: 100);
+        await SeedAsync(jobName: "sort-a", startedAt: t.AddSeconds(1), durationMs: 9000);
+        await SeedAsync(jobName: "sort-a", startedAt: t.AddSeconds(2), durationMs: 2500);
 
         var (items, _) = await _repo.ListAsync(new BackgroundJobRunQuery(
             JobName: "sort-a", SortBy: "durationMs", SortDir: "desc", Limit: 50, Offset: 0));

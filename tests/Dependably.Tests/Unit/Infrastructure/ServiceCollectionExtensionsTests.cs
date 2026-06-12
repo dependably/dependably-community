@@ -4,9 +4,7 @@ using Dependably.Infrastructure.Siem;
 using Dependably.Protocol;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -77,7 +75,6 @@ public sealed class ServiceCollectionExtensionsTests
         // Two-tier storage formalisation
         Assert.True(HasSingleton<CacheArtifactRepository>(services));
         Assert.True(HasSingleton<TenantArtifactAccessRepository>(services));
-        Assert.True(HasSingleton<MetadataCacheRepository>(services));
         Assert.True(HasSingleton<CacheAccessRecorder>(services));
 
         // Name-claim mechanism
@@ -230,6 +227,25 @@ public sealed class ServiceCollectionExtensionsTests
         var factory = sp.GetRequiredService<IHttpClientFactory>();
         using var client = factory.CreateClient("osv");
         Assert.Equal("https://osv.example.invalid/v1/", client.BaseAddress!.ToString());
+    }
+
+    [Fact]
+    public void AddDependablyVulnerabilityScanning_RemoteMode_OsvClientHasResponseBodyCap()
+    {
+        // The named "osv" HttpClient must set MaxResponseContentBufferSize to
+        // UpstreamClient.MaxMetadataResponseBytes (32 MB) so unbounded OSV responses
+        // are rejected before filling managed memory.
+        var services = new ServiceCollection();
+        var config = BuildConfig(("OSV_MODE", "remote"));
+
+        services.AddDependablyVulnerabilityScanning(config,
+            "https://osv.example.invalid/v1/");
+
+        using var sp = services.BuildServiceProvider();
+        var factory = sp.GetRequiredService<IHttpClientFactory>();
+        using var client = factory.CreateClient("osv");
+        Assert.Equal(Dependably.Protocol.UpstreamClient.MaxMetadataResponseBytes,
+            client.MaxResponseContentBufferSize);
     }
 
     [Fact]

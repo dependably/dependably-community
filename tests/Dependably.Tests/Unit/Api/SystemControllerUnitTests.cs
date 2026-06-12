@@ -5,8 +5,6 @@ using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
-using Xunit;
-using Dependably.Infrastructure;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -24,13 +22,13 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync("acme");
         await s.WithUserAsync(role: "owner");
-        await OrgSeeder.InsertAsync(s.Store, $"second-{Guid.NewGuid():N}".Substring(0, 16));
-        await OrgSeeder.InsertAsync(s.Store, $"third-{Guid.NewGuid():N}".Substring(0, 16));
+        await OrgSeeder.InsertAsync(s.Store, $"second-{Guid.NewGuid():N}"[..16]);
+        await OrgSeeder.InsertAsync(s.Store, $"third-{Guid.NewGuid():N}"[..16]);
         var b = await s.BuildAsync();
 
         var result = await b.SystemController.ListTenants(limit: 50, page: 1);
         var ok = Assert.IsType<OkObjectResult>(result);
-        var total = (int)ok.Value!.GetType().GetProperty("total")!.GetValue(ok.Value)!;
+        int total = (int)ok.Value!.GetType().GetProperty("total")!.GetValue(ok.Value)!;
         Assert.True(total >= 3);
     }
 
@@ -43,7 +41,7 @@ public sealed class SystemControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = (OkObjectResult)await b.SystemController.ListTenants(limit: 1000, page: 1);
-        var limit = (int)result.Value!.GetType().GetProperty("limit")!.GetValue(result.Value)!;
+        int limit = (int)result.Value!.GetType().GetProperty("limit")!.GetValue(result.Value)!;
         Assert.Equal(200, limit);
     }
 
@@ -62,7 +60,7 @@ public sealed class SystemControllerUnitTests
 
     [Theory]
     [InlineData("admin", "owner@example.com")]
-    [InlineData("",      "owner@example.com")]
+    [InlineData("", "owner@example.com")]
     [InlineData("Bad Slug!", "owner@example.com")]
     public async Task CreateTenant_InvalidSlug_Returns422(string slug, string email)
     {
@@ -88,7 +86,7 @@ public sealed class SystemControllerUnitTests
         await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var slug = $"valid-{Guid.NewGuid():N}".Substring(0, 18);
+        string slug = $"valid-{Guid.NewGuid():N}"[..18];
         var result = await b.SystemController.CreateTenant(
             new CreateTenantRequest(slug, email), CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
@@ -101,7 +99,7 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var targetSlug = $"target-{Guid.NewGuid():N}".Substring(0, 18);
+        string targetSlug = $"target-{Guid.NewGuid():N}"[..18];
         await OrgSeeder.InsertAsync(s.Store, targetSlug);
         var b = await s.BuildAsync();
 
@@ -116,7 +114,7 @@ public sealed class SystemControllerUnitTests
         Assert.NotNull(org!.DeletedAt);
 
         await using var conn = await b.Db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'tenant.deleted'");
         Assert.True(auditCount >= 1);
     }
@@ -139,8 +137,8 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var slug = $"restore-{Guid.NewGuid():N}".Substring(0, 18);
-        var orgId = await OrgSeeder.InsertAsync(s.Store, slug);
+        string slug = $"restore-{Guid.NewGuid():N}"[..18];
+        string orgId = await OrgSeeder.InsertAsync(s.Store, slug);
         await using (var conn = await s.Store.OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -158,7 +156,7 @@ public sealed class SystemControllerUnitTests
         Assert.Null(restored!.DeletedAt);
 
         await using var verify = await b.Db.OpenAsync();
-        var auditCount = await verify.ExecuteScalarAsync<long>(
+        long auditCount = await verify.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'tenant.restored'");
         Assert.True(auditCount >= 1);
     }
@@ -172,7 +170,7 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var slug = $"alive-{Guid.NewGuid():N}".Substring(0, 18);
+        string slug = $"alive-{Guid.NewGuid():N}"[..18];
         await OrgSeeder.InsertAsync(s.Store, slug);
         var b = await s.BuildAsync();
 
@@ -201,8 +199,8 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var slug = $"quota-{Guid.NewGuid():N}".Substring(0, 18);
-        var orgId = await OrgSeeder.InsertAsync(s.Store, slug);
+        string slug = $"quota-{Guid.NewGuid():N}"[..18];
+        string orgId = await OrgSeeder.InsertAsync(s.Store, slug);
         var b = await s.BuildAsync();
 
         var result = await b.SystemController.SetTenantStorageQuota(
@@ -216,7 +214,7 @@ public sealed class SystemControllerUnitTests
         Assert.Equal(1_000_000_000L, org!.StorageQuotaBytes);
 
         await using var conn = await b.Db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'tenant.quota_changed'");
         Assert.True(auditCount >= 1);
     }
@@ -229,8 +227,8 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var slug = $"qclear-{Guid.NewGuid():N}".Substring(0, 18);
-        var orgId = await OrgSeeder.InsertAsync(s.Store, slug);
+        string slug = $"qclear-{Guid.NewGuid():N}"[..18];
+        string orgId = await OrgSeeder.InsertAsync(s.Store, slug);
         var orgs = new Dependably.Infrastructure.OrgRepository(s.Store);
         await orgs.SetStorageQuotaBytesAsync(orgId, 500);
         var b = await s.BuildAsync();
@@ -256,7 +254,7 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var slug = $"qbad-{Guid.NewGuid():N}".Substring(0, 18);
+        string slug = $"qbad-{Guid.NewGuid():N}"[..18];
         await OrgSeeder.InsertAsync(s.Store, slug);
         var b = await s.BuildAsync();
 
@@ -287,7 +285,7 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var slug = $"qnull-{Guid.NewGuid():N}".Substring(0, 18);
+        string slug = $"qnull-{Guid.NewGuid():N}"[..18];
         await OrgSeeder.InsertAsync(s.Store, slug);
         var b = await s.BuildAsync();
 
@@ -304,15 +302,15 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var slug = $"qlist-{Guid.NewGuid():N}".Substring(0, 18);
-        var orgId = await OrgSeeder.InsertAsync(s.Store, slug);
+        string slug = $"qlist-{Guid.NewGuid():N}"[..18];
+        string orgId = await OrgSeeder.InsertAsync(s.Store, slug);
         var orgs = new Dependably.Infrastructure.OrgRepository(s.Store);
         await orgs.SetStorageQuotaBytesAsync(orgId, 2_500);
         var b = await s.BuildAsync();
 
         var result = await b.SystemController.ListTenants();
         var ok = Assert.IsType<OkObjectResult>(result);
-        var json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
+        string json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
         using var doc = System.Text.Json.JsonDocument.Parse(json);
         var items = doc.RootElement.GetProperty("items");
         var match = items.EnumerateArray()
@@ -361,7 +359,7 @@ public sealed class SystemControllerUnitTests
         var result = await b.SystemController.LookupUsers(
             email: "find@lookup-org.test", tenantSlug: null, limit: 50);
         var ok = Assert.IsType<OkObjectResult>(result);
-        var items = ok.Value!.GetType().GetProperty("items")!.GetValue(ok.Value);
+        object? items = ok.Value!.GetType().GetProperty("items")!.GetValue(ok.Value);
         Assert.NotNull(items);
     }
 
@@ -473,7 +471,7 @@ public sealed class SystemControllerUnitTests
 
         var ok = Assert.IsType<OkObjectResult>(await b.SystemController.ListAdmins(CancellationToken.None));
         var items = (System.Collections.IEnumerable)ok.Value!;
-        var first = items.Cast<object>().First();
+        object first = items.Cast<object>().First();
         var props = first.GetType().GetProperties().Select(p => p.Name).ToHashSet();
         Assert.DoesNotContain("passwordHash", props);
         Assert.DoesNotContain("password_hash", props);
@@ -492,17 +490,17 @@ public sealed class SystemControllerUnitTests
         var result = await b.SystemController.CreateAdmin(
             new CreateAdminRequest("new-ops@example.test"), CancellationToken.None);
         var created = Assert.IsType<CreatedAtActionResult>(result);
-        var value = created.Value!;
-        var temp = (string)value.GetType().GetProperty("temporaryPassword")!.GetValue(value)!;
+        object value = created.Value!;
+        string temp = (string)value.GetType().GetProperty("temporaryPassword")!.GetValue(value)!;
         Assert.False(string.IsNullOrWhiteSpace(temp));
 
         await using var conn = await b.Db.OpenAsync();
-        var row = await conn.QuerySingleAsync<(string Email, string Status, int Mcp, string Hash)>(
+        var (Email, Status, Mcp, Hash) = await conn.QuerySingleAsync<(string Email, string Status, int Mcp, string Hash)>(
             "SELECT email AS Email, account_status AS Status, must_change_password AS Mcp, password_hash AS Hash FROM system_admins WHERE email = 'new-ops@example.test'");
-        Assert.Equal("active", row.Status);
-        Assert.Equal(1, row.Mcp);
-        Assert.True(BCrypt.Net.BCrypt.Verify(temp, row.Hash));
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        Assert.Equal("active", Status);
+        Assert.Equal(1, Mcp);
+        Assert.True(BCrypt.Net.BCrypt.Verify(temp, Hash));
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'system_admin.admin_created'");
         Assert.Equal(1, auditCount);
     }
@@ -542,7 +540,7 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var selfId = await SystemAdminSeeder.InsertAsync(s.Store, "self@example.test");
+        string selfId = await SystemAdminSeeder.InsertAsync(s.Store, "self@example.test");
         await SystemAdminSeeder.InsertAsync(s.Store, "other@example.test");
         var b = await s.BuildAsync();
         SetSystemActor(b, selfId);
@@ -560,8 +558,8 @@ public sealed class SystemControllerUnitTests
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
         // Only one admin exists; another actor (caller) is needed to satisfy no-self.
-        var aloneId = await SystemAdminSeeder.InsertAsync(s.Store, "alone@example.test");
-        var callerId = Guid.NewGuid().ToString("N"); // synthetic caller id; no row in system_admins
+        string aloneId = await SystemAdminSeeder.InsertAsync(s.Store, "alone@example.test");
+        string callerId = Guid.NewGuid().ToString("N"); // synthetic caller id; no row in system_admins
         var b = await s.BuildAsync();
         SetSystemActor(b, callerId);
 
@@ -577,8 +575,8 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var targetId = await SystemAdminSeeder.InsertAsync(s.Store, "target@example.test");
-        var otherId = await SystemAdminSeeder.InsertAsync(s.Store, "stays-active@example.test");
+        string targetId = await SystemAdminSeeder.InsertAsync(s.Store, "target@example.test");
+        string otherId = await SystemAdminSeeder.InsertAsync(s.Store, "stays-active@example.test");
         var b = await s.BuildAsync();
         SetSystemActor(b, otherId);
 
@@ -587,10 +585,10 @@ public sealed class SystemControllerUnitTests
         Assert.IsType<NoContentResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var status = await conn.ExecuteScalarAsync<string>(
+        string? status = await conn.ExecuteScalarAsync<string>(
             "SELECT account_status FROM system_admins WHERE id = @id", new { id = targetId });
         Assert.Equal("disabled", status);
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'system_admin.admin_account_status_changed'");
         Assert.Equal(1, auditCount);
     }
@@ -601,7 +599,7 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var targetId = await SystemAdminSeeder.InsertAsync(s.Store, "t@example.test");
+        string targetId = await SystemAdminSeeder.InsertAsync(s.Store, "t@example.test");
         var b = await s.BuildAsync();
         SetSystemActor(b, Guid.NewGuid().ToString("N"));
 
@@ -617,7 +615,7 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var selfId = await SystemAdminSeeder.InsertAsync(s.Store, "self2@example.test");
+        string selfId = await SystemAdminSeeder.InsertAsync(s.Store, "self2@example.test");
         var b = await s.BuildAsync();
         SetSystemActor(b, selfId);
 
@@ -632,24 +630,24 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var targetId = await SystemAdminSeeder.InsertAsync(s.Store, "reset-me@example.test", password: "OldPassword123");
+        string targetId = await SystemAdminSeeder.InsertAsync(s.Store, "reset-me@example.test", password: "OldPassword123");
         var b = await s.BuildAsync();
         SetSystemActor(b, Guid.NewGuid().ToString("N"));
 
         var result = await b.SystemController.ResetAdminPassword(targetId, CancellationToken.None);
         var ok = Assert.IsType<OkObjectResult>(result);
-        var temp = (string)ok.Value!.GetType().GetProperty("temporaryPassword")!.GetValue(ok.Value)!;
+        string temp = (string)ok.Value!.GetType().GetProperty("temporaryPassword")!.GetValue(ok.Value)!;
         Assert.False(string.IsNullOrWhiteSpace(temp));
 
         await using var conn = await b.Db.OpenAsync();
-        var row = await conn.QuerySingleAsync<(string Hash, int Mcp, string? Issued)>(
+        var (Hash, Mcp, Issued) = await conn.QuerySingleAsync<(string Hash, int Mcp, string? Issued)>(
             "SELECT password_hash AS Hash, must_change_password AS Mcp, password_reset_issued_at AS Issued FROM system_admins WHERE id = @id",
             new { id = targetId });
-        Assert.True(BCrypt.Net.BCrypt.Verify(temp, row.Hash));
-        Assert.False(BCrypt.Net.BCrypt.Verify("OldPassword123", row.Hash));
-        Assert.Equal(1, row.Mcp);
-        Assert.False(string.IsNullOrEmpty(row.Issued));
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        Assert.True(BCrypt.Net.BCrypt.Verify(temp, Hash));
+        Assert.False(BCrypt.Net.BCrypt.Verify("OldPassword123", Hash));
+        Assert.Equal(1, Mcp);
+        Assert.False(string.IsNullOrEmpty(Issued));
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'system_admin.admin_password_reset'");
         Assert.Equal(1, auditCount);
     }
@@ -660,7 +658,7 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var selfId = await SystemAdminSeeder.InsertAsync(s.Store, "self3@example.test");
+        string selfId = await SystemAdminSeeder.InsertAsync(s.Store, "self3@example.test");
         var b = await s.BuildAsync();
         SetSystemActor(b, selfId);
 
@@ -675,7 +673,7 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var targetId = await SystemAdminSeeder.InsertAsync(s.Store, "still-active@example.test");
+        string targetId = await SystemAdminSeeder.InsertAsync(s.Store, "still-active@example.test");
         var b = await s.BuildAsync();
         SetSystemActor(b, Guid.NewGuid().ToString("N"));
 
@@ -690,7 +688,7 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var targetId = await SystemAdminSeeder.InsertAsync(s.Store, "delete-me@example.test");
+        string targetId = await SystemAdminSeeder.InsertAsync(s.Store, "delete-me@example.test");
         // Pre-disable the target so DELETE proceeds.
         await using (var conn = await s.Store.OpenAsync())
         {
@@ -704,10 +702,10 @@ public sealed class SystemControllerUnitTests
         Assert.IsType<NoContentResult>(result);
 
         await using var verify = await b.Db.OpenAsync();
-        var count = await verify.ExecuteScalarAsync<long>(
+        long count = await verify.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM system_admins WHERE id = @id", new { id = targetId });
         Assert.Equal(0, count);
-        var auditCount = await verify.ExecuteScalarAsync<long>(
+        long auditCount = await verify.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'system_admin.admin_deleted'");
         Assert.Equal(1, auditCount);
     }
@@ -732,13 +730,13 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var adminId = await SystemAdminSeeder.InsertAsync(s.Store, $"ops-{Guid.NewGuid():N}@example.test");
+        string adminId = await SystemAdminSeeder.InsertAsync(s.Store, $"ops-{Guid.NewGuid():N}@example.test");
         var b = await s.BuildAsync();
 
         var ok = Assert.IsType<OkObjectResult>(
             await b.SystemController.GetAdmin(adminId, CancellationToken.None));
-        var id = (string)ok.Value!.GetType().GetProperty("id")!.GetValue(ok.Value)!;
-        var email = (string?)ok.Value.GetType().GetProperty("email")!.GetValue(ok.Value);
+        string id = (string)ok.Value!.GetType().GetProperty("id")!.GetValue(ok.Value)!;
+        string? email = (string?)ok.Value.GetType().GetProperty("email")!.GetValue(ok.Value);
         Assert.Equal(adminId, id);
         Assert.False(string.IsNullOrEmpty(email));
     }
@@ -785,7 +783,7 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var adminId = await SystemAdminSeeder.InsertAsync(s.Store, $"ops-{Guid.NewGuid():N}@example.test");
+        string adminId = await SystemAdminSeeder.InsertAsync(s.Store, $"ops-{Guid.NewGuid():N}@example.test");
         await using (var seed = await s.Store.OpenAsync())
         {
             await seed.ExecuteAsync(
@@ -796,7 +794,7 @@ public sealed class SystemControllerUnitTests
 
         var ok = Assert.IsType<OkObjectResult>(
             await b.SystemController.Me(CancellationToken.None));
-        var lang = (string?)ok.Value!.GetType().GetProperty("language")!.GetValue(ok.Value);
+        string? lang = (string?)ok.Value!.GetType().GetProperty("language")!.GetValue(ok.Value);
         Assert.Equal("fr", lang);
     }
 
@@ -808,13 +806,13 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var adminId = await SystemAdminSeeder.InsertAsync(s.Store, $"ops-{Guid.NewGuid():N}@example.test");
+        string adminId = await SystemAdminSeeder.InsertAsync(s.Store, $"ops-{Guid.NewGuid():N}@example.test");
         var b = await s.BuildAsync();
         SetSystemActor(b, adminId);
 
         var ok = Assert.IsType<OkObjectResult>(
             await b.SystemController.Me(CancellationToken.None));
-        var lang = (string?)ok.Value!.GetType().GetProperty("language")!.GetValue(ok.Value);
+        string? lang = (string?)ok.Value!.GetType().GetProperty("language")!.GetValue(ok.Value);
         Assert.Equal(Dependably.Infrastructure.LanguageCodes.Default, lang);
     }
 
@@ -872,7 +870,7 @@ public sealed class SystemControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
-        var adminId = await SystemAdminSeeder.InsertAsync(s.Store, $"ops-{Guid.NewGuid():N}@example.test");
+        string adminId = await SystemAdminSeeder.InsertAsync(s.Store, $"ops-{Guid.NewGuid():N}@example.test");
         var b = await s.BuildAsync();
         SetSystemActor(b, adminId);
 
@@ -881,10 +879,10 @@ public sealed class SystemControllerUnitTests
         Assert.IsType<NoContentResult>(result);
 
         await using var verify = await b.Db.OpenAsync();
-        var stored = await verify.ExecuteScalarAsync<string?>(
+        string? stored = await verify.ExecuteScalarAsync<string?>(
             "SELECT language FROM system_admins WHERE id = @id", new { id = adminId });
         Assert.Equal("fr", stored);
-        var auditCount = await verify.ExecuteScalarAsync<long>(
+        long auditCount = await verify.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'system_admin.language_changed' AND actor_id = @id",
             new { id = adminId });
         Assert.True(auditCount >= 1);
@@ -957,7 +955,7 @@ public sealed class SystemControllerUnitTests
         var config = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["METRICS_ENABLED"] = "1" })
             .Build();
-        Task<string?> Reader(string _, CancellationToken __) => Task.FromResult<string?>(null);
+        static Task<string?> Reader(string _, CancellationToken __) => Task.FromResult<string?>(null);
         var access = new Dependably.Security.MetricsAccessConfig(Reader, config);
 
         var result = await b.SystemController.UpdateMetricsAccess(
@@ -979,7 +977,7 @@ public sealed class SystemControllerUnitTests
         var config = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["METRICS_ALLOWED_IPS"] = "10.0.0.0/8" })
             .Build();
-        Task<string?> Reader(string _, CancellationToken __) => Task.FromResult<string?>(null);
+        static Task<string?> Reader(string _, CancellationToken __) => Task.FromResult<string?>(null);
         var access = new Dependably.Security.MetricsAccessConfig(Reader, config);
 
         var result = await b.SystemController.UpdateMetricsAccess(

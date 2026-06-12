@@ -1,8 +1,9 @@
 using System.Security.Claims;
 using Dapper;
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
 using Dependably.Infrastructure;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Api;
 
@@ -68,7 +69,7 @@ public sealed class SystemController : ControllerBase
     {
         limit = Math.Clamp(limit, 1, 200);
         page = Math.Max(page, 1);
-        var offset = (page - 1) * limit;
+        int offset = (page - 1) * limit;
         var (items, total) = await _orgs.ListOrgsAsync(limit, offset, ct: ct);
 
         // Control-plane-only projection. memberCount/storageBytes are computed inline in
@@ -100,15 +101,22 @@ public sealed class SystemController : ControllerBase
     [HttpPost("tenants")]
     public async Task<IActionResult> CreateTenant([FromBody] CreateTenantRequest req, CancellationToken ct)
     {
-        if (req is null) return _problems.ValidationErrorAction("body", "Body is required.");
+        if (req is null)
+        {
+            return _problems.ValidationErrorAction("body", "Body is required.");
+        }
 
         var extraReserved = ReservedSlugs.ParseExtra(_config["RESERVED_SUBDOMAINS"]);
-        var slug = ReservedSlugs.Normalize(req.Slug, extraReserved);
+        string? slug = ReservedSlugs.Normalize(req.Slug, extraReserved);
         if (slug is null)
+        {
             return _problems.ValidationErrorAction("slug", "Slug is missing, reserved, or contains invalid characters.");
+        }
 
         if (string.IsNullOrWhiteSpace(req.OwnerEmail) || !req.OwnerEmail.Contains('@'))
+        {
             return _problems.ValidationErrorAction("ownerEmail", "Valid owner email is required.");
+        }
 
         string orgId;
         string ownerPassword;
@@ -119,7 +127,7 @@ public sealed class SystemController : ControllerBase
             {
                 // Slug uniqueness check before commit so the response is a clean 409 instead of
                 // a SQLite UNIQUE constraint exception bubbling up.
-                var existing = await conn.ExecuteScalarAsync<int>(
+                int existing = await conn.ExecuteScalarAsync<int>(
                     "SELECT COUNT(*) FROM orgs WHERE slug = @slug", new { slug });
                 if (existing > 0)
                 {
@@ -142,8 +150,8 @@ public sealed class SystemController : ControllerBase
 
                 ownerPassword = Convert.ToBase64String(
                     System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
-                var hash = BCrypt.Net.BCrypt.HashPassword(ownerPassword, workFactor: 12);
-                var userId = Guid.NewGuid().ToString("N");
+                string hash = BCrypt.Net.BCrypt.HashPassword(ownerPassword, workFactor: 12);
+                string userId = Guid.NewGuid().ToString("N");
 
                 await conn.ExecuteAsync(
                     """
@@ -163,7 +171,7 @@ public sealed class SystemController : ControllerBase
 
         // Audit on a fresh connection — opening it inside the BEGIN IMMEDIATE above would
         // deadlock SQLite's single writer lock.
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         await _audit.LogSystemAsync(
             action: "tenant.created",
@@ -186,15 +194,19 @@ public sealed class SystemController : ControllerBase
     /// background <see cref="Background.TenantHardDeleteService"/> hard-deletes via FK cascade.
     /// </summary>
     [HttpDelete("tenants/{slug}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> SoftDeleteTenant(string slug, CancellationToken ct)
     {
         var org = await _orgs.GetBySlugAsync(slug, ct: ct);
-        if (org is null) return NotFound();
+        if (org is null)
+        {
+            return NotFound();
+        }
 
         await _orgs.SoftDeleteOrgAsync(org.Id, ct);
         _tenantCache?.InvalidateSlug(slug);
 
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         await _audit.LogSystemAsync(
             action: "tenant.deleted",
@@ -218,17 +230,26 @@ public sealed class SystemController : ControllerBase
         [FromBody] SetStorageQuotaRequest? req,
         CancellationToken ct)
     {
-        if (req is null) return _problems.ValidationErrorAction("body", "Body is required.");
+        if (req is null)
+        {
+            return _problems.ValidationErrorAction("body", "Body is required.");
+        }
+
         if (req.QuotaBytes is long bytes && bytes <= 0)
+        {
             return _problems.ValidationErrorAction("quotaBytes",
                 "Quota must be a positive number of bytes, or null to clear.");
+        }
 
         var org = await _orgs.GetBySlugAsync(slug, ct: ct);
-        if (org is null) return NotFound();
+        if (org is null)
+        {
+            return NotFound();
+        }
 
         await _orgs.SetStorageQuotaBytesAsync(org.Id, req.QuotaBytes, ct);
 
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         await _audit.LogSystemAsync(
             action: "tenant.quota_changed",
@@ -254,25 +275,39 @@ public sealed class SystemController : ControllerBase
     /// first. <c>'archived'</c> and <c>'deleting'</c> are enterprise-only and rejected here.
     /// </summary>
     [HttpPatch("tenants/{slug}/status")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> SetTenantStatus(
         string slug,
         [FromBody] SetTenantStatusRequest? req,
         CancellationToken ct)
     {
-        if (req is null) return _problems.ValidationErrorAction("body", "Body is required.");
+        if (req is null)
+        {
+            return _problems.ValidationErrorAction("body", "Body is required.");
+        }
+
         if (req.Status is not ("active" or "suspended"))
+        {
             return _problems.ValidationErrorAction("status",
                 "Must be 'active' or 'suspended'. ('archived' and 'deleting' are enterprise-only.)");
+        }
 
         var org = await _orgs.GetBySlugAsync(slug, ct: ct);
-        if (org is null) return NotFound();
+        if (org is null)
+        {
+            return NotFound();
+        }
 
-        var priorStatus = org.Status;
-        var ok = await _orgs.UpdateOrgStatusAsync(org.Id, req.Status, ct);
-        if (!ok) return NotFound();
+        string priorStatus = org.Status;
+        bool ok = await _orgs.UpdateOrgStatusAsync(org.Id, req.Status, ct);
+        if (!ok)
+        {
+            return NotFound();
+        }
+
         _tenantCache?.InvalidateSlug(slug);
 
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         await _audit.LogSystemAsync(
             action: "tenant.status_changed",
@@ -289,18 +324,29 @@ public sealed class SystemController : ControllerBase
     /// if the tenant doesn't exist or isn't currently soft-deleted (idempotent on already-active).
     /// </summary>
     [HttpPatch("tenants/{slug}/restore")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> RestoreTenant(string slug, CancellationToken ct)
     {
         var org = await _orgs.GetBySlugAsync(slug, includeDeleted: true, ct: ct);
-        if (org is null) return NotFound();
-        if (org.DeletedAt is null)
-            return _problems.ConflictAction("Tenant is already active.");
+        if (org is null)
+        {
+            return NotFound();
+        }
 
-        var restored = await _orgs.RestoreOrgAsync(org.Id, ct);
-        if (!restored) return NotFound();
+        if (org.DeletedAt is null)
+        {
+            return _problems.ConflictAction("Tenant is already active.");
+        }
+
+        bool restored = await _orgs.RestoreOrgAsync(org.Id, ct);
+        if (!restored)
+        {
+            return NotFound();
+        }
+
         _tenantCache?.InvalidateSlug(slug);
 
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         await _audit.LogSystemAsync(
             action: "tenant.restored",
@@ -325,7 +371,9 @@ public sealed class SystemController : ControllerBase
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(email) && string.IsNullOrWhiteSpace(tenantSlug))
+        {
             return _problems.ValidationErrorAction("query", "Provide at least one of: email, tenantSlug.");
+        }
 
         limit = Math.Clamp(limit, 1, 200);
         var items = await _orgs.LookupUsersAsync(
@@ -350,7 +398,7 @@ public sealed class SystemController : ControllerBase
     {
         limit = Math.Clamp(limit, 1, 200);
         page = Math.Max(page, 1);
-        var offset = (page - 1) * limit;
+        int offset = (page - 1) * limit;
         var (items, total) = await _audit.ListSystemAuditAsync(
             limit, offset, search, action, sortBy, sortDir, ct);
         return Ok(new { items, total, limit, offset });
@@ -380,9 +428,9 @@ public sealed class SystemController : ControllerBase
         [FromQuery] BackgroundJobsQuery query,
         CancellationToken ct = default)
     {
-        var limit = Math.Clamp(query.Limit, 1, 200);
-        var page = Math.Max(query.Page, 1);
-        var offset = (page - 1) * limit;
+        int limit = Math.Clamp(query.Limit, 1, 200);
+        int page = Math.Max(query.Page, 1);
+        int offset = (page - 1) * limit;
         var (items, total) = await repo.ListAsync(
             new BackgroundJobRunQuery(
                 Search: query.Search,
@@ -467,23 +515,30 @@ public sealed class SystemController : ControllerBase
         "max_upload_bytes_nuget",
         "gc_schedule",
         "siem_max_lookback_days",
+        "default_storage_quota_bytes",
+        "max_active_tokens_per_tenant",
     };
 
     /// <summary>PUT /api/v1/system/settings — update instance-wide settings.</summary>
     [HttpPut("settings")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> UpdateSettings(
         [FromBody] Dictionary<string, string> settings, CancellationToken ct)
     {
-        foreach (var key in settings.Keys)
+        foreach (string key in settings.Keys)
         {
             if (!AllowedInstanceSettingKeys.Contains(key))
+            {
                 return _problems.ValidationErrorAction("settings", $"Unknown setting key: {key}");
+            }
         }
 
         foreach (var (key, value) in settings)
+        {
             await _orgs.SetInstanceSettingAsync(key, value, ct);
+        }
 
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         await _audit.LogSystemAsync(
             action: "system_admin.instance_settings_updated",
@@ -503,18 +558,27 @@ public sealed class SystemController : ControllerBase
     /// user account. Body: <c>{ accountStatus, tenantSlug }</c>. Audited.
     /// </summary>
     [HttpPatch("users/{email}/account-status")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> SetAccountStatus(
         string email, [FromBody] SetAccountStatusRequest req, CancellationToken ct)
     {
         if (req is null || string.IsNullOrWhiteSpace(req.TenantSlug))
+        {
             return _problems.ValidationErrorAction("tenantSlug", "tenantSlug is required.");
+        }
+
         if (req.AccountStatus is not ("active" or "locked" or "disabled"))
+        {
             return _problems.ValidationErrorAction("accountStatus", "Must be 'active', 'locked', or 'disabled'.");
+        }
 
-        var ok = await _orgs.SetUserAccountStatusAsync(email, req.TenantSlug, req.AccountStatus, ct);
-        if (!ok) return NotFound();
+        bool ok = await _orgs.SetUserAccountStatusAsync(email, req.TenantSlug, req.AccountStatus, ct);
+        if (!ok)
+        {
+            return NotFound();
+        }
 
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         await _audit.LogSystemAsync(
             action: "system_admin.account_status_changed",
@@ -536,12 +600,17 @@ public sealed class SystemController : ControllerBase
         string email, [FromBody] PasswordResetRequest req, CancellationToken ct)
     {
         if (req is null || string.IsNullOrWhiteSpace(req.TenantSlug))
+        {
             return _problems.ValidationErrorAction("tenantSlug", "tenantSlug is required.");
+        }
 
         var result = await _orgs.IssuePasswordResetAsync(email, req.TenantSlug, ct);
-        if (result is null) return NotFound();
+        if (result is null)
+        {
+            return NotFound();
+        }
 
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         await _audit.LogSystemAsync(
             action: "system_admin.password_reset",
@@ -564,24 +633,39 @@ public sealed class SystemController : ControllerBase
     /// boot (must_change_password=1) and any time the operator wants to rotate.
     /// </summary>
     [HttpPost("me/password")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> ChangeMyPassword(
         [FromBody] ChangePasswordRequest req, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.CurrentPassword))
+        {
             return _problems.ValidationErrorAction("currentPassword", "Current password is required.");
+        }
+
         var verdict = _passwordPolicy.Evaluate(req.NewPassword, new Dependably.Security.PasswordContext());
         if (!verdict.IsOk)
+        {
             return _problems.ValidationErrorAction("newPassword", verdict.ToReason());
+        }
+
         if (req.NewPassword == req.CurrentPassword)
+        {
             return _problems.ValidationErrorAction("newPassword", "New password must differ from current.");
+        }
 
-        var sub = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? sub = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
-        if (sub is null) return Unauthorized();
+        if (sub is null)
+        {
+            return Unauthorized();
+        }
 
-        var newHash = BCrypt.Net.BCrypt.HashPassword(req.NewPassword, workFactor: 12);
-        var rotated = await _systemAdmins.RotatePasswordAsync(sub, req.CurrentPassword, newHash, ct);
-        if (!rotated) return Unauthorized(new { detail = "Current password is incorrect." });
+        string newHash = BCrypt.Net.BCrypt.HashPassword(req.NewPassword, workFactor: 12);
+        bool rotated = await _systemAdmins.RotatePasswordAsync(sub, req.CurrentPassword, newHash, ct);
+        if (!rotated)
+        {
+            return Unauthorized(new { detail = "Current password is incorrect." });
+        }
 
         await _audit.LogSystemAsync(
             action: "system_admin.password_changed",
@@ -598,35 +682,44 @@ public sealed class SystemController : ControllerBase
     [HttpGet("me")]
     public async Task<IActionResult> Me(CancellationToken ct)
     {
-        var sub = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? sub = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
-        if (sub is null) return Unauthorized();
+        if (sub is null)
+        {
+            return Unauthorized();
+        }
 
         var sa = await _systemAdmins.GetByIdAsync(sub, ct);
-        if (sa is null) return NotFound();
-
-        return Ok(new
-        {
-            id = sa.Id,
-            email = sa.Email,
-            mustChangePassword = sa.MustChangePassword,
-            lastLoginAt = sa.LastLoginAt,
-            language = string.IsNullOrEmpty(sa.Language) ? LanguageCodes.Default : sa.Language,
-        });
+        return sa is null
+            ? NotFound()
+            : Ok(new
+            {
+                id = sa.Id,
+                email = sa.Email,
+                mustChangePassword = sa.MustChangePassword,
+                lastLoginAt = sa.LastLoginAt,
+                language = string.IsNullOrEmpty(sa.Language) ? LanguageCodes.Default : sa.Language,
+            });
     }
 
     /// <summary>POST /api/v1/system/me/language — set the system_admin's locale override.</summary>
     [HttpPost("me/language")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> UpdateMyLanguage(
         [FromBody] UpdateLanguageRequest req, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.Language) || !LanguageCodes.IsSupported(req.Language))
+        {
             return _problems.ValidationErrorAction("language",
                 $"Unsupported language code. Allowed: {string.Join(", ", LanguageCodes.Supported)}.");
+        }
 
-        var sub = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? sub = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
-        if (sub is null) return Unauthorized();
+        if (sub is null)
+        {
+            return Unauthorized();
+        }
 
         await _systemAdmins.UpdateLanguageAsync(sub, req.Language, ct);
 
@@ -678,36 +771,48 @@ public sealed class SystemController : ControllerBase
         CancellationToken ct)
     {
         if (req is null)
+        {
             return _problems.ValidationErrorAction("body", "Request body required.");
+        }
 
         var resolved = await access.ResolveAsync(ct);
 
         if (req.Enabled.HasValue && resolved.EnabledLockedByEnv)
+        {
             return EnvLockedConflict("metrics_enabled", "METRICS_ENABLED");
+        }
 
         if (req.AllowedIps is not null && resolved.AllowlistLockedByEnv)
+        {
             return EnvLockedConflict("metrics_allowed_ips", "METRICS_ALLOWED_IPS");
+        }
 
         var warnings = new List<string>();
         if (req.AllowedIps is not null)
         {
             var validationError = ValidateAllowedIps(req.AllowedIps, warnings);
             if (validationError is not null)
+            {
                 return validationError;
+            }
         }
 
         if (req.Enabled.HasValue)
+        {
             await _orgs.SetInstanceSettingAsync("metrics_enabled", req.Enabled.Value ? "1" : "0", ct);
+        }
 
         if (req.AllowedIps is not null)
+        {
             await _orgs.SetInstanceSettingAsync(
                 "metrics_allowed_ips",
                 System.Text.Json.JsonSerializer.Serialize(req.AllowedIps),
                 ct);
+        }
 
         access.Invalidate();
 
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         await _audit.LogSystemAsync(
             action: "system_admin.metrics_access_updated",
@@ -734,15 +839,19 @@ public sealed class SystemController : ControllerBase
     // the DB never contains junk that MetricsAccessConfig has to silently drop.
     private IActionResult? ValidateAllowedIps(IReadOnlyList<string> allowed, List<string> warnings)
     {
-        foreach (var raw in allowed)
+        foreach (string raw in allowed)
         {
             if (!NetTools.IPAddressRange.TryParse(raw, out _))
+            {
                 return _problems.ValidationErrorAction(
                     "allowedIps",
                     $"\"{raw}\" is not a valid IP or CIDR.");
+            }
 
             if (raw is "0.0.0.0/0" or "::/0")
+            {
                 warnings.Add($"Allowlist entry \"{raw}\" matches all addresses — this disables the IP gate entirely.");
+            }
         }
         return null;
     }
@@ -845,17 +954,18 @@ public sealed class SystemController : ControllerBase
     public async Task<IActionResult> GetAdmin(string id, CancellationToken ct)
     {
         var a = await _systemAdmins.GetByIdAsync(id, ct);
-        if (a is null) return NotFound();
-        return Ok(new
-        {
-            id = a.Id,
-            email = a.Email,
-            accountStatus = a.AccountStatus,
-            mustChangePassword = a.MustChangePassword,
-            lastLoginAt = a.LastLoginAt,
-            passwordResetIssuedAt = a.PasswordResetIssuedAt,
-            createdAt = a.CreatedAt,
-        });
+        return a is null
+            ? NotFound()
+            : Ok(new
+            {
+                id = a.Id,
+                email = a.Email,
+                accountStatus = a.AccountStatus,
+                mustChangePassword = a.MustChangePassword,
+                lastLoginAt = a.LastLoginAt,
+                passwordResetIssuedAt = a.PasswordResetIssuedAt,
+                createdAt = a.CreatedAt,
+            });
     }
 
     /// <summary>
@@ -865,20 +975,25 @@ public sealed class SystemController : ControllerBase
     /// on first login. Email match is case-insensitive; duplicates → 409.
     /// </summary>
     [HttpPost("admins")]
+    [ProducesResponseType(StatusCodes.Status201Created)]
     public async Task<IActionResult> CreateAdmin([FromBody] CreateAdminRequest req, CancellationToken ct)
     {
         if (req is null || string.IsNullOrWhiteSpace(req.Email))
+        {
             return _problems.ValidationErrorAction("email", "email is required.");
+        }
 
         var existing = await _systemAdmins.GetByEmailAsync(req.Email, ct);
         if (existing is not null)
+        {
             return _problems.ConflictAction("A system_admin with that email already exists.", reason: "duplicate_email");
+        }
 
-        var rawPassword = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
-        var hash = BCrypt.Net.BCrypt.HashPassword(rawPassword, workFactor: 12);
-        var id = await _systemAdmins.CreateAsync(req.Email, hash, mustChangePassword: true, ct);
+        string rawPassword = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        string hash = BCrypt.Net.BCrypt.HashPassword(rawPassword, workFactor: 12);
+        string id = await _systemAdmins.CreateAsync(req.Email, hash, mustChangePassword: true, ct);
 
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         await _audit.LogSystemAsync(
             action: "system_admin.admin_created",
@@ -901,33 +1016,46 @@ public sealed class SystemController : ControllerBase
     /// PATCH /api/v1/system/admins/{id}/account-status — change status to active/locked/disabled.
     /// </summary>
     [HttpPatch("admins/{id}/account-status")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> SetAdminAccountStatus(
         string id, [FromBody] SetAdminAccountStatusRequest req, CancellationToken ct)
     {
         if (req is null || req.AccountStatus is not ("active" or "locked" or "disabled"))
+        {
             return _problems.ValidationErrorAction("accountStatus", "Must be 'active', 'locked', or 'disabled'.");
+        }
 
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         if (string.Equals(actor, id, StringComparison.Ordinal))
+        {
             return _problems.ForbiddenAction(
                 "Operators cannot change their own account status; use /api/v1/system/me/password instead.",
                 reason: "cannot_modify_self");
+        }
 
         var target = await _systemAdmins.GetByIdAsync(id, ct);
-        if (target is null) return NotFound();
+        if (target is null)
+        {
+            return NotFound();
+        }
 
         if (req.AccountStatus != "active")
         {
-            var otherActive = await _systemAdmins.CountActiveExcludingAsync(id, ct);
+            int otherActive = await _systemAdmins.CountActiveExcludingAsync(id, ct);
             if (otherActive == 0)
+            {
                 return _problems.ConflictAction(
                     "Cannot disable or lock the last active system_admin.",
                     reason: "last_active_admin");
+            }
         }
 
-        var ok = await _systemAdmins.SetAccountStatusAsync(id, req.AccountStatus, ct);
-        if (!ok) return NotFound();
+        bool ok = await _systemAdmins.SetAccountStatusAsync(id, req.AccountStatus, ct);
+        if (!ok)
+        {
+            return NotFound();
+        }
 
         await _audit.LogSystemAsync(
             action: "system_admin.admin_account_status_changed",
@@ -946,21 +1074,29 @@ public sealed class SystemController : ControllerBase
     [HttpPost("admins/{id}/password-reset")]
     public async Task<IActionResult> ResetAdminPassword(string id, CancellationToken ct)
     {
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         if (string.Equals(actor, id, StringComparison.Ordinal))
+        {
             return _problems.ForbiddenAction(
                 "Operators cannot reset their own password through this endpoint; use /api/v1/system/me/password instead.",
                 reason: "cannot_modify_self");
+        }
 
         var target = await _systemAdmins.GetByIdAsync(id, ct);
-        if (target is null) return NotFound();
+        if (target is null)
+        {
+            return NotFound();
+        }
 
-        var rawPassword = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
-        var hash = BCrypt.Net.BCrypt.HashPassword(rawPassword, workFactor: 12);
+        string rawPassword = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        string hash = BCrypt.Net.BCrypt.HashPassword(rawPassword, workFactor: 12);
         var issuedAt = DateTimeOffset.UtcNow;
-        var ok = await _systemAdmins.ResetPasswordAsync(id, hash, issuedAt, ct);
-        if (!ok) return NotFound();
+        bool ok = await _systemAdmins.ResetPasswordAsync(id, hash, issuedAt, ct);
+        if (!ok)
+        {
+            return NotFound();
+        }
 
         await _audit.LogSystemAsync(
             action: "system_admin.admin_password_reset",
@@ -985,25 +1121,36 @@ public sealed class SystemController : ControllerBase
     /// active).
     /// </summary>
     [HttpDelete("admins/{id}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> DeleteAdmin(string id, CancellationToken ct)
     {
-        var actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         if (string.Equals(actor, id, StringComparison.Ordinal))
+        {
             return _problems.ForbiddenAction(
                 "Operators cannot delete their own account.",
                 reason: "cannot_modify_self");
+        }
 
         var target = await _systemAdmins.GetByIdAsync(id, ct);
-        if (target is null) return NotFound();
+        if (target is null)
+        {
+            return NotFound();
+        }
 
         if (target.AccountStatus != "disabled")
+        {
             return _problems.ConflictAction(
                 "Disable the system_admin (PATCH /account-status with 'disabled') before deleting.",
                 reason: "must_disable_first");
+        }
 
-        var affected = await _systemAdmins.DeleteIfDisabledAsync(id, ct);
-        if (affected == 0) return NotFound();
+        int affected = await _systemAdmins.DeleteIfDisabledAsync(id, ct);
+        if (affected == 0)
+        {
+            return NotFound();
+        }
 
         await _audit.LogSystemAsync(
             action: "system_admin.admin_deleted",

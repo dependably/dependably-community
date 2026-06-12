@@ -2,7 +2,6 @@ using System.Security.Claims;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Options;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 

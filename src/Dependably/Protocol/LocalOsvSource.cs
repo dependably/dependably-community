@@ -43,7 +43,7 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         _path = config["OSV_LOCAL_PATH"]
             ?? throw new InvalidOperationException(
                 "OSV_LOCAL_PATH is required when OSV_MODE=local.");
-        var minutes = int.TryParse(config["OSV_LOCAL_REFRESH_MINUTES"], out var m) && m > 0 ? m : 60;
+        int minutes = int.TryParse(config["OSV_LOCAL_REFRESH_MINUTES"], out int m) && m > 0 ? m : 60;
         var refreshInterval = TimeSpan.FromMinutes(minutes);
 
         _initialLoad = new Lazy<Task>(() => Task.Run(() => ReloadAsync(default)));
@@ -70,10 +70,17 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     {
         await _initialLoad.Value;
         var parsed = ParsePurl(purl);
-        if (parsed is null) return [];
+        if (parsed is null)
+        {
+            return [];
+        }
+
         var (ecosystem, name, version) = parsed.Value;
 
-        if (!_index.TryGetValue((ecosystem, name), out var list)) return [];
+        if (!_index.TryGetValue((ecosystem, name), out var list))
+        {
+            return [];
+        }
 
         // Match version against each advisory's affected versions. An advisory with no
         // version list (range-only) is reported — the scan service's downstream handling
@@ -91,9 +98,13 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     {
         await _initialLoad.Value;
         var result = new List<List<OsvAdvisory>>(purls.Count);
-        foreach (var p in purls)
+        foreach (string p in purls)
         {
-            if (ct.IsCancellationRequested) break;
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
             result.Add(await QueryAsync(p, ct));
         }
         return result;
@@ -113,14 +124,24 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         }
 
         var newIndex = new Dictionary<(string Ecosystem, string Name), List<OsvAdvisory>>(EcosystemNameComparer.Instance);
-        var loaded = 0;
-        var errors = 0;
+        int loaded = 0;
+        int errors = 0;
 
-        foreach (var file in Directory.EnumerateFiles(_path, "*.json", SearchOption.AllDirectories))
+        foreach (string file in Directory.EnumerateFiles(_path, "*.json", SearchOption.AllDirectories))
         {
-            if (ct.IsCancellationRequested) break;
-            if (await TryIndexFileAsync(file, newIndex, ct)) loaded++;
-            else errors++;
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
+            if (await TryIndexFileAsync(file, newIndex, ct))
+            {
+                loaded++;
+            }
+            else
+            {
+                errors++;
+            }
         }
 
         _index = newIndex;
@@ -144,14 +165,21 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         {
             // Read the file as a string (each dump file is a single advisory) so the raw OSV
             // JSON can be carried on the advisory for persistence, mirroring the remote client.
-            var content = await File.ReadAllTextAsync(file, ct);
+            string content = await File.ReadAllTextAsync(file, ct);
             var raw = JsonSerializer.Deserialize<RawOsvDump>(content, JsonOpts);
-            if (raw is null) return false;
+            if (raw is null)
+            {
+                return false;
+            }
 
             var advisory = BuildAdvisory(raw, content);
             foreach (var pkg in advisory.AffectedPackages)
             {
-                if (pkg.Ecosystem is null || pkg.Name is null) continue;
+                if (pkg.Ecosystem is null || pkg.Name is null)
+                {
+                    continue;
+                }
+
                 var key = (pkg.Ecosystem.ToLowerInvariant(), pkg.Name.ToLowerInvariant());
                 if (!index.TryGetValue(key, out var list))
                 {
@@ -172,16 +200,28 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     private static (string Ecosystem, string Name, string Version)? ParsePurl(string purl)
     {
         // pkg:{ecosystem}/{name}@{version}
-        if (!purl.StartsWith("pkg:", StringComparison.OrdinalIgnoreCase)) return null;
-        var rest = purl["pkg:".Length..];
-        var slash = rest.IndexOf('/');
-        if (slash < 0) return null;
-        var ecosystem = rest[..slash];
-        var nameAndVersion = rest[(slash + 1)..];
-        var at = nameAndVersion.LastIndexOf('@');
-        if (at < 0) return null;
-        var name = nameAndVersion[..at];
-        var version = nameAndVersion[(at + 1)..];
+        if (!purl.StartsWith("pkg:", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        string rest = purl["pkg:".Length..];
+        int slash = rest.IndexOf('/');
+        if (slash < 0)
+        {
+            return null;
+        }
+
+        string ecosystem = rest[..slash];
+        string nameAndVersion = rest[(slash + 1)..];
+        int at = nameAndVersion.LastIndexOf('@');
+        if (at < 0)
+        {
+            return null;
+        }
+
+        string name = nameAndVersion[..at];
+        string version = nameAndVersion[(at + 1)..];
         return (NormalizeEcosystem(ecosystem), name.ToLowerInvariant(), version);
     }
 
@@ -193,6 +233,11 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         "nuget" => "nuget",
         // OSV uses capitalised "Maven"; case-insensitive matching in MatchesEcosystemAndName.
         "maven" => "Maven",
+        // OSV uses "Go" (capitalised); case-insensitive matching handles both.
+        "golang" => "Go",
+        // Cargo maps to the "crates.io" ecosystem in OSV, which is the canonical name for
+        // Rust crate advisories in the RustSec and GitHub Advisory databases.
+        "cargo" => "crates.io",
         // RPM and OCI are intentionally not normalised here: OSV has no single "RPM" ecosystem
         // (vulnerabilities live under distro-specific names like "Rocky Linux", "AlmaLinux",
         // "Red Hat"), and OCI image vulns are image-scan territory (Trivy), not OSV. Falling
@@ -202,8 +247,8 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
 
     private static bool MatchesEcosystemAndName(OsvAffectedPackage ap, string ecosystem, string name)
     {
-        var apEco = ap.Ecosystem?.ToLowerInvariant();
-        var apName = ap.Name?.ToLowerInvariant();
+        string? apEco = ap.Ecosystem?.ToLowerInvariant();
+        string? apName = ap.Name?.ToLowerInvariant();
         // OSV uses "PyPI", "npm", "NuGet" (case sensitive in the schema). Match case-insensitively.
         return apEco is not null
             && apName is not null
@@ -228,10 +273,12 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         var cvss = raw.Severity?.FirstOrDefault(s =>
             s.Type?.StartsWith("CVSS", StringComparison.OrdinalIgnoreCase) == true);
         if (cvss?.Score is not null)
+        {
             cvssScore = OsvScoring.ParseCvssBaseScore(cvss.Score, out severity);
+        }
 
         if (severity is null && raw.DatabaseSpecific is not null
-            && raw.DatabaseSpecific.TryGetValue("severity", out var dbSev))
+            && raw.DatabaseSpecific.TryGetValue("severity", out object? dbSev))
         {
             severity = dbSev?.ToString();
         }

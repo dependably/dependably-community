@@ -4,12 +4,23 @@
   import { api } from '../lib/api.js'
   import { submitForm, extractErrorMessage } from '../lib/form.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
+  import SearchInput from '../lib/SearchInput.svelte'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
+  import { readQuery, writeQuery } from '../lib/tableState.js'
+
+  // Filter state lives in the URL query string so it survives route changes,
+  // reloads, and copied links.
+  const DEFAULTS = { q: '', eco: '', state: '' }
+  const init = readQuery(DEFAULTS)
 
   let claims = []
   let loading = true
   let error = ''
-  let filterEco = '', filterState = '', search = ''
+  let filterEco = init.eco, filterState = init.state, search = init.q
+
+  function sync() {
+    writeQuery({ q: search, eco: filterEco, state: filterState }, DEFAULTS)
+  }
 
   // Modal state.
   // mode: null | 'create' | 'transition' | 'release'
@@ -38,11 +49,8 @@
 
   onMount(load)
 
-  let searchTimeout
-  function onSearchInput() {
-    clearTimeout(searchTimeout)
-    searchTimeout = setTimeout(load, 300)
-  }
+  function onSearch() { sync(); load() }
+  function onFilterChange() { sync(); load() }
 
   function openCreate() {
     modal = 'create'
@@ -97,22 +105,21 @@
   <p class="text-muted desc">{$t('claims.description')}</p>
 
   <div class="search-bar">
-    <select bind:value={filterEco} on:change={load} class="eco-select">
+    <select bind:value={filterEco} on:change={onFilterChange} class="eco-select">
       <option value="">{$t('claims.filters.ecosystem')}</option>
       {#each ECOSYSTEMS as eco (eco)}
         <option value={eco}>{ECO_LABEL[eco]}</option>
       {/each}
     </select>
-    <select bind:value={filterState} on:change={load} class="state-select">
+    <select bind:value={filterState} on:change={onFilterChange} class="state-select">
       <option value="">{$t('claims.filters.state')}</option>
       <option value="local_only">{$t('claims.states.local_only')}</option>
       <option value="mixed">{$t('claims.states.mixed')}</option>
     </select>
-    <input
-      type="text"
+    <SearchInput
       placeholder={$t('claims.filters.search')}
       bind:value={search}
-      on:input={onSearchInput}
+      on:search={onSearch}
       class="search-input"
     />
   </div>
@@ -245,7 +252,7 @@
   .page-header { display: flex; align-items: center; justify-content: space-between; }
   .desc { max-width: 720px; }
   .search-bar { display: flex; gap: 8px; margin-bottom: 12px; }
-  .search-input { flex: 1; max-width: 320px; }
+  .search-bar :global(.search-input) { flex: 1; max-width: 320px; }
   .eco-select, .state-select { width: auto; }
   .reason-cell { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .actions-col { width: 200px; white-space: nowrap; }

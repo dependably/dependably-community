@@ -6,7 +6,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -34,9 +33,11 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task NuGet_Index_HostedNamespace_StillMergesUpstreamVersions()
     {
-        var id = $"mixednuget{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"mixednuget{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         // Push a private 99.0.0 — this flips packages.is_proxy to false.
         await _factory.PushNuGetPackage(id, "99.0.0");
+        // Hosted names are implicit local_only; merging upstream needs the explicit operator opt-in.
+        await _factory.SeedMixedClaim("nuget", id);
 
         // Stub upstream flatcontainer to return public versions for this name.
         _factory.MockUpstream.Given(
@@ -47,13 +48,13 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
                 .WithHeader("Content-Type", "application/json")
                 .WithBody("{\"versions\":[\"1.0.0\",\"2.0.0\"]}"));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{id}/index.json");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var json = await resp.Content.ReadAsStringAsync();
+        string json = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
         var versions = doc.RootElement.GetProperty("versions").EnumerateArray()
             .Select(v => v.GetString()).ToHashSet();
@@ -66,8 +67,9 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task NuGet_Index_UpstreamFailure_SetsXUpstreamStatusErrorHeader()
     {
-        var id = $"upstreamerr{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"upstreamerr{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "1.0.0");
+        await _factory.SeedMixedClaim("nuget", id);
 
         _factory.MockUpstream.Given(
                 Request.Create()
@@ -75,7 +77,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
                     .UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.InternalServerError));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{id}/index.json");
@@ -88,8 +90,9 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task NuGet_Download_UncachedUpstreamVersion_HostedNamespace_ProxyFetches()
     {
-        var id = $"mixeddl{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"mixeddl{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "99.0.0");
+        await _factory.SeedMixedClaim("nuget", id);
 
         // Build a valid .nupkg for the upstream version so the proxy-fetch path can verify
         // checksums and produce a sane DB row.
@@ -102,7 +105,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
                 .WithHeader("Content-Type", "application/octet-stream")
                 .WithBody(upstreamBytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
         // Despite packages.is_proxy=false (private upload exists), the public version is
@@ -114,7 +117,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task NuGet_Download_PrivateVersion_StillRequiresAuth()
     {
-        var id = $"privatedl{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"privatedl{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "1.0.0");
 
         // Anonymous request for the private version must still 401 — per-version routing
@@ -129,10 +132,11 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task PyPi_SimpleIndex_HostedNamespace_StillMergesUpstreamVersions()
     {
-        var name = $"mixedpypi{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"mixedpypi{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushPyPiPackage(name, "99.0.0");
+        await _factory.SeedMixedClaim("pypi", name);
 
-        var upstreamHtml = $"""
+        string upstreamHtml = $"""
             <!DOCTYPE html>
             <html><body>
             <a href="https://files.pythonhosted.org/packages/aa/bb/{name}-1.0.0.tar.gz#sha256=cafe">{name}-1.0.0.tar.gz</a><br/>
@@ -146,15 +150,15 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "text/html").WithBody(upstreamHtml));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/simple/{name}/");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var html = await resp.Content.ReadAsStringAsync();
+        string html = await resp.Content.ReadAsStringAsync();
         Assert.Contains($"{name}-1.0.0.tar.gz", html);
         // Local 99.0.0 wheel filename pattern: {name_underscored}-99.0.0-py3-none-any.whl
-        var underscored = name.Replace('-', '_');
+        string underscored = name.Replace('-', '_');
         Assert.Contains($"{underscored}-99.0.0-py3-none-any.whl", html);
     }
 
@@ -163,10 +167,11 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task Npm_Packument_HostedNamespace_StillMergesUpstreamVersions()
     {
-        var name = $"mixednpm{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"mixednpm{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNpmPackage(name, "99.0.0");
+        await _factory.SeedMixedClaim("npm", name);
 
-        var upstreamJson = $$"""
+        string upstreamJson = $$"""
         {
           "_id": "{{name}}",
           "name": "{{name}}",
@@ -188,13 +193,13 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(upstreamJson));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/{name}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var json = await resp.Content.ReadAsStringAsync();
+        string json = await resp.Content.ReadAsStringAsync();
         using var doc = JsonDocument.Parse(json);
         var versions = doc.RootElement.GetProperty("versions");
         Assert.True(versions.TryGetProperty("1.0.0", out _), "upstream version should be present");
@@ -210,8 +215,9 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         // (origin='uploaded'), then later wants to proxy-fetch a different upstream version.
         // The proxy-fetched version is anonymously readable; the uploaded one still requires
         // auth. Both live under the same packages.id row.
-        var id = $"coexist{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"coexist{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "99.0.0");
+        await _factory.SeedMixedClaim("nuget", id);
 
         // Mock upstream's nupkg for 1.0.0 so the proxy-fetch leg actually caches a row.
         var (nupkg100, _) = NuGetFixtures.BuildNupkg(id, "1.0.0");
@@ -225,7 +231,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
 
         // First fetch primes the cache: authenticated request for 1.0.0 succeeds and writes
         // a package_versions row with origin='proxy'.
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var authClient = _factory.CreateClientWithBasic(token);
         var primeResp = await authClient.GetAsync($"/nuget/flatcontainer/{id}/1.0.0/{id}.1.0.0.nupkg");
         Assert.Equal(HttpStatusCode.OK, primeResp.StatusCode);
@@ -258,8 +264,9 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task PyPi_Download_RoutesByVersionOrigin_PrivateRequiresAuth_ProxyDoesNot()
     {
-        var name = $"pypiroute{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"pypiroute{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushPyPiPackage(name, "99.0.0");
+        await _factory.SeedMixedClaim("pypi", name);
 
         // Default test org has AnonymousPull=false. Turn it on for this test so anon access
         // to the proxy-cached version is allowed by tenant policy. The point being tested is
@@ -268,7 +275,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         // this class (IClassFixture), so we restore the setting in a finally block below.
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn0 = await store.OpenAsync();
-        var orgId = await conn0.ExecuteScalarAsync<string>(
+        string orgId = await conn0.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
             ?? throw new InvalidOperationException("Default org not found.");
         await conn0.ExecuteAsync(
@@ -278,46 +285,46 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         try
         {
 
-        // Prime a proxy-fetched version. The simplest path is to mock the simple index
-        // and the file download so the proxy flow creates a package_versions row.
-        var underscored = name.Replace('-', '_');
-        var publicFilename = $"{underscored}-1.0.0-py3-none-any.whl";
+            // Prime a proxy-fetched version. The simplest path is to mock the simple index
+            // and the file download so the proxy flow creates a package_versions row.
+            string underscored = name.Replace('-', '_');
+            string publicFilename = $"{underscored}-1.0.0-py3-none-any.whl";
 
-        var (wheelBytes, wheelSha) = PyPiFixtures.BuildWheel(name, "1.0.0");
-        // The simple-index href must point at a URL the test environment can reach. Use the
-        // MockUpstream's own base so DownloadAndCacheAsync's GET resolves to a mocked response.
-        // The #sha256= fragment is now verified on first-fetch — supply the real hash so the
-        // proxy fetch doesn't 502 on the integrity check.
-        var mockBase = _factory.MockUpstream.Urls[0];
-        var simpleHtml = $"""
+            var (wheelBytes, wheelSha) = PyPiFixtures.BuildWheel(name, "1.0.0");
+            // The simple-index href must point at a URL the test environment can reach. Use the
+            // MockUpstream's own base so DownloadAndCacheAsync's GET resolves to a mocked response.
+            // The #sha256= fragment is now verified on first-fetch — supply the real hash so the
+            // proxy fetch doesn't 502 on the integrity check.
+            string mockBase = _factory.MockUpstream.Urls[0];
+            string simpleHtml = $"""
             <!DOCTYPE html><html><body>
             <a href="{mockBase}/files/{publicFilename}#sha256={wheelSha}">{publicFilename}</a><br/>
             </body></html>
             """;
-        _factory.MockUpstream.Given(
-                Request.Create().WithPath($"/simple/{name}/").UsingGet())
-            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
-                .WithHeader("Content-Type", "text/html").WithBody(simpleHtml));
-        _factory.MockUpstream.Given(
-                Request.Create().WithPath($"/files/{publicFilename}").UsingGet())
-            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
-                .WithHeader("Content-Type", "application/octet-stream").WithBody(wheelBytes));
+            _factory.MockUpstream.Given(
+                    Request.Create().WithPath($"/simple/{name}/").UsingGet())
+                .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                    .WithHeader("Content-Type", "text/html").WithBody(simpleHtml));
+            _factory.MockUpstream.Given(
+                    Request.Create().WithPath($"/files/{publicFilename}").UsingGet())
+                .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                    .WithHeader("Content-Type", "application/octet-stream").WithBody(wheelBytes));
 
-        // Prime cache via authenticated request.
-        var token = await _factory.CreateToken("pull");
-        using var authClient = _factory.CreateClientWithBasic(token);
-        var primeResp = await authClient.GetAsync($"/packages/{publicFilename}");
-        Assert.Equal(HttpStatusCode.OK, primeResp.StatusCode);
+            // Prime cache via authenticated request.
+            string token = await _factory.CreateToken("pull");
+            using var authClient = _factory.CreateClientWithBasic(token);
+            var primeResp = await authClient.GetAsync($"/packages/{publicFilename}");
+            Assert.Equal(HttpStatusCode.OK, primeResp.StatusCode);
 
-        // Anon request for the proxy version → 200 (no auth required for proxy-cached).
-        using var anonClient = _factory.CreateClient();
-        var anonProxyResp = await anonClient.GetAsync($"/packages/{publicFilename}");
-        Assert.Equal(HttpStatusCode.OK, anonProxyResp.StatusCode);
+            // Anon request for the proxy version → 200 (no auth required for proxy-cached).
+            using var anonClient = _factory.CreateClient();
+            var anonProxyResp = await anonClient.GetAsync($"/packages/{publicFilename}");
+            Assert.Equal(HttpStatusCode.OK, anonProxyResp.StatusCode);
 
-        // Anon request for the privately uploaded version → 401.
-        var privateFilename = $"{underscored}-99.0.0-py3-none-any.whl";
-        var anonPrivateResp = await anonClient.GetAsync($"/packages/{privateFilename}");
-        Assert.Equal(HttpStatusCode.Unauthorized, anonPrivateResp.StatusCode);
+            // Anon request for the privately uploaded version → 401.
+            string privateFilename = $"{underscored}-99.0.0-py3-none-any.whl";
+            var anonPrivateResp = await anonClient.GetAsync($"/packages/{privateFilename}");
+            Assert.Equal(HttpStatusCode.Unauthorized, anonPrivateResp.StatusCode);
         }
         finally
         {
@@ -333,18 +340,19 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task Npm_Tarball_RoutesByVersionOrigin_PrivateRequiresAuth_ProxyDoesNot()
     {
-        var name = $"npmroute{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"npmroute{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNpmPackage(name, "99.0.0");
+        await _factory.SeedMixedClaim("npm", name);
 
         // Mock the upstream packument so the proxy-fetch path can resolve version 1.0.0,
         // and the tarball blob itself.
-        var publicTarball = $"{name}-1.0.0.tgz";
+        string publicTarball = $"{name}-1.0.0.tgz";
         var (tarballBytes, _, _) = NpmFixtures.BuildTarball(name, "1.0.0");
         // dist.shasum is now verified against tarball bytes on first-fetch; emit the real
         // SHA-1 so the proxy fetch doesn't 502 on the integrity check.
-        var tarballSha1 = Convert.ToHexString(
+        string tarballSha1 = Convert.ToHexString(
             System.Security.Cryptography.SHA1.HashData(tarballBytes)).ToLowerInvariant();
-        var packumentJson = $$"""
+        string packumentJson = $$"""
         {
           "_id": "{{name}}",
           "name": "{{name}}",
@@ -367,7 +375,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(tarballBytes));
 
         // Prime cache for 1.0.0 (proxy origin).
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var authClient = _factory.CreateClientWithBearer(token);
         var primeResp = await authClient.GetAsync($"/npm/tarballs/{name}/{publicTarball}");
         Assert.Equal(HttpStatusCode.OK, primeResp.StatusCode);
@@ -378,7 +386,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         Assert.Equal(HttpStatusCode.OK, anonProxyResp.StatusCode);
 
         // Anon request for the private version → 401.
-        var privateTarball = $"{name}-99.0.0.tgz";
+        string privateTarball = $"{name}-99.0.0.tgz";
         var anonPrivateResp = await anonClient.GetAsync($"/npm/tarballs/{name}/{privateTarball}");
         Assert.Equal(HttpStatusCode.Unauthorized, anonPrivateResp.StatusCode);
     }
@@ -388,13 +396,13 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task NuGet_Index_PassthroughDisabled_ReturnsLocalOnlyWithSkippedHeader()
     {
-        var id = $"passthroughoff{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = $"passthroughoff{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "1.0.0");
 
         // Turn off passthrough.
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var orgId = await conn.ExecuteScalarAsync<string>(
+        string orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
             ?? throw new InvalidOperationException("Default org not found.");
         await conn.ExecuteAsync(
@@ -408,13 +416,13 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
 
         try
         {
-            var token = await _factory.CreateToken("pull");
+            string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBasic(token);
             var resp = await client.GetAsync($"/nuget/flatcontainer/{id}/index.json");
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
             Assert.Equal("skipped", resp.Headers.GetValues("X-Upstream-Status").FirstOrDefault());
 
-            var json = await resp.Content.ReadAsStringAsync();
+            string json = await resp.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(json);
             var versions = doc.RootElement.GetProperty("versions").EnumerateArray()
                 .Select(v => v.GetString()).ToList();

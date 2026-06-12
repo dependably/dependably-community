@@ -10,7 +10,7 @@
       },
       "JunitXml.TestLogger": {
         "type": "Direct",
-        "requested": "[3.0.453, )",
+        "requested": "[3.1.12, )",
         "resolved": "3.1.12",
         "contentHash": "XHeSTfBj6/kLNcfbOoaoVogamaOcKXOENQ3epo616EjnnGJHFNzuNFI6TGXgL+lYwtX4E8cpCGu6UfhYrOtHGQ=="
       },
@@ -43,6 +43,12 @@
         "dependencies": {
           "Castle.Core": "5.1.1"
         }
+      },
+      "Scriban.Signed": {
+        "type": "Direct",
+        "requested": "[7.2.0, )",
+        "resolved": "7.2.0",
+        "contentHash": "AGI7QURe/UR9lsfM53yylQngbe77PngBnpzZQ+QV3wcevP4cydyCT+YAMR4rntWEle7v++xUjmfmtXuAvp6Rtw=="
       },
       "WireMock.Net": {
         "type": "Direct",
@@ -1500,11 +1506,6 @@
           "Fare": "2.2.1",
           "Stef.Validation": "0.1.1"
         }
-      },
-      "Scriban.Signed": {
-        "type": "Transitive",
-        "resolved": "7.0.6",
-        "contentHash": "98D1jpulhXIju/NaHSf0ZsGRhjFszC84sxPKIkfvWg3DKctCiBOEY9fL4/n5VbV1p6wcJkfhk10FmdBNYws83Q=="
       },
       "Serilog": {
         "type": "Transitive",

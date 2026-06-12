@@ -1,4 +1,3 @@
-using System.Text;
 using System.Xml.Linq;
 
 namespace Dependably.Protocol;
@@ -52,14 +51,23 @@ public static class MavenMetadataBuilder
 
     private static XElement? LatestElement(IReadOnlyList<string> versions, bool releaseOnly)
     {
-        if (versions.Count == 0) return null;
-        if (!releaseOnly) return new XElement("latest", versions[^1]);
+        if (versions.Count == 0)
+        {
+            return null;
+        }
+
+        if (!releaseOnly)
+        {
+            return new XElement("latest", versions[^1]);
+        }
 
         // <release> excludes SNAPSHOT versions (Maven convention).
-        for (var i = versions.Count - 1; i >= 0; i--)
+        for (int i = versions.Count - 1; i >= 0; i--)
         {
             if (!versions[i].EndsWith("-SNAPSHOT", StringComparison.OrdinalIgnoreCase))
+            {
                 return new XElement("release", versions[i]);
+            }
         }
         return null;
     }

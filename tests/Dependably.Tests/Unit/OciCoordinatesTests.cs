@@ -1,5 +1,4 @@
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -74,7 +73,7 @@ public sealed class OciCoordinatesTests
     [Fact]
     public void Parse_DigestReference_MarkedAsDigest()
     {
-        var digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        string digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         var c = OciCoordinatesParser.Parse("library/ubuntu", digest);
         Assert.NotNull(c);
         Assert.True(c!.IsDigest);

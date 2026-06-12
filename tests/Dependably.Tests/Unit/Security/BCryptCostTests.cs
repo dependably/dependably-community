@@ -1,5 +1,4 @@
 using System.Text.RegularExpressions;
-using Xunit;
 using Xunit.Abstractions;
 
 namespace Dependably.Tests.Unit.Security;
@@ -21,7 +20,7 @@ public sealed partial class BCryptCostTests
     [Fact]
     public void HashPassword_with_workFactor_12_emits_hash_with_cost_12()
     {
-        var hash = BCrypt.Net.BCrypt.HashPassword("correct-horse-battery-staple", workFactor: 12);
+        string hash = BCrypt.Net.BCrypt.HashPassword("correct-horse-battery-staple", workFactor: 12);
         var match = BCryptPrefixRegex().Match(hash);
         Assert.True(match.Success, $"Unexpected BCrypt hash shape: {hash}");
         Assert.Equal(12, int.Parse(match.Groups["cost"].Value));
@@ -36,22 +35,24 @@ public sealed partial class BCryptCostTests
     [Fact]
     public void Every_HashPassword_call_site_uses_workFactor_at_least_12()
     {
-        var srcRoot = LocateSourceRoot();
+        string srcRoot = LocateSourceRoot();
         Assert.True(Directory.Exists(srcRoot), $"src root not found at {srcRoot}");
 
         var violations = new List<string>();
-        foreach (var file in Directory.EnumerateFiles(srcRoot, "*.cs", SearchOption.AllDirectories))
+        foreach (string file in Directory.EnumerateFiles(srcRoot, "*.cs", SearchOption.AllDirectories))
         {
             if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") ||
                 file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+            {
                 continue;
+            }
 
-            var source = File.ReadAllText(file);
+            string source = File.ReadAllText(file);
             foreach (Match call in HashPasswordCallRegex().Matches(source))
             {
-                var args = call.Groups["args"].Value;
-                var lineNumber = source[..call.Index].Count(c => c == '\n') + 1;
-                var rel = Path.GetRelativePath(srcRoot, file);
+                string args = call.Groups["args"].Value;
+                int lineNumber = source[..call.Index].Count(c => c == '\n') + 1;
+                string rel = Path.GetRelativePath(srcRoot, file);
 
                 var workFactor = WorkFactorRegex().Match(args);
                 if (!workFactor.Success)
@@ -60,15 +61,21 @@ public sealed partial class BCryptCostTests
                     continue;
                 }
 
-                var cost = int.Parse(workFactor.Groups["cost"].Value);
+                int cost = int.Parse(workFactor.Groups["cost"].Value);
                 if (cost < MinCostFactor)
+                {
                     violations.Add($"{rel}:{lineNumber} — workFactor: {cost} is below floor {MinCostFactor}");
+                }
             }
         }
 
         if (violations.Count > 0)
         {
-            foreach (var v in violations) _output.WriteLine(v);
+            foreach (string v in violations)
+            {
+                _output.WriteLine(v);
+            }
+
             Assert.Fail($"{violations.Count} BCrypt.HashPassword call(s) violate the cost floor. " +
                         $"encryption.md §1 mandates workFactor ≥ {MinCostFactor}.");
         }
@@ -79,8 +86,12 @@ public sealed partial class BCryptCostTests
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null)
         {
-            var candidate = Path.Combine(dir.FullName, "src", "Dependably");
-            if (Directory.Exists(candidate)) return candidate;
+            string candidate = Path.Combine(dir.FullName, "src", "Dependably");
+            if (Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+
             dir = dir.Parent;
         }
         return string.Empty;

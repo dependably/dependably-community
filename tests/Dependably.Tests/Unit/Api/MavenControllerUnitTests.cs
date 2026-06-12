@@ -10,7 +10,6 @@ using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -97,7 +96,9 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         }
 
         if (authHeader is not null)
+        {
             http.Request.Headers.Authorization = authHeader;
+        }
 
         var svc = new MavenControllerServices(
             Packages: _packages,
@@ -111,7 +112,10 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             // ProxyFetch is only reached on the proxy-miss path, which short-circuits to 404
             // here because Upstream is null. BlockGate runs on every cache hit, so it's real.
             ProxyFetch: null!,
-            BlockGate: new BlockGateService(new VulnerabilityRepository(_db), _audit),
+            BlockGate: new BlockGateService(new VulnerabilityRepository(_db), _audit, new QuarantineRepository(_db), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance),
+            ReservedNamespaces: new ReservedNamespaceService(
+                _db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
             // Real resolver over an empty registry list — these tests exercise publish/auth
             // paths, not proxy fetches.
             Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db)));
@@ -135,27 +139,27 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     private async Task<(string pkgId, string verId, string blobKey)> SeedMavenArtifactAsync(
         string groupId, string artifactId, string version, byte[] bytes)
     {
-        var purlName = $"{groupId}:{artifactId}";
-        var filename = $"{artifactId}-{version}.jar";
-        var blobKey = BlobKeys.Hosted(_orgId, "maven", groupId.Replace('.', '/') + "/" + artifactId, version, filename);
+        string purlName = $"{groupId}:{artifactId}";
+        string filename = $"{artifactId}-{version}.jar";
+        string blobKey = BlobKeys.Hosted(_orgId, "maven", groupId.Replace('.', '/') + "/" + artifactId, version, filename);
 
         await _blobs.PutAsync(blobKey, new MemoryStream(bytes), CancellationToken.None);
 
-        var sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        var sha1 = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
-        var md5 = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
+        string sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string sha1 = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
+        string md5 = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
 
-        var verId = Guid.NewGuid().ToString("N");
-        var fileId = Guid.NewGuid().ToString("N");
+        string verId = Guid.NewGuid().ToString("N");
+        string fileId = Guid.NewGuid().ToString("N");
 
         await using var conn = await _db.OpenAsync();
         // Reuse the packages row if it already exists for this (org, ecosystem, purl_name) —
         // the UNIQUE constraint forbids a second insert and tests can seed multiple versions
         // of the same artifact (e.g. for maven-metadata.xml).
-        var existingPkgId = await conn.ExecuteScalarAsync<string?>(
+        string? existingPkgId = await conn.ExecuteScalarAsync<string?>(
             "SELECT id FROM packages WHERE org_id = @org AND ecosystem = 'maven' AND purl_name = @purl",
             new { org = _orgId, purl = purlName });
-        var pkgId = existingPkgId ?? Guid.NewGuid().ToString("N");
+        string pkgId = existingPkgId ?? Guid.NewGuid().ToString("N");
         if (existingPkgId is null)
         {
             await conn.ExecuteAsync(
@@ -222,7 +226,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     public async Task Download_HappyPath_ReturnsFile()
     {
         await SetAnonymousPullAsync(true);
-        var bytes = Encoding.UTF8.GetBytes("jar-content");
+        byte[] bytes = Encoding.UTF8.GetBytes("jar-content");
         await SeedMavenArtifactAsync("com.example", "mylib", "1.0", bytes);
 
         var ctl = BuildController();
@@ -279,7 +283,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     public async Task Download_StoredChecksumSidecar_ReturnsHex()
     {
         await SetAnonymousPullAsync(true);
-        var bytes = Encoding.UTF8.GetBytes("primary-bytes");
+        byte[] bytes = Encoding.UTF8.GetBytes("primary-bytes");
         await SeedMavenArtifactAsync("com.example", "lib", "1.2.3", bytes);
 
         var ctl = BuildController();
@@ -299,7 +303,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         // sha512 isn't in the per-file columns; the controller reads the blob and hashes on
         // demand. This exercises the BlobKeys.StoreKey + ComputeChecksumAsync branch.
         await SetAnonymousPullAsync(true);
-        var bytes = Encoding.UTF8.GetBytes("primary-bytes-for-sha512");
+        byte[] bytes = Encoding.UTF8.GetBytes("primary-bytes-for-sha512");
         await SeedMavenArtifactAsync("com.example", "lib", "2.0", bytes);
 
         var ctl = BuildController();
@@ -316,8 +320,8 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     public async Task Download_MetadataXml_Returns200_WithVersions()
     {
         await SetAnonymousPullAsync(true);
-        var b1 = Encoding.UTF8.GetBytes("v1");
-        var b2 = Encoding.UTF8.GetBytes("v2");
+        byte[] b1 = Encoding.UTF8.GetBytes("v1");
+        byte[] b2 = Encoding.UTF8.GetBytes("v2");
         await SeedMavenArtifactAsync("com.example", "lib", "1.0", b1);
         await SeedMavenArtifactAsync("com.example", "lib", "2.0", b2);
 
@@ -377,7 +381,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     private async Task SeedScannedVulnAsync(string versionId, double cvssScore)
     {
         await using var conn = await _db.OpenAsync();
-        var vulnId = Guid.NewGuid().ToString("N");
+        string vulnId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             """
             INSERT INTO vulnerabilities (id, osv_id, ecosystem, package_name, severity, cvss_score)
@@ -470,7 +474,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     public async Task Head_ExistingArtifact_Returns200_WithContentType()
     {
         await SetAnonymousPullAsync(true);
-        var bytes = Encoding.UTF8.GetBytes("jar-content");
+        byte[] bytes = Encoding.UTF8.GetBytes("jar-content");
         await SeedMavenArtifactAsync("com.example", "headtest", "1.0", bytes);
 
         var ctl = BuildController();
@@ -529,8 +533,8 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         // Token issued for _otherOrgId but presented at a route bound to _orgId. The org-scoped
         // overload of ResolveTokenAsync returns null for cross-tenant — controller treats that
         // identically to "no token" and 401s.
-        var otherUser = await UserSeeder.InsertAsync(_db, _otherOrgId, "intruder@other.test", "owner");
-        var raw = await IssueTokenAsync(_otherOrgId, otherUser);
+        string otherUser = await UserSeeder.InsertAsync(_db, _otherOrgId, "intruder@other.test", "owner");
+        string raw = await IssueTokenAsync(_otherOrgId, otherUser);
 
         var ctl = BuildController(authHeader: $"Bearer {raw}");
         SetBody(ctl.HttpContext, Encoding.UTF8.GetBytes("nope"));
@@ -542,8 +546,8 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     [Fact]
     public async Task Publish_HappyPath_ReturnsCreated_AndPersists()
     {
-        var raw = await IssueTokenAsync(_orgId, _userId);
-        var bytes = Encoding.UTF8.GetBytes("real-jar-bytes");
+        string raw = await IssueTokenAsync(_orgId, _userId);
+        byte[] bytes = Encoding.UTF8.GetBytes("real-jar-bytes");
 
         var ctl = BuildController(authHeader: $"Bearer {raw}");
         SetBody(ctl.HttpContext, bytes);
@@ -556,7 +560,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
 
         // Verify the row landed.
         await using var conn = await _db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             """
             SELECT COUNT(*) FROM maven_version_files mvf
             JOIN package_versions pv ON pv.id = mvf.package_version_id
@@ -570,7 +574,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         // coords.PackageName.Replace(':','/') = "com.example/newlib" — the dotted group is
         // kept intact (only the g:a separator becomes '/'). The blob layout differs from the
         // request path layout (which uses g/a/v/file form) by design.
-        var blobKey = BlobKeys.Hosted(_orgId, "maven", "com.example/newlib", "1.0", "newlib-1.0.jar");
+        string blobKey = BlobKeys.Hosted(_orgId, "maven", "com.example/newlib", "1.0", "newlib-1.0.jar");
         Assert.True(await _blobs.ExistsAsync(blobKey, CancellationToken.None));
     }
 
@@ -579,14 +583,14 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     {
         // The ON CONFLICT clause on maven_version_files (package_version_id, filename) keeps
         // exactly one row per (version, file) — a second push overwrites checksums.
-        var raw = await IssueTokenAsync(_orgId, _userId);
+        string raw = await IssueTokenAsync(_orgId, _userId);
 
-        var first = Encoding.UTF8.GetBytes("first-bytes");
+        byte[] first = Encoding.UTF8.GetBytes("first-bytes");
         var ctl1 = BuildController(authHeader: $"Bearer {raw}");
         SetBody(ctl1.HttpContext, first);
         await ctl1.Publish("com/example/repub/1.0/repub-1.0.jar", CancellationToken.None);
 
-        var second = Encoding.UTF8.GetBytes("second-bytes-distinct");
+        byte[] second = Encoding.UTF8.GetBytes("second-bytes-distinct");
         var ctl2 = BuildController(authHeader: $"Bearer {raw}");
         SetBody(ctl2.HttpContext, second);
         var result = await ctl2.Publish("com/example/repub/1.0/repub-1.0.jar", CancellationToken.None);
@@ -595,7 +599,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         Assert.Equal(201, status.StatusCode);
 
         await using var conn = await _db.OpenAsync();
-        var sha = await conn.ExecuteScalarAsync<string>(
+        string? sha = await conn.ExecuteScalarAsync<string>(
             """
             SELECT mvf.checksum_sha256 FROM maven_version_files mvf
             JOIN package_versions pv ON pv.id = mvf.package_version_id
@@ -614,7 +618,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     {
         // maven-metadata.xml uploads from the client are accepted-and-discarded — we always
         // re-derive metadata at GET time from package_versions.
-        var raw = await IssueTokenAsync(_orgId, _userId);
+        string raw = await IssueTokenAsync(_orgId, _userId);
         var ctl = BuildController(authHeader: $"Bearer {raw}");
         SetBody(ctl.HttpContext, Encoding.UTF8.GetBytes("<metadata/>"));
 
@@ -625,7 +629,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
 
         // No package_versions / maven_version_files row should be created for the metadata upload.
         await using var conn = await _db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM packages WHERE org_id = @org AND purl_name = 'com.example:lib'",
             new { org = _orgId });
         Assert.Equal(0, count);
@@ -638,7 +642,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         // (g/a/maven-metadata.xml) without one is accepted (metadata branch) but a plain
         // artifact at g/a/file.jar without a version-looking dir parses as metadata-no-version
         // and is rejected by the !IsMetadata check.
-        var raw = await IssueTokenAsync(_orgId, _userId);
+        string raw = await IssueTokenAsync(_orgId, _userId);
         var ctl = BuildController(authHeader: $"Bearer {raw}");
         SetBody(ctl.HttpContext, Encoding.UTF8.GetBytes("body"));
 
@@ -655,7 +659,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     {
         // PathSafeValidator runs per-segment after we accept the parse. ".." in a segment
         // is rejected even though Maven path parsing might otherwise tolerate the shape.
-        var raw = await IssueTokenAsync(_orgId, _userId);
+        string raw = await IssueTokenAsync(_orgId, _userId);
         var ctl = BuildController(authHeader: $"Bearer {raw}");
         SetBody(ctl.HttpContext, Encoding.UTF8.GetBytes("evil"));
 
@@ -669,7 +673,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     public async Task Publish_ExceedsPerTenantMavenCap_Returns413()
     {
         await SetMaxUploadMavenAsync(8);  // tiny cap so any real payload trips it
-        var raw = await IssueTokenAsync(_orgId, _userId);
+        string raw = await IssueTokenAsync(_orgId, _userId);
 
         var ctl = BuildController(authHeader: $"Bearer {raw}");
         SetBody(ctl.HttpContext, Encoding.UTF8.GetBytes("definitely-larger-than-eight"));
@@ -685,11 +689,11 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     {
         // Seed primary first, then upload its sidecar — the controller looks up the stored
         // sha1 and confirms our upload matches.
-        var bytes = Encoding.UTF8.GetBytes("primary-for-sidecar");
+        byte[] bytes = Encoding.UTF8.GetBytes("primary-for-sidecar");
         await SeedMavenArtifactAsync("com.example", "sidelib", "1.0", bytes);
 
-        var raw = await IssueTokenAsync(_orgId, _userId);
-        var sha1Hex = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
+        string raw = await IssueTokenAsync(_orgId, _userId);
+        string sha1Hex = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
 
         var ctl = BuildController(authHeader: $"Bearer {raw}");
         SetBody(ctl.HttpContext, Encoding.UTF8.GetBytes(sha1Hex + "  sidelib-1.0.jar\n"));
@@ -703,10 +707,10 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     [Fact]
     public async Task Publish_MismatchedChecksumSidecar_Returns400()
     {
-        var bytes = Encoding.UTF8.GetBytes("primary-bytes-for-mismatch");
+        byte[] bytes = Encoding.UTF8.GetBytes("primary-bytes-for-mismatch");
         await SeedMavenArtifactAsync("com.example", "mismatch", "1.0", bytes);
 
-        var raw = await IssueTokenAsync(_orgId, _userId);
+        string raw = await IssueTokenAsync(_orgId, _userId);
         var ctl = BuildController(authHeader: $"Bearer {raw}");
         // Wrong hex — controller's ExtractHex pulls "dead..." out and finds it doesn't match
         // the stored sha1.
@@ -723,7 +727,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     {
         // The "no primary yet" branch: a client uploads the sidecar first, before the primary.
         // The controller has no expected hash to compare against and returns 201.
-        var raw = await IssueTokenAsync(_orgId, _userId);
+        string raw = await IssueTokenAsync(_orgId, _userId);
         var ctl = BuildController(authHeader: $"Bearer {raw}");
         SetBody(ctl.HttpContext, Encoding.UTF8.GetBytes("0123456789abcdef0123456789abcdef01234567"));
 

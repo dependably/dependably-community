@@ -1,5 +1,4 @@
 using System.Net;
-using Microsoft.AspNetCore.Http;
 
 namespace Dependably.Security;
 
@@ -30,7 +29,6 @@ public static class IpAddressExtensions
     /// </summary>
     public static string? Normalize(IPAddress? ip)
     {
-        if (ip is null) return null;
-        return (ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip).ToString();
+        return ip is null ? null : (ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip).ToString();
     }
 }

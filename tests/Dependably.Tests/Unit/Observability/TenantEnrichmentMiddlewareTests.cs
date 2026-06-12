@@ -5,7 +5,6 @@ using Microsoft.AspNetCore.Http;
 using Serilog;
 using Serilog.Core;
 using Serilog.Events;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Observability;
 

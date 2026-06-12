@@ -1,10 +1,11 @@
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.RateLimiting;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit;
 using Dependably.Infrastructure.Audit.Events;
 using Dependably.Security;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Dependably.Api;
 
@@ -19,6 +20,7 @@ namespace Dependably.Api;
 public sealed class OrgTokensController : OrgScopedControllerBase
 {
     private readonly TokenRepository _tokens;
+    private readonly OrgRepository _orgs;
     private readonly OrgAccessGuard _guard;
     private readonly AuditRepository _audit;
     private readonly IAuditEmitter _auditEmitter;
@@ -26,12 +28,14 @@ public sealed class OrgTokensController : OrgScopedControllerBase
 
     public OrgTokensController(
         TokenRepository tokens,
+        OrgRepository orgs,
         OrgAccessGuard guard,
         AuditRepository audit,
         IAuditEmitter auditEmitter,
         ProblemResults problems)
     {
         _tokens = tokens;
+        _orgs = orgs;
         _guard = guard;
         _audit = audit;
         _auditEmitter = auditEmitter;
@@ -43,11 +47,18 @@ public sealed class OrgTokensController : OrgScopedControllerBase
     public async Task<IActionResult> ListTokens(CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ManageOwnTokens, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
-        var userId = GetUserId();
-        if (userId is null) return Forbid();
+        string orgId = CurrentTenantId();
+        string? userId = GetUserId();
+        if (userId is null)
+        {
+            return Forbid();
+        }
+
         var list = await _tokens.ListUserTokensAsync(orgId, userId, ct);
         return Ok(list);
     }
@@ -58,28 +69,51 @@ public sealed class OrgTokensController : OrgScopedControllerBase
     public async Task<IActionResult> CreateToken([FromBody] CreateTokenRequest req, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ManageOwnTokens, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
         // Retired-field guard: callers updating from the legacy `scope` shorthand get a
         // clear 400 instead of having their intent silently dropped.
         if (req.Scope is not null)
+        {
             return _problems.ValidationErrorAction("scope",
                 "The 'scope' field is no longer accepted. Send 'capabilities' instead.");
+        }
 
-        var orgId = CurrentTenantId();
-        var userId = GetUserId();
-        if (userId is null) return Forbid();
+        string orgId = CurrentTenantId();
+        string? userId = GetUserId();
+        if (userId is null)
+        {
+            return Forbid();
+        }
 
-        var role = User.FindFirst("role")?.Value ?? "member";
+        string role = User.FindFirst("role")?.Value ?? "member";
         var callerGrants = Capabilities.ForRole(role);
 
         if (!Capabilities.TryNormalizeAndAuthorize(
                 req.Capabilities, callerGrants,
-                out var canonicalJson, out var caps, out var error, out var field))
+                out string? canonicalJson, out string[]? caps, out string? error, out string? field))
+        {
             return _problems.ValidationErrorAction(field ?? "capabilities", error!);
+        }
 
-        if (!TryNormalizeDescription(req.Description, out var description, out var descError))
+        if (!TryNormalizeDescription(req.Description, out string? description, out string? descError))
+        {
             return _problems.ValidationErrorAction("description", descError!);
+        }
+
+        // Token cap. Count+insert is intentionally non-transactional: a small race overshoot
+        // (two concurrent creates both reading the same count just below the cap) is acceptable
+        // and bounded — the DB grows by at most one row past the cap in a concurrent burst.
+        int activeCount = await _orgs.CountActiveTokensAsync(orgId, ct);
+        int cap = await _orgs.GetMaxActiveTokensPerTenantAsync(ct);
+        if (activeCount >= cap)
+        {
+            return _problems.ValidationErrorAction("tokens",
+                $"Active token limit ({cap}) reached for this tenant. Revoke unused tokens before creating new ones.");
+        }
 
         var (raw, record) = await _tokens.CreateUserTokenAsync(
             orgId, userId, canonicalJson, req.ExpiresAt, description, ct);
@@ -103,13 +137,17 @@ public sealed class OrgTokensController : OrgScopedControllerBase
 
     /// <summary>DELETE /api/v1/orgs/{org}/tokens/{id} — members may revoke their own; admin/owner may revoke any</summary>
     [HttpDelete("api/v1/tokens/{id}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> DeleteToken(string id, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ManageOwnTokens, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
-        var userId = GetUserId()!;
+        string orgId = CurrentTenantId();
+        string userId = GetUserId()!;
 
         // Admin/owner can revoke any token in the org; members can only revoke their own.
         // tenant:configure is the management-override cap (admin + owner both have it).
@@ -118,13 +156,18 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         {
             var token = await _tokens.GetTokenByIdAsync(id, orgId, ct);
             if (token is null || token.UserId != userId)
+            {
                 return Forbid();
+            }
         }
 
         // Org-scoped delete: a token id from another tenant deletes nothing. 404 (not 403) so a
         // cross-org id is indistinguishable from a nonexistent one, matching the codebase stance.
-        var deleted = await _tokens.DeleteTokenAsync(id, orgId, ct);
-        if (deleted == 0) return NotFound();
+        int deleted = await _tokens.DeleteTokenAsync(id, orgId, ct);
+        if (deleted == 0)
+        {
+            return NotFound();
+        }
 
         await _audit.LogAsync("token_revoked", orgId, userId,
             detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }), ct: ct);
@@ -141,9 +184,12 @@ public sealed class OrgTokensController : OrgScopedControllerBase
     public async Task<IActionResult> ListServiceTokens(CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         var list = await _tokens.ListServiceTokensAsync(orgId, ct);
         return Ok(list);
     }
@@ -154,29 +200,50 @@ public sealed class OrgTokensController : OrgScopedControllerBase
     public async Task<IActionResult> CreateServiceToken([FromBody] CreateServiceTokenRequest req, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
         if (string.IsNullOrWhiteSpace(req.Name))
+        {
             return _problems.ValidationErrorAction("name", "Name is required.");
+        }
 
         if (req.Scope is not null)
+        {
             return _problems.ValidationErrorAction("scope",
                 "The 'scope' field is no longer accepted. Send 'capabilities' instead.");
+        }
 
         // Service tokens are minted under tenant:configure; the caller's role grants form the
         // ceiling. The minted token still gets its own narrowed cap set.
-        var role = User.FindFirst("role")?.Value ?? "member";
+        string role = User.FindFirst("role")?.Value ?? "member";
         var callerGrants = Capabilities.ForRole(role);
 
         if (!Capabilities.TryNormalizeAndAuthorize(
                 req.Capabilities, callerGrants,
-                out var canonicalJson, out var caps, out var error, out var field))
+                out string? canonicalJson, out string[]? caps, out string? error, out string? field))
+        {
             return _problems.ValidationErrorAction(field ?? "capabilities", error!);
+        }
 
-        if (!TryNormalizeDescription(req.Description, out var description, out var descError))
+        if (!TryNormalizeDescription(req.Description, out string? description, out string? descError))
+        {
             return _problems.ValidationErrorAction("description", descError!);
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
+
+        // Token cap — same non-transactional count+insert pattern as user-token creation.
+        int activeCountSvc = await _orgs.CountActiveTokensAsync(orgId, ct);
+        int capSvc = await _orgs.GetMaxActiveTokensPerTenantAsync(ct);
+        if (activeCountSvc >= capSvc)
+        {
+            return _problems.ValidationErrorAction("tokens",
+                $"Active token limit ({capSvc}) reached for this tenant. Revoke unused tokens before creating new ones.");
+        }
+
         var (raw, record) = await _tokens.CreateServiceTokenAsync(orgId, req.Name, canonicalJson, req.ExpiresAt, description, ct);
 
         await _audit.LogAsync("service_token_created", orgId, GetUserId(),
@@ -199,16 +266,23 @@ public sealed class OrgTokensController : OrgScopedControllerBase
 
     /// <summary>DELETE /api/v1/orgs/{org}/service-tokens/{id}</summary>
     [HttpDelete("api/v1/service-tokens/{id}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> DeleteServiceToken(string id, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
 
         // Org-scoped delete: a service-token id from another tenant deletes nothing → 404.
-        var deleted = await _tokens.DeleteServiceTokenAsync(id, orgId, ct);
-        if (deleted == 0) return NotFound();
+        int deleted = await _tokens.DeleteServiceTokenAsync(id, orgId, ct);
+        if (deleted == 0)
+        {
+            return NotFound();
+        }
 
         await _audit.LogAsync("service_token_revoked", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }), ct: ct);
@@ -229,9 +303,17 @@ public sealed class OrgTokensController : OrgScopedControllerBase
     {
         normalized = null;
         error = null;
-        if (raw is null) return true;
-        var trimmed = raw.Trim();
-        if (trimmed.Length == 0) return true;
+        if (raw is null)
+        {
+            return true;
+        }
+
+        string trimmed = raw.Trim();
+        if (trimmed.Length == 0)
+        {
+            return true;
+        }
+
         if (trimmed.Length > MaxDescriptionLength)
         {
             error = $"Description must be {MaxDescriptionLength} characters or fewer.";

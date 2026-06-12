@@ -6,7 +6,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -57,7 +56,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             airGap,
             NullLogger<VulnerabilityScanService>.Instance);
         var proxyVersions = new ProxyVersionRecorder(packages, audit, licenses);
-        var blockGate = new BlockGateService(vulns, audit);
+        var blockGate = new BlockGateService(vulns, audit, new QuarantineRepository(_db), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance);
         var cacheArtifact = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var cacheRecorder = new CacheAccessRecorder(cacheArtifact, tenantAccess,
@@ -67,8 +66,8 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
 
     private static async Task<BlobHandle> SeedBlobAsync(InMemoryBlobStore blobs, byte[] bytes)
     {
-        var sha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
-        var key = BlobKeys.Proxy(sha);
+        string sha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+        string key = BlobKeys.Proxy(sha);
         await blobs.PutAsync(key, new MemoryStream(bytes));
         return new BlobHandle(key, sha, bytes.LongLength,
             async ct => await blobs.GetAsync(key, ct)
@@ -80,7 +79,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
     {
         var svc = Build();
 
-        var bytes = "tarball-bytes"u8.ToArray();
+        byte[] bytes = "tarball-bytes"u8.ToArray();
         var blob = await SeedBlobAsync(_blobs, bytes);
         var result = await svc.RecordAndScanAsync(new ProxyFetchRequest(
             OrgId: "o1", Ecosystem: "npm",
@@ -113,7 +112,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             }));
         var svc = Build(osvOverride: osv);
 
-        var bytes = "malicious-artifact"u8.ToArray();
+        byte[] bytes = "malicious-artifact"u8.ToArray();
         var blob = await SeedBlobAsync(_blobs, bytes);
         var result = await svc.RecordAndScanAsync(new ProxyFetchRequest(
             OrgId: "o1", Ecosystem: "maven",
@@ -138,7 +137,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         // lookup then keeps missing and every later request re-enters this path and re-blocks.
         var svc = Build();
 
-        var bytes = "deprecated-tarball"u8.ToArray();
+        byte[] bytes = "deprecated-tarball"u8.ToArray();
         var blob = await SeedBlobAsync(_blobs, bytes);
         var result = await svc.RecordAndScanAsync(new ProxyFetchRequest(
             OrgId: "o1", Ecosystem: "npm",
@@ -156,9 +155,9 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         Assert.Null(result.VersionId);
 
         await using var conn = await _db.OpenAsync();
-        var rowCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions");
+        long rowCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions");
         Assert.Equal(0, rowCount);
-        var blockCount = await conn.ExecuteScalarAsync<long>(
+        long blockCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM activity WHERE event_type = 'blocked_deprecated'");
         Assert.Equal(1, blockCount);
     }
@@ -170,7 +169,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         // surface the deprecation status separately).
         var svc = Build();
 
-        var bytes = "warn-tarball"u8.ToArray();
+        byte[] bytes = "warn-tarball"u8.ToArray();
         var blob = await SeedBlobAsync(_blobs, bytes);
         var result = await svc.RecordAndScanAsync(new ProxyFetchRequest(
             OrgId: "o1", Ecosystem: "npm",
@@ -193,7 +192,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
     {
         var svc = Build();
 
-        var bytes = "tarball"u8.ToArray();
+        byte[] bytes = "tarball"u8.ToArray();
         var blob = await SeedBlobAsync(_blobs, bytes);
         await svc.RecordAndScanAsync(new ProxyFetchRequest(
             OrgId: "o1", Ecosystem: "nuget",
@@ -208,7 +207,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
                 UpstreamUrl: "https://api.nuget.org/v3/flatcontainer/foo/1.0.0/foo.1.0.0.nupkg")));
 
         await using var conn = await _db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'nuget'");
         Assert.Equal(1, count);
     }
@@ -232,9 +231,9 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         const int failFrom = 3; // keys 4 and 5 fail (1-indexed)
 
         var coords = new List<(string PackageName, string Version, byte[] Bytes, BlobHandle Blob)>();
-        for (var i = 0; i < total; i++)
+        for (int i = 0; i < total; i++)
         {
-            var bytes = System.Text.Encoding.UTF8.GetBytes($"tar-{i}");
+            byte[] bytes = System.Text.Encoding.UTF8.GetBytes($"tar-{i}");
             var blob = await SeedBlobAsync(inner, bytes);
             coords.Add(($"pkg-{i}", $"1.0.{i}", bytes, blob));
         }
@@ -286,25 +285,25 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         Assert.All(results, r => Assert.NotNull(r.VersionId));
 
         await using var conn = await _db.OpenAsync();
-        var rowCount = await conn.ExecuteScalarAsync<long>(
+        long rowCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM package_versions");
         Assert.Equal(total, rowCount);
 
         // First three succeeded — licence rows should be present.
-        for (var i = 0; i < failFrom; i++)
+        for (int i = 0; i < failFrom; i++)
         {
-            var versionId = results[i].VersionId!;
-            var licCount = await conn.ExecuteScalarAsync<long>(
+            string versionId = results[i].VersionId!;
+            long licCount = await conn.ExecuteScalarAsync<long>(
                 "SELECT COUNT(*) FROM package_version_licenses WHERE package_version_id = @v",
                 new { v = versionId });
             Assert.Equal(1, licCount);
         }
 
         // Last two failed on stream-open — extractor never ran, no licence rows.
-        for (var i = failFrom; i < total; i++)
+        for (int i = failFrom; i < total; i++)
         {
-            var versionId = results[i].VersionId!;
-            var licCount = await conn.ExecuteScalarAsync<long>(
+            string versionId = results[i].VersionId!;
+            long licCount = await conn.ExecuteScalarAsync<long>(
                 "SELECT COUNT(*) FROM package_version_licenses WHERE package_version_id = @v",
                 new { v = versionId });
             Assert.Equal(0, licCount);
@@ -337,11 +336,11 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
 
         public Task<Stream?> GetAsync(string key, CancellationToken ct = default)
         {
-            if (_failGetKeys.Contains(key))
-                throw new IOException($"simulated transient backend error for {key}");
-            return _inner.GetAsync(key, ct);
+            return _failGetKeys.Contains(key) ? throw new IOException($"simulated transient backend error for {key}") : _inner.GetAsync(key, ct);
         }
 
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+            => _inner.GetRangeAsync(key, from, to, ct);
         public Task<bool> ExistsAsync(string key, CancellationToken ct = default)
             => _inner.ExistsAsync(key, ct);
         public Task DeleteAsync(string key, CancellationToken ct = default)

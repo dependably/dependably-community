@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Observability;
 
@@ -24,19 +25,24 @@ public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
     public static string? ValidateUrl(string? url)
     {
         if (string.IsNullOrWhiteSpace(url))
+        {
             return "Upstream URL must not be empty.";
+        }
 
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
             return "Invalid URL format.";
+        }
 
-        if (uri.Scheme != "http" && uri.Scheme != "https")
+        if (uri.Scheme is not "http" and not "https")
+        {
             return "Only http:// and https:// schemes are accepted.";
+        }
 
         // Static host check (IP addresses only — hostnames checked at request time)
-        if (IPAddress.TryParse(uri.Host, out var ip) && SsrfGuard.IsBlockedIp(ip))
-            return $"Upstream URL resolves to a blocked IP range: {ip}";
-
-        return null;
+        return IPAddress.TryParse(uri.Host, out var ip) && SsrfGuard.IsBlockedIp(ip)
+            ? $"Upstream URL resolves to a blocked IP range: {ip}"
+            : null;
     }
 
     /// <summary>
@@ -46,19 +52,24 @@ public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
     public async Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
             return false;
+        }
 
         try
         {
             var addresses = await Dns.GetHostAddressesAsync(uri.Host, ct);
             var blocked = addresses.FirstOrDefault(SsrfGuard.IsBlockedIp);
-            if (blocked is null) return true;
+            if (blocked is null)
+            {
+                return true;
+            }
 
             DependablyMeter.UpstreamUrlBlocks.Add(1);
             await _audit.LogAsync(
                 "ssrf_blocked",
                 orgId: orgId,
-                detail: $"{{\"url\":\"{uri.Host}\",\"resolved\":\"{blocked}\"}}",
+                detail: JsonSerializer.Serialize(new { url = uri.Host, resolved = blocked.ToString() }),
                 ct: ct);
             return false;
         }

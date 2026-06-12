@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 
 namespace Dependably.Security;
@@ -24,28 +23,35 @@ public sealed class PasswordPolicy
     public PasswordPolicyResult Evaluate(string? password, PasswordContext ctx)
     {
         if (string.IsNullOrEmpty(password))
+        {
             return new PasswordPolicyResult(PasswordPolicyVerdict.TooShort, MinLength, null);
+        }
 
         if (password.Length < MinLength)
+        {
             return new PasswordPolicyResult(PasswordPolicyVerdict.TooShort, MinLength, null);
+        }
 
-        var byteLength = Encoding.UTF8.GetByteCount(password);
+        int byteLength = Encoding.UTF8.GetByteCount(password);
         if (byteLength > MaxBytesUtf8)
+        {
             return new PasswordPolicyResult(PasswordPolicyVerdict.TooLong, MaxBytesUtf8, null);
+        }
 
-        var matched = FindContextMatch(password, ctx);
+        string? matched = FindContextMatch(password, ctx);
         if (matched is not null)
+        {
             return new PasswordPolicyResult(PasswordPolicyVerdict.ContainsContext, 0, matched);
+        }
 
         var userInputs = BuildUserInputs(ctx);
         var zxcvbn = Zxcvbn.Core.EvaluatePassword(password, userInputs);
-        if (zxcvbn.Score < MinZxcvbnScore)
-            return new PasswordPolicyResult(
+        return zxcvbn.Score < MinZxcvbnScore
+            ? new PasswordPolicyResult(
                 PasswordPolicyVerdict.LowEntropy,
                 zxcvbn.Score,
-                zxcvbn.Feedback?.Warning);
-
-        return PasswordPolicyResult.Ok;
+                zxcvbn.Feedback?.Warning)
+            : PasswordPolicyResult.Ok;
     }
 
     private static string? FindContextMatch(string password, PasswordContext ctx)
@@ -54,37 +60,40 @@ public sealed class PasswordPolicy
         // sides so "alice.dev" (an email local-part) matches "AliceDevPassphrase",
         // and "john_doe" matches "JohnDoe2026". NIST/ASVS calls this matching
         // against "derivatives" of the username, not just the verbatim string.
-        var normalizedPassword = Normalize(password);
+        string normalizedPassword = Normalize(password);
 
-        var blockedMatch = AlwaysBlockedSubstrings.FirstOrDefault(normalizedPassword.Contains);
+        string? blockedMatch = AlwaysBlockedSubstrings.FirstOrDefault(normalizedPassword.Contains);
         if (blockedMatch is not null)
+        {
             return blockedMatch;
+        }
 
         if (!string.IsNullOrWhiteSpace(ctx.Email))
         {
-            var localPart = ExtractEmailLocalPart(ctx.Email);
+            string? localPart = ExtractEmailLocalPart(ctx.Email);
             if (localPart is not null && localPart.Length >= 3 &&
                 normalizedPassword.Contains(Normalize(localPart)))
+            {
                 return localPart;
+            }
         }
 
-        if (!string.IsNullOrWhiteSpace(ctx.TenantSlug) &&
+        return !string.IsNullOrWhiteSpace(ctx.TenantSlug) &&
             ctx.TenantSlug.Length >= 3 &&
-            normalizedPassword.Contains(Normalize(ctx.TenantSlug)))
-            return ctx.TenantSlug;
-
-        return null;
+            normalizedPassword.Contains(Normalize(ctx.TenantSlug))
+            ? ctx.TenantSlug
+            : null;
     }
 
     private static string Normalize(string value)
     {
-        var nfc = value.Normalize(NormalizationForm.FormC).ToLowerInvariant();
+        string nfc = value.Normalize(NormalizationForm.FormC).ToLowerInvariant();
         return new string(nfc.Where(char.IsLetterOrDigit).ToArray());
     }
 
     private static string? ExtractEmailLocalPart(string email)
     {
-        var at = email.IndexOf('@');
+        int at = email.IndexOf('@');
         return at <= 0 ? null : email[..at];
     }
 
@@ -94,11 +103,17 @@ public sealed class PasswordPolicy
         if (!string.IsNullOrWhiteSpace(ctx.Email))
         {
             inputs.Add(ctx.Email);
-            var local = ExtractEmailLocalPart(ctx.Email);
-            if (local is not null) inputs.Add(local);
+            string? local = ExtractEmailLocalPart(ctx.Email);
+            if (local is not null)
+            {
+                inputs.Add(local);
+            }
         }
         if (!string.IsNullOrWhiteSpace(ctx.TenantSlug))
+        {
             inputs.Add(ctx.TenantSlug);
+        }
+
         return inputs;
     }
 }

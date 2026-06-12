@@ -7,7 +7,6 @@ using Dependably.Api;
 using Dependably.Configuration;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
-using Dependably.Security;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -16,7 +15,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -50,11 +48,11 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await new SchemaInitializer(_db).InitializeAsync();
-        _orgs   = new OrgRepository(_db);
+        _orgs = new OrgRepository(_db);
         _tokens = new TokenRepository(_db);
-        _audit  = new AuditRepository(_db);
+        _audit = new AuditRepository(_db);
 
-        _orgId  = await OrgSeeder.InsertAsync(_db, "oci-proxy-org");
+        _orgId = await OrgSeeder.InsertAsync(_db, "oci-proxy-org");
         _userId = await UserSeeder.InsertAsync(_db, _orgId, "dev@oci.test", "admin");
 
         // Enable anonymous pull for all tests.
@@ -73,7 +71,7 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
 
     private static byte[] RandomBytes(int n = 128)
     {
-        var b = new byte[n];
+        byte[] b = new byte[n];
         Random.Shared.NextBytes(b);
         return b;
     }
@@ -83,9 +81,9 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         string? tag = null,
         string origin = "proxy")
     {
-        var sha256 = Sha256Hex(manifestBytes);
-        var digest = "sha256:" + sha256;
-        var blobKey = BlobKeys.OciBlob("sha256", sha256);
+        string sha256 = Sha256Hex(manifestBytes);
+        string digest = "sha256:" + sha256;
+        string blobKey = BlobKeys.OciBlob("sha256", sha256);
 
         var targetStore = origin == "proxy" ? _cacheBlobs : _registryBlobs;
         await targetStore.PutAsync(blobKey, new MemoryStream(manifestBytes), default);
@@ -119,9 +117,9 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
 
     private async Task<string> SeedBlobAsync(byte[] blobBytes, string origin = "proxy")
     {
-        var sha256 = Sha256Hex(blobBytes);
-        var digest = "sha256:" + sha256;
-        var blobKey = BlobKeys.OciBlob("sha256", sha256);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+        string blobKey = BlobKeys.OciBlob("sha256", sha256);
 
         var targetStore = origin == "proxy" ? _cacheBlobs : _registryBlobs;
         await targetStore.PutAsync(blobKey, new MemoryStream(blobBytes), default);
@@ -139,11 +137,15 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     }
 
     private OciController BuildController(OciUpstreamResolver upstream)
+        => BuildControllerForOrg(_orgId, upstream);
+
+    private OciController BuildControllerForOrgWithAuth(string orgId, string bearerToken, OciUpstreamResolver upstream)
     {
         var http = new DefaultHttpContext();
         http.Request.Scheme = "https";
         http.Request.Host = new HostString("oci-proxy-org.example.test");
-        http.Items[TenantContext.HttpItemsKey] = TenantContext.ForTenant(_orgId, "oci-proxy-org");
+        http.Request.Headers.Authorization = $"Bearer {bearerToken}";
+        http.Items[TenantContext.HttpItemsKey] = TenantContext.ForTenant(orgId, "oci-proxy-org");
 
         var services = new ServiceCollection();
         services.AddLogging();
@@ -155,9 +157,44 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
             Orgs: _orgs,
             BlobStore: new TieredBlobStorage(_cacheBlobs, _registryBlobs),
             Db: _db,
-            Upstream: upstream);
+            Upstream: upstream,
+            Uploads: new OciUploadService(
+                _db,
+                new TieredBlobStorage(_cacheBlobs, _registryBlobs),
+                new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<OciUploadService>.Instance));
 
-        return new OciController(svc)
+        return new OciController(svc, NullLogger<OciController>.Instance)
+        {
+            ControllerContext = new ControllerContext { HttpContext = http },
+        };
+    }
+
+    private OciController BuildControllerForOrg(string orgId, OciUpstreamResolver upstream)
+    {
+        var http = new DefaultHttpContext();
+        http.Request.Scheme = "https";
+        http.Request.Host = new HostString("oci-proxy-org.example.test");
+        http.Items[TenantContext.HttpItemsKey] = TenantContext.ForTenant(orgId, "oci-proxy-org");
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        http.RequestServices = services.BuildServiceProvider();
+
+        var svc = new OciControllerServices(
+            Tokens: _tokens,
+            Audit: _audit,
+            Orgs: _orgs,
+            BlobStore: new TieredBlobStorage(_cacheBlobs, _registryBlobs),
+            Db: _db,
+            Upstream: upstream,
+            Uploads: new OciUploadService(
+                _db,
+                new TieredBlobStorage(_cacheBlobs, _registryBlobs),
+                new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<OciUploadService>.Instance));
+
+        return new OciController(svc, NullLogger<OciController>.Instance)
         {
             ControllerContext = new ControllerContext { HttpContext = http },
         };
@@ -199,21 +236,20 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetManifest_LocalCacheHit_ReturnsXCacheHit()
     {
-        var manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
-        var digest = await SeedManifestAsync(manifestBytes, tag: "latest");
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
+        _ = await SeedManifestAsync(manifestBytes, tag: "latest");
 
         var ctl = BuildController(BuildResolver());
         var result = await ctl.Get($"library/ubuntu/manifests/latest", default);
-
-        var fileResult = Assert.IsType<FileStreamResult>(result);
+        _ = Assert.IsType<FileStreamResult>(result);
         Assert.Equal("HIT", ctl.Response.Headers["X-Cache"].ToString());
     }
 
     [Fact]
     public async Task GetManifest_DigestRef_LocalCacheHit_ReturnsXCacheHit()
     {
-        var manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"digest\":true}");
-        var digest = await SeedManifestAsync(manifestBytes);
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"digest\":true}");
+        string digest = await SeedManifestAsync(manifestBytes);
 
         var ctl = BuildController(BuildResolver());
         var result = await ctl.Get($"library/ubuntu/manifests/{digest}", default);
@@ -227,9 +263,9 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetManifest_LocalMiss_ProxyFetches_ReturnsXCacheMiss()
     {
-        var manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"proxied\":true}");
-        var sha256 = Sha256Hex(manifestBytes);
-        var digest = "sha256:" + sha256;
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"proxied\":true}");
+        string sha256 = Sha256Hex(manifestBytes);
+        string digest = "sha256:" + sha256;
 
         var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -275,8 +311,8 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetBlob_LocalCacheHit_ReturnsXCacheHit()
     {
-        var blobBytes = RandomBytes(256);
-        var digest = await SeedBlobAsync(blobBytes);
+        byte[] blobBytes = RandomBytes(256);
+        string digest = await SeedBlobAsync(blobBytes);
 
         var ctl = BuildController(BuildResolver());
         var result = await ctl.Get($"library/ubuntu/blobs/{digest}", default);
@@ -288,8 +324,8 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetBlob_ProxyOrigin_ServedFromCacheTier()
     {
-        var blobBytes = RandomBytes(128);
-        var digest = await SeedBlobAsync(blobBytes, origin: "proxy");
+        byte[] blobBytes = RandomBytes(128);
+        string digest = await SeedBlobAsync(blobBytes, origin: "proxy");
 
         var ctl = BuildController(BuildResolver());
         var result = await ctl.Get($"library/ubuntu/blobs/{digest}", default);
@@ -305,9 +341,9 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetBlob_LocalMiss_ProxyFetches_ServesBytes()
     {
-        var blobBytes = RandomBytes(256);
-        var sha256 = Sha256Hex(blobBytes);
-        var digest = "sha256:" + sha256;
+        byte[] blobBytes = RandomBytes(256);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
 
         var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -330,8 +366,8 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetBlob_NoUpstream_Returns404()
     {
-        var sha256 = Sha256Hex(RandomBytes());
-        var digest = "sha256:" + sha256;
+        string sha256 = Sha256Hex(RandomBytes());
+        string digest = "sha256:" + sha256;
 
         var ctl = BuildController(BuildResolverNoUpstream());
         var result = await ctl.Get($"library/ubuntu/blobs/{digest}", default);
@@ -343,17 +379,18 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     // ── ListTags ──────────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task ListTags_LocalHasTags_ReturnsFromDb()
+    public async Task ListTags_LocalHasTags_ReturnsLocalTags()
     {
-        var manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
         await SeedManifestAsync(manifestBytes, tag: "stable");
 
-        var ctl = BuildController(BuildResolver()); // NeverCallFactory — no HTTP
+        // Use no-upstream resolver: local tags are returned without an upstream call.
+        var ctl = BuildController(BuildResolverNoUpstream());
 
         var result = await ctl.Get("library/ubuntu/tags/list", default);
 
         var json = Assert.IsType<JsonResult>(result);
-        var obj = json.Value!;
+        object obj = json.Value!;
         var tagsProperty = obj.GetType().GetProperty("tags");
         Assert.NotNull(tagsProperty);
         var tags = tagsProperty!.GetValue(obj) as IEnumerable<string>;
@@ -363,8 +400,8 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task ListTags_LocalEmpty_FallsBackToUpstream()
     {
-        var tags = new[] { "latest", "22.04" };
-        var json = JsonSerializer.Serialize(new { name = "library/ubuntu", tags });
+        string[] tags = new[] { "latest", "22.04" };
+        string json = JsonSerializer.Serialize(new { name = "library/ubuntu", tags });
 
         var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -377,11 +414,69 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         var result = await ctl.Get("library/ubuntu/tags/list", default);
 
         var jsonResult = Assert.IsType<JsonResult>(result);
-        var obj = jsonResult.Value!;
+        object obj = jsonResult.Value!;
         var tagsProperty = obj.GetType().GetProperty("tags");
         Assert.NotNull(tagsProperty);
         var returnedTags = tagsProperty!.GetValue(obj) as IEnumerable<string>;
         Assert.Contains("latest", returnedTags!);
+    }
+
+    [Fact]
+    public async Task ListTags_LocalAndUpstream_ReturnsMergedSortedDeduped()
+    {
+        // Seed one local tag.
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
+        await SeedManifestAsync(manifestBytes, tag: "local-only");
+
+        // Upstream returns two tags; "local-only" overlaps with the local tag.
+        string[] upstreamTags = ["local-only", "upstream-only"];
+        string json = JsonSerializer.Serialize(new { name = "library/ubuntu", tags = upstreamTags });
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        };
+        var http = new SingleResponseFactory(upstreamResp);
+        var ctl = BuildController(BuildResolver(http));
+
+        var result = await ctl.Get("library/ubuntu/tags/list", default);
+
+        var jsonResult = Assert.IsType<JsonResult>(result);
+        object obj = jsonResult.Value!;
+        var tagsProperty = obj.GetType().GetProperty("tags");
+        Assert.NotNull(tagsProperty);
+        var returnedTags = (tagsProperty!.GetValue(obj) as IEnumerable<string>)!.ToList();
+
+        // Both tags present, no duplicate, sorted lexically.
+        Assert.Contains("local-only", returnedTags);
+        Assert.Contains("upstream-only", returnedTags);
+        Assert.Equal(returnedTags.Distinct().OrderBy(t => t, StringComparer.Ordinal).ToList(), returnedTags);
+        // Exactly two entries (deduped).
+        Assert.Equal(2, returnedTags.Count);
+    }
+
+    [Fact]
+    public async Task ListTags_NZero_ReturnsEmptyListWithoutLinkHeader()
+    {
+        // Seed a tag so there are results to potentially return.
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
+        await SeedManifestAsync(manifestBytes, tag: "exists");
+
+        var ctl = BuildController(BuildResolverNoUpstream());
+        // Simulate ?n=0
+        ctl.ControllerContext.HttpContext.Request.QueryString = new QueryString("?n=0");
+
+        var result = await ctl.Get("library/ubuntu/tags/list", default);
+
+        var json = Assert.IsType<JsonResult>(result);
+        object obj = json.Value!;
+        var tagsProperty = obj.GetType().GetProperty("tags");
+        Assert.NotNull(tagsProperty);
+        var tags = (tagsProperty!.GetValue(obj) as IEnumerable<string>)!.ToList();
+
+        // OCI spec: n=0 returns an empty list.
+        Assert.Empty(tags);
+        // No Link header.
+        Assert.False(ctl.Response.Headers.ContainsKey("Link"));
     }
 
     [Fact]
@@ -403,8 +498,8 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task HeadManifest_LocalCacheHit_Returns200WithHeaders()
     {
-        var manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
-        var digest = await SeedManifestAsync(manifestBytes, tag: "latest");
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
+        string digest = await SeedManifestAsync(manifestBytes, tag: "latest");
 
         var ctl = BuildController(BuildResolver());
         var result = await ctl.Head("library/ubuntu/manifests/latest", default);
@@ -449,5 +544,176 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         public bool IsEnabled => false;
         public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
         public bool IsJobDisabled(string jobName) => false;
+    }
+
+    private sealed class EnabledAirGap : IAirGapMode
+    {
+        public bool IsEnabled => true;
+        public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
+        public bool IsJobDisabled(string jobName) => false;
+    }
+
+    // ── Shared-digest refcount: physical blob survives single-org delete ──────
+
+    /// <summary>
+    /// Two orgs reference the same content-addressed blob_key in <c>oci_blobs</c>.
+    /// When org A deletes its manifest, the controller must check that org B still holds a
+    /// row for the same blob_key and therefore must NOT delete the physical blob from the
+    /// Registry tier.  Org B's subsequent pull must succeed.
+    /// </summary>
+    [Fact]
+    public async Task DeleteManifest_SharedDigest_PhysicalBlobSurvivesWhenOtherOrgRefExists()
+    {
+        // ── Seed ──────────────────────────────────────────────────────────────
+        string orgBId = await OrgSeeder.InsertAsync(_db, "oci-shared-org-b");
+
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"shared\":true}");
+        string sha256 = Sha256Hex(manifestBytes);
+        string digest = "sha256:" + sha256;
+        string blobKey = BlobKeys.OciBlob("sha256", sha256);
+        const string repo = "library/shared-img";
+
+        // Write the physical blob into the registry tier.
+        await _registryBlobs.PutAsync(blobKey, new MemoryStream(manifestBytes), default);
+
+        // Insert oci_blobs rows for BOTH orgs referencing the same blob_key.
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin)
+            VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', @size, @blobKey, 'uploaded')
+            """,
+            new { digest, orgId = _orgId, size = (long)manifestBytes.Length, blobKey });
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin)
+            VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', @size, @blobKey, 'uploaded')
+            """,
+            new { digest, orgId = orgBId, size = (long)manifestBytes.Length, blobKey });
+
+        // Insert a tag for org A so the manifest is findable.
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO oci_tags (org_id, repository, tag, digest, updated_at, last_revalidated)
+            VALUES (@orgId, @repo, 'v1', @digest, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            """,
+            new { orgId = _orgId, repo, digest });
+
+        // Create a yank token so AuthorizeYankAsync passes.
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "yank-shared", """["yank:oci","read:artifact"]""", expiresAt: null);
+
+        // ── Delete as org A ───────────────────────────────────────────────────
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolverNoUpstream());
+        var result = await ctl.Delete($"{repo}/manifests/{digest}", default);
+
+        var objResult = Assert.IsAssignableFrom<StatusCodeResult>(result);
+        Assert.Equal(StatusCodes.Status204NoContent, objResult.StatusCode);
+
+        // ── Physical blob must still exist (org B still references it) ────────
+        Assert.True(await _registryBlobs.ExistsAsync(blobKey),
+            "Physical blob must not be deleted while another org still references it.");
+
+        // ── Org A's DB row must be gone ───────────────────────────────────────
+        int orgACount = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId = _orgId });
+        Assert.Equal(0, orgACount);
+
+        // ── Org B's DB row must still exist ───────────────────────────────────
+        int orgBCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId = orgBId });
+        Assert.Equal(1, orgBCount);
+    }
+
+    [Fact]
+    public async Task DeleteManifest_LastRefHolder_PhysicalBlobIsRemoved()
+    {
+        // Only one org references the blob — physical delete must proceed.
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"sole\":true}");
+        string sha256 = Sha256Hex(manifestBytes);
+        string digest = "sha256:" + sha256;
+        string blobKey = BlobKeys.OciBlob("sha256", sha256);
+        const string repo = "library/sole-img";
+
+        await _registryBlobs.PutAsync(blobKey, new MemoryStream(manifestBytes), default);
+
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin)
+            VALUES (@digest, @orgId, 'application/vnd.oci.image.manifest.v1+json', @size, @blobKey, 'uploaded')
+            """,
+            new { digest, orgId = _orgId, size = (long)manifestBytes.Length, blobKey });
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO oci_tags (org_id, repository, tag, digest, updated_at, last_revalidated)
+            VALUES (@orgId, @repo, 'sole', @digest, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            """,
+            new { orgId = _orgId, repo, digest });
+
+        var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
+            _orgId, "yank-sole", """["yank:oci","read:artifact"]""", expiresAt: null);
+
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolverNoUpstream());
+        var result = await ctl.Delete($"{repo}/manifests/{digest}", default);
+
+        Assert.IsAssignableFrom<StatusCodeResult>(result);
+
+        // Only org — blob must have been physically deleted.
+        Assert.False(await _registryBlobs.ExistsAsync(blobKey),
+            "Physical blob must be deleted when no org rows remain.");
+    }
+
+    // ── Air-gap: tags/list degrades to local-only ──────────────────────────────
+
+    /// <summary>
+    /// In air-gap mode <see cref="OciUpstreamResolver.FetchTagsAsync"/> throws
+    /// <see cref="AirGappedException"/>. The controller must catch it and return local tags
+    /// rather than propagating a 503.
+    /// </summary>
+    [Fact]
+    public async Task ListTags_AirGapMode_ReturnsLocalTagsOnly()
+    {
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
+        await SeedManifestAsync(manifestBytes, tag: "air-local");
+
+        var options = Options.Create(new OciOptions
+        {
+            ManifestTagTtl = TimeSpan.FromMinutes(5),
+            Upstreams =
+            [
+                new OciUpstreamRegistryOptions
+                {
+                    Name     = "dockerhub",
+                    Host     = "registry-1.docker.io",
+                    AuthType = OciAuthType.Anonymous,
+                    Prefixes = [""],
+                }
+            ],
+        });
+
+        // Air-gap mode: any call to the upstream HTTP client would fail, but the controller
+        // must not reach it — AirGappedException is thrown before any network attempt and
+        // must be caught so the local listing is still returned.
+        var airGap = new EnabledAirGap();
+        var authSvc = new OciUpstreamAuthService(
+            new NeverCallFactory(), options, airGap, NullLogger<OciUpstreamAuthService>.Instance);
+        var blobs = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
+        var resolver = new OciUpstreamResolver(
+            new NeverCallFactory(), authSvc, options, blobs, _db,
+            airGap, NullLogger<OciUpstreamResolver>.Instance);
+
+        var ctl = BuildController(resolver);
+        var result = await ctl.Get("library/ubuntu/tags/list", default);
+
+        // Must be 200 with the local tag — not a 503.
+        var json = Assert.IsType<JsonResult>(result);
+        object obj = json.Value!;
+        var tagsProperty = obj.GetType().GetProperty("tags");
+        Assert.NotNull(tagsProperty);
+        var tags = tagsProperty!.GetValue(obj) as IEnumerable<string>;
+        Assert.Contains("air-local", tags!);
     }
 }

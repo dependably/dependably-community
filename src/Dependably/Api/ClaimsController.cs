@@ -1,8 +1,9 @@
 using System.Security.Claims;
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
 using Dependably.Infrastructure;
 using Dependably.Security;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Api;
 
@@ -65,7 +66,7 @@ public sealed class ClaimsController : ControllerBase
         string orgId, string ecosystem, string name, CancellationToken ct)
     {
         var blobKeys = await _packages.DeleteProxyVersionsForNameAsync(orgId, ecosystem, name, ct);
-        foreach (var key in blobKeys)
+        foreach (string key in blobKeys)
         {
             try { await _blobs.DeleteAsync(key, ct); }
             catch (Exception ex)
@@ -81,8 +82,10 @@ public sealed class ClaimsController : ControllerBase
     }
 
     /// <summary>GET /api/v1/admin/claims</summary>
+    // claim:manage (not read:claims) matches what AuthorizeAsync enforces below — the claims
+    // admin surface is manager-only, reads included.
     [HttpGet("/api/v1/admin/claims")]
-    [RequireCapability(Capabilities.ReadClaims)]
+    [RequireCapability(Capabilities.ClaimManage)]
     public async Task<IActionResult> List(
         [FromQuery] string? ecosystem,
         [FromQuery] string? state,
@@ -90,23 +93,31 @@ public sealed class ClaimsController : ControllerBase
         [FromQuery] int limit = 100,
         CancellationToken ct = default)
     {
-        var ctx = await AuthorizeAsync(ct);
-        if (ctx.Error is not null) return ctx.Error;
+        var (Error, OrgId, _) = await AuthorizeAsync(ct);
+        if (Error is not null)
+        {
+            return Error;
+        }
 
-        var rows = await _claims.ListAsync(ctx.OrgId!, ecosystem, state, search,
+        var rows = await _claims.ListAsync(OrgId!, ecosystem, state, search,
             limit: Math.Clamp(limit, 1, 500), ct);
         return Ok(new { items = rows.Select(ToDto), total = rows.Count });
     }
 
     /// <summary>GET /api/v1/admin/claims/{ecosystem}/{name}</summary>
+    // claim:manage (not read:claims) matches what AuthorizeAsync enforces below — the claims
+    // admin surface is manager-only, reads included.
     [HttpGet("/api/v1/admin/claims/{ecosystem}/{name}")]
-    [RequireCapability(Capabilities.ReadClaims)]
+    [RequireCapability(Capabilities.ClaimManage)]
     public async Task<IActionResult> Get(string ecosystem, string name, CancellationToken ct)
     {
-        var ctx = await AuthorizeAsync(ct);
-        if (ctx.Error is not null) return ctx.Error;
+        var (Error, OrgId, _) = await AuthorizeAsync(ct);
+        if (Error is not null)
+        {
+            return Error;
+        }
 
-        var eff = await _resolver.ResolveAsync(ctx.OrgId!, ecosystem, name.ToLowerInvariant(), ct);
+        var eff = await _resolver.ResolveAsync(OrgId!, ecosystem, name.ToLowerInvariant(), ct);
         return Ok(new
         {
             ecosystem,
@@ -120,69 +131,90 @@ public sealed class ClaimsController : ControllerBase
     /// <summary>POST /api/v1/admin/claims — create a claim from unclaimed.</summary>
     [HttpPost("/api/v1/admin/claims")]
     [RequireCapability(Capabilities.ClaimManage)]
+    [ProducesResponseType(StatusCodes.Status201Created)]
     public async Task<IActionResult> Create(
         [FromBody] CreateClaimRequest req, CancellationToken ct)
     {
-        var ctx = await AuthorizeAsync(ct);
-        if (ctx.Error is not null) return ctx.Error;
-        if (req is null) return BadRequest("Body required.");
+        var (Error, OrgId, ActorId) = await AuthorizeAsync(ct);
+        if (Error is not null)
+        {
+            return Error;
+        }
+
+        if (req is null)
+        {
+            return BadRequest("Body required.");
+        }
+
         if (string.IsNullOrWhiteSpace(req.Reason))
+        {
             return BadRequest("reason is required.");
+        }
 
-        var ecosystem = req.Ecosystem?.ToLowerInvariant() ?? "";
-        var name = req.Name?.ToLowerInvariant() ?? "";
+        string ecosystem = req.Ecosystem?.ToLowerInvariant() ?? "";
+        string name = req.Name?.ToLowerInvariant() ?? "";
         if (ecosystem is not ("npm" or "pypi" or "nuget" or "maven" or "rpm" or "oci"))
+        {
             return BadRequest("ecosystem must be one of: npm, pypi, nuget, maven, rpm, oci.");
-        if (string.IsNullOrEmpty(name)) return BadRequest("name is required.");
+        }
 
-        var existing = await _claims.GetAsync(ctx.OrgId!, ecosystem, name, ct);
+        if (string.IsNullOrEmpty(name))
+        {
+            return BadRequest("name is required.");
+        }
+
+        var existing = await _claims.GetAsync(OrgId!, ecosystem, name, ct);
         if (existing is not null)
+        {
             return Conflict(new ProblemDetails
             {
                 Status = 409,
                 Detail = $"Claim already exists for {ecosystem}/{name} (state: {existing.State}). " +
                          "Use PATCH to transition.",
             });
+        }
 
         var validation = ClaimStateMachine.ValidateCreate(req.State ?? "");
         if (!validation.Allowed)
+        {
             return BadRequest(new ProblemDetails { Status = 400, Detail = validation.RejectionReason });
+        }
 
         // Purge: when the claim transition demands it (creating with state=local_only),
         // evict cached proxy versions BEFORE persisting the transition. Doing it before
         // means a concurrent install racing the create can't repopulate the cache between
         // purge and claim-row creation.
-        var purgedCount = validation.PurgesProxy
-            ? await PurgeProxyArtefactsAsync(ctx.OrgId!, ecosystem, name, ct)
+        int purgedCount = validation.PurgesProxy
+            ? await PurgeProxyArtefactsAsync(OrgId!, ecosystem, name, ct)
             : 0;
 
         var tx = new ClaimTransition
         {
             ClaimId = Guid.NewGuid().ToString("D"),
             HistoryId = Guid.NewGuid().ToString("D"),
-            OrgId = ctx.OrgId!,
+            OrgId = OrgId!,
             Ecosystem = ecosystem,
             Name = name,
             PriorState = null,
             NewState = req.State,
             Reason = req.Reason!,
-            ActorId = ctx.ActorId,
+            ActorId = ActorId,
             OccurredAt = DateTimeOffset.UtcNow,
             PurgedCount = purgedCount,
         };
         await _claims.ApplyTransitionAsync(tx, ct);
-        await _audit.LogAsync("claim.create", ctx.OrgId, ctx.ActorId, ecosystem,
+        await _audit.LogAsync("claim.create", OrgId, ActorId, ecosystem,
             $"pkg:{ecosystem}/{name}",
             detail: $"{{\"state\":\"{req.State}\",\"reason\":{System.Text.Json.JsonSerializer.Serialize(req.Reason)},\"purged\":{purgedCount}}}",
             ct: ct);
         // Typed event into audit_event.
-        var createPayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Create(
+        string createPayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Create(
             ecosystem, name, req.State!, req.Reason!, validation.PurgesProxy).ToJson();
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.ClaimEvents.TypeCreate,
-            ctx.OrgId, "user", ctx.ActorId, "accepted", createPayload, ct);
+            OrgId, "user", ActorId, "accepted", createPayload, ct);
 
-        var created = await _claims.GetAsync(ctx.OrgId!, ecosystem, name, ct);
+        var created = await _claims.GetAsync(OrgId!, ecosystem, name, ct);
         return Created($"/api/v1/admin/claims/{ecosystem}/{name}", new
         {
             claim = ToDto(created!),
@@ -198,104 +230,124 @@ public sealed class ClaimsController : ControllerBase
         string ecosystem, string name,
         [FromBody] TransitionClaimRequest req, CancellationToken ct)
     {
-        var ctx = await AuthorizeAsync(ct);
-        if (ctx.Error is not null) return ctx.Error;
+        var (Error, OrgId, ActorId) = await AuthorizeAsync(ct);
+        if (Error is not null)
+        {
+            return Error;
+        }
+
         if (req is null || string.IsNullOrWhiteSpace(req.State) || string.IsNullOrWhiteSpace(req.Reason))
+        {
             return BadRequest("state and reason are required.");
+        }
 
         ecosystem = ecosystem.ToLowerInvariant();
         name = name.ToLowerInvariant();
 
-        var existing = await _claims.GetAsync(ctx.OrgId!, ecosystem, name, ct);
-        if (existing is null) return NotFound();
+        var existing = await _claims.GetAsync(OrgId!, ecosystem, name, ct);
+        if (existing is null)
+        {
+            return NotFound();
+        }
 
         var validation = ClaimStateMachine.ValidateChange(existing.State, req.State!);
         if (!validation.Allowed)
+        {
             return BadRequest(new ProblemDetails { Status = 400, Detail = validation.RejectionReason });
+        }
 
         // Purge on mixed → local_only. See Create for the purge-before-persist rationale.
-        var purgedCount = validation.PurgesProxy
-            ? await PurgeProxyArtefactsAsync(ctx.OrgId!, ecosystem, name, ct)
+        int purgedCount = validation.PurgesProxy
+            ? await PurgeProxyArtefactsAsync(OrgId!, ecosystem, name, ct)
             : 0;
 
         var tx = new ClaimTransition
         {
             ClaimId = existing.Id,
             HistoryId = Guid.NewGuid().ToString("D"),
-            OrgId = ctx.OrgId!,
+            OrgId = OrgId!,
             Ecosystem = ecosystem,
             Name = name,
             PriorState = existing.State,
             NewState = req.State,
             Reason = req.Reason!,
-            ActorId = ctx.ActorId,
+            ActorId = ActorId,
             OccurredAt = DateTimeOffset.UtcNow,
             PurgedCount = purgedCount,
         };
         await _claims.ApplyTransitionAsync(tx, ct);
-        await _audit.LogAsync("claim.transition", ctx.OrgId, ctx.ActorId, ecosystem,
+        await _audit.LogAsync("claim.transition", OrgId, ActorId, ecosystem,
             $"pkg:{ecosystem}/{name}",
             detail: $"{{\"from\":\"{existing.State}\",\"to\":\"{req.State}\",\"purged\":{purgedCount}}}",
             ct: ct);
-        var transitionPayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Transition(
+        string transitionPayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Transition(
             ecosystem, name, existing.State, req.State!, req.Reason!, validation.PurgesProxy).ToJson();
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.ClaimEvents.TypeTransition,
-            ctx.OrgId, "user", ctx.ActorId, "accepted", transitionPayload, ct);
+            OrgId, "user", ActorId, "accepted", transitionPayload, ct);
 
-        var updated = await _claims.GetAsync(ctx.OrgId!, ecosystem, name, ct);
+        var updated = await _claims.GetAsync(OrgId!, ecosystem, name, ct);
         return Ok(new { claim = ToDto(updated!), purgesProxy = validation.PurgesProxy, purgedCount });
     }
 
     /// <summary>DELETE /api/v1/admin/claims/{ecosystem}/{name} — release back to unclaimed.</summary>
     [HttpDelete("/api/v1/admin/claims/{ecosystem}/{name}")]
     [RequireCapability(Capabilities.ClaimManage)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> Release(
         string ecosystem, string name,
         [FromQuery] string? reason, CancellationToken ct)
     {
-        var ctx = await AuthorizeAsync(ct);
-        if (ctx.Error is not null) return ctx.Error;
+        var (Error, OrgId, ActorId) = await AuthorizeAsync(ct);
+        if (Error is not null)
+        {
+            return Error;
+        }
 
         ecosystem = ecosystem.ToLowerInvariant();
         name = name.ToLowerInvariant();
 
-        var existing = await _claims.GetAsync(ctx.OrgId!, ecosystem, name, ct);
-        if (existing is null) return NotFound();
+        var existing = await _claims.GetAsync(OrgId!, ecosystem, name, ct);
+        if (existing is null)
+        {
+            return NotFound();
+        }
 
-        var localCount = await _claims.CountLocalVersionsAsync(ctx.OrgId!, ecosystem, name, ct);
+        int localCount = await _claims.CountLocalVersionsAsync(OrgId!, ecosystem, name, ct);
         var validation = ClaimStateMachine.ValidateRelease(existing.State, localCount);
         if (!validation.Allowed)
+        {
             return Conflict(new ProblemDetails
             {
                 Status = 409,
                 Detail = validation.RejectionReason,
                 Extensions = { ["localVersionCount"] = localCount }
             });
+        }
 
         var tx = new ClaimTransition
         {
             ClaimId = existing.Id,
             HistoryId = Guid.NewGuid().ToString("D"),
-            OrgId = ctx.OrgId!,
+            OrgId = OrgId!,
             Ecosystem = ecosystem,
             Name = name,
             PriorState = existing.State,
             NewState = null,
             Reason = reason ?? "released",
-            ActorId = ctx.ActorId,
+            ActorId = ActorId,
             OccurredAt = DateTimeOffset.UtcNow,
         };
         await _claims.ApplyTransitionAsync(tx, ct);
-        await _audit.LogAsync("claim.release", ctx.OrgId, ctx.ActorId, ecosystem,
+        await _audit.LogAsync("claim.release", OrgId, ActorId, ecosystem,
             $"pkg:{ecosystem}/{name}",
             detail: $"{{\"from\":\"{existing.State}\"}}",
             ct: ct);
-        var releasePayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Release(
+        string releasePayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Release(
             ecosystem, name, existing.State, reason ?? "released", localCount).ToJson();
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.ClaimEvents.TypeRelease,
-            ctx.OrgId, "user", ctx.ActorId, "accepted", releasePayload, ct);
+            OrgId, "user", ActorId, "accepted", releasePayload, ct);
 
 
         return NoContent();
@@ -306,9 +358,13 @@ public sealed class ClaimsController : ControllerBase
     private async Task<(IActionResult? Error, string? OrgId, string? ActorId)> AuthorizeAsync(CancellationToken ct)
     {
         var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ClaimManage, ct);
-        if (deny is not null) return (deny, null, null);
+        if (deny is not null)
+        {
+            return (deny, null, null);
+        }
+
         var ctx = (TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!;
-        var actorId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? actorId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                    ?? User.FindFirst("sub")?.Value;
         return (null, ctx.TenantId, actorId);
     }

@@ -1,5 +1,4 @@
 using System.Text.RegularExpressions;
-using Xunit;
 using Xunit.Abstractions;
 
 namespace Dependably.Tests.Compliance;
@@ -43,7 +42,7 @@ public sealed partial class SchemaSyncComplianceTests
     [Fact]
     public void EveryAdditiveColumn_IsDeclaredInBothCreateTableBlocks()
     {
-        var src = SchemaTestPaths.SourceRoot();
+        string src = SchemaTestPaths.SourceRoot();
         var adds = ParseAdditiveColumns(src);
         Assert.NotEmpty(adds); // guard: the regex + path must actually find the migration array
 
@@ -68,7 +67,9 @@ public sealed partial class SchemaSyncComplianceTests
             bool notNull = NotNullRegex().IsMatch(add.Rest);
             bool hasDefault = DefaultRegex().IsMatch(add.Rest);
             if (notNull && !hasDefault)
+            {
                 violations.Add($"{add.Table}.{add.Column}: NOT NULL ADD COLUMN without DEFAULT — fails on a populated table");
+            }
         }
         Report(violations, "NOT NULL additive column(s) without DEFAULT");
     }
@@ -78,8 +79,8 @@ public sealed partial class SchemaSyncComplianceTests
     [InlineData("Schema.pg.sql")]
     public void NoDuplicateObjectNames_WithinSchemaFile(string file)
     {
-        var src = SchemaTestPaths.SourceRoot();
-        var sql = File.ReadAllText(Path.Combine(src, "Infrastructure", "schema", file));
+        string src = SchemaTestPaths.SourceRoot();
+        string sql = File.ReadAllText(Path.Combine(src, "Infrastructure", "schema", file));
         var violations = new List<string>();
         AppendDuplicates(violations, file, "TABLE", SchemaSqlParser.CreatedTableNames(sql));
         AppendDuplicates(violations, file, "INDEX", SchemaSqlParser.CreatedIndexNames(sql));
@@ -88,7 +89,7 @@ public sealed partial class SchemaSyncComplianceTests
 
     private static List<AddColumn> ParseAdditiveColumns(string src)
     {
-        var initializer = File.ReadAllText(SchemaTestPaths.SchemaInitializer(src));
+        string initializer = File.ReadAllText(SchemaTestPaths.SchemaInitializer(src));
         return AddColumnRegex().Matches(initializer)
             .Select(m => new AddColumn(m.Groups["table"].Value, m.Groups["col"].Value, m.Groups["rest"].Value))
             .ToList();
@@ -99,19 +100,31 @@ public sealed partial class SchemaSyncComplianceTests
     {
         if (!schema.TryGetValue(add.Table, out var cols)
             || !cols.Contains(add.Column, StringComparer.OrdinalIgnoreCase))
+        {
             violations.Add($"{file}: `{add.Column}` (added via ALTER TABLE {add.Table}) is not declared in its CREATE TABLE block");
+        }
     }
 
     private static void AppendDuplicates(List<string> violations, string file, string kind, List<string> names)
     {
         foreach (var g in names.GroupBy(n => n, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+        {
             violations.Add($"{file}: {kind} `{g.Key}` declared {g.Count()} times");
+        }
     }
 
     private void Report(List<string> violations, string what)
     {
-        if (violations.Count == 0) return;
-        foreach (var v in violations) _output.WriteLine(v);
+        if (violations.Count == 0)
+        {
+            return;
+        }
+
+        foreach (string v in violations)
+        {
+            _output.WriteLine(v);
+        }
+
         Assert.Fail($"{violations.Count} {what}. See test output for the full list.");
     }
 }

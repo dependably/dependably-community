@@ -17,7 +17,12 @@ Each entry uses this schema. Free-form notes rot; the structure is mandatory:
 - SQLite gap: <which SQLite behavior differs from Postgres>
 - Follow-up: <what the Postgres test must assert>
 - Added: <YYYY-MM-DD> / phase <N>
+- Status: <`open` | `done — <TestClassName>`>
 ```
+
+When a follow-up lands, set its `Status` to `done — <TestClassName>` instead of
+deleting the entry — the gap analysis stays useful as documentation of *why*
+the test exists.
 
 Add entries when a new repo test exercises any of:
 
@@ -29,7 +34,13 @@ Add entries when a new repo test exercises any of:
 - Recursive CTEs
 
 The Testcontainers.PostgreSql follow-up pass works off this list. Until
-that pass lands, this file is the inventory of known coverage gaps.
+that pass lands, this file is the inventory of known coverage gaps — every
+entry below is `Status: open`.
+
+Follow-up tests belong in `Integration/` tagged `Category=SchemaPostgres`,
+alongside [PostgresSchemaApplyTests](Integration/PostgresSchemaApplyTests.cs)
+(which covers schema *application* against live Postgres via
+`TEST_POSTGRES_CONNECTION`, but none of the per-query behaviors listed here).
 
 ## Entries
 
@@ -38,27 +49,32 @@ that pass lands, this file is the inventory of known coverage gaps.
 - SQLite gap: SQLite's `lower()` is ASCII-only; Postgres `lower()` is locale-aware (ICU on modern installs). A user with non-ASCII email may mismatch between the two.
 - Follow-up: Postgres test that inserts a non-ASCII email and confirms `SetUserAccountStatusAsync` resolves it case-insensitively.
 - Added: 2026-05-11 / phase 2
+- Status: open
 
 ### VulnerabilityRepository.GetVulnReportAsync / GetVulnSummaryAsync
 - Query: 4-table JOIN (`package_version_vulns × package_versions × packages × orgs/vulnerabilities`)
 - SQLite gap: SQLite's planner has no statistics-based reordering. Postgres may pick a different join order under load; correctness should be identical but performance is not.
 - Follow-up: Postgres-backed test with 10k rows asserting `GetVulnReportAsync` returns the same set + ordering at scale.
 - Added: 2026-05-11 / phase 2
+- Status: open
 
 ### PackageRepository.GetOrgStatsAsync
 - Query: aggregates with `strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-7 days'))` and similar
 - SQLite gap: Postgres uses `NOW() - INTERVAL '7 days'`; the SchemaInitializer rewrites the SQL but the date-arithmetic semantics differ subtly (Postgres respects timezone-aware comparisons natively).
 - Follow-up: Postgres test that inserts activity rows at 6/7/8 day boundaries and asserts the bucket boundaries match SQLite's behaviour.
 - Added: 2026-05-11 / phase 2
+- Status: open
 
 ### PackageRepository.ListPaginatedAsync
 - Query: `WHERE p.name LIKE @searchPattern ESCAPE '\\'` with caller-escaped `%` and `_`
 - SQLite gap: SQLite's `LIKE` is case-insensitive by default for ASCII; Postgres `LIKE` is case-sensitive (callers must opt into `ILIKE` for case-insensitive matching).
 - Follow-up: Postgres test confirming search matches behave consistently (or alternatively that the Postgres schema variant uses `ILIKE`).
 - Added: 2026-05-11 / phase 2
+- Status: open
 
 ### SamlConfigRepository.TryConsumeTestRunAsync
 - Query: `WHERE expires_at > @now` over ISO 8601 strings
 - SQLite gap: SQLite compares TEXT lexicographically; works for `yyyy-MM-ddTHH:mm:ssZ` but breaks if any caller writes a different format. Postgres uses `TIMESTAMPTZ` natively.
 - Follow-up: Postgres test that exercises the consume path across DST + leap-second boundaries.
 - Added: 2026-05-11 / phase 2
+- Status: open

@@ -45,49 +45,57 @@ public static class EcosystemDetector
     {
         using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
 
-        var hasRootNuspec = zip.Entries.Any(e =>
+        bool hasRootNuspec = zip.Entries.Any(e =>
             e.Name.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase)
             && !e.FullName.Contains('/'));
         if (hasRootNuspec)
         {
             var (parseResult, id, version) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
             if (!parseResult.IsValid)
+            {
                 return Fail("nupkg_invalid", parseResult.Message ?? "Invalid .nupkg.");
+            }
             // Outer-label override: when the filename follows the `{Id}.{Version}.nupkg`
             // convention with a parseable trailing version, use that as the version. Lets
             // two distinct uploads with the same .nuspec but different filenames land
             // separately; canonical `dotnet pack` output is unaffected because filename
             // and nuspec already agree.
-            if (OuterVersionLabel.TryFromNupkgFilename(filename, out var labelled))
+            if (OuterVersionLabel.TryFromNupkgFilename(filename, out string? labelled))
+            {
                 version = labelled;
-            var purlName = id!.ToLowerInvariant();
-            var normalizedVersion = PurlNormalizer.NormalizeNuGetVersionString(version!);
+            }
+
+            string purlName = id!.ToLowerInvariant();
+            string normalizedVersion = PurlNormalizer.NormalizeNuGetVersionString(version!);
             return Ok("nuget", id, purlName, normalizedVersion);
         }
 
-        var hasDistInfo = zip.Entries.Any(e =>
+        bool hasDistInfo = zip.Entries.Any(e =>
             e.FullName.EndsWith(".dist-info/METADATA", StringComparison.OrdinalIgnoreCase));
         if (hasDistInfo)
         {
-            var wheel = PyPiArtifactValidator.ValidateWheel(bytes, out var name, out var version);
+            var wheel = PyPiArtifactValidator.ValidateWheel(bytes, out string? name, out string? version);
             if (!wheel.IsValid)
+            {
                 return Fail("artifact_invalid", wheel.Message ?? "Invalid PyPI wheel.");
+            }
             // Outer-label override: PEP 427 wheel filenames carry the version in segment 2
             // of `{dist}-{version}-{python}-{abi}-{platform}.whl`. Use it when present so
             // a renamed/relabelled wheel can land under its outer label.
-            if (OuterVersionLabel.TryFromWheelFilename(filename, out var labelled))
+            if (OuterVersionLabel.TryFromWheelFilename(filename, out string? labelled))
+            {
                 version = labelled;
+            }
+
             return Ok("pypi", name!, name!, version!);
         }
 
-        var hasEggInfo = zip.Entries.Any(e =>
+        bool hasEggInfo = zip.Entries.Any(e =>
             e.FullName.EndsWith("EGG-INFO/PKG-INFO", StringComparison.OrdinalIgnoreCase));
         if (hasEggInfo)
         {
-            var egg = PyPiArtifactValidator.ValidateEgg(bytes, out var name, out var version);
-            if (!egg.IsValid)
-                return Fail("artifact_invalid", egg.Message ?? "Invalid PyPI egg.");
-            return Ok("pypi", name!, name!, version!);
+            var egg = PyPiArtifactValidator.ValidateEgg(bytes, out string? name, out string? version);
+            return !egg.IsValid ? Fail("artifact_invalid", egg.Message ?? "Invalid PyPI egg.") : Ok("pypi", name!, name!, version!);
         }
 
         return Fail("unrecognised_format",
@@ -100,19 +108,15 @@ public static class EcosystemDetector
         switch (marker)
         {
             case TarMarker.NpmPackageJson:
-            {
-                var npm = NpmTarballValidator.Validate(bytes, out var name, out var version);
-                if (!npm.IsValid)
-                    return Fail("tarball_invalid", npm.Message ?? "Invalid npm tarball.");
-                return Ok("npm", name!, name!, version!);
-            }
+                {
+                    var npm = NpmTarballValidator.Validate(bytes, out string? name, out string? version);
+                    return !npm.IsValid ? Fail("tarball_invalid", npm.Message ?? "Invalid npm tarball.") : Ok("npm", name!, name!, version!);
+                }
             case TarMarker.PyPiSdist:
-            {
-                var sdist = PyPiArtifactValidator.ValidateSdist(bytes, out var name, out var version);
-                if (!sdist.IsValid)
-                    return Fail("artifact_invalid", sdist.Message ?? "Invalid PyPI sdist.");
-                return Ok("pypi", name!, name!, version!);
-            }
+                {
+                    var sdist = PyPiArtifactValidator.ValidateSdist(bytes, out string? name, out string? version);
+                    return !sdist.IsValid ? Fail("artifact_invalid", sdist.Message ?? "Invalid PyPI sdist.") : Ok("pypi", name!, name!, version!);
+                }
             default:
                 return Fail("unrecognised_format",
                     "Gzipped tar contains neither a top-level package.json nor a top-level PKG-INFO/pyproject.toml.");
@@ -123,22 +127,38 @@ public static class EcosystemDetector
 
     private static TarMarker ScanGzippedTar(byte[] bytes)
     {
-        using var gzip = new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress);
+        // Zip-bomb guard: cap total decompressed bytes and entry count. Skipping past
+        // entries still decompresses their payloads, so an uncapped scan over a crafted
+        // high-ratio gzip would burn unbounded CPU before any marker match.
+        using var gzip = new LimitedReadStream(
+            new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress),
+            TarScanLimits.MaxTotalDecompressedBytes, "Archive");
         using var tar = new TarReader(gzip, leaveOpen: false);
+        int entryCount = 0;
         while (tar.GetNextEntry() is { } entry)
         {
+            if (++entryCount > TarScanLimits.MaxEntries)
+            {
+                throw new InvalidDataException(
+                    $"Archive exceeds the {TarScanLimits.MaxEntries}-entry limit.");
+            }
+
             // `npm pack` writes package/package.json, but git-archive and hand-rolled tarballs
             // commonly use {name}-{version}/package.json or no wrapper at all. NpmTarballValidator
             // accepts the same set so detection and validation stay in lockstep.
             if (NpmTarballValidator.IsTopLevelPackageJson(entry.Name))
+            {
                 return TarMarker.NpmPackageJson;
+            }
             // PyPI sdists per PEP 314 use top-level {name}-{version}/PKG-INFO; some legacy
             // sdists carry pyproject.toml at the same depth without PKG-INFO.
-            var slashCount = entry.Name.Count(c => c == '/');
+            int slashCount = entry.Name.Count(c => c == '/');
             if (slashCount == 1
                 && (entry.Name.EndsWith("/PKG-INFO", StringComparison.OrdinalIgnoreCase)
                     || entry.Name.EndsWith("/pyproject.toml", StringComparison.OrdinalIgnoreCase)))
+            {
                 return TarMarker.PyPiSdist;
+            }
         }
         return TarMarker.None;
     }

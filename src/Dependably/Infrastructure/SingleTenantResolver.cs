@@ -27,10 +27,9 @@ public sealed class SingleTenantResolver : ITenantResolver
         // Active tenants only — if the operator soft-deletes the single tenant, the install
         // becomes Uninitialized (503) until restore. Order is for determinism on the unlikely
         // edge of multiple rows.
-        var row = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug)>(
+        var (Id, Slug) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug)>(
             "SELECT id, slug FROM orgs WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 1");
 
-        if (row.Id is null) return TenantContext.Uninitialized;
-        return TenantContext.ForTenant(row.Id, row.Slug);
+        return Id is null ? TenantContext.Uninitialized : TenantContext.ForTenant(Id, Slug);
     }
 }

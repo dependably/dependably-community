@@ -3,7 +3,6 @@ using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Protocol;
 
@@ -25,7 +24,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     {
         _fixture = fixture;
         _audit = new AuditRepository(_fixture.Store);
-        _sut = new BlockGateService(new VulnerabilityRepository(_fixture.Store), _audit);
+        _sut = new BlockGateService(new VulnerabilityRepository(_fixture.Store), _audit, new QuarantineRepository(_fixture.Store), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance);
     }
 
     // ── manual-block / manual-allow ───────────────────────────────────────────
@@ -34,7 +33,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     public async Task ManualBlock_Wins_OverEverythingElse()
     {
         // Manual block takes precedence even when release-age would have allowed and OSV is fine.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"mb-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"mb-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             ManualState = "blocked",
@@ -51,7 +50,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     public async Task ManualAllow_ShortCircuits_PastReleaseAgeAndOsv()
     {
         // Operator override: manual allow returns early, skipping both auto gates.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ma-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ma-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             ManualState = "allowed",
@@ -69,7 +68,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Deprecated_Block_Mode_Blocks_AndLogsActivity()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-block-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-block-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             Deprecated = "This version is abandoned",
@@ -84,7 +83,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     public async Task Deprecated_BlockAll_OnServePath_Blocks()
     {
         // block_all denies an already-cached deprecated version on the serve (cache-hit) path.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-all-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-all-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             Deprecated = "This version is abandoned",
@@ -100,7 +99,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     {
         // The crux of the new/all split: block_new lets an already-cached deprecated version keep
         // serving. Its blocking happens only on the first-fetch path (asserted separately).
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-new-serve-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-new-serve-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             Deprecated = "This version is abandoned",
@@ -119,7 +118,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     {
         // On the cache-miss first-fetch path both block_new and block_all (and legacy block)
         // refuse a deprecated version so it is never cached.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-ff-{mode}-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-ff-{mode}-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             Deprecated = "abandoned",
@@ -135,7 +134,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     [InlineData("warn")]
     public async Task Deprecated_FirstFetch_AllowsUnderNonBlockingMode(string mode)
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-ff-allow-{mode}-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-ff-allow-{mode}-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             Deprecated = "abandoned",
@@ -149,7 +148,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Deprecated_FirstFetch_NullDeprecated_AllowsThrough()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-ff-null-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-ff-null-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             Deprecated = null,
@@ -163,7 +162,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Deprecated_Warn_Mode_AllowsThrough()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-warn-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-warn-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             Deprecated = "Use the new package instead",
@@ -177,7 +176,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Deprecated_Off_Mode_AllowsThrough()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-off-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-off-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             Deprecated = "use something else",
@@ -192,7 +191,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     public async Task Deprecated_Block_Mode_NullDeprecated_AllowsThrough()
     {
         // block mode only fires when the version actually has a deprecation message.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-null-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-null-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             Deprecated = null,
@@ -207,7 +206,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     public async Task ManualAllow_ShortCircuits_PastDeprecatedGate()
     {
         // Priority: manual-allow (2) wins over deprecated-block (3).
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-ma-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-ma-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             ManualState = "allowed",
@@ -222,7 +221,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task Deprecated_Block_LogsDeprecatedMessageInDetail()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-detail-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"dep-detail-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             Deprecated = "legacy package",
@@ -232,7 +231,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         await _sut.EvaluateAsync(req);
 
         await using var conn = await _fixture.Store.OpenAsync();
-        var detail = await conn.ExecuteScalarAsync<string>(
+        string? detail = await conn.ExecuteScalarAsync<string>(
             "SELECT detail FROM activity WHERE event_type = 'blocked_deprecated' AND org_id = @orgId",
             new { orgId });
         Assert.Contains("\"deprecated\":", detail);
@@ -244,7 +243,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task ReleaseAge_TooYoung_Blocks_AndLogsActivity()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"young-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"young-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             MinReleaseAgeHours = 24,
@@ -256,7 +255,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
 
         // Detail JSON carries the three diagnostic fields the dashboard renders.
         await using var conn = await _fixture.Store.OpenAsync();
-        var detail = await conn.ExecuteScalarAsync<string>(
+        string? detail = await conn.ExecuteScalarAsync<string>(
             "SELECT detail FROM activity WHERE event_type = 'blocked_release_age' AND org_id = @orgId",
             new { orgId });
         Assert.Contains("\"published_at\":", detail);
@@ -269,7 +268,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     {
         // Published comfortably past the hold — release-age gate does not fire. With no
         // VulnCheckedAt, the OSV branch returns Allowed.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"old-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"old-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             MinReleaseAgeHours = 24,
@@ -285,7 +284,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     {
         // Upstream metadata didn't carry a timestamp (rare quirk in older NuGet/npm rows).
         // Documented design choice: don't block on missing data — let the artefact through.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"nopub-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"nopub-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             MinReleaseAgeHours = 720, // very strict — wouldn't matter
@@ -301,7 +300,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     {
         // Belt + suspenders: a tenant with no policy set (NULL) must not block, even if the
         // version's published_at is "now" (which would be 0 hours old).
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"unset-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"unset-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             MinReleaseAgeHours = null,
@@ -317,7 +316,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     {
         // 0 is a valid integer the controller could persist if a future migration zeroed the
         // column; the gate treats it as policy-off rather than blocking everything.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"zero-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"zero-{Guid.NewGuid():N}");
         var req = BaseRequest(orgId) with
         {
             MinReleaseAgeHours = 0,
@@ -326,6 +325,406 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
 
         Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
         Assert.Equal(0, await CountActivityAsync(orgId, "blocked_release_age"));
+    }
+
+    // ── malicious-advisory gate ───────────────────────────────────────────────
+
+    [Fact]
+    public async Task Malicious_UnscoredMalAdvisory_Blocks_UnderBlockMode()
+    {
+        // The gap the gate closes: MAL- advisories usually carry no CVSS score, so the
+        // score-tolerance comparison alone would let known malware straight through.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"mal-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            VulnCheckedAt = DateTimeOffset.UtcNow,
+            BlockMaliciousMode = "block",
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"MAL-2026-{Guid.NewGuid():N}", severity: null, cvssScore: null);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+        Assert.Equal(1, await CountActivityAsync(orgId, "blocked_malicious"));
+
+        await using var conn = await _fixture.Store.OpenAsync();
+        string? detail = await conn.ExecuteScalarAsync<string>(
+            "SELECT detail FROM activity WHERE event_type = 'blocked_malicious' AND org_id = @orgId",
+            new { orgId });
+        Assert.Contains("\"osv_ids\":", detail);
+        Assert.Contains("MAL-2026-", detail);
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("warn")]
+    [InlineData(null)] // callers that predate the gate behave as 'off'
+    public async Task Malicious_NonBlockingModes_AllowThrough(string? mode)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"mal-allow-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            VulnCheckedAt = DateTimeOffset.UtcNow,
+            BlockMaliciousMode = mode,
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"MAL-2026-{Guid.NewGuid():N}", severity: null, cvssScore: null);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_malicious"));
+    }
+
+    [Fact]
+    public async Task ManualAllow_ShortCircuits_PastMaliciousGate()
+    {
+        // The false-positive escape hatch: a manual per-version allow wins over a MAL advisory.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"mal-ma-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            ManualState = "allowed",
+            VulnCheckedAt = DateTimeOffset.UtcNow,
+            BlockMaliciousMode = "block",
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"MAL-2026-{Guid.NewGuid():N}", severity: null, cvssScore: null);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_malicious"));
+    }
+
+    [Fact]
+    public async Task Malicious_RunsAhead_OfScoreGate_SingleEvent()
+    {
+        // A MAL advisory that also carries a CVSS score above tolerance produces exactly one
+        // blocked_malicious event — the malicious verdict outranks the score comparison.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"mal-score-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            VulnCheckedAt = DateTimeOffset.UtcNow,
+            BlockMaliciousMode = "block",
+            MaxOsvScoreTolerance = 0.0,
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"MAL-2026-{Guid.NewGuid():N}", severity: "CRITICAL", cvssScore: 9.8);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+        Assert.Equal(1, await CountActivityAsync(orgId, "blocked_malicious"));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_vuln_score"));
+    }
+
+    [Fact]
+    public async Task ScoredNonMalAdvisory_StillBlocksOnScore()
+    {
+        // Regression guard for the signals-query refactor: the plain CVSS path is unchanged.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"cvss-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            VulnCheckedAt = DateTimeOffset.UtcNow,
+            BlockMaliciousMode = "block",
+            MaxOsvScoreTolerance = 5.0,
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"GHSA-{Guid.NewGuid():N}", severity: "CRITICAL", cvssScore: 9.8);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+        Assert.Equal(1, await CountActivityAsync(orgId, "blocked_vuln_score"));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_malicious"));
+    }
+
+    [Fact]
+    public async Task Malicious_UnscannedVersion_AllowsThrough()
+    {
+        // VulnCheckedAt null = the OSV scan hasn't run yet, so no advisory data exists to act
+        // on; the gate keeps the existing fail-open-until-scanned semantics.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"mal-unscanned-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            VulnCheckedAt = null,
+            BlockMaliciousMode = "block",
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"MAL-2026-{Guid.NewGuid():N}", severity: null, cvssScore: null);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_malicious"));
+    }
+
+    // ── KEV / EPSS gates ──────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Kev_BlockMode_Blocks_AndLogsAdvisoryIds()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"kev-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            VulnCheckedAt = DateTimeOffset.UtcNow,
+            BlockKevMode = "block",
+        };
+        string kevOsvId = $"GHSA-kev-{Guid.NewGuid():N}";
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, kevOsvId, severity: "HIGH", cvssScore: 7.0, isKev: true);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+        Assert.Equal(1, await CountActivityAsync(orgId, "blocked_kev"));
+
+        await using var conn = await _fixture.Store.OpenAsync();
+        string? detail = await conn.ExecuteScalarAsync<string>(
+            "SELECT detail FROM activity WHERE event_type = 'blocked_kev' AND org_id = @orgId",
+            new { orgId });
+        Assert.Contains(kevOsvId, detail);
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("warn")]
+    [InlineData(null)]
+    public async Task Kev_NonBlockingModes_AllowThrough(string? mode)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"kev-allow-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            VulnCheckedAt = DateTimeOffset.UtcNow,
+            BlockKevMode = mode,
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"GHSA-kev-{Guid.NewGuid():N}", severity: null, cvssScore: null, isKev: true);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_kev"));
+    }
+
+    [Fact]
+    public async Task Epss_AboveTolerance_Blocks_AndLogsDetail()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"epss-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            VulnCheckedAt = DateTimeOffset.UtcNow,
+            MaxEpssTolerance = 0.5,
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"GHSA-epss-{Guid.NewGuid():N}", severity: null, cvssScore: null, epssScore: 0.92);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+        Assert.Equal(1, await CountActivityAsync(orgId, "blocked_epss"));
+
+        await using var conn = await _fixture.Store.OpenAsync();
+        string? detail = await conn.ExecuteScalarAsync<string>(
+            "SELECT detail FROM activity WHERE event_type = 'blocked_epss' AND org_id = @orgId",
+            new { orgId });
+        Assert.Contains("\"max_epss\":0.92", detail);
+        Assert.Contains("\"tolerance\":0.5", detail);
+    }
+
+    [Theory]
+    [InlineData(0.92)] // equal to the score — pass-on-equal matches the CVSS convention
+    [InlineData(0.95)]
+    public async Task Epss_AtOrBelowTolerance_AllowsThrough(double tolerance)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"epss-ok-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            VulnCheckedAt = DateTimeOffset.UtcNow,
+            MaxEpssTolerance = tolerance,
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"GHSA-epss-ok-{Guid.NewGuid():N}", severity: null, cvssScore: null, epssScore: 0.92);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_epss"));
+    }
+
+    [Fact]
+    public async Task Epss_PolicyUnset_DoesNotEvaluate()
+    {
+        // NULL tolerance = policy off even for a near-certain exploitation score.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"epss-unset-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            VulnCheckedAt = DateTimeOffset.UtcNow,
+            MaxEpssTolerance = null,
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"GHSA-epss-unset-{Guid.NewGuid():N}", severity: null, cvssScore: null, epssScore: 0.99);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_epss"));
+    }
+
+    [Fact]
+    public async Task GatePriority_MaliciousBeatsKev_KevBeatsEpss_SingleEvent()
+    {
+        // One advisory trips every signal at once; exactly one event fires, in priority order.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"prio-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            VulnCheckedAt = DateTimeOffset.UtcNow,
+            BlockMaliciousMode = "block",
+            BlockKevMode = "block",
+            MaxEpssTolerance = 0.1,
+            MaxOsvScoreTolerance = 0.0,
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"MAL-2026-{Guid.NewGuid():N}",
+            severity: "CRITICAL", cvssScore: 9.9, isKev: true, epssScore: 0.99);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+        Assert.Equal(1, await CountActivityAsync(orgId, "blocked_malicious"));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_kev"));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_epss"));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_vuln_score"));
+    }
+
+    [Fact]
+    public async Task ManualAllow_ShortCircuits_PastKevAndEpssGates()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"kev-ma-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/acme@1.0.0");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = verId,
+            ManualState = "allowed",
+            VulnCheckedAt = DateTimeOffset.UtcNow,
+            BlockKevMode = "block",
+            MaxEpssTolerance = 0.1,
+        };
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, $"GHSA-kev-ma-{Guid.NewGuid():N}", isKev: true, epssScore: 0.9);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, req.VersionId, vulnId);
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_kev"));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_epss"));
+    }
+
+    // ── quarantine review-row side effects ────────────────────────────────────
+
+    [Fact]
+    public async Task PolicyBlock_WritesPendingReviewRow()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"qr-{Guid.NewGuid():N}");
+        // Empty VersionId maps to a NULL review-row FK — the first-fetch shape, where the
+        // block fires before any version row exists.
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = string.Empty,
+            MinReleaseAgeHours = 24,
+            PublishedAt = DateTimeOffset.UtcNow.AddHours(-1),
+        };
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+
+        var quarantine = new QuarantineRepository(_fixture.Store);
+        var (items, total) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
+        Assert.Equal(1, total);
+        Assert.Equal("release_age", items[0].Gate);
+        Assert.Equal(req.Purl, items[0].Purl);
+        Assert.Contains("min_age_hours", items[0].Detail);
+    }
+
+    [Fact]
+    public async Task ManualBlock_DoesNotWriteReviewRow()
+    {
+        // A manual block is already a human decision — queueing it for review would be noise.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"qr-manual-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with { ManualState = "blocked" };
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+
+        var quarantine = new QuarantineRepository(_fixture.Store);
+        var (_, total) = await quarantine.ListAsync(orgId, null, null, 10, 0);
+        Assert.Equal(0, total);
+    }
+
+    [Fact]
+    public async Task FirstFetchDeprecation_ApprovedReviewRow_Unblocks()
+    {
+        // The version-less unblock path: a first-fetch block has no version row to carry a
+        // manual_block_state, so an approved review row on the purl is the override.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"qr-ff-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = string.Empty,
+            Deprecated = "abandoned",
+            BlockDeprecatedMode = "block_new",
+        };
+
+        // First fetch blocks and queues the pending row.
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateFirstFetchDeprecationAsync(req));
+        var quarantine = new QuarantineRepository(_fixture.Store);
+        var (items, _) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
+        string id = items.Single(i => i.Purl == req.Purl).Id;
+
+        // Approval flips the next first fetch to allowed.
+        Assert.True(await quarantine.DecideAsync(orgId, id, "approved", null, null));
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateFirstFetchDeprecationAsync(req));
+    }
+
+    [Fact]
+    public async Task FirstFetchDeprecation_DeniedReviewRow_StaysBlocked()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"qr-ffd-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            VersionId = string.Empty,
+            Deprecated = "abandoned",
+            BlockDeprecatedMode = "block_new",
+        };
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateFirstFetchDeprecationAsync(req));
+        var quarantine = new QuarantineRepository(_fixture.Store);
+        var (items, _) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
+        await quarantine.DecideAsync(orgId, items.Single(i => i.Purl == req.Purl).Id, "denied", null, null);
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateFirstFetchDeprecationAsync(req));
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────

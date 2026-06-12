@@ -32,19 +32,14 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
     public S3BlobStore(string bucket, string region, string? endpoint = null, bool forcePathStyle = false)
     {
         _bucket = bucket;
-        if (string.IsNullOrWhiteSpace(endpoint))
-        {
-            _client = new AmazonS3Client(Amazon.RegionEndpoint.GetBySystemName(region));
-        }
-        else
-        {
-            _client = new AmazonS3Client(new AmazonS3Config
+        _client = string.IsNullOrWhiteSpace(endpoint)
+            ? new AmazonS3Client(Amazon.RegionEndpoint.GetBySystemName(region))
+            : new AmazonS3Client(new AmazonS3Config
             {
                 ServiceURL = endpoint,
                 ForcePathStyle = forcePathStyle,
                 AuthenticationRegion = region,
             });
-        }
         _ownsClient = true;
     }
 
@@ -66,6 +61,47 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
         {
             var response = await _client.GetObjectAsync(_bucket, key, ct);
             return response.ResponseStream;
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
+    public async Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+    {
+        // Fetch object metadata first to resolve the total length and clamp the range.
+        GetObjectMetadataResponse meta;
+        try
+        {
+            meta = await _client.GetObjectMetadataAsync(_bucket, key, ct);
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        long totalLength = meta.ContentLength;
+        long effectiveTo = Math.Min(to, totalLength - 1);
+
+        if (from > effectiveTo || totalLength == 0)
+        {
+            // Requested range starts past the end — return sentinel with empty range.
+            return new RangedStream(Stream.Null, from, from - 1, totalLength);
+        }
+
+        // S3 Range header is inclusive on both ends: "bytes=from-to".
+        var request = new GetObjectRequest
+        {
+            BucketName = _bucket,
+            Key = key,
+            ByteRange = new ByteRange(from, effectiveTo),
+        };
+
+        try
+        {
+            var response = await _client.GetObjectAsync(request, ct);
+            return new RangedStream(response.ResponseStream, from, effectiveTo, totalLength);
         }
         catch (AmazonS3Exception ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
@@ -117,7 +153,10 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
             response = await _client.ListObjectsV2Async(request, ct);
             foreach (var obj in response.S3Objects)
             {
-                if (ct.IsCancellationRequested) yield break;
+                if (ct.IsCancellationRequested)
+                {
+                    yield break;
+                }
                 // LastModified on S3 objects is server-side time; trust it for the orphan
                 // grace window. Size missing on truncated metadata defaults to 0 — the
                 // reconciler treats it as a candidate either way.
@@ -132,7 +171,11 @@ public sealed class S3BlobStore : IBlobStore, IAsyncDisposable
 
     public ValueTask DisposeAsync()
     {
-        if (_ownsClient && _client is IDisposable d) d.Dispose();
+        if (_ownsClient && _client is IDisposable d)
+        {
+            d.Dispose();
+        }
+
         return ValueTask.CompletedTask;
     }
 }

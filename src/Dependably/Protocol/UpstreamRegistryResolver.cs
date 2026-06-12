@@ -27,7 +27,6 @@ public sealed class UpstreamRegistryResolver
         string orgId, string ecosystem, CancellationToken ct = default)
     {
         var urls = await _repo.ListUrlsForEcosystemAsync(orgId, ecosystem, ct);
-        if (urls.Count == 0) return urls;
-        return urls.Select(u => u.TrimEnd('/')).ToList();
+        return urls.Count == 0 ? urls : urls.Select(u => u.TrimEnd('/')).ToList();
     }
 }

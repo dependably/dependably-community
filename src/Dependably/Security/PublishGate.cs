@@ -18,19 +18,18 @@ namespace Dependably.Security;
 /// </summary>
 public sealed class PublishGate
 {
-    private readonly bool _enforced;
     private readonly ClaimResolver _claims;
 
     public PublishGate(IConfiguration config, ClaimResolver claims)
     {
-        _enforced = string.Equals(
+        IsEnforced = string.Equals(
             (config["CLAIM_ENFORCEMENT"] ?? "off").Trim(),
             "on",
             StringComparison.OrdinalIgnoreCase);
         _claims = claims;
     }
 
-    public bool IsEnforced => _enforced;
+    public bool IsEnforced { get; }
 
     /// <summary>
     /// Returns null when publish is allowed (gate off, or claim is local_only/mixed).
@@ -40,24 +39,25 @@ public sealed class PublishGate
     public async Task<IActionResult?> CheckAsync(
         string orgId, string ecosystem, string name, CancellationToken ct = default)
     {
-        if (!_enforced) return null;
-        if (await _claims.CanPublishAsync(orgId, ecosystem, name, ct)) return null;
-
-        return new ObjectResult(new ProblemDetails
-        {
-            Type = "https://dependably.dev/problems/claim-required",
-            Title = "Name not claimed",
-            Status = StatusCodes.Status409Conflict,
-            Detail = $"Publishing to '{name}' is not permitted because the name is unclaimed. " +
+        return !IsEnforced
+            ? null
+            : await _claims.CanPublishAsync(orgId, ecosystem, name, ct)
+            ? null
+            : (IActionResult)new ObjectResult(new ProblemDetails
+            {
+                Type = "https://dependably.dev/problems/claim-required",
+                Title = "Name not claimed",
+                Status = StatusCodes.Status409Conflict,
+                Detail = $"Publishing to '{name}' is not permitted because the name is unclaimed. " +
                      "Create a 'local_only' or 'mixed' claim for this name before uploading.",
-            Extensions =
+                Extensions =
             {
                 ["ecosystem"] = ecosystem,
                 ["name"] = name
             }
-        })
-        {
-            StatusCode = StatusCodes.Status409Conflict
-        };
+            })
+            {
+                StatusCode = StatusCodes.Status409Conflict
+            };
     }
 }

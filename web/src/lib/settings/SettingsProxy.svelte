@@ -10,6 +10,7 @@
 <script>
   import { t } from 'svelte-i18n'
   import SettingsList from './SettingsList.svelte'
+  import SettingsNamespaces from './SettingsNamespaces.svelte'
   import SettingsUpstreamRegistries from './SettingsUpstreamRegistries.svelte'
   import InfoTip from '../InfoTip.svelte'
 
@@ -32,6 +33,13 @@
   export let onAddBlocklist = () => {}
   /** @type {(id: string) => void} */
   export let onRemoveBlocklist = () => {}
+
+  export let reservedEntries = []
+  export let reservedLoaded = false
+  /** @type {() => void} */
+  export let onAddReserved = () => {}
+  /** @type {(id: string) => void} */
+  export let onRemoveReserved = () => {}
 </script>
 
 <div class="card card-narrow">
@@ -81,6 +89,33 @@
       <option value="block_all">{$t('settings.proxy.blockDeprecatedBlockAll')}</option>
     </select>
   </div>
+  <div class="form-row">
+    <label class="label-row" for="block-malicious">{$t('settings.proxy.blockMalicious')} <InfoTip text={$t('settings.proxy.blockMaliciousHint')} /></label>
+    <select id="block-malicious" bind:value={proxySettings.block_malicious}>
+      <option value="off">{$t('settings.proxy.blockMaliciousOff')}</option>
+      <option value="warn">{$t('settings.proxy.blockMaliciousWarn')}</option>
+      <option value="block">{$t('settings.proxy.blockMaliciousBlock')}</option>
+    </select>
+  </div>
+  <div class="form-row">
+    <label class="label-row" for="block-kev">{$t('settings.proxy.blockKev')} <InfoTip text={$t('settings.proxy.blockKevHint')} /></label>
+    <select id="block-kev" bind:value={proxySettings.block_kev}>
+      <option value="off">{$t('settings.proxy.blockKevOff')}</option>
+      <option value="warn">{$t('settings.proxy.blockKevWarn')}</option>
+      <option value="block">{$t('settings.proxy.blockKevBlock')}</option>
+    </select>
+  </div>
+  <div class="form-row">
+    <label class="label-row" for="max-epss">{$t('settings.proxy.maxEpssTolerance')} <InfoTip text={$t('settings.proxy.maxEpssToleranceHint')} /></label>
+    <input
+      id="max-epss"
+      type="text"
+      inputmode="decimal"
+      pattern="[0-9]*(\.[0-9]+)?"
+      placeholder={$t('settings.proxy.maxEpssTolerancePlaceholder')}
+      bind:value={proxySettings.max_epss_tolerance}
+    />
+  </div>
   <button class="primary" on:click={onSave} disabled={saving}>
     {saving ? $t('common.actions.saving') : $t('common.actions.save')}
   </button>
@@ -107,6 +142,16 @@
   patternField="pattern"
   onAdd={onAddBlocklist}
   onRemove={onRemoveBlocklist} />
+
+<div class="page-header list-header mt-4">
+  <h3 class="section-h">{$t('settings.proxy.reservedSection')}</h3>
+</div>
+<p class="form-hint">{$t('settings.proxy.reservedHint')}</p>
+<SettingsNamespaces
+  entries={reservedEntries}
+  loading={!reservedLoaded}
+  onAdd={onAddReserved}
+  onRemove={onRemoveReserved} />
 
 <SettingsUpstreamRegistries />
 

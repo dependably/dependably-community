@@ -21,16 +21,18 @@ public sealed class RequestPublicUrlBuilder : IPublicUrlBuilder
 
     public string Absolute(HttpContext context, string path)
     {
-        if (string.IsNullOrEmpty(path)) return BaseUrl(context);
-        if (path[0] != '/') throw new ArgumentException("Path must start with '/'.", nameof(path));
-        return $"{Scheme(context)}://{context.Request.Host}{path}";
+        return string.IsNullOrEmpty(path)
+            ? BaseUrl(context)
+            : path[0] != '/'
+            ? throw new ArgumentException("Path must start with '/'.", nameof(path))
+            : $"{Scheme(context)}://{context.Request.Host}{path}";
     }
 
     public bool IsHttpsDeployment =>
         string.Equals(_configuredScheme, "https", StringComparison.OrdinalIgnoreCase);
 
     public CookieOptions SessionCookieOptions(HttpContext ctx, SameSiteMode sameSite = SameSiteMode.Strict) =>
-        new CookieOptions
+        new()
         {
             HttpOnly = true,
             Secure = ctx.Request.IsHttps || IsHttpsDeployment,

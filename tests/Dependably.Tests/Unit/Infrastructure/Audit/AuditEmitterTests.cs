@@ -1,5 +1,4 @@
 using Dapper;
-using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -8,7 +7,6 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure.Audit;
 
@@ -40,8 +38,8 @@ public sealed class AuditEmitterTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task EmitAsync_PersistsRowWithEnvelopeFromHttpContext()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
-        var eventType = $"emit-env-{Guid.NewGuid():N}";
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string eventType = $"emit-env-{Guid.NewGuid():N}";
 
         var http = new DefaultHttpContext { TraceIdentifier = "trace-123" };
         http.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("10.0.0.5");
@@ -52,35 +50,35 @@ public sealed class AuditEmitterTests : IClassFixture<InMemoryDbFixture>
             outcome: "accepted", payloadJson: "{\"k\":\"v\"}");
 
         await using var conn = await _fixture.Store.OpenAsync();
-        var row = await conn.QuerySingleOrDefaultAsync<(string RequestId, string SourceIp, string UserAgent, string TenantResolver, string Payload)>(
+        var (RequestId, SourceIp, UserAgent, TenantResolver, Payload) = await conn.QuerySingleOrDefaultAsync<(string RequestId, string SourceIp, string UserAgent, string TenantResolver, string Payload)>(
             "SELECT request_id AS RequestId, source_ip AS SourceIp, user_agent AS UserAgent, " +
             "       tenant_resolver AS TenantResolver, payload AS Payload " +
             "FROM audit_event WHERE event_type = @t ORDER BY occurred_at DESC LIMIT 1",
             new { t = eventType });
-        Assert.False(string.IsNullOrEmpty(row.RequestId));
-        Assert.Equal("trace-123", row.RequestId);
-        Assert.Equal("10.0.0.5", row.SourceIp);
-        Assert.Equal("test-agent/1.0", row.UserAgent);
-        Assert.Equal("multi", row.TenantResolver);
-        Assert.Equal("{\"k\":\"v\"}", row.Payload);
+        Assert.False(string.IsNullOrEmpty(RequestId));
+        Assert.Equal("trace-123", RequestId);
+        Assert.Equal("10.0.0.5", SourceIp);
+        Assert.Equal("test-agent/1.0", UserAgent);
+        Assert.Equal("multi", TenantResolver);
+        Assert.Equal("{\"k\":\"v\"}", Payload);
     }
 
     [Fact]
     public async Task EmitAsync_NoHttpContext_StillPersists_AndLeavesEnvelopeFieldsNull()
     {
-        var eventType = $"ambient-{Guid.NewGuid():N}";
+        string eventType = $"ambient-{Guid.NewGuid():N}";
         var sut = NewSut(http: null);
         await sut.EmitAsync(eventType, orgId: null, actorType: "system", actorId: null,
             outcome: "accepted", payloadJson: "{}");
 
         await using var conn = await _fixture.Store.OpenAsync();
-        var row = await conn.QuerySingleOrDefaultAsync<(string? RequestId, string? SourceIp, string? UserAgent)>(
+        var (RequestId, SourceIp, UserAgent) = await conn.QuerySingleOrDefaultAsync<(string? RequestId, string? SourceIp, string? UserAgent)>(
             "SELECT request_id AS RequestId, source_ip AS SourceIp, user_agent AS UserAgent " +
             "FROM audit_event WHERE event_type = @t ORDER BY occurred_at DESC LIMIT 1",
             new { t = eventType });
-        Assert.Null(row.RequestId);
-        Assert.Null(row.SourceIp);
-        Assert.Null(row.UserAgent);
+        Assert.Null(RequestId);
+        Assert.Null(SourceIp);
+        Assert.Null(UserAgent);
     }
 
     [Fact]
@@ -93,7 +91,7 @@ public sealed class AuditEmitterTests : IClassFixture<InMemoryDbFixture>
         await sut.EmitAsync($"ua-trunc-{Guid.NewGuid():N}", null, "system", null, "accepted", "{}");
 
         await using var conn = await _fixture.Store.OpenAsync();
-        var ua = await conn.ExecuteScalarAsync<string>(
+        string? ua = await conn.ExecuteScalarAsync<string>(
             "SELECT user_agent FROM audit_event ORDER BY occurred_at DESC LIMIT 1");
         Assert.NotNull(ua);
         Assert.Equal(512, ua.Length);

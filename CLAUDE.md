@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**dependably** is a self-hosted private artifact repository for npm, PyPI, and NuGet. Core design priorities: supply chain awareness (first-fetch tracking, checksum verification, SBOM generation) and multitenancy (org isolation, scoped tokens, BOLA protection).
+**dependably** is a self-hosted private artifact repository for npm, PyPI, NuGet, Maven, RPM, and OCI images. Core design priorities: supply chain awareness (first-fetch tracking, checksum verification, SBOM generation) and multitenancy (org isolation, scoped tokens, BOLA protection).
 
 Tech stack: **ASP.NET Core 9 / C#**, **Dapper** (parameterized SQL only — no string interpolation), **SQLite** (`IMetadataStore` / `SqliteMetadataStore`), **Serilog** structured JSON logging, **JWT** sessions, **BCrypt** passwords, **NuGet.Versioning** for NuGet version normalization.
 
@@ -44,6 +44,13 @@ dotnet run --project src/Dependably
 
 # Build release binary
 dotnet publish src/Dependably -c Release -r linux-musl-x64 --self-contained true /p:PublishSingleFile=true
+
+# Web frontend (Svelte, from web/)
+cd web && npm install
+npm run dev      # Vite dev server
+npm run build    # production build into src/Dependably/wwwroot — wipes ALL of wwwroot,
+                 # including the tracked wwwroot/swagger/ assets; restore them afterwards
+                 # (git checkout -- src/Dependably/wwwroot/swagger)
 ```
 
 ## Project structure
@@ -66,7 +73,7 @@ src/Dependably/
     InMemoryBlobStore.cs  — for tests only
     BlobStoreFactory.cs   — reads STORAGE_BACKEND env var, instantiates correct impl
   Protocol/
-    PurlNormalizer.cs     — PyPi/Npm/NuGet canonical PURL construction
+    PurlNormalizer.cs     — canonical PURL construction for every ecosystem (pypi/npm/nuget/maven/rpm)
     PurlParser.cs         — parses PURL strings back to (ecosystem, name, version)
     UpstreamClient.cs     — fetches from upstream, verifies SHA-256, caches in blob store
   Security/
@@ -79,9 +86,12 @@ src/Dependably/
     TokenRepository.cs    — resolves user + service tokens by SHA-256 hash
     AuditRepository.cs    — append-only audit_log + activity inserts
   Api/
-    PyPiController.cs     — GET /o/{org}/simple/, GET /o/{org}/packages/{file}, POST /o/{org}/pypi/legacy/
-    NpmController.cs      — GET+PUT /o/{org}/npm/{pkg}, GET /o/{org}/npm/tarballs/{pkg}/{file}
+    PyPiController.cs     — GET /simple/, GET /packages/{file}, POST /pypi/legacy/
+    NpmController.cs      — GET+PUT /npm/{pkg}, GET /npm/tarballs/{pkg}/{file}
     NuGetController.cs    — full NuGet v3: service index, registration, flatcontainer, push, unlist, symbols
+    MavenController.cs    — GET/HEAD/PUT /maven/{**path}: artifact + sidecar + metadata proxy and publish
+    RpmController.cs      — GET /rpm/repodata/* + /rpm/packages/*, PUT /rpm/upload
+    OciController.cs      — OCI Distribution Spec at /v2/{**path} (GET/HEAD/POST/PUT)
     ProblemResults.cs     — RFC 7807 helpers (ValidationError, Conflict, PayloadTooLarge, etc.)
 
 tests/Dependably.Tests/
@@ -92,14 +102,15 @@ tests/Dependably.Tests/
 
 ## Key architectural rules
 
-- **BlobKeys is the only place blob keys are constructed.** Callers never build key strings inline.
-- **All Dapper queries must use parameterized form.** No string interpolation inside SQL calls — enforced by CI Roslyn analyzer.
+- **BlobKeys is the only place blob keys are constructed.** Callers never build key strings inline — enforced by the `BlobKeyConstructionComplianceTests` test (inline literal/interpolated keys passed to `IBlobStore` members fail; opt out a deliberate non-namespaced key with `// blobkey-ok: <reason>`).
+- **All Dapper queries must use parameterized form.** No string interpolation inside SQL — enforced by the `NoInterpolatedSqlComplianceTests` test (the `SecurityCodeScan` analyzer also flags it as an advisory warning, but the test is the gate). A compile-time-constant interpolated fragment (e.g. a whitelisted `ORDER BY`) opts out with a `// rawsql: <reason>` comment in the 5 lines above the SQL literal.
 - **SQL touching tenant-scoped tables must filter on `org_id`/`tenant_id`** — enforced by the `OrgIdFilteringComplianceTests` test. Legitimately cross-tenant queries (one-shot migrations, system-admin views, queries keyed by an FK-bound id that's already org-scoped) opt out with a `// xtenant: <reason>` comment in the 5 lines above the SQL literal.
-- **Comments describe the current architecture, not its development history.** No issue/tracker numbers (`#123`), milestone tags (`M2.1`), or ephemeral branch/PR pointers (`this PR`, `see plan §2`, `pre-#91`, `used to…`) in code or config comments — that provenance belongs in git history and the issue tracker, not the source. Write present-tense descriptions of how the code behaves now. (Functional markers such as the `// xtenant:` opt-out above and `// deepcode ignore` suppressions are not provenance and are fine.)
+- **Comments describe the current architecture, not its development history.** No issue/tracker numbers (`#123`), milestone tags (`M2.1`), or ephemeral branch/PR pointers (`this PR`, `see plan §2`, `pre-#91`, `used to…`) in code or config comments — that provenance belongs in git history and the issue tracker, not the source. Write present-tense descriptions of how the code behaves now. The unambiguous patterns (`#NNN`, `M<x>.<y>`, `this PR/MR`, `see plan`, `pre-#`) are enforced over `src/**/*.cs` comments by the `CommentProvenanceComplianceTests` test; the prose-history form (`used to…`) is a guideline a regex can't safely distinguish from present-tense purpose, so it stays reviewer-enforced. (Functional markers such as the `// xtenant:` / `// rawsql:` / `// blobkey-ok:` opt-outs and `// deepcode ignore` suppressions are not provenance and are fine.)
 - **`IBlobStore` never makes naming decisions** — keys always come from `BlobKeys`.
+- **Architectural invariants are enforced by `Category=Compliance` static-scan tests, not just docs.** The family (`OrgIdFilteringComplianceTests`, `NoInterpolatedSqlComplianceTests`, `BlobKeyConstructionComplianceTests`, `CommentProvenanceComplianceTests`, `NoDebugOutputComplianceTests`, `NoFocusedOrSkippedTestComplianceTests`, plus the `Schema*ComplianceTests`) reads source, regexes for a banned pattern, and fails with the full list — so violations surface locally and on every MR. Production code uses Serilog (no `Console`/`Debug` output outside the allowlisted first-boot banner) and ships no `NotImplementedException` stubs; no committed test is focused (`.only`/`fit`/`fdescribe`) or skipped (`.skip`/`[Fact(Skip=…)]`, opt out a deliberate skip with `// skip-ok: <reason>`). Prefer adding a compliance test over a CI grep when codifying a new rule.
 - **`IMetadataStore` returns raw connections.** Callers use Dapper extension methods and are responsible for `await using`.
 - **PURLs are the canonical package identity.** `PurlNormalizer` is the single source of truth — used by push handlers, proxy handlers, simple index generator, and npm metadata rewriter.
-- Org routes: `/o/{org}/simple/`, `/o/{org}/npm/`, `/o/{org}/nuget/`. Short aliases `/simple/`, `/npm/`, `/nuget/` redirect to the default org.
+- Registry routes: `/simple/`, `/npm/`, `/nuget/v3/index.json`, `/maven/`, `/rpm/`. Tenancy is host-resolved: `DEPLOYMENT_MODE=single` (default) serves the one org from the bare host; `DEPLOYMENT_MODE=multi` routes each org by subdomain (`my-org.apex/simple/` etc.). OCI has no org prefix — the Distribution Spec mandates `/v2/`.
 - **Token auth**: npm uses `Authorization: Bearer <token>`; PyPI and NuGet use `Authorization: Basic base64(user:<token>)`. Resolution in `TokenAuthExtensions.ResolveTokenAsync`. Token stored as SHA-256 hash in DB.
 - **NuGet push** uses `X-NuGet-ApiKey` header, not Authorization.
 - **Proxy cache miss** path: check `BlobKeys.Proxy(sha256)` in blob store → if absent, fetch from upstream, verify checksum, store, serve. Configured via `PyPI:Upstream`, `Npm:Upstream`, `NuGet:Upstream` settings.
@@ -110,30 +121,11 @@ tests/Dependably.Tests/
 
 ## Environment variables
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `DB_PATH` | `/data/dependably.db` | SQLite database file path |
-| `STORAGE_BACKEND` | `local` | `local`, `s3`, or `azure` — default for both storage tiers |
-| `STORAGE_BACKEND_CACHE` / `STORAGE_BACKEND_REGISTRY` | inherits | #57 per-tier override. Cache holds proxy artefacts (eviction-friendly); registry holds published artefacts (durable, never auto-evicted). |
-| `LOCAL_STORAGE_PATH` | `/data/blobs` | Root for local blob store |
-| `LOCAL_STORAGE_PATH_CACHE` / `LOCAL_STORAGE_PATH_REGISTRY` | inherits | Per-tier path override (use to keep tiers on separate volumes) |
-| `S3_BUCKET` / `S3_REGION` | — | Required for S3 backend; suffixed `_CACHE` / `_REGISTRY` for per-tier |
-| `AZURE_CONNECTION_STRING` / `AZURE_CONTAINER` | — | Required for Azure backend; suffixed `_CACHE` / `_REGISTRY` for per-tier |
-| `DEFAULT_ORG_SLUG` | `default` | Slug of the default org created on first boot |
-| `MAX_UPLOAD_BYTES` | — | Instance-wide upload size limit |
-| `MAX_UPLOAD_BYTES_PYPI/NPM/NUGET` | — | Per-ecosystem upload size limits |
-| `BASE_URL` | derived from request | Public base URL for tarball rewriting and NuGet service index |
-| `TRUSTED_PROXIES` | — (trust all forwarders) | Comma-separated IPs/CIDRs allowed to set `X-Forwarded-For`/`-Proto` (e.g. `10.0.0.0/8,172.18.0.1`). When unset, forwarded headers are accepted from any client (back-compat) and a startup warning is logged — set this to your reverse proxy's address(es) so source IP (used by the `/metrics` allowlist, rate-limit keys, audit `source_ip`) can't be spoofed. |
-| `PyPI:Upstream` | `https://pypi.org` | Upstream PyPI registry |
-| `Npm:Upstream` | `https://registry.npmjs.org` | Upstream npm registry |
-| `NuGet:Upstream` | `https://api.nuget.org/v3` | Upstream NuGet registry |
-| `Maven:Upstream` | `https://repo1.maven.org/maven2` | Upstream Maven registry (Maven Central). `Maven:NegativeCacheTtl`, `Maven:VerifyWithUpstreamSha256` tune the proxy. |
-| `Rpm:Upstream` | — (no default URL) | Upstream RPM repo base URL. Proxy passthrough is governed by the per-org `ProxyPassthroughEnabled` (default **on**), same as every ecosystem — RPM is **not** disabled by default. The only difference: RPM ships with **no default upstream URL** (PyPI/npm/NuGet/Maven have hardcoded defaults) because RPM repos are distro/release-specific, so set this to point RPM at a mirror. `Rpm:UpstreamMode` (`passthrough`) selects behaviour. Signature verification is opt-in via `Rpm:GpgKey`. |
-| `Rpm:GpgKey` | — (verification off) | Operator-pinned trust anchor for the RPM proxy: an inline ASCII-armored OpenPGP public key block, or a file path / `file:` URL the operator trusts out of band. When set, the proxy verifies `repomd.xml`'s detached signature (`repomd.xml.asc`) before trusting upstream metadata; on failure it refuses to resolve (fail closed). When unset, verification is skipped (back-compat) and a startup warning is logged. The anchor must be operator-provided — the upstream-fetched GPG key is not used as the trust root (circular against a MITM). |
-| `Rpm:VerifyRepomdSignature` | derived | Force signature verification on/off. When unset, verification is enabled iff `Rpm:GpgKey` is set. Setting `true` with no parseable key fails every resolution closed. |
-| `Oci:Upstreams` | Docker Hub (`registry-1.docker.io`) | Array of upstream OCI registries (prefix-routed, per-registry auth). Configured in `appsettings.json` under `Oci:Upstreams`, not a flat env var. |
-| `PROXY_STAGING_PATH` | `Path.GetTempPath()` | #104 hash-and-stage staging dir for proxy-fetch MISS path. Container deployments expecting large artefacts should set this to a disk-backed volume (e.g. `/data/staging`) — `/tmp` is often tmpfs (RAM-backed), which defeats the memory-bounding goal. |
-| `VULN_SCAN_SCHEDULE` | `0 4 * * *` | Cron schedule for vulnerability scan + rescan passes |
-| `VULN_SCAN_JITTER_SECONDS` | `3600` | Random offset (0..N seconds) added to each scheduled scan to avoid thundering-herd against OSV. Set `0` to disable. |
-| `VULN_RESCAN_AGE_HOURS` | `24` | Re-check already-scanned proxy versions whose `vuln_checked_at` is older than this |
-| `VULN_SCAN_BATCH_DELAY_MS` | `500` | Delay between OSV /querybatch calls during scan/rescan |
+The complete reference table lives in [CONTRIBUTING.md → Environment variables](CONTRIBUTING.md#environment-variables) — keep that table as the single source of truth; do not duplicate it here. Behavioral notes that matter when changing code:
+
+- Config keys are written `Section:Key` in `appsettings.json` and code; their environment-variable form uses double underscores (`Rpm__GpgKey` sets `Rpm:GpgKey`). Both spellings refer to the same setting.
+- **Storage is two tiers**: *cache* holds proxy artefacts (eviction-friendly); *registry* holds published artefacts (durable, never auto-evicted). `STORAGE_BACKEND`, `LOCAL_STORAGE_PATH`, and the S3/Azure variable pairs all accept `_CACHE` / `_REGISTRY` suffixes for per-tier overrides; unsuffixed values apply to both tiers.
+- **`TRUSTED_PROXIES` unset = forwarded headers trusted from any client** (back-compat; startup warning logged). Source IP feeds the `/metrics` allowlist, rate-limit keys, and audit `source_ip`, so it's spoofable until this is set.
+- **RPM** follows the same per-org `ProxyPassthroughEnabled` gate (default **on**) as every ecosystem — it is not disabled by default; it just ships with no default upstream URL (repos are distro/release-specific). `Rpm:UpstreamMode`: `passthrough` (default) forwards upstream repodata verbatim and refuses hosted publish; `merged` serves local ∪ upstream (local shadows on NEVRA collision) and allows hosted publish. `Rpm:GpgKey` is an operator-pinned trust anchor — when set, `repomd.xml` signature verification fails closed; the upstream-fetched key is never the trust root.
+- **`PROXY_STAGING_PATH`** (proxy-fetch MISS hash-and-stage dir) defaults to the OS temp dir; in containers `/tmp` is often RAM-backed tmpfs, which defeats memory bounding — large-artefact deployments should point it at a disk-backed volume.
+- **`Oci:Upstreams`** is an array in `appsettings.json` (prefix-routed, per-registry auth), not a flat env var.

@@ -7,6 +7,7 @@ import { getBootstrap, ADMIN_EMAIL, ADMIN_PASSWORD } from '../../helpers/api-cli
 
 async function ensureMulti(baseURL: string): Promise<void> {
   const bootstrap = await getBootstrap(baseURL)
+  // skip-ok: conditional runtime skip — these specs run only against a multi-mode deployment.
   test.skip(bootstrap.mode !== 'multi', 'system-admin specs require multi-mode deployment')
 }
 

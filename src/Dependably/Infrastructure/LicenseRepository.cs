@@ -39,7 +39,7 @@ public sealed class LicenseRepository
     {
         await using var conn = await _db.OpenAsync(ct);
         // Upsert each SPDX identifier; ignore duplicates from same source
-        foreach (var spdx in spdxIds)
+        foreach (string spdx in spdxIds)
         {
             // xtenant: INSERT pinned to caller-supplied package_version_id (org-scoped via FK).
             await conn.ExecuteAsync(
@@ -56,7 +56,11 @@ public sealed class LicenseRepository
         IEnumerable<string> versionIds, CancellationToken ct = default)
     {
         var ids = versionIds.ToList();
-        if (ids.Count == 0) return Enumerable.Empty<VersionLicenseRow>().ToLookup(r => r.VersionId, r => r.Spdx);
+        if (ids.Count == 0)
+        {
+            return Enumerable.Empty<VersionLicenseRow>().ToLookup(r => r.VersionId, r => r.Spdx);
+        }
+
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: keyed by an IN list of package_version_ids (each caller-org-scoped).
         var rows = await conn.QueryAsync<VersionLicenseRow>(
@@ -91,7 +95,7 @@ public sealed class LicenseRepository
         string orgId, string licenseSpdx, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         try
         {
             await conn.ExecuteAsync(
@@ -105,7 +109,10 @@ public sealed class LicenseRepository
         }
         return new LicenseAllowlistEntry
         {
-            Id = id, OrgId = orgId, LicenseSpdx = licenseSpdx, CreatedAt = DateTimeOffset.UtcNow
+            Id = id,
+            OrgId = orgId,
+            LicenseSpdx = licenseSpdx,
+            CreatedAt = DateTimeOffset.UtcNow
         };
     }
 
@@ -113,7 +120,7 @@ public sealed class LicenseRepository
         string orgId, string licenseSpdx, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var affected = await conn.ExecuteAsync(
+        int affected = await conn.ExecuteAsync(
             "DELETE FROM license_allowlist WHERE org_id = @orgId AND license_spdx = @licenseSpdx",
             new { orgId, licenseSpdx });
         return affected > 0;
@@ -138,7 +145,7 @@ public sealed class LicenseRepository
         string orgId, string licenseSpdx, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         try
         {
             await conn.ExecuteAsync(
@@ -151,7 +158,10 @@ public sealed class LicenseRepository
         }
         return new LicenseBlocklistEntry
         {
-            Id = id, OrgId = orgId, LicenseSpdx = licenseSpdx, CreatedAt = DateTimeOffset.UtcNow
+            Id = id,
+            OrgId = orgId,
+            LicenseSpdx = licenseSpdx,
+            CreatedAt = DateTimeOffset.UtcNow
         };
     }
 
@@ -159,7 +169,7 @@ public sealed class LicenseRepository
         string orgId, string licenseSpdx, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var affected = await conn.ExecuteAsync(
+        int affected = await conn.ExecuteAsync(
             "DELETE FROM license_blocklist WHERE org_id = @orgId AND license_spdx = @licenseSpdx",
             new { orgId, licenseSpdx });
         return affected > 0;
@@ -232,23 +242,29 @@ public sealed class LicenseRepository
         string orgId, string mode, IReadOnlyList<string> spdxIds, CancellationToken ct = default)
     {
         if (mode == "off" || spdxIds.Count == 0)
+        {
             return (true, null);
+        }
 
         var blocklist = await GetBlocklistAsync(orgId, ct);
         var blockSet = blocklist.Select(e => e.LicenseSpdx).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var blocked = spdxIds.FirstOrDefault(blockSet.Contains);
+        string? blocked = spdxIds.FirstOrDefault(blockSet.Contains);
         if (blocked is not null)
+        {
             return (false, blocked);
+        }
 
         if (mode == "block")
         {
             var allowlist = await GetAllowlistAsync(orgId, ct);
             var allowSet = allowlist.Select(e => e.LicenseSpdx).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var spdx in spdxIds)
+            foreach (string spdx in spdxIds)
             {
                 if (!allowSet.Contains(spdx))
+                {
                     return (false, spdx);
+                }
             }
         }
 

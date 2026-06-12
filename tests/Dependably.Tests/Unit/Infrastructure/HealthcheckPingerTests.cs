@@ -7,7 +7,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -153,7 +152,7 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
         Assert.NotNull(handler.LastRequest);
         Assert.Equal(HttpMethod.Post, handler.LastRequest!.Method);
         Assert.NotNull(handler.LastRequest.Content);
-        var body = await handler.LastRequest.Content!.ReadAsStringAsync();
+        string body = await handler.LastRequest.Content!.ReadAsStringAsync();
         Assert.Contains("\"status\":", body);
         Assert.Contains("\"instance_id\":", body);
     }

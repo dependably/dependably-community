@@ -37,6 +37,10 @@
      rows; the one deliberate "Quiet, not loud" exception), soft chips for medium/low. */
   --sev-critical-bg:   light-dark(#7c3aed, #2e1065);
   --sev-critical-text: light-dark(#ffffff, #e9d5ff);
+  /* Malicious-package advisories (OSV MAL- ids) — a verdict, not a score, so the chip sits
+     outside the CVSS palette: near-black with red text. */
+  --sev-malicious-bg:   light-dark(#1f2937, #0b0f19);
+  --sev-malicious-text: light-dark(#fca5a5, #f87171);
   --sev-high-bg:       light-dark(#dc2626, #450a0a);
   --sev-high-text:     light-dark(#ffffff, #fecaca);
   --sev-medium-bg:     light-dark(#fef3c7, #451a03);
@@ -375,6 +379,7 @@ table td, .copy-block { font-variant-numeric: tabular-nums; }
   border-radius: 3px;
 }
 .sev-critical { background: var(--sev-critical-bg); color: var(--sev-critical-text); }
+.sev-malicious { background: var(--sev-malicious-bg); color: var(--sev-malicious-text); }
 .sev-high     { background: var(--sev-high-bg);     color: var(--sev-high-text); }
 .sev-medium   { background: var(--sev-medium-bg);   color: var(--sev-medium-text); }
 .sev-low      { background: var(--sev-low-bg);      color: var(--sev-low-text); }

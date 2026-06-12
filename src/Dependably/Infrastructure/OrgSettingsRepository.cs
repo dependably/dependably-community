@@ -50,7 +50,11 @@ public sealed class OrgSettingsRepository
                    COALESCE(default_language, 'en') as DefaultLanguage,
                    COALESCE(allow_version_overwrite, 0) as AllowVersionOverwrite,
                    COALESCE(air_gapped, 0) as AirGapped,
-                   COALESCE(block_deprecated, 'off') as BlockDeprecated
+                   COALESCE(block_deprecated, 'off') as BlockDeprecated,
+                   COALESCE(block_malicious, 'block') as BlockMalicious,
+                   COALESCE(block_kev, 'off') as BlockKev,
+                   max_epss_tolerance as MaxEpssTolerance,
+                   COALESCE(storage_used_bytes, 0) as StorageUsedBytes
             FROM org_settings WHERE org_id = @orgId
             """,
             new { orgId });
@@ -60,13 +64,11 @@ public sealed class OrgSettingsRepository
     {
         static long? Clamp(long? orgVal, long? instanceMax)
         {
-            if (orgVal is null) return null;
-            if (instanceMax is null) return orgVal;
-            return Math.Min(orgVal.Value, instanceMax.Value);
+            return orgVal is null ? null : instanceMax is null ? orgVal : Math.Min(orgVal.Value, instanceMax.Value);
         }
 
         await using var conn = await _db.OpenAsync(ct);
-        var lang = string.IsNullOrWhiteSpace(update.DefaultLanguage) ? null : update.DefaultLanguage;
+        string? lang = string.IsNullOrWhiteSpace(update.DefaultLanguage) ? null : update.DefaultLanguage;
         await conn.ExecuteAsync(
             """
             INSERT INTO org_settings (org_id, anonymous_pull, allowlist_mode,
@@ -92,19 +94,19 @@ public sealed class OrgSettingsRepository
             """,
             new
             {
-                orgId         = update.OrgId,
-                anonPull      = update.AnonymousPull ? 1 : 0,
-                allowlist     = update.AllowlistMode ? 1 : 0,
-                maxBytes      = Clamp(update.MaxUploadBytes,      update.InstanceMaxUploadBytes),
-                maxBytesPyPi  = Clamp(update.MaxUploadBytesPyPi,  update.InstanceMaxUploadBytes),
-                maxBytesNpm   = Clamp(update.MaxUploadBytesNpm,   update.InstanceMaxUploadBytes),
+                orgId = update.OrgId,
+                anonPull = update.AnonymousPull ? 1 : 0,
+                allowlist = update.AllowlistMode ? 1 : 0,
+                maxBytes = Clamp(update.MaxUploadBytes, update.InstanceMaxUploadBytes),
+                maxBytesPyPi = Clamp(update.MaxUploadBytesPyPi, update.InstanceMaxUploadBytes),
+                maxBytesNpm = Clamp(update.MaxUploadBytesNpm, update.InstanceMaxUploadBytes),
                 maxBytesNuGet = Clamp(update.MaxUploadBytesNuGet, update.InstanceMaxUploadBytes),
                 maxBytesMaven = Clamp(update.MaxUploadBytesMaven, update.InstanceMaxUploadBytes),
-                maxBytesRpm   = Clamp(update.MaxUploadBytesRpm,   update.InstanceMaxUploadBytes),
-                maxBytesOci   = Clamp(update.MaxUploadBytesOci,   update.InstanceMaxUploadBytes),
+                maxBytesRpm = Clamp(update.MaxUploadBytesRpm, update.InstanceMaxUploadBytes),
+                maxBytesOci = Clamp(update.MaxUploadBytesOci, update.InstanceMaxUploadBytes),
                 lang,
-                overwrite     = ToBoolFlag(update.AllowVersionOverwrite),
-                airGapped     = ToBoolFlag(update.AirGapped),
+                overwrite = ToBoolFlag(update.AllowVersionOverwrite),
+                airGapped = ToBoolFlag(update.AirGapped),
             });
 
         _orgs?.InvalidateSettingsCache(update.OrgId);
@@ -112,8 +114,7 @@ public sealed class OrgSettingsRepository
 
     private static int? ToBoolFlag(bool? value)
     {
-        if (value is null) return null;
-        return value.Value ? 1 : 0;
+        return value is null ? null : value.Value ? 1 : 0;
     }
 
     public async Task UpsertRetentionAsync(
@@ -135,27 +136,33 @@ public sealed class OrgSettingsRepository
     }
 
     public async Task UpsertProxySettingsAsync(
-        string orgId, bool proxyPassthroughEnabled, double maxOsvScoreTolerance,
-        int? minReleaseAgeHours, string blockDeprecated = "off", CancellationToken ct = default)
+        string orgId, ProxyPolicySettings policy,
+        CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO org_settings (org_id, proxy_passthrough_enabled, max_osv_score_tolerance, min_release_age_hours, block_deprecated)
-            VALUES (@orgId, @proxyEnabled, @maxScore, @minAgeHours, @blockDeprecated)
+            INSERT INTO org_settings (org_id, proxy_passthrough_enabled, max_osv_score_tolerance, min_release_age_hours, block_deprecated, block_malicious, block_kev, max_epss_tolerance)
+            VALUES (@orgId, @proxyEnabled, @maxScore, @minAgeHours, @blockDeprecated, @blockMalicious, @blockKev, @maxEpss)
             ON CONFLICT(org_id) DO UPDATE SET
                 proxy_passthrough_enabled = @proxyEnabled,
                 max_osv_score_tolerance   = @maxScore,
                 min_release_age_hours     = @minAgeHours,
-                block_deprecated          = @blockDeprecated
+                block_deprecated          = @blockDeprecated,
+                block_malicious           = @blockMalicious,
+                block_kev                 = @blockKev,
+                max_epss_tolerance        = @maxEpss
             """,
             new
             {
                 orgId,
-                proxyEnabled = proxyPassthroughEnabled ? 1 : 0,
-                maxScore = maxOsvScoreTolerance,
-                minAgeHours = minReleaseAgeHours,
-                blockDeprecated,
+                proxyEnabled = policy.ProxyPassthroughEnabled ? 1 : 0,
+                maxScore = policy.MaxOsvScoreTolerance,
+                minAgeHours = policy.MinReleaseAgeHours,
+                blockDeprecated = policy.BlockDeprecated,
+                blockMalicious = policy.BlockMalicious,
+                blockKev = policy.BlockKev,
+                maxEpss = policy.MaxEpssTolerance,
             });
         _orgs?.InvalidateSettingsCache(orgId);
     }
@@ -198,3 +205,16 @@ public sealed class OrgSettingsRepository
             new { key, value });
     }
 }
+
+/// <summary>
+/// Proxy and block-gate policy values written by <see cref="OrgSettingsRepository.UpsertProxySettingsAsync"/>.
+/// Grouped as a record to keep the method within a sane parameter count.
+/// </summary>
+public sealed record ProxyPolicySettings(
+    bool ProxyPassthroughEnabled,
+    double MaxOsvScoreTolerance,
+    int? MinReleaseAgeHours = null,
+    string BlockDeprecated = "off",
+    string BlockMalicious = "block",
+    string BlockKev = "off",
+    double? MaxEpssTolerance = null);

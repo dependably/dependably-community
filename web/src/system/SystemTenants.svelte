@@ -4,6 +4,13 @@
   import { systemApi } from '../lib/api.js'
   import DataTable from '../lib/DataTable.svelte'
   import RowActionsMenu from '../lib/RowActionsMenu.svelte'
+  import SearchInput from '../lib/SearchInput.svelte'
+  import { readQuery, writeQuery } from '../lib/tableState.js'
+
+  // Search state lives in the URL query string so it survives route changes,
+  // reloads, and copied links.
+  const DEFAULTS = { q: '' }
+  const init = readQuery(DEFAULTS)
 
   let tenants = [], loading = true, error = ''
   let showCreate = false
@@ -12,7 +19,11 @@
   let createdResult = null  // { tenant, owner: { email, ownerPassword } }
 
   // Client-side filter on slug. The list endpoint caps at 200 rows so client-side scales fine.
-  let searchQuery = ''
+  let searchQuery = init.q
+
+  function sync() {
+    writeQuery({ q: searchQuery }, DEFAULTS)
+  }
 
   // Currently open actions popover (tenant id) — owned here, bound through RowActionsMenu.
   let openActionsId = null
@@ -247,12 +258,12 @@
   {#if error}<div class="page-error">{error}</div>{/if}
 
   <div class="toolbar">
-    <input
-      type="search"
+    <SearchInput
       class="table-search"
       placeholder={$t('system.tenants.searchPlaceholder')}
+        ariaLabel={$t('system.tenants.searchPlaceholder')}
       bind:value={searchQuery}
-      aria-label={$t('system.tenants.searchPlaceholder')}
+      on:search={sync}
     />
   </div>
 
@@ -429,15 +440,10 @@
   /* Toolbar proportions: override the global `input { width: 100% }` rule so the search input
      doesn't span the whole row. Pattern mirrored from SystemAudit / SystemAdmins. */
   .toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
-  .table-search {
+  .toolbar :global(.table-search) {
     flex: 1 1 240px; min-width: 200px; max-width: 360px;
-    padding: 6px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg);
-    color: var(--text);
-    font-size: 13px;
   }
+  .toolbar :global(.table-search input) { font-size: 13px; }
   tr.deleted { color: var(--text2); }
   /* Wrap row buttons in a flex container — never put display:flex on the <td> itself
      (breaks the row's border-bottom alignment). Pattern copied from web/src/pages/Users.svelte. */

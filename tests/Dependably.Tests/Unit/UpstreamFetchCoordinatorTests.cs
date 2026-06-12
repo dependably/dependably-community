@@ -1,5 +1,4 @@
 using Dependably.Storage;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -10,7 +9,7 @@ public class UpstreamFetchCoordinatorTests
     public async Task ConcurrentCallers_SameKey_ShareOneFetch()
     {
         var coordinator = new UpstreamFetchCoordinator();
-        var fetchCount = 0;
+        int fetchCount = 0;
         var gate = new TaskCompletionSource();
         var fetchStarted = new TaskCompletionSource();
 
@@ -36,7 +35,7 @@ public class UpstreamFetchCoordinatorTests
 
         gate.SetResult();
 
-        var results = await Task.WhenAll(t1, t2, t3);
+        byte[][] results = await Task.WhenAll(t1, t2, t3);
         Assert.Equal(1, fetchCount);
         Assert.All(results, r => Assert.Equal(new byte[] { 1, 2, 3 }, r));
     }
@@ -45,7 +44,7 @@ public class UpstreamFetchCoordinatorTests
     public async Task DifferentKeys_FetchIndependently()
     {
         var coordinator = new UpstreamFetchCoordinator();
-        var fetchCount = 0;
+        int fetchCount = 0;
 
         Func<Task<byte[]>> fetch = () =>
         {
@@ -62,7 +61,7 @@ public class UpstreamFetchCoordinatorTests
     public async Task FailedFetch_DoesNotPoisonNextRequest()
     {
         var coordinator = new UpstreamFetchCoordinator();
-        var calls = 0;
+        int calls = 0;
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             coordinator.FetchAsync("k", () =>
@@ -72,7 +71,7 @@ public class UpstreamFetchCoordinatorTests
             }));
 
         // Next caller should re-attempt, not get the cached failure.
-        var bytes = await coordinator.FetchAsync("k", () =>
+        byte[] bytes = await coordinator.FetchAsync("k", () =>
         {
             calls++;
             return Task.FromResult(new byte[] { 9 });

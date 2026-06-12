@@ -35,11 +35,13 @@ public sealed class PublishAuditor
             request.AuditAction, request.ActorUserId, actorKind: request.ActorKind,
             detail: request.AuditDetail, sourceIp: request.SourceIp, ct: ct);
 
-        var actorType = request.ActorUserId is null ? "system" : "user";
+        string actorType = request.ActorUserId is null ? "system" : "user";
         await EmitTypedAsync(request, sha256, actorType, ct);
 
         if (existing is not null)
+        {
             await RecordReplaceAsync(request, sha256, existing, actorType, ct);
+        }
     }
 
     private async Task EmitTypedAsync(PublishRequest request, string sha256, string actorType, CancellationToken ct)
@@ -47,7 +49,7 @@ public sealed class PublishAuditor
         if (request.AuditAction == "import")
         {
             var (batchId, importMode) = ExtractBatchInfo(request.AuditDetail);
-            var payload = new PackageEvents.Import(
+            string payload = new PackageEvents.Import(
                 request.Ecosystem, request.PurlName, request.Version, request.Filename,
                 "sha256:" + sha256, request.ArtifactBytes.LongLength, request.Origin,
                 batchId, importMode, request.ClaimState).ToJson();
@@ -56,7 +58,7 @@ public sealed class PublishAuditor
         }
         else
         {
-            var payload = new PackageEvents.Publish(
+            string payload = new PackageEvents.Publish(
                 request.Ecosystem, request.PurlName, request.Version, request.Filename,
                 "sha256:" + sha256, request.ArtifactBytes.LongLength, request.Origin,
                 request.ClaimState).ToJson();
@@ -68,9 +70,9 @@ public sealed class PublishAuditor
     private async Task RecordReplaceAsync(PublishRequest request, string sha256, PackageVersion existing,
         string actorType, CancellationToken ct)
     {
-        var priorHash = "sha256:" + (existing.ChecksumSha256 ?? "");
-        var newHash = "sha256:" + sha256;
-        var replaceDetail = JsonSerializer.Serialize(new
+        string priorHash = "sha256:" + (existing.ChecksumSha256 ?? "");
+        string newHash = "sha256:" + sha256;
+        string replaceDetail = JsonSerializer.Serialize(new
         {
             prior_artifact_hash = priorHash,
             artifact_hash = newHash,
@@ -79,7 +81,7 @@ public sealed class PublishAuditor
         await _audit.LogAsync("package.replace", request.OrgId, request.ActorUserId,
             request.ActorKind, request.Ecosystem, request.Purl, detail: replaceDetail, ct: ct);
 
-        var replacePayload = new PackageEvents.Replace(
+        string replacePayload = new PackageEvents.Replace(
             request.Ecosystem, request.PurlName, request.Version, request.Filename,
             newHash, priorHash, request.ArtifactBytes.LongLength, request.Origin,
             request.ClaimState).ToJson();
@@ -89,14 +91,18 @@ public sealed class PublishAuditor
 
     private static (string BatchId, string ImportMode) ExtractBatchInfo(string? detail)
     {
-        if (string.IsNullOrEmpty(detail)) return ("", "single");
+        if (string.IsNullOrEmpty(detail))
+        {
+            return ("", "single");
+        }
+
         try
         {
             using var doc = JsonDocument.Parse(detail);
             var root = doc.RootElement;
-            var batchId = root.TryGetProperty("batch_id", out var b) && b.ValueKind == JsonValueKind.String
+            string batchId = root.TryGetProperty("batch_id", out var b) && b.ValueKind == JsonValueKind.String
                 ? b.GetString() ?? "" : "";
-            var mode = root.TryGetProperty("import_mode", out var m) && m.ValueKind == JsonValueKind.String
+            string mode = root.TryGetProperty("import_mode", out var m) && m.ValueKind == JsonValueKind.String
                 ? m.GetString() ?? "single" : "single";
             return (batchId, mode);
         }

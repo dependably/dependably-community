@@ -235,6 +235,18 @@ export const api = {
   addBlocklist: (pattern) => req('POST', '/blocklist', { pattern }),
   deleteBlocklist: (id) => req('DELETE', `/blocklist/${id}`),
 
+  // Reserved namespaces (dependency-confusion guard)
+  getReservedNamespaces: () => req('GET', '/reserved-namespaces'),
+  addReservedNamespace: (ecosystem, pattern) => req('POST', '/reserved-namespaces', { ecosystem, pattern }),
+  deleteReservedNamespace: (id) => req('DELETE', `/reserved-namespaces/${id}`),
+
+  // Quarantine review queue
+  getQuarantine: (state) => {
+    const suffix = state ? `?state=${encodeURIComponent(state)}` : ''
+    return req('GET', `/quarantine${suffix}`)
+  },
+  decideQuarantine: (id, decision, note) => req('POST', `/quarantine/${id}/decide`, { decision, note }),
+
   // Upstream proxy registries — per ecosystem, priority-ordered (top = tried first).
   getUpstreamRegistries: () => req('GET', '/upstream-registries'),
   addUpstreamRegistry: (ecosystem, url, name) => req('POST', '/upstream-registries', { ecosystem, url, name }),

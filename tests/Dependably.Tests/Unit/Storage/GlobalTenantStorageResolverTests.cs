@@ -1,7 +1,6 @@
 using Dapper;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Storage;
 
@@ -164,7 +163,7 @@ public sealed class GlobalTenantStorageResolverTests : IAsyncLifetime
         var aStore = await _sut.GetRegistryAsync("t-active");
         var bStore = await _sut.GetRegistryAsync("t-other");
 
-        var keyOfB = BlobKeys.Hosted("t-other", "npm", "x", "1.0", "x-1.0.tgz");
+        string keyOfB = BlobKeys.Hosted("t-other", "npm", "x", "1.0", "x-1.0.tgz");
         await bStore.PutAsync(keyOfB, new MemoryStream([1, 2, 3]));
 
         // Documents the community pool behaviour: orgA's store CAN read orgB's key

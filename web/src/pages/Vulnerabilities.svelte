@@ -6,13 +6,24 @@
   import Pagination from '../lib/Pagination.svelte'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import DataTable from '../lib/DataTable.svelte'
+  import SearchInput from '../lib/SearchInput.svelte'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
+  import { readQuery, writeQuery } from '../lib/tableState.js'
+
+  // Table state lives in the URL query string so it survives route changes,
+  // reloads, and copied links.
+  const DEFAULTS = { q: '', eco: '', page: 1, limit: 50, sort: 'severity', dir: 'desc' }
+  const init = readQuery(DEFAULTS)
 
   let items = [], loading = true, error = ''
-  let ecosystem = ''
-  let search = ''
-  let page = 1, limit = 50, total = 0
-  let sortCol = 'severity', sortDir = 'desc'
+  let ecosystem = init.eco
+  let search = init.q
+  let page = init.page, limit = init.limit, total = 0
+  let sortCol = init.sort, sortDir = init.dir
+
+  function sync() {
+    writeQuery({ q: search, eco: ecosystem, page, limit, sort: sortCol, dir: sortDir }, DEFAULTS)
+  }
 
   // Which row is expanded, keyed by `${purl}::${osvId}` so the same advisory under two
   // versions expands independently. The open row's detail lives in `expandedDetail`, a plain
@@ -43,10 +54,10 @@
 
   $: if (org !== undefined) load()
 
-  function onPageChange(e) { page = e.detail.page; load() }
-  function onLimitChange(e) { limit = e.detail.limit; page = 1; load() }
-  function handleEcoChange() { page = 1; load() }
-  function onSortChange(e) { sortCol = e.detail.col; sortDir = e.detail.dir; page = 1; load() }
+  function onPageChange(e) { page = e.detail.page; sync(); load() }
+  function onLimitChange(e) { limit = e.detail.limit; page = 1; sync(); load() }
+  function handleEcoChange() { page = 1; sync(); load() }
+  function onSortChange(e) { sortCol = e.detail.col; sortDir = e.detail.dir; page = 1; sync(); load() }
 
   async function toggleRow(r) {
     const key = `${r.purl}::${r.osvId}`
@@ -104,7 +115,7 @@
 <div class="page page-wide">
   <div class="page-header">
     <h1 class="page-title">{$t('vulnerabilities.title')}</h1>
-    <input placeholder="Search package, OSV ID, summary…" bind:value={search} class="header-search" />
+    <SearchInput placeholder="Search package, OSV ID, summary…" bind:value={search} on:search={sync} class="header-search" />
   </div>
 
   <div class="search-bar">
@@ -142,7 +153,11 @@
       </td>
       <td class="mono nowrap" title={r.purl}>{r.version}</td>
       <td class="nowrap">
-        {#if r.severity}
+        {#if r.osvId?.startsWith('MAL-')}
+          <!-- Malicious-package advisories are a verdict, not a score — surfaced ahead of any
+               CVSS severity the advisory might also carry. -->
+          <span class="sev sev-malicious">{$t('vulnerabilities.malicious')}</span>
+        {:else if r.severity}
           <span class="sev sev-{r.severity.toLowerCase()}">{r.severity}</span>
         {:else}
           <span class="text-muted">—</span>
@@ -312,7 +327,7 @@
     align-items: center;
     justify-content: space-between;
   }
-  .header-search { width: 260px; }
+  .page-header :global(.header-search) { width: 260px; }
   .eco-select { width: auto; }
   .summary-cell { font-size: 13px; }
 

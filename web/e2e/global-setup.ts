@@ -37,12 +37,17 @@ async function clearForcedRotation(base: string, email: string, password: string
     body: JSON.stringify({ currentPassword: password, newPassword: password + '!Rotated' }),
   })
   if (!rotate.ok) throw new Error(`E2E setup: forced rotation failed (${rotate.status})`)
+  // A password change invalidates every session minted under the old password and
+  // re-issues the caller's cookie on the response — the restore call must use the
+  // fresh cookie, not the pre-rotation login cookie.
+  const rotatedCookie = rotate.headers.get('set-cookie') ?? cookie
   // Restore the canonical password so per-test logins still match what fixtures expect.
-  await fetch(`${base}/api/v1/users/me/password`, {
+  const restore = await fetch(`${base}/api/v1/users/me/password`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    headers: { 'Content-Type': 'application/json', Cookie: rotatedCookie },
     body: JSON.stringify({ currentPassword: password + '!Rotated', newPassword: password }),
   })
+  if (!restore.ok) throw new Error(`E2E setup: password restore failed (${restore.status})`)
 }
 
 export default async function globalSetup(config: FullConfig) {

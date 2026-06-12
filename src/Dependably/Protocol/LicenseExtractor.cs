@@ -48,11 +48,15 @@ public static class LicenseExtractor
     {
         try
         {
-            var text = filename.EndsWith(".whl", StringComparison.OrdinalIgnoreCase)
+            string? text = filename.EndsWith(".whl", StringComparison.OrdinalIgnoreCase)
                 ? ReadWheelMetadata(stream)
                 : ReadSdistPkgInfo(stream, filename);
-            if (text is null) return ExtractedMetadata.Empty;
-            var spdx = ParsePyPiMetadataLicense(text);
+            if (text is null)
+            {
+                return ExtractedMetadata.Empty;
+            }
+
+            string[] spdx = ParsePyPiMetadataLicense(text);
             return new ExtractedMetadata(spdx, null);
         }
         catch { return ExtractedMetadata.Empty; }
@@ -64,7 +68,11 @@ public static class LicenseExtractor
         using var zip = OpenZipArchive(stream, "pypi-wheel");
         var entry = zip.Entries.FirstOrDefault(e =>
             e.FullName.EndsWith(".dist-info/METADATA", StringComparison.OrdinalIgnoreCase));
-        if (entry is null) return null;
+        if (entry is null)
+        {
+            return null;
+        }
+
         using var entryStream = entry.Open();
         using var reader = new StreamReader(entryStream, Encoding.UTF8);
         return reader.ReadToEnd();
@@ -74,13 +82,16 @@ public static class LicenseExtractor
     {
         // Most PyPI sdists are tar.gz; a small minority are zip. Try tar.gz first when the
         // filename suggests it, otherwise probe both with a buffered re-readable stream.
-        var preferTar = filename.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase)
+        bool preferTar = filename.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase)
             || filename.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase);
 
         if (preferTar)
         {
-            var tarResult = TryReadSdistFromTarGz(stream);
-            if (tarResult is not null) return tarResult;
+            string? tarResult = TryReadSdistFromTarGz(stream);
+            if (tarResult is not null)
+            {
+                return tarResult;
+            }
             // Tar parse failed — we've consumed the upstream stream so we can't retry as
             // zip. PyPI almost never serves sdists with a tar.gz extension that aren't
             // actually tar.gz; returning null is the same fail-soft we had previously.
@@ -96,18 +107,28 @@ public static class LicenseExtractor
     {
         try
         {
-            using var gzip = new GZipStream(stream, CompressionMode.Decompress, leaveOpen: false);
+            using var gzip = new LimitedReadStream(
+                new GZipStream(stream, CompressionMode.Decompress, leaveOpen: false),
+                ArchiveDecompressLimits.MaxDecompressedBytes, "PyPI sdist tar.gz");
             using var tar = new TarReader(gzip, leaveOpen: false);
             while (tar.GetNextEntry() is { } entry)
             {
-                if (entry.DataStream is null) continue;
-                if (!entry.Name.EndsWith("/PKG-INFO", StringComparison.Ordinal)) continue;
+                if (entry.DataStream is null)
+                {
+                    continue;
+                }
+
+                if (!entry.Name.EndsWith("/PKG-INFO", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
                 using var ms = new MemoryStream();
                 entry.DataStream.CopyTo(ms);
                 return Encoding.UTF8.GetString(ms.ToArray());
             }
         }
-        catch { /* malformed gzip / tar — return null, caller tolerates */ }
+        catch { /* malformed gzip / tar / over decompression limit — return null, caller tolerates */ }
         return null;
     }
 
@@ -121,12 +142,22 @@ public static class LicenseExtractor
 
         try
         {
-            using var gzip = new GZipStream(pooled, CompressionMode.Decompress, leaveOpen: true);
-            using var tar = new TarReader(gzip, leaveOpen: true);
+            using var gzip = new LimitedReadStream(
+                new GZipStream(pooled, CompressionMode.Decompress, leaveOpen: true),
+                ArchiveDecompressLimits.MaxDecompressedBytes, "PyPI sdist tar.gz probe");
+            using var tar = new TarReader(gzip, leaveOpen: false);
             while (tar.GetNextEntry() is { } entry)
             {
-                if (entry.DataStream is null) continue;
-                if (!entry.Name.EndsWith("/PKG-INFO", StringComparison.Ordinal)) continue;
+                if (entry.DataStream is null)
+                {
+                    continue;
+                }
+
+                if (!entry.Name.EndsWith("/PKG-INFO", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
                 using var ms = new MemoryStream();
                 entry.DataStream.CopyTo(ms);
                 return Encoding.UTF8.GetString(ms.ToArray());
@@ -140,7 +171,11 @@ public static class LicenseExtractor
             using var zip = new ZipArchive(pooled, ZipArchiveMode.Read, leaveOpen: true);
             var entry = zip.Entries.FirstOrDefault(e =>
                 e.Name.Equals("PKG-INFO", StringComparison.Ordinal));
-            if (entry is null) return null;
+            if (entry is null)
+            {
+                return null;
+            }
+
             using var entryStream = entry.Open();
             using var reader = new StreamReader(entryStream, Encoding.UTF8);
             return reader.ReadToEnd();
@@ -163,14 +198,18 @@ public static class LicenseExtractor
         foreach (var (key, value) in ParseRfc822Headers(text))
         {
             if (key.Equals("License-Expression", StringComparison.OrdinalIgnoreCase) && IsPlausibleSpdx(value))
+            {
                 expression = value.Trim();
+            }
             else if (key.Equals("License", StringComparison.OrdinalIgnoreCase) && IsPlausibleSpdx(value))
+            {
                 freeForm = value.Trim();
+            }
         }
 
-        if (!string.IsNullOrEmpty(expression)) return new[] { expression };
-        if (!string.IsNullOrEmpty(freeForm)) return new[] { freeForm };
-        return Array.Empty<string>();
+        return !string.IsNullOrEmpty(expression)
+            ? (new[] { expression })
+            : !string.IsNullOrEmpty(freeForm) ? (new[] { freeForm }) : Array.Empty<string>();
     }
 
     // RFC 822-style header parser. Stops at first blank line. Continuation lines (starting with
@@ -183,7 +222,10 @@ public static class LicenseExtractor
         using var reader = new StringReader(text);
         while (reader.ReadLine() is { } line)
         {
-            if (line.Length == 0) break;
+            if (line.Length == 0)
+            {
+                break;
+            }
 
             if (currentKey is not null && (line[0] == ' ' || line[0] == '\t'))
             {
@@ -192,9 +234,11 @@ public static class LicenseExtractor
             }
 
             if (currentKey is not null)
+            {
                 yield return (currentKey, sb.ToString());
+            }
 
-            var idx = line.IndexOf(':');
+            int idx = line.IndexOf(':');
             if (idx <= 0) { currentKey = null; continue; }
             currentKey = line[..idx].Trim();
             sb.Clear();
@@ -202,7 +246,9 @@ public static class LicenseExtractor
         }
 
         if (currentKey is not null)
+        {
             yield return (currentKey, sb.ToString());
+        }
     }
 
     /// <summary>
@@ -216,13 +262,24 @@ public static class LicenseExtractor
     {
         try
         {
-            if (urlEntry.ValueKind != JsonValueKind.Object) return ExtractedMetadata.Empty;
-            if (!urlEntry.TryGetProperty("yanked", out var yanked)) return ExtractedMetadata.Empty;
-            if (yanked.ValueKind != JsonValueKind.True) return ExtractedMetadata.Empty;
+            if (urlEntry.ValueKind != JsonValueKind.Object)
+            {
+                return ExtractedMetadata.Empty;
+            }
+
+            if (!urlEntry.TryGetProperty("yanked", out var yanked))
+            {
+                return ExtractedMetadata.Empty;
+            }
+
+            if (yanked.ValueKind != JsonValueKind.True)
+            {
+                return ExtractedMetadata.Empty;
+            }
 
             string? reason = urlEntry.TryGetProperty("yanked_reason", out var r)
                 && r.ValueKind == JsonValueKind.String ? r.GetString() : null;
-            var message = string.IsNullOrWhiteSpace(reason) ? "Yanked" : reason!.Trim();
+            string message = string.IsNullOrWhiteSpace(reason) ? "Yanked" : reason!.Trim();
             return new ExtractedMetadata(Array.Empty<string>(), message);
         }
         catch { return ExtractedMetadata.Empty; }
@@ -237,14 +294,22 @@ public static class LicenseExtractor
     /// </summary>
     public static ExtractedMetadata FromNpmPackumentVersion(JsonNode? versionNode)
     {
-        if (versionNode is null) return ExtractedMetadata.Empty;
+        if (versionNode is null)
+        {
+            return ExtractedMetadata.Empty;
+        }
+
         try
         {
             var spdx = ParseNpmLicense(versionNode);
             string? deprecated = null;
             try { deprecated = versionNode["deprecated"]?.GetValue<string>(); }
             catch { /* deprecated is sometimes a boolean — ignore */ }
-            if (string.IsNullOrWhiteSpace(deprecated)) deprecated = null;
+            if (string.IsNullOrWhiteSpace(deprecated))
+            {
+                deprecated = null;
+            }
+
             return new ExtractedMetadata(spdx, deprecated);
         }
         catch { return ExtractedMetadata.Empty; }
@@ -260,25 +325,29 @@ public static class LicenseExtractor
 
     private static void AddNpmSingleLicense(JsonNode? license, List<string> results)
     {
-        var spdx = license switch
+        string? spdx = license switch
         {
-            JsonValue v  => SafeReadString(v),
+            JsonValue v => SafeReadString(v),
             JsonObject o => SafeReadString(o["type"]),
-            _            => null,
+            _ => null,
         };
         AddIfPlausibleSpdx(spdx, results);
     }
 
     private static void AddNpmLegacyLicensesArray(JsonNode? licenses, List<string> results)
     {
-        if (licenses is not JsonArray arr) return;
+        if (licenses is not JsonArray arr)
+        {
+            return;
+        }
+
         foreach (var item in arr)
         {
-            var spdx = item switch
+            string? spdx = item switch
             {
-                JsonValue v  => SafeReadString(v),
+                JsonValue v => SafeReadString(v),
                 JsonObject o => SafeReadString(o["type"]),
-                _            => null,
+                _ => null,
             };
             AddIfPlausibleSpdx(spdx, results);
         }
@@ -286,17 +355,27 @@ public static class LicenseExtractor
 
     private static string? SafeReadString(JsonNode? node)
     {
-        if (node is null) return null;
+        if (node is null)
+        {
+            return null;
+        }
+
         try { return node.GetValue<string>(); }
         catch { return null; /* non-string node — skip */ }
     }
 
     private static void AddIfPlausibleSpdx(string? candidate, List<string> results)
     {
-        if (string.IsNullOrEmpty(candidate) || !IsPlausibleSpdx(candidate)) return;
-        var trimmed = candidate.Trim();
+        if (string.IsNullOrEmpty(candidate) || !IsPlausibleSpdx(candidate))
+        {
+            return;
+        }
+
+        string trimmed = candidate.Trim();
         if (!results.Contains(trimmed, StringComparer.OrdinalIgnoreCase))
+        {
             results.Add(trimmed);
+        }
     }
 
     /// <summary>
@@ -310,13 +389,22 @@ public static class LicenseExtractor
     {
         try
         {
-            using var gzip = new GZipStream(tarball, CompressionMode.Decompress, leaveOpen: false);
+            using var gzip = new LimitedReadStream(
+                new GZipStream(tarball, CompressionMode.Decompress, leaveOpen: false),
+                ArchiveDecompressLimits.MaxDecompressedBytes, "npm tarball");
             using var tar = new TarReader(gzip, leaveOpen: false);
             while (tar.GetNextEntry() is { } entry)
             {
-                if (entry.DataStream is null) continue;
-                if (!entry.Name.EndsWith("package/package.json", StringComparison.OrdinalIgnoreCase))
+                if (entry.DataStream is null)
+                {
                     continue;
+                }
+
+                if (!entry.Name.EndsWith("package/package.json", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 using var ms = new MemoryStream();
                 entry.DataStream.CopyTo(ms);
                 var node = JsonNode.Parse(ms.ToArray());
@@ -347,25 +435,32 @@ public static class LicenseExtractor
             var entry = zip.Entries.FirstOrDefault(e =>
                 e.Name.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase) &&
                 !e.FullName.Contains('/'));
-            if (entry is null) return ExtractedMetadata.Empty;
+            if (entry is null)
+            {
+                return ExtractedMetadata.Empty;
+            }
 
             using var entryStream = entry.Open();
             var doc = XDocument.Load(entryStream);
-            var ns = doc.Root?.Name.NamespaceName ?? "";
+            string ns = doc.Root?.Name.NamespaceName ?? "";
             XNamespace xns = ns;
             var metadata = doc.Root?.Element(xns + "metadata");
             var licenseEl = metadata?.Element(xns + "license");
-            if (licenseEl is null) return ExtractedMetadata.Empty;
+            if (licenseEl is null)
+            {
+                return ExtractedMetadata.Empty;
+            }
 
-            var type = licenseEl.Attribute("type")?.Value;
+            string? type = licenseEl.Attribute("type")?.Value;
             if (!string.Equals(type, "expression", StringComparison.OrdinalIgnoreCase))
+            {
                 return ExtractedMetadata.Empty;
+            }
 
-            var value = licenseEl.Value?.Trim();
-            if (string.IsNullOrEmpty(value) || !IsPlausibleSpdx(value))
-                return ExtractedMetadata.Empty;
-
-            return new ExtractedMetadata(new[] { value }, null);
+            string? value = licenseEl.Value?.Trim();
+            return string.IsNullOrEmpty(value) || !IsPlausibleSpdx(value)
+                ? ExtractedMetadata.Empty
+                : new ExtractedMetadata(new[] { value }, null);
         }
         catch { return ExtractedMetadata.Empty; }
         finally { nupkgStream.Dispose(); }
@@ -421,14 +516,28 @@ public static class LicenseExtractor
     /// </summary>
     private static bool IsPlausibleSpdx(string value)
     {
-        if (string.IsNullOrWhiteSpace(value)) return false;
-        var trimmed = value.Trim();
-        if (trimmed.Length is 0 or > 100) return false;
-        if (trimmed.Contains('\n') || trimmed.Contains('\r')) return false;
-        foreach (var c in trimmed)
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        string trimmed = value.Trim();
+        if (trimmed.Length is 0 or > 100)
+        {
+            return false;
+        }
+
+        if (trimmed.Contains('\n') || trimmed.Contains('\r'))
+        {
+            return false;
+        }
+
+        foreach (char c in trimmed)
         {
             if (!(char.IsLetterOrDigit(c) || c is '.' or '-' or '+' or ' ' or '(' or ')'))
+            {
                 return false;
+            }
         }
         return true;
     }

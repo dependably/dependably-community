@@ -1,13 +1,13 @@
 using Dependably.Api;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
 /// <summary>
-/// Routing acceptance: the OCI Distribution Spec catches the three GET-side
-/// surfaces — manifests/, blobs/, tags/list — out of an arbitrary-depth repository path.
-/// Repository names can contain slashes (e.g. <c>library/ubuntu</c>) which is why we
-/// can't use the ASP.NET catch-all-with-trailing-segments pattern.
+/// Routing acceptance: the OCI Distribution Spec surfaces parsed out of an arbitrary-depth
+/// repository path — manifests/, blobs/, tags/list (read side) plus blobs/uploads and
+/// blobs/uploads/{id} (push side). Repository names can contain slashes (e.g.
+/// <c>library/ubuntu</c>) which is why we can't use the ASP.NET catch-all-with-trailing-segments
+/// pattern.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class OciRouteTests
@@ -52,11 +52,34 @@ public sealed class OciRouteTests
     }
 
     [Fact]
-    public void Parse_BlobUploadsPath_ReturnsNull()
+    public void Parse_BlobUploadInit()
     {
-        // /blobs/uploads/... is the push-path the proxy MVP doesn't implement;
-        // surfacing null lets the controller return UNSUPPORTED cleanly.
-        Assert.Null(OciRoute.Parse("library/ubuntu/blobs/uploads/abc"));
+        var r = OciRoute.Parse("library/ubuntu/blobs/uploads");
+        Assert.NotNull(r);
+        Assert.Equal(OciRouteKind.BlobUploadInit, r!.Kind);
+        Assert.Equal("library/ubuntu", r.Name);
+        Assert.Null(r.Reference);
+    }
+
+    [Fact]
+    public void Parse_BlobUploadInit_TrailingSlashTrimmed()
+    {
+        // POST /v2/{name}/blobs/uploads/ — the catch-all may carry a trailing slash; Parse
+        // trims it and still resolves to the init kind.
+        var r = OciRoute.Parse("library/ubuntu/blobs/uploads/");
+        Assert.NotNull(r);
+        Assert.Equal(OciRouteKind.BlobUploadInit, r!.Kind);
+        Assert.Equal("library/ubuntu", r.Name);
+    }
+
+    [Fact]
+    public void Parse_BlobUploadSession()
+    {
+        var r = OciRoute.Parse("library/ubuntu/blobs/uploads/9f8e7d6c5b4a");
+        Assert.NotNull(r);
+        Assert.Equal(OciRouteKind.BlobUploadSession, r!.Kind);
+        Assert.Equal("library/ubuntu", r.Name);
+        Assert.Equal("9f8e7d6c5b4a", r.Reference);
     }
 
     [Theory]

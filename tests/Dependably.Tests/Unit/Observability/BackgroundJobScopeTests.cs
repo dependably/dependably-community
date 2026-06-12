@@ -1,6 +1,6 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using Dependably.Infrastructure.Observability;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Observability;
 
@@ -15,7 +15,7 @@ namespace Dependably.Tests.Unit.Observability;
 public sealed class BackgroundJobScopeTests : IDisposable
 {
     private readonly ActivityListener _listener;
-    private readonly List<Activity> _stoppedActivities = new();
+    private readonly ConcurrentBag<Activity> _stoppedActivities = new();
 
     public BackgroundJobScopeTests()
     {
@@ -34,7 +34,7 @@ public sealed class BackgroundJobScopeTests : IDisposable
     [Fact]
     public void Complete_Success_RecordsLastSuccessGauge()
     {
-        var jobName = $"unit-success-{Guid.NewGuid():N}";
+        string jobName = $"unit-success-{Guid.NewGuid():N}";
 
         using (var scope = BackgroundJobScope.Begin(jobName, "test_op"))
         {
@@ -53,7 +53,7 @@ public sealed class BackgroundJobScopeTests : IDisposable
     {
         // The Complete path only writes the last-success gauge when outcome == "success".
         // A non-default outcome (e.g. "skipped") sets the activity tag but leaves the gauge alone.
-        var jobName = $"unit-skipped-{Guid.NewGuid():N}";
+        string jobName = $"unit-skipped-{Guid.NewGuid():N}";
 
         using (var scope = BackgroundJobScope.Begin(jobName, "test_op"))
         {
@@ -68,7 +68,7 @@ public sealed class BackgroundJobScopeTests : IDisposable
     [Fact]
     public void Fail_WithException_AttachesAndMarksError()
     {
-        var jobName = $"unit-fail-{Guid.NewGuid():N}";
+        string jobName = $"unit-fail-{Guid.NewGuid():N}";
         var ex = new InvalidOperationException("boom");
 
         using (var scope = BackgroundJobScope.Begin(jobName, "test_op"))
@@ -88,7 +88,7 @@ public sealed class BackgroundJobScopeTests : IDisposable
     {
         // The exception?.Message null-coalesce + the `if (exception is not null)` guard:
         // both branches must fire — this test hits the null-exception branch of both.
-        var jobName = $"unit-fail-nullex-{Guid.NewGuid():N}";
+        string jobName = $"unit-fail-nullex-{Guid.NewGuid():N}";
 
         using (var scope = BackgroundJobScope.Begin(jobName, "test_op"))
         {
@@ -106,7 +106,7 @@ public sealed class BackgroundJobScopeTests : IDisposable
         // Verifies a non-default outcome flows to the activity tag (and, via Dispose, the
         // duration histogram). Cardinality-budget enforcement lives elsewhere; here we only
         // assert the value propagates.
-        var jobName = $"unit-fail-custom-{Guid.NewGuid():N}";
+        string jobName = $"unit-fail-custom-{Guid.NewGuid():N}";
 
         using (var scope = BackgroundJobScope.Begin(jobName, "test_op"))
         {
@@ -123,7 +123,7 @@ public sealed class BackgroundJobScopeTests : IDisposable
         // When neither Complete nor Fail is called, _outcome stays "cancelled" — Dispose
         // still records the duration histogram with that label and the activity carries
         // no explicit outcome tag (since it's set inside Complete/Fail).
-        var jobName = $"unit-cancelled-{Guid.NewGuid():N}";
+        string jobName = $"unit-cancelled-{Guid.NewGuid():N}";
 
         using (BackgroundJobScope.Begin(jobName, "test_op")) { }
 

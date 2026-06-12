@@ -1,8 +1,8 @@
+using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi;
-using Dependably.Security;
 
 namespace Dependably.Infrastructure.OpenApi;
 
@@ -102,11 +102,15 @@ internal sealed class SecuritySchemeOperationTransformer : IOpenApiOperationTran
 
         // Action-level [AllowAnonymous] beats class-level [Authorize].
         if (metadata.OfType<IAllowAnonymous>().Any())
+        {
             return Task.CompletedTask;
+        }
 
         var authorizeData = metadata.OfType<IAuthorizeData>().ToList();
         if (authorizeData.Count == 0)
+        {
             return Task.CompletedTask;
+        }
 
         var schemes = authorizeData
             .Select(a => a.AuthenticationSchemes)
@@ -114,7 +118,7 @@ internal sealed class SecuritySchemeOperationTransformer : IOpenApiOperationTran
             .SelectMany(s => s!.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var allowsApiToken = schemes.Contains(TokenAuthenticationDefaults.Scheme);
+        bool allowsApiToken = schemes.Contains(TokenAuthenticationDefaults.Scheme);
 
         operation.Security ??= new List<OpenApiSecurityRequirement>();
 
@@ -126,7 +130,9 @@ internal sealed class SecuritySchemeOperationTransformer : IOpenApiOperationTran
             operation.Security.Add(RequirementFor(context, SecuritySchemeDocumentTransformer.ApiTokenScheme));
 
             if (IsNuGetPushOrUnlist(context))
+            {
                 operation.Security.Add(RequirementFor(context, SecuritySchemeDocumentTransformer.NuGetApiKeyScheme));
+            }
         }
         else
         {
@@ -148,10 +154,16 @@ internal sealed class SecuritySchemeOperationTransformer : IOpenApiOperationTran
     private static bool IsNuGetPushOrUnlist(OpenApiOperationTransformerContext context)
     {
         if (context.Description.ActionDescriptor is not ControllerActionDescriptor cad)
+        {
             return false;
+        }
+
         if (!string.Equals(cad.ControllerName, "NuGet", StringComparison.OrdinalIgnoreCase))
+        {
             return false;
-        var method = context.Description.HttpMethod;
+        }
+
+        string? method = context.Description.HttpMethod;
         return string.Equals(method, "PUT", StringComparison.OrdinalIgnoreCase)
             || string.Equals(method, "DELETE", StringComparison.OrdinalIgnoreCase);
     }

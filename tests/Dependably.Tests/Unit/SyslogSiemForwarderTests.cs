@@ -1,6 +1,5 @@
 using Dependably.Infrastructure.Siem;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -48,7 +47,7 @@ public class SyslogSiemForwarderTests
     [Fact]
     public void FormatCef_StructureMatchesSiemController()
     {
-        var line = SyslogSiemForwarder.FormatCef(Sample());
+        string line = SyslogSiemForwarder.FormatCef(Sample());
         // Header: CEF:0|Dependably|dependably|1.0|<sig>|<name>|<sev>|<ext>
         Assert.StartsWith("CEF:0|Dependably|dependably|1.0|", line);
         Assert.Contains("|login.success|Login Success|3|", line);
@@ -63,7 +62,7 @@ public class SyslogSiemForwarderTests
     public void FormatCef_EscapesPipesEqualsAndNewlines()
     {
         var ev = Sample(detail: "msg with | pipe and = equals\nand newline");
-        var line = SyslogSiemForwarder.FormatCef(ev);
+        string line = SyslogSiemForwarder.FormatCef(ev);
         Assert.Contains("\\|", line);
         Assert.Contains("\\=", line);
         Assert.Contains("\\n", line);
@@ -73,14 +72,14 @@ public class SyslogSiemForwarderTests
     [Fact]
     public void FormatCef_LockoutMapsToSeverity7()
     {
-        var line = SyslogSiemForwarder.FormatCef(Sample(action: "lockout.triggered"));
+        string line = SyslogSiemForwarder.FormatCef(Sample(action: "lockout.triggered"));
         Assert.Contains("|Account Lockout|7|", line);
     }
 
     [Fact]
     public void FormatRfc5424_ContainsPriorityTimestampAndStructuredData()
     {
-        var line = SyslogSiemForwarder.FormatRfc5424(Sample());
+        string line = SyslogSiemForwarder.FormatRfc5424(Sample());
         Assert.StartsWith("<134>1 ", line);                       // local0(16)*8 + info(6) = 134
         Assert.Contains("2026-05-09T12:30:45.123+00:00", line);
         Assert.Contains("[dependably@0", line);
@@ -93,7 +92,7 @@ public class SyslogSiemForwarderTests
     public void FormatRfc5424_EscapesQuotesAndBackslashesInSd()
     {
         var ev = Sample() with { OrgId = "org\"with]quotes\\" };
-        var line = SyslogSiemForwarder.FormatRfc5424(ev);
+        string line = SyslogSiemForwarder.FormatRfc5424(ev);
         Assert.Contains("org=\"org\\\"with\\]quotes\\\\\"", line);
     }
 }

@@ -1,11 +1,9 @@
 using System.Net;
 using System.Net.Http.Headers;
-using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -43,7 +41,7 @@ public sealed class ProxyClaimGateTests : IClassFixture<DependablyFactory>, IAsy
 
     private async Task<HttpClient> AuthedClient()
     {
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
         return c;
@@ -52,7 +50,7 @@ public sealed class ProxyClaimGateTests : IClassFixture<DependablyFactory>, IAsy
     [Fact]
     public async Task NpmTarball_LocalOnlyClaim_DisablesProxyFetch()
     {
-        var orgId = await DefaultOrgId();
+        string orgId = await DefaultOrgId();
         await SeedClaim(orgId, "npm", "claimed-pkg", state: ClaimStateMachine.LocalOnly);
 
         // No local version exists for the (org, npm, claimed-pkg, *) coordinate. The proxy
@@ -82,7 +80,7 @@ public sealed class ProxyClaimGateTests : IClassFixture<DependablyFactory>, IAsy
         // disabling proxy fetch even without an explicit claim row. Uses the resolver
         // directly because configuring AIR_GAPPED requires a separate factory.
         var db = _factory.Services.GetRequiredService<IMetadataStore>();
-        var orgId = await DefaultOrgId();
+        string orgId = await DefaultOrgId();
 
         // Construct a fresh resolver wired for air-gap mode without restarting the host.
         var cfg = new Microsoft.Extensions.Configuration.ConfigurationBuilder()

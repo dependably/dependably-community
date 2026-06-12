@@ -17,9 +17,13 @@ public static class ChecksumVerifier
     /// <summary>Parses the #sha256= fragment from a PyPI download URL.</summary>
     public static ChecksumSpec? ParsePyPiUrl(string url)
     {
-        var idx = url.IndexOf("#sha256=", StringComparison.OrdinalIgnoreCase);
-        if (idx < 0) return null;
-        var hash = url[(idx + 8)..];
+        int idx = url.IndexOf("#sha256=", StringComparison.OrdinalIgnoreCase);
+        if (idx < 0)
+        {
+            return null;
+        }
+
+        string hash = url[(idx + 8)..];
         return new ChecksumSpec(ChecksumAlgorithm.Sha256, hash);
     }
 
@@ -28,11 +32,14 @@ public static class ChecksumVerifier
     {
         if (integrity is not null && integrity.StartsWith("sha512-", StringComparison.OrdinalIgnoreCase))
         {
-            var b64 = integrity[7..];
+            string b64 = integrity[7..];
             return new ChecksumSpec(ChecksumAlgorithm.Sha512, b64); // base64-encoded
         }
         if (shasum is not null)
+        {
             return new ChecksumSpec(ChecksumAlgorithm.Sha1, shasum); // hex SHA-1
+        }
+
         return null;
     }
 
@@ -40,9 +47,15 @@ public static class ChecksumVerifier
     public static ChecksumSpec? ParseNuGetHash(string? packageHash, string? algorithm)
     {
         if (string.IsNullOrEmpty(packageHash) || string.IsNullOrEmpty(algorithm))
+        {
             return null;
+        }
+
         if (!algorithm.Equals("SHA512", StringComparison.OrdinalIgnoreCase))
+        {
             return null; // Only SHA512 accepted; caller emits checksum_algorithm_unsupported
+        }
+
         return new ChecksumSpec(ChecksumAlgorithm.Sha512, packageHash); // base64-encoded
     }
 
@@ -52,12 +65,15 @@ public static class ChecksumVerifier
     /// </summary>
     public static bool Verify(byte[] data, ChecksumSpec? spec)
     {
-        if (spec is null) return true; // caller must decide whether to cache without checksum
+        if (spec is null)
+        {
+            return true; // caller must decide whether to cache without checksum
+        }
 
         return spec.Algorithm switch
         {
             ChecksumAlgorithm.Sha256 => VerifyHex(data, spec.ExpectedValue, SHA256.HashData),
-            ChecksumAlgorithm.Sha1   => VerifyHex(data, spec.ExpectedValue, SHA1.HashData),
+            ChecksumAlgorithm.Sha1 => VerifyHex(data, spec.ExpectedValue, SHA1.HashData),
             ChecksumAlgorithm.Sha512 => VerifyBase64OrHex(data, spec.ExpectedValue, SHA512.HashData),
             _ => false
         };
@@ -75,10 +91,13 @@ public static class ChecksumVerifier
     public static async ValueTask<string> ComputeSha256HexAsync(Stream data, CancellationToken ct = default)
     {
         using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var buffer = new byte[81920];
+        byte[] buffer = new byte[81920];
         int read;
         while ((read = await data.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+        {
             hasher.AppendData(buffer, 0, read);
+        }
+
         return Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
     }
 
@@ -91,53 +110,59 @@ public static class ChecksumVerifier
     public static async ValueTask<bool> VerifyAsync(
         Stream data, ChecksumSpec? spec, CancellationToken ct = default)
     {
-        if (spec is null) return true;
+        if (spec is null)
+        {
+            return true;
+        }
 
         var algo = spec.Algorithm switch
         {
             ChecksumAlgorithm.Sha256 => HashAlgorithmName.SHA256,
-            ChecksumAlgorithm.Sha1   => HashAlgorithmName.SHA1,
+            ChecksumAlgorithm.Sha1 => HashAlgorithmName.SHA1,
             ChecksumAlgorithm.Sha512 => HashAlgorithmName.SHA512,
             _ => HashAlgorithmName.SHA256
         };
         using var hasher = IncrementalHash.CreateHash(algo);
-        var buffer = new byte[81920];
+        byte[] buffer = new byte[81920];
         int read;
         while ((read = await data.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+        {
             hasher.AppendData(buffer, 0, read);
-        var actualBytes = hasher.GetHashAndReset();
+        }
+
+        byte[] actualBytes = hasher.GetHashAndReset();
 
         if (spec.Algorithm == ChecksumAlgorithm.Sha512)
         {
             // NuGet form: base64-encoded SHA-512. Fall through to hex for any other source.
             try
             {
-                var expectedBytes = Convert.FromBase64String(spec.ExpectedValue);
+                byte[] expectedBytes = Convert.FromBase64String(spec.ExpectedValue);
                 return CryptographicOperations.FixedTimeEquals(actualBytes, expectedBytes);
             }
             catch { /* fall through to hex */ }
         }
-        var actualHex = Convert.ToHexString(actualBytes).ToLowerInvariant();
+        string actualHex = Convert.ToHexString(actualBytes).ToLowerInvariant();
         return string.Equals(actualHex, spec.ExpectedValue.ToLowerInvariant(), StringComparison.Ordinal);
     }
 
     private static bool VerifyHex(byte[] data, string expected, Func<byte[], byte[]> hashFn)
     {
-        var actual = Convert.ToHexString(hashFn(data)).ToLowerInvariant();
+        string actual = Convert.ToHexString(hashFn(data)).ToLowerInvariant();
         return string.Equals(actual, expected.ToLowerInvariant(), StringComparison.Ordinal);
     }
 
     private static bool VerifyBase64OrHex(byte[] data, string expected, Func<byte[], byte[]> hashFn)
     {
-        var actualBytes = hashFn(data);
+        byte[] actualBytes = hashFn(data);
         // Try base64 first (NuGet format)
         try
         {
-            var expectedBytes = Convert.FromBase64String(expected);
+            byte[] expectedBytes = Convert.FromBase64String(expected);
             return CryptographicOperations.FixedTimeEquals(actualBytes, expectedBytes);
         }
         catch { /* fall through to hex */ }
-        var actualHex = Convert.ToHexString(actualBytes).ToLowerInvariant();
+        string actualHex = Convert.ToHexString(actualBytes).ToLowerInvariant();
         return string.Equals(actualHex, expected.ToLowerInvariant(), StringComparison.Ordinal);
     }
 }

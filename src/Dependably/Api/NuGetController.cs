@@ -1,24 +1,33 @@
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text.Json;
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.RateLimiting;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using Dapper;
-using Microsoft.AspNetCore.Mvc;
-using NuGet.Versioning;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Caching.Memory;
+using NuGet.Versioning;
 
 namespace Dependably.Api;
 
 [ApiController]
 public partial class NuGetController : ControllerBase
 {
+    // JSON serialization options that preserve characters like '+' (SemVer build metadata) without
+    // escaping them as \uXXXX, keeping round-tripped registration JSON readable and spec-valid.
+    private static readonly JsonSerializerOptions RelaxedJsonOptions = new()
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
     // Known Microsoft nuspec namespaces
     private static readonly HashSet<string> KnownNuspecNamespaces = [
         "http://schemas.microsoft.com/packaging/2010/07/nuspec.xsd",
@@ -30,6 +39,14 @@ public partial class NuGetController : ControllerBase
 
     [GeneratedRegex(@"^[A-Za-z0-9_\-\.]+$")]
     private static partial Regex NuGetIdRegex();
+
+    // Single-flight map: deduplicates concurrent registration rebuilds for the same key.
+    private static readonly ConcurrentDictionary<string, Lazy<Task<byte[]?>>> _registrationInFlight = new();
+
+    // TTL for proxy-merged registration pages (upstream can change); local-only registrations
+    // use a longer TTL because invalidation on mutation is the primary expiry mechanism.
+    private static readonly TimeSpan RegistrationProxyTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan RegistrationLocalTtl = TimeSpan.FromMinutes(10);
 
     private readonly OrgRepository _orgs;
     private readonly PackageRepository _packages;
@@ -46,9 +63,11 @@ public partial class NuGetController : ControllerBase
     private readonly PublishGate _publishGate;
     private readonly Dependably.Infrastructure.Publish.IPackagePublishService _publish;
     private readonly ClaimResolver _claimResolver;
+    private readonly ReservedNamespaceService _reserved;
     private readonly Dependably.Storage.ProxyFetchService _proxyFetch;
     private readonly ILogger<NuGetController> _logger;
     private readonly UpstreamRegistryResolver _registries;
+    private readonly IMemoryCache _cache;
 
     public NuGetController(NuGetControllerServices svc)
     {
@@ -67,19 +86,27 @@ public partial class NuGetController : ControllerBase
         _publishGate = svc.PublishGate;
         _publish = svc.Publish;
         _claimResolver = svc.ClaimResolver;
+        _reserved = svc.ReservedNamespaces;
         _proxyFetch = svc.ProxyFetch;
         _logger = svc.Logger;
         _registries = svc.Registries;
+        _cache = svc.Cache;
     }
+
+    // Builds the IMemoryCache key for a NuGet registration index response.
+    // semVer2 is part of the key because the registration variant (semver1 vs semver2)
+    // affects which upstream URL is used and therefore which versions are included.
+    private static string RegistrationCacheKey(string orgId, string normalizedId, bool semVer2) =>
+        $"metadata:{orgId}:nuget:{normalizedId}:{(semVer2 ? "sv2" : "sv1")}";
 
     // ── Service index ────────────────────────────────────────────────────────
 
-    /// <summary>GET /o/{org}/nuget/v3/index.json and /o/{org}/nuget/index.json — NuGet v3 service index</summary>
+    /// <summary>GET /nuget/v3/index.json and /nuget/index.json — NuGet v3 service index</summary>
     [HttpGet("/nuget/v3/index.json")]
     [HttpGet("/nuget/index.json")]
     public async Task<IActionResult> ServiceIndex(CancellationToken ct)
     {
-        var baseUrl = BaseUrl();
+        string baseUrl = BaseUrl();
 
         static Dictionary<string, string> R(string id, string type) =>
             new() { ["@id"] = id, ["@type"] = type };
@@ -87,12 +114,16 @@ public partial class NuGetController : ControllerBase
         // Advertise both registration resource types so SemVer 2-aware clients pick the
         // semver2 base URL (which we serve from the registration5-{,gz-}semver2 alias),
         // while older clients keep using the unversioned RegistrationsBaseUrl.
+        // Catalog (Catalog/3.0.0) is intentionally not advertised — catalog-based mirroring
+        // is unsupported; clients that require it must use a full catalog-publishing registry.
         return new JsonResult(new
         {
             version = "3.0.0",
             resources = new[]
             {
                 R($"{baseUrl}/query",                       "SearchQueryService"),
+                R($"{baseUrl}/autocomplete",                "SearchAutocompleteService"),
+                R($"{baseUrl}/autocomplete",                "SearchAutocompleteService/3.0.0-beta"),
                 R($"{baseUrl}/registration",                "RegistrationsBaseUrl"),
                 R($"{baseUrl}/registration5-gz-semver2",    "RegistrationsBaseUrl/3.6.0"),
                 R($"{baseUrl}/flatcontainer",               "PackageBaseAddress/3.0.0"),
@@ -104,7 +135,7 @@ public partial class NuGetController : ControllerBase
 
     // ── Search ───────────────────────────────────────────────────────────────
 
-    /// <summary>GET /o/{org}/nuget/query — NuGet search endpoint</summary>
+    /// <summary>GET /nuget/query — NuGet search endpoint</summary>
     [HttpGet("/nuget/query")]
     public async Task<IActionResult> Search([FromQuery] string? q, [FromQuery] int skip = 0, [FromQuery] int take = 20, CancellationToken ct = default)
     {
@@ -113,7 +144,7 @@ public partial class NuGetController : ControllerBase
         skip = Math.Max(0, skip);
         take = Math.Clamp(take, 0, 100);
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
@@ -129,14 +160,17 @@ public partial class NuGetController : ControllerBase
             ? allPkgs
             : allPkgs.Where(p => p.Name.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
 
-        var baseUrl = BaseUrl();
+        string baseUrl = BaseUrl();
         var results = new List<object>();
 
         foreach (var pkg in filtered.Skip(skip).Take(take))
         {
             var versions = await _packages.GetVersionsAsync(pkg.Id, ct);
             var latestVersion = versions.Where(v => !v.Yanked).MaxBy(v => v.CreatedAt);
-            if (latestVersion is null) continue;
+            if (latestVersion is null)
+            {
+                continue;
+            }
 
             results.Add(new
             {
@@ -150,9 +184,97 @@ public partial class NuGetController : ControllerBase
         return new JsonResult(new { totalHits = results.Count, data = results });
     }
 
+    // ── Autocomplete ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// GET /o/{org}/nuget/autocomplete — NuGet v3 autocomplete endpoint.
+    /// Two forms per the NuGet v3 autocomplete spec:
+    /// - id-prefix search: ?q=&amp;skip=&amp;take=&amp;prerelease=&amp;semVerLevel=
+    ///   returns { "totalHits": N, "data": ["PackageId", ...] }
+    /// - version enumeration: ?id={id}&amp;prerelease=
+    ///   returns { "data": ["1.0.0", ...] }
+    /// The <c>id</c> parameter discriminates the two forms; when both are present, version
+    /// enumeration takes precedence (matching the NuGet.org behavior).
+    /// </summary>
+    [HttpGet("/nuget/autocomplete")]
+    public async Task<IActionResult> Autocomplete(
+        [FromQuery] string? q,
+        [FromQuery] string? id,
+        [FromQuery] int skip = 0,
+        [FromQuery] int take = 20,
+        [FromQuery] bool prerelease = false,
+        CancellationToken ct = default)
+    {
+        string orgId = CurrentTenantId();
+
+        var settings = await _orgs.GetSettingsAsync(orgId, ct);
+        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
+        var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
+        if (!settings!.AnonymousPull && token is null)
+        {
+            Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
+            return Unauthorized();
+        }
+
+        // Version enumeration form: ?id={id}
+        if (!string.IsNullOrWhiteSpace(id))
+        {
+            return await AutocompleteVersionsAsync(orgId, id.Trim(), prerelease, ct);
+        }
+
+        // Id-prefix search form: ?q=...&skip=...&take=...
+        // Clamp paging: guard a negative skip and bound the result set.
+        // 100 covers any legitimate UI page.
+        skip = Math.Max(0, skip);
+        take = Math.Clamp(take, 0, 100);
+
+        var allPkgs = await _packages.ListAsync(orgId, "nuget", ct);
+        var filtered = string.IsNullOrWhiteSpace(q)
+            ? allPkgs
+            : allPkgs.Where(p => p.Name.Contains(q.Trim(), StringComparison.OrdinalIgnoreCase)).ToList();
+
+        // Return only packages that have at least one non-yanked version. prerelease=false
+        // excludes packages whose only versions are pre-release, mirroring the spec's intent.
+        var ids = new List<string>();
+        foreach (var pkg in filtered.Skip(skip).Take(take))
+        {
+            var versions = await _packages.GetVersionsAsync(pkg.Id, ct);
+            bool hasMatchingVersion = versions.Any(v =>
+                !v.Yanked && (prerelease || !IsPrerelease(v.Version)));
+            if (hasMatchingVersion)
+            {
+                ids.Add(pkg.Name);
+            }
+        }
+
+        return new JsonResult(new { totalHits = ids.Count, data = ids });
+    }
+
+    private async Task<IActionResult> AutocompleteVersionsAsync(
+        string orgId, string packageId, bool prerelease, CancellationToken ct)
+    {
+        string normalizedId = packageId.ToLowerInvariant();
+        var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
+        if (pkg is null)
+        {
+            return new JsonResult(new { data = Array.Empty<string>() });
+        }
+
+        var versions = await _packages.GetVersionsAsync(pkg.Id, ct);
+        var matching = versions
+            .Where(v => !v.Yanked && (prerelease || !IsPrerelease(v.Version)))
+            .Select(v => v.Version)
+            .ToList();
+
+        return new JsonResult(new { data = matching });
+    }
+
+    private static bool IsPrerelease(string version) =>
+        NuGetVersion.TryParse(version, out var nv) && nv.IsPrerelease;
+
     // ── Registration ─────────────────────────────────────────────────────────
 
-    /// <summary>GET /o/{org}/nuget/registration/{id}/ — registration index (SemVer 1, unversioned alias)</summary>
+    /// <summary>GET /nuget/registration/{id}/ — registration index (SemVer 1, unversioned alias)</summary>
     // SemVer 1 routes — the unversioned path is the canonical one we advertise in the service
     // index. The "5-semver1" / "5-gz-semver1" aliases exist for tooling that hardcodes the
     // upstream URL shape (xunit.runner.visualstudio probes these directly regardless of the
@@ -172,7 +294,7 @@ public partial class NuGetController : ControllerBase
     public Task<IActionResult> RegistrationIndex(string id, CancellationToken ct)
         => RegistrationIndexCoreAsync(id, semVer2: false, ct);
 
-    /// <summary>GET /o/{org}/nuget/registration5-{,gz-}semver2/{id}/index.json — SemVer 2 registration</summary>
+    /// <summary>GET /nuget/registration5-{,gz-}semver2/{id}/index.json — SemVer 2 registration</summary>
     [HttpGet("/nuget/registration5-semver2/{id}/")]
     [HttpGet("/nuget/registration5-semver2/{id}/index.json")]
     [HttpGet("/nuget/registration5-gz-semver2/{id}/")]
@@ -191,7 +313,7 @@ public partial class NuGetController : ControllerBase
     public Task<IActionResult> RegistrationLeaf(string id, string version, CancellationToken ct)
         => RegistrationLeafCoreAsync(id, version, semVer2: false, ct);
 
-    /// <summary>GET /o/{org}/nuget/registration5-{,gz-}semver2/{id}/{version}.json — SemVer 2 leaf</summary>
+    /// <summary>GET /nuget/registration5-{,gz-}semver2/{id}/{version}.json — SemVer 2 leaf</summary>
     [HttpGet("/nuget/registration5-semver2/{id}/{version}.json")]
     [HttpGet("/nuget/registration5-gz-semver2/{id}/{version}.json")]
     public Task<IActionResult> RegistrationLeafSemVer2(string id, string version, CancellationToken ct)
@@ -199,7 +321,14 @@ public partial class NuGetController : ControllerBase
 
     private async Task<IActionResult> RegistrationLeafCoreAsync(string id, string version, bool semVer2, CancellationToken ct)
     {
-        var orgId = CurrentTenantId();
+        // Both route values flow into the upstream registration-leaf URL — reject
+        // traversal-shaped values before any lookup or upstream call.
+        if (!AreUpstreamSafeNuGetSegments(id, version))
+        {
+            return NotFound();
+        }
+
+        string orgId = CurrentTenantId();
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
         var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
@@ -209,7 +338,7 @@ public partial class NuGetController : ControllerBase
             return Unauthorized();
         }
 
-        var normalizedId = id.ToLowerInvariant();
+        string normalizedId = id.ToLowerInvariant();
         var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
 
         // A version with a local row (uploaded or proxy-cached) is served from our own data — its
@@ -218,23 +347,24 @@ public partial class NuGetController : ControllerBase
         {
             var pkgVersion = await _packages.GetVersionAsync(pkg.Id, NormalizeNuGetVersion(version), ct);
             if (pkgVersion is not null && !pkgVersion.Yanked)
+            {
                 return BuildLocalLeafResponse(normalizedId, pkg.Name, pkgVersion.Version);
+            }
         }
 
-        // Otherwise the version lives upstream — proxy its leaf when passthrough + claims allow.
-        if (settings.ProxyPassthroughEffective
-            && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
-        {
-            return await ProxyRegistrationLeafAsync(orgId, normalizedId, version, semVer2, ct);
-        }
-
-        return NotFound();
+        // Otherwise the version lives upstream — proxy its leaf when passthrough + claims
+        // allow and the name is not operator-reserved.
+        return settings.ProxyPassthroughEffective
+            && !await _reserved.IsReservedAsync(orgId, "nuget", normalizedId, ct)
+            && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct)
+            ? await ProxyRegistrationLeafAsync(orgId, normalizedId, version, semVer2, ct)
+            : NotFound();
     }
 
     private JsonResult BuildLocalLeafResponse(string normalizedId, string pkgName, string version)
     {
-        var baseUrl = BaseUrl();
-        var packageContent = $"{baseUrl}/flatcontainer/{normalizedId}/{version}/{normalizedId}.{version}.nupkg";
+        string baseUrl = BaseUrl();
+        string packageContent = $"{baseUrl}/flatcontainer/{normalizedId}/{version}/{normalizedId}.{version}.nupkg";
         return new JsonResult(new
         {
             @id = $"{baseUrl}/registration/{normalizedId}/{version}.json",
@@ -254,21 +384,24 @@ public partial class NuGetController : ControllerBase
 
     private async Task<IActionResult> ProxyRegistrationLeafAsync(string orgId, string normalizedId, string version, bool semVer2, CancellationToken ct)
     {
-        var variant = semVer2 ? "registration5-gz-semver2" : "registration5-semver1";
+        string variant = semVer2 ? "registration5-gz-semver2" : "registration5-semver1";
         // Walk the org's configured upstreams in priority order; the first that answers wins.
         // No configured upstream ⇒ proxying is disabled for nuget, so the loop is skipped and
         // the leaf 404s.
         var bases = await _registries.ResolveAsync(orgId, "nuget", ct);
-        foreach (var upstreamBase in bases)
+        foreach (string upstreamBase in bases)
         {
-            var upstreamUrl = $"{upstreamBase}/{variant}/{normalizedId}/{version.ToLowerInvariant()}.json";
+            string upstreamUrl = $"{upstreamBase}/{variant}/{normalizedId}/{version.ToLowerInvariant()}.json";
             try
             {
                 using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
                 var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, linkedCts.Token);
                 if (resp.IsSuccessStatusCode)
-                    return Content(resp.BodyAsString(), "application/json");
+                {
+                    string rewritten = RewriteRegistrationLeafUrls(resp.BodyAsString(), normalizedId, BaseUrl());
+                    return Content(rewritten, "application/json");
+                }
                 // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
                 _logger.LogWarning("NuGet upstream registration leaf fetch failed: {Status} for {Url}", resp.StatusCode, upstreamUrl);
             }
@@ -281,9 +414,62 @@ public partial class NuGetController : ControllerBase
         return NotFound();
     }
 
+    // Rewrites packageContent and @id in an upstream registration leaf JSON document so that
+    // all download and leaf URLs resolve to this instance rather than the upstream registry.
+    // Tolerates absent or non-string fields — upstream JSON is untrusted input.
+    internal static string RewriteRegistrationLeafUrls(string leafJson, string normalizedId, string baseUrl)
+    {
+        JsonObject? leaf;
+        try { leaf = JsonNode.Parse(leafJson) as JsonObject; }
+        catch (JsonException) { return leafJson; }
+        if (leaf is null)
+        {
+            return leafJson;
+        }
+
+        RewriteLeafNode(leaf, normalizedId, baseUrl);
+        return leaf.ToJsonString(RelaxedJsonOptions);
+    }
+
+    // Rewrites the leaf @id and packageContent fields (at the leaf root and inside catalogEntry)
+    // to local registration and flatcontainer routes. catalogEntry @id is intentionally left
+    // unchanged — it is an upstream catalog resource URI, not a download path.
+    private static void RewriteLeafNode(JsonObject leaf, string normalizedId, string baseUrl)
+    {
+        // Leaf @id: `{registrationBase}/{id}/{version}.json` — rewrite to local registration route.
+        string? version = TryGetString(leaf["catalogEntry"]?["version"]);
+        if (!string.IsNullOrEmpty(version))
+        {
+            leaf["@id"] = $"{baseUrl}/registration/{normalizedId}/{version}.json";
+        }
+
+        // packageContent at leaf root and inside catalogEntry both point at a flatcontainer .nupkg.
+        string? localPackageContent = !string.IsNullOrEmpty(version)
+            ? $"{baseUrl}/flatcontainer/{normalizedId}/{version}/{normalizedId}.{version}.nupkg"
+            : null;
+        if (localPackageContent is not null)
+        {
+            if (leaf["packageContent"] is not null)
+            {
+                leaf["packageContent"] = localPackageContent;
+            }
+            if (leaf["catalogEntry"] is JsonObject catalogEntry && catalogEntry["packageContent"] is not null)
+            {
+                catalogEntry["packageContent"] = localPackageContent;
+            }
+        }
+    }
+
     private async Task<IActionResult> RegistrationIndexCoreAsync(string id, bool semVer2, CancellationToken ct)
     {
-        var orgId = CurrentTenantId();
+        // The id flows into the upstream registration URL — reject traversal-shaped values
+        // before any lookup or upstream call.
+        if (!AreUpstreamSafeNuGetSegments(id))
+        {
+            return NotFound();
+        }
+
+        string orgId = CurrentTenantId();
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
@@ -294,7 +480,7 @@ public partial class NuGetController : ControllerBase
             return Unauthorized();
         }
 
-        var normalizedId = id.ToLowerInvariant();
+        string normalizedId = id.ToLowerInvariant();
         var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
 
         // Always merge upstream + local versions when passthrough + claims allow. An existing
@@ -302,22 +488,118 @@ public partial class NuGetController : ControllerBase
         // a private prerelease must not delete the public version line from the listing, or
         // downstream packages pinning ">= <stable>" of the same name fail NU1103. Mirrors
         // FlatcontainerVersions and PyPi's PackageIndex.
-        var passthroughAllowed = settings.ProxyPassthroughEffective
+        bool passthroughAllowed = settings.ProxyPassthroughEffective
+            && !await _reserved.IsReservedAsync(orgId, "nuget", normalizedId, ct)
             && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct);
 
         if (passthroughAllowed)
-            return await ProxyMergedRegistrationAsync(orgId, id, pkg, semVer2, ct);
+        {
+            return await ServeProxyMergedRegistrationAsync(orgId, id, normalizedId, pkg, semVer2, ct);
+        }
 
         // Passthrough disabled or claim-local — local-only.
-        if (pkg is null) return NotFound();
+        return pkg is null
+            ? NotFound()
+            : await ServeLocalRegistrationAsync(orgId, id, normalizedId, pkg, semVer2, ct);
+    }
+
+    // Sets the payload's ETag and reports whether the client's If-None-Match header already
+    // matches it — the caller responds 304 Not Modified (ETag only, no Cache-Control) in
+    // that case.
+    private bool IsClientCopyCurrent(byte[] bytes)
+    {
+        string etag = ComputeETag(bytes);
+        Response.Headers.ETag = etag;
+        return Request.Headers.IfNoneMatch.FirstOrDefault() == etag;
+    }
+
+    // Serves a cached registration payload with the ETag / If-None-Match handshake:
+    // 304 when the client already holds the current bytes, otherwise the payload with
+    // ETag and Cache-Control headers set.
+    private IActionResult RegistrationBytesResult(byte[] bytes, string cacheControl)
+    {
+        if (IsClientCopyCurrent(bytes))
+        {
+            return StatusCode(304);
+        }
+        Response.Headers.CacheControl = cacheControl;
+        return new FileContentResult(bytes, "application/json");
+    }
+
+    // Upstream-merged registration with an IMemoryCache front: cache hit serves the stored
+    // bytes; a miss rebuilds via single-flighted ProxyMergedRegistrationAsync.
+    private async Task<IActionResult> ServeProxyMergedRegistrationAsync(
+        string orgId, string id, string normalizedId, Package? pkg, bool semVer2, CancellationToken ct)
+    {
+        string proxyCacheKey = RegistrationCacheKey(orgId, normalizedId, semVer2);
+        if (_cache.TryGetValue<byte[]>(proxyCacheKey, out byte[]? proxyHit) && proxyHit is not null)
+        {
+            return RegistrationBytesResult(proxyHit, "private, max-age=60");
+        }
+
+        // Single-flight: collapse concurrent registration rebuilds for the same key.
+        var lazy = _registrationInFlight.GetOrAdd(proxyCacheKey,
+            _ => new Lazy<Task<byte[]?>>(async () =>
+            {
+                // CancellationToken.None: shared task must not be poisoned by any one
+                // caller's disconnection — callers detach via WaitAsync(ct).
+                var result = await ProxyMergedRegistrationAsync(orgId, id, pkg, semVer2, CancellationToken.None);
+                string? json = result switch
+                {
+                    ContentResult cr => cr.Content,
+                    JsonResult jr => System.Text.Json.JsonSerializer.Serialize(jr.Value, RelaxedJsonOptions),
+                    _ => null,
+                };
+                if (json is null) { return null; }
+                byte[] entryBytes = System.Text.Encoding.UTF8.GetBytes(json);
+                _cache.Set(proxyCacheKey, entryBytes, new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = RegistrationProxyTtl,
+                    Size = entryBytes.Length,
+                });
+                return entryBytes;
+            }));
+
+        byte[]? proxyBytes;
+        try { proxyBytes = await lazy.Value.WaitAsync(ct); }
+        finally { _registrationInFlight.TryRemove(new KeyValuePair<string, Lazy<Task<byte[]?>>>(proxyCacheKey, lazy)); }
+
+        if (proxyBytes is not null)
+        {
+            return new FileContentResult(proxyBytes, "application/json");
+        }
+
+        // Non-cacheable result (e.g. NotFound) — fall through to direct return.
+        return await ProxyMergedRegistrationAsync(orgId, id, pkg, semVer2, ct);
+    }
+
+    // Local-only registration with an IMemoryCache front: a cache hit serves the stored
+    // bytes, and a miss rebuilds from the package's version rows and caches the document.
+    private async Task<IActionResult> ServeLocalRegistrationAsync(
+        string orgId, string id, string normalizedId, Package pkg, bool semVer2, CancellationToken ct)
+    {
+        string localCacheKey = RegistrationCacheKey(orgId, normalizedId, semVer2);
+        if (_cache.TryGetValue<byte[]>(localCacheKey, out byte[]? localHit) && localHit is not null)
+        {
+            return RegistrationBytesResult(localHit, "private, max-age=300");
+        }
+
         var versions = await _packages.GetVersionsAsync(pkg.Id, ct);
-        return BuildLocalRegistration(id, pkg, versions);
+        var localResult = BuildLocalRegistration(id, pkg, versions);
+        string localJson = System.Text.Json.JsonSerializer.Serialize(localResult.Value, RelaxedJsonOptions);
+        byte[] localBytes = System.Text.Encoding.UTF8.GetBytes(localJson);
+        _cache.Set(localCacheKey, localBytes, new MemoryCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = RegistrationLocalTtl,
+            Size = localBytes.Length,
+        });
+        return RegistrationBytesResult(localBytes, "private, max-age=300");
     }
 
     private JsonResult BuildLocalRegistration(string id, Package pkg, IReadOnlyList<PackageVersion> versions)
     {
-        var normalizedId = id.ToLowerInvariant();
-        var baseUrl = BaseUrl();
+        string normalizedId = id.ToLowerInvariant();
+        string baseUrl = BaseUrl();
         var leaves = versions.Where(v => !v.Yanked).Select(v => new
         {
             @id = $"{baseUrl}/registration/{normalizedId}/{v.Version}.json",
@@ -346,22 +628,64 @@ public partial class NuGetController : ControllerBase
 
     private async Task<IActionResult> ProxyMergedRegistrationAsync(string orgId, string id, Package? pkg, bool semVer2, CancellationToken ct)
     {
-        var normalizedId = id.ToLowerInvariant();
+        string normalizedId = id.ToLowerInvariant();
         // semver1 excludes SemVer-2 build metadata (+suffix); semver2 is the superset. Pick the
         // upstream variant that matches what the client asked for. api.nuget.org publishes
         // -semver1 uncompressed but only -gz-semver2 for the SemVer 2 superset (the
         // registration5-semver2 path returns 404); HttpClient's AutomaticDecompression handles
         // the gzip transparently.
-        var variant = semVer2 ? "registration5-gz-semver2" : "registration5-semver1";
+        string variant = semVer2 ? "registration5-gz-semver2" : "registration5-semver1";
 
-        // Walk the org's configured upstreams in priority order; the first that answers wins.
-        // No configured upstream ⇒ proxying is disabled for nuget, so the loop is skipped and
-        // we fall through to local-only below.
-        var bases = await _registries.ResolveAsync(orgId, "nuget", ct);
-        string? upstreamJson = null;
-        foreach (var upstreamBase in bases)
+        string? upstreamJson = await FetchUpstreamRegistrationJsonAsync(orgId, variant, normalizedId, ct);
+
+        var localVersions = pkg is null
+            ? Array.Empty<PackageVersion>() as IReadOnlyList<PackageVersion>
+            : await _packages.GetVersionsAsync(pkg.Id, ct);
+
+        if (upstreamJson is null)
         {
-            var upstreamUrl = $"{upstreamBase}/{variant}/{normalizedId}/index.json";
+            if (pkg is null || localVersions.Count == 0)
+            {
+                return NotFound();
+            }
+
+            var localFallback = BuildLocalRegistration(id, pkg, localVersions);
+            byte[] localFallbackBytes = System.Text.Encoding.UTF8.GetBytes(
+                System.Text.Json.JsonSerializer.Serialize(localFallback.Value, RelaxedJsonOptions));
+            if (IsClientCopyCurrent(localFallbackBytes))
+            {
+                return StatusCode(304);
+            }
+            Response.Headers.CacheControl = "private, max-age=300";
+            return localFallback;
+        }
+
+        string baseUrl = BaseUrl();
+
+        string responseJson = pkg is null || localVersions.Count == 0
+            ? RewriteRegistrationIndexUrls(upstreamJson, normalizedId, baseUrl)
+            : MergeLocalIntoUpstreamRegistration(upstreamJson, localVersions, pkg, id, baseUrl);
+
+        byte[] regBytes = System.Text.Encoding.UTF8.GetBytes(responseJson);
+        if (IsClientCopyCurrent(regBytes))
+        {
+            return StatusCode(304);
+        }
+        Response.Headers.CacheControl = "private, max-age=60";
+        return Content(responseJson, "application/json");
+    }
+
+    // Walks the org's configured upstreams in priority order and returns the first
+    // registration index that answers successfully. No configured upstream ⇒ proxying is
+    // disabled for nuget, so the loop is skipped; null means the caller falls back to
+    // local-only data.
+    private async Task<string?> FetchUpstreamRegistrationJsonAsync(
+        string orgId, string variant, string normalizedId, CancellationToken ct)
+    {
+        var bases = await _registries.ResolveAsync(orgId, "nuget", ct);
+        foreach (string upstreamBase in bases)
+        {
+            string upstreamUrl = $"{upstreamBase}/{variant}/{normalizedId}/index.json";
             try
             {
                 using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -370,8 +694,7 @@ public partial class NuGetController : ControllerBase
                 var resp = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, linkedCts.Token);
                 if (resp.IsSuccessStatusCode)
                 {
-                    upstreamJson = resp.BodyAsString();
-                    break;
+                    return resp.BodyAsString();
                 }
                 // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
                 _logger.LogWarning("NuGet upstream registration fetch failed: {Status} for {Url}", resp.StatusCode, upstreamUrl);
@@ -382,62 +705,117 @@ public partial class NuGetController : ControllerBase
                 _logger.LogWarning(ex, "NuGet upstream registration fetch threw for {Url}", upstreamUrl);
             }
         }
-
-        var localVersions = pkg is null
-            ? Array.Empty<PackageVersion>() as IReadOnlyList<PackageVersion>
-            : await _packages.GetVersionsAsync(pkg.Id, ct);
-
-        if (upstreamJson is null)
-        {
-            if (pkg is null || localVersions.Count == 0) return NotFound();
-            return BuildLocalRegistration(id, pkg, localVersions);
-        }
-
-        if (pkg is null || localVersions.Count == 0)
-            return Content(upstreamJson, "application/json");
-
-        var merged = MergeLocalIntoUpstreamRegistration(upstreamJson, localVersions, pkg, id);
-        return Content(merged, "application/json");
+        return null;
     }
 
     // Splice local-only versions into upstream registration JSON as an extra CatalogPage.
     // Dedupes by version against the upstream catalog entries already present so a name with
-    // a privately uploaded build of an upstream version doesn't appear twice. Public so unit
-    // tests can verify the splice without spinning up the controller.
+    // a privately uploaded build of an upstream version doesn't appear twice. Rewrites upstream
+    // leaf URLs (packageContent, @id) to local routes before returning. Public so unit tests can
+    // verify the splice without spinning up the controller.
     internal static string MergeLocalIntoUpstreamRegistration(
-        string upstreamJson, IReadOnlyList<PackageVersion> localVersions, Package pkg, string id)
+        string upstreamJson, IReadOnlyList<PackageVersion> localVersions, Package pkg, string id,
+        string? baseUrl = null)
     {
-        var normalizedId = id.ToLowerInvariant();
+        string normalizedId = id.ToLowerInvariant();
         JsonObject? root;
         try { root = JsonNode.Parse(upstreamJson) as JsonObject; }
         catch (JsonException) { return upstreamJson; }
-        if (root is null) return upstreamJson;
+        if (root is null)
+        {
+            return upstreamJson;
+        }
 
         var upstreamVersionSet = CollectUpstreamVersions(root);
         var localOnly = localVersions
             .Where(v => !v.Yanked && !upstreamVersionSet.Contains(v.Version))
             .ToList();
-        if (localOnly.Count == 0) return upstreamJson;
+
+        if (baseUrl is not null)
+        {
+            RewriteAllLeafUrls(root, normalizedId, baseUrl);
+        }
+
+        if (localOnly.Count == 0)
+        {
+            return root.ToJsonString(RelaxedJsonOptions);
+        }
 
         var localPage = BuildLocalPage(localOnly, normalizedId, pkg.Name);
         AppendPage(root, localPage);
-        return root.ToJsonString();
+        return root.ToJsonString(RelaxedJsonOptions);
+    }
+
+    // Rewrites packageContent and leaf @id fields in a full upstream registration index document
+    // (all pages, all leaves) to local flatcontainer and registration routes. Tolerates absent
+    // or non-string fields — upstream JSON is untrusted input.
+    internal static string RewriteRegistrationIndexUrls(string indexJson, string normalizedId, string baseUrl)
+    {
+        JsonObject? root;
+        try { root = JsonNode.Parse(indexJson) as JsonObject; }
+        catch (JsonException) { return indexJson; }
+        if (root is null)
+        {
+            return indexJson;
+        }
+
+        RewriteAllLeafUrls(root, normalizedId, baseUrl);
+        return root.ToJsonString(RelaxedJsonOptions);
+    }
+
+    // Walks the pages and leaf entries inside a parsed registration index and rewrites each
+    // leaf's @id and packageContent to local routes. Page @id fields are informational (the
+    // server inlines all pages and never externalises them), but rewriting them avoids leaking
+    // upstream URLs into the document. Absent or non-object nodes are silently skipped.
+    private static void RewriteAllLeafUrls(JsonObject root, string normalizedId, string baseUrl)
+    {
+        if (root["items"] is not JsonArray pages)
+        {
+            return;
+        }
+
+        foreach (var pageNode in pages.OfType<JsonObject>())
+        {
+            if (pageNode["items"] is not JsonArray leaves)
+            {
+                continue;
+            }
+
+            foreach (var leafNode in leaves.OfType<JsonObject>())
+            {
+                RewriteLeafNode(leafNode, normalizedId, baseUrl);
+            }
+        }
     }
 
     private static HashSet<string> CollectUpstreamVersions(JsonObject root)
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (root["items"] is not JsonArray pages) return set;
+        if (root["items"] is not JsonArray pages)
+        {
+            return set;
+        }
+
         var entries = pages
             .OfType<JsonObject>()
             .SelectMany(p => (p["items"] as JsonArray)?.OfType<JsonObject>() ?? []);
         foreach (var entry in entries)
         {
-            var v = entry["catalogEntry"]?["version"]?.GetValue<string>();
-            if (v is not null) set.Add(v);
+            string? v = TryGetString(entry["catalogEntry"]?["version"]);
+            if (v is not null)
+            {
+                set.Add(v);
+            }
         }
         return set;
     }
+
+    // Returns the string value of a JsonNode when it is a JSON string, or null for any other
+    // type (number, bool, array, object, null). GetValue<string>() throws InvalidOperationException
+    // for non-string nodes, so this helper is used on all upstream-controlled fields to avoid
+    // a hostile or malformed upstream crashing the registration response path.
+    private static string? TryGetString(JsonNode? node) =>
+        node is JsonValue jv && jv.TryGetValue<string>(out string? s) ? s : null;
 
     // BaseUrl isn't available in a static context — leaves reference our own registration/
     // flatcontainer at relative paths. NuGet clients combine these with the service-index
@@ -494,16 +872,26 @@ public partial class NuGetController : ControllerBase
             root["items"] = pages;
         }
         pages.Add(page);
-        if (root["count"] is not null) root["count"] = pages.Count;
+        if (root["count"] is not null)
+        {
+            root["count"] = pages.Count;
+        }
     }
 
     // ── Flatcontainer / download ─────────────────────────────────────────────
 
-    /// <summary>GET /o/{org}/nuget/flatcontainer/{id}/index.json — version list</summary>
+    /// <summary>GET /nuget/flatcontainer/{id}/index.json — version list</summary>
     [HttpGet("/nuget/flatcontainer/{id}/index.json")]
     public async Task<IActionResult> FlatcontainerVersions(string id, CancellationToken ct)
     {
-        var orgId = CurrentTenantId();
+        // The id flows into the upstream flatcontainer URL — reject traversal-shaped values
+        // before any lookup or upstream call, mirroring the push-side validation.
+        if (!AreUpstreamSafeNuGetSegments(id))
+        {
+            return NotFound();
+        }
+
+        string orgId = CurrentTenantId();
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
         var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
@@ -513,7 +901,7 @@ public partial class NuGetController : ControllerBase
             return Unauthorized();
         }
 
-        var normalizedId = id.ToLowerInvariant();
+        string normalizedId = id.ToLowerInvariant();
         var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
 
         var versionSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -523,6 +911,7 @@ public partial class NuGetController : ControllerBase
         // namespace that can hold proxy-fetched versions. Gate on passthrough + claims, not on
         // whether anyone has ever published into this name.
         if (settings.ProxyPassthroughEffective
+            && !await _reserved.IsReservedAsync(orgId, "nuget", normalizedId, ct)
             && await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
         {
             await MergeUpstreamVersionsAsync(orgId, id, versionSet, ct);
@@ -532,15 +921,21 @@ public partial class NuGetController : ControllerBase
             Response.Headers["X-Upstream-Status"] = "skipped";
         }
 
-        if (versionSet.Count == 0) return NotFound();
-        return new JsonResult(new { versions = versionSet.Order() });
+        return versionSet.Count == 0 ? NotFound() : new JsonResult(new { versions = versionSet.Order() });
     }
 
     private async Task CollectLocalVersionsAsync(Package? pkg, HashSet<string> versionSet, CancellationToken ct)
     {
-        if (pkg is null) return;
+        if (pkg is null)
+        {
+            return;
+        }
+
         var local = await _packages.GetVersionsAsync(pkg.Id, ct);
-        foreach (var v in local.Where(v => !v.Yanked)) versionSet.Add(v.Version);
+        foreach (var v in local.Where(v => !v.Yanked))
+        {
+            versionSet.Add(v.Version);
+        }
     }
 
     // Fetch the upstream version list and merge. Short timeout so slow upstream responses don't
@@ -552,9 +947,9 @@ public partial class NuGetController : ControllerBase
         // version list wins and we stop. No configured upstream ⇒ proxying is disabled for nuget,
         // so the loop is skipped and the status reflects the unreachable/empty outcome.
         var bases = await _registries.ResolveAsync(orgId, "nuget", ct);
-        foreach (var upstreamBase in bases)
+        foreach (string upstreamBase in bases)
         {
-            var url = $"{upstreamBase}/flatcontainer/{id.ToLowerInvariant()}/index.json";
+            string url = $"{upstreamBase}/flatcontainer/{id.ToLowerInvariant()}/index.json";
             try
             {
                 using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -580,8 +975,11 @@ public partial class NuGetController : ControllerBase
                 }
                 foreach (var v in versionsElem.EnumerateArray())
                 {
-                    var ver = v.GetString();
-                    if (ver is not null) versionSet.Add(ver);
+                    string? ver = v.GetString();
+                    if (ver is not null)
+                    {
+                        versionSet.Add(ver);
+                    }
                 }
                 Response.Headers["X-Upstream-Status"] = "ok";
                 return;
@@ -601,16 +999,24 @@ public partial class NuGetController : ControllerBase
         }
     }
 
-    /// <summary>GET /o/{org}/nuget/flatcontainer/{id}/{version}/{file} — package download</summary>
+    /// <summary>GET /nuget/flatcontainer/{id}/{version}/{file} — package download</summary>
     [HttpGet("/nuget/flatcontainer/{id}/{version}/{file}")]
     [EnableRateLimiting("download")]
     public async Task<IActionResult> Flatcontainer(string id, string version, string file, CancellationToken ct)
     {
-        var orgId = CurrentTenantId();
+        // All three route values flow into the upstream flatcontainer URL — reject
+        // traversal-shaped values before any lookup or upstream call, mirroring the
+        // push-side validation.
+        if (!AreUpstreamSafeNuGetSegments(id, version, file))
+        {
+            return NotFound();
+        }
+
+        string orgId = CurrentTenantId();
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
         var token = await Request.ResolveTokenAsync(_tokens, orgId, ct);
-        var normalizedId = id.ToLowerInvariant();
+        string normalizedId = id.ToLowerInvariant();
         var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
 
         // Route by the specific version's origin (per-version state), not by the package-level
@@ -619,7 +1025,10 @@ public partial class NuGetController : ControllerBase
         if (pkg is not null)
         {
             var routed = await TryRouteToKnownVersionAsync(pkg, version, file, orgId, token, settings!, ct);
-            if (routed is not null) return routed;
+            if (routed is not null)
+            {
+                return routed;
+            }
         }
 
         if (!settings!.AnonymousPull && token is null)
@@ -628,9 +1037,12 @@ public partial class NuGetController : ControllerBase
             return Unauthorized();
         }
 
-        var purlCheck = $"pkg:nuget/{normalizedId}";
+        string purlCheck = $"pkg:nuget/{normalizedId}";
         if (settings.AllowlistMode && !await _allowlist.IsAllowedAsync(orgId, purlCheck, ct))
+        {
             return StatusCode(403);
+        }
+
         if (await _blocklist.IsBlockedAsync(orgId, purlCheck, ct))
         {
             await _audit.LogActivityAsync(orgId, "nuget", purlCheck, "blocked", token?.UserId,
@@ -638,14 +1050,18 @@ public partial class NuGetController : ControllerBase
             return StatusCode(403);
         }
 
-        if (!settings.ProxyPassthroughEffective) return NotFound();
-
-        // Claim state gates the proxy fetch. local_only (or air-gap implicit local_only)
-        // disables proxy serving for that name.
-        if (!await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
+        if (!settings.ProxyPassthroughEffective)
+        {
             return NotFound();
+        }
 
-        return await ProxyFetchNupkgAsync(orgId, id, version, file, token, settings, ct);
+        // Claim state and reserved namespaces gate the proxy fetch. local_only (or air-gap
+        // implicit local_only) and reserved names disable proxy serving with the same
+        // silent 404.
+        return await _reserved.IsReservedAsync(orgId, "nuget", normalizedId, ct)
+            || !await _claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct)
+            ? NotFound()
+            : await ProxyFetchNupkgAsync(orgId, id, version, file, token, settings, ct);
     }
 
     // Per-version origin routing: returns a hosted version, a cached proxy version, or null
@@ -654,17 +1070,13 @@ public partial class NuGetController : ControllerBase
     private async Task<IActionResult?> TryRouteToKnownVersionAsync(
         Package pkg, string version, string file, string orgId, TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
-        var normalizedVersion = NormalizeNuGetVersion(version);
+        string normalizedVersion = NormalizeNuGetVersion(version);
         var pkgVersion = await _packages.GetVersionAsync(pkg.Id, normalizedVersion, ct);
-        if (pkgVersion is null) return null;
-
-        if (pkgVersion.Origin == "uploaded")
-            return await ServeHostedVersionAsync(orgId, pkgVersion, file, token, settings, ct);
-
-        if (pkgVersion.Origin == "proxy")
-            return await TryServeCachedProxyVersionAsync(orgId, pkgVersion, file, token, settings, ct);
-
-        return null;
+        return pkgVersion is null
+            ? null
+            : pkgVersion.Origin == "uploaded"
+            ? await ServeHostedVersionAsync(orgId, pkgVersion, file, token, settings, ct)
+            : pkgVersion.Origin == "proxy" ? await TryServeCachedProxyVersionAsync(orgId, pkgVersion, file, token, settings, ct) : null;
     }
 
     private async Task<IActionResult> ServeHostedVersionAsync(
@@ -677,7 +1089,7 @@ public partial class NuGetController : ControllerBase
             return Unauthorized();
         }
 
-        var sourceIp = HttpContext.GetNormalizedRemoteIp();
+        string? sourceIp = HttpContext.GetNormalizedRemoteIp();
         if (await _blockGate.EvaluateAsync(
                 new BlockGateRequest(orgId, "nuget", pkgVersion.Purl, pkgVersion.Id,
                     pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
@@ -686,14 +1098,28 @@ public partial class NuGetController : ControllerBase
                     PublishedAt: pkgVersion.PublishedAt,
                     ActorKind: token.ActorKind,
                     Deprecated: pkgVersion.Deprecated,
-                    BlockDeprecatedMode: settings.BlockDeprecated), ct)
-            == BlockDecision.Blocked) return StatusCode(403);
+                    BlockDeprecatedMode: settings.BlockDeprecated,
+                    BlockMaliciousMode: settings.BlockMalicious,
+                    BlockKevMode: settings.BlockKev,
+                    MaxEpssTolerance: settings.MaxEpssTolerance), ct)
+            == BlockDecision.Blocked)
+        {
+            return StatusCode(403);
+        }
 
         var stream = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
-        if (stream is null) return NotFound();
+        if (stream is null)
+        {
+            return NotFound();
+        }
 
         Response.Headers["X-Cache"] = "HIT";
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
+        if (pkgVersion.ChecksumSha256 is not null)
+        {
+            Response.Headers.ETag = $"\"sha256:{pkgVersion.ChecksumSha256}\"";
+            Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+        }
         await _audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token.UserId,
             actorKind: token.ActorKind, sourceIp: sourceIp, ct: ct);
         await _packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
@@ -707,7 +1133,7 @@ public partial class NuGetController : ControllerBase
     private async Task<IActionResult?> TryServeCachedProxyVersionAsync(
         string orgId, PackageVersion pkgVersion, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
-        var sourceIp = HttpContext.GetNormalizedRemoteIp();
+        string? sourceIp = HttpContext.GetNormalizedRemoteIp();
         if (await _blockGate.EvaluateAsync(
                 new BlockGateRequest(orgId, "nuget", pkgVersion.Purl, pkgVersion.Id,
                     pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
@@ -716,22 +1142,45 @@ public partial class NuGetController : ControllerBase
                     PublishedAt: pkgVersion.PublishedAt,
                     ActorKind: token?.ActorKind,
                     Deprecated: pkgVersion.Deprecated,
-                    BlockDeprecatedMode: settings.BlockDeprecated), ct)
-            == BlockDecision.Blocked) return StatusCode(403);
+                    BlockDeprecatedMode: settings.BlockDeprecated,
+                    BlockMaliciousMode: settings.BlockMalicious,
+                    BlockKevMode: settings.BlockKev,
+                    MaxEpssTolerance: settings.MaxEpssTolerance), ct)
+            == BlockDecision.Blocked)
+        {
+            return StatusCode(403);
+        }
 
         if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase))
+        {
             return null;
+        }
 
         var stream = await _blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
-        if (stream is null) return null;
+        if (stream is null)
+        {
+            return null;
+        }
 
         Response.Headers["X-Cache"] = "HIT";
         Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
+        if (pkgVersion.ChecksumSha256 is not null)
+        {
+            Response.Headers.ETag = $"\"sha256:{pkgVersion.ChecksumSha256}\"";
+            Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+        }
         await _audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token?.UserId,
             actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         await _packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
         return File(stream, "application/octet-stream", file);
     }
+
+    /// <summary>
+    /// True when every route value is safe to embed as a single path segment of an
+    /// upstream proxy URL (no traversal, separators, control chars, or percent-encoding).
+    /// </summary>
+    private static bool AreUpstreamSafeNuGetSegments(params string[] values)
+        => Array.TrueForAll(values, v => PathSafeValidator.ValidateUpstreamSegment(v, "segment").IsValid);
 
     private static string NormalizeNuGetVersion(string version) =>
         NuGet.Versioning.NuGetVersion.TryParse(version, out var nv)
@@ -744,90 +1193,197 @@ public partial class NuGetController : ControllerBase
         // Resolve the org's configured upstreams in priority order. An empty list means
         // proxying is disabled for nuget — a download miss is a 404.
         var bases = await _registries.ResolveAsync(orgId, "nuget", ct);
-        if (bases.Count == 0) return NotFound();
+        if (bases.Count == 0)
+        {
+            return NotFound();
+        }
 
         Response.Headers["X-Cache"] = "MISS";
         try
         {
-            // Walk upstreams in priority order; the first reachable one to return the artefact
-            // wins, and the heavy cache/record/scan/serve work runs single-shot for that URL.
-            //
-            // NuGet artefacts still route through GetOrFetchMetadataAsync (a buffered
-            // byte[]) because flatcontainer URLs don't carry a content-addressed hash,
-            // and we haven't yet flipped this path onto FetchAndStageAsync. That's a
-            // parallel concern; the proxy-fetch refactor isolates the residue here by wrapping the byte[]
-            // in a BlobHandle so everything downstream (ProxyFetchService,
-            // ProxyVersionRecorder, LicenseExtractor) stays uniformly stream-shaped.
-            string? upstreamBase = null;
-            byte[]? bytes = null;
-            foreach (var candidateBase in bases)
+            var fetched = await FetchNupkgFromUpstreamsAsync(bases, id, version, file, orgId, ct);
+            if (fetched is null)
             {
-                // Single-flight flatcontainer fetch — collapses concurrent first-fetches
-                // of the same coordinate onto one upstream call.
-                var resp = await _upstream.GetOrFetchMetadataAsync(
-                    $"{candidateBase}/flatcontainer/{id.ToLowerInvariant()}/{version}/{file}", ct);
-                if (!resp.IsSuccessStatusCode) continue;
-                upstreamBase = candidateBase;
-                bytes = resp.Body;
-                break;
+                return NotFound();
             }
-            if (upstreamBase is null || bytes is null) return NotFound();
 
-            var normalizedId = id.ToLowerInvariant();
-            var normalizedVersion = NormalizeNuGetVersion(version);
-            var canonicalId = ResolveCanonicalNuGetId(file, bytes, normalizedId);
-            var purl = PurlNormalizer.NuGet(canonicalId, normalizedVersion);
+            var (fetchResult, upstreamBase) = fetched.Value;
+
+            string normalizedId = id.ToLowerInvariant();
+            string normalizedVersion = NormalizeNuGetVersion(version);
+            string proxyKey = fetchResult.BlobKey;
+            string sha = fetchResult.Sha256Hex;
+            long sizeBytes = fetchResult.SizeBytes;
+
+            // Resolve canonical-case ID for the PURL from the cached blob. The blob was
+            // already written by the streaming MISS path so a single blob-store open is enough.
+            string canonicalId = await ResolveCanonicalNuGetIdFromBlobAsync(file, proxyKey, normalizedId, ct);
+            string purl = PurlNormalizer.NuGet(canonicalId, normalizedVersion);
 
             var meta = await TryFetchNuGetFirstFetchMetadataAsync(upstreamBase, normalizedId, normalizedVersion, ct);
 
-            // Cache the artefact under its content-addressed key once and describe it
-            // with a BlobHandle. OpenAsync prefers the blob-store stream; the byte[]
-            // fallback covers the edge case where the blob vanishes between the put and
-            // the licence read.
-            var sha = ChecksumVerifier.ComputeSha256Hex(bytes);
-            var proxyKey = BlobKeys.Proxy(sha);
-            if (!await _blobs.ExistsAsync(proxyKey, ct))
-                await _blobs.PutAsync(proxyKey, new MemoryStream(bytes), ct);
-            var blob = new BlobHandle(proxyKey, sha, bytes.LongLength,
+            // The streaming MISS path already wrote the blob and computed the SHA-256 inline —
+            // no large byte[] allocation needed. BlobHandle wraps the result so ProxyFetchService
+            // can open a fresh blob-store stream for licence extraction or checksum re-verification.
+            var blob = new BlobHandle(proxyKey, sha, sizeBytes,
                 async openCt => await _blobs.GetAsync(proxyKey, openCt)
-                    ?? (Stream)new MemoryStream(bytes, writable: false));
+                    ?? Stream.Null);
 
             // deepcode ignore PT,LogForging: ProxyFetchService stores under BlobKeys.Proxy(sha256),
             // which validates a 64-char lowercase hex — path traversal cannot escape that key. All
             // structured logs use Serilog RenderedCompactJsonFormatter (CRLF-safe).
-            var result = await _proxyFetch.RecordAndScanAsync(new ProxyFetchRequest(
-                OrgId: orgId, Ecosystem: "nuget",
-                PackageName: normalizedId, PurlName: normalizedId,
-                Version: normalizedVersion, Purl: purl, File: file, Blob: blob,
-                ExtractLicenses: stream => file.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase)
-                    ? LicenseExtractor.FromNuspec(stream)
-                    : LicenseExtractor.ExtractedMetadata.Empty,
-                UserId: token?.UserId,
-                ActorKind: token?.ActorKind,
-                SourceIp: HttpContext.GetNormalizedRemoteIp(),
-                MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
-                MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                CacheAccess: new CacheAccess(orgId, "nuget", normalizedId, normalizedVersion, file,
-                    Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: $"{upstreamBase}/flatcontainer/{normalizedId}/{normalizedVersion}/{file}"),
-                PublishedAt: meta.PublishedAt,
-                UpstreamChecksum: meta.Checksum,
-                UpstreamIntegrityValue: meta.IntegrityBase64,
-                UpstreamIntegrityAlgorithm: meta.IntegrityBase64 is not null ? "sha512-b64" : null,
-                Deprecated: meta.Deprecated,
-                BlockDeprecatedMode: settings.BlockDeprecated
-            ), ct);
+            var result = await _proxyFetch.RecordAndScanAsync(
+                BuildNuGetProxyFetchRequest(orgId, normalizedId, normalizedVersion, purl, file, blob, upstreamBase, token, settings, meta, HttpContext.GetNormalizedRemoteIp()), ct);
 
-            if (result.Decision == BlockDecision.Blocked) return StatusCode(403);
+            if (result.Decision == BlockDecision.Blocked)
+            {
+                return StatusCode(403);
+            }
 
             // Stream the cached blob back to the client (response memory is one read
             // buffer, not the whole artefact).
             var blobStream = await _blobs.GetAsync(result.BlobKey, ct);
-            if (blobStream is null) return File(bytes, "application/octet-stream", file);
-            return File(blobStream, "application/octet-stream", file);
+            return blobStream is null
+                ? NotFound()
+                : File(blobStream, "application/octet-stream", file);
         }
         catch (Microsoft.Data.Sqlite.SqliteException) { throw; }
         catch (ChecksumException) { return StatusCode(502); }
+        catch (UpstreamResponseTooLargeException) { return StatusCode(502); }
         catch { return NotFound(); }
+    }
+
+    // Walks upstreams in priority order; streams and stages the first successful flatcontainer
+    // artifact to disk, hashing inline. Memory usage is bounded by the staging buffer
+    // regardless of artifact size. Returns (UpstreamFetchResult, upstreamBase) on success,
+    // or null when no upstream returns a success response. Single-flight: concurrent
+    // first-fetches of the same coordinate share one upstream call.
+    private async Task<(UpstreamFetchResult FetchResult, string UpstreamBase)?> FetchNupkgFromUpstreamsAsync(
+        IReadOnlyList<string> bases, string id, string version, string file, string orgId, CancellationToken ct)
+    {
+        foreach (string candidateBase in bases)
+        {
+            string candidateUrl = $"{candidateBase}/flatcontainer/{id.ToLowerInvariant()}/{version}/{file}";
+            try
+            {
+                // Streams upstream → staging file (hashing inline) → blob store.
+                // No upstream checksum is known for flatcontainer URLs; the ingest-time
+                // SHA-256 computed inline is the canonical reference.
+                var fetchResult = await _upstream.FetchAndCacheByUrlAsync(
+                    candidateUrl, null, "nuget", orgId, ct);
+                return (fetchResult, candidateBase);
+            }
+            // Only transport-level failures advance to the next upstream; checksum, size-cap,
+            // SSRF, and air-gap failures propagate to the caller.
+            catch (HttpRequestException) { /* try next upstream */ }
+        }
+
+        return null;
+    }
+
+    // Reads the canonical-case NuGet ID from the cached blob. Opens one blob-store stream to
+    // parse the nuspec inside a .nupkg ZIP, or the nuspec file directly. Falls back to the
+    // lowercase URL-derived ID on any error so PURL construction is never blocked on a parse
+    // failure of the upstream content.
+    private async Task<string> ResolveCanonicalNuGetIdFromBlobAsync(
+        string file, string blobKey, string normalizedId, CancellationToken ct)
+    {
+        try
+        {
+            await using var stream = await _blobs.GetAsync(blobKey, ct);
+            if (stream is null)
+            {
+                return normalizedId;
+            }
+
+            if (file.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase))
+            {
+                var doc = await System.Xml.Linq.XDocument.LoadAsync(stream, System.Xml.Linq.LoadOptions.None, ct);
+                string ns = doc.Root?.Name.NamespaceName ?? "";
+                System.Xml.Linq.XNamespace xns = ns;
+                string? parsedId = doc.Root?.Element(xns + "metadata")?.Element(xns + "id")?.Value?.Trim();
+                if (!string.IsNullOrEmpty(parsedId))
+                {
+                    return parsedId;
+                }
+            }
+            else if (file.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase))
+            {
+                // ZipArchive needs a seekable stream, so the blob must be buffered first.
+                // Cap at 50 MB to bound the allocation: nupkgs with a nuspec as the first
+                // ZIP entry (the common case) parse correctly from a truncated read; packages
+                // larger than the cap fall back to the lowercase ID with no functional harm.
+                const int maxNupkgBytes = 50 * 1024 * 1024;
+                using var ms = new MemoryStream();
+                byte[] buf = new byte[81920];
+                int totalRead = 0, read;
+                while (totalRead < maxNupkgBytes &&
+                       (read = await stream.ReadAsync(buf.AsMemory(0, Math.Min(buf.Length, maxNupkgBytes - totalRead)), ct)) > 0)
+                {
+                    ms.Write(buf, 0, read);
+                    totalRead += read;
+                }
+                ms.Position = 0;
+                ms.Position = 0;
+                using var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Read);
+                var nuspecEntry = zip.Entries.FirstOrDefault(e =>
+                    e.Name.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase) &&
+                    !e.FullName.Contains('/'));
+                if (nuspecEntry is not null)
+                {
+                    using var nuspecStream = nuspecEntry.Open();
+                    var doc = System.Xml.Linq.XDocument.Load(nuspecStream);
+                    string ns = doc.Root?.Name.NamespaceName ?? "";
+                    System.Xml.Linq.XNamespace xns = ns;
+                    string? parsedId = doc.Root?.Element(xns + "metadata")?.Element(xns + "id")?.Value?.Trim();
+                    if (!string.IsNullOrEmpty(parsedId))
+                    {
+                        return parsedId;
+                    }
+                }
+            }
+        }
+        catch { /* malformed content — fall back to lowercase */ }
+
+        return normalizedId;
+    }
+
+    // Builds the ProxyFetchRequest record for a NuGet package, including integrity metadata
+    // from the upstream registration leaf. The license extractor branches on file extension:
+    // .nupkg files contain a nuspec; other sidecar files (e.g. .snupkg) carry no license data.
+    // The parameters are the assembly inputs of the ProxyFetchRequest record; grouping them
+    // into an intermediate carrier would add indirection without cohesion.
+#pragma warning disable S107
+    private static ProxyFetchRequest BuildNuGetProxyFetchRequest(
+        string orgId, string normalizedId, string normalizedVersion, string purl,
+        string file, BlobHandle blob, string upstreamBase,
+        TokenRecord? token, OrgSettings settings, NuGetFirstFetchMetadata meta,
+        string? sourceIp)
+#pragma warning restore S107
+    {
+        return new ProxyFetchRequest(
+            OrgId: orgId, Ecosystem: "nuget",
+            PackageName: normalizedId, PurlName: normalizedId,
+            Version: normalizedVersion, Purl: purl, File: file, Blob: blob,
+            ExtractLicenses: stream => file.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase)
+                ? LicenseExtractor.FromNuspec(stream)
+                : LicenseExtractor.ExtractedMetadata.Empty,
+            UserId: token?.UserId,
+            ActorKind: token?.ActorKind,
+            SourceIp: sourceIp,
+            MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
+            MinReleaseAgeHours: settings.MinReleaseAgeHours,
+            CacheAccess: new CacheAccess(orgId, "nuget", normalizedId, normalizedVersion, file,
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: $"{upstreamBase}/flatcontainer/{normalizedId}/{normalizedVersion}/{file}"),
+            PublishedAt: meta.PublishedAt,
+            UpstreamChecksum: meta.Checksum,
+            UpstreamIntegrityValue: meta.IntegrityBase64,
+            UpstreamIntegrityAlgorithm: meta.IntegrityBase64 is not null ? "sha512-b64" : null,
+            Deprecated: meta.Deprecated,
+            BlockDeprecatedMode: settings.BlockDeprecated,
+            BlockMaliciousMode: settings.BlockMalicious,
+            BlockKevMode: settings.BlockKev,
+            MaxEpssTolerance: settings.MaxEpssTolerance);
     }
 
     /// <summary>
@@ -843,41 +1399,49 @@ public partial class NuGetController : ControllerBase
     {
         try
         {
-            var leafUrl = $"{upstreamBase}/registration5-semver1/{normalizedId}/{normalizedVersion}.json";
+            string leafUrl = $"{upstreamBase}/registration5-semver1/{normalizedId}/{normalizedVersion}.json";
             // Route through single-flight — this leaf fetch is called inline with
             // every NuGet first-fetch download, so concurrent fan-out would otherwise
             // stampede the registration URL too.
             var resp = await _upstream.GetOrFetchMetadataAsync(leafUrl, ct);
-            if (!resp.IsSuccessStatusCode) return NuGetFirstFetchMetadata.Empty;
+            if (!resp.IsSuccessStatusCode)
+            {
+                return NuGetFirstFetchMetadata.Empty;
+            }
+
             var node = JsonNode.Parse(resp.BodyAsString());
 
             DateTimeOffset? publishedAt = null;
-            var published = node?["published"]?.GetValue<string>()
+            string? published = node?["published"]?.GetValue<string>()
                 ?? node?["catalogEntry"]?["published"]?.GetValue<string>();
             if (DateTimeOffset.TryParse(published, null,
                     System.Globalization.DateTimeStyles.RoundtripKind, out var ts)
                 && ts.Year >= 1901)
+            {
                 publishedAt = ts;
+            }
 
             // packageHash + packageHashAlgorithm live at the leaf root on most NuGet
             // sources; fall back to catalogEntry.* for older feeds that nest them there.
-            var hash = node?["packageHash"]?.GetValue<string>()
+            string? hash = node?["packageHash"]?.GetValue<string>()
                 ?? node?["catalogEntry"]?["packageHash"]?.GetValue<string>();
-            var algorithm = node?["packageHashAlgorithm"]?.GetValue<string>()
+            string? algorithm = node?["packageHashAlgorithm"]?.GetValue<string>()
                 ?? node?["catalogEntry"]?["packageHashAlgorithm"]?.GetValue<string>();
             var checksum = ChecksumVerifier.ParseNuGetHash(hash, algorithm);
 
             // Only surface the raw value when it's the SHA-512-base64 form we recognise —
             // otherwise the UI label would lie about the algorithm. The verification spec
             // above is gated the same way (ParseNuGetHash returns null for non-SHA512).
-            var integrityB64 = !string.IsNullOrEmpty(hash)
+            string? integrityB64 = !string.IsNullOrEmpty(hash)
                 && string.Equals(algorithm, "SHA512", StringComparison.OrdinalIgnoreCase)
                 ? hash : null;
 
             string? deprecated = null;
             var listed = node?["listed"] ?? node?["catalogEntry"]?["listed"];
-            if (listed is JsonValue lv && lv.TryGetValue<bool>(out var listedVal) && !listedVal)
+            if (listed is JsonValue lv && lv.TryGetValue<bool>(out bool listedVal) && !listedVal)
+            {
                 deprecated = "Unlisted upstream";
+            }
 
             return new NuGetFirstFetchMetadata(publishedAt, checksum, integrityB64, deprecated);
         }
@@ -893,34 +1457,9 @@ public partial class NuGetController : ControllerBase
         public static NuGetFirstFetchMetadata Empty => new(null, null, null, null);
     }
 
-    // NuGet client URLs use lowercase IDs, but OSV PURL lookups are case-sensitive.
-    // Extract the canonical-case ID from the downloaded content so the PURL matches OSV.
-    private static string ResolveCanonicalNuGetId(string file, byte[] bytes, string normalizedId)
-    {
-        if (file.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase))
-        {
-            try
-            {
-                var doc = XDocument.Parse(System.Text.Encoding.UTF8.GetString(bytes));
-                var ns = doc.Root?.Name.NamespaceName ?? "";
-                XNamespace xns = ns;
-                var parsedId = doc.Root?.Element(xns + "metadata")?.Element(xns + "id")?.Value?.Trim();
-                if (!string.IsNullOrEmpty(parsedId)) return parsedId;
-            }
-            catch { /* malformed nuspec — fall back to lowercase */ }
-        }
-        else if (file.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase))
-        {
-            var (parseResult, nuspecId, _) = ParseNupkg(bytes, isSymbol: false);
-            if (parseResult.IsValid && !string.IsNullOrEmpty(nuspecId)) return nuspecId;
-        }
-        return normalizedId;
-    }
-
-
     // ── Push ─────────────────────────────────────────────────────────────────
 
-    /// <summary>PUT /o/{org}/nuget/publish — push a .nupkg</summary>
+    /// <summary>PUT /nuget/publish — push a .nupkg</summary>
     [HttpPut("/nuget/publish")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishNuget)]
@@ -929,7 +1468,7 @@ public partial class NuGetController : ControllerBase
     public Task<IActionResult> Push(CancellationToken ct)
         => PushPackage(isSymbol: false, ct);
 
-    /// <summary>PUT /o/{org}/nuget/symbols — push a .snupkg</summary>
+    /// <summary>PUT /nuget/symbols — push a .snupkg</summary>
     [HttpPut("/nuget/symbols")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishNuget)]
@@ -940,20 +1479,28 @@ public partial class NuGetController : ControllerBase
 
     private async Task<IActionResult> PushPackage(bool isSymbol, CancellationToken ct)
     {
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
 
         var (token, authError) = await ResolveNuGetPushTokenAsync(orgId, ct);
-        if (authError is not null) return authError;
+        if (authError is not null)
+        {
+            return authError;
+        }
 
         var (bytes, readError) = await ReadPushBodyAsync(ct);
-        if (readError is not null) return readError;
+        if (readError is not null)
+        {
+            return readError;
+        }
 
         var (parseResult, nuspecId, nuspecVersion) = ParseNupkg(bytes!, isSymbol);
         if (!parseResult.IsValid)
+        {
             return UnprocessableEntity(new ProblemDetails { Detail = parseResult.Message, Status = 422 });
+        }
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        var limit = await _orgs.GetUploadLimitAsync(settings, "nuget", ct);
+        long limit = await _orgs.GetUploadLimitAsync(settings, "nuget", ct);
         var pushCtx = new NuGetPushContext(orgId, token!, settings, limit);
         var publishResult = await PublishNuspecAsync(
             pushCtx, nuspecId!, nuspecVersion!, isSymbol, bytes!, ct);
@@ -979,9 +1526,12 @@ public partial class NuGetController : ControllerBase
     private async Task<(TokenRecord? token, IActionResult? error)> ResolveNuGetPushTokenAsync(
         string orgId, CancellationToken ct)
     {
-        var apiKey = Request.Headers["X-NuGet-ApiKey"].FirstOrDefault();
+        string? apiKey = Request.Headers["X-NuGet-ApiKey"].FirstOrDefault();
         TokenRecord? token = null;
-        if (apiKey is not null) token = await _tokens.ResolveAsync(apiKey, ct);
+        if (apiKey is not null)
+        {
+            token = await _tokens.ResolveAsync(apiKey, ct);
+        }
 
         if (token is null || token.OrgId != orgId)
         {
@@ -998,12 +1548,16 @@ public partial class NuGetController : ControllerBase
     private async Task<(byte[]? bytes, IActionResult? error)> ReadPushBodyAsync(CancellationToken ct)
     {
         if (!Request.HasFormContentType)
+        {
             return (null, BadRequest("Expected multipart/form-data."));
+        }
 
         var form = await Request.ReadFormAsync(ct);
         var file = form.Files.Count > 0 ? form.Files[0] : null;
         if (file is null)
+        {
             return (null, UnprocessableEntity(new ProblemDetails { Detail = "No file in request.", Status = 422 }));
+        }
 
         using var ms = new MemoryStream();
         await file.CopyToAsync(ms, ct);
@@ -1019,14 +1573,24 @@ public partial class NuGetController : ControllerBase
         NuGetPushContext ctx, string nuspecId, string nuspecVersion,
         bool isSymbol, byte[] bytes, CancellationToken ct)
     {
-        var normalizedVersion = PurlNormalizer.NormalizeNuGetVersionString(nuspecVersion);
-        var purlName = nuspecId.ToLowerInvariant();
-        var filename = $"{purlName}.{normalizedVersion.ToLowerInvariant()}.{(isSymbol ? "snupkg" : "nupkg")}";
+        string normalizedVersion = PurlNormalizer.NormalizeNuGetVersionString(nuspecVersion);
+        string purlName = nuspecId.ToLowerInvariant();
+        string filename = $"{purlName}.{normalizedVersion.ToLowerInvariant()}.{(isSymbol ? "snupkg" : "nupkg")}";
 
-        if (ValidateNuspecCoordinates(nuspecId, nuspecVersion, filename) is { } pathError) return pathError;
-        if (await _publishGate.CheckAsync(ctx.OrgId, "nuget", purlName, ct) is { } claimReject) return claimReject;
+        if (ValidateNuspecCoordinates(nuspecId, nuspecVersion, filename) is { } pathError)
+        {
+            return pathError;
+        }
+
+        if (await _publishGate.CheckAsync(ctx.OrgId, "nuget", purlName, ct) is { } claimReject)
+        {
+            return claimReject;
+        }
+
         if (bytes.Length > ctx.Limit)
+        {
             return StatusCode(413, new ProblemDetails { Detail = "Upload exceeds NuGet size limit.", Status = 413 });
+        }
 
         var claim = await _claimResolver.ResolveAsync(ctx.OrgId, "nuget", purlName, ct);
         var publishResult = await _publish.StoreAndRecordAsync(
@@ -1039,8 +1603,14 @@ public partial class NuGetController : ControllerBase
                 : StatusCode(rej.HttpStatus, new ProblemDetails { Detail = rej.Message, Status = rej.HttpStatus });
         }
 
-        var versionId = ((Dependably.Infrastructure.Publish.PublishResult.Accepted)publishResult).VersionId;
+        string versionId = ((Dependably.Infrastructure.Publish.PublishResult.Accepted)publishResult).VersionId;
         await EmitNuspecLicensesAsync(versionId, bytes, ct);
+
+        // Evict both semver1 and semver2 registration caches so the newly-pushed version
+        // appears immediately on the next registration index request.
+        _cache.Remove(RegistrationCacheKey(ctx.OrgId, purlName, semVer2: false));
+        _cache.Remove(RegistrationCacheKey(ctx.OrgId, purlName, semVer2: true));
+
         return StatusCode(201);
     }
 
@@ -1055,7 +1625,9 @@ public partial class NuGetController : ControllerBase
         {
             var check = PathSafeValidator.Validate(value, kind);
             if (!check.IsValid)
+            {
                 return UnprocessableEntity(new ProblemDetails { Detail = check.Message, Status = 422 });
+            }
         }
         return null;
     }
@@ -1094,24 +1666,29 @@ public partial class NuGetController : ControllerBase
         // out of scope for this change). Wrap in a MemoryStream for the unified extractor.
         var extracted = LicenseExtractor.FromNuspec(new MemoryStream(bytes, writable: false));
         if (extracted.Spdx.Count > 0)
+        {
             await _licenses.SetLicensesAsync(versionId, extracted.Spdx, "upstream", ct);
+        }
     }
 
     // ── Unlist ───────────────────────────────────────────────────────────────
 
-    /// <summary>DELETE /o/{org}/nuget/publish/{id}/{version} — unlist (not hard-delete)</summary>
+    /// <summary>DELETE /nuget/publish/{id}/{version} — unlist (not hard-delete)</summary>
     [HttpDelete("/nuget/publish/{id}/{version}")]
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.YankNuget)]
     public async Task<IActionResult> Unlist(string id, string version, CancellationToken ct)
     {
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
 
         // [Authorize] + [RequireCapability(YankNuget)] enforce auth + capability above.
         // Resolve the token here only for the cross-tenant guard.
-        var apiKey = Request.Headers["X-NuGet-ApiKey"].FirstOrDefault();
+        string? apiKey = Request.Headers["X-NuGet-ApiKey"].FirstOrDefault();
         TokenRecord? token = null;
-        if (apiKey is not null) token = await _tokens.ResolveAsync(apiKey, ct);
+        if (apiKey is not null)
+        {
+            token = await _tokens.ResolveAsync(apiKey, ct);
+        }
 
         if (token is null || token.OrgId != orgId)
         {
@@ -1120,26 +1697,38 @@ public partial class NuGetController : ControllerBase
         }
 
         var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", id.ToLowerInvariant(), ct);
-        if (pkg is null) return NotFound();
+        if (pkg is null)
+        {
+            return NotFound();
+        }
 
         var pkgVersion = await _packages.GetVersionAsync(pkg.Id, version, ct);
-        if (pkgVersion is null) return NotFound();
+        if (pkgVersion is null)
+        {
+            return NotFound();
+        }
 
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE package_versions SET yanked = 1 WHERE id = @id",
             new { id = pkgVersion.Id });
 
+        // Evict both semver variants so the unlisted version disappears from registration
+        // index responses immediately.
+        string normalizedPurl = id.ToLowerInvariant();
+        _cache.Remove(RegistrationCacheKey(orgId, normalizedPurl, semVer2: false));
+        _cache.Remove(RegistrationCacheKey(orgId, normalizedPurl, semVer2: true));
+
         return NoContent();
     }
 
     // ── Symbol download ──────────────────────────────────────────────────────
 
-    /// <summary>GET /o/{org}/nuget/symbols/{id}/{version}/{file}</summary>
+    /// <summary>GET /nuget/symbols/{id}/{version}/{file}</summary>
     [HttpGet("/nuget/symbols/{id}/{version}/{file}")]
     public async Task<IActionResult> GetSymbols(string id, string version, string file, CancellationToken ct)
     {
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
@@ -1151,13 +1740,19 @@ public partial class NuGetController : ControllerBase
         }
 
         var pkg = await _packages.GetByPurlNameAsync(orgId, "nuget", id.ToLowerInvariant(), ct);
-        if (pkg is null) return NotFound();
+        if (pkg is null)
+        {
+            return NotFound();
+        }
 
         var versions = await _packages.GetVersionsAsync(pkg.Id, ct);
-        var normalizedSymbolVersion = NuGet.Versioning.NuGetVersion.TryParse(version, out var snv)
+        string normalizedSymbolVersion = NuGet.Versioning.NuGetVersion.TryParse(version, out var snv)
             ? snv.ToNormalizedString() : version;
         var match = versions.FirstOrDefault(v => v.Version == normalizedSymbolVersion && v.BlobKey.EndsWith(".snupkg"));
-        if (match is null) return NotFound();
+        if (match is null)
+        {
+            return NotFound();
+        }
 
         // Privately-uploaded symbols require a token regardless of AnonymousPull, mirroring the
         // .nupkg path (ServeHostedVersionAsync). Symbols are always uploaded-origin (there is no
@@ -1170,9 +1765,7 @@ public partial class NuGetController : ControllerBase
         }
 
         var stream = await _blobs.GetAsync(BlobKeys.StoreKey(match.BlobKey), ct);
-        if (stream is null) return NotFound();
-
-        return File(stream, "application/octet-stream", file);
+        return stream is null ? NotFound() : File(stream, "application/octet-stream", file);
     }
 
     // ── Validation helpers ────────────────────────────────────────────────────
@@ -1185,9 +1778,11 @@ public partial class NuGetController : ControllerBase
 
             if (isSymbol)
             {
-                var hasPdb = zip.Entries.Any(e => e.Name.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase));
+                bool hasPdb = zip.Entries.Any(e => e.Name.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase));
                 if (!hasPdb)
+                {
                     return (ValidationResult.Fail("content", ".snupkg must contain at least one .pdb file"), null, null);
+                }
             }
 
             var nuspecEntry = zip.Entries.FirstOrDefault(e =>
@@ -1195,36 +1790,50 @@ public partial class NuGetController : ControllerBase
                 !e.FullName.Contains('/'));
 
             if (nuspecEntry is null)
+            {
                 return (ValidationResult.Fail("content", "No .nuspec found at ZIP root"), null, null);
+            }
 
             using var nuspecStream = nuspecEntry.Open();
             var doc = XDocument.Load(nuspecStream);
-            var ns = doc.Root?.Name.NamespaceName ?? "";
+            string ns = doc.Root?.Name.NamespaceName ?? "";
 
             if (!KnownNuspecNamespaces.Contains(ns))
+            {
                 return (ValidationResult.Fail("content", $"Unknown nuspec namespace: {ns}"), null, null);
+            }
 
             XNamespace xns = ns;
             var metadata = doc.Root?.Element(xns + "metadata");
-            var id = metadata?.Element(xns + "id")?.Value?.Trim();
-            var version = metadata?.Element(xns + "version")?.Value?.Trim();
-            var description = metadata?.Element(xns + "description")?.Value?.Trim();
-            var authors = metadata?.Element(xns + "authors")?.Value?.Trim();
+            string? id = metadata?.Element(xns + "id")?.Value?.Trim();
+            string? version = metadata?.Element(xns + "version")?.Value?.Trim();
+            string? description = metadata?.Element(xns + "description")?.Value?.Trim();
+            string? authors = metadata?.Element(xns + "authors")?.Value?.Trim();
 
             if (string.IsNullOrEmpty(id) || id.Length > 100)
+            {
                 return (ValidationResult.Fail("id", "id must be 1-100 characters"), null, null);
+            }
 
             if (!NuGetIdRegex().IsMatch(id))
+            {
                 return (ValidationResult.Fail("id", "id contains invalid characters"), null, null);
+            }
 
             if (!NuGetVersion.TryParse(version, out _))
+            {
                 return (ValidationResult.Fail("version", $"Invalid NuGet version: {version}"), null, null);
+            }
 
             if (string.IsNullOrEmpty(description))
+            {
                 return (ValidationResult.Fail("description", "description is required"), null, null);
+            }
 
             if (string.IsNullOrEmpty(authors))
+            {
                 return (ValidationResult.Fail("authors", "authors is required"), null, null);
+            }
 
             return (ValidationResult.Ok(), id, version);
         }
@@ -1246,6 +1855,12 @@ public partial class NuGetController : ControllerBase
 
     private static string SanitizeHeader(string value)
         => value.Replace("\r", "").Replace("\n", "").Replace("\0", "");
+
+    private static string ComputeETag(byte[] bytes)
+    {
+        byte[] hash = SHA256.HashData(bytes);
+        return "\"" + Convert.ToHexString(hash)[..16].ToLowerInvariant() + "\"";
+    }
 }
 
 // DI-injected dependency aggregate for NuGetController. Single param avoids S107.
@@ -1266,6 +1881,8 @@ public sealed record NuGetControllerServices(
     PublishGate PublishGate,
     Dependably.Infrastructure.Publish.IPackagePublishService Publish,
     ClaimResolver ClaimResolver,
+    ReservedNamespaceService ReservedNamespaces,
     Dependably.Storage.ProxyFetchService ProxyFetch,
     ILogger<NuGetController> Logger,
-    UpstreamRegistryResolver Registries);
+    UpstreamRegistryResolver Registries,
+    IMemoryCache Cache);

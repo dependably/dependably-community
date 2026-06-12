@@ -4,7 +4,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -24,7 +23,7 @@ public sealed class DeleteVersionPackageGcTests : IClassFixture<DependablyFactor
 
     private async Task<HttpClient> AdminClient()
     {
-        var jwt = await _factory.CreateAdminJwt();
+        string jwt = await _factory.CreateAdminJwt();
         var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         return c;
@@ -34,8 +33,10 @@ public sealed class DeleteVersionPackageGcTests : IClassFixture<DependablyFactor
     {
         var part = new ByteArrayContent(bytes);
         part.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-        var content = new MultipartFormDataContent();
-        content.Add(part, "files", name);
+        var content = new MultipartFormDataContent
+        {
+            { part, "files", name }
+        };
         return content;
     }
 
@@ -62,11 +63,11 @@ public sealed class DeleteVersionPackageGcTests : IClassFixture<DependablyFactor
 
         await using (var conn = await db.OpenAsync())
         {
-            var pkgCountAfter = await conn.ExecuteScalarAsync<long>(
+            long pkgCountAfter = await conn.ExecuteScalarAsync<long>(
                 "SELECT COUNT(*) FROM packages WHERE ecosystem = 'npm' AND purl_name = 'acme-gc-last'");
             Assert.Equal(0, pkgCountAfter);
 
-            var verCountAfter = await conn.ExecuteScalarAsync<long>(
+            long verCountAfter = await conn.ExecuteScalarAsync<long>(
                 "SELECT COUNT(*) FROM package_versions pv " +
                 "JOIN packages p ON p.id = pv.package_id " +
                 "WHERE p.ecosystem = 'npm' AND p.purl_name = 'acme-gc-last'");
@@ -88,7 +89,7 @@ public sealed class DeleteVersionPackageGcTests : IClassFixture<DependablyFactor
 
         var db = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await db.OpenAsync();
-        var pkgCount = await conn.ExecuteScalarAsync<long>(
+        long pkgCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM packages WHERE ecosystem = 'npm' AND purl_name = 'acme-gc-two'");
         Assert.Equal(1, pkgCount);
 

@@ -30,7 +30,7 @@ public sealed class SystemBackgroundJobsTests : IClassFixture<DependablyMultiFac
         // on subsequent calls — fine, the hook is idempotent.
         BackgroundJobScope.Services = _factory.Services;
 
-        var uniqueJob = "test-job-" + Guid.NewGuid().ToString("N")[..8];
+        string uniqueJob = "test-job-" + Guid.NewGuid().ToString("N")[..8];
         using (var scope = BackgroundJobScope.Begin(uniqueJob, "smoke-tick"))
         {
             scope.Complete();
@@ -40,7 +40,7 @@ public sealed class SystemBackgroundJobsTests : IClassFixture<DependablyMultiFac
         // we read it back. Short retry loop avoids a sleep race on slower CI hardware.
         JsonElement match = default;
         using var client = await _factory.CreateSystemAdminClient();
-        for (var attempt = 0; attempt < 30; attempt++)
+        for (int attempt = 0; attempt < 30; attempt++)
         {
             var resp = await client.GetAsync($"/api/v1/system/background-jobs?jobName={uniqueJob}&limit=50");
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -72,7 +72,7 @@ public sealed class SystemBackgroundJobsTests : IClassFixture<DependablyMultiFac
     public async Task ListBackgroundJobs_FiltersByOutcome()
     {
         BackgroundJobScope.Services = _factory.Services;
-        var name = "test-outcome-" + Guid.NewGuid().ToString("N")[..8];
+        string name = "test-outcome-" + Guid.NewGuid().ToString("N")[..8];
 
         using (var ok = BackgroundJobScope.Begin(name, "ok")) { ok.Complete(); }
         using (var bad = BackgroundJobScope.Begin(name, "bad")) { bad.Fail(new InvalidOperationException("boom")); }
@@ -80,13 +80,17 @@ public sealed class SystemBackgroundJobsTests : IClassFixture<DependablyMultiFac
         // Wait for both rows to land. We loop on the unfiltered count so we don't race the
         // outcome filter on a partially-flushed pair.
         var db = _factory.Services.GetRequiredService<IMetadataStore>();
-        for (var attempt = 0; attempt < 30; attempt++)
+        for (int attempt = 0; attempt < 30; attempt++)
         {
             await using var conn = await db.OpenAsync();
-            var count = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn,
+            int count = await Dapper.SqlMapper.ExecuteScalarAsync<int>(conn,
                 "SELECT COUNT(*) FROM background_job_runs WHERE job_name = @name",
                 new { name });
-            if (count >= 2) break;
+            if (count >= 2)
+            {
+                break;
+            }
+
             await Task.Delay(50);
         }
 
@@ -108,7 +112,7 @@ public sealed class SystemBackgroundJobsTests : IClassFixture<DependablyMultiFac
         using var tenantClient = _factory.CreateClient();
         var resp = await tenantClient.GetAsync("/api/v1/system/background-jobs");
         Assert.True(
-            resp.StatusCode == HttpStatusCode.NotFound || resp.StatusCode == HttpStatusCode.Unauthorized,
+            resp.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Unauthorized,
             $"Unauthenticated tenant call must not succeed; got {(int)resp.StatusCode}.");
     }
 }

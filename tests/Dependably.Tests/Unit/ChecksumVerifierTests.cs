@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -148,7 +147,7 @@ public sealed class ChecksumVerifierTests
     public void Verify_Sha512_Mismatch_ReturnsFalse()
     {
         // 64 valid-base64 chars but not the right hash.
-        var bogus = Convert.ToBase64String(new byte[64]);
+        string bogus = Convert.ToBase64String(new byte[64]);
         Assert.False(ChecksumVerifier.Verify(Payload, new ChecksumSpec(ChecksumAlgorithm.Sha512, bogus)));
     }
 

@@ -20,9 +20,9 @@ public static partial class BlobKeys
     /// </remarks>
     public static string Proxy(string sha256)
     {
-        if (!Sha256HexRegex().IsMatch(sha256))
-            throw new ArgumentException("sha256 must be 64 lowercase hex characters", nameof(sha256));
-        return $"proxy/{sha256}";
+        return !Sha256HexRegex().IsMatch(sha256)
+            ? throw new ArgumentException("sha256 must be 64 lowercase hex characters", nameof(sha256))
+            : $"proxy/{sha256}";
     }
 
     /// <summary>Org-scoped key for hosted (privately published) blobs.</summary>
@@ -32,8 +32,7 @@ public static partial class BlobKeys
     /// <summary>
     /// Org-scoped key for generated RPM repodata files. repomd.xml and the
     /// compressed primary/filelists/other XML documents live under a per-arch path so
-    /// <c>dnf</c> clients reading <c>/o/{org}/rpm/repodata/{arch}/{file}</c> resolve
-    /// directly.
+    /// <c>dnf</c> clients reading <c>/rpm/repodata/{arch}/{file}</c> resolve directly.
     /// </summary>
     public static string Repodata(string orgId, string arch, string filename)
         => $"hosted/{orgId}/rpm/repodata/{arch}/{filename}";
@@ -56,13 +55,30 @@ public static partial class BlobKeys
         => $"oci/{digestAlgorithm}/{digestHex}";
 
     /// <summary>
+    /// Org-scoped key for a Go module proxy artifact.
+    /// <paramref name="ext"/> is one of <c>info</c>, <c>mod</c>, or <c>zip</c>.
+    /// The module path may contain slashes (e.g. <c>github.com/user/pkg</c>); callers must
+    /// validate each segment with <see cref="Dependably.Security.PathSafeValidator"/> before
+    /// passing the assembled path here.
+    /// </summary>
+    public static string Go(string orgId, string module, string version, string ext)
+        => $"go/{orgId}/{module}/{version}/{ext}";
+
+    /// <summary>
+    /// Org-scoped key for a Cargo crate file (.crate). Each (org, name, version) tuple maps
+    /// to one blob; the .crate suffix matches what the Cargo client expects on download.
+    /// </summary>
+    public static string Cargo(string orgId, string name, string version)
+        => $"cargo/{orgId}/{name}/{version}.crate";
+
+    /// <summary>
     /// Converts a DB blob key to the actual blob store key.
     /// Proxy DB keys include a filename suffix (proxy/{sha256}/{file}) but blobs are stored at proxy/{sha256}.
     /// Hosted keys are returned unchanged.
     /// </summary>
     public static string StoreKey(string dbKey)
     {
-        var parts = dbKey.Split('/');
+        string[] parts = dbKey.Split('/');
         return parts.Length == 3 && parts[0] == "proxy" ? $"{parts[0]}/{parts[1]}" : dbKey;
     }
 }

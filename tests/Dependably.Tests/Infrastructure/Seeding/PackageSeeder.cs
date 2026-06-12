@@ -18,7 +18,7 @@ public static class PackageSeeder
         string? purlName = null,
         CancellationToken ct = default)
     {
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         await using var conn = await db.OpenAsync(ct);
         await conn.ExecuteAsync("""
             INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy)
@@ -39,11 +39,11 @@ public static class PackageSeeder
         string? checksumSha256 = null,
         CancellationToken ct = default)
     {
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         // Mirror PackageRepository.CreateVersionAsync: derive filename from blob_key so
         // the new download lookup (FindVersionByBlobKeySuffixAsync) can find seeded rows
         // via idx_package_versions_filename instead of the previous LIKE.
-        var filename = PackageRepository.DeriveFilename(blobKey);
+        string filename = PackageRepository.DeriveFilename(blobKey);
         await using var conn = await db.OpenAsync(ct);
         await conn.ExecuteAsync("""
             INSERT INTO package_versions (id, package_id, version, purl, blob_key, filename, size_bytes, checksum_sha256, origin)

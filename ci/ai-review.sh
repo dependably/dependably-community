@@ -13,7 +13,14 @@ REPORT_FILE="${2:?usage: ai-review.sh <persona_file> <report_file>}"
 : "${CI_MERGE_REQUEST_IID:?this script only runs on merge_request_event pipelines}"
 
 MAX_DIFF_BYTES="${AI_REVIEW_MAX_DIFF_BYTES:-120000}"
-NUM_CTX="${AI_REVIEW_NUM_CTX:-16384}"
+# Context window. MUST be large enough to hold the prompt (persona + the capped
+# diff, ~3.45 bytes/token => a 120000-byte diff is ~35K tokens) AND leave room to
+# generate (NUM_PREDICT). At the old 16384 a large diff filled the entire window,
+# so Ollama truncated the prompt to fit and left ~0 tokens for output: the model
+# emitted 1 token then stopped (done_reason=length) and the run reported empty /
+# near-empty content. 49152 holds the full diff cap plus the verify pass's
+# candidates-and-diff turn with headroom. Keep NUM_CTX ≳ MAX_DIFF_BYTES/3 + 6000.
+NUM_CTX="${AI_REVIEW_NUM_CTX:-49152}"
 # Sampling tuned to avoid BOTH degeneration modes a 30B quantized coder falls
 # into. A small non-zero temperature avoids greedy repetition loops. min_p
 # tail-cuts improbable tokens, which is the robust guard against word-salad.
@@ -25,12 +32,22 @@ TEMPERATURE="${AI_REVIEW_TEMPERATURE:-0.3}"
 REPEAT_PENALTY="${AI_REVIEW_REPEAT_PENALTY:-1.1}"
 MIN_P="${AI_REVIEW_MIN_P:-0.05}"
 NUM_PREDICT="${AI_REVIEW_NUM_PREDICT:-1500}"
+# Disable model "thinking". Reasoning models (e.g. gemma4:*) split their output
+# into a `message.thinking` chain-of-thought and a `message.content` answer, and
+# the thinking counts against num_predict. On a real diff the model exhausts the
+# whole NUM_PREDICT budget reasoning (done_reason=length) before it writes a
+# single token of content, so `.message.content` — the only field we read — comes
+# back empty and the run reports "no content". For an advisory review that is then
+# speculation-filtered we want the formatted findings, not the scratch work, so we
+# turn thinking off by default (also faster / cheaper). Set AI_REVIEW_THINK=true to
+# restore it (and raise NUM_PREDICT well past the thinking length if you do).
+THINK="${AI_REVIEW_THINK:-false}"
 CURL_MAX_TIME="${AI_REVIEW_CURL_MAX_TIME:-1000}"
 # Diff context width (git default is 3). More surrounding lines let the model
 # verify a hunk against its neighbours instead of speculating about code it
 # can't see ("not visible here, but…"). Kept modest: wider context grows the
 # diff, so it reaches MAX_DIFF_BYTES / num_ctx sooner on large MRs. Full
-# changed-file bodies would blow the 16K context window, so -U10 is the middle.
+# changed-file bodies would blow the context window, so -U10 is the middle.
 DIFF_CONTEXT="${AI_REVIEW_DIFF_CONTEXT:-10}"
 # Self-verify: a second model pass that filters the first pass's findings,
 # keeping only those grounded in a quoted diff line. Cuts false positives from
@@ -116,9 +133,10 @@ build_request() {  # <system_file> <user_file>
     --argjson predict "$NUM_PREDICT" \
     --argjson rpen "$REPEAT_PENALTY" \
     --argjson minp "$MIN_P" \
+    --argjson think "$THINK" \
     --rawfile sys "$1" \
     --rawfile usr "$2" \
-    '{model: $model, stream: false,
+    '{model: $model, stream: false, think: $think,
       options: {temperature: $temp, num_ctx: $ctx, num_predict: $predict,
                 repeat_penalty: $rpen, repeat_last_n: 512, min_p: $minp},
       messages: [

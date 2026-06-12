@@ -7,7 +7,15 @@ namespace Dependably.Infrastructure;
 /// Operators can still create explicit claim rows in air-gap mode for auditing — those rows
 /// are honored if present.
 ///
-/// In connected deployments, missing claim row → <see cref="ClaimStateMachine.Unclaimed"/>.
+/// In connected deployments, a missing claim row resolves by hosted content
+/// (dependency-confusion guard): a name the org has at least one hosted
+/// (origin='uploaded') version for is implicitly <see cref="ClaimStateMachine.LocalOnly"/>
+/// — upstream must not be able to shadow it — while a name with no hosted versions stays
+/// <see cref="ClaimStateMachine.Unclaimed"/>. An explicit <c>mixed</c> claim remains the
+/// deliberate operator opt-in to upstream merging on a hosted name.
+///
+/// Resolutions are computed per call (no caching here), so the implicit state flips as soon
+/// as the first hosted version lands.
 /// </summary>
 public sealed class ClaimResolver
 {
@@ -28,9 +36,20 @@ public sealed class ClaimResolver
     {
         var explicitClaim = await _claims.GetAsync(orgId, ecosystem, name, ct);
         if (explicitClaim is not null)
+        {
             return new EffectiveClaim(explicitClaim.State, explicitClaim, IsImplicit: false);
+        }
 
-        var defaultState = _airGap.IsEnabled ? ClaimStateMachine.LocalOnly : ClaimStateMachine.Unclaimed;
+        if (_airGap.IsEnabled)
+        {
+            return new EffectiveClaim(ClaimStateMachine.LocalOnly, null, IsImplicit: true);
+        }
+
+        // Hosted-name shadowing guard: a name with hosted versions but no claim row is
+        // implicitly local_only so the proxy never merges or fetches upstream for it.
+        string defaultState = await _claims.HasUploadedVersionsAsync(orgId, ecosystem, name, ct)
+            ? ClaimStateMachine.LocalOnly
+            : ClaimStateMachine.Unclaimed;
         return new EffectiveClaim(defaultState, null, IsImplicit: true);
     }
 

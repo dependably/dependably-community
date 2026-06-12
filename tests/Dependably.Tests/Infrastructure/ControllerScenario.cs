@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Claims;
 using Dependably.Api;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Mail;
 using Dependably.Protocol;
 using Dependably.Resources;
 using Dependably.Security;
@@ -68,15 +69,18 @@ public sealed class ControllerScenario : IAsyncDisposable
 
     private void EnsureNotBuilt()
     {
-        if (_built) throw new InvalidOperationException(
+        if (_built)
+        {
+            throw new InvalidOperationException(
             "ControllerScenario is immutable after BuildAsync. Add seeding before BuildAsync.");
+        }
     }
 
     /// <summary>Inserts a tenant. The first call sets the "primary" org the controller's TenantContext binds to.</summary>
     public async Task<ControllerScenario> WithOrgAsync(string slug = "acme")
     {
         EnsureNotBuilt();
-        var id = await OrgSeeder.InsertAsync(_fixture.Store, slug);
+        string id = await OrgSeeder.InsertAsync(_fixture.Store, slug);
         _orgIdsBySlug[slug] = id;
         _primaryOrgSlug ??= slug;
         return this;
@@ -92,13 +96,20 @@ public sealed class ControllerScenario : IAsyncDisposable
         string accountStatus = "active")
     {
         EnsureNotBuilt();
-        if (!_orgIdsBySlug.TryGetValue(org, out var orgId))
+        if (!_orgIdsBySlug.TryGetValue(org, out string? orgId))
+        {
             throw new InvalidOperationException(
                 $"WithUserAsync references org '{org}' that hasn't been added. Call WithOrgAsync(\"{org}\") first.");
-        var id = await UserSeeder.InsertAsync(_fixture.Store, orgId, email, role, accountStatus: accountStatus);
+        }
+
+        string id = await UserSeeder.InsertAsync(_fixture.Store, orgId, email, role, accountStatus: accountStatus);
         _userIdsByEmail[email] = id;
         _actorUserId ??= id;
-        if (_actorUserId == id) _actorRole = role;
+        if (_actorUserId == id)
+        {
+            _actorRole = role;
+        }
+
         return this;
     }
 
@@ -106,9 +117,12 @@ public sealed class ControllerScenario : IAsyncDisposable
     public async Task<ControllerScenario> WithLicensePolicyAsync(string mode, string org = "acme")
     {
         EnsureNotBuilt();
-        if (!_orgIdsBySlug.TryGetValue(org, out var orgId))
+        if (!_orgIdsBySlug.TryGetValue(org, out string? orgId))
+        {
             throw new InvalidOperationException(
                 $"WithLicensePolicyAsync references org '{org}' that hasn't been added. Call WithOrgAsync(\"{org}\") first.");
+        }
+
         await LicensePolicySeeder.SetModeAsync(_fixture.Store, orgId, mode);
         return this;
     }
@@ -121,10 +135,13 @@ public sealed class ControllerScenario : IAsyncDisposable
         string name, string ecosystem = "npm", string org = "acme", bool isProxy = false)
     {
         EnsureNotBuilt();
-        if (!_orgIdsBySlug.TryGetValue(org, out var orgId))
+        if (!_orgIdsBySlug.TryGetValue(org, out string? orgId))
+        {
             throw new InvalidOperationException(
                 $"WithPackageAsync references org '{org}' that hasn't been added. Call WithOrgAsync(\"{org}\") first.");
-        var id = await PackageSeeder.InsertAsync(_fixture.Store, orgId, ecosystem, name, isProxy);
+        }
+
+        string id = await PackageSeeder.InsertAsync(_fixture.Store, orgId, ecosystem, name, isProxy);
         _packageIds[(org, ecosystem, name)] = id;
         return this;
     }
@@ -138,12 +155,15 @@ public sealed class ControllerScenario : IAsyncDisposable
         string name, string version, string ecosystem = "npm", string org = "acme", string origin = "uploaded")
     {
         EnsureNotBuilt();
-        if (!_packageIds.TryGetValue((org, ecosystem, name), out var pkgId))
+        if (!_packageIds.TryGetValue((org, ecosystem, name), out string? pkgId))
+        {
             throw new InvalidOperationException(
                 $"WithPackageVersionAsync references package '{ecosystem}/{name}' in org '{org}' that hasn't been added. " +
                 $"Call WithPackageAsync first.");
-        var purl = $"pkg:{ecosystem}/{Guid.NewGuid():N}/{name}@{version}";
-        var verId = await PackageSeeder.InsertVersionAsync(
+        }
+
+        string purl = $"pkg:{ecosystem}/{Guid.NewGuid():N}/{name}@{version}";
+        string verId = await PackageSeeder.InsertVersionAsync(
             _fixture.Store, pkgId, version, purl, origin: origin, blobKey: $"blob/{Guid.NewGuid():N}");
         _versionIds[(org, ecosystem, name, version)] = verId;
         return this;
@@ -153,9 +173,12 @@ public sealed class ControllerScenario : IAsyncDisposable
     public async Task<ControllerScenario> WithLicenseAllowlistEntryAsync(string spdx, string org = "acme")
     {
         EnsureNotBuilt();
-        if (!_orgIdsBySlug.TryGetValue(org, out var orgId))
+        if (!_orgIdsBySlug.TryGetValue(org, out string? orgId))
+        {
             throw new InvalidOperationException(
                 $"Org '{org}' not seeded. Call WithOrgAsync first.");
+        }
+
         await LicensePolicySeeder.AddAllowlistEntryAsync(_fixture.Store, orgId, spdx);
         return this;
     }
@@ -164,9 +187,12 @@ public sealed class ControllerScenario : IAsyncDisposable
     public async Task<ControllerScenario> WithLicenseBlocklistEntryAsync(string spdx, string org = "acme")
     {
         EnsureNotBuilt();
-        if (!_orgIdsBySlug.TryGetValue(org, out var orgId))
+        if (!_orgIdsBySlug.TryGetValue(org, out string? orgId))
+        {
             throw new InvalidOperationException(
                 $"Org '{org}' not seeded. Call WithOrgAsync first.");
+        }
+
         await LicensePolicySeeder.AddBlocklistEntryAsync(_fixture.Store, orgId, spdx);
         return this;
     }
@@ -191,11 +217,14 @@ public sealed class ControllerScenario : IAsyncDisposable
     {
         EnsureNotBuilt();
         if (_primaryOrgSlug is null)
+        {
             throw new InvalidOperationException(
                 "Call WithOrgAsync(...) first to establish the primary org before WithUserInDifferentOrgAsync.");
-        var otherOrgId = await OrgSeeder.InsertAsync(_fixture.Store, otherOrgSlug);
+        }
+
+        string otherOrgId = await OrgSeeder.InsertAsync(_fixture.Store, otherOrgSlug);
         _orgIdsBySlug[otherOrgSlug] = otherOrgId;
-        var userId = await UserSeeder.InsertAsync(_fixture.Store, otherOrgId, email, role);
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, otherOrgId, email, role);
         _userIdsByEmail[email] = userId;
         _actorUserId = userId;
         _actorRole = role;
@@ -212,14 +241,16 @@ public sealed class ControllerScenario : IAsyncDisposable
 
     // ── Build ────────────────────────────────────────────────────────────────
 
-    public async Task<ControllerScenarioResult> BuildAsync()
+    public async Task<ControllerScenarioResult> BuildAsync(IInviteMailer? mailer = null)
     {
         EnsureNotBuilt();
 
         if (_primaryOrgSlug is null)
+        {
             throw new InvalidOperationException("A scenario must include at least one WithOrgAsync(...) call.");
+        }
 
-        var primaryOrgId = _orgIdsBySlug[_primaryOrgSlug];
+        string primaryOrgId = _orgIdsBySlug[_primaryOrgSlug];
 
         var http = new DefaultHttpContext();
         // Default a sensible host so RequestPublicUrlBuilder.BaseUrl doesn't produce
@@ -229,7 +260,7 @@ public sealed class ControllerScenario : IAsyncDisposable
         http.Items[TenantContext.HttpItemsKey] = TenantContext.ForTenant(primaryOrgId, _primaryOrgSlug);
         if (!_actorIsAnonymous && _actorUserId is not null)
         {
-            var orgIdForClaim = _actorOrgOverride ?? primaryOrgId;
+            string orgIdForClaim = _actorOrgOverride ?? primaryOrgId;
             http.User = new ClaimsPrincipal(new ClaimsIdentity(
                 [
                     new Claim(ClaimTypes.NameIdentifier, _actorUserId),
@@ -274,6 +305,8 @@ public sealed class ControllerScenario : IAsyncDisposable
         var allowlist = new AllowlistRepository(db);
         var blocklist = new BlocklistRepository(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
             new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
+        var reservedNamespaces = new ReservedNamespaceService(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
+            new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
         var samlConfig = new SamlConfigRepository(db);
         var blobs = new Dependably.Storage.InMemoryBlobStore();
         var publicUrl = new RequestPublicUrlBuilder(new ConfigurationBuilder().Build());
@@ -281,41 +314,56 @@ public sealed class ControllerScenario : IAsyncDisposable
 
         var license = new LicenseController(licenses, orgs, guard, problems, audit) { ControllerContext = ctx };
         var jobRuns = new BackgroundJobRunRepository(db);
-        var instance = new InstanceController(orgs, audit, guard, noAirGap, jobRuns) { ControllerContext = ctx };
-        var vuln = new VulnerabilityController(vulns, packages, scanner, audit, guard,
-            NullLogger<VulnerabilityController>.Instance) { ControllerContext = ctx };
+        var instance = new InstanceController(orgs, audit, guard, noAirGap, jobRuns,
+            new ConfigurationBuilder().Build())
+        { ControllerContext = ctx };
+        var vuln = new VulnerabilityController(vulns, packages, scanner, audit,
+            new QuarantineRepository(db), guard,
+            NullLogger<VulnerabilityController>.Instance)
+        { ControllerContext = ctx };
         var system = new SystemController(orgs, systemAdmins, db, audit, problems,
             new ConfigurationBuilder().Build(),
-            new Dependably.Security.PasswordPolicy()) { ControllerContext = ctx };
+            new Dependably.Security.PasswordPolicy())
+        { ControllerContext = ctx };
 
         var packageAnalytics = new PackageAnalyticsRepository(db);
+        var statsSnapshots = new StatsSnapshotRepository(db);
         var orgSvc = new OrgControllerServices(
             Orgs: orgs, Packages: packages, PackageAnalytics: packageAnalytics,
+            StatsSnapshots: statsSnapshots,
             Tokens: tokens, Invites: invites,
             Allowlist: allowlist, Blocklist: blocklist, Audit: audit, Guard: guard,
             Blobs: blobs, BlobStorage: new Dependably.Storage.TieredBlobStorage(blobs, blobs),
             Config: new ConfigurationBuilder().Build(),
             Logger: NullLogger<OrgController>.Instance, Problems: problems,
             Licenses: licenses, Vulns: vulns, Urls: publicUrl,
-            AuditEmitter: orgAuditEmitter);
+            AuditEmitter: orgAuditEmitter,
+            Cache: new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
         var org = new OrgController(orgSvc) { ControllerContext = ctx };
         var orgSettingsRepo = new OrgSettingsRepository(db);
         var orgSettings = new OrgSettingsController(
             orgSettingsRepo, guard, audit, orgAuditEmitter,
             new ConfigurationBuilder().Build(), problems,
-            new AirGapMode(new ConfigurationBuilder().Build())) { ControllerContext = ctx };
+            new AirGapMode(new ConfigurationBuilder().Build()))
+        { ControllerContext = ctx };
         var orgTokens = new OrgTokensController(
-            tokens, guard, audit, orgAuditEmitter, problems) { ControllerContext = ctx };
+            tokens, orgs, guard, audit, orgAuditEmitter, problems)
+        { ControllerContext = ctx };
         var orgInvites = new OrgInvitesController(
             invites, guard, audit, new ConfigurationBuilder().Build(),
-            NullLogger<OrgInvitesController>.Instance, publicUrl, problems) { ControllerContext = ctx };
+            NullLogger<OrgInvitesController>.Instance, publicUrl, problems,
+            mailer: mailer)
+        { ControllerContext = ctx };
         var orgUsers = new OrgUsersController(
-            orgs, guard, audit, problems) { ControllerContext = ctx };
+            orgs, guard, audit, problems)
+        { ControllerContext = ctx };
         var orgLists = new OrgListsController(
-            allowlist, blocklist, guard, audit, problems) { ControllerContext = ctx };
+            allowlist, blocklist, reservedNamespaces, guard, audit, problems)
+        { ControllerContext = ctx };
         var orgAudit = new OrgAuditController(audit, guard) { ControllerContext = ctx };
         var orgAuthConfig = new OrgAuthConfigController(
-            guard, samlConfig, audit, publicUrl, problems) { ControllerContext = ctx };
+            guard, samlConfig, audit, publicUrl, problems)
+        { ControllerContext = ctx };
 
         var claimRepo = new ClaimRepository(db);
         var airGap = Substitute.For<IAirGapMode>();
@@ -328,7 +376,8 @@ public sealed class ControllerScenario : IAsyncDisposable
         var claims = new ClaimsController(claimSvc) { ControllerContext = ctx };
 
         var siem = new SiemController(audit, vulns, orgs, tokens,
-            new ConfigurationBuilder().Build()) { ControllerContext = ctx };
+            new ConfigurationBuilder().Build())
+        { ControllerContext = ctx };
 
         // ImportController: the heavy publish pipeline (IPackagePublishService) gets mocked
         // so tests focus on auth + form-validation branches, not the storage tail.
@@ -342,10 +391,13 @@ public sealed class ControllerScenario : IAsyncDisposable
             .Returns(call => new Dependably.Infrastructure.Publish.PublishResult.Accepted(
                 "", call.Arg<Dependably.Infrastructure.Publish.PublishRequest>().Purl, "sha-stub"));
         var publishGate = new Dependably.Security.PublishGate(new ConfigurationBuilder().Build(), claimResolver);
+        var uploadLimitResolver = new Dependably.Protocol.UploadLimitResolver(orgs, new ConfigurationBuilder().Build());
         var importSvc = new ImportControllerServices(
             Guard: guard, PublishGate: publishGate, Orgs: orgs,
             Publish: PublishService, ClaimResolver: claimResolver,
-            Licenses: licenses);
+            Licenses: licenses, LimitResolver: uploadLimitResolver,
+            StagingPath: Path.GetTempPath(),
+            Cache: new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
         var import = new ImportController(importSvc) { ControllerContext = ctx };
 
         _built = true;

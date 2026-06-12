@@ -1,6 +1,5 @@
 using Dependably.Infrastructure;
 using Dependably.Security;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -14,7 +13,10 @@ public sealed class HasCapabilityTests
 {
     private static TokenRecord Token(string? capabilities = null) => new()
     {
-        Id = "t1", OrgId = "o1", UserId = "u1", Capabilities = capabilities,
+        Id = "t1",
+        OrgId = "o1",
+        UserId = "u1",
+        Capabilities = capabilities,
         CreatedAt = DateTimeOffset.UtcNow,
     };
 

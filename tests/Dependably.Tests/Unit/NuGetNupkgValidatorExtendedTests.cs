@@ -1,7 +1,6 @@
 using System.IO.Compression;
 using System.Text;
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -18,7 +17,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     public void Parse_MalformedXml_FailsWithCatchPath()
     {
         // Hits the catch block: XDocument.Load throws on truncated XML.
-        var bytes = BuildZip(("a.nuspec", "<package xmlns=\"http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd\"><metadata"));
+        byte[] bytes = BuildZip(("a.nuspec", "<package xmlns=\"http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd\"><metadata"));
         var (result, id, version) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.False(result.IsValid);
         Assert.Equal("content", result.FieldName);
@@ -32,7 +31,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     {
         // doc.Root?.Name.NamespaceName returns "" when no xmlns is declared.
         // Empty namespace is not in the known set -> fail.
-        var bytes = BuildZip(("a.nuspec", """
+        byte[] bytes = BuildZip(("a.nuspec", """
             <?xml version="1.0"?>
             <package>
               <metadata>
@@ -52,7 +51,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     {
         // No <metadata> wrapper -> id, version, description, authors are all null.
         // string.IsNullOrEmpty(id) short-circuits on the null path (not the empty-string path).
-        var bytes = BuildZip(("a.nuspec", """
+        byte[] bytes = BuildZip(("a.nuspec", """
             <?xml version="1.0"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
             </package>
@@ -66,7 +65,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     public void Parse_MissingVersionTag_FailsOnNullVersion()
     {
         // <version> element absent -> version is null -> NuGetVersion.TryParse returns false.
-        var bytes = BuildZip(("a.nuspec", """
+        byte[] bytes = BuildZip(("a.nuspec", """
             <?xml version="1.0"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
               <metadata>
@@ -85,7 +84,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     public void Parse_MissingDescriptionTag_FailsOnNullDescription()
     {
         // No <description> element at all -> description is null (vs empty-string covered in base tests).
-        var bytes = BuildZip(("a.nuspec", """
+        byte[] bytes = BuildZip(("a.nuspec", """
             <?xml version="1.0"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
               <metadata>
@@ -104,7 +103,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     public void Parse_MissingAuthorsTag_FailsOnNullAuthors()
     {
         // No <authors> element at all -> authors is null.
-        var bytes = BuildZip(("a.nuspec", """
+        byte[] bytes = BuildZip(("a.nuspec", """
             <?xml version="1.0"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
               <metadata>
@@ -123,7 +122,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     public void Parse_NuspecEntryNameMatchedCaseInsensitively()
     {
         // .NUSPEC (upper case) must still match via OrdinalIgnoreCase.
-        var bytes = BuildZip(("PACKAGE.NUSPEC", BuildNuspec("Acme", "1.0.0", "desc", "x")));
+        byte[] bytes = BuildZip(("PACKAGE.NUSPEC", BuildNuspec("Acme", "1.0.0", "desc", "x")));
         var (result, id, version) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.True(result.IsValid);
         Assert.Equal("Acme", id);
@@ -134,7 +133,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     public void Parse_Symbol_PdbCaseInsensitive_Succeeds()
     {
         // Upper-case .PDB extension must still satisfy the "has any .pdb" branch.
-        var bytes = BuildZip(
+        byte[] bytes = BuildZip(
             ("a.nuspec", BuildNuspec("Acme", "1.0.0", "desc", "x")),
             ("lib/Acme.PDB", "synthetic pdb"));
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: true);
@@ -146,7 +145,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     {
         // No entries at all -> hasPdb false; symbol branch returns the .pdb failure
         // before the nuspec lookup runs.
-        var bytes = BuildZip();
+        byte[] bytes = BuildZip();
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: true);
         Assert.False(result.IsValid);
         Assert.Equal("content", result.FieldName);
@@ -157,8 +156,8 @@ public sealed class NuGetNupkgValidatorExtendedTests
     public void Parse_IdAtBoundary_100Chars_Succeeds()
     {
         // id.Length == 100 must NOT trip the > 100 guard (off-by-one boundary).
-        var boundaryId = new string('a', 100);
-        var bytes = BuildZip(("a.nuspec", BuildNuspec(boundaryId, "1.0.0", "desc", "x")));
+        string boundaryId = new('a', 100);
+        byte[] bytes = BuildZip(("a.nuspec", BuildNuspec(boundaryId, "1.0.0", "desc", "x")));
         var (result, id, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.True(result.IsValid);
         Assert.Equal(boundaryId, id);
@@ -168,7 +167,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     public void Parse_IdWithUnderscoresAndDots_Succeeds()
     {
         // Exercise IdRegex's full allowed character class: A-Z, a-z, 0-9, _, -, .
-        var bytes = BuildZip(("a.nuspec", BuildNuspec("My_Cool-Pkg.v2", "1.0.0", "desc", "x")));
+        byte[] bytes = BuildZip(("a.nuspec", BuildNuspec("My_Cool-Pkg.v2", "1.0.0", "desc", "x")));
         var (result, id, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.True(result.IsValid);
         Assert.Equal("My_Cool-Pkg.v2", id);
@@ -178,7 +177,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     public void Parse_PrereleaseVersion_NormalizedAndAccepted()
     {
         // NuGet.Versioning treats SemVer prerelease + build metadata as parseable.
-        var bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "1.0.0-beta.1+build.42", "desc", "x")));
+        byte[] bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "1.0.0-beta.1+build.42", "desc", "x")));
         var (result, _, version) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.True(result.IsValid);
         Assert.Equal("1.0.0-beta.1+build.42", version);
@@ -188,7 +187,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     public void Parse_VersionWithSurroundingWhitespace_TrimmedAndAccepted()
     {
         // Whitespace inside the <version> element is trimmed before TryParse.
-        var bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "  2.5.0  ", "desc", "x")));
+        byte[] bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "  2.5.0  ", "desc", "x")));
         var (result, _, version) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.True(result.IsValid);
         Assert.Equal("2.5.0", version);
@@ -198,7 +197,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     public void Parse_EmptyVersionTag_FailsVersion()
     {
         // <version></version> -> empty after Trim -> TryParse("") returns false.
-        var bytes = BuildZip(("a.nuspec", """
+        byte[] bytes = BuildZip(("a.nuspec", """
             <?xml version="1.0"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
               <metadata>
@@ -219,7 +218,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     {
         // FullName "deep/nested/x.nuspec" has Name "x.nuspec" but FullName contains '/'.
         // Tests the !FullName.Contains('/') half of the predicate alongside an entry-name match.
-        var bytes = BuildZip(("deep/nested/x.nuspec", BuildNuspec("Acme", "1.0.0", "desc", "x")));
+        byte[] bytes = BuildZip(("deep/nested/x.nuspec", BuildNuspec("Acme", "1.0.0", "desc", "x")));
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.False(result.IsValid);
         Assert.Equal("content", result.FieldName);
@@ -229,7 +228,7 @@ public sealed class NuGetNupkgValidatorExtendedTests
     public void Parse_NonSymbol_WithoutPdb_StillEvaluatesNuspec()
     {
         // isSymbol=false skips the pdb gate entirely; a package with no pdb is fine.
-        var bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "1.0.0", "desc", "x")));
+        byte[] bytes = BuildZip(("a.nuspec", BuildNuspec("Acme", "1.0.0", "desc", "x")));
         var (result, _, _) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
         Assert.True(result.IsValid);
     }

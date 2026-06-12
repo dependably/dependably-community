@@ -3,7 +3,6 @@ using System.Security.Cryptography;
 using Dependably.Tests.Infrastructure;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -28,13 +27,13 @@ public sealed class NpmConventionalTarballRouteTests : IClassFixture<DependablyF
     [Fact]
     public async Task ConventionalPath_UnscopedProxyFirstFetch_ServesTarball()
     {
-        var name = $"convnpm{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.1.4";
+        string name = $"convnpm{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.1.4";
         var (bytes, _, integrity) = NpmFixtures.BuildTarball(name, version);
-        var filename = $"{name}-{version}.tgz";
-        var shasum = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
+        string filename = $"{name}-{version}.tgz";
+        string shasum = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
 
-        var packument = $$"""
+        string packument = $$"""
             {
               "name": "{{name}}",
               "versions": {
@@ -52,7 +51,7 @@ public sealed class NpmConventionalTarballRouteTests : IClassFixture<DependablyF
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         // The conventional path npm ci uses after host-swapping the public lockfile URL —
@@ -67,7 +66,7 @@ public sealed class NpmConventionalTarballRouteTests : IClassFixture<DependablyF
     {
         await _factory.PushNpmPackage("@ext/conv-scoped", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         // Scoped conventional path: /npm/@{scope}/{pkg}/-/{file}.

@@ -1,11 +1,9 @@
-using System.Formats.Tar;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -16,7 +14,7 @@ public class LicenseExtractorTests
     [Fact]
     public void PyPi_Wheel_RealFixture_ExtractsLicense()
     {
-        var bytes = File.ReadAllBytes(Path.Combine(
+        byte[] bytes = File.ReadAllBytes(Path.Combine(
             FixtureManifest.FixturesRoot, "pypi", "mypy_extensions-1.0.0-py3-none-any.whl"));
         var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "mypy_extensions-1.0.0-py3-none-any.whl");
         Assert.NotEmpty(result.Spdx);
@@ -26,7 +24,7 @@ public class LicenseExtractorTests
     [Fact]
     public void PyPi_Sdist_RealFixture_ExtractsLicense()
     {
-        var bytes = File.ReadAllBytes(Path.Combine(
+        byte[] bytes = File.ReadAllBytes(Path.Combine(
             FixtureManifest.FixturesRoot, "pypi", "mypy_extensions-1.0.0.tar.gz"));
         var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "mypy_extensions-1.0.0.tar.gz");
         Assert.NotEmpty(result.Spdx);
@@ -37,7 +35,7 @@ public class LicenseExtractorTests
     [Fact]
     public void PyPi_Synthetic_LicenseExpression_PreferredOverFreeText()
     {
-        var bytes = BuildWheel("""
+        byte[] bytes = BuildWheel("""
             Metadata-Version: 2.3
             Name: foo
             Version: 1.0
@@ -53,7 +51,7 @@ public class LicenseExtractorTests
     [Fact]
     public void PyPi_Synthetic_FreeTextLicense_RejectedWhenMultiline()
     {
-        var bytes = BuildWheel("""
+        byte[] bytes = BuildWheel("""
             Metadata-Version: 2.1
             Name: foo
             Version: 1.0
@@ -70,7 +68,7 @@ public class LicenseExtractorTests
     [Fact]
     public void PyPi_Synthetic_FreeTextLicense_AcceptedWhenSpdxShaped()
     {
-        var bytes = BuildWheel("""
+        byte[] bytes = BuildWheel("""
             Metadata-Version: 2.1
             Name: foo
             Version: 1.0
@@ -85,7 +83,7 @@ public class LicenseExtractorTests
     [Fact]
     public void PyPi_Synthetic_NoLicenseFields_ReturnsEmpty()
     {
-        var bytes = BuildWheel("""
+        byte[] bytes = BuildWheel("""
             Metadata-Version: 2.1
             Name: foo
             Version: 1.0
@@ -100,7 +98,7 @@ public class LicenseExtractorTests
     [Fact]
     public void PyPi_MalformedZip_ReturnsEmptyWithoutThrowing()
     {
-        var bytes = Encoding.UTF8.GetBytes("not a zip file at all");
+        byte[] bytes = Encoding.UTF8.GetBytes("not a zip file at all");
         var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "broken.whl");
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
@@ -227,7 +225,7 @@ public class LicenseExtractorTests
     [Fact]
     public void Npm_Tarball_RealFixture_ExtractsLicense()
     {
-        var bytes = File.ReadAllBytes(Path.Combine(
+        byte[] bytes = File.ReadAllBytes(Path.Combine(
             FixtureManifest.FixturesRoot, "npm", "is-odd-3.0.1.tgz"));
         var result = LicenseExtractor.FromNpmTarballPackageJson(new MemoryStream(bytes));
         Assert.NotEmpty(result.Spdx);
@@ -292,7 +290,7 @@ public class LicenseExtractorTests
     [Fact]
     public void NuGet_Nupkg_RealFixture_ExtractsLicense()
     {
-        var bytes = File.ReadAllBytes(Path.Combine(
+        byte[] bytes = File.ReadAllBytes(Path.Combine(
             FixtureManifest.FixturesRoot, "nuget", "Newtonsoft.Json.13.0.3.nupkg"));
         var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(new[] { "MIT" }, result.Spdx);
@@ -303,7 +301,7 @@ public class LicenseExtractorTests
     [Fact]
     public void NuGet_Synthetic_LicenseTypeFile_Ignored()
     {
-        var bytes = BuildNupkg("""
+        byte[] bytes = BuildNupkg("""
             <?xml version="1.0"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
               <metadata>
@@ -320,7 +318,7 @@ public class LicenseExtractorTests
     [Fact]
     public void NuGet_Synthetic_NoLicenseElement_ReturnsEmpty()
     {
-        var bytes = BuildNupkg("""
+        byte[] bytes = BuildNupkg("""
             <?xml version="1.0"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
               <metadata>
@@ -336,7 +334,7 @@ public class LicenseExtractorTests
     [Fact]
     public void NuGet_MalformedXml_ReturnsEmptyWithoutThrowing()
     {
-        var bytes = BuildNupkg("not xml");
+        byte[] bytes = BuildNupkg("not xml");
         var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }

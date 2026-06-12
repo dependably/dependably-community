@@ -1,5 +1,4 @@
 using Dependably.Infrastructure.Redis;
-using StackExchange.Redis;
 
 namespace Dependably.Infrastructure;
 
@@ -22,8 +21,8 @@ public sealed class RedisLockoutStore : ILockoutStore
         string emailHash, CancellationToken ct)
     {
         var db = _redis.GetDatabase();
-        var lockedKey = _redis.ApplyPrefix($"lockout:locked:{emailHash}");
-        var attemptsKey = _redis.ApplyPrefix($"lockout:attempts:{emailHash}");
+        string lockedKey = _redis.ApplyPrefix($"lockout:locked:{emailHash}");
+        string attemptsKey = _redis.ApplyPrefix($"lockout:attempts:{emailHash}");
 
         var locked = await db.StringGetWithExpiryAsync(lockedKey);
         if (locked.Value.HasValue)
@@ -40,8 +39,8 @@ public sealed class RedisLockoutStore : ILockoutStore
         string emailHash, int newCount, DateTimeOffset? lockedUntil, CancellationToken ct)
     {
         var db = _redis.GetDatabase();
-        var attemptsKey = _redis.ApplyPrefix($"lockout:attempts:{emailHash}");
-        var lockedKey = _redis.ApplyPrefix($"lockout:locked:{emailHash}");
+        string attemptsKey = _redis.ApplyPrefix($"lockout:attempts:{emailHash}");
+        string lockedKey = _redis.ApplyPrefix($"lockout:locked:{emailHash}");
 
         // Use a pipeline to minimize round trips.
         var batch = db.CreateBatch();
@@ -51,7 +50,9 @@ public sealed class RedisLockoutStore : ILockoutStore
         {
             var ttl = lockedUntil.Value - DateTimeOffset.UtcNow;
             if (ttl > TimeSpan.Zero)
+            {
                 _ = batch.StringSetAsync(lockedKey, "1", ttl);
+            }
         }
 
         batch.Execute();

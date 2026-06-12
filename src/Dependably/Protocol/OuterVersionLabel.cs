@@ -38,9 +38,17 @@ public static partial class OuterVersionLabel
     public static bool TryFromNpmWrapper(string wrapperDir, out string version)
     {
         version = "";
-        if (string.IsNullOrEmpty(wrapperDir)) return false;
+        if (string.IsNullOrEmpty(wrapperDir))
+        {
+            return false;
+        }
+
         var m = SemverWrapperRegex().Match(wrapperDir);
-        if (!m.Success) return false;
+        if (!m.Success)
+        {
+            return false;
+        }
+
         version = m.Groups[1].Value;
         return true;
     }
@@ -53,9 +61,17 @@ public static partial class OuterVersionLabel
     public static bool TryFromPyPiSdistWrapper(string wrapperDir, out string version)
     {
         version = "";
-        if (string.IsNullOrEmpty(wrapperDir)) return false;
+        if (string.IsNullOrEmpty(wrapperDir))
+        {
+            return false;
+        }
+
         var m = Pep440WrapperRegex().Match(wrapperDir);
-        if (!m.Success) return false;
+        if (!m.Success)
+        {
+            return false;
+        }
+
         version = m.Groups[1].Value;
         return true;
     }
@@ -68,15 +84,31 @@ public static partial class OuterVersionLabel
     public static bool TryFromWheelFilename(string filename, out string version)
     {
         version = "";
-        if (string.IsNullOrEmpty(filename)) return false;
-        if (!filename.EndsWith(".whl", StringComparison.OrdinalIgnoreCase)) return false;
-        var stem = filename[..^4];
-        var parts = stem.Split('-');
+        if (string.IsNullOrEmpty(filename))
+        {
+            return false;
+        }
+
+        if (!filename.EndsWith(".whl", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string stem = filename[..^4];
+        string[] parts = stem.Split('-');
         // PEP 427 requires at least 5 dash-segments; we accept the 2nd as the version
         // candidate if it starts with a digit (PEP 440 versions always do).
-        if (parts.Length < 5) return false;
-        var candidate = parts[1];
-        if (candidate.Length == 0 || !char.IsDigit(candidate[0])) return false;
+        if (parts.Length < 5)
+        {
+            return false;
+        }
+
+        string candidate = parts[1];
+        if (candidate.Length == 0 || !char.IsDigit(candidate[0]))
+        {
+            return false;
+        }
+
         version = candidate;
         return true;
     }
@@ -92,16 +124,31 @@ public static partial class OuterVersionLabel
     public static bool TryFromNupkgFilename(string filename, out string version)
     {
         version = "";
-        if (string.IsNullOrEmpty(filename)) return false;
+        if (string.IsNullOrEmpty(filename))
+        {
+            return false;
+        }
+
         if (!filename.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase)
             && !filename.EndsWith(".snupkg", StringComparison.OrdinalIgnoreCase))
-            return false;
-        var stem = filename[..filename.LastIndexOf('.')];
-        for (var i = 0; i < stem.Length - 1; i++)
         {
-            if (stem[i] != '.') continue;
-            var candidate = stem[(i + 1)..];
-            if (candidate.Length == 0 || !char.IsDigit(candidate[0])) continue;
+            return false;
+        }
+
+        string stem = filename[..filename.LastIndexOf('.')];
+        for (int i = 0; i < stem.Length - 1; i++)
+        {
+            if (stem[i] != '.')
+            {
+                continue;
+            }
+
+            string candidate = stem[(i + 1)..];
+            if (candidate.Length == 0 || !char.IsDigit(candidate[0]))
+            {
+                continue;
+            }
+
             if (NuGetVersion.TryParse(candidate, out _))
             {
                 version = candidate;

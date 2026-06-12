@@ -24,7 +24,7 @@ public sealed class SystemTenantStatusTests : IClassFixture<DependablyMultiFacto
 
     private async Task<(HttpClient client, string slug)> CreateTenantAsync()
     {
-        var slug = "s-" + Guid.NewGuid().ToString("N")[..8];
+        string slug = "s-" + Guid.NewGuid().ToString("N")[..8];
         var client = await _factory.CreateSystemAdminClient();
         var resp = await client.PostAsJsonAsync("/api/v1/system/tenants", new
         {
@@ -101,7 +101,7 @@ public sealed class SystemTenantStatusTests : IClassFixture<DependablyMultiFacto
 
             var db = _factory.Services.GetRequiredService<IMetadataStore>();
             await using var conn = await db.OpenAsync();
-            var detail = await conn.QuerySingleAsync<string>(
+            string detail = await conn.QuerySingleAsync<string>(
                 """
                 SELECT detail FROM audit_log
                 WHERE scope = 'system' AND action = 'tenant.status_changed'
@@ -130,7 +130,7 @@ public sealed class SystemTenantStatusTests : IClassFixture<DependablyMultiFacto
         var resp = await tenantClient.PatchAsJsonAsync(
             $"/api/v1/system/tenants/{slug}/status", new { status = "suspended" });
         Assert.True(
-            resp.StatusCode == HttpStatusCode.NotFound || resp.StatusCode == HttpStatusCode.Unauthorized,
+            resp.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Unauthorized,
             $"Unauthenticated tenant call must not succeed; got {(int)resp.StatusCode}.");
     }
 }

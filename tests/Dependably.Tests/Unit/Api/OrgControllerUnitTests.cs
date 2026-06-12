@@ -1,11 +1,9 @@
 using Dapper;
 using Dependably.Api;
 using Dependably.Tests.Infrastructure;
-using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -20,6 +18,8 @@ namespace Dependably.Tests.Unit.Api;
 [Trait("Category", "Unit")]
 public sealed class OrgControllerUnitTests
 {
+    private static readonly System.Text.Json.JsonSerializerOptions WebJsonOptions = new(System.Text.Json.JsonSerializerDefaults.Web);
+
     // ── Settings: GET / PUT ─────────────────────────────────────────────────
 
     [Fact]
@@ -61,12 +61,12 @@ public sealed class OrgControllerUnitTests
         Assert.IsType<NoContentResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var anonymousPull = await conn.ExecuteScalarAsync<long>(
+        long anonymousPull = await conn.ExecuteScalarAsync<long>(
             "SELECT anonymous_pull FROM org_settings WHERE org_id = @org",
             new { org = b.PrimaryOrgId });
         Assert.Equal(1, anonymousPull);
 
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'org_settings_updated' AND org_id = @org",
             new { org = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);
@@ -110,7 +110,7 @@ public sealed class OrgControllerUnitTests
         Assert.IsType<NoContentResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var keep = await conn.ExecuteScalarAsync<long>(
+        long keep = await conn.ExecuteScalarAsync<long>(
             "SELECT keep_versions FROM org_settings WHERE org_id = @org",
             new { org = b.PrimaryOrgId });
         Assert.Equal(5, keep);
@@ -168,7 +168,7 @@ public sealed class OrgControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = await b.OrgController.GetPackage("npm", "never-exists", CancellationToken.None);
-        var status = (result as IStatusCodeActionResult)?.StatusCode;
+        int? status = (result as IStatusCodeActionResult)?.StatusCode;
         Assert.Equal(StatusCodes.Status404NotFound, status);
     }
 
@@ -193,7 +193,7 @@ public sealed class OrgControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = await b.OrgController.DeleteVersion("npm", "ghost", "1.0.0", CancellationToken.None);
-        var status = (result as IStatusCodeActionResult)?.StatusCode;
+        int? status = (result as IStatusCodeActionResult)?.StatusCode;
         Assert.Equal(StatusCodes.Status404NotFound, status);
     }
 
@@ -266,6 +266,62 @@ public sealed class OrgControllerUnitTests
         var b = await s.BuildAsync();
 
         Assert.IsType<OkObjectResult>(await b.OrgController.GetStats(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GetStats_ServesSnapshot_NormalizesToFrontendCasing()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var stats = new Dependably.Infrastructure.OrgStats(
+            PackagesByEcosystem: new[] { new Dependably.Infrastructure.EcoCount { Ecosystem = "npm", Count = 3 } },
+            DownloadsByHour: Array.Empty<Dependably.Infrastructure.HourCount>(),
+            VulnsByEcosystemAndSeverity: Array.Empty<Dependably.Infrastructure.EcoSeverityCount>(),
+            DiskByEcosystem: new[] { new Dependably.Infrastructure.EcoDiskBytes { Ecosystem = "npm", TotalBytes = 100 } },
+            TotalDiskBytes: 100,
+            NewVulns: new Dependably.Infrastructure.VulnPeriodCounts(),
+            ActiveUsers7d: 5, BlockedPulls30d: 2, TotalDownloads30d: 7);
+
+        // Store the snapshot in PascalCase to prove the endpoint tolerates any stored casing.
+        string pascalJson = System.Text.Json.JsonSerializer.Serialize(stats);
+        var snapshots = new Dependably.Infrastructure.StatsSnapshotRepository(b.Fixture.Store);
+        await snapshots.UpsertSnapshotAsync(b.PrimaryOrgId, pascalJson, "2026-06-08T00:00:00Z", 1);
+
+        var result = await b.OrgController.GetStats(CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var returned = Assert.IsType<Dependably.Infrastructure.OrgStats>(ok.Value);
+        // Snapshot path was taken (not a live recompute, which would be all-zero on the empty DB).
+        Assert.Equal(5, returned.ActiveUsers7d);
+        Assert.Equal(3, returned.PackagesByEcosystem.Single().Count);
+
+        // The frontend reads camelCase (stats.packagesByEcosystem.reduce(...)). Returning the
+        // value via Ok() routes it through the MVC serializer, so the emitted shape is camelCase
+        // regardless of how the snapshot was stored — guarding against the regression where the
+        // snapshot path emitted PascalCase verbatim and broke the dashboard.
+        string emitted = System.Text.Json.JsonSerializer.Serialize(ok.Value, WebJsonOptions);
+        Assert.Contains("\"packagesByEcosystem\"", emitted);
+        Assert.DoesNotContain("\"PackagesByEcosystem\"", emitted);
+    }
+
+    [Fact]
+    public async Task GetStats_MalformedSnapshot_FallsBackToLiveCompute()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        // A corrupt snapshot row must not 500 the dashboard — the endpoint discards it and
+        // recomputes live instead.
+        var snapshots = new Dependably.Infrastructure.StatsSnapshotRepository(b.Fixture.Store);
+        await snapshots.UpsertSnapshotAsync(b.PrimaryOrgId, "{ not valid json", "2026-06-08T00:00:00Z", 1);
+
+        var result = await b.OrgController.GetStats(CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(result);
+        // Live compute on the empty seeded DB yields a well-formed all-zero OrgStats.
+        var returned = Assert.IsType<Dependably.Infrastructure.OrgStats>(ok.Value);
+        Assert.Equal(0, returned.ActiveUsers7d);
     }
 
     [Theory]
@@ -360,8 +416,8 @@ public sealed class OrgControllerUnitTests
         var created = (OkObjectResult)await b.OrgTokensController.CreateToken(
             new CreateTokenRequest(null, Capabilities: new[] { "read:metadata" }),
             CancellationToken.None);
-        var record = created.Value!.GetType().GetProperty("record")!.GetValue(created.Value)!;
-        var tokenId = (string)record.GetType().GetProperty("Id")!.GetValue(record)!;
+        object record = created.Value!.GetType().GetProperty("record")!.GetValue(created.Value)!;
+        string tokenId = (string)record.GetType().GetProperty("Id")!.GetValue(record)!;
 
         var deleteResult = await b.OrgTokensController.DeleteToken(tokenId, CancellationToken.None);
         Assert.IsType<NoContentResult>(deleteResult);
@@ -452,7 +508,7 @@ public sealed class OrgControllerUnitTests
 
         // Resolve the target id (anything except the actor user).
         await using var conn = await built.Db.OpenAsync();
-        var targetId = await conn.ExecuteScalarAsync<string>(
+        string? targetId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM users WHERE tenant_id = @t AND id != @actor LIMIT 1",
             new { t = built.PrimaryOrgId, actor = built.ActorUserId });
         Assert.NotNull(targetId);
@@ -505,7 +561,7 @@ public sealed class OrgControllerUnitTests
         Assert.IsType<NoContentResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var stored = await conn.ExecuteScalarAsync<string>(
+        string? stored = await conn.ExecuteScalarAsync<string>(
             "SELECT block_deprecated FROM org_settings WHERE org_id = @org", new { org = b.PrimaryOrgId });
         Assert.Equal(mode, stored);
     }
@@ -525,7 +581,7 @@ public sealed class OrgControllerUnitTests
         Assert.IsType<NoContentResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var stored = await conn.ExecuteScalarAsync<string>(
+        string? stored = await conn.ExecuteScalarAsync<string>(
             "SELECT block_deprecated FROM org_settings WHERE org_id = @org", new { org = b.PrimaryOrgId });
         Assert.Equal("block_all", stored);
     }
@@ -557,7 +613,7 @@ public sealed class OrgControllerUnitTests
 
         // "conda" is not a known ecosystem — the switch falls to null and we expect 404.
         var result = await b.OrgController.DeleteVersion("conda", "some-pkg", "1.0.0", CancellationToken.None);
-        var status = (result as IStatusCodeActionResult)?.StatusCode;
+        int? status = (result as IStatusCodeActionResult)?.StatusCode;
         Assert.Equal(StatusCodes.Status404NotFound, status);
     }
 
@@ -615,7 +671,10 @@ public sealed class OrgControllerUnitTests
             CancellationToken.None);
 
         // "OWNER" normalises to "owner" (valid), so skip assertion for it.
-        if (role.ToLowerInvariant() is "member" or "admin" or "owner" or "auditor") return;
+        if (role.ToLowerInvariant() is "member" or "admin" or "owner" or "auditor")
+        {
+            return;
+        }
 
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
@@ -634,7 +693,7 @@ public sealed class OrgControllerUnitTests
         var built = await s.BuildAsync();
 
         await using var conn = await built.Db.OpenAsync();
-        var targetId = await conn.ExecuteScalarAsync<string>(
+        string? targetId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM users WHERE tenant_id = @t AND id != @actor LIMIT 1",
             new { t = built.PrimaryOrgId, actor = built.ActorUserId });
         Assert.NotNull(targetId);

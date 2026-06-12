@@ -12,7 +12,7 @@ public static class OrgSeeder
 {
     public static async Task<string> InsertAsync(IMetadataStore db, string slug, CancellationToken ct = default)
     {
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         await using var conn = await db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",

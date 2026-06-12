@@ -38,8 +38,8 @@ public sealed class ExternalIdentityRepository
         string orgId, string userId, string idpEntityId, string nameId, string? emailSnapshot,
         CancellationToken ct = default)
     {
-        var id = Guid.NewGuid().ToString("N");
-        var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string id = Guid.NewGuid().ToString("N");
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
@@ -65,6 +65,8 @@ public sealed class ExternalIdentityRepository
         string id, string? emailSnapshot, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: id is the external_identities PK resolved by the org-scoped FindAsync in
+        // LoginService (LoginViaExternalIdentityAsync); the row is already bound to the tenant.
         await conn.ExecuteAsync(
             """
             UPDATE external_identities

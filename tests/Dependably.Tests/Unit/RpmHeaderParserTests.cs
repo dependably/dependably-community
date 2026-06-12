@@ -1,7 +1,6 @@
 using System.Buffers.Binary;
 using System.Text;
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -16,7 +15,7 @@ public sealed class RpmHeaderParserTests
     [Fact]
     public void Parse_RejectsBadLeadMagic()
     {
-        var bytes = new byte[200];
+        byte[] bytes = new byte[200];
         bytes[0] = 0x00; // wrong
         Assert.Throws<RpmParseException>(() => RpmHeaderParser.Parse(bytes));
     }
@@ -24,7 +23,7 @@ public sealed class RpmHeaderParserTests
     [Fact]
     public void Parse_RejectsUnsupportedMajor()
     {
-        var bytes = BuildBareRpm(majorVersion: 99);
+        byte[] bytes = BuildBareRpm(majorVersion: 99);
         Assert.Throws<RpmParseException>(() => RpmHeaderParser.Parse(bytes));
     }
 
@@ -32,14 +31,14 @@ public sealed class RpmHeaderParserTests
     public void Parse_RejectsMissingMandatoryTags()
     {
         // Build an RPM with empty signature + empty main header — no NAME tag.
-        var bytes = BuildRpmWithMainHeader(new List<RpmTagWrite>());
+        byte[] bytes = BuildRpmWithMainHeader(new List<RpmTagWrite>());
         Assert.Throws<RpmParseException>(() => RpmHeaderParser.Parse(bytes));
     }
 
     [Fact]
     public void Parse_HappyPath_PullsNevra()
     {
-        var bytes = BuildRpmWithMainHeader(new List<RpmTagWrite>
+        byte[] bytes = BuildRpmWithMainHeader(new List<RpmTagWrite>
         {
             RpmTagWrite.String(1000, "zlib"),     // NAME
             RpmTagWrite.String(1001, "1.2.11"),   // VERSION
@@ -63,7 +62,7 @@ public sealed class RpmHeaderParserTests
     [Fact]
     public void Parse_HeaderRange_PointsAtMainHeader()
     {
-        var bytes = BuildRpmWithMainHeader(new List<RpmTagWrite>
+        byte[] bytes = BuildRpmWithMainHeader(new List<RpmTagWrite>
         {
             RpmTagWrite.String(1000, "demo"),
             RpmTagWrite.String(1001, "1.0"),
@@ -83,40 +82,40 @@ public sealed class RpmHeaderParserTests
     private static byte[] BuildBareRpm(byte majorVersion = 3)
     {
         // Lead with valid magic, configurable major, plus an empty signature header.
-        var lead = new byte[96];
+        byte[] lead = new byte[96];
         lead[0] = 0xED; lead[1] = 0xAB; lead[2] = 0xEE; lead[3] = 0xDB;
         lead[4] = majorVersion;
         lead[5] = 0;
         // type, archnum, name, osnum, signature_type, reserved — left as zeros.
 
         // Empty signature header: 0 index entries, 0 hsize.
-        var sig = BuildEmptyHeaderIntro();
-        return [..lead, ..sig];
+        byte[] sig = BuildEmptyHeaderIntro();
+        return [.. lead, .. sig];
     }
 
     private static byte[] BuildRpmWithMainHeader(List<RpmTagWrite> tags)
     {
         // Lead + empty signature + aligned main header carrying the supplied tags.
-        var lead = new byte[96];
+        byte[] lead = new byte[96];
         lead[0] = 0xED; lead[1] = 0xAB; lead[2] = 0xEE; lead[3] = 0xDB;
         lead[4] = 3; // major 3
 
-        var sig = BuildEmptyHeaderIntro();
-        var sigEnd = 96 + sig.Length;
-        var padLen = (8 - (sigEnd % 8)) % 8;
-        var pad = new byte[padLen];
+        byte[] sig = BuildEmptyHeaderIntro();
+        int sigEnd = 96 + sig.Length;
+        int padLen = (8 - (sigEnd % 8)) % 8;
+        byte[] pad = new byte[padLen];
 
         var (index, store) = BuildHeader(tags);
-        var intro = BuildHeaderIntro(tags.Count, store.Length);
+        byte[] intro = BuildHeaderIntro(tags.Count, store.Length);
 
-        return [..lead, ..sig, ..pad, ..intro, ..index, ..store];
+        return [.. lead, .. sig, .. pad, .. intro, .. index, .. store];
     }
 
     private static byte[] BuildEmptyHeaderIntro() => BuildHeaderIntro(0, 0);
 
     private static byte[] BuildHeaderIntro(int nindex, int hsize)
     {
-        var b = new byte[16];
+        byte[] b = new byte[16];
         b[0] = 0x8E; b[1] = 0xAD; b[2] = 0xE8; b[3] = 0x01;
         // bytes 4..7 reserved
         BinaryPrimitives.WriteInt32BigEndian(b.AsSpan(8, 4), nindex);
@@ -131,7 +130,7 @@ public sealed class RpmHeaderParserTests
 
         foreach (var t in tags)
         {
-            var offset = storeBytes.Count;
+            int offset = storeBytes.Count;
             indexBytes.AddRange(WriteIndexEntry(t.Tag, t.Type, offset, t.Count));
             storeBytes.AddRange(t.Bytes);
         }
@@ -140,7 +139,7 @@ public sealed class RpmHeaderParserTests
 
     private static byte[] WriteIndexEntry(int tag, int type, int offset, int count)
     {
-        var b = new byte[16];
+        byte[] b = new byte[16];
         BinaryPrimitives.WriteInt32BigEndian(b.AsSpan(0, 4), tag);
         BinaryPrimitives.WriteInt32BigEndian(b.AsSpan(4, 4), type);
         BinaryPrimitives.WriteInt32BigEndian(b.AsSpan(8, 4), offset);
@@ -152,15 +151,15 @@ public sealed class RpmHeaderParserTests
     {
         public static RpmTagWrite String(int tag, string value)
         {
-            var bytes = Encoding.UTF8.GetBytes(value);
-            var withNul = new byte[bytes.Length + 1];
+            byte[] bytes = Encoding.UTF8.GetBytes(value);
+            byte[] withNul = new byte[bytes.Length + 1];
             Array.Copy(bytes, withNul, bytes.Length);
             return new RpmTagWrite(tag, Type: 6, Count: 1, withNul);
         }
 
         public static RpmTagWrite Int32(int tag, int value)
         {
-            var bytes = new byte[4];
+            byte[] bytes = new byte[4];
             BinaryPrimitives.WriteInt32BigEndian(bytes, value);
             return new RpmTagWrite(tag, Type: 4, Count: 1, bytes);
         }

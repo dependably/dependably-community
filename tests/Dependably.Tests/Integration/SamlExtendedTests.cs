@@ -1,7 +1,4 @@
 using System.Net;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Text;
 using System.Text.Json;
 using Dapper;
 using Dependably.Api;
@@ -49,7 +46,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
         var resp = await client.GetAsync("/saml/metadata");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var xml = await resp.Content.ReadAsStringAsync();
+        string xml = await resp.Content.ReadAsStringAsync();
         Assert.Contains("https://override.sp.example/spid", xml);
         Assert.Contains("urn:oasis:names:tc:SAML:2.0:nameid-format:transient", xml);
     }
@@ -108,7 +105,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
         var resp = await client.GetAsync("/saml/login");
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         Assert.Contains("not configured", body, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -118,7 +115,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
         // IsSamlConfigured requires entityId AND sso AND signing cert. Seed only the entity
         // id + cert; the missing SSO URL must trip the "not configured" branch.
         await ResetSamlConfigAsync();
-        var orgId = await GetDefaultOrgIdAsync();
+        string orgId = await GetDefaultOrgIdAsync();
         await using (var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -160,9 +157,9 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
     {
         // Covers test-mode path on a POST binding (relay state read from Request.Form).
         await SeedFakeSamlConfigAsync(enabled: false, formsLoginEnabled: true, withMetadata: true);
-        var orgId = await GetDefaultOrgIdAsync();
+        string orgId = await GetDefaultOrgIdAsync();
 
-        var cid = Guid.NewGuid().ToString("N");
+        string cid = Guid.NewGuid().ToString("N");
         var samlRepo = _factory.Services.GetRequiredService<SamlConfigRepository>();
         await samlRepo.IssueTestRunAsync(cid, orgId, actorId: "post-actor",
             expiresAt: DateTimeOffset.UtcNow.AddMinutes(10));
@@ -176,7 +173,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
         var resp = await client.PostAsync("/saml/acs", form);
 
         Assert.Equal(HttpStatusCode.Redirect, resp.StatusCode);
-        var location = resp.Headers.Location?.OriginalString ?? "";
+        string location = resp.Headers.Location?.OriginalString ?? "";
         Assert.Contains("/saml-test-result", location);
         Assert.Contains("error=validation_failed", location);
     }
@@ -196,7 +193,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
         var resp = await client.PostAsync("/saml/acs", form);
 
         Assert.Equal(HttpStatusCode.Redirect, resp.StatusCode);
-        var location = resp.Headers.Location?.OriginalString ?? "";
+        string location = resp.Headers.Location?.OriginalString ?? "";
         Assert.Contains("/saml-test-result", location);
         Assert.Contains("error=test_session_lost", location);
     }
@@ -213,7 +210,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
         var resp = await client.GetAsync("/saml/acs");
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
         Assert.Contains("not configured", body, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -245,7 +242,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
         var resp = await client.GetAsync("/saml/acs?SAMLResponse=garbage");
 
         Assert.Equal(HttpStatusCode.Redirect, resp.StatusCode);
-        var location = resp.Headers.Location?.OriginalString ?? "";
+        string location = resp.Headers.Location?.OriginalString ?? "";
         Assert.Contains("/saml-test-result", location);
         Assert.Contains("error=test_session_lost", location);
     }
@@ -259,14 +256,14 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
 
         var protector = _factory.Services.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector("saml-test-marker.v1");
-        var payload = JsonSerializer.Serialize(new
+        string payload = JsonSerializer.Serialize(new
         {
             tid = "WRONG-TENANT",
             actor = "actor",
             cid = Guid.NewGuid().ToString("N"),
             exp = DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeSeconds(),
         });
-        var cookie = protector.Protect(payload);
+        string cookie = protector.Protect(payload);
 
         using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
         client.DefaultRequestHeaders.Add("Cookie", $"dependably_saml_test={cookie}");
@@ -282,18 +279,18 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
         // exp in the past → TryReadTestCookie returns false. With no relay state and SAML
         // not enabled the test_session_lost redirect path runs.
         await SeedFakeSamlConfigAsync(enabled: false, formsLoginEnabled: true, withMetadata: true);
-        var orgId = await GetDefaultOrgIdAsync();
+        string orgId = await GetDefaultOrgIdAsync();
 
         var protector = _factory.Services.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector("saml-test-marker.v1");
-        var payload = JsonSerializer.Serialize(new
+        string payload = JsonSerializer.Serialize(new
         {
             tid = orgId,
             actor = "actor",
             cid = Guid.NewGuid().ToString("N"),
             exp = DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeSeconds(),
         });
-        var cookie = protector.Protect(payload);
+        string cookie = protector.Protect(payload);
 
         using var client = _factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
         client.DefaultRequestHeaders.Add("Cookie", $"dependably_saml_test={cookie}");
@@ -328,7 +325,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
     [Fact]
     public void IdpMetadataParser_MissingEntityIdAttribute_Throws()
     {
-        var xml = """
+        string xml = """
             <?xml version="1.0"?>
             <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata">
               <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"/>
@@ -341,7 +338,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
     [Fact]
     public void IdpMetadataParser_NoIdpSsoDescriptor_Throws()
     {
-        var xml = """
+        string xml = """
             <?xml version="1.0"?>
             <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp/x"/>
             """;
@@ -352,7 +349,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
     [Fact]
     public void IdpMetadataParser_NoSingleSignOnService_Throws()
     {
-        var xml = $"""
+        string xml = $"""
             <?xml version="1.0"?>
             <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp/x">
               <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
@@ -373,7 +370,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
     {
         // The selector finds a SingleSignOnService with HTTP-Redirect binding but no
         // Location attribute. That hits the "Location is missing" branch directly.
-        var xml = $"""
+        string xml = $"""
             <?xml version="1.0"?>
             <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp/x">
               <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
@@ -394,7 +391,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
     public void IdpMetadataParser_HttpPostBindingOnly_ParsesViaFallback()
     {
         // Redirect binding is preferred but HTTP-POST is the documented fallback.
-        var xml = $"""
+        string xml = $"""
             <?xml version="1.0"?>
             <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp/x">
               <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
@@ -418,7 +415,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
         // Parser prefers <KeyDescriptor use='signing'> but falls back to the first
         // <KeyDescriptor> when no signing-tagged one is present (Entra ID emits both
         // signing and encryption KeyDescriptors but some IdPs omit the 'use' attribute).
-        var xml = $"""
+        string xml = $"""
             <?xml version="1.0"?>
             <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp/x">
               <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
@@ -438,7 +435,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
     [Fact]
     public void IdpMetadataParser_NoX509Certificate_Throws()
     {
-        var xml = """
+        string xml = """
             <?xml version="1.0"?>
             <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp/x">
               <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
@@ -455,7 +452,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
     {
         // The cert is bogus (not valid base64 → not parseable X.509). Parser wraps the
         // failure in an InvalidOperationException with our custom message.
-        var xml = """
+        string xml = """
             <?xml version="1.0"?>
             <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp/x">
               <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
@@ -478,7 +475,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
         // XXE defence: DTDs are explicitly prohibited by the XmlReaderSettings, so a doc with
         // a DOCTYPE declaration must fail to parse rather than silently allowing entity
         // expansion. The underlying XmlException bubbles up.
-        var xml = """
+        string xml = """
             <?xml version="1.0"?>
             <!DOCTYPE EntityDescriptor [<!ENTITY x "x">]>
             <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp/x"/>
@@ -492,9 +489,9 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
         // PEM-style line breaks inside the X509Certificate element are common; the parser
         // must strip whitespace before validating the base64. We split the sample cert in
         // half with a newline and confirm the round-trip still succeeds.
-        var half = SampleIdpCertBase64.Length / 2;
-        var withWs = SampleIdpCertBase64.Insert(half, "\n  ");
-        var xml = $"""
+        int half = SampleIdpCertBase64.Length / 2;
+        string withWs = SampleIdpCertBase64.Insert(half, "\n  ");
+        string xml = $"""
             <?xml version="1.0"?>
             <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp/x">
               <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
@@ -533,7 +530,7 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
         string? spEntityId = null, string? nameIdFormat = null)
     {
         await ResetSamlConfigAsync();
-        var orgId = await GetDefaultOrgIdAsync();
+        string orgId = await GetDefaultOrgIdAsync();
         await using var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
         await conn.ExecuteAsync(
             """

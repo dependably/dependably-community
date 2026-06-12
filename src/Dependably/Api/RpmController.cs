@@ -1,13 +1,14 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using Dapper;
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.RateLimiting;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace Dependably.Api;
 
@@ -34,7 +35,7 @@ public sealed class RpmController : OrgScopedControllerBase
 
     // ── Upload ────────────────────────────────────────────────────────────────
 
-    /// <summary>PUT /o/{org}/rpm/upload — twine-style upload (body = .rpm bytes).</summary>
+    /// <summary>PUT /rpm/upload — RPM upload (body = .rpm bytes).</summary>
     [HttpPut("/rpm/upload")]
     [HttpPost("/rpm/upload")]
     [Authorize(AuthenticationSchemes = "Bearer," + Dependably.Security.TokenAuthenticationDefaults.Scheme)]
@@ -43,21 +44,23 @@ public sealed class RpmController : OrgScopedControllerBase
     [RequestSizeLimit(500 * 1024 * 1024)]
     public async Task<IActionResult> Upload(CancellationToken ct)
     {
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
 
         // Refuse uploads when upstream passthrough is active for this org — a locally published
         // package would silently shadow upstream content and break dep-resolution for dnf clients.
         // Effective passthrough = instance mode is 'passthrough' AND the org has ≥1 rpm registry.
         if (_svc.Proxy is { IsPassthroughModeSelected: true }
             && (await _svc.Registries.ResolveAsync(orgId, "rpm", ct)).Count > 0)
+        {
             return Conflict(new ProblemDetails
             {
                 Title = "Cannot publish under passthrough proxy mode",
                 Detail = "This org has a configured rpm upstream registry and Rpm:UpstreamMode=passthrough. " +
                          "Publishing would silently shadow upstream content. Switch Rpm:UpstreamMode " +
-                         "to 'merged' (deferred) or remove the org's rpm upstream registry to enable hosted publishing.",
+                         "to 'merged' or remove the org's rpm upstream registry to enable hosted publishing.",
                 Status = 409,
             });
+        }
 
         var token = await Request.ResolveTokenAsync(_svc.Tokens, orgId, ct);
         if (token is null || token.OrgId != orgId)
@@ -68,9 +71,11 @@ public sealed class RpmController : OrgScopedControllerBase
 
         using var ms = new MemoryStream();
         await Request.Body.CopyToAsync(ms, ct);
-        var bytes = ms.ToArray();
+        byte[] bytes = ms.ToArray();
         if (bytes.Length < RpmArtifactValidator.MinimumValidSize)
+        {
             return BadRequest("RPM upload too small.");
+        }
 
         RpmHeaderInfo header;
         try
@@ -83,17 +88,19 @@ public sealed class RpmController : OrgScopedControllerBase
         }
 
         // Size cap: per-tenant override → instance global.
-        var sizeCap = await ResolveSizeCapAsync(orgId, ct);
+        long? sizeCap = await ResolveSizeCapAsync(orgId, ct);
         if (sizeCap is { } cap && bytes.LongLength > cap)
+        {
             return StatusCode(413, $"RPM upload exceeds size limit ({cap} bytes).");
+        }
 
         // NEVRA filename convention; dnf clients expect this exact shape.
-        var filename = $"{header.Name}-{header.Version}-{header.Release}.{header.Arch}.rpm";
-        var purlName = header.Name.ToLowerInvariant();
-        var version = $"{header.Version}-{header.Release}";
-        var purl = PurlNormalizer.Rpm(header.Name, header.Version, header.Release, header.Arch, header.Epoch ?? 0);
-        var sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        var blobKey = BlobKeys.Hosted(orgId, "rpm", purlName, version, filename);
+        string filename = $"{header.Name}-{header.Version}-{header.Release}.{header.Arch}.rpm";
+        string purlName = header.Name.ToLowerInvariant();
+        string version = $"{header.Version}-{header.Release}";
+        string purl = PurlNormalizer.Rpm(header.Name, header.Version, header.Release, header.Arch, header.Epoch ?? 0);
+        string sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string blobKey = BlobKeys.Hosted(orgId, "rpm", purlName, version, filename);
 
         await _svc.BlobStore.Registry.PutAsync(blobKey, new MemoryStream(bytes), ct);
 
@@ -102,7 +109,7 @@ public sealed class RpmController : OrgScopedControllerBase
         // xtenant: pkg.Id came from GetOrCreateAsync(orgId, ...); inserts against it
         // inherit tenant scope via the packages.org_id FK chain.
         await using var conn = await _svc.Db.OpenAsync(ct);
-        var existing = await conn.ExecuteScalarAsync<string?>(
+        string? existing = await conn.ExecuteScalarAsync<string?>(
             "SELECT id FROM package_versions WHERE package_id = @pkgId AND version = @version",
             new { pkgId = pkg.Id, version });
 
@@ -195,6 +202,10 @@ public sealed class RpmController : OrgScopedControllerBase
             """,
             new { orgId, arch = header.Arch });
 
+        // Drop the cached merged repodata so the just-published version shows up in the next
+        // repomd/primary/filelists fetch instead of waiting out the TTL (no-op outside merged mode).
+        _svc.MemoryCache.Remove(MergedRepodataCacheKey(orgId));
+
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "push",
             actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
@@ -204,18 +215,24 @@ public sealed class RpmController : OrgScopedControllerBase
 
     // ── Download ──────────────────────────────────────────────────────────────
 
-    /// <summary>GET /o/{org}/rpm/packages/{file} — download an RPM by NEVRA filename.</summary>
+    /// <summary>GET /rpm/packages/{file} — download an RPM by NEVRA filename.</summary>
     [HttpGet("/rpm/packages/{file}")]
     [HttpHead("/rpm/packages/{file}")]
     [EnableRateLimiting("download")]
     public async Task<IActionResult> Download(string file, CancellationToken ct)
     {
         var pathCheck = PathSafeValidator.Validate(file, "file");
-        if (!pathCheck.IsValid) return BadRequest(pathCheck.Message);
-        if (!file.EndsWith(".rpm", StringComparison.OrdinalIgnoreCase))
-            return BadRequest("RPM filename must end with .rpm.");
+        if (!pathCheck.IsValid)
+        {
+            return BadRequest(pathCheck.Message);
+        }
 
-        var orgId = CurrentTenantId();
+        if (!file.EndsWith(".rpm", StringComparison.OrdinalIgnoreCase))
+        {
+            return BadRequest("RPM filename must end with .rpm.");
+        }
+
+        string orgId = CurrentTenantId();
         var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
         var token = await Request.ResolveTokenAsync(_svc.Tokens, orgId, ct);
         if (settings is not null && !settings.AnonymousPull && token is null)
@@ -227,17 +244,24 @@ public sealed class RpmController : OrgScopedControllerBase
         var versionMatch = await _svc.Packages.FindVersionByBlobKeySuffixAsync(orgId, "rpm", file, ct);
 
         if (versionMatch is not null)
+        {
             return await ServePackageFromCacheAsync(orgId, file, versionMatch.Value, token, ct);
+        }
 
         // Cache MISS — attempt upstream proxy if configured.
-        if (_svc.Proxy is null || _svc.UpstreamClient is null) return NotFound();
-        if (settings is null || !settings.ProxyPassthroughEffective) return NotFound();
+        if (_svc.Proxy is null || _svc.UpstreamClient is null)
+        {
+            return NotFound();
+        }
+
+        if (settings is null || !settings.ProxyPassthroughEffective)
+        {
+            return NotFound();
+        }
 
         // Per-org upstream: top-priority configured rpm registry. Empty ⇒ proxying disabled.
         var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
-        if (bases.Count == 0) return NotFound();
-
-        return await ProxyDownloadAsync(orgId, bases[0], file, token, ct);
+        return bases.Count == 0 ? NotFound() : await ProxyDownloadAsync(orgId, bases[0], file, token, ct);
     }
 
     private async Task<IActionResult> ServePackageFromCacheAsync(
@@ -245,14 +269,22 @@ public sealed class RpmController : OrgScopedControllerBase
         (Package Package, PackageVersion Version) versionMatch,
         TokenRecord? token, CancellationToken ct)
     {
-        var blobKey = BlobKeys.StoreKey(versionMatch.Version.BlobKey);
+        string blobKey = BlobKeys.StoreKey(versionMatch.Version.BlobKey);
         var hitStore = versionMatch.Version.Origin == "proxy"
             ? _svc.BlobStore.Cache
             : _svc.BlobStore.Registry;
         var stream = await hitStore.GetAsync(blobKey, ct);
-        if (stream is null) return NotFound();
+        if (stream is null)
+        {
+            return NotFound();
+        }
 
         Response.Headers["X-Cache"] = "HIT";
+        if (versionMatch.Version.ChecksumSha256 is not null)
+        {
+            Response.Headers.ETag = $"\"sha256:{versionMatch.Version.ChecksumSha256}\"";
+            Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+        }
         await _svc.Audit.LogActivityAsync(orgId, "rpm", versionMatch.Version.Purl, "download",
             token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         await _svc.Packages.IncrementDownloadCountAsync(versionMatch.Version.Id, ct);
@@ -263,7 +295,10 @@ public sealed class RpmController : OrgScopedControllerBase
         string orgId, string upstreamBase, string file, TokenRecord? token, CancellationToken ct)
     {
         // 1. Negative cache
-        if (await _svc.Proxy!.IsNegativelyCachedAsync(file, ct)) return NotFound();
+        if (await _svc.Proxy!.IsNegativelyCachedAsync(file, ct))
+        {
+            return NotFound();
+        }
 
         // 2. Resolve package URL from primary.xml.gz
         var resolution = await TryResolveUpstreamPackageAsync(upstreamBase, file, ct);
@@ -275,11 +310,15 @@ public sealed class RpmController : OrgScopedControllerBase
 
         // 3. Parse NEVRA from filename
         var nevra = ParseNevra(file);
-        if (nevra is null) return NotFound();
+        if (nevra is null)
+        {
+            return NotFound();
+        }
+
         var (name, epoch, rpmVersion, release, arch) = nevra.Value;
-        var ver = $"{rpmVersion}-{release}";
-        var purl = PurlNormalizer.Rpm(name, rpmVersion, release, arch, epoch);
-        var blobStoreKey = BlobKeys.Proxy(resolution.Sha256);
+        string ver = $"{rpmVersion}-{release}";
+        string purl = PurlNormalizer.Rpm(name, rpmVersion, release, arch, epoch);
+        string blobStoreKey = BlobKeys.Proxy(resolution.Sha256);
 
         // 4. Fetch from upstream via UpstreamClient (checksum-verified, cached on Cache tier)
         Stream body;
@@ -297,9 +336,9 @@ public sealed class RpmController : OrgScopedControllerBase
         }
 
         // 5. Persist DB row (package_versions + rpm_metadata) on first fetch
-        var dbBlobKey = $"proxy/{resolution.Sha256}/{file}"; // StoreKey strips the filename suffix
+        string dbBlobKey = $"proxy/{resolution.Sha256}/{file}"; // StoreKey strips the filename suffix
         // Use Content-Length if the stream knows it; otherwise fall back to 0 (updated async).
-        var contentLength = body.CanSeek ? (int)body.Length : 0;
+        int contentLength = body.CanSeek ? (int)body.Length : 0;
         await CacheProxyPackageAsync(
             new ProxyCachePackage(orgId, file, resolution, nevra.Value, ver, purl, dbBlobKey, contentLength),
             ct);
@@ -319,7 +358,8 @@ public sealed class RpmController : OrgScopedControllerBase
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {
-            _logger.LogWarning(ex,
+            // deepcode ignore LogForging: Serilog RenderedCompactJsonFormatter JSON-encodes {Filename}, neutralising newline/control-char injection.
+            Logger.LogWarning(ex,
                 "RPM proxy: ResolvePackageUrlAsync failed for {Filename}: {ExceptionType}",
                 file, ex.GetType().Name);
             return null;
@@ -327,7 +367,7 @@ public sealed class RpmController : OrgScopedControllerBase
     }
 
     /// <summary>
-    /// GET /o/{org}/rpm/Packages/{bucket}/{file} — download an RPM by the *nested*
+    /// GET /rpm/Packages/{bucket}/{file} — download an RPM by the *nested*
     /// path that upstream repodata advertises in its <c>&lt;location href&gt;</c>
     /// (e.g. <c>Packages/t/tree-2.1.0-5.fc40.x86_64.rpm</c>).
     /// </summary>
@@ -349,16 +389,19 @@ public sealed class RpmController : OrgScopedControllerBase
 
     // ── Repodata ──────────────────────────────────────────────────────────────
 
-    /// <summary>GET /o/{org}/rpm/repodata/{file} — repomd.xml or compressed XML docs.</summary>
+    /// <summary>GET /rpm/repodata/{file} — repomd.xml or compressed XML docs.</summary>
     [HttpGet("/rpm/repodata/{file}")]
     [HttpHead("/rpm/repodata/{file}")]
     [EnableRateLimiting("download")]
     public async Task<IActionResult> Repodata(string file, CancellationToken ct)
     {
         var pathCheck = PathSafeValidator.Validate(file, "file");
-        if (!pathCheck.IsValid) return BadRequest(pathCheck.Message);
+        if (!pathCheck.IsValid)
+        {
+            return BadRequest(pathCheck.Message);
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
         var token = await Request.ResolveTokenAsync(_svc.Tokens, orgId, ct);
         if (settings is not null && !settings.AnonymousPull && token is null)
@@ -367,27 +410,238 @@ public sealed class RpmController : OrgScopedControllerBase
             return Unauthorized();
         }
 
-        // Passthrough mode: delegate repodata to upstream proxy. Effective passthrough =
-        // instance mode is 'passthrough' AND org passthrough effective (air-gap-aware) AND the
-        // org has ≥1 rpm registry. The top-priority registry (bases[0]) is the whole-repo source.
-        if (_svc.Proxy is { IsPassthroughModeSelected: true } && settings!.ProxyPassthroughEffective)
+        // Proxy modes (passthrough / merged) delegate to upstream before local generation; both
+        // fall through to local on a null result (unrecognised filename / upstream 404).
+        var proxied = await TryServeRepodataFromProxyAsync(orgId, settings!, file, ct);
+        return proxied ?? await ServeRepodataLocallyAsync(orgId, file, ct);
+    }
+
+    /// <summary>
+    /// Serves repodata from the configured RPM proxy when proxying is effective for the org.
+    /// Passthrough mode forwards upstream's repomd/compressed docs verbatim; merged mode serves a
+    /// combined local ∪ upstream index. Effective engagement = org passthrough effective
+    /// (air-gap-aware) AND ≥1 rpm registry; the top-priority registry (bases[0]) is the whole-repo
+    /// source. Returns null when proxying is not effective, no rpm registry is configured, or the
+    /// upstream result is null — the caller then falls back to local generation.
+    /// </summary>
+    private async Task<IActionResult?> TryServeRepodataFromProxyAsync(string orgId, OrgSettings settings, string file, CancellationToken ct)
+    {
+        if (!settings.ProxyPassthroughEffective)
         {
-            var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
-            if (bases.Count > 0)
-            {
-                var passthrough = await TryServeRepodataFromUpstreamAsync(bases[0], file, ct);
-                if (passthrough is not null) return passthrough;
-                // Fall through to local generation on null (unrecognised filename / upstream 404).
-            }
+            return null;
         }
 
-        return await ServeRepodataLocallyAsync(orgId, file, ct);
+        if (_svc.Proxy is { IsPassthroughModeSelected: true })
+        {
+            var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
+            return bases.Count > 0 ? await TryServeRepodataFromUpstreamAsync(bases[0], file, ct) : null;
+        }
+
+        if (_svc.Proxy is { IsMergedModeSelected: true })
+        {
+            var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
+            return bases.Count > 0 ? await TryServeMergedRepodataAsync(orgId, bases[0], file, ct) : null;
+        }
+
+        return null;
     }
+
+    /// <summary>
+    /// Serves <c>repomd.xml</c>, <c>primary.xml.gz</c>, and <c>filelists.xml.gz</c> as a merge
+    /// of the tenant's locally published RPMs and the upstream repo's packages. The gzipped
+    /// documents are memoised per org (short TTL, evicted on upload) so the <c>repomd.xml</c>
+    /// request and the follow-up document requests return byte-identical content — otherwise the
+    /// SHA-256 checksums the repomd seals would not match what dnf downloads.
+    ///
+    /// Upstream non-primary repomd entries (other, group, modules, updateinfo, …) with
+    /// hash-prefixed (content-addressed) hrefs are passed through verbatim in the merged repomd;
+    /// entries with plain hrefs are dropped at build time (see <see cref="BuildMergedRepodataAsync"/>)
+    /// because this dispatch cannot proxy them. When dnf follows an advertised hash-prefixed href,
+    /// the request arrives here as a hash-prefixed filename and is proxied upstream via
+    /// <see cref="TryServeRepodataFromUpstreamAsync"/> (the same caching + checksum path
+    /// passthrough mode uses) — so every href the merged repomd advertises resolves here.
+    ///
+    /// Returns null when the upstream primary can't be fetched (caller then falls back to local-only),
+    /// or when a hash-prefixed upstream fetch also returns null (caller 404s).
+    /// </summary>
+    private async Task<IActionResult?> TryServeMergedRepodataAsync(string orgId, string upstreamBase, string file, CancellationToken ct)
+    {
+        bool isRepomd = file.Equals("repomd.xml", StringComparison.OrdinalIgnoreCase);
+        bool isPrimary = file.Equals("primary.xml.gz", StringComparison.OrdinalIgnoreCase);
+        bool isFilelists = file.Equals("filelists.xml.gz", StringComparison.OrdinalIgnoreCase);
+
+        // Hash-prefixed filenames are upstream non-primary blobs (other, updateinfo, group, modules,
+        // etc.) advertised in the merged repomd. Proxy them through the upstream fetch path so they
+        // are reachable — the same caching + checksum verification used by passthrough mode applies.
+        if (!isRepomd && !isPrimary && !isFilelists)
+        {
+            return RpmUpstreamProxy.IsHashPrefixedFilename(file)
+                ? await TryServeRepodataFromUpstreamAsync(upstreamBase, file, ct)
+                : null;
+        }
+
+        var merged = await BuildMergedRepodataAsync(orgId, upstreamBase, ct);
+        if (merged is null)
+        {
+            return null;
+        }
+
+        if (isPrimary)
+        {
+            return File(merged.PrimaryGz, "application/x-gzip", "primary.xml.gz");
+        }
+
+        if (isFilelists)
+        {
+            return File(merged.FilelistsGz, "application/x-gzip", "filelists.xml.gz");
+        }
+
+        // repomd.xml: local primary + filelists entries sealed by their checksums, plus upstream's
+        // hash-prefixed non-primary entries (other, group, modules, updateinfo) passed through
+        // verbatim — plain-named upstream entries were dropped at build time as unservable.
+        // Locally published RPMs do not appear in upstream's other/group/modules documents — dnf
+        // handles these as supplemental metadata and degrades gracefully when a package is absent.
+        string repomd = RpmRepodataService.BuildRepomd(
+            merged.PrimaryGz,
+            merged.FilelistsGz,
+            otherGz: null,
+            merged.UpstreamNonPrimaryEntries);
+        return File(System.Text.Encoding.UTF8.GetBytes(repomd), "application/xml", "repomd.xml");
+    }
+
+    /// <summary>
+    /// Builds (and caches) the gzipped combined documents for merged mode. Returns null when the
+    /// upstream primary can't be fetched/verified so the caller degrades to local-only.
+    /// </summary>
+    private async Task<MergedRepodataCache?> BuildMergedRepodataAsync(string orgId, string upstreamBase, CancellationToken ct)
+    {
+        string cacheKey = MergedRepodataCacheKey(orgId);
+        if (_svc.MemoryCache.TryGetValue<MergedRepodataCache>(cacheKey, out var cached) && cached is not null)
+        {
+            return cached;
+        }
+
+        byte[]? upstreamPrimaryGz;
+        try
+        {
+            upstreamPrimaryGz = await _svc.Proxy!.GetUpstreamPrimaryXmlGzAsync(upstreamBase, ct);
+        }
+        catch (Exception ex) when (ex is not AirGappedException)
+        {
+            Logger.LogWarning(ex,
+                "RPM merged mode: upstream primary fetch failed for {UpstreamBase}: {ExceptionType}",
+                upstreamBase, ex.GetType().Name);
+            return null;
+        }
+        if (upstreamPrimaryGz is null)
+        {
+            return null;
+        }
+
+        // Fetch upstream filelists for merging; a missing upstream filelists is non-fatal —
+        // local filelists is still generated and served.
+        byte[]? upstreamFilelistsGz = null;
+        try
+        {
+            upstreamFilelistsGz = await _svc.Proxy!.GetUpstreamFilelistsXmlGzAsync(upstreamBase, ct);
+        }
+        catch (Exception ex) when (ex is not AirGappedException)
+        {
+            Logger.LogWarning(ex,
+                "RPM merged mode: upstream filelists fetch failed for {UpstreamBase}: {ExceptionType}",
+                upstreamBase, ex.GetType().Name);
+        }
+
+        // Fetch upstream non-primary repomd entries to pass through verbatim.
+        IReadOnlyList<System.Xml.Linq.XElement> upstreamExtras = Array.Empty<System.Xml.Linq.XElement>();
+        try
+        {
+            upstreamExtras = await _svc.Proxy!.GetUpstreamNonPrimaryRepomdEntriesAsync(upstreamBase, ct);
+        }
+        catch (Exception ex) when (ex is not AirGappedException)
+        {
+            Logger.LogWarning(ex,
+                "RPM merged mode: upstream repomd entry fetch failed for {UpstreamBase}: {ExceptionType}",
+                upstreamBase, ex.GetType().Name);
+        }
+
+        // Build merged primary.
+        string mergedPrimary = await _svc.Repodata.BuildMergedPrimaryAsync(orgId, upstreamPrimaryGz, ct);
+        byte[] primaryGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(mergedPrimary));
+
+        // Build merged filelists: local entries from stored files_json merged with upstream entries.
+        byte[] filelistsGz;
+        if (upstreamFilelistsGz is not null)
+        {
+            string mergedFilelists = await _svc.Repodata.BuildMergedFilelistsAsync(orgId, upstreamFilelistsGz, ct);
+            filelistsGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(mergedFilelists));
+        }
+        else
+        {
+            string localFilelists = await _svc.Repodata.BuildFilelistsAsync(orgId, ct);
+            filelistsGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(localFilelists));
+        }
+
+        // Filter upstream extras down to entries the merged repo can actually serve. The
+        // upstream filelists entry is dropped because a merged local+upstream filelists is
+        // generated above — advertising upstream's as well would make dnf parse two
+        // conflicting filelists documents. Entries whose advertised href is not hash-prefixed
+        // are also dropped: the repodata dispatch only proxies content-addressed
+        // (64-hex-prefixed) filenames upstream, so a plain-named entry (e.g. an
+        // uncompressed comps group file from classic createrepo) would 404 when dnf
+        // follows it. dnf treats absent supplemental metadata as non-fatal, so dropping the
+        // entry degrades gracefully instead of advertising an unreachable href.
+        var filteredExtras = upstreamExtras
+            .Where(e => (string?)e.Attribute("type") != "filelists")
+            .Where(HasProxyableHref)
+            .ToArray();
+
+        var result = new MergedRepodataCache(primaryGz, filelistsGz, filteredExtras);
+        _svc.MemoryCache.Set(cacheKey, result, new MemoryCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = MergedRepodataTtl,
+            Size = primaryGz.Length + filelistsGz.Length,
+        });
+        return result;
+    }
+
+    /// <summary>
+    /// True when an upstream repomd <c>&lt;data&gt;</c> entry's advertised
+    /// <c>&lt;location href&gt;</c> names a hash-prefixed (content-addressed) file — the only
+    /// upstream repodata filenames the merged-mode dispatch can proxy. Entries failing this
+    /// check are excluded from the merged repomd so every advertised href resolves.
+    /// </summary>
+    private static bool HasProxyableHref(System.Xml.Linq.XElement entry)
+    {
+        // The repomd XML namespace identifier — an opaque match string, never fetched over the network.
+#pragma warning disable S5332
+        System.Xml.Linq.XNamespace ns = "http://linux.duke.edu/metadata/repo";
+#pragma warning restore S5332
+        string? href = (string?)entry.Element(ns + "location")?.Attribute("href");
+        if (href is null)
+        {
+            return false;
+        }
+
+        string filename = href.Contains('/') ? href[(href.LastIndexOf('/') + 1)..] : href;
+        return RpmUpstreamProxy.IsHashPrefixedFilename(filename);
+    }
+
+    private sealed record MergedRepodataCache(
+        byte[] PrimaryGz,
+        byte[] FilelistsGz,
+        IReadOnlyList<System.Xml.Linq.XElement> UpstreamNonPrimaryEntries);
+
+    private static string MergedRepodataCacheKey(string orgId) => $"rpm:merged-repodata:{orgId}";
+
+    // Keep the repomd/primary/filelists tuple consistent across a single dnf sync while
+    // still picking up new upstream content within a minute — matches the repomd passthrough TTL.
+    private static readonly TimeSpan MergedRepodataTtl = TimeSpan.FromSeconds(60);
 
     private async Task<IActionResult?> TryServeRepodataFromUpstreamAsync(string upstreamBase, string file, CancellationToken ct)
     {
-        var ifNoneMatch = Request.Headers.IfNoneMatch.FirstOrDefault();
-        var ifModifiedSince = Request.Headers.IfModifiedSince.FirstOrDefault();
+        string? ifNoneMatch = Request.Headers.IfNoneMatch.FirstOrDefault();
+        string? ifModifiedSince = Request.Headers.IfModifiedSince.FirstOrDefault();
 
         RepodataResult? upstreamResult;
         try
@@ -396,23 +650,38 @@ public sealed class RpmController : OrgScopedControllerBase
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {
-            _logger.LogWarning(ex,
+            // deepcode ignore LogForging: Serilog RenderedCompactJsonFormatter JSON-encodes {Filename}, neutralising newline/control-char injection.
+            Logger.LogWarning(ex,
                 "RPM proxy: GetRepodataAsync failed for {Filename}: {ExceptionType}",
                 file, ex.GetType().Name);
             return null;
         }
 
-        if (upstreamResult is null) return null;
-        if (upstreamResult.NotModified) return StatusCode(304);
+        if (upstreamResult is null)
+        {
+            return null;
+        }
+
+        if (upstreamResult.NotModified)
+        {
+            return StatusCode(304);
+        }
 
         if (upstreamResult.ETag is not null)
+        {
             Response.Headers.ETag = upstreamResult.ETag;
+        }
+
         if (upstreamResult.LastModified is not null)
+        {
             Response.Headers.LastModified = upstreamResult.LastModified;
+        }
 
         // Honor range requests for hash-prefixed (zchunk-capable) metadata files.
         if (RpmUpstreamProxy.IsHashPrefixedFilename(file) && Request.Headers.Range.Count > 0)
+        {
             Response.Headers.AcceptRanges = "bytes";
+        }
 
         return File(upstreamResult.Body, upstreamResult.ContentType);
     }
@@ -421,16 +690,32 @@ public sealed class RpmController : OrgScopedControllerBase
     {
         if (file.Equals("repomd.xml", StringComparison.OrdinalIgnoreCase))
         {
-            var primary = await _svc.Repodata.BuildPrimaryAsync(orgId, ct);
-            var primaryGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(primary));
-            var repomd = RpmRepodataService.BuildRepomd(primaryGz);
+            string primary = await _svc.Repodata.BuildPrimaryAsync(orgId, ct);
+            byte[] primaryGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(primary));
+            string filelists = await _svc.Repodata.BuildFilelistsAsync(orgId, ct);
+            byte[] filelistsGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(filelists));
+            string other = await _svc.Repodata.BuildOtherAsync(orgId, ct);
+            byte[] otherGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(other));
+            string repomd = RpmRepodataService.BuildRepomd(primaryGz, filelistsGz, otherGz);
             return File(System.Text.Encoding.UTF8.GetBytes(repomd), "application/xml", "repomd.xml");
         }
         if (file.Equals("primary.xml.gz", StringComparison.OrdinalIgnoreCase))
         {
-            var primary = await _svc.Repodata.BuildPrimaryAsync(orgId, ct);
+            string primary = await _svc.Repodata.BuildPrimaryAsync(orgId, ct);
             return File(RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(primary)),
                 "application/x-gzip", "primary.xml.gz");
+        }
+        if (file.Equals("filelists.xml.gz", StringComparison.OrdinalIgnoreCase))
+        {
+            string filelists = await _svc.Repodata.BuildFilelistsAsync(orgId, ct);
+            return File(RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(filelists)),
+                "application/x-gzip", "filelists.xml.gz");
+        }
+        if (file.Equals("other.xml.gz", StringComparison.OrdinalIgnoreCase))
+        {
+            string other = await _svc.Repodata.BuildOtherAsync(orgId, ct);
+            return File(RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(other)),
+                "application/x-gzip", "other.xml.gz");
         }
 
         return NotFound();
@@ -439,7 +724,7 @@ public sealed class RpmController : OrgScopedControllerBase
     // ── GPG key ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// GET /o/{org}/rpm/repodata/RPM-GPG-KEY or .../repomd.xml.key — upstream GPG key.
+    /// GET /rpm/repodata/RPM-GPG-KEY or /rpm/repodata/repomd.xml.key — upstream GPG key.
     /// Both routes alias the same handler so <c>dnf</c> succeeds regardless of which path
     /// the upstream <c>.repo</c> file specifies for <c>gpgkey=</c>.
     /// </summary>
@@ -450,12 +735,18 @@ public sealed class RpmController : OrgScopedControllerBase
     [EnableRateLimiting("download")]
     public async Task<IActionResult> GpgKey(CancellationToken ct)
     {
-        if (_svc.Proxy is null) return NotFound();
+        if (_svc.Proxy is null)
+        {
+            return NotFound();
+        }
 
         // Per-org upstream: top-priority configured rpm registry. Empty ⇒ proxying disabled.
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
-        if (bases.Count == 0) return NotFound();
+        if (bases.Count == 0)
+        {
+            return NotFound();
+        }
 
         byte[]? key;
         try
@@ -464,12 +755,11 @@ public sealed class RpmController : OrgScopedControllerBase
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {
-            _logger.LogWarning(ex, "RPM proxy: GetGpgKeyAsync failed: {ExceptionType}", ex.GetType().Name);
+            Logger.LogWarning(ex, "RPM proxy: GetGpgKeyAsync failed: {ExceptionType}", ex.GetType().Name);
             return NotFound();
         }
 
-        if (key is null) return NotFound();
-        return File(key, "application/pgp-keys");
+        return key is null ? NotFound() : File(key, "application/pgp-keys");
     }
 
     // ── NEVRA parsing ─────────────────────────────────────────────────────────
@@ -481,27 +771,43 @@ public sealed class RpmController : OrgScopedControllerBase
     /// </summary>
     internal static (string Name, int Epoch, string Version, string Release, string Arch)? ParseNevra(string filename)
     {
-        if (!filename.EndsWith(".rpm", StringComparison.OrdinalIgnoreCase)) return null;
-        var stem = filename[..^4];
+        if (!filename.EndsWith(".rpm", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
 
-        var archDot = stem.LastIndexOf('.');
-        if (archDot < 0) return null;
-        var arch = stem[(archDot + 1)..];
-        var nameVerRel = stem[..archDot];
+        string stem = filename[..^4];
 
-        var relDash = nameVerRel.LastIndexOf('-');
-        if (relDash < 0) return null;
-        var release = nameVerRel[(relDash + 1)..];
-        var nameVer = nameVerRel[..relDash];
+        int archDot = stem.LastIndexOf('.');
+        if (archDot < 0)
+        {
+            return null;
+        }
 
-        var verDash = nameVer.LastIndexOf('-');
-        if (verDash < 0) return null;
-        var version = nameVer[(verDash + 1)..];
-        var name = nameVer[..verDash];
+        string arch = stem[(archDot + 1)..];
+        string nameVerRel = stem[..archDot];
+
+        int relDash = nameVerRel.LastIndexOf('-');
+        if (relDash < 0)
+        {
+            return null;
+        }
+
+        string release = nameVerRel[(relDash + 1)..];
+        string nameVer = nameVerRel[..relDash];
+
+        int verDash = nameVer.LastIndexOf('-');
+        if (verDash < 0)
+        {
+            return null;
+        }
+
+        string version = nameVer[(verDash + 1)..];
+        string name = nameVer[..verDash];
 
         int epoch = 0;
-        var colon = version.IndexOf(':');
-        if (colon > 0 && int.TryParse(version[..colon], out var e))
+        int colon = version.IndexOf(':');
+        if (colon > 0 && int.TryParse(version[..colon], out int e))
         {
             epoch = e;
             version = version[(colon + 1)..];
@@ -512,7 +818,7 @@ public sealed class RpmController : OrgScopedControllerBase
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    private ILogger<RpmController> _logger => HttpContext.RequestServices
+    private ILogger<RpmController> Logger => HttpContext.RequestServices
         .GetRequiredService<ILogger<RpmController>>();
 
     /// <summary>
@@ -525,13 +831,16 @@ public sealed class RpmController : OrgScopedControllerBase
             p.OrgId, "rpm", p.Resolution.Name, p.Resolution.Name.ToLowerInvariant(), isProxy: true, ct);
 
         await using var conn = await _svc.Db.OpenAsync(ct);
-        var existing = await conn.ExecuteScalarAsync<string?>(
+        string? existing = await conn.ExecuteScalarAsync<string?>(
             "SELECT id FROM package_versions WHERE package_id = @pkgId AND version = @ver",
             new { pkgId = pkg.Id, ver = p.Ver });
 
-        if (existing is not null) return;
+        if (existing is not null)
+        {
+            return;
+        }
 
-        var versionId = Guid.NewGuid().ToString("N");
+        string versionId = Guid.NewGuid().ToString("N");
         // xtenant: pkg.Id from GetOrCreateAsync(orgId,...); inherits tenant scope.
         await conn.ExecuteAsync(
             """
@@ -587,10 +896,13 @@ public sealed class RpmController : OrgScopedControllerBase
     private async Task<long?> ResolveSizeCapAsync(string orgId, CancellationToken ct)
     {
         var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
-        if (settings is null) return null;
+        if (settings is null)
+        {
+            return null;
+        }
         // xtenant: keyed by org_id directly.
         await using var conn = await _svc.Db.OpenAsync(ct);
-        var rpmCap = await conn.ExecuteScalarAsync<long?>(
+        long? rpmCap = await conn.ExecuteScalarAsync<long?>(
             "SELECT max_upload_bytes_rpm FROM org_settings WHERE org_id = @orgId",
             new { orgId });
         return rpmCap ?? settings.MaxUploadBytes;
@@ -607,5 +919,6 @@ public sealed record RpmControllerServices(
     IMetadataStore Db,
     RpmRepodataService Repodata,
     UpstreamRegistryResolver Registries,
+    IMemoryCache MemoryCache,
     UpstreamClient? UpstreamClient = null,
     IRpmUpstreamProxy? Proxy = null);

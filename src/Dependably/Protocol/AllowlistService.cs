@@ -32,10 +32,10 @@ public sealed class AllowlistService
         await using var conn = await _db.OpenAsync(ct);
 
         // Wildcard match: check for pkg:ecosystem/name (no @version)
-        var atIdx = purl.LastIndexOf('@');
-        var purlWithoutVersion = atIdx > 0 ? purl[..atIdx] : purl;
+        int atIdx = purl.LastIndexOf('@');
+        string purlWithoutVersion = atIdx > 0 ? purl[..atIdx] : purl;
 
-        var match = await conn.ExecuteScalarAsync<int>(
+        int match = await conn.ExecuteScalarAsync<int>(
             """
             SELECT COUNT(*) FROM allowlist
             WHERE org_id = @orgId
@@ -44,12 +44,14 @@ public sealed class AllowlistService
             new { orgId, purl, purlWithoutVersion });
 
         if (match > 0)
+        {
             return true;
+        }
 
         // Extract ecosystem from the PURL prefix for telemetry labels / audit. Falls back to
         // "" if the input isn't a valid PURL — the upstream caller has already routed by
         // ecosystem so this is purely a labelling concern.
-        var ecosystem = ExtractEcosystem(purl);
+        string ecosystem = ExtractEcosystem(purl);
         DependablyMeter.AllowlistBlocks.Add(1, new KeyValuePair<string, object?>("ecosystem", ecosystem));
         await _audit.LogAsync("allowlist_blocked", orgId: orgId, ecosystem: ecosystem, purl: purl, ct: ct);
         return false;
@@ -57,8 +59,12 @@ public sealed class AllowlistService
 
     private static string ExtractEcosystem(string purl)
     {
-        if (!purl.StartsWith("pkg:", StringComparison.Ordinal)) return "";
-        var slash = purl.IndexOf('/', 4);
+        if (!purl.StartsWith("pkg:", StringComparison.Ordinal))
+        {
+            return "";
+        }
+
+        int slash = purl.IndexOf('/', 4);
         return slash > 4 ? purl[4..slash] : "";
     }
 

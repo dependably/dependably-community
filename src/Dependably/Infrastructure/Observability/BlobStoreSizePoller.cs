@@ -31,7 +31,7 @@ public sealed class BlobStoreSizePoller : BackgroundService
     {
         _tiers = tiers;
         _logger = logger;
-        var seconds = int.TryParse(config["BLOB_STORE_SIZE_POLL_INTERVAL_SECONDS"], out var s) && s > 0
+        int seconds = int.TryParse(config["BLOB_STORE_SIZE_POLL_INTERVAL_SECONDS"], out int s) && s > 0
             ? s
             : 300;
         _interval = TimeSpan.FromSeconds(seconds);
@@ -61,14 +61,16 @@ public sealed class BlobStoreSizePoller : BackgroundService
         // otherwise we'd double-count and emit two identical gauge values
         // under different labels.
         if (_tiers.IsSplit)
+        {
             await PollTierAsync("cache", _tiers.Cache, ct);
+        }
     }
 
     private async Task PollTierAsync(string tier, IBlobStore store, CancellationToken ct)
     {
         try
         {
-            var size = await store.GetTotalSizeAsync(ct);
+            long size = await store.GetTotalSizeAsync(ct);
             DependablyMeter.RecordBlobStoreSize(tier, size);
         }
         catch (OperationCanceledException) { throw; }

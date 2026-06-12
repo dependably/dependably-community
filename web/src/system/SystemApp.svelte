@@ -43,7 +43,10 @@
     else if (intended.page === 'system-login') finalPage = 'system-dashboard'
     else finalPage = intended.page
 
-    navigate(finalPage, {}, { replace: true })
+    // Preserve the query string when the user lands on the page they asked for —
+    // system list pages hydrate their table state from it. Redirected landings get
+    // a clean URL.
+    navigate(finalPage, {}, { replace: true, preserveSearch: finalPage === intended.page })
 
     window.addEventListener('popstate', (e) => {
       const next = (e.state && e.state.page) ? e.state : routeFor(window.location.pathname)

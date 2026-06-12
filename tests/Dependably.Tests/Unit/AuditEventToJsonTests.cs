@@ -1,6 +1,5 @@
 using System.Text.Json;
 using Dependably.Infrastructure.Audit.Events;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -154,7 +153,7 @@ public sealed class AuditEventToJsonTests
         // Compliance invariant: email is recorded as a hash, never plaintext.
         var ev = new AuthEvents.LoginFailure(Realm: "tenant", EmailHash: "abcd1234");
 
-        var json = ev.ToJson();
+        string json = ev.ToJson();
 
         Assert.DoesNotContain("email\"", json); // no plaintext `email` field
         var root = Parse(json);

@@ -2,7 +2,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -85,10 +84,18 @@ public class AuditEventRepositoryTests : IAsyncLifetime
         var ev = Sample("o1", "x", DateTimeOffset.UtcNow);
         var bad = new AuditEvent
         {
-            EventId = ev.EventId, SchemaVersion = ev.SchemaVersion, EventType = ev.EventType,
-            OrgId = ev.OrgId, TenantResolver = ev.TenantResolver, ActorType = ev.ActorType,
-            ActorId = ev.ActorId, RequestId = ev.RequestId, SourceIp = ev.SourceIp,
-            UserAgent = ev.UserAgent, Outcome = "maybe", Payload = ev.Payload,
+            EventId = ev.EventId,
+            SchemaVersion = ev.SchemaVersion,
+            EventType = ev.EventType,
+            OrgId = ev.OrgId,
+            TenantResolver = ev.TenantResolver,
+            ActorType = ev.ActorType,
+            ActorId = ev.ActorId,
+            RequestId = ev.RequestId,
+            SourceIp = ev.SourceIp,
+            UserAgent = ev.UserAgent,
+            Outcome = "maybe",
+            Payload = ev.Payload,
             OccurredAt = ev.OccurredAt
         };
         await Assert.ThrowsAnyAsync<Exception>(() => repo.InsertAsync(bad));

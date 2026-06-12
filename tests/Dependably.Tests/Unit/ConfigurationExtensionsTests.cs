@@ -1,6 +1,5 @@
 using Dependably.Infrastructure;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -19,8 +18,8 @@ public sealed class ConfigurationExtensionsTests
         // operator who pastes "https://repo.example.com/" gets the same behaviour as one who
         // does not. (A CORS origin or "{base}/join" link built from the slashed form would
         // otherwise silently break.)
-        var withSlash = Config("https://repo.example.com/").PublicBaseUrl();
-        var withoutSlash = Config("https://repo.example.com").PublicBaseUrl();
+        string? withSlash = Config("https://repo.example.com/").PublicBaseUrl();
+        string? withoutSlash = Config("https://repo.example.com").PublicBaseUrl();
 
         Assert.Equal("https://repo.example.com", withoutSlash);
         Assert.Equal(withoutSlash, withSlash);

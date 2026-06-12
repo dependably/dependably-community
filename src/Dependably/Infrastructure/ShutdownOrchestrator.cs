@@ -27,7 +27,7 @@ public sealed class ShutdownOrchestrator : IHostedService
         _lifetime = lifetime;
         _logger = logger;
         _preStopDelay = TimeSpan.FromSeconds(
-            int.TryParse(config["SHUTDOWN_PRESTOP_DELAY"], out var d) ? d : 10);
+            int.TryParse(config["SHUTDOWN_PRESTOP_DELAY"], out int d) ? d : 10);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)

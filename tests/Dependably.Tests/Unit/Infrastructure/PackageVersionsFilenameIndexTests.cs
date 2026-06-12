@@ -2,7 +2,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -37,7 +36,7 @@ public sealed class PackageVersionsFilenameIndexTests : IAsyncLifetime
             new { filename = "acme-1.0.tar.gz", orgId = "o1", ecosystem = "pypi" })).ToList();
 
         Assert.NotEmpty(plan);
-        var detail = string.Join("\n", plan.Select(p => p.Detail));
+        string detail = string.Join("\n", plan.Select(p => p.Detail));
         Assert.Contains("idx_package_versions_filename", detail);
         // The previous LIKE-on-blob_key plan reported "SCAN package_versions"; the index
         // path reports SEARCH using the new index. Either substring keeps the assertion
@@ -56,12 +55,12 @@ public sealed class PackageVersionsFilenameIndexTests : IAsyncLifetime
         }
         var pkg = await repo.GetOrCreateAsync("o1", "pypi", "demo", "demo", isProxy: false);
 
-        var blobKey = BlobKeys.Hosted("o1", "pypi", "demo", "1.0", "demo-1.0.tar.gz");
+        string blobKey = BlobKeys.Hosted("o1", "pypi", "demo", "1.0", "demo-1.0.tar.gz");
         var v = await repo.CreateVersionAsync(new NewPackageVersion(
             pkg.Id, "1.0", "pkg:pypi/demo@1.0", blobKey, 100, "deadbeef"));
 
         await using var conn2 = await _db.OpenAsync();
-        var filename = await conn2.ExecuteScalarAsync<string?>(
+        string? filename = await conn2.ExecuteScalarAsync<string?>(
             "SELECT filename FROM package_versions WHERE id = @id", new { id = v.Id });
         Assert.Equal("demo-1.0.tar.gz", filename);
     }
@@ -75,7 +74,7 @@ public sealed class PackageVersionsFilenameIndexTests : IAsyncLifetime
             await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1', 'acme')");
         }
         var pkg = await repo.GetOrCreateAsync("o1", "pypi", "demo", "demo", isProxy: false);
-        var blobKey = BlobKeys.Hosted("o1", "pypi", "demo", "2.0", "demo-2.0.tar.gz");
+        string blobKey = BlobKeys.Hosted("o1", "pypi", "demo", "2.0", "demo-2.0.tar.gz");
         _ = await repo.CreateVersionAsync(new NewPackageVersion(
             pkg.Id, "2.0", "pkg:pypi/demo@2.0", blobKey, 100, "cafebabe"));
 
@@ -113,7 +112,7 @@ public sealed class PackageVersionsFilenameIndexTests : IAsyncLifetime
         await new SchemaInitializer(_db).InitializeAsync();
 
         await using var conn2 = await _db.OpenAsync();
-        var filename = await conn2.ExecuteScalarAsync<string?>(
+        string? filename = await conn2.ExecuteScalarAsync<string?>(
             "SELECT filename FROM package_versions LIMIT 1");
         Assert.Equal("legacy-0.1.tar.gz", filename);
     }

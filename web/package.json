@@ -13,7 +13,7 @@
     "format": "prettier --write src",
     "check": "svelte-check --tsconfig ./jsconfig.json",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage --reporter=default --reporter=junit --outputFile.junit=test-results/junit.xml",
     "e2e": "playwright test --config e2e/playwright.config.ts",
     "e2e:ui": "playwright test --config e2e/playwright.config.ts --ui",
     "e2e:debug": "playwright test --config e2e/playwright.config.ts --debug",

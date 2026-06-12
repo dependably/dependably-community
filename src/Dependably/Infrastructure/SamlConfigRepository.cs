@@ -31,8 +31,65 @@ public sealed class SamlConfigRepository
                    role_attribute      AS RoleAttribute,
                    role_mapping        AS RoleMapping,
                    default_role        AS DefaultRole,
+                   idp_can_assign_admin AS IdpCanAssignAdmin,
+                   cert_expiry_alert_stage AS CertExpiryAlertStage,
                    updated_at          AS UpdatedAt
             FROM tenant_saml_config
+            WHERE org_id = @orgId
+            """,
+            new { orgId });
+    }
+
+    /// <summary>
+    /// Returns a lightweight projection of all orgs that have SAML enabled and an IdP signing
+    /// cert configured. Used by the daily cert-expiry sweep, which reads every tenant's cert
+    /// fields in a single cross-tenant pass.
+    /// </summary>
+    public async Task<IReadOnlyList<TenantSamlCertRow>> GetAllCertRowsAsync(CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: daily cert-expiry sweep reads all orgs for operator-level monitoring
+        var rows = await conn.QueryAsync<TenantSamlCertRow>(
+            """
+            SELECT tsc.org_id              AS OrgId,
+                   tsc.idp_signing_cert    AS IdpSigningCert,
+                   tsc.idp_signing_cert_override AS IdpSigningCertOverride,
+                   tsc.cert_expiry_alert_stage   AS CertExpiryAlertStage
+            FROM tenant_saml_config tsc
+            JOIN orgs o ON o.id = tsc.org_id
+            WHERE (tsc.idp_signing_cert IS NOT NULL OR tsc.idp_signing_cert_override IS NOT NULL)
+              AND o.deleted_at IS NULL
+            """);
+        return rows.ToList();
+    }
+
+    /// <summary>
+    /// Records the cert-expiry alert stage after the daily sweep emits an audit event.
+    /// The stage is one of "30", "14", "7", "1", or "expired".
+    /// </summary>
+    public async Task SetCertExpiryAlertStageAsync(string orgId, string stage, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            UPDATE tenant_saml_config
+            SET cert_expiry_alert_stage = @stage
+            WHERE org_id = @orgId
+            """,
+            new { orgId, stage });
+    }
+
+    /// <summary>
+    /// Resets the cert-expiry alert stage to NULL so the sweep re-evaluates against the new cert.
+    /// Called whenever the metadata cert or signing-cert override is replaced or cleared.
+    /// </summary>
+    public async Task ResetCertExpiryAlertStageAsync(string orgId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            UPDATE tenant_saml_config
+            SET cert_expiry_alert_stage = NULL
             WHERE org_id = @orgId
             """,
             new { orgId });
@@ -50,10 +107,10 @@ public sealed class SamlConfigRepository
             """
             INSERT INTO tenant_saml_config (org_id, enabled, forms_login_enabled,
                 sp_entity_id, name_id_format, email_attribute, button_label,
-                role_attribute, role_mapping, default_role, updated_at)
+                role_attribute, role_mapping, default_role, idp_can_assign_admin, updated_at)
             VALUES (@orgId, @enabled, @formsEnabled,
                 @spEntityId, @nameIdFormat, @emailAttribute, @buttonLabel,
-                @roleAttribute, @roleMapping, @defaultRole, @now)
+                @roleAttribute, @roleMapping, @defaultRole, @idpCanAssignAdmin, @now)
             ON CONFLICT(org_id) DO UPDATE SET
                 enabled             = @enabled,
                 forms_login_enabled = @formsEnabled,
@@ -64,21 +121,23 @@ public sealed class SamlConfigRepository
                 role_attribute      = @roleAttribute,
                 role_mapping        = @roleMapping,
                 default_role        = @defaultRole,
+                idp_can_assign_admin = @idpCanAssignAdmin,
                 updated_at          = @now
             """,
             new
             {
-                orgId          = update.OrgId,
-                enabled        = update.Enabled ? 1 : 0,
-                formsEnabled   = update.FormsLoginEnabled ? 1 : 0,
-                spEntityId     = update.SpEntityId,
-                nameIdFormat   = update.NameIdFormat,
+                orgId = update.OrgId,
+                enabled = update.Enabled ? 1 : 0,
+                formsEnabled = update.FormsLoginEnabled ? 1 : 0,
+                spEntityId = update.SpEntityId,
+                nameIdFormat = update.NameIdFormat,
                 emailAttribute = update.EmailAttribute,
-                buttonLabel    = update.ButtonLabel,
-                roleAttribute  = update.RoleAttribute,
-                roleMapping    = update.RoleMapping,
-                defaultRole    = update.DefaultRole,
-                now            = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                buttonLabel = update.ButtonLabel,
+                roleAttribute = update.RoleAttribute,
+                roleMapping = update.RoleMapping,
+                defaultRole = update.DefaultRole,
+                idpCanAssignAdmin = update.IdpCanAssignAdmin ? 1 : 0,
+                now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
     }
 
@@ -216,7 +275,7 @@ public sealed class SamlConfigRepository
         string cid, string tenantId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.ExecuteAsync(
+        int rows = await conn.ExecuteAsync(
             """
             UPDATE saml_test_runs
             SET consumed_at = @now
@@ -234,13 +293,113 @@ public sealed class SamlConfigRepository
         return rows == 1;
     }
 
-    /// <summary>Garbage-collects expired or consumed test runs older than 1 hour.</summary>
-    public async Task PurgeExpiredTestRunsAsync(CancellationToken ct = default)
+    /// <summary>
+    /// Garbage-collects expired rows across all three SAML one-shot tables. Each table also prunes
+    /// itself on write, so this scheduled sweep only matters for a tenant that goes idle after
+    /// generating rows — it bounds the table even when no further SAML traffic fires the on-write
+    /// prune. Test runs keep a 1-hour grace (recent runs stay visible for debugging); pending
+    /// requests and consumed assertions are reclaimed as soon as they expire.
+    /// </summary>
+    public async Task PurgeExpiredSamlAsync(CancellationToken ct = default)
+    {
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string testCutoff = DateTimeOffset.UtcNow.AddHours(-1).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: global retention sweep of expired one-shot rows; deletes by expiry across all tenants
+        await conn.ExecuteAsync("DELETE FROM saml_pending_requests WHERE expires_at < @now", new { now });
+        // xtenant: global retention sweep of expired one-shot rows; deletes by expiry across all tenants
+        await conn.ExecuteAsync("DELETE FROM saml_consumed_assertions WHERE expires_at < @now", new { now });
+        // xtenant: global retention sweep of expired one-shot rows; deletes by expiry across all tenants
+        await conn.ExecuteAsync("DELETE FROM saml_test_runs WHERE expires_at < @testCutoff", new { testCutoff });
+    }
+
+    // ── SP-initiated request binding (InResponseTo) ───────────────────────────
+
+    /// <summary>
+    /// Records a pending SP-initiated AuthnRequest keyed by <paramref name="requestId"/> so the
+    /// ACS handler can bind the response's InResponseTo back to a request this SP actually issued.
+    /// Expired rows are pruned opportunistically.
+    /// </summary>
+    public async Task IssuePendingRequestAsync(
+        string requestId, string tenantId, DateTimeOffset expiresAt, CancellationToken ct = default)
+    {
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: prune-on-write of expired one-shot rows; deletes by expiry across all tenants
+        await conn.ExecuteAsync("DELETE FROM saml_pending_requests WHERE expires_at < @now", new { now });
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO saml_pending_requests (request_id, tenant_id, issued_at, expires_at)
+            VALUES (@requestId, @tenantId, @issuedAt, @expiresAt)
+            """,
+            new
+            {
+                requestId,
+                tenantId,
+                issuedAt = now,
+                expiresAt = expiresAt.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            });
+    }
+
+    /// <summary>
+    /// Atomically consumes a pending AuthnRequest. Returns true exactly once for a given
+    /// <paramref name="requestId"/> + <paramref name="tenantId"/> pair that hasn't expired and
+    /// hasn't already been consumed; subsequent calls (and unknown/unsolicited ids) return false.
+    /// </summary>
+    public async Task<bool> TryConsumePendingRequestAsync(
+        string requestId, string tenantId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
-            "DELETE FROM saml_test_runs WHERE expires_at < @cutoff",
-            new { cutoff = DateTimeOffset.UtcNow.AddHours(-1).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+        int rows = await conn.ExecuteAsync(
+            """
+            UPDATE saml_pending_requests
+            SET consumed_at = @now
+            WHERE request_id = @requestId
+              AND tenant_id = @tenantId
+              AND consumed_at IS NULL
+              AND expires_at > @now
+            """,
+            new
+            {
+                requestId,
+                tenantId,
+                now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            });
+        return rows == 1;
+    }
+
+    // ── Assertion replay guard ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Records an accepted assertion's signed ID as consumed for <paramref name="tenantId"/>.
+    /// Returns true the first time the (tenant, assertion) pair is seen and false on any repeat —
+    /// the insert's primary-key conflict is the atomic replay guard. <paramref name="expiresAt"/>
+    /// is the assertion's NotOnOrAfter so the row outlives the window in which it could be replayed.
+    /// Expired rows are pruned opportunistically.
+    /// </summary>
+    public async Task<bool> TryConsumeAssertionAsync(
+        string tenantId, string? idpEntityId, string assertionId, DateTimeOffset expiresAt,
+        CancellationToken ct = default)
+    {
+        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: prune-on-write of expired one-shot rows; deletes by expiry across all tenants
+        await conn.ExecuteAsync("DELETE FROM saml_consumed_assertions WHERE expires_at < @now", new { now });
+        int rows = await conn.ExecuteAsync(
+            """
+            INSERT INTO saml_consumed_assertions (tenant_id, assertion_id, idp_entity_id, consumed_at, expires_at)
+            VALUES (@tenantId, @assertionId, @idpEntityId, @now, @expiresAt)
+            ON CONFLICT DO NOTHING
+            """,
+            new
+            {
+                tenantId,
+                assertionId,
+                idpEntityId,
+                now,
+                expiresAt = expiresAt.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            });
+        return rows == 1;
     }
 }
 
@@ -254,4 +413,21 @@ public sealed record SamlSettingsUpdate(
     string? ButtonLabel,
     string? RoleAttribute,
     string? RoleMapping,
-    string DefaultRole);
+    string DefaultRole,
+    bool IdpCanAssignAdmin = false);
+
+/// <summary>
+/// Lightweight projection of the columns the cert-expiry sweep needs from
+/// <c>tenant_saml_config</c>. Avoids loading the full metadata XML for every tenant
+/// in the daily cross-tenant pass.
+/// </summary>
+public sealed class TenantSamlCertRow
+{
+    public string OrgId { get; set; } = "";
+    /// <summary>Base64-encoded X.509 cert parsed from IdP metadata. NULL when absent.</summary>
+    public string? IdpSigningCert { get; set; }
+    /// <summary>Admin-pinned signing cert override. NULL when absent. Takes precedence over IdpSigningCert.</summary>
+    public string? IdpSigningCertOverride { get; set; }
+    /// <summary>Most-recently emitted alert stage: "30","14","7","1","expired". NULL = never alerted or cert changed.</summary>
+    public string? CertExpiryAlertStage { get; set; }
+}

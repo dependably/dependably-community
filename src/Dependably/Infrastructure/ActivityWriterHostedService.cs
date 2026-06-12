@@ -60,7 +60,9 @@ public sealed class ActivityWriterHostedService : BackgroundService
             }
         }
         if (buffer.Count > 0)
+        {
             await FlushAsync(buffer, ct);
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -75,7 +77,9 @@ public sealed class ActivityWriterHostedService : BackgroundService
                 // Block until at least one record is available — when the channel completes
                 // (graceful shutdown) WaitToReadAsync returns false and the loop exits.
                 if (!await reader.WaitToReadAsync(stoppingToken))
+                {
                     break;
+                }
 
                 await CollectAndFlushBatchAsync(reader, buffer, stoppingToken);
             }
@@ -121,11 +125,15 @@ public sealed class ActivityWriterHostedService : BackgroundService
             }
 
             if (!await WaitForMoreOrTimeoutAsync(reader, flushDeadline, stoppingToken))
+            {
                 break;
+            }
         }
 
         if (buffer.Count > 0)
+        {
             await FlushAsync(buffer, stoppingToken);
+        }
     }
 
     /// <summary>
@@ -139,7 +147,10 @@ public sealed class ActivityWriterHostedService : BackgroundService
         CancellationToken stoppingToken)
     {
         var remaining = MaxFlushInterval - flushDeadline.Elapsed;
-        if (remaining <= TimeSpan.Zero) return false;
+        if (remaining <= TimeSpan.Zero)
+        {
+            return false;
+        }
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         cts.CancelAfter(remaining);
@@ -175,7 +186,9 @@ public sealed class ActivityWriterHostedService : BackgroundService
                 }
             }
             if (buffer.Count > 0)
+            {
                 await FlushAsync(buffer, CancellationToken.None);
+            }
         }
         catch (Exception ex)
         {
@@ -185,7 +198,10 @@ public sealed class ActivityWriterHostedService : BackgroundService
 
     internal async Task FlushAsync(IReadOnlyList<ActivityRecord> rows, CancellationToken ct)
     {
-        if (rows.Count == 0) return;
+        if (rows.Count == 0)
+        {
+            return;
+        }
 
         await using var conn = await _db.OpenAsync(ct);
         // Wrap the batch in a single transaction so the writer holds the WAL writer lock
@@ -210,11 +226,19 @@ public sealed class ActivityWriterHostedService : BackgroundService
     /// </summary>
     public async Task WaitForIdleAsync(TimeSpan timeout = default, CancellationToken ct = default)
     {
-        if (timeout == default) timeout = TimeSpan.FromSeconds(5);
+        if (timeout == default)
+        {
+            timeout = TimeSpan.FromSeconds(5);
+        }
+
         var sw = Stopwatch.StartNew();
         while (sw.Elapsed < timeout)
         {
-            if (FlushedCount >= _writer.EnqueuedCount) return;
+            if (FlushedCount >= _writer.EnqueuedCount)
+            {
+                return;
+            }
+
             await Task.Delay(5, ct);
         }
         throw new TimeoutException(

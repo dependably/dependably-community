@@ -14,7 +14,7 @@ public static class TokenGenerator
     /// </summary>
     public static string Generate()
     {
-        var bytes = RandomNumberGenerator.GetBytes(32);
+        byte[] bytes = RandomNumberGenerator.GetBytes(32);
         // URL-safe base64: replace + with - and / with _
         return Convert.ToBase64String(bytes)
             .Replace('+', '-')

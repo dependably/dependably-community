@@ -3,7 +3,6 @@ using Amazon.S3;
 using Amazon.S3.Model;
 using Dependably.Storage;
 using NSubstitute;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Storage;
 

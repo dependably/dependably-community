@@ -12,6 +12,7 @@
     "audit": "Audit",
     "settings": "Paramètres",
     "vulnerabilities": "Vulnérabilités",
+    "quarantine": "Quarantaine",
     "licensePolicy": "Licences",
     "setup": "Configuration",
     "admin": "Administration",
@@ -50,7 +51,8 @@
     "never": "jamais",
     "notSet": "non défini",
     "notAvailable": "Non disponible.",
-    "allEcosystems": "Tous les écosystèmes"
+    "allEcosystems": "Tous les écosystèmes",
+    "clearSearch": "Effacer la recherche"
   },
   "password": {
     "tooShort": "Utilisez au moins {min} caractères.",
@@ -100,8 +102,15 @@
       "ecosystem": "Écosystème",
       "purl": "PURL",
       "versions": "Versions",
+      "downloads": "Téléchargements",
+      "latest": "À jour",
       "vulns": "Vulnér.",
       "created": "Créé le"
+    },
+    "latest": {
+      "current": "La dernière version amont est en cache",
+      "stale": "Une version amont plus récente n'est pas en cache",
+      "unknown": "Aucune version amont à comparer"
     },
     "empty": "Aucun paquet trouvé"
   },
@@ -334,6 +343,8 @@
       "saml.config_updated": "Configuration SAML mise à jour",
       "saml.metadata_uploaded": "Métadonnées SAML téléversées",
       "saml.config_deleted": "Configuration SAML supprimée",
+      "saml.signing_cert_expiring": "Certificat de signature SAML arrivant à expiration",
+      "saml.signing_cert_expired": "Certificat de signature SAML expiré",
       "license_policy_mode_changed": "Mode de politique de licences modifié",
       "license_allowlist_added": "Entrée de liste blanche de licences ajoutée",
       "license_allowlist_removed": "Entrée de liste blanche de licences supprimée",
@@ -526,7 +537,12 @@
       "roleMappingSaved": "Mappage des rôles enregistré.",
       "testPopupBlocked": "Le navigateur a bloqué la fenêtre contextuelle de test SAML. Autorisez les fenêtres contextuelles pour ce site et réessayez.",
       "testSucceeded": "Test SAML réussi (courriel reçu : {email}). La connexion par formulaire peut maintenant être désactivée dans les 10 prochaines minutes.",
-      "testFailed": "Échec du test SAML : {reason}"
+      "testFailed": "Échec du test SAML : {reason}",
+      "certExpiryWarningTitle": "Le certificat de signature IdP arrive à expiration",
+      "certExpiryExpiredTitle": "Le certificat de signature IdP a expiré",
+      "certExpiryWarningBody": "Le certificat de signature IdP SAML expire dans {days} jour(s) ({notAfter}). Remplacez-le dans Paramètres → Authentification avant son expiration pour éviter toute interruption de la connexion SAML.",
+      "certExpiryExpiredBody": "Le certificat de signature IdP SAML a expiré le {notAfter}. Les connexions SAML peuvent échouer. Remplacez le certificat dans Paramètres → Authentification immédiatement.",
+      "certExpiryReplace": "Remplacer le certificat"
     },
     "saved": "Paramètres enregistrés.",
     "retentionSaved": "Paramètres de rétention enregistrés.",
@@ -568,12 +584,27 @@
       "minReleaseAgeUnitDays": "Jours",
       "allowlistSection": "Liste d'autorisation",
       "blocklistSection": "Liste de blocage",
+      "reservedSection": "Espaces de noms réservés",
+      "reservedHint": "Protection contre la confusion de dépendances : les noms correspondant à ces modèles par écosystème ne sont jamais récupérés ni fusionnés depuis l'amont — seul votre contenu hébergé est servi. Les noms que vous avez publiés sont protégés automatiquement ; réservez des modèles ici pour couvrir aussi les noms pas encore publiés.",
       "blockDeprecated": "Politique des paquets obsolètes",
       "blockDeprecatedHint": "Traitement des versions marquées obsolètes en amont. « Avertir » affiche un statut « obsolète » dans l'interface et l'API. « Bloquer les nouveaux » refuse une version obsolète absente du cache — elle n'est jamais récupérée, mise en cache ni servie — tandis que les versions déjà en cache continuent d'être servies. « Tout bloquer » renvoie en plus une erreur 403 pour les versions déjà en cache une fois obsolètes. Les données d'obsolescence sont capturées lors de la récupération via le proxy et actualisées chaque jour par la tâche d'actualisation.",
       "blockDeprecatedOff": "Désactivé — autoriser les obsolètes",
       "blockDeprecatedWarn": "Avertir — signaler seulement",
       "blockDeprecatedBlockNew": "Bloquer les nouveaux — refuser les nouvelles récupérations obsolètes",
       "blockDeprecatedBlockAll": "Tout bloquer — cesser aussi de servir le cache",
+      "blockMalicious": "Politique des paquets malveillants",
+      "blockMaliciousHint": "Traitement des versions associées à un avis de paquet malveillant (rapports OSV MAL- du flux OpenSSF malicious-packages, collectés par l'analyse de vulnérabilités habituelle). Ces avis n'ont généralement pas de score CVSS, la tolérance de score OSV ne s'y applique donc jamais. « Bloquer » renvoie une erreur 403 à la récupération et au service ; « Avertir » affiche seulement l'avis dans le rapport de vulnérabilités. Une autorisation manuelle par version reste prioritaire, comme échappatoire aux faux positifs.",
+      "blockMaliciousOff": "Désactivé — ignorer les avis de malveillance",
+      "blockMaliciousWarn": "Avertir — signaler seulement",
+      "blockMaliciousBlock": "Bloquer — refuser les versions signalées",
+      "blockKev": "Politique des vulnérabilités exploitées (KEV)",
+      "blockKevHint": "Traitement des versions dont un avis correspond à une CVE du catalogue CISA Known Exploited Vulnerabilities — exploitation confirmée sur le terrain, indépendamment du score CVSS. Le catalogue est actualisé chaque jour par la tâche de flux de menaces. « Bloquer » renvoie une erreur 403 à la récupération et au service ; « Avertir » affiche seulement l'indicateur KEV dans le rapport de vulnérabilités. Une autorisation manuelle par version reste prioritaire.",
+      "blockKevOff": "Désactivé — ignorer le catalogue KEV",
+      "blockKevWarn": "Avertir — signaler seulement",
+      "blockKevBlock": "Bloquer — refuser les vulnérabilités exploitées",
+      "maxEpssTolerance": "Plafond de probabilité EPSS",
+      "maxEpssToleranceHint": "Probabilité d'exploitation EPSS (FIRST.org) maximale tolérée (0,0–1,0) parmi les avis d'une version. EPSS estime la probabilité qu'une CVE soit exploitée sous 30 jours ; par exemple 0.5 bloque les versions dont un avis est jugé plus probablement exploité qu'improbable. Les scores sont actualisés chaque jour par la tâche de flux de menaces. Laisser vide pour désactiver.",
+      "maxEpssTolerancePlaceholder": "Désactivé",
       "saved": "Paramètres proxy enregistrés.",
       "upstreamRegistries": {
         "section": "Registres en amont",
@@ -670,6 +701,23 @@
       "pattern": "Modèle regex",
       "patternPlaceholder": "p. ex. ^pkg:npm/evil-.*",
       "patternHint": "Regex appliquée sur le PURL complet — ancrez avec ^pkg:npm/ (ou pypi, nuget) pour cibler un seul écosystème."
+    }
+  },
+  "reservedNamespaces": {
+    "addEntry": "Réserver un espace de noms",
+    "removeConfirm": "Supprimer cet espace de noms réservé ? Les noms correspondants redeviennent récupérables depuis l'amont.",
+    "columns": {
+      "ecosystem": "Écosystème",
+      "pattern": "Modèle",
+      "added": "Ajouté le"
+    },
+    "empty": "Aucun espace de noms réservé",
+    "modal": {
+      "title": "Réserver un espace de noms",
+      "ecosystem": "Écosystème",
+      "pattern": "Modèle",
+      "patternPlaceholder": "p. ex. @acme/* ou com.acme",
+      "patternHint": "Nom exact ou glob final * (« @acme/* », « Acme.* »). Les modèles Maven sont des préfixes de groupId délimités par des points : « com.acme » réserve aussi tous les groupIds « com.acme.* », mais jamais « com.acmecorp »."
     }
   },
   "users": {
@@ -772,10 +820,46 @@
     "vulns": "Vulnérabilités",
     "packageBreakdown": "Paquets par écosystème",
     "donutEmpty": "Aucun paquet",
-    "unscored": "NON COTÉE"
+    "unscored": "NON COTÉE",
+    "samlCertExpiryCard": "Cert. SAML arrivant à expiration",
+    "samlCertExpiredCard": "Cert. SAML expiré",
+    "samlCertDays": "{days} jour(s) restant(s)",
+    "samlCertNotAfter": "Expire le {notAfter}"
+  },
+  "quarantine": {
+    "title": "Quarantaine",
+    "intro": "Chaque blocage automatique de politique (obsolète, âge de publication, malveillant, KEV, EPSS, score de vulnérabilité) arrive ici pour révision pendant que les téléchargements continuent de renvoyer 403. Approuver pose l'autorisation manuelle de la version — elle prime sur toutes les politiques ; refuser enregistre un blocage manuel. Les décisions sont consignées dans le journal d'audit.",
+    "empty": "Aucune entrée.",
+    "approve": "Approuver",
+    "deny": "Refuser",
+    "filters": {
+      "pending": "En attente",
+      "approved": "Approuvées",
+      "denied": "Refusées",
+      "all": "Toutes"
+    },
+    "states": {
+      "approved": "Approuvée",
+      "denied": "Refusée"
+    },
+    "gates": {
+      "deprecated": "obsolète",
+      "release_age": "âge de publication",
+      "malicious": "malveillant",
+      "kev": "KEV",
+      "epss": "EPSS",
+      "vuln_score": "score de vuln."
+    },
+    "columns": {
+      "package": "Paquet",
+      "gate": "Politique",
+      "detail": "Détail",
+      "updated": "Mis à jour"
+    }
   },
   "vulnerabilities": {
     "title": "Vulnérabilités",
+    "malicious": "MALVEILLANT",
     "columns": {
       "package": "Paquet",
       "version": "Version",

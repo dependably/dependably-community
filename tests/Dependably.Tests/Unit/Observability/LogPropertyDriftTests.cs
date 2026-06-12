@@ -1,5 +1,4 @@
 using System.Runtime.CompilerServices;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Observability;
 
@@ -17,54 +16,61 @@ public sealed class LogPropertyDriftTests
 {
     private static readonly Dictionary<string, string> Banned = new(StringComparer.Ordinal)
     {
-        ["tenant_id"]    = "TenantId",
-        ["Tenant_Id"]    = "TenantId",
-        ["TenantID"]     = "TenantId",
-        ["tenantId"]     = "TenantId",
-        ["tenantid"]     = "TenantId",
-        ["org_id"]       = "OrgId",
-        ["Org_Id"]       = "OrgId",
-        ["OrgID"]        = "OrgId",
-        ["orgId"]        = "OrgId",
-        ["orgid"]        = "OrgId",
-        ["trace_id"]     = "TraceId",
-        ["TraceID"]      = "TraceId",
-        ["traceId"]      = "TraceId",
-        ["span_id"]      = "SpanId",
-        ["SpanID"]       = "SpanId",
-        ["spanId"]       = "SpanId",
+        ["tenant_id"] = "TenantId",
+        ["Tenant_Id"] = "TenantId",
+        ["TenantID"] = "TenantId",
+        ["tenantId"] = "TenantId",
+        ["tenantid"] = "TenantId",
+        ["org_id"] = "OrgId",
+        ["Org_Id"] = "OrgId",
+        ["OrgID"] = "OrgId",
+        ["orgId"] = "OrgId",
+        ["orgid"] = "OrgId",
+        ["trace_id"] = "TraceId",
+        ["TraceID"] = "TraceId",
+        ["traceId"] = "TraceId",
+        ["span_id"] = "SpanId",
+        ["SpanID"] = "SpanId",
+        ["spanId"] = "SpanId",
         ["ecosystem_id"] = "Ecosystem",
     };
 
     [Fact]
     public void NoBannedPropertyNamesInLogTemplates()
     {
-        var srcDir = GetSourceDir();
+        string srcDir = GetSourceDir();
         Assert.True(Directory.Exists(srcDir), $"Source directory not found: {srcDir}");
 
         var violations = new List<string>();
 
-        foreach (var file in Directory.EnumerateFiles(srcDir, "*.cs", SearchOption.AllDirectories))
+        foreach (string file in Directory.EnumerateFiles(srcDir, "*.cs", SearchOption.AllDirectories))
         {
             if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-                continue;
-            if (file.EndsWith(".g.cs", StringComparison.Ordinal) || file.EndsWith(".AssemblyInfo.cs", StringComparison.Ordinal))
-                continue;
-
-            var lines = File.ReadAllLines(file);
-            for (var i = 0; i < lines.Length; i++)
             {
-                var line = lines[i];
-                var rel = Path.GetRelativePath(srcDir, file);
+                continue;
+            }
+
+            if (file.EndsWith(".g.cs", StringComparison.Ordinal) || file.EndsWith(".AssemblyInfo.cs", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string[] lines = File.ReadAllLines(file);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string line = lines[i];
+                string rel = Path.GetRelativePath(srcDir, file);
 
                 // Pattern A — message-template tokens like `{tenant_id}` inside a logger call.
                 if (IsLoggerCallLine(line))
                 {
                     foreach (var (bad, canonical) in Banned)
                     {
-                        var token = "{" + bad + "}";
+                        string token = "{" + bad + "}";
                         if (line.Contains(token, StringComparison.Ordinal))
+                        {
                             violations.Add($"{rel}:{i + 1}  uses {token} — use {{{canonical}}} instead");
+                        }
                     }
                 }
 
@@ -73,9 +79,11 @@ public sealed class LogPropertyDriftTests
                 {
                     foreach (var (bad, canonical) in Banned)
                     {
-                        var token = $"PushProperty(\"{bad}\"";
+                        string token = $"PushProperty(\"{bad}\"";
                         if (line.Contains(token, StringComparison.Ordinal))
+                        {
                             violations.Add($"{rel}:{i + 1}  pushes \"{bad}\" — use \"{canonical}\" instead");
+                        }
                     }
                 }
             }
@@ -107,8 +115,8 @@ public sealed class LogPropertyDriftTests
     {
         // tests/Dependably.Tests/Unit/Observability/LogPropertyDriftTests.cs
         //   → up four → repo root → src/Dependably
-        var dir = Path.GetDirectoryName(callerFilePath)!;
-        var repoRoot = Path.GetFullPath(Path.Combine(dir, "..", "..", "..", ".."));
+        string dir = Path.GetDirectoryName(callerFilePath)!;
+        string repoRoot = Path.GetFullPath(Path.Combine(dir, "..", "..", "..", ".."));
         return Path.Combine(repoRoot, "src", "Dependably");
     }
 }

@@ -29,7 +29,7 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
     {
         _host = config["SIEM_SYSLOG_HOST"]
             ?? throw new InvalidOperationException("SIEM_SYSLOG_HOST is required for SyslogSiemForwarder.");
-        _port = int.TryParse(config["SIEM_SYSLOG_PORT"], out var p) && p > 0 ? p : 514;
+        _port = int.TryParse(config["SIEM_SYSLOG_PORT"], out int p) && p > 0 ? p : 514;
         _transport = (config["SIEM_SYSLOG_PROTO"] ?? "udp").Trim().ToLowerInvariant() switch
         {
             "udp" => Transport.Udp,
@@ -51,8 +51,8 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
 
     public async Task SendAsync(SiemEvent ev, CancellationToken ct = default)
     {
-        var line = _format == Format.Cef ? FormatCef(ev) : FormatRfc5424(ev);
-        var bytes = Encoding.UTF8.GetBytes(line + "\n");
+        string line = _format == Format.Cef ? FormatCef(ev) : FormatRfc5424(ev);
+        byte[] bytes = Encoding.UTF8.GetBytes(line + "\n");
 
         switch (_transport)
         {
@@ -91,7 +91,10 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
         }
         await stream.WriteAsync(bytes, ct);
         await stream.FlushAsync(ct);
-        if (stream is SslStream tlsStream) await tlsStream.DisposeAsync();
+        if (stream is SslStream tlsStream)
+        {
+            await tlsStream.DisposeAsync();
+        }
     }
 
     /// <summary>
@@ -101,16 +104,36 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
     /// </summary>
     internal static string FormatCef(SiemEvent ev)
     {
-        var sig = CefEscape(ev.Action);
-        var name = CefFriendlyName(ev.Action);
-        var sev = CefSeverity(ev.Action);
+        string sig = CefEscape(ev.Action);
+        string name = CefFriendlyName(ev.Action);
+        int sev = CefSeverity(ev.Action);
         var ext = new StringBuilder();
         ext.Append($"rt={ev.CreatedAt:yyyyMMddHHmmss.fffZ}");
-        if (ev.ActorId is not null) ext.Append($" suid={CefEscape(ev.ActorId)}");
-        if (ev.OrgId is not null) ext.Append($" cs1={CefEscape(ev.OrgId)} cs1Label=OrgId");
-        if (ev.Ecosystem is not null) ext.Append($" cs2={CefEscape(ev.Ecosystem)} cs2Label=Ecosystem");
-        if (ev.Purl is not null) ext.Append($" cs3={CefEscape(ev.Purl)} cs3Label=Purl");
-        if (ev.Detail is not null) ext.Append($" msg={CefEscape(ev.Detail)}");
+        if (ev.ActorId is not null)
+        {
+            ext.Append($" suid={CefEscape(ev.ActorId)}");
+        }
+
+        if (ev.OrgId is not null)
+        {
+            ext.Append($" cs1={CefEscape(ev.OrgId)} cs1Label=OrgId");
+        }
+
+        if (ev.Ecosystem is not null)
+        {
+            ext.Append($" cs2={CefEscape(ev.Ecosystem)} cs2Label=Ecosystem");
+        }
+
+        if (ev.Purl is not null)
+        {
+            ext.Append($" cs3={CefEscape(ev.Purl)} cs3Label=Purl");
+        }
+
+        if (ev.Detail is not null)
+        {
+            ext.Append($" msg={CefEscape(ev.Detail)}");
+        }
+
         return $"CEF:0|Dependably|dependably|1.0|{sig}|{name}|{sev}|{ext}";
     }
 
@@ -122,19 +145,35 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
     internal static string FormatRfc5424(SiemEvent ev)
     {
         const int prival = 16 * 8 + 6;  // local0.info
-        var ts = ev.CreatedAt.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz");
+        string ts = ev.CreatedAt.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz");
         string hostname;
         try { hostname = Dns.GetHostName() ?? "dependably"; }
         catch { hostname = "dependably"; }
 
         var sd = new StringBuilder("[dependably@0");
-        if (ev.OrgId is not null)     sd.Append($" org=\"{Rfc5424Escape(ev.OrgId)}\"");
-        if (ev.ActorId is not null)   sd.Append($" actor=\"{Rfc5424Escape(ev.ActorId)}\"");
-        if (ev.Ecosystem is not null) sd.Append($" ecosystem=\"{Rfc5424Escape(ev.Ecosystem)}\"");
-        if (ev.Purl is not null)      sd.Append($" purl=\"{Rfc5424Escape(ev.Purl)}\"");
+        if (ev.OrgId is not null)
+        {
+            sd.Append($" org=\"{Rfc5424Escape(ev.OrgId)}\"");
+        }
+
+        if (ev.ActorId is not null)
+        {
+            sd.Append($" actor=\"{Rfc5424Escape(ev.ActorId)}\"");
+        }
+
+        if (ev.Ecosystem is not null)
+        {
+            sd.Append($" ecosystem=\"{Rfc5424Escape(ev.Ecosystem)}\"");
+        }
+
+        if (ev.Purl is not null)
+        {
+            sd.Append($" purl=\"{Rfc5424Escape(ev.Purl)}\"");
+        }
+
         sd.Append(']');
 
-        var msg = ev.Detail ?? "";
+        string msg = ev.Detail ?? "";
         return $"<{prival}>1 {ts} {hostname} dependably - {ev.Action} {sd} {msg}";
     }
 
@@ -146,25 +185,25 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
 
     private static string CefFriendlyName(string action) => action switch
     {
-        "login.success"      => "Login Success",
-        "login.failure"      => "Login Failure",
-        "lockout.triggered"  => "Account Lockout",
-        "token.created"      => "Token Created",
-        "token.revoked"      => "Token Revoked",
-        "rbac.role_changed"  => "Role Changed",
-        "rbac.member_added"  => "Member Added",
-        "rbac.member_removed"=> "Member Removed",
-        _                    => action,
+        "login.success" => "Login Success",
+        "login.failure" => "Login Failure",
+        "lockout.triggered" => "Account Lockout",
+        "token.created" => "Token Created",
+        "token.revoked" => "Token Revoked",
+        "rbac.role_changed" => "Role Changed",
+        "rbac.member_added" => "Member Added",
+        "rbac.member_removed" => "Member Removed",
+        _ => action,
     };
 
     private static int CefSeverity(string action) => action switch
     {
         "lockout.triggered" => 7,
-        "login.failure"     => 5,
-        "login.success"     => 3,
-        "token.revoked"     => 4,
+        "login.failure" => 5,
+        "login.success" => 3,
+        "token.revoked" => 4,
         "rbac.role_changed" => 6,
-        _                   => 3,
+        _ => 3,
     };
 
     private enum Transport { Udp, Tcp, Tls }

@@ -2,7 +2,6 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -27,7 +26,7 @@ public sealed class UserManagementCapabilityTests : IClassFixture<DependablyFact
 
     private async Task<HttpClient> ClientFor(string userId, string role)
     {
-        var jwt = await _factory.CreateUserJwt(userId, role);
+        string jwt = await _factory.CreateUserJwt(userId, role);
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         return client;
@@ -36,8 +35,8 @@ public sealed class UserManagementCapabilityTests : IClassFixture<DependablyFact
     [Fact]
     public async Task PatchMemberRole_AdminPromotesMemberToAdmin_Allowed()
     {
-        var adminId = await _factory.CreateUser($"admin-{Guid.NewGuid():N}@example.com", "x", "admin");
-        var memberId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "x", "member");
+        string adminId = await _factory.CreateUser($"admin-{Guid.NewGuid():N}@example.com", "x", "admin");
+        string memberId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "x", "member");
         using var client = await ClientFor(adminId, "admin");
 
         var resp = await client.PatchAsJsonAsync($"/api/v1/users/{memberId}/role", new { role = "admin" });
@@ -49,8 +48,8 @@ public sealed class UserManagementCapabilityTests : IClassFixture<DependablyFact
     public async Task PatchMemberRole_AdminTouchesOwnerRow_Forbidden()
     {
         // Admin caller, owner target → tier-2 tenant:admin check must reject.
-        var adminId = await _factory.CreateUser($"admin-{Guid.NewGuid():N}@example.com", "x", "admin");
-        var ownerId = await _factory.CreateUser($"owner-{Guid.NewGuid():N}@example.com", "x", "owner");
+        string adminId = await _factory.CreateUser($"admin-{Guid.NewGuid():N}@example.com", "x", "admin");
+        string ownerId = await _factory.CreateUser($"owner-{Guid.NewGuid():N}@example.com", "x", "owner");
         using var client = await ClientFor(adminId, "admin");
 
         var resp = await client.PatchAsJsonAsync($"/api/v1/users/{ownerId}/role", new { role = "admin" });
@@ -62,8 +61,8 @@ public sealed class UserManagementCapabilityTests : IClassFixture<DependablyFact
     public async Task PatchMemberRole_AdminGrantsOwnerRole_Forbidden()
     {
         // Admin caller, granting owner → tier-2 tenant:admin check must reject.
-        var adminId = await _factory.CreateUser($"admin-{Guid.NewGuid():N}@example.com", "x", "admin");
-        var memberId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "x", "member");
+        string adminId = await _factory.CreateUser($"admin-{Guid.NewGuid():N}@example.com", "x", "admin");
+        string memberId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "x", "member");
         using var client = await ClientFor(adminId, "admin");
 
         var resp = await client.PatchAsJsonAsync($"/api/v1/users/{memberId}/role", new { role = "owner" });
@@ -74,8 +73,8 @@ public sealed class UserManagementCapabilityTests : IClassFixture<DependablyFact
     [Fact]
     public async Task PatchMemberRole_OwnerPromotesMemberToOwner_Allowed()
     {
-        var callerOwnerId = await _factory.CreateUser($"owner-{Guid.NewGuid():N}@example.com", "x", "owner");
-        var memberId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "x", "member");
+        string callerOwnerId = await _factory.CreateUser($"owner-{Guid.NewGuid():N}@example.com", "x", "owner");
+        string memberId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "x", "member");
         using var client = await ClientFor(callerOwnerId, "owner");
 
         var resp = await client.PatchAsJsonAsync($"/api/v1/users/{memberId}/role", new { role = "owner" });
@@ -86,8 +85,8 @@ public sealed class UserManagementCapabilityTests : IClassFixture<DependablyFact
     [Fact]
     public async Task PatchMemberRole_MemberCaller_Forbidden()
     {
-        var caller = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "x", "member");
-        var target = await _factory.CreateUser($"member2-{Guid.NewGuid():N}@example.com", "x", "member");
+        string caller = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "x", "member");
+        string target = await _factory.CreateUser($"member2-{Guid.NewGuid():N}@example.com", "x", "member");
         using var client = await ClientFor(caller, "member");
 
         var resp = await client.PatchAsJsonAsync($"/api/v1/users/{target}/role", new { role = "admin" });
@@ -98,8 +97,8 @@ public sealed class UserManagementCapabilityTests : IClassFixture<DependablyFact
     [Fact]
     public async Task RemoveUser_AdminRemovesMember_Allowed()
     {
-        var adminId = await _factory.CreateUser($"admin-{Guid.NewGuid():N}@example.com", "x", "admin");
-        var memberId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "x", "member");
+        string adminId = await _factory.CreateUser($"admin-{Guid.NewGuid():N}@example.com", "x", "admin");
+        string memberId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "x", "member");
         using var client = await ClientFor(adminId, "admin");
 
         var resp = await client.DeleteAsync($"/api/v1/users/{memberId}");
@@ -110,8 +109,8 @@ public sealed class UserManagementCapabilityTests : IClassFixture<DependablyFact
     [Fact]
     public async Task RemoveUser_AdminRemovesOwner_Forbidden()
     {
-        var adminId = await _factory.CreateUser($"admin-{Guid.NewGuid():N}@example.com", "x", "admin");
-        var ownerId = await _factory.CreateUser($"owner-{Guid.NewGuid():N}@example.com", "x", "owner");
+        string adminId = await _factory.CreateUser($"admin-{Guid.NewGuid():N}@example.com", "x", "admin");
+        string ownerId = await _factory.CreateUser($"owner-{Guid.NewGuid():N}@example.com", "x", "owner");
         using var client = await ClientFor(adminId, "admin");
 
         var resp = await client.DeleteAsync($"/api/v1/users/{ownerId}");
@@ -122,8 +121,8 @@ public sealed class UserManagementCapabilityTests : IClassFixture<DependablyFact
     [Fact]
     public async Task RemoveUser_MemberCaller_Forbidden()
     {
-        var caller = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "x", "member");
-        var target = await _factory.CreateUser($"member2-{Guid.NewGuid():N}@example.com", "x", "member");
+        string caller = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "x", "member");
+        string target = await _factory.CreateUser($"member2-{Guid.NewGuid():N}@example.com", "x", "member");
         using var client = await ClientFor(caller, "member");
 
         var resp = await client.DeleteAsync($"/api/v1/users/{target}");

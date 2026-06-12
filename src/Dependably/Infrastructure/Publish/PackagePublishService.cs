@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using Dependably.Infrastructure.Observability;
-using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
 
@@ -58,13 +57,16 @@ public sealed class PackagePublishService : IPackagePublishService
         activity?.SetTag("dependably.size_bytes", request.ArtifactBytes.Length);
 
         var stopwatch = Stopwatch.StartNew();
-        var outcome = "success";
+        string outcome = "success";
         try
         {
             var result = await StoreAndRecordInnerAsync(request, ct);
             outcome = result is PublishResult.Accepted ? "success" : "client_error";
             if (result is PublishResult.Accepted)
+            {
                 SnapshotCounters.IncrementPublish();
+            }
+
             return result;
         }
         catch (Exception ex)
@@ -93,30 +95,57 @@ public sealed class PackagePublishService : IPackagePublishService
 
     private async Task<PublishResult> StoreAndRecordInnerAsync(PublishRequest request, CancellationToken ct)
     {
-        if (ValidatePathSafety(request) is { } pathReject) return pathReject;
-        if (CheckSizeCap(request) is { } sizeReject) return sizeReject;
+        if (ValidatePathSafety(request) is { } pathReject)
+        {
+            return pathReject;
+        }
+
+        if (CheckSizeCap(request) is { } sizeReject)
+        {
+            return sizeReject;
+        }
 
         // Claim gate. The PublishGate is no-op when CLAIM_ENFORCEMENT=off and when an
         // explicit local_only/mixed claim already exists. Errors come back as 409 from
         // the gate; we translate them into the service's structured Rejected shape.
         var claimReject = await _publishGate.CheckAsync(request.OrgId, request.Ecosystem, request.PurlName, ct);
         if (claimReject is not null)
+        {
             return new PublishResult.Rejected(409, "claim_required",
                 $"Name '{request.PurlName}' is unclaimed; create a 'local_only' or 'mixed' claim first.");
+        }
 
         // Dedup vs overwrite. When AllowOverwrite is false (default) a duplicate
         // coordinate rejects with 409. When true, the existing row's artefact is replaced
         // in place and a package.replace audit event records both old and new hashes.
-        var blobKey = BlobKeys.Hosted(request.OrgId, request.Ecosystem, request.PurlName, request.Version, request.Filename);
+        string blobKey = BlobKeys.Hosted(request.OrgId, request.Ecosystem, request.PurlName, request.Version, request.Filename);
         var pkg = await _packages.GetOrCreateAsync(request.OrgId, request.Ecosystem, request.Name, request.PurlName, isProxy: false, ct);
         var existing = await _packages.GetVersionAsync(pkg.Id, request.Version, ct);
         if (existing is not null && !request.AllowOverwrite)
+        {
             return new PublishResult.Rejected(409, "version_exists",
                 $"Tarball parsed as {request.PurlName}@{request.Version}; that version already exists. " +
                 "Delete it first or enable allow_version_overwrite.");
+        }
 
-        if (await EnforceTenantQuotaAsync(request, existing, ct) is { } quotaReject)
-            return quotaReject;
+        // Atomic quota reservation: reserves the net delta (new size minus replaced size)
+        // against the counter before any bytes are written. 0 rows affected = quota exceeded.
+        // SQLite's single-writer lock (busy_timeout=5000) serialises the reserve UPDATE, so
+        // two publishes that each individually fit cannot both pass when their combined size
+        // would exceed the cap. The reservation is released on any failure after this point.
+        // When quota is null (unlimited), skip the reservation — no counter to maintain.
+        long delta = request.ArtifactBytes.LongLength - (existing?.SizeBytes ?? 0);
+        long? quota = await _orgs.GetEffectiveStorageQuotaAsync(request.OrgId, ct);
+        bool reserved = false;
+        if (quota is not null)
+        {
+            if (!await _orgs.TryReserveStorageAsync(request.OrgId, delta, quota, ct))
+            {
+                return new PublishResult.Rejected(413, "tenant_quota_exceeded",
+                    $"Tenant storage quota ({quota.Value} bytes) would be exceeded by this publish.");
+            }
+            reserved = true;
+        }
 
         // Hash + blob put. SHA-256 is recomputed inside the trust boundary even when
         // callers passed the bytes pre-hashed — cheap, and it removes "did the caller
@@ -126,22 +155,45 @@ public sealed class PackagePublishService : IPackagePublishService
         // before any bytes leave this process. A TenantNotReadyException from here means
         // the orgs row is not active or an enterprise provisioning job hasn't completed —
         // not a transient fault.
-        var sha256 = Convert.ToHexString(SHA256.HashData(request.ArtifactBytes)).ToLowerInvariant();
+        string sha256 = Convert.ToHexString(SHA256.HashData(request.ArtifactBytes)).ToLowerInvariant();
         // npm's packument carries dist.shasum as hex SHA-1 — compute it here so
         // BuildNpmMetadata can emit the correct hash. NULL for non-npm rows; the column
         // is read by NpmController.{Build,Merge}*. Cheap (~500 MB/s); always compute.
-        var sha1 = request.Ecosystem == "npm"
+        string? sha1 = request.Ecosystem == "npm"
             ? Convert.ToHexString(SHA1.HashData(request.ArtifactBytes)).ToLowerInvariant()
             : null;
         var registry = await _storage.GetRegistryAsync(request.OrgId, ct);
-        await registry.PutAsync(blobKey, new MemoryStream(request.ArtifactBytes), ct);
+        try
+        {
+            await registry.PutAsync(blobKey, new MemoryStream(request.ArtifactBytes), ct);
 
-        var newVersion = await CommitMetadataAsync(request, pkg, existing,
-            new PersistedArtifact(blobKey, sha256, sha1), registry, ct);
-        await ScanQuietlyAsync(request, newVersion, ct);
-        await _auditor.RecordAsync(request, sha256, existing, ct);
+            var newVersion = await CommitMetadataAsync(request, pkg, existing,
+                new PersistedArtifact(blobKey, sha256, sha1), registry, ct);
+            await ScanQuietlyAsync(request, newVersion, ct);
+            await _auditor.RecordAsync(request, sha256, existing, ct);
 
-        return new PublishResult.Accepted(newVersion.Id, request.Purl, sha256);
+            return new PublishResult.Accepted(newVersion.Id, request.Purl, sha256);
+        }
+        catch
+        {
+            // Release the reservation so the quota counter stays accurate when the
+            // blob put or metadata commit fails. Fire-and-forget: a release failure
+            // leaves the counter high (conservative — subsequent publishes are more
+            // likely to 413), which is safer than leaving it low.
+            if (reserved)
+            {
+                try { await _orgs.ReleaseStorageAsync(request.OrgId, delta, CancellationToken.None); }
+                catch (Exception releaseEx)
+                {
+                    _logger.LogError(releaseEx,
+                        "Quota counter release failed for org {OrgId} after publish failure; " +
+                        "counter may be high until the next successful publish or manual reset. TraceId={TraceId}",
+                        request.OrgId,
+                        System.Diagnostics.Activity.Current?.TraceId.ToString());
+                }
+            }
+            throw;
+        }
     }
 
     /// <summary>
@@ -155,13 +207,22 @@ public sealed class PackagePublishService : IPackagePublishService
     /// </summary>
     public async Task<PublishResult> ValidateAsync(PublishRequest request, CancellationToken ct = default)
     {
-        if (ValidatePathSafety(request) is { } pathReject) return pathReject;
-        if (CheckSizeCap(request) is { } sizeReject) return sizeReject;
+        if (ValidatePathSafety(request) is { } pathReject)
+        {
+            return pathReject;
+        }
+
+        if (CheckSizeCap(request) is { } sizeReject)
+        {
+            return sizeReject;
+        }
 
         var claimReject = await _publishGate.CheckAsync(request.OrgId, request.Ecosystem, request.PurlName, ct);
         if (claimReject is not null)
+        {
             return new PublishResult.Rejected(409, "claim_required",
                 $"Name '{request.PurlName}' is unclaimed; create a 'local_only' or 'mixed' claim first.");
+        }
 
         // Non-mutating lookup. If the package row doesn't exist yet, the version can't
         // either, so dedup passes implicitly.
@@ -170,12 +231,14 @@ public sealed class PackagePublishService : IPackagePublishService
         {
             var existing = await _packages.GetVersionAsync(pkg.Id, request.Version, ct);
             if (existing is not null && !request.AllowOverwrite)
+            {
                 return new PublishResult.Rejected(409, "version_exists",
                     $"Tarball parsed as {request.PurlName}@{request.Version}; that version already exists. " +
                     "Delete it first or enable allow_version_overwrite.");
+            }
         }
 
-        var sha256 = Convert.ToHexString(SHA256.HashData(request.ArtifactBytes)).ToLowerInvariant();
+        string sha256 = Convert.ToHexString(SHA256.HashData(request.ArtifactBytes)).ToLowerInvariant();
         return new PublishResult.Accepted(VersionId: "", request.Purl, sha256);
     }
 
@@ -183,7 +246,9 @@ public sealed class PackagePublishService : IPackagePublishService
     // intentionally not validated by PathSafeValidator: npm scoped names ("@scope/name")
     // legitimately contain a slash, and per-ecosystem callers do their own format
     // validation (PEP 508, NuGet id charset, npm name regex) before reaching the service.
-    // PurlName / Name still need a traversal guard — reject only the dangerous shape.
+    // PurlName / Name still need a traversal + separator guard: '..' and NUL always reject,
+    // and path separators reject except npm's single leading '@scope/' segment — names land
+    // verbatim in the hosted blob key, so a stray '/' would inject extra key segments.
     private static PublishResult.Rejected? ValidatePathSafety(PublishRequest request)
     {
         foreach (var (value, kind) in new[]
@@ -194,39 +259,44 @@ public sealed class PackagePublishService : IPackagePublishService
         {
             var safe = PathSafeValidator.Validate(value, kind);
             if (!safe.IsValid)
+            {
                 return new PublishResult.Rejected(422, "path_unsafe", safe.Message ?? "Unsafe value.");
+            }
         }
-        if (request.Name.Contains("..") || request.PurlName.Contains("..")
-            || request.Name.Contains('\0') || request.PurlName.Contains('\0'))
-            return new PublishResult.Rejected(422, "path_unsafe", "Name must not contain '..' or null bytes.");
-        return null;
+
+        return request.Name.Contains("..") || request.PurlName.Contains("..")
+            || request.Name.Contains('\0') || request.PurlName.Contains('\0')
+            ? new PublishResult.Rejected(422, "path_unsafe", "Name must not contain '..' or null bytes.")
+            : HasUnsafeSeparator(request.Ecosystem, request.Name)
+              || HasUnsafeSeparator(request.Ecosystem, request.PurlName)
+            ? new PublishResult.Rejected(422, "path_unsafe",
+                "Name must not contain path separators (npm permits a single leading '@scope/').")
+            : null;
+    }
+
+    // npm scoped names contain exactly one slash, after a leading '@' and with non-empty
+    // segments on both sides. Every other ecosystem's name is a single path segment in the
+    // hosted blob key, so any separator is unsafe.
+    private static bool HasUnsafeSeparator(string ecosystem, string value)
+    {
+        int slash = value.IndexOf('/');
+        return value.Contains('\\')
+            || (slash >= 0
+                && (ecosystem != "npm"
+                    || !value.StartsWith('@')
+                    || slash != value.LastIndexOf('/')
+                    || slash < 2
+                    || slash == value.Length - 1));
     }
 
     // Size cap. Callers know per-tenant + per-ecosystem cap; we enforce as a final
     // safety net so no single path can write a too-large blob even if a caller forgets.
     private static PublishResult.Rejected? CheckSizeCap(PublishRequest request)
     {
-        if (request.ArtifactBytes.LongLength > request.SizeCap)
-            return new PublishResult.Rejected(413, "size_limit_exceeded",
-                $"File exceeds the {request.Ecosystem} upload size limit ({request.SizeCap} bytes).");
-        return null;
-    }
-
-    // Per-tenant storage quota. Operator-set cap on the sum of size_bytes across every
-    // version under this org's packages. Noisy-neighbour guard for pooled multi-tenant
-    // deployments; trivially satisfied (or unset) in single-tenant installs. Computed
-    // AFTER dedup so an overwrite of an existing version only counts the net delta.
-    private async Task<PublishResult.Rejected?> EnforceTenantQuotaAsync(PublishRequest request, PackageVersion? existing, CancellationToken ct)
-    {
-        var org = await _orgs.GetByIdAsync(request.OrgId, ct);
-        if (org?.StorageQuotaBytes is not long quota) return null;
-
-        var currentUsage = await _packages.GetTotalSizeBytesAsync(request.OrgId, ct);
-        var delta = request.ArtifactBytes.LongLength - (existing?.SizeBytes ?? 0);
-        if (currentUsage + delta > quota)
-            return new PublishResult.Rejected(413, "tenant_quota_exceeded",
-                $"Tenant storage quota ({quota} bytes) would be exceeded by this publish.");
-        return null;
+        return request.ArtifactBytes.LongLength > request.SizeCap
+            ? new PublishResult.Rejected(413, "size_limit_exceeded",
+                $"File exceeds the {request.Ecosystem} upload size limit ({request.SizeCap} bytes).")
+            : null;
     }
 
     // Metadata commit, with compensating blob delete on failure.

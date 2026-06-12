@@ -26,9 +26,30 @@ public sealed class InMemoryBlobStore : IBlobStore
 
     public Task<Stream?> GetAsync(string key, CancellationToken ct = default)
     {
+        return !_blobs.TryGetValue(key, out var entry)
+            ? Task.FromResult<Stream?>(null)
+            : Task.FromResult<Stream?>(new MemoryStream(entry.Bytes));
+    }
+
+    public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+    {
         if (!_blobs.TryGetValue(key, out var entry))
-            return Task.FromResult<Stream?>(null);
-        return Task.FromResult<Stream?>(new MemoryStream(entry.Bytes));
+        {
+            return Task.FromResult<RangedStream?>(null);
+        }
+
+        long totalLength = entry.Bytes.Length;
+        long effectiveTo = Math.Min(to, totalLength - 1);
+
+        if (from > effectiveTo || totalLength == 0)
+        {
+            // Range starts past the end — return sentinel with empty range.
+            return Task.FromResult<RangedStream?>(new RangedStream(Stream.Null, from, from - 1, totalLength));
+        }
+
+        int sliceLength = (int)(effectiveTo - from + 1);
+        var slice = new MemoryStream(entry.Bytes, (int)from, sliceLength, writable: false);
+        return Task.FromResult<RangedStream?>(new RangedStream(slice, from, effectiveTo, totalLength));
     }
 
     public Task<bool> ExistsAsync(string key, CancellationToken ct = default)
@@ -50,8 +71,16 @@ public sealed class InMemoryBlobStore : IBlobStore
         // doesn't throw. Test scope only — production stores stream from the backend.
         foreach (var kvp in _blobs.ToArray())
         {
-            if (ct.IsCancellationRequested) yield break;
-            if (!kvp.Key.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            if (ct.IsCancellationRequested)
+            {
+                yield break;
+            }
+
+            if (!kvp.Key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             yield return new BlobInfo(kvp.Key, kvp.Value.Bytes.Length, kvp.Value.LastModified);
             await Task.Yield();
         }

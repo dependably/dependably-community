@@ -1,7 +1,8 @@
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
 using Dependably.Infrastructure;
 using Dependably.Security;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Api;
 
@@ -53,9 +54,12 @@ public sealed class LicenseController : ControllerBase
     public async Task<IActionResult> GetPolicy(CancellationToken ct)
     {
         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
-        if (authResult is not null) return authResult;
+        if (authResult is not null)
+        {
+            return authResult;
+        }
 
-        var orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         var allowlist = await _licenses.GetAllowlistAsync(orgId, ct);
@@ -79,9 +83,12 @@ public sealed class LicenseController : ControllerBase
         [FromQuery] bool includeDeprecated, CancellationToken ct)
     {
         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (authResult is not null) return authResult;
+        if (authResult is not null)
+        {
+            return authResult;
+        }
 
-        var orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
         var entries = await _licenses.GetReviewQueueAsync(orgId, includeDeprecated, ct);
         return Ok(entries);
     }
@@ -93,12 +100,17 @@ public sealed class LicenseController : ControllerBase
     public async Task<IActionResult> SetMode([FromBody] SetModeRequest req, CancellationToken ct)
     {
         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (authResult is not null) return authResult;
+        if (authResult is not null)
+        {
+            return authResult;
+        }
 
         if (req.Mode is not ("off" or "warn" or "block"))
+        {
             return _problems.ValidationErrorAction("mode", "Mode must be 'off', 'warn', or 'block'.");
+        }
 
-        var orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
 
         await _orgs.UpsertLicensePolicyModeAsync(orgId, req.Mode, ct);
 
@@ -115,9 +127,12 @@ public sealed class LicenseController : ControllerBase
     public async Task<IActionResult> GetAllowlist(CancellationToken ct)
     {
         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
-        if (authResult is not null) return authResult;
+        if (authResult is not null)
+        {
+            return authResult;
+        }
 
-        var orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
 
         var entries = await _licenses.GetAllowlistAsync(orgId, ct);
         return Ok(entries);
@@ -125,19 +140,27 @@ public sealed class LicenseController : ControllerBase
 
     /// <summary>POST /api/v1/orgs/{org}/license-policy/allowlist</summary>
     [HttpPost("api/v1/license-policy/allowlist")]
+    [ProducesResponseType(StatusCodes.Status201Created)]
     public async Task<IActionResult> AddAllowlist([FromBody] LicenseSpdxRequest req, CancellationToken ct)
     {
         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (authResult is not null) return authResult;
+        if (authResult is not null)
+        {
+            return authResult;
+        }
 
         if (string.IsNullOrWhiteSpace(req.LicenseSpdx))
+        {
             return _problems.ValidationErrorAction("license_spdx", "SPDX identifier is required.");
+        }
 
-        var orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
 
         var entry = await _licenses.AddAllowlistAsync(orgId, req.LicenseSpdx.Trim(), ct);
         if (entry is null)
+        {
             return _problems.ConflictAction($"'{req.LicenseSpdx}' is already on the allowlist.");
+        }
 
         await _audit.LogAsync("license_allowlist_added", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new { spdx = req.LicenseSpdx.Trim() }), ct: ct);
@@ -147,15 +170,22 @@ public sealed class LicenseController : ControllerBase
 
     /// <summary>DELETE /api/v1/orgs/{org}/license-policy/allowlist/{spdx}</summary>
     [HttpDelete("api/v1/license-policy/allowlist/{spdx}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> RemoveAllowlist(string spdx, CancellationToken ct)
     {
         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (authResult is not null) return authResult;
+        if (authResult is not null)
+        {
+            return authResult;
+        }
 
-        var orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
 
-        var removed = await _licenses.RemoveAllowlistAsync(orgId, spdx, ct);
-        if (!removed) return NotFound();
+        bool removed = await _licenses.RemoveAllowlistAsync(orgId, spdx, ct);
+        if (!removed)
+        {
+            return NotFound();
+        }
 
         await _audit.LogAsync("license_allowlist_removed", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new { spdx }), ct: ct);
@@ -170,9 +200,12 @@ public sealed class LicenseController : ControllerBase
     public async Task<IActionResult> GetBlocklist(CancellationToken ct)
     {
         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
-        if (authResult is not null) return authResult;
+        if (authResult is not null)
+        {
+            return authResult;
+        }
 
-        var orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
 
         var entries = await _licenses.GetBlocklistAsync(orgId, ct);
         return Ok(entries);
@@ -180,19 +213,27 @@ public sealed class LicenseController : ControllerBase
 
     /// <summary>POST /api/v1/orgs/{org}/license-policy/blocklist</summary>
     [HttpPost("api/v1/license-policy/blocklist")]
+    [ProducesResponseType(StatusCodes.Status201Created)]
     public async Task<IActionResult> AddBlocklist([FromBody] LicenseSpdxRequest req, CancellationToken ct)
     {
         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (authResult is not null) return authResult;
+        if (authResult is not null)
+        {
+            return authResult;
+        }
 
         if (string.IsNullOrWhiteSpace(req.LicenseSpdx))
+        {
             return _problems.ValidationErrorAction("license_spdx", "SPDX identifier is required.");
+        }
 
-        var orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
 
         var entry = await _licenses.AddBlocklistAsync(orgId, req.LicenseSpdx.Trim(), ct);
         if (entry is null)
+        {
             return _problems.ConflictAction($"'{req.LicenseSpdx}' is already on the blocklist.");
+        }
 
         await _audit.LogAsync("license_blocklist_added", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new { spdx = req.LicenseSpdx.Trim() }), ct: ct);
@@ -202,15 +243,22 @@ public sealed class LicenseController : ControllerBase
 
     /// <summary>DELETE /api/v1/orgs/{org}/license-policy/blocklist/{spdx}</summary>
     [HttpDelete("api/v1/license-policy/blocklist/{spdx}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> RemoveBlocklist(string spdx, CancellationToken ct)
     {
         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (authResult is not null) return authResult;
+        if (authResult is not null)
+        {
+            return authResult;
+        }
 
-        var orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
 
-        var removed = await _licenses.RemoveBlocklistAsync(orgId, spdx, ct);
-        if (!removed) return NotFound();
+        bool removed = await _licenses.RemoveBlocklistAsync(orgId, spdx, ct);
+        if (!removed)
+        {
+            return NotFound();
+        }
 
         await _audit.LogAsync("license_blocklist_removed", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new { spdx }), ct: ct);

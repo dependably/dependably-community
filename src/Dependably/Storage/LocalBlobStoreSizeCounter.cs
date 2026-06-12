@@ -43,13 +43,19 @@ public sealed class LocalBlobStoreSizeCounter
     /// first when replacing an existing file.</summary>
     public void Add(long bytes)
     {
-        if (bytes != 0) Interlocked.Add(ref _bytes, bytes);
+        if (bytes != 0)
+        {
+            Interlocked.Add(ref _bytes, bytes);
+        }
     }
 
     /// <summary>Records a deletion. Pass the positive byte count that was removed.</summary>
     public void Subtract(long bytes)
     {
-        if (bytes > 0) Interlocked.Add(ref _bytes, -bytes);
+        if (bytes > 0)
+        {
+            Interlocked.Add(ref _bytes, -bytes);
+        }
     }
 
     /// <summary>Forces a fresh recompute via full directory walk. Backs the
@@ -58,11 +64,15 @@ public sealed class LocalBlobStoreSizeCounter
 
     private long WalkRoot()
     {
-        if (!Directory.Exists(_root)) return 0L;
+        if (!Directory.Exists(_root))
+        {
+            return 0L;
+        }
+
         long total = 0;
         // EnumerateFiles streams, so even a million-file tree never materializes the full
         // list in memory.
-        foreach (var path in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories))
+        foreach (string path in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories))
         {
             try { total += new FileInfo(path).Length; }
             catch { /* race: file removed mid-walk — skip */ }

@@ -14,19 +14,18 @@ public sealed class InProcessDistributedLock : IDistributedLock
     public async Task<ILockHandle?> TryAcquireAsync(string name, TimeSpan ttl, CancellationToken ct = default)
     {
         var sem = _locks.GetOrAdd(name, _ => new SemaphoreSlim(1, 1));
-        var acquired = await sem.WaitAsync(0, ct);
-        if (!acquired) return null;
-        return new LockHandle(name, sem, ttl);
+        bool acquired = await sem.WaitAsync(0, ct);
+        return !acquired ? null : (ILockHandle)new LockHandle(name, sem, ttl);
     }
 
     public async Task<ILockHandle> AcquireAsync(
         string name, TimeSpan ttl, TimeSpan wait, TimeSpan retryInterval, CancellationToken ct = default)
     {
         var sem = _locks.GetOrAdd(name, _ => new SemaphoreSlim(1, 1));
-        var acquired = await sem.WaitAsync(wait, ct);
-        if (!acquired)
-            throw new TimeoutException($"Could not acquire in-process lock '{name}' within {wait}.");
-        return new LockHandle(name, sem, ttl);
+        bool acquired = await sem.WaitAsync(wait, ct);
+        return !acquired
+            ? throw new TimeoutException($"Could not acquire in-process lock '{name}' within {wait}.")
+            : (ILockHandle)new LockHandle(name, sem, ttl);
     }
 
     private sealed class LockHandle : ILockHandle
@@ -56,7 +55,11 @@ public sealed class InProcessDistributedLock : IDistributedLock
 
         private void Release()
         {
-            if (_released) return;
+            if (_released)
+            {
+                return;
+            }
+
             _released = true;
             try { _sem.Release(); } catch { /* already released */ }
         }

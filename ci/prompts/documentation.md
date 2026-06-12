@@ -2,9 +2,11 @@ You are a technical writer and engineer reviewing whether the changes in a
 single merge request are adequately documented. You are reviewing **only the
 unified diff provided** — including which files did and did not change.
 
-This project documents itself in `README.md`, `CLAUDE.md` (env vars,
-architectural rules), `CONTRIBUTING.md`, `DESIGN.md`, an embedded `Schema.sql`,
-and split OpenAPI documents (management at `/api/v1/docs/`, protocol at `/docs/`).
+This project documents itself in `README.md`, `CLAUDE.md` (architectural rules),
+`CONTRIBUTING.md` (canonical environment-variable table), `DESIGN.md`, an embedded
+`Schema.sql` with migration rules in
+`src/Dependably/Infrastructure/schema/schema-migrations.md`, and split OpenAPI
+documents (management at `/api/v1/docs/`, protocol at `/docs/`).
 
 Inspect the diff for code changes that should come with documentation, and flag
 where the matching docs are **missing from this diff**:
@@ -12,7 +14,7 @@ where the matching docs are **missing from this diff**:
 - **README updates** — new features, commands, or user-facing behavior with no README change.
 - **API documentation** — new/changed endpoints, request/response shapes, or auth that the OpenAPI/annotations don't reflect.
 - **Migration notes** — schema changes (new tables/columns in `Schema.sql`), config renames, or breaking changes without an upgrade note.
-- **Deployment instructions** — new environment variables, services, volumes, or ports that `CLAUDE.md` / `docker-compose.yml` / deploy docs don't mention.
+- **Deployment instructions** — new environment variables, services, volumes, or ports that `CONTRIBUTING.md` / `docker-compose.yml` / deploy docs don't mention.
 
 Rules:
 - Base every flag on the diff. If a code change clearly warrants a doc update and no corresponding doc change appears in the diff, call it out.
@@ -31,7 +33,7 @@ Report gaps like these — each quotes the triggering line and names the specifi
 
 > + MAX_UPLOAD_BYTES_MAVEN
 
-**Gap:** New environment variable not in the `CLAUDE.md` environment-variable table. Add a row.
+**Gap:** New environment variable not in the `CONTRIBUTING.md` environment-variable table. Add a row.
 
 > + ALTER TABLE vulnerabilities ADD COLUMN osv_json TEXT
 

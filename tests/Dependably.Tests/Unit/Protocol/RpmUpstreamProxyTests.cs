@@ -4,10 +4,9 @@ using System.Text;
 using System.Xml.Linq;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
-using Dependably.Storage;
 using Dependably.Security;
+using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
-using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Org.BouncyCastle.Bcpg;
@@ -19,7 +18,6 @@ using Org.BouncyCastle.Security;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Protocol;
 
@@ -64,7 +62,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetRepodataAsync_RepomdXml_FetchesAndCaches()
     {
-        var repomdBytes = Encoding.UTF8.GetBytes(MinimalRepomd());
+        byte[] repomdBytes = Encoding.UTF8.GetBytes(MinimalRepomd());
         _server.Given(Request.Create().WithPath("/repodata/repomd.xml").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200)
                    .WithBody(repomdBytes)
@@ -85,7 +83,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetRepodataAsync_RepomdXml_SecondCall_ServesFromMemoryCache()
     {
-        var repomdBytes = Encoding.UTF8.GetBytes(MinimalRepomd());
+        byte[] repomdBytes = Encoding.UTF8.GetBytes(MinimalRepomd());
         _server.Given(Request.Create().WithPath("/repodata/repomd.xml").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(repomdBytes));
 
@@ -118,7 +116,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetRepodataAsync_RepomdXmlAsc_FetchedAndCached()
     {
-        var ascBytes = Encoding.UTF8.GetBytes("-----BEGIN PGP SIGNATURE-----");
+        byte[] ascBytes = Encoding.UTF8.GetBytes("-----BEGIN PGP SIGNATURE-----");
         _server.Given(Request.Create().WithPath("/repodata/repomd.xml.asc").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(ascBytes));
 
@@ -136,9 +134,9 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetRepodataAsync_HashPrefixedFile_FirstFetchStoresBlobSecondServesFromBlob()
     {
-        var body = new byte[] { 1, 2, 3, 4, 5 };
-        var sha256 = Convert.ToHexString(SHA256.HashData(body)).ToLowerInvariant();
-        var filename = $"{sha256}-primary.xml.gz";
+        byte[] body = new byte[] { 1, 2, 3, 4, 5 };
+        string sha256 = Convert.ToHexString(SHA256.HashData(body)).ToLowerInvariant();
+        string filename = $"{sha256}-primary.xml.gz";
         _server.Given(Request.Create().WithPath($"/repodata/{filename}").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(body));
 
@@ -166,9 +164,9 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     public async Task GetRepodataAsync_HashPrefixedFile_BodyHashMismatch_RejectedAndNotCached()
     {
         // A poisoned / MITM'd upstream serves bytes that do not hash to the requested prefix.
-        var sha256 = new string('a', 64);                 // not the hash of `body`
-        var filename = $"{sha256}-primary.xml.gz";
-        var body = new byte[] { 9, 8, 7 };
+        string sha256 = new('a', 64);                 // not the hash of `body`
+        string filename = $"{sha256}-primary.xml.gz";
+        byte[] body = new byte[] { 9, 8, 7 };
         _server.Given(Request.Create().WithPath($"/repodata/{filename}").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(body));
 
@@ -186,8 +184,8 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     {
         // Repos that declare only <open-checksum> name the hash of the DECOMPRESSED primary.xml;
         // the body verification must accept that interpretation, not just the compressed hash.
-        var packageSha256 = new string('e', 64);
-        var primaryGzBytes = BuildPrimaryXmlGz(new[]
+        string packageSha256 = new('e', 64);
+        byte[] primaryGzBytes = BuildPrimaryXmlGz(new[]
         {
             ("curl", 0, "8.6.0", "1.fc40", "x86_64", packageSha256,
              "Packages/c/curl-8.6.0-1.fc40.x86_64.rpm", (string?)"HTTP client", (string?)null)
@@ -196,11 +194,11 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         byte[] decompressed;
         using (var gz = new GZipStream(new MemoryStream(primaryGzBytes), CompressionMode.Decompress))
         using (var ms = new MemoryStream()) { gz.CopyTo(ms); decompressed = ms.ToArray(); }
-        var openSha = Convert.ToHexString(SHA256.HashData(decompressed)).ToLowerInvariant();
-        var compressedSha = Convert.ToHexString(SHA256.HashData(primaryGzBytes)).ToLowerInvariant();
-        var primaryFilename = $"{compressedSha}-primary.xml.gz";  // DNF names by compressed hash
+        string openSha = Convert.ToHexString(SHA256.HashData(decompressed)).ToLowerInvariant();
+        string compressedSha = Convert.ToHexString(SHA256.HashData(primaryGzBytes)).ToLowerInvariant();
+        string primaryFilename = $"{compressedSha}-primary.xml.gz";  // DNF names by compressed hash
 
-        var repomd = $"""
+        string repomd = $"""
             <?xml version="1.0" encoding="UTF-8"?>
             <repomd xmlns="http://linux.duke.edu/metadata/repo">
               <data type="primary">
@@ -227,8 +225,8 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public void ParsePrimaryFromRepomd_ExtractsFilenameAndSha256()
     {
-        var sha256 = new string('b', 64);
-        var repomd = $"""
+        string sha256 = new('b', 64);
+        string repomd = $"""
             <?xml version="1.0" encoding="UTF-8"?>
             <repomd xmlns="http://linux.duke.edu/metadata/repo">
               <data type="primary">
@@ -247,7 +245,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public void ParsePrimaryFromRepomd_MissingPrimaryData_ReturnsNulls()
     {
-        var repomd = """
+        string repomd = """
             <?xml version="1.0" encoding="UTF-8"?>
             <repomd xmlns="http://linux.duke.edu/metadata/repo">
               <data type="filelists">
@@ -267,8 +265,8 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public void ParsePrimaryXmlGz_LocatesPackageByFilename()
     {
-        var sha256 = new string('c', 64);
-        var gzBytes = BuildPrimaryXmlGz(new[]
+        string sha256 = new('c', 64);
+        byte[] gzBytes = BuildPrimaryXmlGz(new[]
         {
             ("tree", 0, "2.1.1", "1.fc40", "x86_64", sha256, "Packages/t/tree-2.1.1-1.fc40.x86_64.rpm",
              (string?)"A recursive directory listing command", (string?)"tree-devel")
@@ -291,7 +289,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public void ParsePrimaryXmlGz_PackageAbsent_EmptyMap()
     {
-        var gzBytes = BuildPrimaryXmlGz([]);
+        byte[] gzBytes = BuildPrimaryXmlGz([]);
         var map = RpmUpstreamProxy.ParsePrimaryXmlGz(gzBytes, "https://mirror.example.com");
         Assert.Empty(map);
     }
@@ -301,18 +299,18 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public async Task ResolvePackageUrlAsync_PackageInPrimary_ReturnsResolution()
     {
-        var packageSha256 = new string('e', 64);
+        string packageSha256 = new('e', 64);
 
-        var primaryGzBytes = BuildPrimaryXmlGz(new[]
+        byte[] primaryGzBytes = BuildPrimaryXmlGz(new[]
         {
             ("curl", 0, "8.6.0", "1.fc40", "x86_64", packageSha256,
              "Packages/c/curl-8.6.0-1.fc40.x86_64.rpm", (string?)"HTTP client", (string?)null)
         });
         // The repomd checksum must be the real hash of the primary.xml.gz, or the proxy's
         // integrity check rejects it before parsing.
-        var primarySha256 = Convert.ToHexString(SHA256.HashData(primaryGzBytes)).ToLowerInvariant();
-        var primaryFilename = $"{primarySha256}-primary.xml.gz";
-        var repomdBytes = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
+        string primarySha256 = Convert.ToHexString(SHA256.HashData(primaryGzBytes)).ToLowerInvariant();
+        string primaryFilename = $"{primarySha256}-primary.xml.gz";
+        byte[] repomdBytes = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
 
         _server.Given(Request.Create().WithPath("/repodata/repomd.xml").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(repomdBytes));
@@ -332,10 +330,10 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public async Task ResolvePackageUrlAsync_PackageAbsentFromPrimary_ReturnsNull()
     {
-        var primaryGzBytes = BuildPrimaryXmlGz([]);
-        var primarySha256 = Convert.ToHexString(SHA256.HashData(primaryGzBytes)).ToLowerInvariant();
-        var primaryFilename = $"{primarySha256}-primary.xml.gz";
-        var repomdBytes = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
+        byte[] primaryGzBytes = BuildPrimaryXmlGz([]);
+        string primarySha256 = Convert.ToHexString(SHA256.HashData(primaryGzBytes)).ToLowerInvariant();
+        string primaryFilename = $"{primarySha256}-primary.xml.gz";
+        byte[] repomdBytes = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
 
         _server.Given(Request.Create().WithPath("/repodata/repomd.xml").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(repomdBytes));
@@ -356,7 +354,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         var proxy = BuildProxy();
 
         await proxy.RecordNegativeAsync("nonexistent-1.0-1.fc40.x86_64.rpm", default);
-        var isCached = await proxy.IsNegativelyCachedAsync("nonexistent-1.0-1.fc40.x86_64.rpm", default);
+        bool isCached = await proxy.IsNegativelyCachedAsync("nonexistent-1.0-1.fc40.x86_64.rpm", default);
 
         Assert.True(isCached);
     }
@@ -367,7 +365,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         var proxy = BuildProxy();
 
         await proxy.RecordNegativeAsync("pkg-a-1.0-1.fc40.x86_64.rpm", default);
-        var isCached = await proxy.IsNegativelyCachedAsync("pkg-b-1.0-1.fc40.x86_64.rpm", default);
+        bool isCached = await proxy.IsNegativelyCachedAsync("pkg-b-1.0-1.fc40.x86_64.rpm", default);
 
         Assert.False(isCached);
     }
@@ -403,12 +401,12 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetGpgKeyAsync_FetchesFromRpmGpgKeyPath()
     {
-        var keyBytes = Encoding.ASCII.GetBytes("-----BEGIN PGP PUBLIC KEY BLOCK-----\nVersion: test\n");
+        byte[] keyBytes = Encoding.ASCII.GetBytes("-----BEGIN PGP PUBLIC KEY BLOCK-----\nVersion: test\n");
         _server.Given(Request.Create().WithPath("/RPM-GPG-KEY").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(keyBytes));
 
         var proxy = BuildProxy();
-        var result = await proxy.GetGpgKeyAsync(_upstream, default);
+        byte[]? result = await proxy.GetGpgKeyAsync(_upstream, default);
 
         Assert.NotNull(result);
         Assert.Equal(keyBytes, result);
@@ -417,7 +415,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetGpgKeyAsync_SecondCall_ServesFromMemoryCache()
     {
-        var keyBytes = Encoding.ASCII.GetBytes("-----BEGIN PGP PUBLIC KEY BLOCK-----\n");
+        byte[] keyBytes = Encoding.ASCII.GetBytes("-----BEGIN PGP PUBLIC KEY BLOCK-----\n");
         _server.Given(Request.Create().WithPath("/RPM-GPG-KEY").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(keyBytes));
 
@@ -449,7 +447,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     {
         var (secret, pubArmored) = GeneratePgpKeyPair();
         var (repomdBytes, primaryFilename, primaryGz) = BuildSignedRepoFixture(packageName: "curl");
-        var asc = SignDetached(repomdBytes, secret);
+        byte[] asc = SignDetached(repomdBytes, secret);
 
         StubRepo(repomdBytes, asc, primaryFilename, primaryGz);
 
@@ -465,9 +463,9 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     {
         var (secret, pubArmored) = GeneratePgpKeyPair();
         var (repomdBytes, primaryFilename, primaryGz) = BuildSignedRepoFixture(packageName: "curl");
-        var asc = SignDetached(repomdBytes, secret);                 // signature over the ORIGINAL bytes
+        byte[] asc = SignDetached(repomdBytes, secret);                 // signature over the ORIGINAL bytes
 
-        var tampered = (byte[])repomdBytes.Clone();
+        byte[] tampered = (byte[])repomdBytes.Clone();
         tampered[^5] ^= 0xFF;                                        // flip a byte → signature no longer matches
         StubRepo(tampered, asc, primaryFilename, primaryGz);
 
@@ -485,7 +483,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         var (signingKey, _) = GeneratePgpKeyPair();
         var (_, trustedPubArmored) = GeneratePgpKeyPair();           // a DIFFERENT key is trusted
         var (repomdBytes, primaryFilename, primaryGz) = BuildSignedRepoFixture(packageName: "curl");
-        var asc = SignDetached(repomdBytes, signingKey);
+        byte[] asc = SignDetached(repomdBytes, signingKey);
 
         StubRepo(repomdBytes, asc, primaryFilename, primaryGz);
 
@@ -547,15 +545,15 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     {
         var (secret, pubArmored) = GeneratePgpKeyPair();
         var (_, otherPubArmored) = GeneratePgpKeyPair();
-        var repomd = Encoding.UTF8.GetBytes("<repomd>trusted</repomd>");
-        var asc = SignDetached(repomd, secret);
+        byte[] repomd = Encoding.UTF8.GetBytes("<repomd>trusted</repomd>");
+        byte[] asc = SignDetached(repomd, secret);
 
         var trustedRing = LoadRing(pubArmored);
         var otherRing = LoadRing(otherPubArmored);
 
         Assert.True(RpmUpstreamProxy.VerifyRepomdSignature(repomd, asc, trustedRing));
 
-        var tampered = (byte[])repomd.Clone();
+        byte[] tampered = (byte[])repomd.Clone();
         tampered[0] ^= 0xFF;
         Assert.False(RpmUpstreamProxy.VerifyRepomdSignature(tampered, asc, trustedRing));
 
@@ -566,16 +564,16 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
     private static (byte[] Repomd, string PrimaryFilename, byte[] PrimaryGz) BuildSignedRepoFixture(string packageName)
     {
-        var primaryGz = BuildPrimaryXmlGz(new[]
+        byte[] primaryGz = BuildPrimaryXmlGz(new[]
         {
             (packageName, 0, "8.6.0", "1.fc40", "x86_64", new string('e', 64),
              $"Packages/c/{packageName}-8.6.0-1.fc40.x86_64.rpm", (string?)"HTTP client", (string?)null)
         });
         // The repomd checksum must be the real hash of the primary.xml.gz, or the proxy's
         // repodata-body integrity check (RepodataBodyMatches) rejects it before parsing.
-        var primarySha256 = Convert.ToHexString(SHA256.HashData(primaryGz)).ToLowerInvariant();
-        var primaryFilename = $"{primarySha256}-primary.xml.gz";
-        var repomd = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
+        string primarySha256 = Convert.ToHexString(SHA256.HashData(primaryGz)).ToLowerInvariant();
+        string primaryFilename = $"{primarySha256}-primary.xml.gz";
+        byte[] repomd = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
         return (repomd, primaryFilename, primaryGz);
     }
 
@@ -607,7 +605,10 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
         using var ms = new MemoryStream();
         using (var armored = new ArmoredOutputStream(ms))
+        {
             secretKey.PublicKey.Encode(armored);
+        }
+
         return (secretKey, ms.ToArray());
     }
 
@@ -624,7 +625,10 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         using var ms = new MemoryStream();
         using (var armored = new ArmoredOutputStream(ms))
         using (var bcpgOut = new BcpgOutputStream(armored))
+        {
             sig.Encode(bcpgOut);
+        }
+
         return ms.ToArray();
     }
 
@@ -641,8 +645,16 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
             ["Rpm:GpgKeyTtl"] = "1.00:00:00",
             ["Rpm:NegativeCacheTtl"] = "00:05:00",
         };
-        if (gpgKey is not null) settings["Rpm:GpgKey"] = gpgKey;
-        if (verifyFlag is not null) settings["Rpm:VerifyRepomdSignature"] = verifyFlag;
+        if (gpgKey is not null)
+        {
+            settings["Rpm:GpgKey"] = gpgKey;
+        }
+
+        if (verifyFlag is not null)
+        {
+            settings["Rpm:VerifyRepomdSignature"] = verifyFlag;
+        }
+
         var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
 
         var httpFactory = new StaticHttpClientFactory(new HttpClient(new WireMockHandler(_server)));
@@ -715,7 +727,10 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         using var ms = new MemoryStream();
         using var gz = new GZipStream(ms, CompressionLevel.Fastest, leaveOpen: true);
         using (var writer = new System.IO.StreamWriter(gz, Encoding.UTF8, leaveOpen: true))
+        {
             doc.Save(writer);
+        }
+
         gz.Flush();
         return ms.ToArray();
     }
@@ -751,10 +766,13 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             // Redirect any request to the WireMock server (preserving path/query).
-            var url = _server.Urls[0] + request.RequestUri!.PathAndQuery;
+            string url = _server.Urls[0] + request.RequestUri!.PathAndQuery;
             using var innerRequest = new HttpRequestMessage(request.Method, url);
             foreach (var h in request.Headers)
+            {
                 innerRequest.Headers.TryAddWithoutValidation(h.Key, h.Value);
+            }
+
             var inner = new HttpClient();
             return await inner.SendAsync(innerRequest, ct);
         }

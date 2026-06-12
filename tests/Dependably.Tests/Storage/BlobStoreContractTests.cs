@@ -15,13 +15,13 @@ public abstract class BlobStoreContractTests
     public async Task Put_ThenGet_ReturnsSameBytes()
     {
         var store = CreateStore();
-        var data = new byte[] { 1, 2, 3, 4, 5 };
+        byte[] data = new byte[] { 1, 2, 3, 4, 5 };
 
         await store.PutAsync("test/put-get", new MemoryStream(data));
 
         await using var stream = await store.GetAsync("test/put-get");
         Assert.NotNull(stream);
-        var result = await ReadAllBytesAsync(stream!);
+        byte[] result = await ReadAllBytesAsync(stream!);
         Assert.Equal(data, result);
     }
 
@@ -30,7 +30,7 @@ public abstract class BlobStoreContractTests
     {
         var store = CreateStore();
 
-        var exists = await store.ExistsAsync($"test/never-written/{Guid.NewGuid():N}");
+        bool exists = await store.ExistsAsync($"test/never-written/{Guid.NewGuid():N}");
 
         Assert.False(exists);
     }
@@ -39,7 +39,7 @@ public abstract class BlobStoreContractTests
     public async Task Exists_AfterPut_ReturnsTrue()
     {
         var store = CreateStore();
-        var key = $"test/exists/{Guid.NewGuid():N}";
+        string key = $"test/exists/{Guid.NewGuid():N}";
 
         await store.PutAsync(key, new MemoryStream(new byte[] { 42 }));
 
@@ -60,7 +60,7 @@ public abstract class BlobStoreContractTests
     public async Task Delete_ThenExists_ReturnsFalse()
     {
         var store = CreateStore();
-        var key = $"test/delete/{Guid.NewGuid():N}";
+        string key = $"test/delete/{Guid.NewGuid():N}";
         await store.PutAsync(key, new MemoryStream(new byte[] { 1 }));
 
         await store.DeleteAsync(key);
@@ -72,7 +72,7 @@ public abstract class BlobStoreContractTests
     public async Task Delete_NonExistentKey_DoesNotThrow()
     {
         var store = CreateStore();
-        var key = $"test/phantom/{Guid.NewGuid():N}";
+        string key = $"test/phantom/{Guid.NewGuid():N}";
 
         // Deleting a key that was never written must be a no-op
         await store.DeleteAsync(key);
@@ -84,13 +84,13 @@ public abstract class BlobStoreContractTests
     public async Task GetTotalSize_IncreasesByBlobSize_AfterPut()
     {
         var store = CreateStore();
-        var before = await store.GetTotalSizeAsync();
-        var data = new byte[256];
+        long before = await store.GetTotalSizeAsync();
+        byte[] data = new byte[256];
         new Random(42).NextBytes(data);
 
         await store.PutAsync($"test/size/{Guid.NewGuid():N}", new MemoryStream(data));
 
-        var after = await store.GetTotalSizeAsync();
+        long after = await store.GetTotalSizeAsync();
         Assert.True(after >= before + data.Length,
             $"Expected total size to increase by at least {data.Length} bytes.");
     }
@@ -99,13 +99,13 @@ public abstract class BlobStoreContractTests
     public async Task Put_OverwritesExistingKey()
     {
         var store = CreateStore();
-        var key = $"test/overwrite/{Guid.NewGuid():N}";
+        string key = $"test/overwrite/{Guid.NewGuid():N}";
 
         await store.PutAsync(key, new MemoryStream(new byte[] { 1, 2, 3 }));
         await store.PutAsync(key, new MemoryStream(new byte[] { 9, 8, 7, 6 }));
 
         await using var stream = await store.GetAsync(key);
-        var bytes = await ReadAllBytesAsync(stream!);
+        byte[] bytes = await ReadAllBytesAsync(stream!);
         Assert.Equal(new byte[] { 9, 8, 7, 6 }, bytes);
     }
 
@@ -113,8 +113,8 @@ public abstract class BlobStoreContractTests
     public async Task HostedKeys_AreIsolatedBetweenOrgs()
     {
         var store = CreateStore();
-        var key1 = BlobKeys.Hosted("org-a", "pypi", "mylib", "1.0.0", "mylib-1.0.0.whl");
-        var key2 = BlobKeys.Hosted("org-b", "pypi", "mylib", "1.0.0", "mylib-1.0.0.whl");
+        string key1 = BlobKeys.Hosted("org-a", "pypi", "mylib", "1.0.0", "mylib-1.0.0.whl");
+        string key2 = BlobKeys.Hosted("org-b", "pypi", "mylib", "1.0.0", "mylib-1.0.0.whl");
 
         await store.PutAsync(key1, new MemoryStream(new byte[] { 1 }));
 
@@ -127,8 +127,8 @@ public abstract class BlobStoreContractTests
     {
         var store = CreateStore();
         // BlobKeys.Proxy (hardened to reject non-hex input) requires 64-char lowercase hex.
-        var sha256 = Convert.ToHexString(new byte[32]).ToLowerInvariant();  // all-zero hash for test
-        var proxyKey = BlobKeys.Proxy(sha256);
+        string sha256 = Convert.ToHexString(new byte[32]).ToLowerInvariant();  // all-zero hash for test
+        string proxyKey = BlobKeys.Proxy(sha256);
 
         await store.PutAsync(proxyKey, new MemoryStream(new byte[] { 1, 2, 3 }));
 
@@ -140,13 +140,13 @@ public abstract class BlobStoreContractTests
     public async Task EmptyBlob_CanBeStored_AndRetrieved()
     {
         var store = CreateStore();
-        var key = $"test/empty/{Guid.NewGuid():N}";
+        string key = $"test/empty/{Guid.NewGuid():N}";
 
         await store.PutAsync(key, new MemoryStream(Array.Empty<byte>()));
 
         await using var stream = await store.GetAsync(key);
         Assert.NotNull(stream);
-        var bytes = await ReadAllBytesAsync(stream!);
+        byte[] bytes = await ReadAllBytesAsync(stream!);
         Assert.Empty(bytes);
     }
 

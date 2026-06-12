@@ -22,12 +22,14 @@ Each skill prompts for three inputs, in order:
 > `allowInsecureConnections`) needed to make this work.
 
 > **Never commit tokens.** Project-level files are checked into source control.
-> Each skill shows how to reference an environment variable (`${NPM_TOKEN}`,
-> `${DEPENDABLY_TOKEN}`) instead of pasting the literal value.
+> Each skill shows how to reference an environment variable instead of pasting
+> the literal value. The variable name differs by ecosystem on purpose: the npm
+> skills use `${NPM_TOKEN}` (npm's own convention); the PyPI and NuGet skills
+> use `${DEPENDABLY_TOKEN}`.
 
 ## See also
 
-- [Quick setup](../README.md#quick-setup) in the top-level README.
+- [Configuring package managers](../README.md#configuring-package-managers) in the top-level README.
 - The in-app **Setup** page generates the same snippets pre-filled for the
   current org. Skills are useful when you want a deeper recipe (Poetry, uv,
   global config, etc.) than the one-snippet Setup page covers.

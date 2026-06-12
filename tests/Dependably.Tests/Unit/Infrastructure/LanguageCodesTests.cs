@@ -1,5 +1,4 @@
 using Dependably.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 

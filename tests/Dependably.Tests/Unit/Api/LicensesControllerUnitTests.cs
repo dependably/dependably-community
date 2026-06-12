@@ -1,6 +1,5 @@
 using Dependably.Api;
 using Microsoft.AspNetCore.Mvc;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -28,12 +27,12 @@ public sealed class LicensesControllerUnitTests
 
         var ok = Assert.IsType<OkObjectResult>(result);
         Assert.NotNull(ok.Value);
-        var payload = ok.Value!;
+        object payload = ok.Value!;
         var type = payload.GetType();
         Assert.True((bool)type.GetProperty("devModeStub")!.GetValue(payload)!);
         Assert.Equal(0, (int)type.GetProperty("count")!.GetValue(payload)!);
         Assert.Null(type.GetProperty("generatedAt")!.GetValue(payload));
-        var components = type.GetProperty("components")!.GetValue(payload);
+        object? components = type.GetProperty("components")!.GetValue(payload);
         Assert.NotNull(components);
         Assert.Empty((System.Collections.IEnumerable)components!);
     }

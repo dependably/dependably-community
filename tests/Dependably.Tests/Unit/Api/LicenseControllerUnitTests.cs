@@ -3,7 +3,6 @@ using Dependably.Api;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -69,7 +68,7 @@ public sealed class LicenseControllerUnitTests
         Assert.IsType<OkObjectResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'license_policy_mode_changed' AND org_id = @orgId",
             new { orgId = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);
@@ -106,14 +105,14 @@ public sealed class LicenseControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
-        var spdx = $"MIT-{Guid.NewGuid():N}".Substring(0, 12);
+        string spdx = $"MIT-{Guid.NewGuid():N}"[..12];
 
         var result = await b.LicenseController.AddAllowlist(new LicenseSpdxRequest(spdx), CancellationToken.None);
         var created = Assert.IsType<CreatedAtActionResult>(result);
         Assert.NotNull(created.Value);
 
         await using var conn = await b.Db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'license_allowlist_added' AND org_id = @orgId",
             new { orgId = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);
@@ -137,7 +136,7 @@ public sealed class LicenseControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
-        var spdx = $"APACHE-{Guid.NewGuid():N}".Substring(0, 15);
+        string spdx = $"APACHE-{Guid.NewGuid():N}"[..15];
 
         var first = await b.LicenseController.AddAllowlist(new LicenseSpdxRequest(spdx), CancellationToken.None);
         Assert.IsType<CreatedAtActionResult>(first);
@@ -163,7 +162,7 @@ public sealed class LicenseControllerUnitTests
     {
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
-        var spdx = $"BSD-{Guid.NewGuid():N}".Substring(0, 10);
+        string spdx = $"BSD-{Guid.NewGuid():N}"[..10];
         await s.WithLicenseAllowlistEntryAsync(spdx);
         var b = await s.BuildAsync();
 
@@ -171,7 +170,7 @@ public sealed class LicenseControllerUnitTests
         Assert.IsType<NoContentResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var auditCount = await conn.ExecuteScalarAsync<long>(
+        long auditCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'license_allowlist_removed' AND org_id = @orgId",
             new { orgId = b.PrimaryOrgId });
         Assert.True(auditCount >= 1);
@@ -196,7 +195,7 @@ public sealed class LicenseControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
-        var spdx = $"GPL-{Guid.NewGuid():N}".Substring(0, 10);
+        string spdx = $"GPL-{Guid.NewGuid():N}"[..10];
 
         var result = await b.LicenseController.AddBlocklist(new LicenseSpdxRequest(spdx), CancellationToken.None);
         Assert.IsType<CreatedAtActionResult>(result);
@@ -223,7 +222,7 @@ public sealed class LicenseControllerUnitTests
     {
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
-        var spdx = $"AGPL-{Guid.NewGuid():N}".Substring(0, 12);
+        string spdx = $"AGPL-{Guid.NewGuid():N}"[..12];
         await s.WithLicenseBlocklistEntryAsync(spdx);
         var b = await s.BuildAsync();
 
@@ -256,7 +255,7 @@ public sealed class LicenseControllerUnitTests
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
-        var spdx = $"LGPL-{Guid.NewGuid():N}".Substring(0, 12);
+        string spdx = $"LGPL-{Guid.NewGuid():N}"[..12];
 
         var first = await b.LicenseController.AddBlocklist(new LicenseSpdxRequest(spdx), CancellationToken.None);
         Assert.IsType<CreatedAtActionResult>(first);
@@ -367,7 +366,7 @@ public sealed class LicenseControllerUnitTests
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var userId = b.ActorUserId!;
+        string userId = b.ActorUserId!;
         b.LicenseController.ControllerContext.HttpContext.User = new System.Security.Claims.ClaimsPrincipal(
             new System.Security.Claims.ClaimsIdentity(
             [
@@ -383,7 +382,7 @@ public sealed class LicenseControllerUnitTests
         Assert.IsType<OkObjectResult>(result);
 
         await using var conn = await b.Db.OpenAsync();
-        var actorId = await conn.ExecuteScalarAsync<string?>(
+        string? actorId = await conn.ExecuteScalarAsync<string?>(
             "SELECT actor_id FROM audit_log WHERE action = 'license_policy_mode_changed' AND org_id = @orgId LIMIT 1",
             new { orgId = b.PrimaryOrgId });
         Assert.Equal(userId, actorId);

@@ -1,5 +1,4 @@
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -23,7 +22,7 @@ public sealed class OuterVersionLabelTests
     [InlineData("pkg-0.0.1", "0.0.1")]
     public void NpmWrapper_Extracts_Semver(string wrapper, string expected)
     {
-        Assert.True(OuterVersionLabel.TryFromNpmWrapper(wrapper, out var v));
+        Assert.True(OuterVersionLabel.TryFromNpmWrapper(wrapper, out string? v));
         Assert.Equal(expected, v);
     }
 
@@ -50,7 +49,7 @@ public sealed class OuterVersionLabelTests
     [InlineData("myproj-1.0.0+local", "1.0.0+local")]   // PEP 440 local version
     public void PyPiSdistWrapper_Extracts_Pep440(string wrapper, string expected)
     {
-        Assert.True(OuterVersionLabel.TryFromPyPiSdistWrapper(wrapper, out var v));
+        Assert.True(OuterVersionLabel.TryFromPyPiSdistWrapper(wrapper, out string? v));
         Assert.Equal(expected, v);
     }
 
@@ -71,7 +70,7 @@ public sealed class OuterVersionLabelTests
     [InlineData("acme-2.0.0-1-py3-none-any.whl", "2.0.0")]   // with build tag
     public void WheelFilename_Extracts_Version(string filename, string expected)
     {
-        Assert.True(OuterVersionLabel.TryFromWheelFilename(filename, out var v));
+        Assert.True(OuterVersionLabel.TryFromWheelFilename(filename, out string? v));
         Assert.Equal(expected, v);
     }
 
@@ -91,7 +90,7 @@ public sealed class OuterVersionLabelTests
     [InlineData("acme-1.0.0-py3-none-any.WHL", "1.0.0")]     // uppercase extension — OrdinalIgnoreCase branch
     public void WheelFilename_Matches_Case_Insensitively(string filename, string expected)
     {
-        Assert.True(OuterVersionLabel.TryFromWheelFilename(filename, out var v));
+        Assert.True(OuterVersionLabel.TryFromWheelFilename(filename, out string? v));
         Assert.Equal(expected, v);
     }
 
@@ -105,7 +104,7 @@ public sealed class OuterVersionLabelTests
     [InlineData("Pkg.1.0.0.snupkg", "1.0.0")]                // symbols package
     public void NupkgFilename_Extracts_Version(string filename, string expected)
     {
-        Assert.True(OuterVersionLabel.TryFromNupkgFilename(filename, out var v));
+        Assert.True(OuterVersionLabel.TryFromNupkgFilename(filename, out string? v));
         Assert.Equal(expected, v);
     }
 
@@ -125,7 +124,7 @@ public sealed class OuterVersionLabelTests
     [InlineData("Pkg.1.0.0.SNUPKG", "1.0.0")]                // uppercase symbols extension
     public void NupkgFilename_Matches_Case_Insensitively(string filename, string expected)
     {
-        Assert.True(OuterVersionLabel.TryFromNupkgFilename(filename, out var v));
+        Assert.True(OuterVersionLabel.TryFromNupkgFilename(filename, out string? v));
         Assert.Equal(expected, v);
     }
 }

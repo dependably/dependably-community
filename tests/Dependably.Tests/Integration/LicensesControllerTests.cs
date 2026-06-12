@@ -1,7 +1,6 @@
 using System.Net;
 using System.Text.Json;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 

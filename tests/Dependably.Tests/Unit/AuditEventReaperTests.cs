@@ -5,7 +5,6 @@ using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -33,7 +32,8 @@ public sealed class AuditEventReaperTests : IAsyncLifetime
             })
             .Build();
         var jwt = new JwtRevocationRepository(_db);
-        return new RetentionService(_db, _blobs, jwt, cfg, NullLogger<RetentionService>.Instance);
+        var samlConfig = new SamlConfigRepository(_db);
+        return new RetentionService(_db, _blobs, jwt, samlConfig, cfg, NullLogger<RetentionService>.Instance);
     }
 
     private async Task SeedEventAsync(string id, DateTimeOffset occurredAt)
@@ -84,11 +84,11 @@ public sealed class AuditEventReaperTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         await svc.PruneAuditEventsAsync(conn, default);
 
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_event WHERE event_id = 'five-days-old'");
         Assert.Equal(0, count);
 
-        var twoDayCount = await conn.ExecuteScalarAsync<long>(
+        long twoDayCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_event WHERE event_id = 'two-days-old'");
         Assert.Equal(1, twoDayCount);
     }
@@ -104,7 +104,7 @@ public sealed class AuditEventReaperTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         await svc.PruneAuditEventsAsync(conn, default);
 
-        var remaining = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM audit_event");
+        long remaining = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM audit_event");
         Assert.Equal(2, remaining);
     }
 }

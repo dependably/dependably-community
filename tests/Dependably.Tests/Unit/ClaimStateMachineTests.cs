@@ -1,5 +1,4 @@
 using Dependably.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -8,7 +7,7 @@ public class ClaimStateMachineTests
 {
     [Theory]
     [InlineData("local_only", true)]
-    [InlineData("mixed",      false)]
+    [InlineData("mixed", false)]
     public void ValidateCreate_ValidStates_AllowsAndReportsPurge(string state, bool expectPurge)
     {
         var r = ClaimStateMachine.ValidateCreate(state);

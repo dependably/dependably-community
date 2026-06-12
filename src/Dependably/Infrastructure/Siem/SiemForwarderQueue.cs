@@ -33,7 +33,7 @@ public sealed class SiemForwarderQueue : BackgroundService
     {
         _forwarder = forwarder;
         _logger = logger;
-        var capacity = int.TryParse(config["SIEM_QUEUE_CAPACITY"], out var c) && c > 0 ? c : DefaultCapacity;
+        int capacity = int.TryParse(config["SIEM_QUEUE_CAPACITY"], out int c) && c > 0 ? c : DefaultCapacity;
         // Default FullMode (Wait) lets TryWrite return false when the channel is at capacity,
         // so producers can record the drop. TryWrite never actually blocks; we just don't use
         // WriteAsync at all on the producer side.
@@ -50,7 +50,11 @@ public sealed class SiemForwarderQueue : BackgroundService
     /// </summary>
     public bool TryEnqueue(SiemEvent ev)
     {
-        if (_channel.Writer.TryWrite(ev)) return true;
+        if (_channel.Writer.TryWrite(ev))
+        {
+            return true;
+        }
+
         Interlocked.Increment(ref _droppedCount);
         return false;
     }
@@ -72,9 +76,13 @@ public sealed class SiemForwarderQueue : BackgroundService
 
     private async Task DeliverWithRetryAsync(SiemEvent ev, CancellationToken ct)
     {
-        for (var attempt = 0; attempt <= BackoffSchedule.Length; attempt++)
+        for (int attempt = 0; attempt <= BackoffSchedule.Length; attempt++)
         {
-            if (ct.IsCancellationRequested) return;
+            if (ct.IsCancellationRequested)
+            {
+                return;
+            }
+
             try
             {
                 await _forwarder.SendAsync(ev, ct);

@@ -61,7 +61,7 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
 
         Assert.True(resp.Headers.Contains("Content-Security-Policy"),
             "Management API responses must include Content-Security-Policy");
-        var csp = resp.Headers.GetValues("Content-Security-Policy").FirstOrDefault();
+        string? csp = resp.Headers.GetValues("Content-Security-Policy").FirstOrDefault();
         Assert.Contains("frame-ancestors 'none'", csp);
         Assert.Contains("form-action 'self'", csp);
     }
@@ -69,12 +69,32 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
     [Fact]
     public async Task SecurityHeaders_RegistryPaths_HaveCacheControlNoStore()
     {
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync("/simple/");
 
         Assert.Equal("no-store", resp.Headers.CacheControl?.ToString());
+    }
+
+    [Fact]
+    public async Task SecurityHeaders_RegistryPaths_HaveRestrictiveCsp()
+    {
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        // The PEP 503 simple index is HTML a browser will render, so it must
+        // carry a CSP even though most registry responses are binary/JSON.
+        var resp = await client.GetAsync("/simple/");
+
+        Assert.True(resp.Headers.Contains("Content-Security-Policy"),
+            "Registry HTML (PEP 503 simple index) must include Content-Security-Policy");
+        string? csp = resp.Headers.GetValues("Content-Security-Policy").FirstOrDefault();
+        Assert.Contains("default-src 'none'", csp);
+        // frame-ancestors / form-action don't fall back to default-src, so they
+        // must be stated explicitly (ZAP rule 10055).
+        Assert.Contains("frame-ancestors 'none'", csp);
+        Assert.Contains("form-action 'none'", csp);
     }
 
     [Fact]
@@ -107,8 +127,8 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
     [InlineData("foo\\..\\bar")]
     public async Task PyPiUpload_PathTraversalName_Returns422AndNoBlobWritten(string maliciousName)
     {
-        var blobSizeBefore = await _factory.BlobStore.GetTotalSizeAsync();
-        var token = await _factory.CreateToken("push");
+        long blobSizeBefore = await _factory.BlobStore.GetTotalSizeAsync();
+        string token = await _factory.CreateToken("push");
         var (bytes, sha256) = PyPiFixtures.BuildWheel("safe-name", "1.0.0");
 
         using var client = _factory.CreateClientWithBasic(token);
@@ -134,11 +154,11 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
     [InlineData("..%2F..%2Fetc%2Fpasswd")]
     public async Task NuGetPush_PathTraversalId_Returns422AndNoBlobWritten(string maliciousId)
     {
-        var blobSizeBefore = await _factory.BlobStore.GetTotalSizeAsync();
-        var token = await _factory.CreateToken("push");
+        long blobSizeBefore = await _factory.BlobStore.GetTotalSizeAsync();
+        string token = await _factory.CreateToken("push");
 
         // Build a nuspec with the malicious ID
-        var nuspec = $"""
+        string nuspec = $"""
             <?xml version="1.0" encoding="utf-8"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
               <metadata>
@@ -156,7 +176,7 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
             using var w = new StreamWriter(entry.Open());
             w.Write(nuspec);
         }
-        var bytes = ms.ToArray();
+        byte[] bytes = ms.ToArray();
 
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
@@ -176,7 +196,7 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
     [Fact]
     public async Task PyPiUpload_HeaderInjectionInName_DoesNotInjectResponseHeader()
     {
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         const string injectionName = "pkg\r\nX-Injected: evil";
         var (bytes, sha256) = PyPiFixtures.BuildWheel("safe", "1.0.0");
 
@@ -213,7 +233,7 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
     [Fact]
     public async Task PyPiPush_PullToken_Returns403NotUnauthorized()
     {
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         var (bytes, sha256) = PyPiFixtures.BuildWheel("scopepkg", "1.0.0");
         using var client = _factory.CreateClientWithBasic(token);
         using var form = BuildPyPiForm("scopepkg", "1.0.0", bytes, sha256);
@@ -235,7 +255,7 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
     [Fact]
     public async Task NuGetPush_PullToken_Returns403()
     {
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         var (bytes, _) = NuGetFixtures.BuildNupkg("ScopeNuGet", "1.0.0");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
@@ -247,7 +267,7 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
     [Fact]
     public async Task NpmPush_NoToken_Returns401()
     {
-        var body = NpmFixtures.BuildPublishBody("authpkg-npm", "1.0.0");
+        string body = NpmFixtures.BuildPublishBody("authpkg-npm", "1.0.0");
         using var client = _factory.CreateClient();
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
         var resp = await client.PutAsync("/npm/authpkg-npm", content);
@@ -257,8 +277,8 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
     [Fact]
     public async Task NpmPush_PullToken_Returns403()
     {
-        var token = await _factory.CreateToken("pull");
-        var body = NpmFixtures.BuildPublishBody("scopepkg-npm", "1.0.0");
+        string token = await _factory.CreateToken("pull");
+        string body = NpmFixtures.BuildPublishBody("scopepkg-npm", "1.0.0");
         using var client = _factory.CreateClientWithBearer(token);
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
         var resp = await client.PutAsync("/npm/scopepkg-npm", content);
@@ -273,7 +293,7 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
         // Set a very small limit (10 bytes) so any real package exceeds it
         await _factory.SetInstanceLimit("pypi", 10);
 
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         var (bytes, sha256) = PyPiFixtures.BuildWheel("bigsizepkg", "1.0.0");
 
         using var client = _factory.CreateClientWithBasic(token);
@@ -296,8 +316,8 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
     {
         await _factory.SetInstanceLimit("npm", 10);
 
-        var token = await _factory.CreateToken("push");
-        var body = NpmFixtures.BuildPublishBody("bigsizepkg", "1.0.0");
+        string token = await _factory.CreateToken("push");
+        string body = NpmFixtures.BuildPublishBody("bigsizepkg", "1.0.0");
 
         using var client = _factory.CreateClientWithBearer(token);
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
@@ -315,7 +335,7 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
     {
         await _factory.SetInstanceLimit("nuget", 10);
 
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         var (bytes, _) = NuGetFixtures.BuildNupkg("BigSizePkg", "1.0.0");
 
         using var client = _factory.CreateClient();
@@ -342,10 +362,10 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
     [InlineData("http://192.168.1.1/packages")]
     public async Task UpdateOrgSettings_BlockedUpstreamUrl_Returns400(string blockedUrl)
     {
-        var adminJwt = await _factory.CreateAdminJwt();
+        string adminJwt = await _factory.CreateAdminJwt();
         using var client = _factory.CreateClientWithBearer(adminJwt);
 
-        var body = JsonSerializer.Serialize(new { pyPiUpstream = blockedUrl });
+        string body = JsonSerializer.Serialize(new { pyPiUpstream = blockedUrl });
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
         var resp = await client.PutAsync("/api/v1/settings", content);
 
@@ -364,7 +384,7 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
             Encoding.UTF8, "application/json");
 
         HttpResponseMessage? lastResp = null;
-        for (var i = 0; i < 11; i++)
+        for (int i = 0; i < 11; i++)
         {
             // Reset content for each request (StringContent is single-use)
             var reqContent = new StringContent(
@@ -383,12 +403,14 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
     private static MultipartFormDataContent BuildPyPiForm(
         string name, string version, byte[] bytes, string sha256)
     {
-        var form = new MultipartFormDataContent();
-        form.Add(new StringContent("file_upload"), ":action");
-        form.Add(new StringContent("2.1"), "metadata_version");
-        form.Add(new StringContent(name), "name");
-        form.Add(new StringContent(version), "version");
-        form.Add(new StringContent(sha256), "sha256_digest");
+        var form = new MultipartFormDataContent
+        {
+            { new StringContent("file_upload"), ":action" },
+            { new StringContent("2.1"), "metadata_version" },
+            { new StringContent(name), "name" },
+            { new StringContent(version), "version" },
+            { new StringContent(sha256), "sha256_digest" }
+        };
         var fileContent = new ByteArrayContent(bytes);
         fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
         form.Add(fileContent, "content", $"{name}-{version}-py3-none-any.whl");

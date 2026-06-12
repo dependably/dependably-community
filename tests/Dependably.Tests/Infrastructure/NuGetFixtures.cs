@@ -13,7 +13,7 @@ public static class NuGetFixtures
     /// </summary>
     public static (byte[] Bytes, string Sha256Hex) BuildNupkg(string id, string version)
     {
-        var nuspec = $"""
+        string nuspec = $"""
             <?xml version="1.0" encoding="utf-8"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
               <metadata>
@@ -33,17 +33,17 @@ public static class NuGetFixtures
             WriteEntry(zip, $"lib/netstandard2.0/_._", "");
         }
 
-        var bytes = ms.ToArray();
-        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        byte[] bytes = ms.ToArray();
+        string hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         return (bytes, hash);
     }
 
     /// <summary>Loads the real Newtonsoft.Json nupkg fixture.</summary>
     public static (byte[] Bytes, string Sha256Hex) RealNupkg()
     {
-        var path = Path.Combine(FixtureManifest.FixturesRoot, "nuget", "Newtonsoft.Json.13.0.3.nupkg");
-        var bytes = File.ReadAllBytes(path);
-        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string path = Path.Combine(FixtureManifest.FixturesRoot, "nuget", "Newtonsoft.Json.13.0.3.nupkg");
+        byte[] bytes = File.ReadAllBytes(path);
+        string hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         return (bytes, hash);
     }
 

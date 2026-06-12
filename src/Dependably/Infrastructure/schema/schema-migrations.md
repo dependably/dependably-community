@@ -1,6 +1,6 @@
 # Schema Migration Rules
 
-Dependably applies its schema on startup via `SchemaInitializer`, in three layers:
+Dependably applies its schema on startup via `SchemaInitializer` (`src/Dependably/Infrastructure/SchemaInitializer.cs`), in three layers:
 
 1. **Base schema** — the embedded `Schema.sql` / `Schema.pg.sql` is applied with `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`, so re-running is a safe no-op.
 2. **Additive columns** — `ALTER TABLE ... ADD COLUMN` statements in `RunAdditiveMigrationsAsync`. SQLite has no `IF NOT EXISTS` for column adds, so `MigrateSqliteAsync` swallows only the "duplicate column" error (code 1); Postgres rewrites to `ADD COLUMN IF NOT EXISTS`.
@@ -47,6 +47,8 @@ Rename = three separate releases:
 3. **Release N+2**: Drop the old column/table.
 
 Never rename in a single release — the old slot still reads the old name during cutover.
+
+This sequencing (and the drop sequencing below) is reviewer-enforced; the compliance tests in [CI check](#ci-check) catch structural mistakes (missing defaults, schema-file drift) but cannot know which release a statement belongs to.
 
 ### Dropping columns or tables
 
@@ -95,29 +97,7 @@ Never pair a destructive statement (`DROP COLUMN`, `DROP TABLE`) with a statemen
 
 ## Existing schema review
 
-The current `Schema.sql` is fully blue-green compatible:
-
-| Table | Verdict | Notes |
-|---|---|---|
-| `orgs` | ✓ | All columns have defaults or are primary key |
-| `org_settings` | ✓ | Optional columns are nullable |
-| `instance_settings` | ✓ | Key-value store, additive |
-| `users` | ✓ | All non-null columns have defaults |
-| `org_members` | ✓ | Role has a default (`'member'`) |
-| `packages` | ✓ | All non-null columns have defaults |
-| `package_versions` | ✓ | Optional fields nullable; booleans default to 0 |
-| `user_tokens` | ✓ | `expires_at` nullable |
-| `service_tokens` | ✓ | `expires_at` nullable |
-| `invites` | ✓ | `accepted_at` nullable |
-| `allowlist` | ✓ | Unique constraint is additive |
-| `upstream_registry` | ✓ | New table; all non-null columns have defaults; unique/index additive |
-| `audit_log` | ✓ | All optional columns nullable |
-| `activity` | ✓ | `detail` nullable |
-| `vulnerabilities` | ✓ | Optional fields nullable |
-| `package_version_vulns` | ✓ | Join table, additive |
-| `login_attempts` | ✓ | All columns have defaults |
-
-All current schema statements satisfy the blue-green compatibility rules.
+There is no hand-maintained per-table compatibility snapshot — it would drift from `Schema.sql` immediately. Blue-green compatibility of the current schema is asserted continuously by the `Category=Schema` compliance tests described below; `Schema.sql` / `Schema.pg.sql` are the authoritative listing of what exists.
 
 ## CI check
 

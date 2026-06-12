@@ -6,7 +6,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -20,7 +19,7 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
 
     private async Task<HttpClient> AdminClient()
     {
-        var jwt = await _factory.CreateAdminJwt();
+        string jwt = await _factory.CreateAdminJwt();
         var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         return c;
@@ -34,13 +33,33 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         Assert.True(resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.NotFound);
     }
 
+    /// <summary>
+    /// Pins the access decision for the claims read endpoints: the whole claims admin
+    /// surface (reads included) requires claim:manage. A member holds read:claims but not
+    /// claim:manage, so List and Get are 403 — the [RequireCapability] attribute and the
+    /// inner AuthorizeAsync check enforce the same requirement.
+    /// </summary>
+    [Fact]
+    public async Task ListAndGet_MemberWithoutClaimManage_Returns403()
+    {
+        string userId = await _factory.CreateUser($"claims-member-{Guid.NewGuid():N}@example.com", "Password12345");
+        string jwt = await _factory.CreateUserJwt(userId, "member");
+        using var c = _factory.CreateClientWithBearer(jwt);
+
+        Assert.Equal(HttpStatusCode.Forbidden, (await c.GetAsync("/api/v1/admin/claims")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await c.GetAsync("/api/v1/admin/claims/npm/some-package")).StatusCode);
+    }
+
     [Fact]
     public async Task Create_LocalOnly_ReturnsCreatedWithPurgesProxy()
     {
         using var c = await AdminClient();
         var resp = await c.PostAsJsonAsync("/api/v1/admin/claims", new
         {
-            ecosystem = "npm", name = "acme-claim-create", state = "local_only", reason = "internal"
+            ecosystem = "npm",
+            name = "acme-claim-create",
+            state = "local_only",
+            reason = "internal"
         });
         Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
 
@@ -67,7 +86,10 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         using var c = await AdminClient();
         var resp = await c.PostAsJsonAsync("/api/v1/admin/claims", new
         {
-            ecosystem = "npm", name = "acme-claim-bad", state = "unclaimed", reason = "x"
+            ecosystem = "npm",
+            name = "acme-claim-bad",
+            state = "unclaimed",
+            reason = "x"
         });
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
@@ -78,7 +100,10 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         using var c = await AdminClient();
         var create = await c.PostAsJsonAsync("/api/v1/admin/claims", new
         {
-            ecosystem = "npm", name = "acme-claim-transition", state = "local_only", reason = "init"
+            ecosystem = "npm",
+            name = "acme-claim-transition",
+            state = "local_only",
+            reason = "init"
         });
         create.EnsureSuccessStatusCode();
 
@@ -106,7 +131,10 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         using var c = await AdminClient();
         var create = await c.PostAsJsonAsync("/api/v1/admin/claims", new
         {
-            ecosystem = "npm", name = "acme-claim-release", state = "local_only", reason = "init"
+            ecosystem = "npm",
+            name = "acme-claim-release",
+            state = "local_only",
+            reason = "init"
         });
         create.EnsureSuccessStatusCode();
 
@@ -131,13 +159,16 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         using var c = await AdminClient();
         var resp = await c.PostAsJsonAsync("/api/v1/admin/claims", new
         {
-            ecosystem = "npm", name = "acme-claim-typed", state = "local_only", reason = "audit test"
+            ecosystem = "npm",
+            name = "acme-claim-typed",
+            state = "local_only",
+            reason = "audit test"
         });
         resp.EnsureSuccessStatusCode();
 
         var db = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await db.OpenAsync();
-        var payload = await conn.ExecuteScalarAsync<string?>(
+        string? payload = await conn.ExecuteScalarAsync<string?>(
             "SELECT payload FROM audit_event WHERE event_type = 'claim.create' " +
             "AND payload LIKE @needle ORDER BY occurred_at DESC LIMIT 1",
             new { needle = "%acme-claim-typed%" });
@@ -155,11 +186,17 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         using var c = await AdminClient();
         await c.PostAsJsonAsync("/api/v1/admin/claims", new
         {
-            ecosystem = "npm", name = "acme-list-local", state = "local_only", reason = "x"
+            ecosystem = "npm",
+            name = "acme-list-local",
+            state = "local_only",
+            reason = "x"
         });
         await c.PostAsJsonAsync("/api/v1/admin/claims", new
         {
-            ecosystem = "npm", name = "acme-list-mixed", state = "mixed", reason = "x"
+            ecosystem = "npm",
+            name = "acme-list-mixed",
+            state = "mixed",
+            reason = "x"
         });
 
         var resp = await c.GetAsync("/api/v1/admin/claims?ecosystem=npm&state=mixed");
@@ -233,15 +270,15 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         // Proxy rows are gone; private bystander is untouched.
         await using (var verify = await store.OpenAsync())
         {
-            var remaining = await verify.ExecuteScalarAsync<long>(
+            long remaining = await verify.ExecuteScalarAsync<long>(
                 "SELECT COUNT(*) FROM package_versions WHERE package_id = 'p-target'");
             Assert.Equal(0, remaining);
 
-            var bystander = await verify.ExecuteScalarAsync<long>(
+            long bystander = await verify.ExecuteScalarAsync<long>(
                 "SELECT COUNT(*) FROM package_versions WHERE id = 'v-private'");
             Assert.Equal(1, bystander);
 
-            var historyPurged = await verify.ExecuteScalarAsync<long>(
+            long historyPurged = await verify.ExecuteScalarAsync<long>(
                 "SELECT purged_count FROM claim_history WHERE name = 'acme-purge-target' ORDER BY occurred_at DESC LIMIT 1");
             Assert.Equal(2, historyPurged);
         }
@@ -261,7 +298,10 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         // Start in mixed (no purge on create); proxy version persists.
         var create = await c.PostAsJsonAsync("/api/v1/admin/claims", new
         {
-            ecosystem = "npm", name = "acme-mixed-transition", state = "mixed", reason = "init"
+            ecosystem = "npm",
+            name = "acme-mixed-transition",
+            state = "mixed",
+            reason = "init"
         });
         create.EnsureSuccessStatusCode();
 

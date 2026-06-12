@@ -1,6 +1,5 @@
 using System.Text.RegularExpressions;
 using Dependably.Security;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Security;
 
@@ -14,18 +13,18 @@ public sealed partial class TokenGeneratorTests
     [Fact]
     public void Decoded_token_is_exactly_32_bytes()
     {
-        var token = TokenGenerator.Generate();
+        string token = TokenGenerator.Generate();
         // Reverse the URL-safe transform, restore padding, decode.
-        var padded = token.Replace('-', '+').Replace('_', '/');
+        string padded = token.Replace('-', '+').Replace('_', '/');
         padded = padded.PadRight(padded.Length + (4 - padded.Length % 4) % 4, '=');
-        var decoded = Convert.FromBase64String(padded);
+        byte[] decoded = Convert.FromBase64String(padded);
         Assert.Equal(32, decoded.Length);
     }
 
     [Fact]
     public void Token_uses_only_url_safe_base64_alphabet()
     {
-        var token = TokenGenerator.Generate();
+        string token = TokenGenerator.Generate();
         Assert.Matches(UrlSafeAlphabetRegex(), token);
         Assert.DoesNotContain('+', token);
         Assert.DoesNotContain('/', token);
@@ -39,7 +38,10 @@ public sealed partial class TokenGeneratorTests
         // would still produce 32-byte output but lose this property fast.
         var tokens = new HashSet<string>();
         for (int i = 0; i < 10_000; i++)
+        {
             Assert.True(tokens.Add(TokenGenerator.Generate()), "Duplicate token generated");
+        }
+
         Assert.Equal(10_000, tokens.Count);
     }
 

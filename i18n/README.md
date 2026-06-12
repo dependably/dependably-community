@@ -71,7 +71,7 @@ Translation handoff to external translators uses [XLIFF 2.0](https://docs.oasis-
 Export files are placed in `i18n/handoff/`:
 
 ```
-docs/i18n/handoff/
+i18n/handoff/
   frontend.en.xlf     # Exported from web/src/locales/en.json
   backend.en.xlf      # Exported from src/Dependably/Resources/SharedResource.resx
   README.md           # Instructions for translators
@@ -168,21 +168,33 @@ The frontend uses the [svelte-i18n](https://github.com/kaisermann/svelte-i18n) l
 
 ### Setup
 
-Locale registration and initialization live in `web/src/i18n/index.js`:
+Locale registration and initialization live in `web/src/i18n/index.js`. The initial locale comes from the `.AspNetCore.Culture` cookie when present (so a server-side choice survives reloads), falling back to the browser language, then `en`:
 
 ```js
-import { register, init, getLocaleFromCookie } from 'svelte-i18n';
+import { register, init, getLocaleFromNavigator } from 'svelte-i18n'
 
-register('en', () => import('../locales/en.json'));
-register('fr', () => import('../locales/fr.json'));
+function getLocaleFromCookie() {
+  const match = document.cookie.match(/\.AspNetCore\.Culture=([^;]+)/)
+  if (!match) return null
+  try {
+    const decoded = decodeURIComponent(match[1])
+    const m = decoded.match(/uic=([a-z]{2})/)
+    return m ? m[1] : null
+  } catch { return null }
+}
 
-init({
-  fallbackLocale: 'en',
-  initialLocale: getLocaleFromCookie('locale') ?? 'en',
-});
+register('en', () => import('../locales/en.json'))
+register('fr', () => import('../locales/fr.json'))
+
+export function setupI18n() {
+  return init({
+    fallbackLocale: 'en',
+    initialLocale: getLocaleFromCookie() ?? getLocaleFromNavigator()?.split('-')[0] ?? 'en'
+  })
+}
 ```
 
-Locale files are loaded lazily — only the active locale is fetched on page load.
+(`getLocaleFromCookie` is defined locally — svelte-i18n only ships `getLocaleFromNavigator`.) Locale files are loaded lazily — only the active locale is fetched on page load.
 
 ### Usage in components
 
@@ -209,33 +221,35 @@ The corresponding source string uses `{user}` as a placeholder:
 
 ### Locale switcher
 
-The locale switcher (`web/src/lib/LocaleSwitcher.svelte`) writes the selected locale to a `locale` cookie and reloads the page so both the frontend and the `.AspNetCore.Culture` cookie (set server-side) stay in sync. The switcher exposes all registered locales:
+Locale switching lives in `web/src/lib/locale.js`, which exports the registered locale list and two functions:
 
 ```js
-const locales = [
+export const locales = [
   { code: 'en', label: 'English' },
-  { code: 'fr', label: 'Français' },
-];
+  { code: 'fr', label: 'Français' }
+]
 ```
+
+- `applyLocale(code)` — client-side only: sets the svelte-i18n locale store, writes the `.AspNetCore.Culture` cookie (`c=<code>|uic=<code>`, with `Secure` over HTTPS) so server-rendered responses use the same culture, persists the choice to `localStorage`, and updates `<html lang>`. No page reload.
+- `switchLocale(code)` — calls `applyLocale` and, when signed in, persists the choice server-side (`/users/me/language`, or `/system/me/language` for the apex system admin) so it follows the user across devices.
 
 ## Format helpers
 
-Date, number, and relative-time formatting lives in `web/src/lib/format.js`. All helpers accept a locale parameter defaulting to the current svelte-i18n locale.
+Date, number, and relative-time formatting lives in `web/src/lib/format.js`. Each helper is a Svelte **derived store** keyed on the current svelte-i18n locale — subscribe with `$` and call the resulting function. When the locale changes, every formatted value re-renders automatically.
 
-```js
-// Dates
-formatDate(date, locale)           // "28 April 2026" / "28 avril 2026"
-formatDateTime(date, locale)       // "28 April 2026, 14:32" / ...
+```svelte
+<script>
+  import { formatDate, formatDateShort, formatRelativeTime, formatNumber, formatBytes } from '../lib/format.js'
+</script>
 
-// Numbers and sizes
-formatNumber(n, locale)            // "1,234" / "1 234"
-formatBytes(bytes, locale)         // "4.2 MB" / "4,2 Mo"
-
-// Relative time
-formatRelative(date, locale)       // "3 days ago" / "il y a 3 jours"
+{$formatDate(pkg.publishedAt)}         <!-- "28 Apr 2026, 14:32" / "28 avr. 2026, 14:32" -->
+{$formatDateShort(pkg.publishedAt)}    <!-- "28 Apr 2026" (date only) -->
+{$formatRelativeTime(pkg.publishedAt)} <!-- "3 days ago" / "il y a 3 jours" -->
+{$formatNumber(count)}                 <!-- "1,234" / "1 234" -->
+{$formatBytes(size)}                   <!-- "4.2 MB" / "4,2 MB" -->
 ```
 
-Internally these use `Intl.DateTimeFormat`, `Intl.NumberFormat`, and `Intl.RelativeTimeFormat` — all built into modern browsers, no extra dependencies required. Locales are passed explicitly rather than read from a global so helpers remain testable in isolation.
+All helpers render `—` (or `0 B`) for null/invalid input. Internally they use `Intl.DateTimeFormat`, `Intl.NumberFormat`, and `Intl.RelativeTimeFormat` — built into modern browsers, no extra dependencies.
 
 ## CI validation
 

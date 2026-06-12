@@ -5,7 +5,6 @@ using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -56,13 +55,13 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
             () => initializer.RunOnceAsync(conn, "wedge_probe_migration", FailingMigrationAsync));
 
         // The wrapping transaction rolled back: the table the action created is gone...
-        var tableCount = await conn.ExecuteScalarAsync<long>(
+        long tableCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='wedge_probe'");
         Assert.Equal(0, tableCount);
 
         // ...and the ledger never records a migration that didn't fully commit, so a retry
         // re-runs it from a clean slate instead of wedging on a leftover artefact.
-        var recorded = await conn.ExecuteScalarAsync<long>(
+        long recorded = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM _applied_migrations WHERE name = 'wedge_probe_migration'");
         Assert.Equal(0, recorded);
     }
@@ -75,7 +74,7 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         await initializer.InitializeAsync();
 
         await using var conn = await _db.OpenAsync();
-        var recorded = await conn.ExecuteScalarAsync<long>(
+        long recorded = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM _applied_migrations WHERE name = 'fix_nuget_proxy_purl_names'");
         Assert.Equal(1, recorded);
     }
@@ -100,7 +99,7 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         await initializer.InitializeAsync();
 
         await using var conn = await _db.OpenAsync();
-        var schemaApplied = await conn.ExecuteScalarAsync<long>(
+        long schemaApplied = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='orgs'");
         Assert.Equal(1, schemaApplied);
     }
@@ -123,9 +122,9 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         await NewInitializer(_db).InitializeAsync();
 
         await using var verify = await _db.OpenAsync();
-        var userTokensHasScope = await verify.ExecuteScalarAsync<long>(
+        long userTokensHasScope = await verify.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM pragma_table_info('user_tokens') WHERE name = 'scope'");
-        var serviceTokensHasScope = await verify.ExecuteScalarAsync<long>(
+        long serviceTokensHasScope = await verify.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM pragma_table_info('service_tokens') WHERE name = 'scope'");
         Assert.Equal(0, userTokensHasScope);
         Assert.Equal(0, serviceTokensHasScope);
@@ -144,7 +143,7 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         Assert.Null(ex);
 
         await using var verify = await _db.OpenAsync();
-        var tokensRows = await verify.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM user_tokens");
+        long tokensRows = await verify.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM user_tokens");
         Assert.Equal(0, tokensRows);
     }
 
@@ -163,7 +162,7 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         await NewInitializer(_db).InitializeAsync();
 
         await using var verify = await _db.OpenAsync();
-        var hasSbom = await verify.ExecuteScalarAsync<long>(
+        long hasSbom = await verify.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM pragma_table_info('package_versions') WHERE name = 'sbom'");
         Assert.Equal(0, hasSbom);
     }
@@ -175,7 +174,7 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         // and the migration is marked applied without touching the table.
         await NewInitializer(_db).InitializeAsync();
         await using var verify = await _db.OpenAsync();
-        var applied = await verify.ExecuteScalarAsync<long>(
+        long applied = await verify.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM _applied_migrations WHERE name = 'drop_package_versions_sbom_column'");
         Assert.Equal(1, applied);
     }
@@ -280,7 +279,7 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         await NewInitializer(_db).InitializeAsync();
 
         await using var verify = await _db.OpenAsync();
-        var purlName = await verify.ExecuteScalarAsync<string>(
+        string? purlName = await verify.ExecuteScalarAsync<string>(
             "SELECT purl_name FROM packages WHERE id = 'p1'");
         Assert.Equal("Newtonsoft.Json", purlName);
     }

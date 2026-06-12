@@ -1,7 +1,7 @@
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
 using Dependably.Infrastructure;
 using Dependably.Security;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Api;
 
@@ -40,10 +40,16 @@ public sealed class OrgAuditController : OrgScopedControllerBase
         CancellationToken ct = default)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadAudit, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
-        if (string.IsNullOrEmpty(eventType)) eventType = null;
+        string orgId = CurrentTenantId();
+        if (string.IsNullOrEmpty(eventType))
+        {
+            eventType = null;
+        }
 
         if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
         {
@@ -57,14 +63,14 @@ public sealed class OrgAuditController : OrgScopedControllerBase
                     item.EventType, item.Ecosystem, item.Purl,
                     item.ActorEmail, item.SourceIp, item.Detail);
             }
-            var bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
-            var filename = $"activity-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}.csv";
+            byte[] bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
+            string filename = $"activity-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}.csv";
             return File(bytes, "text/csv", filename);
         }
 
-        limit  = Math.Clamp(limit, 1, 200);
-        page   = Math.Max(page, 1);
-        var offset = (page - 1) * limit;
+        limit = Math.Clamp(limit, 1, 200);
+        page = Math.Max(page, 1);
+        int offset = (page - 1) * limit;
         var (items, total) = await _audit.ListActivityAsync(orgId, limit, offset, eventType, ct);
         return Ok(new { items, total, limit, offset });
     }
@@ -78,10 +84,16 @@ public sealed class OrgAuditController : OrgScopedControllerBase
         CancellationToken ct = default)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadAudit, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
-        if (string.IsNullOrEmpty(action)) action = null;
+        string orgId = CurrentTenantId();
+        if (string.IsNullOrEmpty(action))
+        {
+            action = null;
+        }
 
         if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
         {
@@ -94,14 +106,14 @@ public sealed class OrgAuditController : OrgScopedControllerBase
                     item.CreatedAt.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
                     item.Action, item.ActorEmail, item.Ecosystem, item.Purl, item.Detail);
             }
-            var bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
-            var filename = $"audit-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}.csv";
+            byte[] bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
+            string filename = $"audit-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}.csv";
             return File(bytes, "text/csv", filename);
         }
 
-        limit  = Math.Clamp(limit, 1, 200);
-        page   = Math.Max(page, 1);
-        var offset = (page - 1) * limit;
+        limit = Math.Clamp(limit, 1, 200);
+        page = Math.Max(page, 1);
+        int offset = (page - 1) * limit;
         var (items, total) = await _audit.ListAuditAsync(orgId, limit, offset, action, ct);
         return Ok(new { items, total, limit, offset });
     }

@@ -1,6 +1,4 @@
-using System.Net;
 using Dependably.Security;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -68,7 +66,7 @@ public class HeaderInjectionTests
     public void SanitizeHeader_StripsCRLF()
     {
         const string purl = "pkg:pypi/requests@2.28.0\r\nX-Injected: evil";
-        var sanitized = SanitizeHeader(purl);
+        string sanitized = SanitizeHeader(purl);
         // CRLF stripped — injection cannot create a separate HTTP header
         Assert.DoesNotContain('\r', sanitized);
         Assert.DoesNotContain('\n', sanitized);
@@ -78,7 +76,7 @@ public class HeaderInjectionTests
     public void SanitizeHeader_StripsNullByte()
     {
         const string purl = "pkg:pypi/requests@2.28.0\0extra";
-        var sanitized = SanitizeHeader(purl);
+        string sanitized = SanitizeHeader(purl);
         Assert.DoesNotContain('\0', sanitized);
     }
 
@@ -108,7 +106,7 @@ public class UpstreamUrlValidatorTests
     [InlineData("http://100.64.0.1/packages")]
     public void ValidateUrl_BlockedIp_ReturnsError(string url)
     {
-        var error = UpstreamUrlValidator.ValidateUrl(url);
+        string? error = UpstreamUrlValidator.ValidateUrl(url);
         Assert.NotNull(error);
     }
 
@@ -118,7 +116,7 @@ public class UpstreamUrlValidatorTests
     [InlineData("not-a-url")]
     public void ValidateUrl_InvalidSchemeOrFormat_ReturnsError(string url)
     {
-        var error = UpstreamUrlValidator.ValidateUrl(url);
+        string? error = UpstreamUrlValidator.ValidateUrl(url);
         Assert.NotNull(error);
     }
 
@@ -129,7 +127,7 @@ public class UpstreamUrlValidatorTests
     [InlineData("http://my-private-registry.example.com")]
     public void ValidateUrl_PublicUrl_ReturnsNull(string url)
     {
-        var error = UpstreamUrlValidator.ValidateUrl(url);
+        string? error = UpstreamUrlValidator.ValidateUrl(url);
         Assert.Null(error);
     }
 
@@ -140,7 +138,7 @@ public class UpstreamUrlValidatorTests
     [InlineData("\t")]
     public void ValidateUrl_NullOrWhitespace_ReturnsEmptyError(string? url)
     {
-        var error = UpstreamUrlValidator.ValidateUrl(url);
+        string? error = UpstreamUrlValidator.ValidateUrl(url);
         Assert.Equal("Upstream URL must not be empty.", error);
     }
 
@@ -151,7 +149,7 @@ public class UpstreamUrlValidatorTests
     [InlineData("ws://example.com")]
     public void ValidateUrl_NonHttpScheme_ReturnsSchemeError(string url)
     {
-        var error = UpstreamUrlValidator.ValidateUrl(url);
+        string? error = UpstreamUrlValidator.ValidateUrl(url);
         Assert.Equal("Only http:// and https:// schemes are accepted.", error);
     }
 
@@ -161,7 +159,7 @@ public class UpstreamUrlValidatorTests
     [InlineData(":::not a uri:::")]
     public void ValidateUrl_MalformedUri_ReturnsFormatError(string url)
     {
-        var error = UpstreamUrlValidator.ValidateUrl(url);
+        string? error = UpstreamUrlValidator.ValidateUrl(url);
         Assert.Equal("Invalid URL format.", error);
     }
 
@@ -171,7 +169,7 @@ public class UpstreamUrlValidatorTests
     [InlineData("http://[fe80::1]/packages")]        // IPv6 link-local
     public void ValidateUrl_BlockedIpv6_ReturnsBlockedError(string url)
     {
-        var error = UpstreamUrlValidator.ValidateUrl(url);
+        string? error = UpstreamUrlValidator.ValidateUrl(url);
         Assert.NotNull(error);
         Assert.StartsWith("Upstream URL resolves to a blocked IP range", error);
     }
@@ -181,7 +179,7 @@ public class UpstreamUrlValidatorTests
     [InlineData("http://8.8.8.8/packages")]                  // Public IPv4 literal
     public void ValidateUrl_PublicIpLiteral_ReturnsNull(string url)
     {
-        var error = UpstreamUrlValidator.ValidateUrl(url);
+        string? error = UpstreamUrlValidator.ValidateUrl(url);
         Assert.Null(error);
     }
 }

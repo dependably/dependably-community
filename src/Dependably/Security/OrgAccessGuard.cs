@@ -1,7 +1,7 @@
 using System.Security.Claims;
 using Dapper;
-using Microsoft.AspNetCore.Mvc;
 using Dependably.Infrastructure;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Security;
 
@@ -41,14 +41,16 @@ public sealed class OrgAccessGuard
         CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var membership = await conn.QuerySingleOrDefaultAsync<(string? TenantId, string? Role)>(
+        var (TenantId, Role) = await conn.QuerySingleOrDefaultAsync<(string? TenantId, string? Role)>(
             "SELECT tenant_id as TenantId, role as Role FROM users WHERE id = @userId AND tenant_id = @orgId",
             new { orgId, userId });
 
-        if (membership.TenantId is null)
+        if (TenantId is null)
+        {
             return AccessResult.NotFound;
+        }
 
-        var granted = ResolveCallerCapabilities(principal, membership.Role);
+        var granted = ResolveCallerCapabilities(principal, Role);
         return Capabilities.Grants(granted, requiredCapability)
             ? AccessResult.Allowed
             : AccessResult.Forbidden;
@@ -67,21 +69,24 @@ public sealed class OrgAccessGuard
         string requiredCapability,
         CancellationToken ct = default)
     {
-        var ctx = httpContext.Items[TenantContext.HttpItemsKey] as TenantContext;
-        if (ctx is null || !ctx.IsTenant || ctx.TenantId is null)
+        if (httpContext.Items[TenantContext.HttpItemsKey] is not TenantContext ctx || !ctx.IsTenant || ctx.TenantId is null)
+        {
             return new NotFoundResult();
+        }
 
-        var userId = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        string? userId = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? principal.FindFirst("sub")?.Value;
         if (userId is null)
+        {
             return new UnauthorizedResult();
+        }
 
         var result = await CheckCapAsync(principal, userId, ctx.TenantId, requiredCapability, ct);
         return result switch
         {
-            AccessResult.NotFound  => new NotFoundResult(),
+            AccessResult.NotFound => new NotFoundResult(),
             AccessResult.Forbidden => new ForbidResult(),
-            _                      => null,
+            _ => null,
         };
     }
 

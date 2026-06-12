@@ -1,8 +1,6 @@
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Net.Http.Headers;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -38,7 +36,7 @@ public sealed class SiemControllerUnitTests
 
         var result = await b.SiemController.GetAuthEvents(null, null, null, null, 100, null);
         // Either UnauthorizedObjectResult or ObjectResult with 401.
-        var status = result switch
+        int? status = result switch
         {
             ObjectResult o => o.StatusCode,
             UnauthorizedResult => 401,
@@ -151,7 +149,7 @@ public sealed class SiemControllerUnitTests
         var b = await s.BuildAsync();
 
         var result = await b.SiemController.GetVulnSummary(null, null);
-        var status = result switch
+        int? status = result switch
         {
             ObjectResult o => o.StatusCode,
             UnauthorizedResult => 401,

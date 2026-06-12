@@ -47,7 +47,10 @@ public sealed class ClaimRepository
             LIMIT @limit
             """, new
         {
-            orgId, ecosystem, state, search,
+            orgId,
+            ecosystem,
+            state,
+            search,
             searchPattern = search is null ? null : $"%{search}%",
             limit
         });
@@ -99,12 +102,19 @@ public sealed class ClaimRepository
                     @HistoryId, @OrgId, @ClaimId, @Ecosystem, @Name,
                     @PriorState, @HistoryNewState, @Reason, @PurgedCount, @ActorId, @OccurredAt)
                 """, new
-                {
-                    tx.HistoryId, tx.OrgId, tx.ClaimId, tx.Ecosystem, tx.Name,
-                    tx.PriorState,
-                    HistoryNewState = tx.NewState ?? ClaimStateMachine.Unclaimed,
-                    tx.Reason, tx.PurgedCount, tx.ActorId, tx.OccurredAt
-                }, dbTx);
+            {
+                tx.HistoryId,
+                tx.OrgId,
+                tx.ClaimId,
+                tx.Ecosystem,
+                tx.Name,
+                tx.PriorState,
+                HistoryNewState = tx.NewState ?? ClaimStateMachine.Unclaimed,
+                tx.Reason,
+                tx.PurgedCount,
+                tx.ActorId,
+                tx.OccurredAt
+            }, dbTx);
 
             await dbTx.CommitAsync(ct);
         }
@@ -113,6 +123,31 @@ public sealed class ClaimRepository
             await dbTx.RollbackAsync(ct);
             throw;
         }
+    }
+
+    /// <summary>
+    /// <see langword="true"/> when the org holds at least one hosted (origin='uploaded')
+    /// version under <c>(org, ecosystem, name)</c>. Drives the implicit <c>local_only</c>
+    /// resolution in <see cref="ClaimResolver"/> — a hosted name with no explicit claim must
+    /// not be shadowable by upstream. EXISTS probe via the packages unique index so the
+    /// per-request cost on the claim-row-miss path stays a point lookup.
+    /// </summary>
+    public async Task<bool> HasUploadedVersionsAsync(
+        string orgId, string ecosystem, string name, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // SQLite surfaces EXISTS as 0/1, Postgres as boolean — Dapper's scalar conversion
+        // handles both as bool.
+        return await conn.ExecuteScalarAsync<bool>("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM packages p
+                JOIN package_versions pv ON pv.package_id = p.id
+                WHERE p.org_id = @orgId
+                  AND p.ecosystem = @ecosystem
+                  AND p.purl_name = @name
+                  AND pv.origin = 'uploaded')
+            """, new { orgId, ecosystem, name });
     }
 
     public async Task<int> CountLocalVersionsAsync(

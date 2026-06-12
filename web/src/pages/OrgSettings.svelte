@@ -27,6 +27,10 @@
   let blocklistEntries = [], blocklistLoaded = false
   let showAddBlocklist = false, newBlPattern = '', addingBl = false
 
+  // Reserved-namespace state (dependency-confusion guard)
+  let reservedEntries = [], reservedLoaded = false
+  let showAddReserved = false, newRsvdEcosystem = 'npm', newRsvdPattern = '', addingRsvd = false
+
   // License policy state. Single fetch returns mode + both lists.
   let licensePolicyLoaded = false
   let licenseMode = 'off'
@@ -82,6 +86,7 @@
     if (key === 'proxy') {
       if (!allowlistLoaded) loadAllowlist()
       if (!blocklistLoaded) loadBlocklist()
+      if (!reservedLoaded) loadReserved()
     }
     if (key === 'licenses' && !licensePolicyLoaded) await loadLicensePolicy()
   }
@@ -203,12 +208,18 @@
     const minReleaseAgeHours = num === null || isNaN(num) || num <= 0
       ? null
       : (proxySettings.min_release_age_unit === 'days' ? num * 24 : num)
+    // Empty EPSS field = policy off (null on the wire); anything else is a 0..1 probability.
+    const epssRaw = String(proxySettings.max_epss_tolerance ?? '').trim()
+    const maxEpssTolerance = epssRaw === '' || isNaN(Number(epssRaw)) ? null : Number(epssRaw)
     await submitForm(() => Promise.all([
       api.updateProxySettings({
         proxyPassthroughEnabled: proxySettings.proxy_passthrough_enabled,
         maxOsvScoreTolerance:    Number(proxySettings.max_osv_score_tolerance),
         minReleaseAgeHours,
         blockDeprecated:         proxySettings.block_deprecated,
+        blockMalicious:          proxySettings.block_malicious,
+        blockKev:                proxySettings.block_kev,
+        maxEpssTolerance,
       }),
       api.updateOrgSettings(settings),
     ]), {
@@ -275,6 +286,30 @@
     blocklistEntries = blocklistEntries.filter(e => e.id !== id)
   }
 
+  // Reserved-namespace handlers
+  async function loadReserved() {
+    try {
+      reservedEntries = await api.getReservedNamespaces()
+      reservedLoaded = true
+    } catch (e) { error = extractErrorMessage(e) }
+  }
+
+  async function addReserved() {
+    addingRsvd = true; error = ''
+    try {
+      const e = await api.addReservedNamespace(newRsvdEcosystem, newRsvdPattern)
+      reservedEntries = [...reservedEntries, e]
+      showAddReserved = false; newRsvdPattern = ''
+    } catch (e) { error = extractErrorMessage(e) }
+    finally { addingRsvd = false }
+  }
+
+  async function removeReserved(id) {
+    if (!confirm($t('reservedNamespaces.removeConfirm'))) return
+    await api.deleteReservedNamespace(id)
+    reservedEntries = reservedEntries.filter(e => e.id !== id)
+  }
+
   // Service-tokens tab is admin-only — service tokens are an org-level resource that
   // only admins/owners can mint (controller enforces tenant:configure). Filtering here
   // is cosmetic; the backend is the authority.
@@ -333,6 +368,9 @@
         onRemoveAllowlist={removeAllowlist}
         onAddBlocklist={() => showAddBlocklist = true}
         onRemoveBlocklist={removeBlocklist}
+        {reservedEntries} {reservedLoaded}
+        onAddReserved={() => showAddReserved = true}
+        onRemoveReserved={removeReserved}
         {saving}
         onSave={saveProxySettings} />
 
@@ -547,6 +585,33 @@
       <div class="modal-actions">
         <button on:click={() => showAddBlocklist = false}>{$t('common.actions.cancel')}</button>
         <button class="primary" on:click={addBlocklist} disabled={addingBl}>{addingBl ? $t('common.actions.adding') : $t('common.actions.add')}</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showAddReserved}
+  <div class="modal-backdrop">
+    <div class="modal">
+      <h3>{$t('reservedNamespaces.modal.title')}</h3>
+      {#if error}<div class="error-msg">{error}</div>{/if}
+      <div class="form-row">
+        <label for="rsvd-ecosystem">{$t('reservedNamespaces.modal.ecosystem')}</label>
+        <select id="rsvd-ecosystem" bind:value={newRsvdEcosystem}>
+          <option value="npm">npm</option>
+          <option value="pypi">PyPI</option>
+          <option value="nuget">NuGet</option>
+          <option value="maven">Maven</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label for="rsvd-pattern">{$t('reservedNamespaces.modal.pattern')}</label>
+        <input id="rsvd-pattern" bind:value={newRsvdPattern} placeholder={$t('reservedNamespaces.modal.patternPlaceholder')} />
+        <div class="form-hint">{$t('reservedNamespaces.modal.patternHint')}</div>
+      </div>
+      <div class="modal-actions">
+        <button on:click={() => showAddReserved = false}>{$t('common.actions.cancel')}</button>
+        <button class="primary" on:click={addReserved} disabled={addingRsvd}>{addingRsvd ? $t('common.actions.adding') : $t('common.actions.add')}</button>
       </div>
     </div>
   </div>

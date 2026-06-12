@@ -1,5 +1,4 @@
 using Dependably.Infrastructure.Observability;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Observability;
 

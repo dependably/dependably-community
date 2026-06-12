@@ -11,7 +11,6 @@ using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Protocol;
 
@@ -95,16 +94,16 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
 
     private static byte[] RandomBytes(int n = 128)
     {
-        var b = new byte[n];
+        byte[] b = new byte[n];
         Random.Shared.NextBytes(b);
         return b;
     }
 
     private async Task<string> SeedManifestAsync(byte[] manifestBytes, string? tag = null)
     {
-        var sha256 = Sha256Hex(manifestBytes);
-        var digest = "sha256:" + sha256;
-        var blobKey = BlobKeys.OciBlob("sha256", sha256);
+        string sha256 = Sha256Hex(manifestBytes);
+        string digest = "sha256:" + sha256;
+        string blobKey = BlobKeys.OciBlob("sha256", sha256);
 
         await _cacheBlobs.PutAsync(blobKey, new MemoryStream(manifestBytes), default);
 
@@ -146,8 +145,8 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         };
         var resolver = Build(options: opts);
 
-        Assert.Equal("ghcr.io",               resolver.MatchUpstream("ghcr/myapp")?.Host);
-        Assert.Equal("registry-1.docker.io",  resolver.MatchUpstream("library/ubuntu")?.Host);
+        Assert.Equal("ghcr.io", resolver.MatchUpstream("ghcr/myapp")?.Host);
+        Assert.Equal("registry-1.docker.io", resolver.MatchUpstream("library/ubuntu")?.Host);
         Assert.Null(resolver.MatchUpstream("private/custom"));
     }
 
@@ -179,8 +178,8 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     [Fact]
     public async Task FetchManifestAsync_DigestRef_CacheHit_ReturnsFromCache()
     {
-        var manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
-        var digest = await SeedManifestAsync(manifestBytes);
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
+        string digest = await SeedManifestAsync(manifestBytes);
 
         var resolver = Build(); // NeverCallFactory — no HTTP should be made
 
@@ -194,7 +193,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     [Fact]
     public async Task FetchManifestAsync_TagRef_WithinTtl_ReturnsFromCache()
     {
-        var manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
         await SeedManifestAsync(manifestBytes, tag: "latest");
 
         var resolver = Build(); // NeverCallFactory
@@ -210,13 +209,13 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     [Fact]
     public async Task FetchManifestAsync_TagRef_Stale_FetchesFromUpstream()
     {
-        var orgId = await OrgSeeder.InsertAsync(_db, "stale-tag-org");
+        string orgId = await OrgSeeder.InsertAsync(_db, "stale-tag-org");
 
         // Seed a tag that was revalidated long ago (outside TTL).
-        var oldManifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"old\":true}");
-        var oldSha256 = Sha256Hex(oldManifestBytes);
-        var oldDigest = "sha256:" + oldSha256;
-        var oldBlobKey = BlobKeys.OciBlob("sha256", oldSha256);
+        byte[] oldManifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"old\":true}");
+        string oldSha256 = Sha256Hex(oldManifestBytes);
+        string oldDigest = "sha256:" + oldSha256;
+        string oldBlobKey = BlobKeys.OciBlob("sha256", oldSha256);
         await _cacheBlobs.PutAsync(oldBlobKey, new MemoryStream(oldManifestBytes), default);
 
         await using var conn = await _db.OpenAsync();
@@ -235,9 +234,9 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             new { o = orgId, d = oldDigest });
 
         // Upstream will return a new manifest.
-        var newManifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"new\":true}");
-        var newSha256 = Sha256Hex(newManifestBytes);
-        var newDigest = "sha256:" + newSha256;
+        byte[] newManifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"new\":true}");
+        string newSha256 = Sha256Hex(newManifestBytes);
+        string newDigest = "sha256:" + newSha256;
 
         var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -266,11 +265,11 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     [Fact]
     public async Task FetchManifestAsync_UpstreamDigestHeaderMismatch_UsesComputedDigest()
     {
-        var orgId = await OrgSeeder.InsertAsync(_db, "digest-mismatch-org");
+        string orgId = await OrgSeeder.InsertAsync(_db, "digest-mismatch-org");
 
-        var manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"x\":1}");
-        var computedDigest = "sha256:" + Sha256Hex(manifestBytes);
-        var bogusDigest = "sha256:" + new string('b', 64); // upstream lies / MITM
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"x\":1}");
+        string computedDigest = "sha256:" + Sha256Hex(manifestBytes);
+        string bogusDigest = "sha256:" + new string('b', 64); // upstream lies / MITM
 
         var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -298,7 +297,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         Assert.NotEqual(bogusDigest, result.Digest);
 
         await using var conn = await _db.OpenAsync();
-        var storedTagDigest = await conn.ExecuteScalarAsync<string>(
+        string? storedTagDigest = await conn.ExecuteScalarAsync<string>(
             "SELECT digest FROM oci_tags WHERE org_id = @o AND repository = 'library/ubuntu' AND tag = 'latest'",
             new { o = orgId });
         Assert.Equal(computedDigest, storedTagDigest);
@@ -324,7 +323,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         // unauthorized repository, even after the token retry. The resolver must return
         // null — so OciController emits a clean OCI 404 MANIFEST_UNKNOWN — rather than
         // letting an HttpRequestException escape to a 500 with an empty body.
-        var orgId = await OrgSeeder.InsertAsync(_db, "oci-401-org");
+        string orgId = await OrgSeeder.InsertAsync(_db, "oci-401-org");
 
         var http = new StatusFactory(HttpStatusCode.Unauthorized);
         var opts = Options.Create(DefaultOptions());
@@ -348,10 +347,10 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         // A tagged docker pull must land in packages / package_versions — the tables the overview
         // counts and the Packages page read from — not only in oci_blobs/oci_tags. Without this,
         // a successfully-pulled image shows as zero everywhere.
-        var manifestBytes = Encoding.UTF8.GetBytes(
+        byte[] manifestBytes = Encoding.UTF8.GetBytes(
             """{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json"}""");
-        var sha256 = Sha256Hex(manifestBytes);
-        var digest = "sha256:" + sha256;
+        string sha256 = Sha256Hex(manifestBytes);
+        string digest = "sha256:" + sha256;
 
         var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -396,10 +395,10 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     [Fact]
     public async Task FetchBlobAsync_CacheHit_ReturnsFromBlobStore()
     {
-        var blobBytes = RandomBytes(256);
-        var sha256 = Sha256Hex(blobBytes);
-        var digest = "sha256:" + sha256;
-        var blobKey = BlobKeys.OciBlob("sha256", sha256);
+        byte[] blobBytes = RandomBytes(256);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+        string blobKey = BlobKeys.OciBlob("sha256", sha256);
         await _cacheBlobs.PutAsync(blobKey, new MemoryStream(blobBytes), default);
 
         var resolver = Build(); // NeverCallFactory
@@ -417,9 +416,9 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     [Fact]
     public async Task FetchBlobAsync_CacheMiss_FetchesFromUpstream_VerifiesDigest()
     {
-        var blobBytes = RandomBytes(512);
-        var sha256 = Sha256Hex(blobBytes);
-        var digest = "sha256:" + sha256;
+        byte[] blobBytes = RandomBytes(512);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
 
         var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -447,8 +446,8 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     public async Task FetchBlobAsync_DigestMismatch_ReturnsNull()
     {
         // Upstream returns bytes that don't match the requested digest.
-        var blobBytes = RandomBytes(64);
-        var wrongDigest = "sha256:" + new string('0', 64); // definitely wrong
+        byte[] blobBytes = RandomBytes(64);
+        string wrongDigest = "sha256:" + new string('0', 64); // definitely wrong
 
         var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -474,7 +473,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     public async Task FetchBlobAsync_NoMatchingUpstream_ReturnsNull()
     {
         var resolver = Build(options: OptionsWithNoUpstreams());
-        var digest = "sha256:" + new string('a', 64);
+        string digest = "sha256:" + new string('a', 64);
 
         var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default);
 
@@ -486,8 +485,8 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     [Fact]
     public async Task FetchTagsAsync_UpstreamReturnsTags_ReturnsList()
     {
-        var tags = new[] { "latest", "22.04", "22.10" };
-        var json = JsonSerializer.Serialize(new { name = "library/ubuntu", tags });
+        string[] tags = new[] { "latest", "22.04", "22.10" };
+        string json = JsonSerializer.Serialize(new { name = "library/ubuntu", tags });
         var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json"),
@@ -546,7 +545,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     public async Task FetchBlobAsync_AirGapped_Throws()
     {
         var resolver = Build(airGapped: true);
-        var digest = "sha256:" + new string('a', 64);
+        string digest = "sha256:" + new string('a', 64);
         await Assert.ThrowsAsync<AirGappedException>(() =>
             resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default));
     }

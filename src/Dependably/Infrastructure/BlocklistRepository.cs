@@ -20,7 +20,9 @@ public sealed class BlocklistRepository
     public async Task<IReadOnlyList<BlocklistEntry>> ListAsync(string orgId, CancellationToken ct = default)
     {
         if (_cache.TryGetValue(CacheKey(orgId), out IReadOnlyList<BlocklistEntry>? cached) && cached is not null)
+        {
             return cached;
+        }
 
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<BlocklistEntry>(
@@ -31,14 +33,18 @@ public sealed class BlocklistRepository
             """,
             new { orgId });
         var list = (IReadOnlyList<BlocklistEntry>)rows.ToList();
-        _cache.Set(CacheKey(orgId), list, CacheTtl);
+        _cache.Set(CacheKey(orgId), list, new MemoryCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = CacheTtl,
+            Size = 1,
+        });
         return list;
     }
 
     public async Task<BlocklistEntry> AddAsync(
         string orgId, string pattern, CancellationToken ct = default)
     {
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
@@ -61,12 +67,23 @@ public sealed class BlocklistRepository
         });
     }
 
-    public async Task DeleteAsync(string entryId, CancellationToken ct = default)
+    /// <summary>
+    /// Deletes a blocklist entry, scoped to <paramref name="orgId"/>. Returns the number of rows
+    /// removed (0 when the id belongs to another tenant or does not exist) so the caller can 404
+    /// without revealing cross-tenant existence. The id is a global PK, so the org_id predicate is
+    /// what enforces tenant isolation here.
+    /// </summary>
+    public async Task<int> DeleteAsync(string orgId, string entryId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        // Invalidate all org caches that might include this entry — fetch org_id first
-        var orgId = await conn.ExecuteScalarAsync<string?>("SELECT org_id FROM blocklist WHERE id = @id", new { id = entryId });
-        await conn.ExecuteAsync("DELETE FROM blocklist WHERE id = @id", new { id = entryId });
-        if (orgId is not null) _cache.Remove(CacheKey(orgId));
+        int rows = await conn.ExecuteAsync(
+            "DELETE FROM blocklist WHERE id = @id AND org_id = @orgId", new { id = entryId, orgId });
+        // Only the caller's own org cache can be affected, so invalidate exactly that one.
+        if (rows > 0)
+        {
+            _cache.Remove(CacheKey(orgId));
+        }
+
+        return rows;
     }
 }

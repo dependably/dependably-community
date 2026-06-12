@@ -11,6 +11,16 @@ public interface IAzureBlobContainer
     Task CreateIfNotExistsAsync(CancellationToken ct);
     Task UploadAsync(string key, Stream data, CancellationToken ct);
     Task<Stream?> DownloadOrNullAsync(string key, CancellationToken ct);
+
+    /// <summary>
+    /// Downloads the byte range [<paramref name="from"/>, <paramref name="to"/>] (inclusive)
+    /// for the blob at <paramref name="key"/>. Returns <c>(null, 0)</c> when the blob does
+    /// not exist. The <c>TotalLength</c> component carries the full unranged blob size so
+    /// callers can build a correct <c>Content-Range</c> header.
+    /// </summary>
+    Task<(Stream? Content, long TotalLength)> DownloadRangeOrNullAsync(
+        string key, long from, long to, CancellationToken ct);
+
     Task<bool> ExistsAsync(string key, CancellationToken ct);
     Task DeleteIfExistsAsync(string key, CancellationToken ct);
 

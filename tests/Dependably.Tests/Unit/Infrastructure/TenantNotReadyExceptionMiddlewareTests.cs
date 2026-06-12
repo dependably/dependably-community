@@ -3,7 +3,6 @@ using Dependably.Infrastructure;
 using Dependably.Storage;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -24,7 +23,7 @@ public sealed class TenantNotReadyExceptionMiddlewareTests
     {
         ctx.Response.Body.Position = 0;
         using var reader = new StreamReader(ctx.Response.Body);
-        var body = await reader.ReadToEndAsync();
+        string body = await reader.ReadToEndAsync();
         return JsonDocument.Parse(body).RootElement.Clone();
     }
 

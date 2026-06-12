@@ -30,8 +30,16 @@ public static class ActivitySeeder
                 INSERT INTO activity (id, org_id, ecosystem, purl, event_type, actor_id, created_at)
                 VALUES (@id, @orgId, @ecosystem, @purl, @eventType, @actorId, @createdAt)
                 """,
-                new { id = Guid.NewGuid().ToString("N"), orgId, ecosystem, purl, eventType, actorId,
-                      createdAt = createdAt.Value.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                new
+                {
+                    id = Guid.NewGuid().ToString("N"),
+                    orgId,
+                    ecosystem,
+                    purl,
+                    eventType,
+                    actorId,
+                    createdAt = createdAt.Value.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                });
         }
     }
 }

@@ -5,7 +5,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -46,13 +45,13 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task Npm_ProxyFirstFetch_CapturesPublishedAtFromPackumentTime()
     {
-        var name = $"npmpub{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.0";
+        string name = $"npmpub{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
         var (bytes, _, _) = NpmFixtures.BuildTarball(name, version);
-        var filename = $"{name}-{version}.tgz";
+        string filename = $"{name}-{version}.tgz";
         const string upstreamIso = "2024-03-15T12:34:56.000Z";
 
-        var packument = $$"""
+        string packument = $$"""
             {
               "name": "{{name}}",
               "versions": { "{{version}}": { "name": "{{name}}", "version": "{{version}}" } },
@@ -66,13 +65,13 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryPublishedAtAsync("npm", version);
+        string? stored = await QueryPublishedAtAsync("npm", version);
         Assert.NotNull(stored);
         Assert.Equal(DateTimeOffset.Parse(upstreamIso).ToUniversalTime(),
             DateTimeOffset.Parse(stored!).ToUniversalTime());
@@ -81,10 +80,10 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task Npm_ProxyFirstFetch_PackumentReturns500_StillSucceeds_NullPublishedAt()
     {
-        var name = $"npmfail{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "2.0.0";
+        string name = $"npmfail{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "2.0.0";
         var (bytes, _, _) = NpmFixtures.BuildTarball(name, version);
-        var filename = $"{name}-{version}.tgz";
+        string filename = $"{name}-{version}.tgz";
 
         _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.InternalServerError));
@@ -92,13 +91,13 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryPublishedAtAsync("npm", version);
+        string? stored = await QueryPublishedAtAsync("npm", version);
         Assert.Null(stored);
     }
 
@@ -107,14 +106,14 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task NuGet_ProxyFirstFetch_CapturesPublishedAtFromRegistrationLeaf()
     {
-        var id = $"NuGetPub{Guid.NewGuid():N}"[..18];
-        var version = "1.2.3";
-        var lowerId = id.ToLowerInvariant();
+        string id = $"NuGetPub{Guid.NewGuid():N}"[..18];
+        string version = "1.2.3";
+        string lowerId = id.ToLowerInvariant();
         var (bytes, _) = NuGetFixtures.BuildNupkg(id, version);
-        var filename = $"{lowerId}.{version}.nupkg";
+        string filename = $"{lowerId}.{version}.nupkg";
         const string upstreamIso = "2023-09-30T14:23:31+00:00";
 
-        var leaf = $$"""
+        string leaf = $$"""
             { "published": "{{upstreamIso}}", "listed": true }
             """;
         _factory.MockUpstream.Given(Request.Create()
@@ -126,13 +125,13 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryPublishedAtAsync("nuget", version);
+        string? stored = await QueryPublishedAtAsync("nuget", version);
         Assert.NotNull(stored);
         Assert.Equal(DateTimeOffset.Parse(upstreamIso).ToUniversalTime(),
             DateTimeOffset.Parse(stored!).ToUniversalTime());
@@ -141,14 +140,14 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task NuGet_ProxyFirstFetch_RegistrationUnlistedSentinel_PublishedAtNull()
     {
-        var id = $"NuGetUnl{Guid.NewGuid():N}"[..18];
-        var version = "1.2.4";
-        var lowerId = id.ToLowerInvariant();
+        string id = $"NuGetUnl{Guid.NewGuid():N}"[..18];
+        string version = "1.2.4";
+        string lowerId = id.ToLowerInvariant();
         var (bytes, _) = NuGetFixtures.BuildNupkg(id, version);
-        var filename = $"{lowerId}.{version}.nupkg";
+        string filename = $"{lowerId}.{version}.nupkg";
 
         // NuGet's unlisted sentinel — TryFetchNuGetPublishedAt must coerce to null.
-        var leaf = """{ "published": "1900-01-01T00:00:00+00:00", "listed": false }""";
+        string leaf = """{ "published": "1900-01-01T00:00:00+00:00", "listed": false }""";
         _factory.MockUpstream.Given(Request.Create()
                 .WithPath($"/registration5-semver1/{lowerId}/{version}.json").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
@@ -158,13 +157,13 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryPublishedAtAsync("nuget", version);
+        string? stored = await QueryPublishedAtAsync("nuget", version);
         Assert.Null(stored);
     }
 
@@ -173,12 +172,12 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task PyPi_ProxyFirstFetch_CapturesUploadTimeFromJsonApi()
     {
-        var name = $"pypipub{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.0";
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-{version}-py3-none-any.whl";
+        string name = $"pypipub{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-{version}-py3-none-any.whl";
         var (wheelBytes, _) = PyPiFixtures.BuildWheel(name, version);
-        var mockBase = _factory.MockUpstream.Urls[0];
+        string mockBase = _factory.MockUpstream.Urls[0];
         const string uploadIso = "2024-06-21T18:45:00.123456Z";
 
         _factory.MockUpstream
@@ -191,7 +190,7 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(wheelBytes));
 
-        var jsonApi = $$"""
+        string jsonApi = $$"""
             {
               "info": { "name": "{{name}}", "version": "{{version}}" },
               "urls": [
@@ -204,12 +203,12 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(jsonApi));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryPublishedAtAsync("pypi", version);
+        string? stored = await QueryPublishedAtAsync("pypi", version);
         Assert.NotNull(stored);
         Assert.Equal(DateTimeOffset.Parse(uploadIso).ToUniversalTime(),
             DateTimeOffset.Parse(stored!).ToUniversalTime());
@@ -218,12 +217,12 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task PyPi_ProxyFirstFetch_JsonApiReturns500_StillSucceeds_NullPublishedAt()
     {
-        var name = $"pypifail{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.1";
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-{version}-py3-none-any.whl";
+        string name = $"pypifail{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.1";
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-{version}-py3-none-any.whl";
         var (wheelBytes, _) = PyPiFixtures.BuildWheel(name, version);
-        var mockBase = _factory.MockUpstream.Urls[0];
+        string mockBase = _factory.MockUpstream.Urls[0];
 
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
@@ -238,12 +237,12 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
             .Given(Request.Create().WithPath($"/pypi/{name}/{version}/json").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.InternalServerError));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryPublishedAtAsync("pypi", version);
+        string? stored = await QueryPublishedAtAsync("pypi", version);
         Assert.Null(stored);
     }
 }

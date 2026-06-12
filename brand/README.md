@@ -67,103 +67,101 @@ brand/
 
 ---
 
-## React component (drop-in)
+## Svelte component (drop-in)
 
-For sharp rendering at any size, use the inline SVG component instead of
-an `<img>` tag:
+For sharp rendering at any size, use an inline SVG component instead of
+an `<img>` tag. The Dependably frontend is Svelte; in-app usages follow
+the `.brand` pattern in `DESIGN.md` §5.1 and use the theme variables from
+`web/src/app.css` (`currentColor` + `var(--accent)`) so the mark follows
+light/dark mode automatically:
 
-```tsx
-// components/Logo.tsx
-type LogoProps = {
-  size?: number;
-  /** When true, renders white-on-dark with a brighter accent. */
-  inverse?: boolean;
-  className?: string;
-};
+```svelte
+<!-- DependablyMark.svelte -->
+<script>
+  export let size = 32
+  /** When true, renders paper-on-ink with the brighter accent (for
+      fixed-dark surfaces outside the theming system). */
+  export let inverse = false
+</script>
 
-export function DependablyMark({ size = 32, inverse = false, className }: LogoProps) {
-  const fg = inverse ? '#faf8f3' : '#0e1a17';
-  const accent = inverse ? '#3aa88f' : '#1f6f5c';
-  const check = inverse ? '#0e1a17' : '#faf8f3';
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 64 64"
-      fill="none"
-      role="img"
-      aria-label="Dependably"
-      className={className}
-    >
-      <path
-        d="M32 32 L14 14 M32 32 L50 14 M32 32 L32 54"
-        stroke={fg}
-        strokeWidth={4}
-        strokeLinecap="round"
-      />
-      <circle cx="14" cy="14" r="5" fill={fg} />
-      <circle cx="50" cy="14" r="5" fill={fg} />
-      <circle cx="32" cy="54" r="5" fill={fg} />
-      <circle cx="32" cy="32" r="9" fill={accent} />
-      <path
-        d="M28 32 L31 35 L37 28"
-        stroke={check}
-        strokeWidth={2.5}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
+<svg
+  width={size}
+  height={size}
+  viewBox="0 0 64 64"
+  fill="none"
+  role="img"
+  aria-label="Dependably"
+  style={inverse ? 'color:#faf8f3; --accent:#3aa88f' : undefined}
+>
+  <path
+    d="M32 32 L14 14 M32 32 L50 14 M32 32 L32 54"
+    stroke="currentColor"
+    stroke-width="4"
+    stroke-linecap="round"
+  />
+  <circle cx="14" cy="14" r="5" fill="currentColor" />
+  <circle cx="50" cy="14" r="5" fill="currentColor" />
+  <circle cx="32" cy="54" r="5" fill="currentColor" />
+  <circle cx="32" cy="32" r="9" fill="var(--accent, #1f6f5c)" />
+  <path
+    d="M28 32 L31 35 L37 28"
+    stroke="var(--bg, #faf8f3)"
+    stroke-width="2.5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>
+```
 
-export function DependablyLockup({ size = 28, inverse = false }: LogoProps) {
-  const fg = inverse ? '#faf8f3' : '#0e1a17';
-  return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
-      <DependablyMark size={size} inverse={inverse} />
-      <span
-        style={{
-          fontFamily: 'Inter, -apple-system, system-ui, sans-serif',
-          fontWeight: 700,
-          fontSize: Math.round(size * 0.78),
-          letterSpacing: '-0.02em',
-          color: fg,
-        }}
-      >
-        Dependably
-      </span>
-    </span>
-  );
-}
+```svelte
+<!-- DependablyLockup.svelte -->
+<script>
+  import DependablyMark from './DependablyMark.svelte'
+  export let size = 28
+  export let inverse = false
+</script>
+
+<span class="lockup" style={inverse ? 'color:#faf8f3' : undefined}>
+  <DependablyMark {size} {inverse} />
+  <span class="wordmark" style="font-size: {Math.round(size * 0.78)}px">Dependably</span>
+</span>
+
+<style>
+  .lockup   { display: inline-flex; align-items: center; gap: 10px; }
+  .wordmark {
+    font-family: Inter, -apple-system, system-ui, sans-serif;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+</style>
 ```
 
 ### Usage
 
-```tsx
-// Top-right corner of site chrome
+```svelte
+<!-- Navbar brand -->
 <DependablyLockup size={26} />
 
-// Login page hero
+<!-- Login page hero -->
 <DependablyMark size={120} inverse />
 
-// Favicon fallback / small UI chip
+<!-- Favicon fallback / small UI chip -->
 <DependablyMark size={16} />
 ```
 
 ---
 
-## Tailwind tokens (optional)
+## CSS tokens (for non-Svelte consumers)
 
-```js
-// tailwind.config.js — extend.colors
-colors: {
-  ink: '#0e1a17',
-  paper: '#faf8f3',
-  accent: {
-    DEFAULT: '#1f6f5c',
-    bright: '#3aa88f',
-    soft: '#e7f1ee',
-  },
+The app's full token set lives in `web/src/app.css`. For embedding the
+brand elsewhere, the four brand tokens are:
+
+```css
+:root {
+  --ink:      #0e1a17;
+  --paper:    #faf8f3;
+  --accent:   #1f6f5c;  /* oklch(0.55 0.10 165) */
+  --accent-2: #3aa88f;  /* accent on dark backgrounds */
 }
 ```
 
@@ -184,6 +182,7 @@ colors: {
 > Re-brand the app to "Dependably". Use `/brand/` as the source of truth
 > for the icon and color tokens. Wire up the favicon and apple-touch-icon
 > in the document head per the snippet in `brand/README.md`. Replace
-> existing logo usages with `<DependablyMark />` (small) and
-> `<DependablyLockup />` (top-bar / footer / login). Do not introduce new
-> colors — only `--ink`, `--paper`, `--accent`, `--accent-2`.
+> existing logo usages with the `DependablyMark` (small) and
+> `DependablyLockup` (top-bar / footer / login) Svelte components from
+> `brand/README.md`. Do not introduce new colors — only `--ink`,
+> `--paper`, `--accent`, `--accent-2`.

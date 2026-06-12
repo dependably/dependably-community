@@ -1,5 +1,4 @@
 using Dependably.Storage;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -9,13 +8,13 @@ public class BlobKeysTests
     // ---- Proxy ----
     // Hex sentinel — 64 lowercase hex chars; the all-`a` form keeps tests legible while satisfying
     // BlobKeys.Proxy's input contract (hardened to reject non-hex input).
-    private const string HexSentinel  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    private const string HexSentinel = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private const string HexSentinel2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     [Fact]
     public void Proxy_Golden_ReturnsProxyPrefixedKey()
     {
-        var key = BlobKeys.Proxy(HexSentinel);
+        string key = BlobKeys.Proxy(HexSentinel);
         Assert.Equal($"proxy/{HexSentinel}", key);
     }
 
@@ -44,7 +43,7 @@ public class BlobKeysTests
     [Fact]
     public void Hosted_Golden_BuildsFiveSegmentKey()
     {
-        var key = BlobKeys.Hosted("acme", "npm", "lodash", "4.17.21", "lodash-4.17.21.tgz");
+        string key = BlobKeys.Hosted("acme", "npm", "lodash", "4.17.21", "lodash-4.17.21.tgz");
         Assert.Equal("hosted/acme/npm/lodash/4.17.21/lodash-4.17.21.tgz", key);
     }
 
@@ -55,7 +54,7 @@ public class BlobKeysTests
     public void Hosted_PreservesAllSegmentsVerbatim(
         string orgId, string ecosystem, string purlName, string version, string filename)
     {
-        var key = BlobKeys.Hosted(orgId, ecosystem, purlName, version, filename);
+        string key = BlobKeys.Hosted(orgId, ecosystem, purlName, version, filename);
         Assert.Equal($"hosted/{orgId}/{ecosystem}/{purlName}/{version}/{filename}", key);
     }
 
@@ -63,15 +62,15 @@ public class BlobKeysTests
     public void Hosted_UnicodeAndSpecialCharsArePassthrough()
     {
         // Pure string composition — no sanitization happens here.
-        var key = BlobKeys.Hosted("orñ", "npm", "pâckage", "1.0.0+ünicode", "f%20.tgz");
+        string key = BlobKeys.Hosted("orñ", "npm", "pâckage", "1.0.0+ünicode", "f%20.tgz");
         Assert.Equal("hosted/orñ/npm/pâckage/1.0.0+ünicode/f%20.tgz", key);
     }
 
     [Fact]
     public void Hosted_VeryLongName_BuildsExpectedKey()
     {
-        var longName = new string('a', 512);
-        var key = BlobKeys.Hosted("org", "npm", longName, "1.0.0", "file.tgz");
+        string longName = new('a', 512);
+        string key = BlobKeys.Hosted("org", "npm", longName, "1.0.0", "file.tgz");
         Assert.Equal($"hosted/org/npm/{longName}/1.0.0/file.tgz", key);
     }
 
@@ -79,7 +78,7 @@ public class BlobKeysTests
     public void Hosted_EmptySegments_StillBuildsKey()
     {
         // No validation — empty pieces produce consecutive slashes.
-        var key = BlobKeys.Hosted("", "", "", "", "");
+        string key = BlobKeys.Hosted("", "", "", "", "");
         Assert.Equal("hosted/////", key);
     }
 
@@ -90,7 +89,7 @@ public class BlobKeysTests
     public void StoreKey_ProxyDbKeyWithFilename_StripsSuffix()
     {
         // 3 parts AND first segment is "proxy" → both conditions true → strip filename.
-        var store = BlobKeys.StoreKey("proxy/abc123/lodash-4.17.21.tgz");
+        string store = BlobKeys.StoreKey("proxy/abc123/lodash-4.17.21.tgz");
         Assert.Equal("proxy/abc123", store);
     }
 
@@ -98,7 +97,7 @@ public class BlobKeysTests
     public void StoreKey_ProxyKeyWithoutFilename_ReturnedUnchanged()
     {
         // 2 parts → Length == 3 is false → return unchanged.
-        var store = BlobKeys.StoreKey("proxy/abc123");
+        string store = BlobKeys.StoreKey("proxy/abc123");
         Assert.Equal("proxy/abc123", store);
     }
 
@@ -107,7 +106,7 @@ public class BlobKeysTests
     {
         // 3 parts but first segment != "proxy" → second condition false → return unchanged.
         // This is the critical branch that exercises the right-hand side of the && short-circuit.
-        var store = BlobKeys.StoreKey("hosted/org/file");
+        string store = BlobKeys.StoreKey("hosted/org/file");
         Assert.Equal("hosted/org/file", store);
     }
 
@@ -115,7 +114,7 @@ public class BlobKeysTests
     public void StoreKey_HostedKey_ReturnedUnchanged()
     {
         // 6 parts — Length != 3 → return unchanged.
-        var input = "hosted/acme/npm/lodash/4.17.21/lodash-4.17.21.tgz";
+        string input = "hosted/acme/npm/lodash/4.17.21/lodash-4.17.21.tgz";
         Assert.Equal(input, BlobKeys.StoreKey(input));
     }
 
@@ -137,7 +136,7 @@ public class BlobKeysTests
     public void StoreKey_ProxyCaseSensitive_NonLowercaseNotStripped()
     {
         // 3 parts but first segment is "Proxy" (capital) — string compare is case-sensitive.
-        var store = BlobKeys.StoreKey("Proxy/abc123/file.tgz");
+        string store = BlobKeys.StoreKey("Proxy/abc123/file.tgz");
         Assert.Equal("Proxy/abc123/file.tgz", store);
     }
 
@@ -145,7 +144,7 @@ public class BlobKeysTests
     public void StoreKey_FourPartProxyKey_ReturnedUnchanged()
     {
         // Length == 4 → first condition false → return unchanged even though it starts with proxy.
-        var input = "proxy/abc123/sub/file.tgz";
+        string input = "proxy/abc123/sub/file.tgz";
         Assert.Equal(input, BlobKeys.StoreKey(input));
     }
 
@@ -153,7 +152,7 @@ public class BlobKeysTests
     public void Proxy_RoundTripsThroughStoreKey()
     {
         // The output of Proxy() has only 2 segments, so StoreKey leaves it untouched.
-        var k = BlobKeys.Proxy(HexSentinel2);
+        string k = BlobKeys.Proxy(HexSentinel2);
         Assert.Equal(k, BlobKeys.StoreKey(k));
     }
 }

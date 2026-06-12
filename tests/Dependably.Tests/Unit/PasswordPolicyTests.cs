@@ -1,5 +1,4 @@
 using Dependably.Security;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -35,7 +34,7 @@ public class PasswordPolicyTests
     public void Evaluate_AboveMaxUtf8Bytes_ReturnsTooLong()
     {
         // Each "猫" is 3 UTF-8 bytes; 25 * 3 = 75 bytes > 72.
-        var pwd = new string('猫', 25);
+        string pwd = new('猫', 25);
         Assert.True(pwd.Length >= PasswordPolicy.MinLength);
 
         var r = _policy.Evaluate(pwd, default);
@@ -179,7 +178,7 @@ public class PasswordPolicyTests
     public void ToReason_LowEntropy_WithoutDetail_UsesScoreTemplate()
     {
         var r = new PasswordPolicyResult(PasswordPolicyVerdict.LowEntropy, 1, null);
-        var msg = r.ToReason();
+        string msg = r.ToReason();
         Assert.Contains("too easy to guess", msg);
         Assert.Contains("score 1/", msg);
     }
@@ -188,7 +187,7 @@ public class PasswordPolicyTests
     public void ToReason_LowEntropy_WithDetail_UsesDetailTemplate()
     {
         var r = new PasswordPolicyResult(PasswordPolicyVerdict.LowEntropy, 1, "common password");
-        var msg = r.ToReason();
+        string msg = r.ToReason();
         Assert.Contains("too easy to guess: common password", msg);
     }
 

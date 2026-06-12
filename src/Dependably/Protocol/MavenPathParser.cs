@@ -27,16 +27,20 @@ public static partial class MavenPathParser
     public static MavenCoordinates? Parse(string path)
     {
         path = path.Trim('/');
-        if (path.Length == 0) return null;
-        var segments = path.Split('/');
-        if (segments.Length < 3) return null;
+        if (path.Length == 0)
+        {
+            return null;
+        }
 
-        var lastSegment = segments[^1];
+        string[] segments = path.Split('/');
+        if (segments.Length < 3)
+        {
+            return null;
+        }
 
-        if (IsMetadataFile(lastSegment))
-            return ParseMetadataPath(segments, lastSegment);
+        string lastSegment = segments[^1];
 
-        return ParseArtifactPath(segments);
+        return IsMetadataFile(lastSegment) ? ParseMetadataPath(segments, lastSegment) : ParseArtifactPath(segments);
     }
 
     private static MavenCoordinates? ParseMetadataPath(string[] segments, string lastSegment)
@@ -45,16 +49,17 @@ public static partial class MavenPathParser
         //   version-level:  g/a/v/maven-metadata.xml   (segments.length >= 4)
         //   artifact-level: g/a/maven-metadata.xml     (segments.length >= 3)
         // We detect version-level when the second-to-last segment looks like a Maven version.
-        var checksumAlg = ChecksumAlgorithmOf(lastSegment);
-        var isChecksum = checksumAlg is not null;
+        string? checksumAlg = ChecksumAlgorithmOf(lastSegment);
+        bool isChecksum = checksumAlg is not null;
 
         if (segments.Length >= 4 && LooksLikeVersion(segments[^2]))
         {
-            var version = segments[^2];
-            var artifactId = segments[^3];
-            var groupId = string.Join('.', segments[..^3]);
-            if (string.IsNullOrEmpty(groupId)) return null;
-            return new MavenCoordinates(
+            string version = segments[^2];
+            string artifactId = segments[^3];
+            string groupId = string.Join('.', segments[..^3]);
+            return string.IsNullOrEmpty(groupId)
+                ? null
+                : new MavenCoordinates(
                 GroupId: groupId, ArtifactId: artifactId, Version: version,
                 Classifier: null, Extension: null, Filename: lastSegment,
                 IsMetadata: true,
@@ -64,10 +69,11 @@ public static partial class MavenPathParser
                 SnapshotTimestamp: null, SnapshotBuildNumber: null);
         }
 
-        var artifactIdOnly = segments[^2];
-        var groupIdOnly = string.Join('.', segments[..^2]);
-        if (string.IsNullOrEmpty(groupIdOnly)) return null;
-        return new MavenCoordinates(
+        string artifactIdOnly = segments[^2];
+        string groupIdOnly = string.Join('.', segments[..^2]);
+        return string.IsNullOrEmpty(groupIdOnly)
+            ? null
+            : new MavenCoordinates(
             GroupId: groupIdOnly, ArtifactId: artifactIdOnly, Version: null,
             Classifier: null, Extension: null, Filename: lastSegment,
             IsMetadata: true,
@@ -79,20 +85,29 @@ public static partial class MavenPathParser
 
     private static MavenCoordinates? ParseArtifactPath(string[] segments)
     {
-        if (segments.Length < 4) return null;
+        if (segments.Length < 4)
+        {
+            return null;
+        }
 
-        var filename = segments[^1];
-        var versionDir = segments[^2];
-        var artifactIdSeg = segments[^3];
-        var groupIdStr = string.Join('.', segments[..^3]);
-        if (string.IsNullOrEmpty(groupIdStr)) return null;
+        string filename = segments[^1];
+        string versionDir = segments[^2];
+        string artifactIdSeg = segments[^3];
+        string groupIdStr = string.Join('.', segments[..^3]);
+        if (string.IsNullOrEmpty(groupIdStr))
+        {
+            return null;
+        }
 
         var (checksumAlg, primaryFilename) = StripChecksumSuffix(filename);
 
         var parsed = ParsePrimaryFilename(primaryFilename, artifactIdSeg, versionDir);
-        if (parsed is null) return null;
+        if (parsed is null)
+        {
+            return null;
+        }
 
-        var isSnapshot = versionDir.EndsWith("-SNAPSHOT", StringComparison.OrdinalIgnoreCase);
+        bool isSnapshot = versionDir.EndsWith("-SNAPSHOT", StringComparison.OrdinalIgnoreCase);
 
         return new MavenCoordinates(
             GroupId: groupIdStr,
@@ -111,7 +126,7 @@ public static partial class MavenPathParser
 
     private static (string? Alg, string Primary) StripChecksumSuffix(string filename)
     {
-        var ext = ChecksumExtensions.FirstOrDefault(
+        string? ext = ChecksumExtensions.FirstOrDefault(
             e => filename.EndsWith(e, StringComparison.OrdinalIgnoreCase));
         return ext is null
             ? (null, filename)
@@ -126,7 +141,7 @@ public static partial class MavenPathParser
     /// </summary>
     public static string PrimaryFilename(string filename)
     {
-        var ext = ChecksumExtensions.FirstOrDefault(
+        string? ext = ChecksumExtensions.FirstOrDefault(
             e => filename.EndsWith(e, StringComparison.OrdinalIgnoreCase));
         return ext is null ? filename : filename[..^ext.Length];
     }
@@ -136,15 +151,20 @@ public static partial class MavenPathParser
     {
         // Every primary artifact starts with "{artifactId}-".
         if (!filename.StartsWith(artifactId + "-", StringComparison.Ordinal))
+        {
             return null;
+        }
 
-        var afterArtifactId = filename[(artifactId.Length + 1)..];
+        string afterArtifactId = filename[(artifactId.Length + 1)..];
 
-        var lastDot = afterArtifactId.LastIndexOf('.');
-        if (lastDot < 0) return null;
+        int lastDot = afterArtifactId.LastIndexOf('.');
+        if (lastDot < 0)
+        {
+            return null;
+        }
 
-        var extension = afterArtifactId[(lastDot + 1)..];
-        var versionAndClassifier = afterArtifactId[..lastDot];
+        string extension = afterArtifactId[(lastDot + 1)..];
+        string versionAndClassifier = afterArtifactId[..lastDot];
 
         if (version.EndsWith("-SNAPSHOT", StringComparison.OrdinalIgnoreCase))
         {
@@ -154,9 +174,8 @@ public static partial class MavenPathParser
                 : (snap.Value.Classifier, extension, snap.Value.Timestamp, snap.Value.BuildNumber);
         }
 
-        var classifier = ParseReleaseClassifier(versionAndClassifier, version);
-        if (versionAndClassifier != version && classifier is null) return null;
-        return (classifier, extension, null, null);
+        string? classifier = ParseReleaseClassifier(versionAndClassifier, version);
+        return versionAndClassifier != version && classifier is null ? null : (classifier, extension, null, null);
     }
 
     private static (string? Classifier, string? Timestamp, int? BuildNumber)?
@@ -164,28 +183,35 @@ public static partial class MavenPathParser
     {
         // SNAPSHOT versions: filename may carry either the literal "-SNAPSHOT" or
         // a timestamp form "{baseVersion}-{yyyyMMdd.HHmmss}-{buildNum}".
-        var baseVersion = version[..^"-SNAPSHOT".Length];
+        string baseVersion = version[..^"-SNAPSHOT".Length];
         if (!versionAndClassifier.StartsWith(baseVersion + "-", StringComparison.Ordinal))
+        {
             return null;
+        }
 
-        var afterBaseVersion = versionAndClassifier[(baseVersion.Length + 1)..];
+        string afterBaseVersion = versionAndClassifier[(baseVersion.Length + 1)..];
 
         if (afterBaseVersion.StartsWith("SNAPSHOT", StringComparison.OrdinalIgnoreCase))
         {
-            var afterSnapshot = afterBaseVersion["SNAPSHOT".Length..];
-            if (afterSnapshot.Length == 0) return (null, null, null);
-            if (afterSnapshot[0] == '-') return (afterSnapshot[1..], null, null);
-            return null;
+            string afterSnapshot = afterBaseVersion["SNAPSHOT".Length..];
+            if (afterSnapshot.Length == 0)
+            {
+                return (null, null, null);
+            }
+
+            return afterSnapshot[0] == '-' ? (afterSnapshot[1..], null, null) : null;
         }
 
         var tsMatch = SnapshotTimestampRegex().Match(afterBaseVersion);
         if (tsMatch.Success)
+        {
             return (null, tsMatch.Groups["ts"].Value, int.Parse(tsMatch.Groups["bn"].Value));
+        }
 
         // Timestamp + classifier: "{ts}-{bn}-{classifier}"
-        var parts = afterBaseVersion.Split('-');
+        string[] parts = afterBaseVersion.Split('-');
         if (parts.Length >= 2 && parts[0].Length == 15 && parts[0][8] == '.'
-            && int.TryParse(parts[1], out var bn))
+            && int.TryParse(parts[1], out int bn))
         {
             string? classifier = parts.Length > 2 ? string.Join('-', parts[2..]) : null;
             return (classifier, parts[0], bn);
@@ -195,8 +221,9 @@ public static partial class MavenPathParser
 
     private static string? ParseReleaseClassifier(string versionAndClassifier, string version)
     {
-        if (versionAndClassifier == version) return null;
-        return versionAndClassifier.StartsWith(version + "-", StringComparison.Ordinal)
+        return versionAndClassifier == version
+            ? null
+            : versionAndClassifier.StartsWith(version + "-", StringComparison.Ordinal)
             ? versionAndClassifier[(version.Length + 1)..]
             : null;
     }
@@ -204,14 +231,13 @@ public static partial class MavenPathParser
     private static bool IsMetadataFile(string filename)
     {
         // Either bare maven-metadata.xml or a checksum sidecar on it.
-        if (filename.Equals("maven-metadata.xml", StringComparison.OrdinalIgnoreCase)) return true;
-        return ChecksumExtensions.Any(
+        return filename.Equals("maven-metadata.xml", StringComparison.OrdinalIgnoreCase) || ChecksumExtensions.Any(
             ext => filename.Equals("maven-metadata.xml" + ext, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string? ChecksumAlgorithmOf(string filename)
     {
-        var ext = ChecksumExtensions.FirstOrDefault(
+        string? ext = ChecksumExtensions.FirstOrDefault(
             e => filename.EndsWith(e, StringComparison.OrdinalIgnoreCase));
         return ext?[1..];
     }

@@ -1,7 +1,6 @@
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -17,8 +16,8 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
     [Fact]
     public async Task Add_AppendsInPriorityOrder_AndListFiltersByOrg()
     {
-        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"a-{Guid.NewGuid():N}");
-        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"a-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
         var repo = NewRepo();
 
         var first = await repo.AddAsync(orgA, "pypi", "https://pypi.org", null);
@@ -37,7 +36,7 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
     [Fact]
     public async Task ListUrls_IsScopedPerEcosystem()
     {
-        var org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         var repo = NewRepo();
         await repo.AddAsync(org, "pypi", "https://pypi.org", null);
         await repo.AddAsync(org, "npm", "https://registry.npmjs.org", null);
@@ -50,7 +49,7 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
     [Fact]
     public async Task Reorder_RewritesPositions_InRequestedOrder()
     {
-        var org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         var repo = NewRepo();
         var a = await repo.AddAsync(org, "npm", "https://a.example", null);
         var b = await repo.AddAsync(org, "npm", "https://b.example", null);
@@ -66,10 +65,10 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
     [Fact]
     public async Task Reorder_PartialList_KeepsOmittedEntriesAfterSuppliedOnes()
     {
-        var org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         var repo = NewRepo();
-        var a = await repo.AddAsync(org, "npm", "https://a.example", null);
-        var b = await repo.AddAsync(org, "npm", "https://b.example", null);
+        _ = await repo.AddAsync(org, "npm", "https://a.example", null);
+        _ = await repo.AddAsync(org, "npm", "https://b.example", null);
         var c = await repo.AddAsync(org, "npm", "https://c.example", null);
 
         // Only name c — a and b should retain their relative order after c.
@@ -85,8 +84,8 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
     [Fact]
     public async Task Delete_IsOrgScoped_CrossOrgDeleteIsNoOp()
     {
-        var orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"a-{Guid.NewGuid():N}");
-        var orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"a-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
         var repo = NewRepo();
         var entry = await repo.AddAsync(orgA, "maven", "https://repo1.maven.org/maven2", null);
 
@@ -103,7 +102,7 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
     [Fact]
     public async Task Add_DuplicateUrlForEcosystem_IsIgnored()
     {
-        var org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         var repo = NewRepo();
         await repo.AddAsync(org, "pypi", "https://pypi.org", null);
         await repo.AddAsync(org, "pypi", "https://pypi.org", "dup");

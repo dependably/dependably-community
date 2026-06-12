@@ -1,7 +1,6 @@
 using System.Net;
 using Dependably.Security;
 using Microsoft.AspNetCore.Http;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 

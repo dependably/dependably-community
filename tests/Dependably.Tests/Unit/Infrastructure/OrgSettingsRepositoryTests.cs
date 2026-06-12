@@ -2,7 +2,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -37,7 +36,7 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     [Fact]
     public async Task GetSettingsAsync_SeededOrg_ReturnsDefaults()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"defaults-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"defaults-{Guid.NewGuid():N}");
         var settings = await _repo.GetSettingsAsync(orgId);
         Assert.NotNull(settings);
         // COALESCE defaults: license_enforcement_mode='off', passthrough=true, tolerance=10.0, lang='en', overwrite=false
@@ -54,7 +53,7 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     public async Task UpsertSettingsAsync_Clamp_OrgValueNull_ReturnsNull()
     {
         // Hits the `if (orgVal is null) return null;` branch of Clamp.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"clamp-orgnull-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"clamp-orgnull-{Guid.NewGuid():N}");
         await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
             OrgId: orgId,
             AnonymousPull: false, AllowlistMode: false,
@@ -74,7 +73,7 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     public async Task UpsertSettingsAsync_Clamp_InstanceMaxNull_PassesOrgValueThrough()
     {
         // Hits the `if (instanceMax is null) return orgVal;` branch of Clamp.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"clamp-instnull-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"clamp-instnull-{Guid.NewGuid():N}");
         await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
             OrgId: orgId,
             AnonymousPull: true, AllowlistMode: true,
@@ -96,7 +95,7 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     public async Task UpsertSettingsAsync_Clamp_BothPresent_TakesMin()
     {
         // Hits the `return Math.Min(orgVal, instanceMax)` branch of Clamp.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"clamp-min-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"clamp-min-{Guid.NewGuid():N}");
         await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
             OrgId: orgId,
             AnonymousPull: false, AllowlistMode: false,
@@ -120,7 +119,7 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     public async Task UpsertSettingsAsync_WhitespaceLanguage_TreatedAsNull_DefaultsToEn()
     {
         // Hits the `string.IsNullOrWhiteSpace == true` branch (lang collapses to null).
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"lang-ws-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"lang-ws-{Guid.NewGuid():N}");
         // First seed a non-en value so we can prove the next call preserves it (COALESCE(@lang, default_language)).
         await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
             orgId, AnonymousPull: false, AllowlistMode: false,
@@ -138,7 +137,7 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     public async Task UpsertSettingsAsync_ConcreteLanguage_StoredVerbatim()
     {
         // Hits the `string.IsNullOrWhiteSpace == false` branch (lang flows through).
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"lang-set-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"lang-set-{Guid.NewGuid():N}");
         await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
             orgId, AnonymousPull: false, AllowlistMode: false,
             null, null, null, null, null, DefaultLanguage: "de"));
@@ -150,7 +149,7 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     {
         // Hits ToOverwriteFlag(false) → returns 0 (distinct from the null/true paths already
         // covered by OrgRepositoryTests). Then a follow-up call with null preserves false.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ow-false-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ow-false-{Guid.NewGuid():N}");
         await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
             orgId, AnonymousPull: false, AllowlistMode: false,
             null, null, null, null, null, DefaultLanguage: null,
@@ -170,7 +169,7 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
         // Insert vs update path: insert a brand-new orgs row (no org_settings yet) and
         // verify UpsertSettings creates one. OrgSeeder always pre-creates org_settings,
         // so we craft an org manually to hit the INSERT half of the upsert.
-        var orgId = Guid.NewGuid().ToString("N");
+        string orgId = Guid.NewGuid().ToString("N");
         await using (var conn = await _fixture.Store.OpenAsync())
         {
             await conn.ExecuteAsync(
@@ -195,7 +194,7 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     [Fact]
     public async Task UpsertSettingsAsync_AirGapped_RoundTripsAndTristateNullPreserves()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"airgap-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"airgap-{Guid.NewGuid():N}");
         // Default: off.
         Assert.False((await _repo.GetSettingsAsync(orgId))!.AirGapped);
 
@@ -242,7 +241,7 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     [Fact]
     public async Task UpsertRetentionAsync_InsertThenUpdate_BothPathsHit()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ret-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ret-{Guid.NewGuid():N}");
         await _repo.UpsertRetentionAsync(orgId, keepVersions: 10, keepDays: 30, activityRetentionDays: 90);
         var first = (await _repo.GetSettingsAsync(orgId))!;
         Assert.Equal(10, first.KeepVersions);
@@ -262,16 +261,16 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     [Fact]
     public async Task UpsertProxySettingsAsync_DisableThenReEnable_PersistsBothShapes()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"proxy-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"proxy-{Guid.NewGuid():N}");
 
-        await _repo.UpsertProxySettingsAsync(orgId, proxyPassthroughEnabled: false, maxOsvScoreTolerance: 3.7, minReleaseAgeHours: null);
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(false, 3.7));
         var disabled = (await _repo.GetSettingsAsync(orgId))!;
         Assert.False(disabled.ProxyPassthroughEnabled);
         Assert.Equal(3.7, disabled.MaxOsvScoreTolerance);
 
         // Hits the `proxyEnabled ? 1 : 0` true branch — paired with the false case above
         // this closes out the ternary's two arms.
-        await _repo.UpsertProxySettingsAsync(orgId, proxyPassthroughEnabled: true, maxOsvScoreTolerance: 8.25, minReleaseAgeHours: null);
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 8.25));
         var enabled = (await _repo.GetSettingsAsync(orgId))!;
         Assert.True(enabled.ProxyPassthroughEnabled);
         Assert.Equal(8.25, enabled.MaxOsvScoreTolerance);
@@ -283,13 +282,13 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
         // Three-state lifecycle: a fresh org starts with the policy off (NULL), the operator
         // sets a positive value, then clears it back to NULL. All three writes must survive
         // a re-read so the UI never shows stale state after a clear.
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"minage-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"minage-{Guid.NewGuid():N}");
         Assert.Null((await _repo.GetSettingsAsync(orgId))!.MinReleaseAgeHours);
 
-        await _repo.UpsertProxySettingsAsync(orgId, proxyPassthroughEnabled: true, maxOsvScoreTolerance: 10.0, minReleaseAgeHours: 48);
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0, MinReleaseAgeHours: 48));
         Assert.Equal(48, (await _repo.GetSettingsAsync(orgId))!.MinReleaseAgeHours);
 
-        await _repo.UpsertProxySettingsAsync(orgId, proxyPassthroughEnabled: true, maxOsvScoreTolerance: 10.0, minReleaseAgeHours: null);
+        await _repo.UpsertProxySettingsAsync(orgId, new ProxyPolicySettings(true, 10.0));
         Assert.Null((await _repo.GetSettingsAsync(orgId))!.MinReleaseAgeHours);
     }
 
@@ -298,7 +297,7 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     [Fact]
     public async Task UpsertLicensePolicyModeAsync_RoundTrip_InsertThenUpdate()
     {
-        var orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"lpm-{Guid.NewGuid():N}");
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"lpm-{Guid.NewGuid():N}");
         await _repo.UpsertLicensePolicyModeAsync(orgId, "warn");
         Assert.Equal("warn", (await _repo.GetSettingsAsync(orgId))!.LicenseEnforcementMode);
         await _repo.UpsertLicensePolicyModeAsync(orgId, "block");
@@ -316,8 +315,8 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     [Fact]
     public async Task SetInstanceSettingAsync_InsertThenOverwrite_ListExcludesJwtSecret()
     {
-        var unique = Guid.NewGuid().ToString("N");
-        var key = $"k-{unique}";
+        string unique = Guid.NewGuid().ToString("N");
+        string key = $"k-{unique}";
 
         // Insert path.
         await _repo.SetInstanceSettingAsync(key, "v1");

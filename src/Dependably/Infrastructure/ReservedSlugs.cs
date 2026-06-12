@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 
 namespace Dependably.Infrastructure;
@@ -27,34 +26,55 @@ public static class ReservedSlugs
     /// </summary>
     public static string? Normalize(string? input, IReadOnlySet<string>? extraReserved = null)
     {
-        var s = TrimAndStripPort(input);
-        if (s is null) return null;
+        string? s = TrimAndStripPort(input);
+        if (s is null)
+        {
+            return null;
+        }
 
         s = s.ToLowerInvariant().Normalize(NormalizationForm.FormC);
-        if (!IsValidSlugShape(s)) return null;
-        if (Builtin.Contains(s)) return null;
-        if (extraReserved is not null && extraReserved.Contains(s)) return null;
-        return s;
+        return !IsValidSlugShape(s) ? null
+            : Builtin.Contains(s) ? null
+            : extraReserved is not null && extraReserved.Contains(s) ? null
+            : s;
     }
 
     private static string? TrimAndStripPort(string? input)
     {
-        if (string.IsNullOrWhiteSpace(input)) return null;
-        var s = input.Trim().TrimEnd('.');
-        var colonIdx = s.IndexOf(':');
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return null;
+        }
+
+        string s = input.Trim().TrimEnd('.');
+        int colonIdx = s.IndexOf(':');
         return colonIdx >= 0 ? s[..colonIdx] : s;
     }
 
     private static bool IsValidSlugShape(string s)
     {
-        if (s.Length == 0 || s.Length > 63) return false;
-        if (s.StartsWith("xn--", StringComparison.Ordinal)) return false;
-        if (s[0] == '-' || s[^1] == '-') return false;
-
-        foreach (var c in s)
+        if (s.Length is 0 or > 63)
         {
-            var ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
-            if (!ok) return false;
+            return false;
+        }
+
+        if (s.StartsWith("xn--", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (s[0] == '-' || s[^1] == '-')
+        {
+            return false;
+        }
+
+        foreach (char c in s)
+        {
+            bool ok = c is >= 'a' and <= 'z' or >= '0' and <= '9' or '-';
+            if (!ok)
+            {
+                return false;
+            }
         }
         return true;
     }
@@ -64,8 +84,9 @@ public static class ReservedSlugs
     /// </summary>
     public static IReadOnlySet<string> ParseExtra(string? envValue)
     {
-        if (string.IsNullOrWhiteSpace(envValue)) return new HashSet<string>(0);
-        return new HashSet<string>(
+        return string.IsNullOrWhiteSpace(envValue)
+            ? new HashSet<string>(0)
+            : new HashSet<string>(
             envValue.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .Select(s => s.ToLowerInvariant()),
             StringComparer.Ordinal);

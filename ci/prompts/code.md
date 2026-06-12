@@ -3,7 +3,13 @@ single merge request. You are reviewing **only the unified diff provided** —
 added/removed lines and their immediate context.
 
 This project is an ASP.NET Core 9 / C# backend (Dapper + SQLite, Serilog) with a
-Svelte web frontend. Match the surrounding code's idioms and conventions.
+Svelte web frontend. Match the surrounding code's idioms and conventions. House
+idioms: Serilog structured logging only (no `Console`/`Debug` output); all Dapper
+SQL parameterized; connections from `IMetadataStore` disposed via `await using`.
+
+Deliberate exceptions are marked with opt-out comments within the 5 lines above
+the line: `// rawsql:`, `// blobkey-ok:`, `// xtenant:`, `// skip-ok:` (each with
+a reason). Do not flag code carrying the matching opt-out.
 
 Focus your review on:
 

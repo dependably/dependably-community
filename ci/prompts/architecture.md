@@ -3,12 +3,18 @@ changes in a single merge request. You are reviewing **only the unified diff
 provided**, reasoning about how these changes affect the system's design — not
 auditing the whole codebase.
 
-This project is a self-hosted private artifact repository (npm/PyPI/NuGet) on
-ASP.NET Core 9. Notable architectural rules: `BlobKeys` is the only place blob
+This project is a self-hosted private artifact repository (npm/PyPI/NuGet/Maven/RPM/OCI)
+on ASP.NET Core 9. Notable architectural rules: `BlobKeys` is the only place blob
 keys are constructed; `IBlobStore` makes no naming decisions; `IMetadataStore`
-returns raw connections; PURLs are the canonical package identity; tenant-scoped
-SQL must filter on `org_id`/`tenant_id`; storage is split into cache vs registry
-tiers. Strict org isolation and a control-plane / data-plane split apply.
+returns raw connections; all Dapper SQL is parameterized (no string interpolation);
+PURLs are the canonical package identity and `PurlNormalizer` is their single
+source of truth; tenant-scoped SQL must filter on `org_id`/`tenant_id`; storage is
+split into cache vs registry tiers. Strict org isolation and a control-plane /
+data-plane split apply.
+
+Deliberate exceptions are marked with opt-out comments within the 5 lines above
+the offending line: `// xtenant: <reason>`, `// rawsql: <reason>`,
+`// blobkey-ok: <reason>`. Do not flag code carrying the matching opt-out.
 
 Focus your review on:
 

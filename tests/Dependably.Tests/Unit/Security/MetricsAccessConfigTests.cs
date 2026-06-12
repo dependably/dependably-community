@@ -1,6 +1,5 @@
 using Dependably.Security;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Security;
 
@@ -23,7 +22,7 @@ public sealed class MetricsAccessConfigTests
 
         var db = dbValues ?? new Dictionary<string, string?>();
         Task<string?> Reader(string key, CancellationToken _) =>
-            Task.FromResult(db.TryGetValue(key, out var v) ? v : null);
+            Task.FromResult(db.TryGetValue(key, out string? v) ? v : null);
 
         return new MetricsAccessConfig(Reader, config);
     }
@@ -204,7 +203,7 @@ public sealed class MetricsAccessConfigTests
     {
         var db = new Dictionary<string, string?> { ["metrics_enabled"] = "1" };
         Task<string?> Reader(string key, CancellationToken _) =>
-            Task.FromResult(db.TryGetValue(key, out var v) ? v : null);
+            Task.FromResult(db.TryGetValue(key, out string? v) ? v : null);
 
         var sut = new MetricsAccessConfig(
             Reader,

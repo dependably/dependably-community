@@ -4,7 +4,12 @@ services:
       context: .
       args:
         REGISTRY_URL: ${REGISTRY_URL:-}
-        REGISTRY_KEY: ${REGISTRY_KEY:-}
+      # The private-registry credential is a BuildKit secret, not a build arg —
+      # build args persist in image history; secret mounts do not. The secret
+      # resolves from the REGISTRY_KEY environment variable (empty when unset,
+      # which the Dockerfile treats as "no private registry").
+      secrets:
+        - registry_key
     ports:
       - "8080:8080"
     volumes:
@@ -22,6 +27,9 @@ services:
       # (archived tree, matching the fedora:40 integration-test fixture).
       Rpm__Upstream: ${RPM_UPSTREAM:-https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Everything/x86_64/os}
       Rpm__UpstreamMode: ${RPM_UPSTREAM_MODE:-passthrough}
+      # Memory guardrails for containers (set DOTNET_GCHeapHardLimit to ~75% of mem_limit)
+      # - DOTNET_GCHeapHardLimit=0xC0000000
+      # - STAGING_DISK_WARN_THRESHOLD_PERCENT=10
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/ready"]
       interval: 10s
@@ -39,3 +47,7 @@ services:
 
 volumes:
   dependably-data:
+
+secrets:
+  registry_key:
+    environment: REGISTRY_KEY

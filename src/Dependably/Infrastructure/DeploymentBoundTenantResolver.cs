@@ -19,21 +19,23 @@ public sealed class DeploymentBoundTenantResolver : ITenantResolver
     public DeploymentBoundTenantResolver(IMetadataStore db, IConfiguration config)
     {
         _db = db;
-        var slug = config["BOUND_TENANT_SLUG"];
+        string? slug = config["BOUND_TENANT_SLUG"];
         if (string.IsNullOrWhiteSpace(slug))
+        {
             throw new InvalidOperationException(
                 "DEPLOYMENT_MODE=bound requires BOUND_TENANT_SLUG to be set.");
+        }
+
         _boundSlug = slug.Trim().ToLowerInvariant();
     }
 
     public async Task<TenantContext> ResolveAsync(HttpContext context, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var row = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug)>(
+        var (Id, Slug) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug)>(
             "SELECT id, slug FROM orgs WHERE slug = @slug AND deleted_at IS NULL LIMIT 1",
             new { slug = _boundSlug });
 
-        if (row.Id is null) return TenantContext.Uninitialized;
-        return TenantContext.ForTenant(row.Id, row.Slug);
+        return Id is null ? TenantContext.Uninitialized : TenantContext.ForTenant(Id, Slug);
     }
 }

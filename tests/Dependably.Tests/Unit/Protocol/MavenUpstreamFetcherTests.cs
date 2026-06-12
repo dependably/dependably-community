@@ -10,7 +10,6 @@ using Microsoft.Extensions.Logging.Abstractions;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Protocol;
 
@@ -93,7 +92,9 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         var urlValidator = new AllowAllValidator();
 
         var upstreamClient = new UpstreamClient(
-            httpFactory, tiered, audit, urlValidator, airGap, config,
+            httpFactory, tiered, audit, urlValidator, airGap,
+            new Dependably.Infrastructure.DriveInfoStagingDiskInfo(Path.GetTempPath()),
+            config,
             NullLogger<UpstreamClient>.Instance);
 
         return new MavenUpstreamFetcher(
@@ -142,9 +143,9 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     [Fact]
     public async Task FetchArtifactAsync_HappyPath_WithSidecar_ReturnsBytesAndCachesBlob()
     {
-        var bytes = Encoding.UTF8.GetBytes("jar-payload");
-        var sha = Sha256Hex(bytes);
-        var path = "com/example/lib/1.0/lib-1.0.jar";
+        byte[] bytes = Encoding.UTF8.GetBytes("jar-payload");
+        string sha = Sha256Hex(bytes);
+        string path = "com/example/lib/1.0/lib-1.0.jar";
         StubArtifact(path, bytes);
         StubSidecar(path, sha);
 
@@ -166,9 +167,9 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     [Fact]
     public async Task FetchArtifactAsync_SecondCall_ServesFromBlobCache_NoUpstreamCall()
     {
-        var bytes = Encoding.UTF8.GetBytes("jar-payload-cached");
-        var sha = Sha256Hex(bytes);
-        var path = "com/example/lib/1.0/lib-1.0.jar";
+        byte[] bytes = Encoding.UTF8.GetBytes("jar-payload-cached");
+        string sha = Sha256Hex(bytes);
+        string path = "com/example/lib/1.0/lib-1.0.jar";
         StubArtifact(path, bytes);
         StubSidecar(path, sha);
 
@@ -179,7 +180,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         var first = await fetcher.FetchArtifactAsync(_upstream, path, default);
         Assert.NotNull(first);
 
-        var artifactCallsAfterFirst = _server.LogEntries.Count(
+        int artifactCallsAfterFirst = _server.LogEntries.Count(
             e => e.RequestMessage?.Path?.EndsWith("lib-1.0.jar") == true);
 
         // Second call should be a cache hit on UpstreamClient (no additional artifact request).
@@ -187,7 +188,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         Assert.NotNull(second);
         Assert.True(second!.IsFromCache);
 
-        var artifactCallsTotal = _server.LogEntries.Count(
+        int artifactCallsTotal = _server.LogEntries.Count(
             e => e.RequestMessage?.Path?.EndsWith("lib-1.0.jar") == true);
         Assert.Equal(artifactCallsAfterFirst, artifactCallsTotal);
     }
@@ -198,8 +199,8 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         // Maven Central serves no .sha256 sidecar for most artifacts — only .sha1/.md5.
         // The fetcher must NOT bail: it fetches the body, derives the content-addressed key
         // locally, verifies against the .sha1 sidecar, and caches the blob.
-        var bytes = Encoding.UTF8.GetBytes("no-sha256-but-sha1");
-        var path = "com/example/nosha256/1.0/nosha256-1.0.jar";
+        byte[] bytes = Encoding.UTF8.GetBytes("no-sha256-but-sha1");
+        string path = "com/example/nosha256/1.0/nosha256-1.0.jar";
         StubArtifact(path, bytes);
         StubSha1Sidecar(path, Sha1Hex(bytes));
 
@@ -221,8 +222,8 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     public async Task FetchArtifactAsync_NoSha256Sidecar_Sha1Mismatch_ThrowsChecksumException()
     {
         // .sha1 sidecar present but wrong → supply-chain mismatch → ChecksumException (502).
-        var bytes = Encoding.UTF8.GetBytes("body-that-wont-match-sha1");
-        var path = "com/example/badsha1/1.0/badsha1-1.0.jar";
+        byte[] bytes = Encoding.UTF8.GetBytes("body-that-wont-match-sha1");
+        string path = "com/example/badsha1/1.0/badsha1-1.0.jar";
         StubArtifact(path, bytes);
         StubSha1Sidecar(path, new string('0', 40)); // 40 hex zeros — not Sha1(bytes)
 
@@ -236,8 +237,8 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     public async Task FetchArtifactAsync_NoSha256OrSha1_VerifiesViaMd5()
     {
         // Only .md5 advertised (no .sha256, no .sha1) → verify against md5 before serving.
-        var bytes = Encoding.UTF8.GetBytes("md5-only-artifact");
-        var path = "com/example/md5only/1.0/md5only-1.0.jar";
+        byte[] bytes = Encoding.UTF8.GetBytes("md5-only-artifact");
+        string path = "com/example/md5only/1.0/md5only-1.0.jar";
         StubArtifact(path, bytes);
         StubMd5Sidecar(path, Md5Hex(bytes));
 
@@ -254,8 +255,8 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     [Fact]
     public async Task FetchArtifactAsync_Md5Mismatch_ThrowsChecksumException()
     {
-        var bytes = Encoding.UTF8.GetBytes("md5-will-not-match");
-        var path = "com/example/badmd5/1.0/badmd5-1.0.jar";
+        byte[] bytes = Encoding.UTF8.GetBytes("md5-will-not-match");
+        string path = "com/example/badmd5/1.0/badmd5-1.0.jar";
         StubArtifact(path, bytes);
         StubMd5Sidecar(path, new string('0', 32)); // 32 hex zeros — not Md5(bytes)
 
@@ -270,8 +271,8 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     {
         // Neither .sha256 nor .sha1 upstream — fetch-then-hash still proxies (best-effort),
         // rather than refusing an artefact that legitimately lacks sidecars.
-        var bytes = Encoding.UTF8.GetBytes("no-sidecars-at-all");
-        var path = "com/example/bare/1.0/bare-1.0.jar";
+        byte[] bytes = Encoding.UTF8.GetBytes("no-sidecars-at-all");
+        string path = "com/example/bare/1.0/bare-1.0.jar";
         StubArtifact(path, bytes);
 
         var blobs = new InMemoryBlobStore();
@@ -287,9 +288,9 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     [Fact]
     public async Task FetchArtifactAsync_ChecksumMismatch_ThrowsChecksumException()
     {
-        var bytes = Encoding.UTF8.GetBytes("real-body");
-        var fakeSha = new string('0', 64); // 64 zeros — won't match Sha256(bytes)
-        var path = "com/example/badhash/1.0/badhash-1.0.jar";
+        byte[] bytes = Encoding.UTF8.GetBytes("real-body");
+        string fakeSha = new('0', 64); // 64 zeros — won't match Sha256(bytes)
+        string path = "com/example/badhash/1.0/badhash-1.0.jar";
         StubArtifact(path, bytes);
         StubSidecar(path, fakeSha);
 
@@ -307,12 +308,12 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         // there's no "5xx → serve stale" branch to test any more. The legitimate way to
         // observe a previously-fetched artifact is a normal cache hit: IsFromCache=true.
         // No Warning: 110 header is emitted on the served response.
-        var bytes = Encoding.UTF8.GetBytes("previously-cached-bytes");
-        var sha = Sha256Hex(bytes);
+        byte[] bytes = Encoding.UTF8.GetBytes("previously-cached-bytes");
+        string sha = Sha256Hex(bytes);
         var blobs = new InMemoryBlobStore();
         await blobs.PutAsync(BlobKeys.Proxy(sha), new MemoryStream(bytes), default);
 
-        var path = "com/example/cached/1.0/cached-1.0.jar";
+        string path = "com/example/cached/1.0/cached-1.0.jar";
 
         // Sidecar must succeed so the fetcher knows the SHA. Primary 500s deliberately —
         // we want to prove it is never contacted because the cache check short-circuits.
@@ -337,8 +338,8 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     [Fact]
     public async Task FetchArtifactAsync_Upstream5xx_NoStaleBlob_ReturnsNull()
     {
-        var sha = new string('a', 64);
-        var path = "com/example/transient/1.0/transient-1.0.jar";
+        string sha = new('a', 64);
+        string path = "com/example/transient/1.0/transient-1.0.jar";
         StubSidecar(path, sha);
         _server.Given(Request.Create().WithPath("/" + path).UsingGet())
                .RespondWith(Response.Create().WithStatusCode(503));
@@ -353,7 +354,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     [Fact]
     public async Task FetchArtifactAsync_NegativelyCached_ReturnsNullWithoutUpstreamCall()
     {
-        var path = "com/example/nope/9.9/nope-9.9.jar";
+        string path = "com/example/nope/9.9/nope-9.9.jar";
         var fetcher = BuildFetcher();
 
         await fetcher.RecordNegativeAsync(path, default);
@@ -371,8 +372,8 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     {
         // The fetcher no longer pre-checks IsEnabled — air-gap is enforced inside
         // UpstreamClient. We still expect AirGappedException to bubble up to the caller.
-        var sha = new string('b', 64);
-        var path = "com/example/airgap/1.0/airgap-1.0.jar";
+        string sha = new('b', 64);
+        string path = "com/example/airgap/1.0/airgap-1.0.jar";
         StubSidecar(path, sha);
 
         var fetcher = BuildFetcher(airGapped: true);
@@ -386,7 +387,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     [Fact]
     public async Task FetchUpstreamVersionsAsync_HappyPath_ReturnsVersions()
     {
-        var xml = """
+        string xml = """
             <?xml version="1.0" encoding="UTF-8"?>
             <metadata>
               <groupId>com.example</groupId>
@@ -400,7 +401,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
               </versioning>
             </metadata>
             """;
-        var artifactPath = "com/example/lib";
+        string artifactPath = "com/example/lib";
         _server.Given(Request.Create().WithPath($"/{artifactPath}/maven-metadata.xml").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(xml));
 
@@ -414,7 +415,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     [Fact]
     public async Task FetchUpstreamVersionsAsync_Upstream5xx_ReturnsNull()
     {
-        var artifactPath = "com/example/broken";
+        string artifactPath = "com/example/broken";
         _server.Given(Request.Create().WithPath($"/{artifactPath}/maven-metadata.xml").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(500));
 
@@ -427,7 +428,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     [Fact]
     public async Task FetchUpstreamVersionsAsync_AirGap_ReturnsNull()
     {
-        var artifactPath = "com/example/lib";
+        string artifactPath = "com/example/lib";
         // Air-gapped: UpstreamClient throws AirGappedException; the fetcher swallows it
         // and returns null so callers fall back to local-only metadata.
         var fetcher = BuildFetcher(airGapped: true);
@@ -440,7 +441,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     [Fact]
     public async Task FetchUpstreamVersionsAsync_404_ReturnsNull()
     {
-        var artifactPath = "com/example/missing";
+        string artifactPath = "com/example/missing";
         _server.Given(Request.Create().WithPath($"/{artifactPath}/maven-metadata.xml").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(404));
 
@@ -458,7 +459,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         var fetcher = BuildFetcher();
         await fetcher.RecordNegativeAsync("com/example/x/1.0/x-1.0.jar", default);
 
-        var hit = await fetcher.IsNegativelyCachedAsync("com/example/x/1.0/x-1.0.jar", default);
+        bool hit = await fetcher.IsNegativelyCachedAsync("com/example/x/1.0/x-1.0.jar", default);
         Assert.True(hit);
     }
 
@@ -468,7 +469,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         var fetcher = BuildFetcher();
         await fetcher.RecordNegativeAsync("com/example/a/1.0/a-1.0.jar", default);
 
-        var hit = await fetcher.IsNegativelyCachedAsync("com/example/b/1.0/b-1.0.jar", default);
+        bool hit = await fetcher.IsNegativelyCachedAsync("com/example/b/1.0/b-1.0.jar", default);
         Assert.False(hit);
     }
 
@@ -504,10 +505,13 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken ct)
         {
-            var url = _server.Urls[0] + request.RequestUri!.PathAndQuery;
+            string url = _server.Urls[0] + request.RequestUri!.PathAndQuery;
             using var innerRequest = new HttpRequestMessage(request.Method, url);
             foreach (var h in request.Headers)
+            {
                 innerRequest.Headers.TryAddWithoutValidation(h.Key, h.Value);
+            }
+
             var inner = new HttpClient();
             return await inner.SendAsync(innerRequest, ct);
         }

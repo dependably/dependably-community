@@ -20,7 +20,7 @@ public sealed class HostEcosystemMap
 
     public HostEcosystemMap(IConfiguration config)
     {
-        var raw = config["HOST_ROUTING"];
+        string? raw = config["HOST_ROUTING"];
         _map = Parse(raw);
     }
 
@@ -40,30 +40,46 @@ public sealed class HostEcosystemMap
     /// </summary>
     public string? PrefixForHost(string? host)
     {
-        if (string.IsNullOrEmpty(host)) return null;
-        var lower = host.ToLowerInvariant();
-        var colon = lower.IndexOf(':');
-        if (colon >= 0) lower = lower[..colon];
-        if (!_map.TryGetValue(lower, out var ecosystem)) return null;
-        return ecosystem == "oci" ? "/v2" : "/" + ecosystem;
+        if (string.IsNullOrEmpty(host))
+        {
+            return null;
+        }
+
+        string lower = host.ToLowerInvariant();
+        int colon = lower.IndexOf(':');
+        if (colon >= 0)
+        {
+            lower = lower[..colon];
+        }
+
+        return !_map.TryGetValue(lower, out string? ecosystem) ? null : ecosystem == "oci" ? "/v2" : "/" + ecosystem;
     }
 
     private static Dictionary<string, string> Parse(string? raw)
     {
         var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (string.IsNullOrWhiteSpace(raw)) return map;
-
-        foreach (var pair in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        if (string.IsNullOrWhiteSpace(raw))
         {
-            var eq = pair.IndexOf('=');
+            return map;
+        }
+
+        foreach (string pair in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int eq = pair.IndexOf('=');
             if (eq <= 0 || eq == pair.Length - 1)
+            {
                 throw new InvalidOperationException(
                     $"HOST_ROUTING entry '{pair}' is malformed; expected 'host=ecosystem'.");
-            var host = pair[..eq].Trim().ToLowerInvariant();
-            var ecosystem = pair[(eq + 1)..].Trim();
+            }
+
+            string host = pair[..eq].Trim().ToLowerInvariant();
+            string ecosystem = pair[(eq + 1)..].Trim();
             if (!KnownEcosystems.Contains(ecosystem))
+            {
                 throw new InvalidOperationException(
                     $"HOST_ROUTING ecosystem '{ecosystem}' is not recognised; expected one of: {string.Join(", ", KnownEcosystems)}.");
+            }
+
             map[host] = ecosystem.ToLowerInvariant();
         }
         return map;

@@ -1,8 +1,6 @@
 using System.Net;
-using System.Net.Http.Headers;
 using Dependably.Infrastructure.Siem;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 

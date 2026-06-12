@@ -25,8 +25,8 @@ public sealed class SystemSupportFlowsTests : IClassFixture<DependablyMultiFacto
 
     private async Task<(string Slug, string OwnerEmail)> CreateTenant()
     {
-        var slug = "supp-" + Guid.NewGuid().ToString("N")[..8];
-        var ownerEmail = $"owner-{Guid.NewGuid():N}@example.com";
+        string slug = "supp-" + Guid.NewGuid().ToString("N")[..8];
+        string ownerEmail = $"owner-{Guid.NewGuid():N}@example.com";
         using var sys = await _factory.CreateSystemAdminClient();
         await sys.PostAsJsonAsync("/api/v1/system/tenants", new { slug, ownerEmail });
         return (slug, ownerEmail);
@@ -125,7 +125,7 @@ public sealed class SystemSupportFlowsTests : IClassFixture<DependablyMultiFacto
 
         var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         Assert.Equal(ownerEmail, doc.RootElement.GetProperty("email").GetString());
-        var tempPwd = doc.RootElement.GetProperty("temporaryPassword").GetString();
+        string? tempPwd = doc.RootElement.GetProperty("temporaryPassword").GetString();
         Assert.False(string.IsNullOrEmpty(tempPwd));
         Assert.True(doc.RootElement.GetProperty("mustChangePassword").GetBoolean());
 
@@ -160,7 +160,9 @@ public sealed class SystemSupportFlowsTests : IClassFixture<DependablyMultiFacto
         // this test exercises that /api/v1/system/me surfaces the rotate flag. The route is on
         // PasswordRotationGuard's allowlist, so it stays reachable while the flag is set.
         await using (var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync())
+        {
             await conn.ExecuteAsync("UPDATE system_admins SET must_change_password = 1");
+        }
 
         var resp = await sys.GetAsync("/api/v1/system/me");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -177,7 +179,7 @@ public sealed class SystemSupportFlowsTests : IClassFixture<DependablyMultiFacto
         await ((IAsyncLifetime)fac).InitializeAsync();
 
         using var sys = await fac.CreateSystemAdminClient();
-        var newPwd = "BrandNewSystemPassword!";
+        string newPwd = "BrandNewSystemPassword!";
         var resp = await sys.PostAsJsonAsync("/api/v1/system/me/password", new
         {
             currentPassword = DependablyMultiFactory.SystemAdminPassword,

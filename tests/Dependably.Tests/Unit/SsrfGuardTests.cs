@@ -1,6 +1,5 @@
 using System.Net;
 using Dependably.Security;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 

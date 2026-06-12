@@ -49,7 +49,10 @@ public sealed class CacheEvictionService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             var next = schedule.GetNextOccurrence(DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
-            if (next is null) break;
+            if (next is null)
+            {
+                break;
+            }
 
             var delay = next.Value - DateTimeOffset.UtcNow;
             if (delay > TimeSpan.Zero)
@@ -58,7 +61,10 @@ public sealed class CacheEvictionService : BackgroundService
                 catch (OperationCanceledException) { break; }
             }
 
-            if (stoppingToken.IsCancellationRequested) break;
+            if (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
 
             using var scope = Dependably.Infrastructure.Observability.BackgroundJobScope.Begin(
                 "cache-eviction", "cache.evict");
@@ -81,9 +87,9 @@ public sealed class CacheEvictionService : BackgroundService
     /// </summary>
     public async Task<EvictionSummary> RunOnceAsync(CancellationToken ct = default)
     {
-        var maxAgeDays = ParseInt("CACHE_MAX_AGE_DAYS");
-        var maxSizeBytes = ParseLong("CACHE_MAX_SIZE_BYTES");
-        var maxArtifacts = ParseInt("CACHE_MAX_ARTIFACTS");
+        int? maxAgeDays = ParseInt("CACHE_MAX_AGE_DAYS");
+        long? maxSizeBytes = ParseLong("CACHE_MAX_SIZE_BYTES");
+        int? maxArtifacts = ParseInt("CACHE_MAX_ARTIFACTS");
 
         if (maxAgeDays is null && maxSizeBytes is null && maxArtifacts is null)
         {
@@ -99,10 +105,14 @@ public sealed class CacheEvictionService : BackgroundService
         long bytesFreed = 0;
 
         if (maxAgeDays is { } days)
+        {
             (evicted, bytesFreed) = await EvictByAgeAsync(days, evicted, bytesFreed, ct);
+        }
 
         if (maxSizeBytes is not null || maxArtifacts is not null)
+        {
             (evicted, bytesFreed) = await EvictBySizeAsync(maxSizeBytes, evicted, bytesFreed, ct);
+        }
 
         _logger.LogInformation("Cache eviction done (evicted={Evicted}, bytesFreed={BytesFreed}).",
             evicted, bytesFreed);
@@ -122,7 +132,11 @@ public sealed class CacheEvictionService : BackgroundService
         while (!ct.IsCancellationRequested)
         {
             var rows = await _cache.ListLruCandidatesAsync(threshold, Batch, ct);
-            if (rows.Count == 0) break;
+            if (rows.Count == 0)
+            {
+                break;
+            }
+
             foreach (var row in rows)
             {
                 await EvictAsync(row, ct);
@@ -141,21 +155,31 @@ public sealed class CacheEvictionService : BackgroundService
     private async Task<(long evicted, long bytesFreed)> EvictBySizeAsync(
         long? maxSizeBytes, long evicted, long bytesFreed, CancellationToken ct)
     {
-        var cap = maxSizeBytes ?? long.MaxValue;
+        long cap = maxSizeBytes ?? long.MaxValue;
         while (!ct.IsCancellationRequested)
         {
-            var total = await _cache.GetTotalSizeBytesAsync(ct);
-            if (total <= cap) break;
+            long total = await _cache.GetTotalSizeBytesAsync(ct);
+            if (total <= cap)
+            {
+                break;
+            }
 
             var rows = await _cache.ListLruCandidatesAsync(DateTimeOffset.UtcNow, Batch, ct);
-            if (rows.Count == 0) break;
+            if (rows.Count == 0)
+            {
+                break;
+            }
+
             foreach (var row in rows)
             {
                 await EvictAsync(row, ct);
                 evicted++;
                 bytesFreed += row.SizeBytes;
                 total -= row.SizeBytes;
-                if (total <= cap) break;
+                if (total <= cap)
+                {
+                    break;
+                }
             }
         }
         return (evicted, bytesFreed);
@@ -179,11 +203,11 @@ public sealed class CacheEvictionService : BackgroundService
     // deepcode ignore NoHardcodedCredentials: reads numeric tuning knobs (limits, ages) from
     // IConfiguration; values are integers, not credentials. `key` is a config name constant.
     private int? ParseInt(string key) =>
-        int.TryParse(_config[key], out var v) && v > 0 ? v : null;
+        int.TryParse(_config[key], out int v) && v > 0 ? v : null;
 
     // deepcode ignore NoHardcodedCredentials: see ParseInt above.
     private long? ParseLong(string key) =>
-        long.TryParse(_config[key], out var v) && v > 0 ? v : null;
+        long.TryParse(_config[key], out long v) && v > 0 ? v : null;
 }
 
 public readonly record struct EvictionSummary(long ArtifactsEvicted, long BytesFreed);

@@ -1,6 +1,6 @@
 # Dependably
 
-Self-hosted private artifact repository for **npm**, **PyPI**, and **NuGet**.
+Self-hosted private artifact repository for **npm**, **PyPI**, **NuGet**, **Maven**, **RPM**, and **OCI** images.
 
 Every package your team pulls from the internet is a supply chain risk. Dependably sits between your developers and the public registries, caching what they pull, verifying checksums, blocking packages that don't belong, and giving you a full audit trail — without requiring a cloud account or a per-seat licence.
 
@@ -8,7 +8,7 @@ Every package your team pulls from the internet is a supply chain risk. Dependab
 
 ## Features
 
-- **Proxy cache** — pull-through cache for npm, PyPI, and NuGet; verified by SHA-256 before storage, served locally on every subsequent request
+- **Proxy cache** — pull-through cache for npm, PyPI, NuGet, Maven, RPM, and OCI; verified by SHA-256 before storage, served locally on every subsequent request
 - **Supply chain tracking** — first-fetch detection, per-version checksum verification, CycloneDX 1.5 SBOM generation
 - **Allowlisting** — per-org PURL pattern allowlists to restrict which packages can be fetched or pushed
 - **Multitenancy** — multiple orgs, scoped tokens, role-based access, full org isolation
@@ -65,7 +65,15 @@ volumes:
 
 ## Configuring package managers
 
-All registry URLs follow the pattern `/o/{org-slug}/{ecosystem}/`. The short aliases `/simple/`, `/npm/`, and `/nuget/` redirect to the default org.
+Tenancy is host-resolved, not path-resolved. The registry URL shape depends on your deployment mode:
+
+- **Single-tenant** (`DEPLOYMENT_MODE=single`, the default): the bare host serves the one org.
+  `https://dependably.example.com/simple/`, `/npm/`, `/nuget/v3/index.json`, etc.
+- **Multi-tenant** (`DEPLOYMENT_MODE=multi`): each org is a subdomain of the apex host.
+  `https://my-org.dependably.example.com/simple/`, `/npm/`, `/nuget/v3/index.json`, etc.
+
+The examples below use the single-tenant form. For multi-tenant, replace `dependably.example.com`
+with `my-org.dependably.example.com` (the ecosystem path stays the same).
 
 Generate a service token or user token from the web UI, then point your tools at Dependably.
 
@@ -77,14 +85,14 @@ Generate a service token or user token from the web UI, then point your tools at
 
 ```ini
 [global]
-index-url = https://user:<token>@dependably.example.com/o/my-org/simple/
+index-url = https://user:<token>@dependably.example.com/simple/
 ```
 
 Publishing with twine:
 
 ```bash
 twine upload \
-  --repository-url https://dependably.example.com/o/my-org/pypi/legacy/ \
+  --repository-url https://dependably.example.com/pypi/legacy/ \
   -u user -p <token> \
   dist/*
 ```
@@ -92,12 +100,12 @@ twine upload \
 ### npm / .npmrc
 
 ```ini
-registry=https://dependably.example.com/o/my-org/npm/
-//dependably.example.com/o/my-org/npm/:_authToken=<token>
+registry=https://dependably.example.com/npm/
+//dependably.example.com/npm/:_authToken=<token>
 ```
 
 ```bash
-npm publish --registry https://dependably.example.com/o/my-org/npm/
+npm publish --registry https://dependably.example.com/npm/
 ```
 
 Verify connectivity and credentials before installing anything:
@@ -113,7 +121,7 @@ npm whoami   # prints the token owner's email (or `service:<name>` for service t
 <?xml version="1.0" encoding="utf-8"?>
 <configuration>
   <packageSources>
-    <add key="dependably" value="https://dependably.example.com/o/my-org/nuget/v3/index.json" />
+    <add key="dependably" value="https://dependably.example.com/nuget/v3/index.json" />
   </packageSources>
   <packageSourceCredentials>
     <dependably>
@@ -126,7 +134,7 @@ npm whoami   # prints the token owner's email (or `service:<name>` for service t
 
 ```bash
 dotnet nuget push MyPackage.1.0.0.nupkg \
-  --source https://dependably.example.com/o/my-org/nuget/v3/index.json \
+  --source https://dependably.example.com/nuget/v3/index.json \
   --api-key <token>
 ```
 
@@ -144,17 +152,18 @@ GET /api/v1/licenses    → third-party attribution data (CycloneDX subset)
 
 ## Architecture
 
-- [Architecture overview](docs/architecture/overview.md) — multitenant storage, database, request routing, deployment shapes
-- [Cross-cutting decisions](docs/architecture/cross-cutting-decisions.md) — async hygiene, isolation strategy, retention, schema conventions, audit invariants
+- [DESIGN.md](DESIGN.md) — product and UI design system, layout, and visual language
+- [CLAUDE.md](CLAUDE.md) — project structure, key architectural rules and invariants, tech stack
+- [CONTRIBUTING.md](CONTRIBUTING.md) — build instructions, environment variable reference, security model
 
 ## API
 
-- [API surface](docs/api-surface.md) — full listing of every HTTP route, generated from controller route attributes (CI-guarded)
+Both API surfaces are documented as live OpenAPI documents served by the running instance:
 
-## Deployment
+- `/docs/` — protocol surfaces (PyPI `/simple/`, npm, NuGet v3, Maven, RPM, OCI `/v2/`); spec at `/openapi/protocol.json`
+- `/api/v1/docs/` — management API; spec at `/openapi/management.json`
 
-- [High-availability](docs/deployment/ha.md) — multi-replica topologies, SQLite vs Postgres trade-offs, per-write-path leader requirements
-- [Transparent intercept](docs/deployment/transparent-intercept.md) — pretending to be `registry.npmjs.org`/`pypi.org`/`api.nuget.org` so stock clients pass through Dependably without config changes
+The full route surface is contract-tested against [`tests/Contracts/openapi.contract.json`](tests/Contracts/openapi.contract.json) — any route change fails CI until the contract is regenerated.
 
 ---
 

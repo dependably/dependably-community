@@ -8,7 +8,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -48,7 +47,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
 
     private async Task SetAnonymousPull(bool enabled)
     {
-        var orgId = await DefaultOrgId();
+        string orgId = await DefaultOrgId();
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
         await conn.ExecuteAsync(
@@ -59,7 +58,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
 
     private async Task SetAllowlistMode(bool enabled)
     {
-        var orgId = await DefaultOrgId();
+        string orgId = await DefaultOrgId();
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
         await conn.ExecuteAsync(
@@ -70,7 +69,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
 
     private async Task SetProxyPassthrough(bool enabled)
     {
-        var orgId = await DefaultOrgId();
+        string orgId = await DefaultOrgId();
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
         await conn.ExecuteAsync(
@@ -81,14 +80,14 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
 
     private async Task AddBlocklistEntry(string pattern)
     {
-        var orgId = await DefaultOrgId();
+        string orgId = await DefaultOrgId();
         var repo = _factory.Services.GetRequiredService<BlocklistRepository>();
         await repo.AddAsync(orgId, pattern);
     }
 
     private async Task AddAllowlistEntry(string purlPattern)
     {
-        var orgId = await DefaultOrgId();
+        string orgId = await DefaultOrgId();
         var repo = _factory.Services.GetRequiredService<AllowlistRepository>();
         await repo.AddAsync(orgId, purlPattern);
     }
@@ -97,13 +96,19 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         string name, string version, byte[] bytes, string sha256, string filename,
         string filetype = "bdist_wheel", string? md5 = null)
     {
-        var content = new MultipartFormDataContent();
-        content.Add(new StringContent("file_upload"), ":action");
-        content.Add(new StringContent("2.1"), "metadata_version");
-        content.Add(new StringContent(name), "name");
-        content.Add(new StringContent(version), "version");
-        content.Add(new StringContent(sha256), "sha256_digest");
-        if (md5 is not null) content.Add(new StringContent(md5), "md5_digest");
+        var content = new MultipartFormDataContent
+        {
+            { new StringContent("file_upload"), ":action" },
+            { new StringContent("2.1"), "metadata_version" },
+            { new StringContent(name), "name" },
+            { new StringContent(version), "version" },
+            { new StringContent(sha256), "sha256_digest" }
+        };
+        if (md5 is not null)
+        {
+            content.Add(new StringContent(md5), "md5_digest");
+        }
+
         content.Add(new StringContent(filetype), "filetype");
         var fileContent = new ByteArrayContent(bytes);
         fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
@@ -123,7 +128,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
             using var client = _factory.CreateClient();
             var resp = await client.GetAsync("/simple/");
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-            var body = await resp.Content.ReadAsStringAsync();
+            string body = await resp.Content.ReadAsStringAsync();
             Assert.Contains("Simple Index", body);
         }
         finally
@@ -138,7 +143,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         _factory.CreateClient().Dispose(); // ensure first-boot ran
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var orgId = await conn.ExecuteScalarAsync<string>("SELECT id FROM orgs WHERE slug = 'default' LIMIT 1");
+        string? orgId = await conn.ExecuteScalarAsync<string>("SELECT id FROM orgs WHERE slug = 'default' LIMIT 1");
 
         // Insert a name with HTML metacharacters directly, bypassing the upload-time PEP 508
         // regex, so the renderer's output encoding is what's under test.
@@ -146,11 +151,11 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
             "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES (@id, @orgId, 'pypi', @name, @name, 0)",
             new { id = Guid.NewGuid().ToString("N"), orgId, name = "evil\"<b>x</b>" });
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync("/simple/");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
 
         Assert.DoesNotContain("<b>x</b>", body);          // raw markup must not survive
         Assert.Contains("&lt;b&gt;x&lt;/b&gt;", body);    // entity-encoded form is emitted
@@ -164,10 +169,11 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         // Mirror of MixedOriginRoutingTests but pins the "data-* attribute stripping" branch
         // by including data-dist-info-metadata in the upstream HTML and asserting the merged
         // local link sits beside the rewritten upstream link.
-        var name = $"mergepypi{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"mergepypi{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushPyPiPackage(name, "9.0.0");
+        await _factory.SeedMixedClaim("pypi", name);
 
-        var upstreamHtml = $"""
+        string upstreamHtml = $"""
             <!DOCTYPE html><html><body>
             <a href="https://files.pythonhosted.org/packages/aa/bb/{name}-1.0.0.tar.gz#sha256=cafe" data-dist-info-metadata="sha256=deadbeef">{name}-1.0.0.tar.gz</a>
             </body></html>
@@ -180,16 +186,16 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
                 .WithHeader("Content-Type", "text/html")
                 .WithBody(upstreamHtml));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/simple/{name}/");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var html = await resp.Content.ReadAsStringAsync();
+        string html = await resp.Content.ReadAsStringAsync();
         // Upstream link rewritten to /packages/{filename} (no host).
         Assert.Contains($"/packages/{name}-1.0.0.tar.gz", html);
         // Local upload merged in alongside.
-        var underscored = name.Replace('-', '_');
+        string underscored = name.Replace('-', '_');
         Assert.Contains($"{underscored}-9.0.0-py3-none-any.whl", html);
         // data-dist-info-metadata attribute stripped from rewritten anchors.
         Assert.DoesNotContain("data-dist-info-metadata", html);
@@ -202,7 +208,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         await SetProxyPassthrough(false);
         try
         {
-            var token = await _factory.CreateToken("pull");
+            string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBasic(token);
             var resp = await client.GetAsync($"/simple/never-{Guid.NewGuid():N}/");
             Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
@@ -220,14 +226,14 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         await SetProxyPassthrough(false);
         try
         {
-            var name = $"localonly{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+            string name = $"localonly{Guid.NewGuid():N}"[..18].ToLowerInvariant();
             await _factory.PushPyPiPackage(name, "1.0.0");
 
-            var token = await _factory.CreateToken("pull");
+            string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBasic(token);
             var resp = await client.GetAsync($"/simple/{name}/");
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-            var html = await resp.Content.ReadAsStringAsync();
+            string html = await resp.Content.ReadAsStringAsync();
             Assert.Contains($"Links for {name}", html);
             Assert.Contains("1.0.0", html);
         }
@@ -242,18 +248,18 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     {
         // Upstream returns 500 (treated by the catch-all as "no upstream HTML"). Since we
         // have local versions, render those — the upstream-failure-with-local-fallback branch.
-        var name = $"upfail{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"upfail{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushPyPiPackage(name, "1.0.0");
 
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.InternalServerError));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/simple/{name}/");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        var html = await resp.Content.ReadAsStringAsync();
+        string html = await resp.Content.ReadAsStringAsync();
         Assert.Contains($"Links for {name}", html);
     }
 
@@ -261,12 +267,12 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     public async Task SimpleIndex_UpstreamUnreachable_NoLocalVersions_Returns404()
     {
         // Passthrough on, no local versions, upstream 404 → simple-index NotFound branch.
-        var name = $"nothing{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"nothing{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/simple/{name}/");
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
@@ -277,7 +283,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     {
         // ProxyUpstreamSimpleIndex hits the "AnonymousPull=false + no token" branch and emits
         // WWW-Authenticate.
-        var name = $"proxauth{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"proxauth{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
@@ -305,12 +311,12 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     public async Task DownloadPackage_CachedBlob_AuthenticatedRequest_ReturnsHit()
     {
         // Pushed wheel → cached path → X-Cache: HIT branch via TryServeCachedBlobAsync.
-        var name = $"cachehit{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"cachehit{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushPyPiPackage(name, "1.0.0");
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-1.0.0-py3-none-any.whl";
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -322,10 +328,10 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     public async Task DownloadPackage_UploadedVersionAnonymous_Returns401WithWwwAuthenticate()
     {
         // CheckDownloadAuth branch: per-version origin='uploaded' + no token → 401.
-        var name = $"upauth{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"upauth{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushPyPiPackage(name, "1.0.0");
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-1.0.0-py3-none-any.whl";
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
 
         using var client = _factory.CreateClient();
         var resp = await client.GetAsync($"/packages/{filename}");
@@ -340,7 +346,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         await SetProxyPassthrough(false);
         try
         {
-            var token = await _factory.CreateToken("pull");
+            string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBasic(token);
             var resp = await client.GetAsync($"/packages/nopas-1.0.0-py3-none-any.whl");
             Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
@@ -357,10 +363,10 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         // CheckProxyAllowlistBlocklistAsync → allowlist branch returns 403. The 403 is
         // emitted after ResolveProxyUpstreamUrlAsync returns a non-null URL, so we must
         // stub the upstream simple index to advertise the wheel.
-        var name = $"forbid{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-1.0.0-py3-none-any.whl";
-        var mockBase = _factory.MockUpstream.Urls[0];
+        string name = $"forbid{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+        string mockBase = _factory.MockUpstream.Urls[0];
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
@@ -370,7 +376,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         await SetAllowlistMode(true);
         try
         {
-            var token = await _factory.CreateToken("pull");
+            string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBasic(token);
             var resp = await client.GetAsync($"/packages/{filename}");
             Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
@@ -387,10 +393,10 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         // CheckProxyAllowlistBlocklistAsync → blocklist branch returns 403 + audit log.
         // Same as above: the 403 fires only after the upstream URL resolves, so stub
         // upstream simple-index.
-        var name = $"blockme{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-1.0.0-py3-none-any.whl";
-        var mockBase = _factory.MockUpstream.Urls[0];
+        string name = $"blockme{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+        string mockBase = _factory.MockUpstream.Urls[0];
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
@@ -398,7 +404,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
                 .WithBody($"<html><body><a href=\"{mockBase}/files/{filename}\">{filename}</a></body></html>"));
         await AddBlocklistEntry($"pkg:pypi/{name}");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
@@ -409,16 +415,16 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     {
         // Allowlist permit branch: the gate clears and the proxy fetch runs against upstream.
         await SetAllowlistMode(true);
-        var name = $"allowok{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string name = $"allowok{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         try
         {
             await AddAllowlistEntry($"pkg:pypi/{name}");
-            var underscored = name.Replace('-', '_');
-            var filename = $"{underscored}-1.0.0-py3-none-any.whl";
+            string underscored = name.Replace('-', '_');
+            string filename = $"{underscored}-1.0.0-py3-none-any.whl";
             var (wheelBytes, _) = PyPiFixtures.BuildWheel(name, "1.0.0");
-            var mockBase = _factory.MockUpstream.Urls[0];
+            string mockBase = _factory.MockUpstream.Urls[0];
 
-            var simpleHtml = $"""
+            string simpleHtml = $"""
                 <!DOCTYPE html><html><body>
                 <a href="{mockBase}/files/{filename}">{filename}</a>
                 </body></html>
@@ -433,7 +439,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
                     .WithHeader("Content-Type", "application/octet-stream")
                     .WithBody(wheelBytes));
 
-            var token = await _factory.CreateToken("pull");
+            string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBasic(token);
             var resp = await client.GetAsync($"/packages/{filename}");
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
@@ -449,15 +455,15 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     {
         // Cache miss + upstream simple-index 404 → ResolveProxyUpstreamUrlAsync returns null
         // → DownloadPackage returns NotFound before reaching FetchAndCacheUpstreamAsync.
-        var name = $"missing{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-1.0.0-py3-none-any.whl";
+        string name = $"missing{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
 
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
@@ -469,11 +475,11 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         // Cache-miss + upstream-success path: ResolveUpstreamPyPiUrlAsync finds the URL,
         // DownloadAndCacheAsync fetches and caches, FetchAndCacheUpstreamAsync emits
         // X-Cache: MISS and serves the bytes. Pins the first-fetch recording branch.
-        var name = $"upmiss{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-1.0.0-py3-none-any.whl";
+        string name = $"upmiss{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
         var (wheelBytes, _) = PyPiFixtures.BuildWheel(name, "1.0.0");
-        var mockBase = _factory.MockUpstream.Urls[0];
+        string mockBase = _factory.MockUpstream.Urls[0];
 
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
@@ -485,13 +491,13 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(wheelBytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         // MISS header from the cache-miss path. (Could be HIT if the proxy fetch service
         // wrote the blob under a different key — we accept either as proof of the path.)
-        var cacheHeader = resp.Headers.GetValues("X-Cache").FirstOrDefault();
+        string? cacheHeader = resp.Headers.GetValues("X-Cache").FirstOrDefault();
         Assert.True(cacheHeader is "MISS" or "HIT", $"unexpected X-Cache: {cacheHeader}");
     }
 
@@ -501,7 +507,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     public async Task Upload_PathTraversalInName_Returns422()
     {
         // ValidatePathSafety branch — a "../" sneaks into the form's name field.
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         var (bytes, sha256) = PyPiFixtures.BuildWheel("dotdot", "1.0.0");
         using var client = _factory.CreateClientWithBasic(token);
         using var form = new MultipartFormDataContent();
@@ -527,7 +533,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         await _factory.SetOrgLimit("default", "pypi", 100); // tiny org limit
         try
         {
-            var token = await _factory.CreateToken("push");
+            string token = await _factory.CreateToken("push");
             var (bytes, sha256) = PyPiFixtures.BuildWheel("toobig", "1.0.0");
             using var client = _factory.CreateClientWithBasic(token);
             using var content = BuildUploadForm("toobig", "1.0.0", bytes, sha256,
@@ -546,7 +552,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     public async Task Upload_WheelMissingMetadata_Returns422()
     {
         // ValidateFileTypeContents → ValidateWheel: zip with no .dist-info/METADATA fails.
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         // Build a wheel-shaped ZIP that lacks the dist-info METADATA entry.
         byte[] bytes;
         using (var ms = new MemoryStream())
@@ -560,7 +566,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
             }
             bytes = ms.ToArray();
         }
-        var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
         using var client = _factory.CreateClientWithBasic(token);
         using var content = BuildUploadForm("nometa", "1.0.0", bytes, sha,
@@ -573,7 +579,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     public async Task Upload_SdistWrongExtension_Returns422()
     {
         // ValidateSdist: filename must end in .tar.gz or .zip.
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         var (bytes, sha256) = PyPiFixtures.BuildSdist("wrongext", "1.0.0");
         using var client = _factory.CreateClientWithBasic(token);
         using var content = BuildUploadForm("wrongext", "1.0.0", bytes, sha256,
@@ -586,7 +592,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     public async Task Upload_SdistFilenameMismatch_Returns422()
     {
         // ValidateSdist: filename must start with the normalized package name.
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         var (bytes, sha256) = PyPiFixtures.BuildSdist("expected", "1.0.0");
         using var client = _factory.CreateClientWithBasic(token);
         using var content = BuildUploadForm("expected", "1.0.0", bytes, sha256,
@@ -599,7 +605,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     public async Task Upload_Md5Mismatch_Returns422()
     {
         // VerifyDigests: sha256 matches but the md5 digest doesn't.
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         var (bytes, sha256) = PyPiFixtures.BuildWheel("md5miss", "1.0.0");
         const string wrongMd5 = "00000000000000000000000000000000";
         using var client = _factory.CreateClientWithBasic(token);
@@ -613,7 +619,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     public async Task Upload_NotMultipart_Returns400()
     {
         // Upload's HasFormContentType=false branch.
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClientWithBasic(token);
         using var content = new StringContent("not multipart", Encoding.UTF8, "application/json");
         var resp = await client.PostAsync("/pypi/legacy/", content);
@@ -625,9 +631,9 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     {
         // Happy path that exercises the optional md5_digest branch (string.IsNullOrEmpty=false
         // and digests match) AND the LicenseExtractor post-publish branch.
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         var (bytes, sha256) = PyPiFixtures.BuildWheel("md5ok-pkg", "2.0.0");
-        var md5 = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
+        string md5 = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
         using var client = _factory.CreateClientWithBasic(token);
         using var content = BuildUploadForm("md5ok-pkg", "2.0.0", bytes, sha256,
             filename: "md5ok_pkg-2.0.0-py3-none-any.whl", md5: md5);

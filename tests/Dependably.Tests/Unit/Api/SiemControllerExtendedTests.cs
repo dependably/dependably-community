@@ -1,11 +1,9 @@
 using System.Security.Claims;
-using System.Text;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -83,10 +81,10 @@ public sealed class SiemControllerExtendedTests
         string? severity)
     {
         await using var conn = await db.OpenAsync();
-        var pkgId = Guid.NewGuid().ToString("N");
-        var verId = Guid.NewGuid().ToString("N");
-        var vulnId = Guid.NewGuid().ToString("N");
-        var osvId = "OSV-" + Guid.NewGuid().ToString("N");
+        string pkgId = Guid.NewGuid().ToString("N");
+        string verId = Guid.NewGuid().ToString("N");
+        string vulnId = Guid.NewGuid().ToString("N");
+        string osvId = "OSV-" + Guid.NewGuid().ToString("N");
 
         await conn.ExecuteAsync(
             "INSERT INTO packages (id, org_id, ecosystem, name, purl_name) VALUES (@id, @orgId, @eco, @name, @name)",
@@ -127,7 +125,7 @@ public sealed class SiemControllerExtendedTests
 
         var result = await b.SiemController.GetAuthEvents(null, null, null, null, 100, null);
         var ok = Assert.IsType<OkObjectResult>(result);
-        var json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
+        string json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
         Assert.Contains("foreign-user", json);
     }
 
@@ -233,7 +231,7 @@ public sealed class SiemControllerExtendedTests
             action: new[] { "lockout" }, // prefix filter (TrimEnd('.') normalisation)
             limit: 100, cursor: null);
         var ok = Assert.IsType<OkObjectResult>(result);
-        var json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
+        string json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
         Assert.Contains("lockout-actor", json);
         Assert.DoesNotContain("login-actor", json);
     }
@@ -292,17 +290,19 @@ public sealed class SiemControllerExtendedTests
         var b = await s.BuildAsync();
 
         var now = DateTimeOffset.UtcNow;
-        for (var i = 0; i < 3; i++)
+        for (int i = 0; i < 3; i++)
+        {
             await SeedAuditAsync(b.Db, b.PrimaryOrgId, "login.success", now.AddMinutes(-i * 5), actorId: $"a{i}");
+        }
 
         // First page with limit=1 → expect cursor + 1 item.
         var first = await b.SiemController.GetAuthEvents(null, null, null, null, limit: 1, cursor: null);
         var firstOk = Assert.IsType<OkObjectResult>(first);
-        var firstJson = System.Text.Json.JsonSerializer.Serialize(firstOk.Value);
+        string firstJson = System.Text.Json.JsonSerializer.Serialize(firstOk.Value);
 
         // Extract next_cursor.
         using var doc = System.Text.Json.JsonDocument.Parse(firstJson);
-        var nextCursor = doc.RootElement.GetProperty("next_cursor").GetString();
+        string? nextCursor = doc.RootElement.GetProperty("next_cursor").GetString();
         Assert.False(string.IsNullOrEmpty(nextCursor));
 
         // Second page using the cursor → should return more items, cursor consumed.
@@ -339,7 +339,7 @@ public sealed class SiemControllerExtendedTests
         var result = await b.SiemController.GetAuthEvents(null, null, null, null, limit: 1, cursor: null);
         var content = Assert.IsType<ContentResult>(result);
         Assert.NotNull(content.Content);
-        var lines = content.Content!.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        string[] lines = content.Content!.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         Assert.True(lines.Length >= 2, "expected one item line + one cursor line");
         Assert.Contains(lines, l => l.Contains("next_cursor"));
     }
@@ -360,7 +360,7 @@ public sealed class SiemControllerExtendedTests
             "rbac.role_changed", "rbac.member_added", "rbac.member_removed",
             "rbac.unmapped_arm", // default branch of both switches
         };
-        for (var i = 0; i < actions.Length; i++)
+        for (int i = 0; i < actions.Length; i++)
         {
             await SeedAuditAsync(
                 b.Db, b.PrimaryOrgId, actions[i],
@@ -382,7 +382,7 @@ public sealed class SiemControllerExtendedTests
         var content = Assert.IsType<ContentResult>(result);
         Assert.StartsWith("application/x-cef", content.ContentType);
         Assert.NotNull(content.Content);
-        var body = content.Content!;
+        string body = content.Content!;
         // CEF header present.
         Assert.Contains("CEF:0|Dependably|dependably|1.0|", body);
         // Friendly names rendered.
@@ -447,13 +447,13 @@ public sealed class SiemControllerExtendedTests
         await s.WithOrgAsync("acme"); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        await SeedVulnAsync(b.Db, b.PrimaryOrgId, "npm",  "lodash",  "1.0.0", severity: "HIGH");
-        await SeedVulnAsync(b.Db, b.PrimaryOrgId, "npm",  "express", "2.0.0", severity: "LOW");
-        await SeedVulnAsync(b.Db, b.PrimaryOrgId, "pypi", "requests","3.0.0", severity: null); // null → "unknown"
+        await SeedVulnAsync(b.Db, b.PrimaryOrgId, "npm", "lodash", "1.0.0", severity: "HIGH");
+        await SeedVulnAsync(b.Db, b.PrimaryOrgId, "npm", "express", "2.0.0", severity: "LOW");
+        await SeedVulnAsync(b.Db, b.PrimaryOrgId, "pypi", "requests", "3.0.0", severity: null); // null → "unknown"
 
         var result = await b.SiemController.GetVulnSummary(org: null, ecosystem: null);
         var ok = Assert.IsType<OkObjectResult>(result);
-        var json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
+        string json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
         Assert.Contains("by_ecosystem", json);
         Assert.Contains("npm", json);
         Assert.Contains("pypi", json);
@@ -467,13 +467,13 @@ public sealed class SiemControllerExtendedTests
         await s.WithOrgAsync("acme"); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        await SeedVulnAsync(b.Db, b.PrimaryOrgId, "npm",  "lodash",   "1.0.0", "HIGH");
+        await SeedVulnAsync(b.Db, b.PrimaryOrgId, "npm", "lodash", "1.0.0", "HIGH");
         await SeedVulnAsync(b.Db, b.PrimaryOrgId, "pypi", "requests", "2.0.0", "LOW");
 
         // ecosystem=npm — pypi row must be filtered out by the continue branch
         var result = await b.SiemController.GetVulnSummary(org: null, ecosystem: "NPM"); // case-insensitive
         var ok = Assert.IsType<OkObjectResult>(result);
-        var json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
+        string json = System.Text.Json.JsonSerializer.Serialize(ok.Value);
         Assert.Contains("npm", json);
         Assert.DoesNotContain("requests", json);
     }

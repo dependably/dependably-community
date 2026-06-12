@@ -3,7 +3,6 @@ using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -44,25 +43,25 @@ public sealed class SpdxLicenseSeederTests
         await using var fx = await NewFixtureAsync();
         await using var conn = await fx.Store.OpenAsync();
 
-        var count = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM spdx_license");
+        long count = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM spdx_license");
         Assert.True(count > 100, $"Expected the embedded SPDX list to seed many rows; got {count}.");
 
-        var version = await conn.ExecuteScalarAsync<string>(
+        string? version = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = @k", new { k = VersionKey });
         Assert.False(string.IsNullOrWhiteSpace(version));
 
         // The overlay assigns explicit copyleft values to a curated subset; everything else
         // falls through to 'unclassified'. Both buckets must be present after a successful run.
-        var unclassified = await conn.ExecuteScalarAsync<long>(
+        long unclassified = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM spdx_license WHERE copyleft = 'unclassified'");
-        var classified = await conn.ExecuteScalarAsync<long>(
+        long classified = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM spdx_license WHERE copyleft <> 'unclassified'");
         Assert.True(unclassified > 0);
         Assert.True(classified > 0);
 
         // Deprecated identifiers ride in on the same JSON; assert at least one is flagged so
         // the el.TryGetProperty("isDeprecatedLicenseId", ...) true-branch is observably hit.
-        var deprecated = await conn.ExecuteScalarAsync<long>(
+        long deprecated = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM spdx_license WHERE is_deprecated = 1");
         Assert.True(deprecated > 0);
     }
@@ -94,8 +93,8 @@ public sealed class SpdxLicenseSeederTests
 
         await using (var conn = await fx.Store.OpenAsync())
         {
-            var afterCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM spdx_license");
-            var afterVersion = await conn.ExecuteScalarAsync<string>(
+            long afterCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM spdx_license");
+            string? afterVersion = await conn.ExecuteScalarAsync<string>(
                 "SELECT value FROM instance_settings WHERE key = @k",
                 new { k = VersionKey });
             Assert.Equal(initialCount, afterCount);
@@ -128,16 +127,16 @@ public sealed class SpdxLicenseSeederTests
         {
             // Sentinel must be gone (DELETE FROM spdx_license fired), real rows reinserted,
             // and the version row brought back up to the embedded value.
-            var sentinel = await conn.ExecuteScalarAsync<long>(
+            long sentinel = await conn.ExecuteScalarAsync<long>(
                 "SELECT COUNT(*) FROM spdx_license WHERE identifier = 'ZZZ-Sentinel'");
             Assert.Equal(0, sentinel);
 
-            var version = await conn.ExecuteScalarAsync<string>(
+            string? version = await conn.ExecuteScalarAsync<string>(
                 "SELECT value FROM instance_settings WHERE key = @k", new { k = VersionKey });
             Assert.False(string.IsNullOrEmpty(version));
             Assert.NotEqual("old-version", version);
 
-            var total = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM spdx_license");
+            long total = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM spdx_license");
             Assert.True(total > 100);
         }
     }
@@ -183,11 +182,9 @@ public sealed class SpdxLicenseSeederTests
             await conn.ExecuteAsync("COMMIT TRANSACTION");
         }
 
-        await using (var fresh = await fx.Store.OpenAsync())
-        {
-            var version = await fresh.ExecuteScalarAsync<string>(
-                "SELECT value FROM instance_settings WHERE key = @k", new { k = VersionKey });
-            Assert.Equal("force-mismatch", version);
-        }
+        await using var fresh = await fx.Store.OpenAsync();
+        string? version = await fresh.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = @k", new { k = VersionKey });
+        Assert.Equal("force-mismatch", version);
     }
 }

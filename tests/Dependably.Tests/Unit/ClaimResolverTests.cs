@@ -2,7 +2,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -92,5 +91,75 @@ public class ClaimResolverTests : IAsyncLifetime
     {
         var resolver = new ClaimResolver(new ClaimRepository(_db), AirGap(true));
         Assert.True(await resolver.CanPublishAsync("o1", "npm", "anything"));
+    }
+
+    // ── hosted-name shadowing guard (implicit local_only) ─────────────────────
+
+    [Fact]
+    public async Task NoClaim_HostedVersionExists_ReturnsLocalOnlyImplicit()
+    {
+        // The dependency-confusion guard: a name the org has uploaded must not resolve as
+        // unclaimed (which would let upstream shadow it).
+        string pkgId = await Tests.Infrastructure.Seeding.PackageSeeder.InsertAsync(_db, "o1", "npm", "internal-lib");
+        await Tests.Infrastructure.Seeding.PackageSeeder.InsertVersionAsync(
+            _db, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/internal-lib@1.0.0", origin: "uploaded");
+
+        var resolver = new ClaimResolver(new ClaimRepository(_db), AirGap(false));
+        var eff = await resolver.ResolveAsync("o1", "npm", "internal-lib");
+
+        Assert.Equal(ClaimStateMachine.LocalOnly, eff.State);
+        Assert.True(eff.IsImplicit);
+        Assert.False(await resolver.IsProxyFetchAllowedAsync("o1", "npm", "internal-lib"));
+    }
+
+    [Fact]
+    public async Task NoClaim_OnlyProxyVersionsExist_StaysUnclaimed()
+    {
+        // Proxy-cached content is upstream's, not the org's — it must not flip the implicit
+        // state, or every cached name would silently stop proxying.
+        string pkgId = await Tests.Infrastructure.Seeding.PackageSeeder.InsertAsync(_db, "o1", "npm", "public-lib");
+        await Tests.Infrastructure.Seeding.PackageSeeder.InsertVersionAsync(
+            _db, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/public-lib@1.0.0", origin: "proxy");
+
+        var resolver = new ClaimResolver(new ClaimRepository(_db), AirGap(false));
+        var eff = await resolver.ResolveAsync("o1", "npm", "public-lib");
+
+        Assert.Equal(ClaimStateMachine.Unclaimed, eff.State);
+        Assert.True(eff.IsImplicit);
+    }
+
+    [Fact]
+    public async Task ExplicitMixedClaim_OverridesHostedImplicitLocalOnly()
+    {
+        // The operator opt-in: an explicit mixed claim keeps upstream merging on a hosted name.
+        string pkgId = await Tests.Infrastructure.Seeding.PackageSeeder.InsertAsync(_db, "o1", "npm", "optin-lib");
+        await Tests.Infrastructure.Seeding.PackageSeeder.InsertVersionAsync(
+            _db, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/optin-lib@1.0.0", origin: "uploaded");
+        await SeedClaim("npm", "optin-lib", ClaimStateMachine.Mixed);
+
+        var resolver = new ClaimResolver(new ClaimRepository(_db), AirGap(false));
+        var eff = await resolver.ResolveAsync("o1", "npm", "optin-lib");
+
+        Assert.Equal(ClaimStateMachine.Mixed, eff.State);
+        Assert.False(eff.IsImplicit);
+        Assert.True(await resolver.IsProxyFetchAllowedAsync("o1", "npm", "optin-lib"));
+    }
+
+    [Fact]
+    public async Task HostedImplicitLocalOnly_IsOrgScoped()
+    {
+        // Org A's hosted name must not flip org B's resolution for the same name.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o2', 'beta')");
+        }
+
+        string pkgId = await Tests.Infrastructure.Seeding.PackageSeeder.InsertAsync(_db, "o1", "npm", "shared-name");
+        await Tests.Infrastructure.Seeding.PackageSeeder.InsertVersionAsync(
+            _db, pkgId, "1.0.0", $"pkg:npm/{Guid.NewGuid():N}/shared-name@1.0.0", origin: "uploaded");
+
+        var resolver = new ClaimResolver(new ClaimRepository(_db), AirGap(false));
+        Assert.Equal(ClaimStateMachine.LocalOnly, (await resolver.ResolveAsync("o1", "npm", "shared-name")).State);
+        Assert.Equal(ClaimStateMachine.Unclaimed, (await resolver.ResolveAsync("o2", "npm", "shared-name")).State);
     }
 }

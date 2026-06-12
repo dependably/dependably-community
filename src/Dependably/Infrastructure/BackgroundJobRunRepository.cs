@@ -83,18 +83,18 @@ public sealed class BackgroundJobRunRepository
         await using var conn = await _db.OpenAsync(ct);
 
         // ORDER BY is interpolated into the SQL — whitelist before use. Never trust raw input here.
-        var orderColumn = query.SortBy switch
+        string orderColumn = query.SortBy switch
         {
             "jobName" => "job_name",
             "durationMs" => "duration_ms",
             "outcome" => "outcome",
             _ => "started_at",
         };
-        var orderDirection = string.Equals(query.SortDir, "asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
+        string orderDirection = string.Equals(query.SortDir, "asc", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
 
-        var searchPattern = string.IsNullOrWhiteSpace(query.Search) ? null : $"%{query.Search.Trim().ToLowerInvariant()}%";
-        var jobNameFilter = string.IsNullOrWhiteSpace(query.JobName) ? null : query.JobName;
-        var outcomeFilter = string.IsNullOrWhiteSpace(query.Outcome) ? null : query.Outcome;
+        string? searchPattern = string.IsNullOrWhiteSpace(query.Search) ? null : $"%{query.Search.Trim().ToLowerInvariant()}%";
+        string? jobNameFilter = string.IsNullOrWhiteSpace(query.JobName) ? null : query.JobName;
+        string? outcomeFilter = string.IsNullOrWhiteSpace(query.Outcome) ? null : query.Outcome;
 
         const string whereClause = """
             (@jobName IS NULL OR job_name = @jobName)
@@ -105,11 +105,13 @@ public sealed class BackgroundJobRunRepository
                    OR lower(COALESCE(error_message, '')) LIKE @searchPattern)
             """;
 
-        var total = await conn.ExecuteScalarAsync<int>(
+        // rawsql: whereClause is a const with only @param placeholders (see S2077 justification above).
+        int total = await conn.ExecuteScalarAsync<int>(
             $"SELECT COUNT(*) FROM background_job_runs WHERE {whereClause}",
             new { jobName = jobNameFilter, outcome = outcomeFilter, searchPattern });
 
-        var listSql = $"""
+        // rawsql: only the whitelisted ORDER BY column/direction are interpolated (see S2077 justification above).
+        string listSql = $"""
             SELECT id AS Id,
                    job_name AS JobName,
                    operation AS Operation,

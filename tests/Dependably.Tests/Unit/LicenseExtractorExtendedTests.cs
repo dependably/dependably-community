@@ -3,7 +3,6 @@ using System.IO.Compression;
 using System.Text;
 using System.Text.Json.Nodes;
 using Dependably.Protocol;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -23,7 +22,7 @@ public sealed class LicenseExtractorExtendedTests
     {
         // Wheel zip with no .dist-info/METADATA entry — ReadWheelMetadata returns null
         // and FromPyPiPackageBytes short-circuits to Empty.
-        var bytes = BuildZip(new Dictionary<string, string>
+        byte[] bytes = BuildZip(new Dictionary<string, string>
         {
             ["foo-1.0.dist-info/RECORD"] = "garbage",
             ["foo/__init__.py"] = "",
@@ -37,7 +36,7 @@ public sealed class LicenseExtractorExtendedTests
     [Fact]
     public void PyPi_Sdist_TarGz_ExtractsLicenseFromPkgInfo()
     {
-        var bytes = BuildTarGz("foo-1.0/PKG-INFO", """
+        byte[] bytes = BuildTarGz("foo-1.0/PKG-INFO", """
             Metadata-Version: 2.1
             Name: foo
             Version: 1.0
@@ -54,7 +53,7 @@ public sealed class LicenseExtractorExtendedTests
     {
         // Valid tar.gz, but no */PKG-INFO entry — tar walk exhausts, zip-fallback
         // sees the same bytes as not-a-zip, and ReadSdistPkgInfo returns null.
-        var bytes = BuildTarGz("foo-1.0/setup.py", "x = 1");
+        byte[] bytes = BuildTarGz("foo-1.0/setup.py", "x = 1");
         var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0.tar.gz");
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
@@ -64,7 +63,7 @@ public sealed class LicenseExtractorExtendedTests
     {
         // Filename doesn't end in .whl, so we go through ReadSdistPkgInfo. Bytes are
         // not gzip, so the tar try-catch falls through; the zip path picks up PKG-INFO.
-        var bytes = BuildZip(new Dictionary<string, string>
+        byte[] bytes = BuildZip(new Dictionary<string, string>
         {
             ["foo-1.0/PKG-INFO"] = """
                 Metadata-Version: 2.1
@@ -83,7 +82,7 @@ public sealed class LicenseExtractorExtendedTests
     public void PyPi_Sdist_ZipFallback_NoPkgInfoEntry_ReturnsEmpty()
     {
         // Valid zip, but no PKG-INFO entry — ReadSdistPkgInfo returns null.
-        var bytes = BuildZip(new Dictionary<string, string>
+        byte[] bytes = BuildZip(new Dictionary<string, string>
         {
             ["foo-1.0/setup.py"] = "x = 1",
         });
@@ -95,7 +94,7 @@ public sealed class LicenseExtractorExtendedTests
     public void PyPi_Sdist_GarbageBytes_ReturnsEmpty()
     {
         // Neither gzip nor zip — both branches throw and the outer catch returns Empty.
-        var bytes = Encoding.UTF8.GetBytes("absolutely not a package");
+        byte[] bytes = Encoding.UTF8.GetBytes("absolutely not a package");
         var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "foo-1.0.tar.gz");
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
@@ -107,7 +106,7 @@ public sealed class LicenseExtractorExtendedTests
     {
         // The continuation extends the License-Expression value, which then contains
         // a newline and is rejected by IsPlausibleSpdx — so no SPDX is emitted.
-        var bytes = BuildWheel("""
+        byte[] bytes = BuildWheel("""
             Metadata-Version: 2.3
             Name: foo
             Version: 1.0
@@ -125,7 +124,7 @@ public sealed class LicenseExtractorExtendedTests
     {
         // The 'orphan' line (no colon) resets currentKey to null; the subsequent
         // License-Expression must still be picked up.
-        var bytes = BuildWheel("""
+        byte[] bytes = BuildWheel("""
             Metadata-Version: 2.3
             Name: foo
             orphan line with no colon
@@ -142,7 +141,7 @@ public sealed class LicenseExtractorExtendedTests
     public void PyPi_Headers_ColonAtStartOfLine_TreatedAsOrphan()
     {
         // idx == 0 → currentKey reset, line skipped. Following License is still parsed.
-        var bytes = BuildWheel("""
+        byte[] bytes = BuildWheel("""
             Metadata-Version: 2.1
             : nothing
             Name: foo
@@ -255,7 +254,7 @@ public sealed class LicenseExtractorExtendedTests
     [Fact]
     public void NpmTarball_NoPackageJson_ReturnsEmpty()
     {
-        var bytes = BuildTarGz("package/index.js", "module.exports = {};");
+        byte[] bytes = BuildTarGz("package/index.js", "module.exports = {};");
         var result = LicenseExtractor.FromNpmTarballPackageJson(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
@@ -264,7 +263,7 @@ public sealed class LicenseExtractorExtendedTests
     public void NpmTarball_MalformedPackageJson_ReturnsEmpty()
     {
         // Tar.gz reads fine, but JsonNode.Parse throws — outer catch returns Empty.
-        var bytes = BuildTarGz("package/package.json", "{ not valid json");
+        byte[] bytes = BuildTarGz("package/package.json", "{ not valid json");
         var result = LicenseExtractor.FromNpmTarballPackageJson(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
@@ -272,7 +271,7 @@ public sealed class LicenseExtractorExtendedTests
     [Fact]
     public void NpmTarball_MalformedGzip_ReturnsEmpty()
     {
-        var bytes = Encoding.UTF8.GetBytes("not a gzipped tarball");
+        byte[] bytes = Encoding.UTF8.GetBytes("not a gzipped tarball");
         var result = LicenseExtractor.FromNpmTarballPackageJson(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
@@ -283,7 +282,7 @@ public sealed class LicenseExtractorExtendedTests
     public void NuGet_NuspecInSubfolder_Ignored_ReturnsEmpty()
     {
         // Only root .nuspec is considered. A nested one must be skipped.
-        var bytes = BuildZip(new Dictionary<string, string>
+        byte[] bytes = BuildZip(new Dictionary<string, string>
         {
             ["_rels/foo.nuspec"] = """
                 <?xml version="1.0"?>
@@ -303,7 +302,7 @@ public sealed class LicenseExtractorExtendedTests
     [Fact]
     public void NuGet_LicenseExpressionType_Extracted()
     {
-        var bytes = BuildZip(new Dictionary<string, string>
+        byte[] bytes = BuildZip(new Dictionary<string, string>
         {
             ["foo.nuspec"] = """
                 <?xml version="1.0"?>
@@ -325,7 +324,7 @@ public sealed class LicenseExtractorExtendedTests
     public void NuGet_LicenseWithoutTypeAttribute_Ignored()
     {
         // No `type` attribute — first branch rejects (type != "expression").
-        var bytes = BuildZip(new Dictionary<string, string>
+        byte[] bytes = BuildZip(new Dictionary<string, string>
         {
             ["foo.nuspec"] = """
                 <?xml version="1.0"?>
@@ -345,7 +344,7 @@ public sealed class LicenseExtractorExtendedTests
     [Fact]
     public void NuGet_LicenseExpressionEmpty_ReturnsEmpty()
     {
-        var bytes = BuildZip(new Dictionary<string, string>
+        byte[] bytes = BuildZip(new Dictionary<string, string>
         {
             ["foo.nuspec"] = """
                 <?xml version="1.0"?>
@@ -366,7 +365,7 @@ public sealed class LicenseExtractorExtendedTests
     public void NuGet_LicenseExpressionImplausibleSpdx_ReturnsEmpty()
     {
         // type="expression" but the value contains invalid SPDX characters.
-        var bytes = BuildZip(new Dictionary<string, string>
+        byte[] bytes = BuildZip(new Dictionary<string, string>
         {
             ["foo.nuspec"] = """
                 <?xml version="1.0"?>
@@ -386,7 +385,7 @@ public sealed class LicenseExtractorExtendedTests
     [Fact]
     public void NuGet_NoNuspecAtAll_ReturnsEmpty()
     {
-        var bytes = BuildZip(new Dictionary<string, string>
+        byte[] bytes = BuildZip(new Dictionary<string, string>
         {
             ["lib/netstandard2.0/_._"] = "",
         });
@@ -397,7 +396,7 @@ public sealed class LicenseExtractorExtendedTests
     [Fact]
     public void NuGet_MalformedZipBytes_ReturnsEmpty()
     {
-        var bytes = Encoding.UTF8.GetBytes("not a zip at all");
+        byte[] bytes = Encoding.UTF8.GetBytes("not a zip at all");
         var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
@@ -406,7 +405,7 @@ public sealed class LicenseExtractorExtendedTests
     public void NuGet_NuspecWithoutMetadataElement_ReturnsEmpty()
     {
         // Root has no <metadata> child — metadata is null, licenseEl is null → Empty.
-        var bytes = BuildZip(new Dictionary<string, string>
+        byte[] bytes = BuildZip(new Dictionary<string, string>
         {
             ["foo.nuspec"] = """
                 <?xml version="1.0"?>
@@ -428,7 +427,7 @@ public sealed class LicenseExtractorExtendedTests
     [InlineData("MIT@2.0")]                 // invalid char '@'
     public void IsPlausibleSpdx_RejectsImplausibleShapes_ViaNuspec(string value)
     {
-        var xml = $"""
+        string xml = $"""
             <?xml version="1.0"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
               <metadata>
@@ -438,7 +437,7 @@ public sealed class LicenseExtractorExtendedTests
               </metadata>
             </package>
             """;
-        var bytes = BuildZip(new Dictionary<string, string> { ["foo.nuspec"] = xml });
+        byte[] bytes = BuildZip(new Dictionary<string, string> { ["foo.nuspec"] = xml });
         var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
@@ -447,8 +446,8 @@ public sealed class LicenseExtractorExtendedTests
     public void IsPlausibleSpdx_RejectsOverlyLongValue_ViaNuspec()
     {
         // 101-char value — IsPlausibleSpdx caps at 100.
-        var longSpdx = new string('A', 101);
-        var xml = $"""
+        string longSpdx = new('A', 101);
+        string xml = $"""
             <?xml version="1.0"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
               <metadata>
@@ -458,7 +457,7 @@ public sealed class LicenseExtractorExtendedTests
               </metadata>
             </package>
             """;
-        var bytes = BuildZip(new Dictionary<string, string> { ["foo.nuspec"] = xml });
+        byte[] bytes = BuildZip(new Dictionary<string, string> { ["foo.nuspec"] = xml });
         var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
@@ -467,7 +466,7 @@ public sealed class LicenseExtractorExtendedTests
     public void IsPlausibleSpdx_AcceptsExpressionWithParensAndPlus_ViaNuspec()
     {
         // Exercises the '(', ')', '+' branches of the char filter.
-        var xml = """
+        string xml = """
             <?xml version="1.0"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
               <metadata>
@@ -477,7 +476,7 @@ public sealed class LicenseExtractorExtendedTests
               </metadata>
             </package>
             """;
-        var bytes = BuildZip(new Dictionary<string, string> { ["foo.nuspec"] = xml });
+        byte[] bytes = BuildZip(new Dictionary<string, string> { ["foo.nuspec"] = xml });
         var result = LicenseExtractor.FromNuspec(new MemoryStream(bytes));
         Assert.Equal(new[] { "(MIT OR GPL-2.0+)" }, result.Spdx);
     }
@@ -515,7 +514,7 @@ public sealed class LicenseExtractorExtendedTests
 
     private static byte[] BuildTarGz(string entryName, string content)
     {
-        var contentBytes = Encoding.UTF8.GetBytes(content);
+        byte[] contentBytes = Encoding.UTF8.GetBytes(content);
         using var ms = new MemoryStream();
         using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
         using (var tw = new TarWriter(gz, leaveOpen: true))

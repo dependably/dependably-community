@@ -1,5 +1,4 @@
 using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
 using System.Text;
 using System.Text.Encodings.Web;
 using Dapper;
@@ -11,7 +10,6 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -66,8 +64,8 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
 
     private async Task<string> SeedUserTokenAsync(string capabilitiesJson, string userId = "u-admin")
     {
-        var raw = TokenGenerator.Generate();
-        var hash = TokenRepository.HashToken(raw);
+        string raw = TokenGenerator.Generate();
+        string hash = TokenRepository.HashToken(raw);
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync("""
             INSERT INTO user_tokens (id, org_id, user_id, token_hash, capabilities)
@@ -79,8 +77,8 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
 
     private async Task<string> SeedServiceTokenAsync(string? capabilitiesJson)
     {
-        var raw = TokenGenerator.Generate();
-        var hash = TokenRepository.HashToken(raw);
+        string raw = TokenGenerator.Generate();
+        string hash = TokenRepository.HashToken(raw);
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync("""
             INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities)
@@ -123,7 +121,7 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
     {
         // Base64 of "tokenwithoutcolon" decodes successfully but has no ':' separator. The
         // extractor returns null, so the handler reports NoResult.
-        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes("tokenwithoutcolon"));
+        string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes("tokenwithoutcolon"));
         var ctx = ContextWithHeader("Authorization", $"Basic {encoded}");
         var handler = await CreateHandlerAsync(ctx);
 
@@ -161,7 +159,7 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
     public async Task XNuGetApiKey_WithKnownToken_Authenticates()
     {
         // The handler must fall through Authorization absence and check X-NuGet-ApiKey.
-        var token = await SeedServiceTokenAsync("""["publish:nuget"]""");
+        string token = await SeedServiceTokenAsync("""["publish:nuget"]""");
         var ctx = ContextWithHeader("X-NuGet-ApiKey", token);
         var handler = await CreateHandlerAsync(ctx);
 
@@ -176,8 +174,8 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
     public async Task BasicAuth_StripsUsername_ResolvesToken()
     {
         // Username segment is ignored; everything after ':' is the token.
-        var token = await SeedUserTokenAsync("""["read:metadata"]""");
-        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes($"someuser:{token}"));
+        string token = await SeedUserTokenAsync("""["read:metadata"]""");
+        string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes($"someuser:{token}"));
         var ctx = ContextWithHeader("Authorization", $"Basic {encoded}");
         var handler = await CreateHandlerAsync(ctx);
 
@@ -192,7 +190,7 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
     [Fact]
     public async Task UserToken_EmitsRoleFromDb_AndSubIsUserId()
     {
-        var token = await SeedUserTokenAsync("""["read:metadata","read:artifact"]""");
+        string token = await SeedUserTokenAsync("""["read:metadata","read:artifact"]""");
         var ctx = ContextWithHeader("Authorization", $"Bearer {token}");
         var handler = await CreateHandlerAsync(ctx);
 
@@ -210,14 +208,15 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task UserToken_MissingUserRow_FallsBackToMemberRole()
+    public async Task UserToken_MissingUserRow_FailsAuthentication()
     {
-        // Token row references a user_id with no matching users row — the role lookup
-        // QuerySingleOrDefault returns null, and the handler falls back to "member".
+        // Token row references a user_id with no matching users row — resolution requires
+        // a live, active owner in the token's tenant, so an orphaned token is rejected
+        // outright (a removed user's credentials must not keep authenticating).
         // Microsoft.Data.Sqlite enables foreign_keys by default; toggle off just for the
         // orphan insert so we can craft this shape without re-enabling globally.
-        var raw = TokenGenerator.Generate();
-        var hash = TokenRepository.HashToken(raw);
+        string raw = TokenGenerator.Generate();
+        string hash = TokenRepository.HashToken(raw);
         await using (var conn = await _db.OpenAsync())
         {
             await conn.ExecuteAsync("PRAGMA foreign_keys = OFF");
@@ -232,15 +231,15 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
         var handler = await CreateHandlerAsync(ctx);
         var result = await handler.AuthenticateAsync();
 
-        Assert.True(result.Succeeded, result.Failure?.Message);
-        Assert.Equal("member", result.Principal!.FindFirst("role")!.Value);
+        Assert.False(result.Succeeded);
+        Assert.Null(result.Principal);
     }
 
     [Fact]
     public async Task ServiceToken_GetsCiRole_AndSubIsTokenId()
     {
         // Service tokens carry no user_id; the handler emits role=ci and uses the token id as sub.
-        var token = await SeedServiceTokenAsync("""["publish:npm"]""");
+        string token = await SeedServiceTokenAsync("""["publish:npm"]""");
         var ctx = ContextWithHeader("Authorization", $"Bearer {token}");
         var handler = await CreateHandlerAsync(ctx);
 
@@ -250,7 +249,7 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
         var principal = result.Principal!;
         Assert.Equal("ci", principal.FindFirst("role")!.Value);
         // sub is the token row id (32-char Guid N format) — definitely not "u-admin".
-        var sub = principal.FindFirst(JwtRegisteredClaimNames.Sub)!.Value;
+        string sub = principal.FindFirst(JwtRegisteredClaimNames.Sub)!.Value;
         Assert.NotEqual("u-admin", sub);
         Assert.Equal(32, sub.Length);
     }
@@ -260,7 +259,7 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
     [Fact]
     public async Task NullCapabilitiesColumn_EmitsNoCapClaims()
     {
-        var token = await SeedServiceTokenAsync(capabilitiesJson: null);
+        string token = await SeedServiceTokenAsync(capabilitiesJson: null);
         var ctx = ContextWithHeader("Authorization", $"Bearer {token}");
         var handler = await CreateHandlerAsync(ctx);
 
@@ -273,7 +272,7 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
     [Fact]
     public async Task WhitespaceCapabilitiesColumn_EmitsNoCapClaims()
     {
-        var token = await SeedServiceTokenAsync(capabilitiesJson: "   ");
+        string token = await SeedServiceTokenAsync(capabilitiesJson: "   ");
         var ctx = ContextWithHeader("Authorization", $"Bearer {token}");
         var handler = await CreateHandlerAsync(ctx);
 
@@ -287,7 +286,7 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
     public async Task MalformedCapabilitiesJson_EmitsNoCapClaims()
     {
         // JsonException catch path — not a JSON array.
-        var token = await SeedServiceTokenAsync(capabilitiesJson: "{not valid json}");
+        string token = await SeedServiceTokenAsync(capabilitiesJson: "{not valid json}");
         var ctx = ContextWithHeader("Authorization", $"Bearer {token}");
         var handler = await CreateHandlerAsync(ctx);
 
@@ -302,7 +301,7 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
     {
         // JSON literal "null" deserializes to a null string[] reference — the handler must
         // treat that the same as an empty set rather than NRE.
-        var token = await SeedServiceTokenAsync(capabilitiesJson: "null");
+        string token = await SeedServiceTokenAsync(capabilitiesJson: "null");
         var ctx = ContextWithHeader("Authorization", $"Bearer {token}");
         var handler = await CreateHandlerAsync(ctx);
 
@@ -316,7 +315,7 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
     public async Task CapabilitiesArray_FiltersWhitespaceEntries()
     {
         // Defensive filter on the deserialized array — blank/whitespace entries are dropped.
-        var token = await SeedServiceTokenAsync(capabilitiesJson: """["publish:npm","   ","","read:metadata"]""");
+        string token = await SeedServiceTokenAsync(capabilitiesJson: """["publish:npm","   ","","read:metadata"]""");
         var ctx = ContextWithHeader("Authorization", $"Bearer {token}");
         var handler = await CreateHandlerAsync(ctx);
 

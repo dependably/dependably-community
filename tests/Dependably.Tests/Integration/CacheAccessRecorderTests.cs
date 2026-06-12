@@ -2,7 +2,6 @@ using System.Net.Http.Headers;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -19,7 +18,7 @@ public sealed class CacheAccessRecorderTests : IClassFixture<DependablyFactory>,
         // The factory's WireMock upstream serves any /packages/* GET as a wheel for "lodash"
         // 1.0.0; the actual fetch path goes through PyPiController.GetTarballImpl which we
         // exercise here. The test factory plumbs the upstream URL through the config.
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
             "Basic", Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"u:{token}")));
@@ -93,7 +92,7 @@ public sealed class CacheAccessRecorderTests : IClassFixture<DependablyFactory>,
         var orgs = _factory.Services.GetRequiredService<OrgRepository>();
         var org = (await orgs.GetBySlugAsync("default"))!;
 
-        for (var i = 0; i < 5; i++)
+        for (int i = 0; i < 5; i++)
         {
             await recorder.RecordAccessAsync(new CacheAccess(org.Id, "npm", "acme-bump", "1.0.0",
                 "acme-bump-1.0.0.tgz", "h", 1, "proxy/h", "u"));
@@ -101,7 +100,7 @@ public sealed class CacheAccessRecorderTests : IClassFixture<DependablyFactory>,
 
         var db = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await db.OpenAsync();
-        var count = await Dapper.SqlMapper.ExecuteScalarAsync<long>(conn, """
+        long count = await Dapper.SqlMapper.ExecuteScalarAsync<long>(conn, """
             SELECT access_count FROM tenant_artifact_access taa
             JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
             WHERE ca.ecosystem = 'npm' AND ca.name = 'acme-bump' AND ca.version = '1.0.0'

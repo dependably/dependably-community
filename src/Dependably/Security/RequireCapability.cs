@@ -65,7 +65,7 @@ public sealed class CapabilityPolicyProvider : IAuthorizationPolicyProvider
     {
         if (policyName.StartsWith(RequireCapabilityAttribute.PolicyPrefix, StringComparison.Ordinal))
         {
-            var capability = policyName[RequireCapabilityAttribute.PolicyPrefix.Length..];
+            string capability = policyName[RequireCapabilityAttribute.PolicyPrefix.Length..];
             var policy = new AuthorizationPolicyBuilder()
                 .RequireAuthenticatedUser()
                 .AddRequirements(new CapabilityRequirement(capability))
@@ -110,21 +110,28 @@ public sealed class CapabilityHandler : AuthorizationHandler<CapabilityRequireme
             // Token-narrowed principal — only the explicit caps grant. Don't fall through
             // to the role claim, otherwise narrowing wouldn't actually narrow.
             if (Capabilities.Grants(explicitCaps, requirement.Capability))
+            {
                 context.Succeed(requirement);
+            }
+
             return Task.CompletedTask;
         }
 
-        var role = context.User.FindFirst("role")?.Value
+        string? role = context.User.FindFirst("role")?.Value
                    ?? context.User.FindFirst(ClaimTypes.Role)?.Value;
         if (string.IsNullOrEmpty(role))
+        {
             return Task.CompletedTask;
+        }
 
         var granted = role == "system_admin"
             ? Capabilities.ForPlatformAdmin()
             : Capabilities.ForRole(role);
 
         if (Capabilities.Grants(granted, requirement.Capability))
+        {
             context.Succeed(requirement);
+        }
 
         return Task.CompletedTask;
     }

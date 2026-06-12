@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Dapper;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -44,7 +45,7 @@ public sealed class MultiTenantBootstrapTests : IClassFixture<DependablyMultiFac
         // is 0" because other tests in the same fixture may have created tenants — tests are
         // order-independent.)
         var sysRepo = _factory.Services.GetRequiredService<Dependably.Infrastructure.SystemAdminRepository>();
-        var count = await sysRepo.CountAsync();
+        int count = await sysRepo.CountAsync();
         Assert.True(count >= 1, "FirstBoot in multi mode should create exactly one system_admin");
     }
 
@@ -60,15 +61,15 @@ public sealed class MultiTenantBootstrapTests : IClassFixture<DependablyMultiFac
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         // Login sets a host-only cookie.
         Assert.True(resp.Headers.Contains("Set-Cookie"));
-        var setCookie = string.Join(";", resp.Headers.GetValues("Set-Cookie"));
+        string setCookie = string.Join(";", resp.Headers.GetValues("Set-Cookie"));
         Assert.DoesNotContain("Domain=", setCookie, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
     public async Task CreateTenant_AtApex_AtomicallyCreatesOrgAndOwner()
     {
-        var slug = "acme-" + Guid.NewGuid().ToString("N")[..8];
-        var ownerEmail = $"alice-{Guid.NewGuid():N}@example.com";
+        string slug = "acme-" + Guid.NewGuid().ToString("N")[..8];
+        string ownerEmail = $"alice-{Guid.NewGuid():N}@example.com";
 
         using var client = await _factory.CreateSystemAdminClient();
         var resp = await client.PostAsJsonAsync("/api/v1/system/tenants", new
@@ -111,7 +112,7 @@ public sealed class MultiTenantBootstrapTests : IClassFixture<DependablyMultiFac
     [Fact]
     public async Task CreateTenant_DuplicateSlug_Returns409()
     {
-        var slug = "dup-" + Guid.NewGuid().ToString("N")[..8];
+        string slug = "dup-" + Guid.NewGuid().ToString("N")[..8];
         using var client = await _factory.CreateSystemAdminClient();
         var first = await client.PostAsJsonAsync("/api/v1/system/tenants", new
         {
@@ -132,7 +133,7 @@ public sealed class MultiTenantBootstrapTests : IClassFixture<DependablyMultiFac
     [Fact]
     public async Task TenantJwt_AtSystemRoute_Returns404_CrossRealmRejection()
     {
-        var slug = "rs-" + Guid.NewGuid().ToString("N")[..8];
+        string slug = "rs-" + Guid.NewGuid().ToString("N")[..8];
         using var sysClient = await _factory.CreateSystemAdminClient();
         var createResp = await sysClient.PostAsJsonAsync("/api/v1/system/tenants", new
         {
@@ -140,10 +141,19 @@ public sealed class MultiTenantBootstrapTests : IClassFixture<DependablyMultiFac
             ownerEmail = $"d-{Guid.NewGuid():N}@example.com",
         });
         var createDoc = JsonDocument.Parse(await createResp.Content.ReadAsStringAsync());
-        var tenantId = createDoc.RootElement.GetProperty("tenant").GetProperty("id").GetString()!;
+        string tenantId = createDoc.RootElement.GetProperty("tenant").GetProperty("id").GetString()!;
 
-        // Tenant JWT presented at system route → 404 (RouteScopeFilter rejects scope mismatch).
-        var tenantJwt = await _factory.CreateTenantJwt(userId: "fake-user", tenantId: tenantId);
+        // Tenant JWT presented at system route → 404 (RouteScopeFilter rejects scope
+        // mismatch). The JWT must reference a live user: token validation rejects sessions
+        // whose user row is missing, which would 401 before the scope check is reached.
+        string ownerId;
+        await using (var conn = await _factory.Services.GetRequiredService<Dependably.Infrastructure.IMetadataStore>().OpenAsync())
+        {
+            ownerId = await conn.ExecuteScalarAsync<string>(
+                "SELECT id FROM users WHERE tenant_id = @tenantId LIMIT 1", new { tenantId })
+                ?? throw new InvalidOperationException("owner user missing");
+        }
+        string tenantJwt = await _factory.CreateTenantJwt(userId: ownerId, tenantId: tenantId);
         using var client = _factory.CreateClientForHost(DependablyMultiFactory.ApexHost);
         client.DefaultRequestHeaders.Authorization =
             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", tenantJwt);
@@ -155,7 +165,7 @@ public sealed class MultiTenantBootstrapTests : IClassFixture<DependablyMultiFac
     [Fact]
     public async Task SystemJwt_AtTenantSubdomainBusinessRoute_Returns404()
     {
-        var slug = "pc-" + Guid.NewGuid().ToString("N")[..8];
+        string slug = "pc-" + Guid.NewGuid().ToString("N")[..8];
         using var sysClient = await _factory.CreateSystemAdminClient();
         await sysClient.PostAsJsonAsync("/api/v1/system/tenants", new
         {
@@ -164,7 +174,7 @@ public sealed class MultiTenantBootstrapTests : IClassFixture<DependablyMultiFac
         });
 
         // System_admin presenting their JWT at a tenant subdomain business route — 404.
-        var sysJwt = await _factory.CreateSystemAdminJwt();
+        string sysJwt = await _factory.CreateSystemAdminJwt();
         using var client = _factory.CreateClientForHost($"{slug}.{DependablyMultiFactory.ApexHost}");
         client.DefaultRequestHeaders.Authorization =
             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", sysJwt);

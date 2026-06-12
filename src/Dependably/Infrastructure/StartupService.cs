@@ -39,12 +39,12 @@ public sealed class StartupService : IHostedService
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        var version = typeof(StartupService).Assembly
+        string version = typeof(StartupService).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
             ?? typeof(StartupService).Assembly.GetName().Version?.ToString()
             ?? "unknown";
-        var dbPath = _config["DB_PATH"] ?? "/data/dependably.db";
-        var storage = _config["STORAGE_BACKEND"] ?? "local";
+        string dbPath = _config["DB_PATH"] ?? "/data/dependably.db";
+        string storage = _config["STORAGE_BACKEND"] ?? "local";
 
         _logger.LogInformation(
             "dependably {Version} starting — db={DbPath} storage={Storage}",
@@ -53,7 +53,7 @@ public sealed class StartupService : IHostedService
         await _schema.InitializeAsync(cancellationToken);
         await _firstBoot.RunAsync(cancellationToken);
 
-        var baseUrl = _config["BASE_URL"];
+        string? baseUrl = _config["BASE_URL"];
         if (baseUrl is null)
         {
             _logger.LogWarning(
@@ -73,10 +73,27 @@ public sealed class StartupService : IHostedService
         if (string.IsNullOrWhiteSpace(_config["TRUSTED_PROXIES"]))
         {
             _logger.LogWarning(
-                "TRUSTED_PROXIES is not set. Forwarded headers (X-Forwarded-For / -Proto) are " +
-                "accepted from any client, so a directly-reachable instance can spoof its source " +
-                "IP (affecting the /metrics allowlist, rate-limit keys, and audit source_ip). " +
+                "TRUSTED_PROXIES is not set. X-Forwarded-For, X-Forwarded-Proto, and " +
+                "X-Forwarded-Host are accepted from any client. Concrete consequences: " +
+                "(1) the /metrics and /version IP allowlist can be bypassed by forging " +
+                "X-Forwarded-For; (2) rate-limit buckets are keyed by the spoofable client IP, " +
+                "so per-IP limits are ineffective; (3) audit source_ip records the attacker-supplied " +
+                "value rather than the real connection address; (4) in DEPLOYMENT_MODE=multi, " +
+                "X-Forwarded-Host can spoof tenant resolution. " +
                 "Set TRUSTED_PROXIES to your reverse proxy's IP(s)/CIDR(s) to restrict this.");
+        }
+
+        bool isReplica =
+            string.Equals(_config["REPLICA_HINT"], "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(_config["INSTANCE_ROLE"], "replica", StringComparison.OrdinalIgnoreCase);
+        if (isReplica)
+        {
+            _logger.LogWarning(
+                "Multi-replica deployment detected (REPLICA_HINT or INSTANCE_ROLE=replica). " +
+                "OCI chunked uploads (/v2/*/blobs/uploads/*) append to a local staging file — " +
+                "PATCH requests for an active upload session must reach the same replica that " +
+                "issued the session UUID. Configure session affinity on your load balancer keyed " +
+                "on the upload UUID path segment before routing OCI push traffic.");
         }
 
         if (!string.IsNullOrWhiteSpace(_config["Rpm:Upstream"])
@@ -89,7 +106,7 @@ public sealed class StartupService : IHostedService
                 "your repo's pinned public key to enforce signature verification.");
         }
 
-        var jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", cancellationToken);
+        string? jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", cancellationToken);
         if (jwtSecret is not null)
         {
             _jwtOptions.Get(JwtBearerDefaults.AuthenticationScheme)
@@ -98,7 +115,18 @@ public sealed class StartupService : IHostedService
         }
         else
         {
-            _logger.LogWarning("JWT secret not found in instance settings after first-boot.");
+            // Fail closed. The JwtBearer options are seeded with a placeholder signing key on
+            // startup; serving without replacing it would let anyone forge owner or system
+            // session tokens offline using those known placeholder bytes. First-boot always
+            // writes jwt_secret, so this state only arises from a partial DB restore or a
+            // migration fault — an operator problem that must surface loudly, not be masked by
+            // silently minting a new secret.
+            throw new InvalidOperationException(
+                "jwt_secret is missing from instance_settings even though the instance is already "
+                + "bootstrapped (users/orgs exist). Refusing to start: serving with the placeholder "
+                + "signing key would accept forged session tokens. Restore the instance_settings "
+                + "table from backup (the jwt_secret row invalidates all existing sessions if "
+                + "regenerated).");
         }
 
         var (_, tenantCount) = await _orgs.ListOrgsAsync(1, 0, includeDeleted: false, cancellationToken);

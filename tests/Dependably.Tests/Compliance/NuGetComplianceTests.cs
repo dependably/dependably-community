@@ -27,10 +27,10 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
     [Fact]
     public async Task ServiceIndex_Version_Is300()
     {
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
-        var json = await client.GetStringAsync("/nuget/v3/index.json");
+        string json = await client.GetStringAsync("/nuget/v3/index.json");
         using var doc = JsonDocument.Parse(json);
 
         Assert.Equal("3.0.0", doc.RootElement.GetProperty("version").GetString());
@@ -39,10 +39,10 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
     [Fact]
     public async Task ServiceIndex_HasRequiredResourceTypes()
     {
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
-        var json = await client.GetStringAsync("/nuget/v3/index.json");
+        string json = await client.GetStringAsync("/nuget/v3/index.json");
         using var doc = JsonDocument.Parse(json);
 
         var types = doc.RootElement
@@ -72,10 +72,10 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
     {
         await _factory.PushNuGetPackage("AliasPkg", "1.2.3");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
-        var aliases = new[]
+        string[] aliases = new[]
         {
             "/nuget/registration/aliaspkg/",
             "/nuget/registration5-semver1/aliaspkg/",
@@ -84,14 +84,14 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
             "/nuget/registration5-gz-semver2/aliaspkg/",
         };
 
-        foreach (var path in aliases)
+        foreach (string? path in aliases)
         {
             // Upstream WireMock returns 404 for unstubbed paths, which exercises the
             // fall-back-to-local branch — perfect for proving the route reached the handler.
             var resp = await client.GetAsync(path);
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-            var json = await resp.Content.ReadAsStringAsync();
+            string json = await resp.Content.ReadAsStringAsync();
             using var doc = JsonDocument.Parse(json);
             var versions = doc.RootElement
                 .GetProperty("items").EnumerateArray()
@@ -113,9 +113,9 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
     [InlineData("http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd")]
     public async Task Push_KnownNuspecNamespace_Returns201(string ns)
     {
-        var token = await _factory.CreateToken("push");
-        var id = $"NsTest{ns.GetHashCode():X8}";
-        var bytes = BuildNupkg(id, "1.0.0", ns);
+        string token = await _factory.CreateToken("push");
+        string id = $"NsTest{ns.GetHashCode():X8}";
+        byte[] bytes = BuildNupkg(id, "1.0.0", ns);
 
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
@@ -129,8 +129,8 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
     [Fact]
     public async Task Push_UnknownNuspecNamespace_Returns422()
     {
-        var token = await _factory.CreateToken("push");
-        var bytes = BuildNupkg("UnknownNs", "1.0.0", "http://schemas.example.com/unknown/nuspec.xsd");
+        string token = await _factory.CreateToken("push");
+        byte[] bytes = BuildNupkg("UnknownNs", "1.0.0", "http://schemas.example.com/unknown/nuspec.xsd");
 
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
@@ -148,7 +148,7 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
     {
         await _factory.PushNuGetPackage("UnlistSearch", "1.0.0");
 
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
 
@@ -157,12 +157,12 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
         Assert.Equal(HttpStatusCode.NoContent, del.StatusCode);
 
         // The version should not appear in search results
-        var pullToken = await _factory.CreateToken("pull");
+        string pullToken = await _factory.CreateToken("pull");
         using var reader = _factory.CreateClientWithBasic(pullToken);
-        var json = await reader.GetStringAsync("/nuget/query?q=UnlistSearch");
+        string json = await reader.GetStringAsync("/nuget/query?q=UnlistSearch");
         using var doc = JsonDocument.Parse(json);
 
-        var hits = doc.RootElement.GetProperty("totalHits").GetInt32();
+        int hits = doc.RootElement.GetProperty("totalHits").GetInt32();
         Assert.Equal(0, hits);
     }
 
@@ -171,7 +171,7 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
     {
         await _factory.PushNuGetPackage("UnlistDown", "2.0.0");
 
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
 
@@ -179,7 +179,7 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
         Assert.Equal(HttpStatusCode.NoContent, del.StatusCode);
 
         // Flatcontainer download must still work after unlisting
-        var pullToken = await _factory.CreateToken("pull");
+        string pullToken = await _factory.CreateToken("pull");
         using var reader = _factory.CreateClientWithBasic(pullToken);
         var resp = await reader.GetAsync("/nuget/flatcontainer/unlistdown/2.0.0/unlistdown.2.0.0.nupkg");
 
@@ -194,7 +194,7 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
         await _factory.PushNuGetPackage("NormalVer", "1.0.0.0");
 
         // 1.0.0.0 → normalised to 1.0.0 in PURL; the package should be accessible under both
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
         // Flatcontainer uses the stored normalised version
@@ -211,7 +211,7 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
     {
         await _factory.PushNuGetPackage("CasePkg", "1.0.0");
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
 
         // NuGet flatcontainer requires case-insensitive ID lookup
@@ -239,7 +239,7 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
     [Fact]
     public async Task Push_PullToken_Returns403()
     {
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         var (bytes, _) = NuGetFixtures.BuildNupkg("ScopePkg", "1.0.0");
 
         using var client = _factory.CreateClient();
@@ -256,7 +256,7 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
     {
         await _factory.PushNuGetPackage("DupNuGet", "1.0.0");
 
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         var (bytes, _) = NuGetFixtures.BuildNupkg("DupNuGet", "1.0.0");
 
         using var client = _factory.CreateClient();
@@ -272,7 +272,7 @@ public sealed class NuGetComplianceTests : IClassFixture<DependablyFactory>, IAs
 
     private static byte[] BuildNupkg(string id, string version, string nuspecNs)
     {
-        var nuspec = $"""
+        string nuspec = $"""
             <?xml version="1.0" encoding="utf-8"?>
             <package xmlns="{nuspecNs}">
               <metadata>

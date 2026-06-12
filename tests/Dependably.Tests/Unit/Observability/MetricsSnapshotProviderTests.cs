@@ -1,5 +1,4 @@
 using Dependably.Infrastructure.Observability;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Observability;
 
@@ -55,24 +54,24 @@ public sealed class MetricsSnapshotProviderTests
         // Use a uniquely-suffixed tier so the assertion survives parallel runs
         // where production code paths may also write "cache"/"registry".
         // Tier is the only label here — never tenant_id (cardinality budget).
-        var tier = $"unit-tier-{Guid.NewGuid():N}";
+        string tier = $"unit-tier-{Guid.NewGuid():N}";
         DependablyMeter.RecordBlobStoreSize(tier, 9_876_543L);
 
         var snapshot = new MetricsSnapshotProvider().Capture();
 
-        Assert.True(snapshot.BlobStoreSizesByTier.TryGetValue(tier, out var bytes));
+        Assert.True(snapshot.BlobStoreSizesByTier.TryGetValue(tier, out long bytes));
         Assert.Equal(9_876_543L, bytes);
     }
 
     [Fact]
     public void Capture_ReflectsBackgroundJobLastSuccessKeyedByJobName()
     {
-        var jobName = $"unit-job-{Guid.NewGuid():N}";
+        string jobName = $"unit-job-{Guid.NewGuid():N}";
         DependablyMeter.RecordBackgroundJobSuccess(jobName);
 
         var snapshot = new MetricsSnapshotProvider().Capture();
 
-        Assert.True(snapshot.BackgroundJobLastSuccessUnixSeconds.TryGetValue(jobName, out var ts));
+        Assert.True(snapshot.BackgroundJobLastSuccessUnixSeconds.TryGetValue(jobName, out long ts));
         // Recorded as DateTimeOffset.UtcNow.ToUnixTimeSeconds() — must be a sane
         // recent epoch second (sometime after 2026-01-01).
         Assert.True(ts >= 1_767_225_600L, $"Unexpected timestamp {ts}");
@@ -105,8 +104,8 @@ public sealed class MetricsSnapshotProviderTests
         // ConcurrentDictionary into a plain Dictionary — later writes must NOT
         // appear in an already-captured snapshot. This guards the page contract
         // that values are point-in-time, not live.
-        var tier = $"unit-stable-tier-{Guid.NewGuid():N}";
-        var jobName = $"unit-stable-job-{Guid.NewGuid():N}";
+        string tier = $"unit-stable-tier-{Guid.NewGuid():N}";
+        string jobName = $"unit-stable-job-{Guid.NewGuid():N}";
 
         DependablyMeter.RecordBlobStoreSize(tier, 1L);
         DependablyMeter.RecordBackgroundJobSuccess(jobName);
@@ -131,7 +130,7 @@ public sealed class MetricsSnapshotProviderTests
 
         var tasks = Enumerable.Range(0, 32).Select(_ => Task.Run(() =>
         {
-            for (var i = 0; i < 25; i++)
+            for (int i = 0; i < 25; i++)
             {
                 var s = provider.Capture();
                 Assert.NotNull(s.BlobStoreSizesByTier);

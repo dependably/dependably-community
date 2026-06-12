@@ -40,23 +40,23 @@ public static class RpmHeaderParser
 
     // RPM tag IDs we care about. Full list lives in rpm/rpmtag.h upstream; we only pull
     // the columns the repodata XML needs.
-    private const int TagName        = 1000;
-    private const int TagVersion     = 1001;
-    private const int TagRelease     = 1002;
-    private const int TagEpoch       = 1003;
-    private const int TagSummary     = 1004;
+    private const int TagName = 1000;
+    private const int TagVersion = 1001;
+    private const int TagRelease = 1002;
+    private const int TagEpoch = 1003;
+    private const int TagSummary = 1004;
     private const int TagDescription = 1005;
-    private const int TagBuildTime   = 1006;
-    private const int TagBuildHost   = 1007;
+    private const int TagBuildTime = 1006;
+    private const int TagBuildHost = 1007;
     private const int TagInstalledSize = 1009;
-    private const int TagVendor      = 1011;
-    private const int TagLicense     = 1014;
-    private const int TagPackager    = 1015;
-    private const int TagGroup       = 1016;
-    private const int TagUrl         = 1020;
-    private const int TagArch        = 1022;
-    private const int TagFileFlags   = 1037;
-    private const int TagSourceRpm   = 1044;
+    private const int TagVendor = 1011;
+    private const int TagLicense = 1014;
+    private const int TagPackager = 1015;
+    private const int TagGroup = 1016;
+    private const int TagUrl = 1020;
+    private const int TagArch = 1022;
+    private const int TagFileFlags = 1037;
+    private const int TagSourceRpm = 1044;
     private const int TagArchiveSize = 1046;
     private const int TagProvideName = 1047;
     private const int TagRequireFlags = 1048;
@@ -73,9 +73,9 @@ public static class RpmHeaderParser
     private const int TagProvideVersion = 1113;
     private const int TagObsoleteFlags = 1114;
     private const int TagObsoleteVersion = 1115;
-    private const int TagDirIndexes  = 1116;
-    private const int TagBaseNames   = 1117;
-    private const int TagDirNames    = 1118;
+    private const int TagDirIndexes = 1116;
+    private const int TagBaseNames = 1117;
+    private const int TagDirNames = 1118;
 
     // Data type tags from header intro (per rpm headerlib.c). The full enum is retained
     // so the spec mapping is obvious to readers; the parser only branches on the subset
@@ -104,9 +104,9 @@ public static class RpmHeaderParser
     private const int TypeI18nString = 9;
 
     // RPMSENSE_* dependency flag bits.
-    private const int SenseLess    = 0x02;
+    private const int SenseLess = 0x02;
     private const int SenseGreater = 0x04;
-    private const int SenseEqual   = 0x08;
+    private const int SenseEqual = 0x08;
 
     private const int FileFlagGhost = 0x40;
 
@@ -120,49 +120,59 @@ public static class RpmHeaderParser
     {
         ArgumentNullException.ThrowIfNull(data);
         if (data.Length < LeadSize + HeaderIntroSize)
+        {
             throw new RpmParseException("RPM file too short to contain a lead + header intro.");
+        }
 
         // ── Lead ────────────────────────────────────────────────────────────────
         if (!(data[0] == LeadMagic0 && data[1] == LeadMagic1 &&
               data[2] == LeadMagic2 && data[3] == LeadMagic3))
+        {
             throw new RpmParseException("Invalid RPM lead magic.");
+        }
 
-        var major = data[4];
-        if (major != 3 && major != 4)
+        byte major = data[4];
+        if (major is not 3 and not 4)
+        {
             throw new RpmParseException($"Unsupported RPM major version: {major}.");
+        }
 
         // ── Signature header (skip; just need its end to align main header) ───
-        var sigStart = LeadSize;
+        int sigStart = LeadSize;
         var (sigNindex, sigHsize) = ReadHeaderIntro(data, sigStart);
-        var sigEnd = sigStart + HeaderIntroSize + sigNindex * IndexEntrySize + sigHsize;
+        int sigEnd = sigStart + HeaderIntroSize + sigNindex * IndexEntrySize + sigHsize;
         // Signature is 8-byte aligned; main header starts at the next 8-byte boundary.
-        var mainHeaderStart = (sigEnd + 7) & ~7;
+        int mainHeaderStart = (sigEnd + 7) & ~7;
         if (mainHeaderStart + HeaderIntroSize > data.Length)
+        {
             throw new RpmParseException("RPM truncated before main header.");
+        }
 
         // ── Main header ─────────────────────────────────────────────────────────
         var (nindex, hsize) = ReadHeaderIntro(data, mainHeaderStart);
-        var indexStart = mainHeaderStart + HeaderIntroSize;
-        var indexEnd = indexStart + nindex * IndexEntrySize;
-        var storeStart = indexEnd;
-        var storeEnd = storeStart + hsize;
+        int indexStart = mainHeaderStart + HeaderIntroSize;
+        int indexEnd = indexStart + nindex * IndexEntrySize;
+        int storeStart = indexEnd;
+        int storeEnd = storeStart + hsize;
         if (storeEnd > data.Length)
+        {
             throw new RpmParseException("RPM main header data store extends past EOF.");
+        }
 
         // Collect raw values keyed by tag — most are scalars or short string arrays we
         // pull out in one pass and then assemble into the strongly-typed record below.
         var raw = new Dictionary<int, IndexEntry>();
-        for (var i = 0; i < nindex; i++)
+        for (int i = 0; i < nindex; i++)
         {
             var entry = ReadIndex(data, indexStart + i * IndexEntrySize);
             raw[entry.Tag] = entry;
         }
 
         // Mandatory tags first so we fail fast.
-        var name = RequireString(data, storeStart, raw, TagName, "RPMTAG_NAME");
-        var version = RequireString(data, storeStart, raw, TagVersion, "RPMTAG_VERSION");
-        var release = RequireString(data, storeStart, raw, TagRelease, "RPMTAG_RELEASE");
-        var arch = RequireString(data, storeStart, raw, TagArch, "RPMTAG_ARCH");
+        string name = RequireString(data, storeStart, raw, TagName, "RPMTAG_NAME");
+        string version = RequireString(data, storeStart, raw, TagVersion, "RPMTAG_VERSION");
+        string release = RequireString(data, storeStart, raw, TagRelease, "RPMTAG_RELEASE");
+        string arch = RequireString(data, storeStart, raw, TagArch, "RPMTAG_ARCH");
 
         // Files reconstructed from basenames + dirnames + dirindexes triples.
         var files = ExtractFiles(data, storeStart, raw);
@@ -210,67 +220,78 @@ public static class RpmHeaderParser
     private static (int Nindex, int Hsize) ReadHeaderIntro(byte[] data, int offset)
     {
         if (data[offset] != HeaderMagic0 || data[offset + 1] != HeaderMagic1 || data[offset + 2] != HeaderMagic2)
+        {
             throw new RpmParseException("Invalid RPM header magic.");
+        }
+
         if (data[offset + 3] != 0x01)
+        {
             throw new RpmParseException("Unsupported RPM header version.");
+        }
         // 4 bytes reserved at offset+4..7, then nindex + hsize as big-endian int32.
-        var nindex = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 8, 4));
-        var hsize = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 12, 4));
-        if (nindex < 0 || hsize < 0)
-            throw new RpmParseException("Negative nindex / hsize in RPM header intro.");
-        return (nindex, hsize);
+        int nindex = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 8, 4));
+        int hsize = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 12, 4));
+        return nindex < 0 || hsize < 0 ? throw new RpmParseException("Negative nindex / hsize in RPM header intro.") : ((int Nindex, int Hsize))(nindex, hsize);
     }
 
     private static IndexEntry ReadIndex(byte[] data, int offset)
     {
         return new IndexEntry(
-            Tag:    BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset, 4)),
-            Type:   BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 4, 4)),
+            Tag: BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset, 4)),
+            Type: BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 4, 4)),
             Offset: BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 8, 4)),
-            Count:  BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 12, 4)));
+            Count: BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 12, 4)));
     }
 
     private readonly record struct IndexEntry(int Tag, int Type, int Offset, int Count);
 
     private static string RequireString(byte[] data, int storeStart, Dictionary<int, IndexEntry> raw, int tag, string label)
     {
-        if (!raw.TryGetValue(tag, out var entry) || (entry.Type != TypeString && entry.Type != TypeI18nString))
-            throw new RpmParseException($"Missing required RPM tag: {label}");
-        return ReadNullTerminated(data, storeStart + entry.Offset);
+        return !raw.TryGetValue(tag, out var entry) || (entry.Type != TypeString && entry.Type != TypeI18nString)
+            ? throw new RpmParseException($"Missing required RPM tag: {label}")
+            : ReadNullTerminated(data, storeStart + entry.Offset);
     }
 
     private static string? ReadOptionalString(byte[] data, int storeStart, Dictionary<int, IndexEntry> raw, int tag)
     {
-        if (!raw.TryGetValue(tag, out var entry)) return null;
-        return entry.Type switch
-        {
-            TypeString or TypeI18nString => ReadNullTerminated(data, storeStart + entry.Offset),
-            TypeStringArray => entry.Count > 0 ? ReadStringArray(data, storeStart + entry.Offset, 1)[0] : null,
-            _ => null,
-        };
+        return !raw.TryGetValue(tag, out var entry)
+            ? null
+            : entry.Type switch
+            {
+                TypeString or TypeI18nString => ReadNullTerminated(data, storeStart + entry.Offset),
+                TypeStringArray => entry.Count > 0 ? ReadStringArray(data, storeStart + entry.Offset, 1)[0] : null,
+                _ => null,
+            };
     }
 
     private static int? ReadOptionalInt32(byte[] data, int storeStart, Dictionary<int, IndexEntry> raw, int tag)
     {
-        if (!raw.TryGetValue(tag, out var entry)) return null;
-        if (entry.Type != TypeInt32) return null;
-        return BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(storeStart + entry.Offset, 4));
+        return !raw.TryGetValue(tag, out var entry)
+            ? null
+            : entry.Type != TypeInt32 ? null : BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(storeStart + entry.Offset, 4));
     }
 
     private static int[] ReadInt32Array(byte[] data, int storeStart, IndexEntry entry)
     {
-        if (entry.Type != TypeInt32 || entry.Count <= 0) return Array.Empty<int>();
-        var arr = new int[entry.Count];
-        for (var i = 0; i < entry.Count; i++)
+        if (entry.Type != TypeInt32 || entry.Count <= 0)
+        {
+            return Array.Empty<int>();
+        }
+
+        int[] arr = new int[entry.Count];
+        for (int i = 0; i < entry.Count; i++)
+        {
             arr[i] = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(storeStart + entry.Offset + i * 4, 4));
+        }
+
         return arr;
     }
 
     private static string[] ReadStringArray(byte[] data, int offset, int count)
     {
-        var result = new string[count];
-        var pos = offset;
-        for (var i = 0; i < count; i++)
+        string[] result = new string[count];
+        int pos = offset;
+        for (int i = 0; i < count; i++)
         {
             result[i] = ReadNullTerminated(data, pos);
             pos += result[i].Length + 1; // skip past the NUL terminator
@@ -280,8 +301,12 @@ public static class RpmHeaderParser
 
     private static string ReadNullTerminated(byte[] data, int offset)
     {
-        var end = offset;
-        while (end < data.Length && data[end] != 0) end++;
+        int end = offset;
+        while (end < data.Length && data[end] != 0)
+        {
+            end++;
+        }
+
         return Encoding.UTF8.GetString(data, offset, end - offset);
     }
 
@@ -289,17 +314,28 @@ public static class RpmHeaderParser
 
     private static RpmFileEntry[] ExtractFiles(byte[] data, int storeStart, Dictionary<int, IndexEntry> raw)
     {
-        if (!raw.TryGetValue(TagBaseNames, out var basenamesEntry)) return Array.Empty<RpmFileEntry>();
-        if (!raw.TryGetValue(TagDirNames, out var dirnamesEntry)) return Array.Empty<RpmFileEntry>();
-        if (!raw.TryGetValue(TagDirIndexes, out var dirIndexesEntry)) return Array.Empty<RpmFileEntry>();
+        if (!raw.TryGetValue(TagBaseNames, out var basenamesEntry))
+        {
+            return Array.Empty<RpmFileEntry>();
+        }
 
-        var basenames = ReadStringArray(data, storeStart + basenamesEntry.Offset, basenamesEntry.Count);
-        var dirnames = ReadStringArray(data, storeStart + dirnamesEntry.Offset, dirnamesEntry.Count);
-        var dirIndexes = ReadInt32Array(data, storeStart, dirIndexesEntry);
-        var fileFlags = raw.TryGetValue(TagFileFlags, out var ff) ? ReadInt32Array(data, storeStart, ff) : Array.Empty<int>();
+        if (!raw.TryGetValue(TagDirNames, out var dirnamesEntry))
+        {
+            return Array.Empty<RpmFileEntry>();
+        }
+
+        if (!raw.TryGetValue(TagDirIndexes, out var dirIndexesEntry))
+        {
+            return Array.Empty<RpmFileEntry>();
+        }
+
+        string[] basenames = ReadStringArray(data, storeStart + basenamesEntry.Offset, basenamesEntry.Count);
+        string[] dirnames = ReadStringArray(data, storeStart + dirnamesEntry.Offset, dirnamesEntry.Count);
+        int[] dirIndexes = ReadInt32Array(data, storeStart, dirIndexesEntry);
+        int[] fileFlags = raw.TryGetValue(TagFileFlags, out var ff) ? ReadInt32Array(data, storeStart, ff) : Array.Empty<int>();
 
         var files = new RpmFileEntry[basenames.Length];
-        for (var i = 0; i < basenames.Length; i++)
+        for (int i = 0; i < basenames.Length; i++)
         {
             files[i] = BuildFileEntry(i, basenames, dirnames, dirIndexes, fileFlags);
         }
@@ -308,19 +344,17 @@ public static class RpmHeaderParser
 
     private static RpmFileEntry BuildFileEntry(int i, string[] basenames, string[] dirnames, int[] dirIndexes, int[] fileFlags)
     {
-        var dirIdx = i < dirIndexes.Length ? dirIndexes[i] : 0;
-        var dir = dirIdx >= 0 && dirIdx < dirnames.Length ? dirnames[dirIdx] : "";
-        var basename = basenames[i];
-        var path = dir + basename;
-        var type = ClassifyFileType(basename, i, fileFlags);
+        int dirIdx = i < dirIndexes.Length ? dirIndexes[i] : 0;
+        string dir = dirIdx >= 0 && dirIdx < dirnames.Length ? dirnames[dirIdx] : "";
+        string basename = basenames[i];
+        string path = dir + basename;
+        string type = ClassifyFileType(basename, i, fileFlags);
         return new RpmFileEntry(path, type);
     }
 
     private static string ClassifyFileType(string basename, int i, int[] fileFlags)
     {
-        if (string.IsNullOrEmpty(basename)) return "dir";
-        if (i < fileFlags.Length && (fileFlags[i] & FileFlagGhost) != 0) return "ghost";
-        return "file";
+        return string.IsNullOrEmpty(basename) ? "dir" : i < fileFlags.Length && (fileFlags[i] & FileFlagGhost) != 0 ? "ghost" : "file";
     }
 
     private static RpmDependency[] ExtractDeps(
@@ -328,17 +362,20 @@ public static class RpmHeaderParser
         int nameTag, int flagsTag, int versionTag)
     {
         if (!raw.TryGetValue(nameTag, out var namesEntry) || namesEntry.Count == 0)
+        {
             return Array.Empty<RpmDependency>();
-        var names = ReadStringArray(data, storeStart + namesEntry.Offset, namesEntry.Count);
-        var flags = raw.TryGetValue(flagsTag, out var flagsEntry) ? ReadInt32Array(data, storeStart, flagsEntry) : Array.Empty<int>();
-        var versions = raw.TryGetValue(versionTag, out var versionsEntry)
+        }
+
+        string[] names = ReadStringArray(data, storeStart + namesEntry.Offset, namesEntry.Count);
+        int[] flags = raw.TryGetValue(flagsTag, out var flagsEntry) ? ReadInt32Array(data, storeStart, flagsEntry) : Array.Empty<int>();
+        string[] versions = raw.TryGetValue(versionTag, out var versionsEntry)
             ? ReadStringArray(data, storeStart + versionsEntry.Offset, versionsEntry.Count)
             : Array.Empty<string>();
 
         var deps = new RpmDependency[names.Length];
-        for (var i = 0; i < names.Length; i++)
+        for (int i = 0; i < names.Length; i++)
         {
-            var flag = i < flags.Length ? flags[i] : 0;
+            int flag = i < flags.Length ? flags[i] : 0;
             deps[i] = new RpmDependency(
                 Name: names[i],
                 Flags: FlagsToSymbol(flag),
@@ -352,25 +389,42 @@ public static class RpmHeaderParser
     private static RpmChangelog[] ExtractChangelogs(byte[] data, int storeStart, Dictionary<int, IndexEntry> raw)
     {
         if (!raw.TryGetValue(TagChangelogName, out var namesEntry) || namesEntry.Count == 0)
+        {
             return Array.Empty<RpmChangelog>();
+        }
 
-        var names = ReadStringArray(data, storeStart + namesEntry.Offset, namesEntry.Count);
-        var times = raw.TryGetValue(TagChangelogTime, out var t) ? ReadInt32Array(data, storeStart, t) : Array.Empty<int>();
-        var texts = raw.TryGetValue(TagChangelogText, out var txt) ? ReadStringArray(data, storeStart + txt.Offset, txt.Count) : Array.Empty<string>();
+        string[] names = ReadStringArray(data, storeStart + namesEntry.Offset, namesEntry.Count);
+        int[] times = raw.TryGetValue(TagChangelogTime, out var t) ? ReadInt32Array(data, storeStart, t) : Array.Empty<int>();
+        string[] texts = raw.TryGetValue(TagChangelogText, out var txt) ? ReadStringArray(data, storeStart + txt.Offset, txt.Count) : Array.Empty<string>();
 
-        var n = Math.Min(names.Length, Math.Min(times.Length, texts.Length));
+        int n = Math.Min(names.Length, Math.Min(times.Length, texts.Length));
         var entries = new RpmChangelog[n];
-        for (var i = 0; i < n; i++)
+        for (int i = 0; i < n; i++)
+        {
             entries[i] = new RpmChangelog(names[i], times[i], texts[i]);
+        }
+
         return entries;
     }
 
     private static string FlagsToSymbol(int flags)
     {
         var parts = new List<string>(2);
-        if ((flags & SenseLess) != 0) parts.Add("LT");
-        if ((flags & SenseGreater) != 0) parts.Add("GT");
-        if ((flags & SenseEqual) != 0) parts.Add("EQ");
+        if ((flags & SenseLess) != 0)
+        {
+            parts.Add("LT");
+        }
+
+        if ((flags & SenseGreater) != 0)
+        {
+            parts.Add("GT");
+        }
+
+        if ((flags & SenseEqual) != 0)
+        {
+            parts.Add("EQ");
+        }
+
         return parts.Count == 0 ? "" : string.Join("", parts);
     }
 }

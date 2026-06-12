@@ -16,7 +16,7 @@ public sealed class UpstreamRegistryRepository
 
     /// <summary>The ecosystems whose upstream lists are user-configurable through this table.</summary>
     public static readonly IReadOnlyList<string> SupportedEcosystems =
-        ["pypi", "npm", "nuget", "maven", "rpm"];
+        ["pypi", "npm", "nuget", "maven", "rpm", "cargo"];
 
     public static bool IsSupportedEcosystem(string? ecosystem) =>
         ecosystem is not null && SupportedEcosystems.Contains(ecosystem);
@@ -60,9 +60,9 @@ public sealed class UpstreamRegistryRepository
     public async Task<UpstreamRegistryEntry> AddAsync(
         string orgId, string ecosystem, string url, string? name, CancellationToken ct = default)
     {
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         await using var conn = await _db.OpenAsync(ct);
-        var nextPosition = await conn.ExecuteScalarAsync<int>(
+        int nextPosition = await conn.ExecuteScalarAsync<int>(
             """
             SELECT COALESCE(MAX(position), -1) + 1
             FROM upstream_registry
@@ -80,8 +80,13 @@ public sealed class UpstreamRegistryRepository
 
         return new UpstreamRegistryEntry
         {
-            Id = id, OrgId = orgId, Ecosystem = ecosystem, Name = name,
-            Url = url, Position = nextPosition, CreatedAt = DateTimeOffset.UtcNow,
+            Id = id,
+            OrgId = orgId,
+            Ecosystem = ecosystem,
+            Name = name,
+            Url = url,
+            Position = nextPosition,
+            CreatedAt = DateTimeOffset.UtcNow,
         };
     }
 
@@ -115,7 +120,7 @@ public sealed class UpstreamRegistryRepository
             var ordered = orderedIds.Where(existing.Contains).ToList();
             ordered.AddRange(existing.Where(id => !ordered.Contains(id)));
 
-            for (var i = 0; i < ordered.Count; i++)
+            for (int i = 0; i < ordered.Count; i++)
             {
                 await conn.ExecuteAsync(
                     "UPDATE upstream_registry SET position = @position WHERE id = @id AND org_id = @orgId",

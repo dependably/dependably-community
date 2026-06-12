@@ -1,5 +1,3 @@
-using Dapper;
-
 namespace Dependably.Infrastructure;
 
 /// <summary>

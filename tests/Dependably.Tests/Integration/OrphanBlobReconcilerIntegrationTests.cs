@@ -4,7 +4,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -31,27 +30,27 @@ public sealed class OrphanBlobReconcilerIntegrationTests : IClassFixture<Dependa
     public async Task RunOnce_DeletesOrphans_KeepsReferenced_KeepsInGrace()
     {
         // Step 1: seed a legitimately referenced hosted blob via the normal publish path.
-        var legitName = $"sigkill-legit-{Guid.NewGuid():N}"[..24];
+        string legitName = $"sigkill-legit-{Guid.NewGuid():N}"[..24];
         await _factory.PushNpmPackage(legitName, "1.0.0");
-        var legitKey = BlobKeys.Hosted("default", "npm", legitName, "1.0.0", $"{legitName}-1.0.0.tgz");
+        _ = BlobKeys.Hosted("default", "npm", legitName, "1.0.0", $"{legitName}-1.0.0.tgz");
         // PushNpmPackage writes via the real PackagePublishService — but its blob key uses
         // the default org's id, not the slug. Resolve the actual id, then derive the key.
         var orgs = _factory.Services.GetRequiredService<OrgRepository>();
         var defaultOrg = (await orgs.GetBySlugAsync("default"))!;
-        legitKey = BlobKeys.Hosted(defaultOrg.Id, "npm", legitName, "1.0.0", $"{legitName}-1.0.0.tgz");
+        string legitKey = BlobKeys.Hosted(defaultOrg.Id, "npm", legitName, "1.0.0", $"{legitName}-1.0.0.tgz");
         Assert.True(await _factory.BlobStore.ExistsAsync(legitKey),
             "Seeded legit blob must exist before the sweep.");
 
         // Step 2: plant a SIGKILL-style orphan — a hosted blob with no package_versions row.
         // Backdate the LastModified so it sits outside the grace window the reconciler uses.
-        var oldOrphanKey = BlobKeys.Hosted(defaultOrg.Id, "npm",
+        string oldOrphanKey = BlobKeys.Hosted(defaultOrg.Id, "npm",
             "sigkill-orphan", "1.0.0", "sigkill-orphan-1.0.0.tgz");
         _factory.BlobStore.SeedWithLastModified(oldOrphanKey, new byte[] { 9, 9, 9 },
             DateTimeOffset.UtcNow.AddHours(-2));
 
         // Step 3: plant a fresh orphan that's INSIDE the grace window — must survive the
         // sweep because it could be from a publish that's still committing.
-        var freshOrphanKey = BlobKeys.Hosted(defaultOrg.Id, "npm",
+        string freshOrphanKey = BlobKeys.Hosted(defaultOrg.Id, "npm",
             "inflight", "1.0.0", "inflight-1.0.0.tgz");
         _factory.BlobStore.SeedWithLastModified(freshOrphanKey, new byte[] { 1, 1, 1 },
             DateTimeOffset.UtcNow);

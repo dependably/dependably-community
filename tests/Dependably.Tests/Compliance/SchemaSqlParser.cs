@@ -31,22 +31,32 @@ internal static partial class SchemaSqlParser
     /// <summary>Maps table name → ordered column names declared in its CREATE TABLE body (comments stripped).</summary>
     public static Dictionary<string, List<string>> ParseTables(string sql)
     {
-        var clean = StripComments(sql);
+        string clean = StripComments(sql);
         var tables = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         foreach (Match header in CreateTableHeaderRegex().Matches(clean))
         {
             // The header regex ends at the opening '('. Bracket-match to find the table body.
             int openParen = header.Index + header.Length - 1;
             int closeParen = MatchingParen(clean, openParen);
-            if (closeParen < 0) continue;
+            if (closeParen < 0)
+            {
+                continue;
+            }
 
             var columns = new List<string>();
-            foreach (var item in SplitTopLevel(clean[(openParen + 1)..closeParen]))
+            foreach (string item in SplitTopLevel(clean[(openParen + 1)..closeParen]))
             {
-                var trimmed = item.Trim();
-                if (trimmed.Length == 0 || IsConstraint(trimmed)) continue;
-                var name = Unquote(FirstToken(trimmed));
-                if (name.Length > 0) columns.Add(name);
+                string trimmed = item.Trim();
+                if (trimmed.Length == 0 || IsConstraint(trimmed))
+                {
+                    continue;
+                }
+
+                string name = Unquote(FirstToken(trimmed));
+                if (name.Length > 0)
+                {
+                    columns.Add(name);
+                }
             }
             tables[Unquote(header.Groups["name"].Value)] = columns;
         }
@@ -73,22 +83,40 @@ internal static partial class SchemaSqlParser
                 sb.Append(c);
                 if (c == quote)
                 {
-                    if (i + 1 < sql.Length && sql[i + 1] == quote) sb.Append(sql[++i]); // escaped '' / ""
-                    else inStr = false;
+                    if (i + 1 < sql.Length && sql[i + 1] == quote)
+                    {
+                        sb.Append(sql[++i]); // escaped '' / ""
+                    }
+                    else
+                    {
+                        inStr = false;
+                    }
                 }
                 continue;
             }
             if (c is '\'' or '"') { inStr = true; quote = c; sb.Append(c); continue; }
             if (c == '-' && i + 1 < sql.Length && sql[i + 1] == '-')
             {
-                while (i < sql.Length && sql[i] != '\n') i++;
-                if (i < sql.Length) sb.Append('\n');
+                while (i < sql.Length && sql[i] != '\n')
+                {
+                    i++;
+                }
+
+                if (i < sql.Length)
+                {
+                    sb.Append('\n');
+                }
+
                 continue;
             }
             if (c == '/' && i + 1 < sql.Length && sql[i + 1] == '*')
             {
                 i += 2;
-                while (i + 1 < sql.Length && !(sql[i] == '*' && sql[i + 1] == '/')) i++;
+                while (i + 1 < sql.Length && !(sql[i] == '*' && sql[i + 1] == '/'))
+                {
+                    i++;
+                }
+
                 i++; // skip the closing '/', the for-loop ++ skips the '*'
                 continue;
             }
@@ -110,8 +138,14 @@ internal static partial class SchemaSqlParser
             {
                 if (c == quote)
                 {
-                    if (i + 1 < s.Length && s[i + 1] == quote) i++;
-                    else inStr = false;
+                    if (i + 1 < s.Length && s[i + 1] == quote)
+                    {
+                        i++;
+                    }
+                    else
+                    {
+                        inStr = false;
+                    }
                 }
                 continue;
             }
@@ -120,7 +154,11 @@ internal static partial class SchemaSqlParser
                 case '\'' or '"': inStr = true; quote = c; break;
                 case '(': depth++; break;
                 case ')':
-                    if (--depth == 0) return i;
+                    if (--depth == 0)
+                    {
+                        return i;
+                    }
+
                     break;
             }
         }
@@ -140,8 +178,14 @@ internal static partial class SchemaSqlParser
             {
                 if (c == quote)
                 {
-                    if (i + 1 < body.Length && body[i + 1] == quote) i++;
-                    else inStr = false;
+                    if (i + 1 < body.Length && body[i + 1] == quote)
+                    {
+                        i++;
+                    }
+                    else
+                    {
+                        inStr = false;
+                    }
                 }
                 continue;
             }
@@ -156,22 +200,34 @@ internal static partial class SchemaSqlParser
                     break;
             }
         }
-        if (start < body.Length) yield return body[start..];
+        if (start < body.Length)
+        {
+            yield return body[start..];
+        }
     }
 
     private static bool IsConstraint(string item)
     {
-        foreach (var leader in ConstraintLeaders)
+        foreach (string leader in ConstraintLeaders)
+        {
             if (item.StartsWith(leader, StringComparison.OrdinalIgnoreCase)
                 && (item.Length == leader.Length || !(char.IsLetterOrDigit(item[leader.Length]) || item[leader.Length] == '_')))
+            {
                 return true;
+            }
+        }
+
         return false;
     }
 
     private static string FirstToken(string item)
     {
         int i = 0;
-        while (i < item.Length && !char.IsWhiteSpace(item[i]) && item[i] != '(') i++;
+        while (i < item.Length && !char.IsWhiteSpace(item[i]) && item[i] != '(')
+        {
+            i++;
+        }
+
         return item[..i];
     }
 
@@ -188,8 +244,12 @@ internal static class SchemaTestPaths
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null)
         {
-            var candidate = Path.Combine(dir.FullName, "src", "Dependably");
-            if (Directory.Exists(candidate)) return candidate;
+            string candidate = Path.Combine(dir.FullName, "src", "Dependably");
+            if (Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+
             dir = dir.Parent;
         }
         throw new DirectoryNotFoundException($"Could not locate src/Dependably from {AppContext.BaseDirectory}");

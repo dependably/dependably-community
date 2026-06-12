@@ -4,7 +4,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -27,24 +26,24 @@ public sealed class TokenAuthenticationHandlerTests : IClassFixture<DependablyFa
 
     private async Task<string> SeedServiceTokenAsync(string? capabilitiesJson)
     {
-        var raw = Dependably.Security.TokenGenerator.Generate();
-        var hash = TokenRepository.HashToken(raw);
+        string raw = Dependably.Security.TokenGenerator.Generate();
+        string hash = TokenRepository.HashToken(raw);
 
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var orgId = await conn.ExecuteScalarAsync<string>(
+        string? orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1");
         await conn.ExecuteAsync("""
             INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities)
             VALUES (@id, @orgId, @name, @hash, @capabilities)
             """, new
-            {
-                id = Guid.NewGuid().ToString("N"),
-                orgId,
-                name = $"auth-test-{Guid.NewGuid():N}",
-                hash,
-                capabilities = capabilitiesJson,
-            });
+        {
+            id = Guid.NewGuid().ToString("N"),
+            orgId,
+            name = $"auth-test-{Guid.NewGuid():N}",
+            hash,
+            capabilities = capabilitiesJson,
+        });
         return raw;
     }
 
@@ -55,7 +54,7 @@ public sealed class TokenAuthenticationHandlerTests : IClassFixture<DependablyFa
         // Authorization header / X-NuGet-ApiKey gets 401 before the controller runs.
         using var client = _factory.CreateClient();
 
-        var body = NpmFixtures.BuildPublishBody("acme-auth-noauth", "1.0.0");
+        string body = NpmFixtures.BuildPublishBody("acme-auth-noauth", "1.0.0");
         using var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
         var resp = await client.PutAsync("/npm/acme-auth-noauth", content);
 
@@ -69,11 +68,11 @@ public sealed class TokenAuthenticationHandlerTests : IClassFixture<DependablyFa
         // column at insert time, so this shape is only reachable by bypassing the repo
         // (direct INSERT). The auth path returns an empty cap claim set, so
         // [RequireCapability(PublishNpm)] rejects.
-        var token = await SeedServiceTokenAsync(capabilitiesJson: null);
+        string token = await SeedServiceTokenAsync(capabilitiesJson: null);
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        var body = NpmFixtures.BuildPublishBody("acme-auth-nullcaps", "1.0.0");
+        string body = NpmFixtures.BuildPublishBody("acme-auth-nullcaps", "1.0.0");
         using var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
         var resp = await client.PutAsync("/npm/acme-auth-nullcaps", content);
 
@@ -86,11 +85,11 @@ public sealed class TokenAuthenticationHandlerTests : IClassFixture<DependablyFa
         // The supported path: mint through the repository (which translates the 'push'
         // scope to an explicit cap array at issue time). The same scope value goes in,
         // but the caps column lands populated and the handler emits the expected claims.
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        var body = NpmFixtures.BuildPublishBody("acme-auth-pushrepo", "1.0.0");
+        string body = NpmFixtures.BuildPublishBody("acme-auth-pushrepo", "1.0.0");
         using var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
         var resp = await client.PutAsync("/npm/acme-auth-pushrepo", content);
 
@@ -103,11 +102,11 @@ public sealed class TokenAuthenticationHandlerTests : IClassFixture<DependablyFa
         // scope='pull' grants read:metadata + read:artifact only — no publish.
         // [RequireCapability(PublishNpm)] must reject before the controller runs. Mint
         // through the repo so the row has the issue-time-derived caps populated.
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        var body = NpmFixtures.BuildPublishBody("acme-auth-pullonly", "1.0.0");
+        string body = NpmFixtures.BuildPublishBody("acme-auth-pullonly", "1.0.0");
         using var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
         var resp = await client.PutAsync("/npm/acme-auth-pullonly", content);
 
@@ -118,11 +117,11 @@ public sealed class TokenAuthenticationHandlerTests : IClassFixture<DependablyFa
     public async Task PublishEndpoint_NarrowedTokenForOtherEcosystem_403s()
     {
         // capabilities=["publish:nuget"] — token can publish nuget, must NOT publish npm.
-        var token = await SeedServiceTokenAsync(capabilitiesJson: """["publish:nuget"]""");
+        string token = await SeedServiceTokenAsync(capabilitiesJson: """["publish:nuget"]""");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        var body = NpmFixtures.BuildPublishBody("acme-auth-narrow", "1.0.0");
+        string body = NpmFixtures.BuildPublishBody("acme-auth-narrow", "1.0.0");
         using var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
         var resp = await client.PutAsync("/npm/acme-auth-narrow", content);
 
@@ -134,7 +133,7 @@ public sealed class TokenAuthenticationHandlerTests : IClassFixture<DependablyFa
     {
         // X-NuGet-ApiKey header must work — the handler tries it after Authorization.
         // Mint through the repo so caps are populated.
-        var token = await _factory.CreateToken("push");
+        string token = await _factory.CreateToken("push");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", token);
 

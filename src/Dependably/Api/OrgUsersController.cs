@@ -1,7 +1,8 @@
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
 using Dependably.Infrastructure;
 using Dependably.Security;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Api;
 
@@ -37,9 +38,12 @@ public sealed class OrgUsersController : OrgScopedControllerBase
     public async Task<IActionResult> ListUsers(CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         var members = await _orgs.ListOrgMembersAsync(orgId, ct);
         return Ok(members);
     }
@@ -47,21 +51,30 @@ public sealed class OrgUsersController : OrgScopedControllerBase
     /// <summary>PATCH /api/v1/orgs/{org}/users/{userId}/role
     /// — admin can manage members/admins; only owner can touch owners or grant owner.</summary>
     [HttpPatch("api/v1/users/{userId}/role")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> PatchMemberRole(string userId, [FromBody] PatchRoleRequest req, CancellationToken ct)
     {
         // Tier 1: tenant:configure gates entry — admin + owner can reach the endpoint.
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
         if (req.Role is not ("member" or "admin" or "owner" or "auditor"))
+        {
             return _problems.ValidationErrorAction("role", "Role must be 'member', 'admin', 'owner', or 'auditor'.");
+        }
 
-        var orgId = CurrentTenantId();
-        var callerId = GetUserId()!;
+        string orgId = CurrentTenantId();
+        string callerId = GetUserId()!;
 
         var members = await _orgs.ListOrgMembersAsync(orgId, ct);
         var target = members.FirstOrDefault(m => m.UserId == userId);
-        if (target is null) return NotFound();
+        if (target is null)
+        {
+            return NotFound();
+        }
 
         // Tier 2: owner-only operations — modifying an owner OR granting the owner role —
         // require tenant:admin. Admins (tenant:configure but not tenant:admin) can manage
@@ -69,14 +82,19 @@ public sealed class OrgUsersController : OrgScopedControllerBase
         if (target.Role == "owner" || req.Role == "owner")
         {
             var ownerCheck = await _guard.CheckCapAsync(User, callerId, orgId, Capabilities.TenantAdmin, ct);
-            if (ownerCheck != OrgAccessGuard.AccessResult.Allowed) return Forbid();
+            if (ownerCheck != OrgAccessGuard.AccessResult.Allowed)
+            {
+                return Forbid();
+            }
         }
 
         // Last-owner invariant: regardless of caller, a tenant must always have at least
         // one owner. Demoting or replacing the last owner is rejected.
         if (req.Role != "owner" && target.Role == "owner"
             && await _orgs.CountOwnersAsync(orgId, ct) <= 1)
+        {
             return _problems.ConflictAction("Cannot demote the last owner of an org.");
+        }
 
         await _orgs.UpdateMemberRoleAsync(orgId, userId, req.Role, ct);
         await _audit.LogAsync("member_role_changed", orgId, callerId,
@@ -88,29 +106,41 @@ public sealed class OrgUsersController : OrgScopedControllerBase
     /// <summary>DELETE /api/v1/orgs/{org}/users/{userId}
     /// — admin can remove members/admins; only owner can remove an owner.</summary>
     [HttpDelete("api/v1/users/{userId}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> RemoveUser(string userId, CancellationToken ct)
     {
         // Tier 1: tenant:configure entry gate.
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
-        var callerId = GetUserId()!;
+        string orgId = CurrentTenantId();
+        string callerId = GetUserId()!;
 
         var members = await _orgs.ListOrgMembersAsync(orgId, ct);
         var target = members.FirstOrDefault(m => m.UserId == userId);
-        if (target is null) return NotFound();
+        if (target is null)
+        {
+            return NotFound();
+        }
 
         // Tier 2: removing an owner requires tenant:admin. Admins cannot remove owners.
         if (target.Role == "owner")
         {
             var ownerCheck = await _guard.CheckCapAsync(User, callerId, orgId, Capabilities.TenantAdmin, ct);
-            if (ownerCheck != OrgAccessGuard.AccessResult.Allowed) return Forbid();
+            if (ownerCheck != OrgAccessGuard.AccessResult.Allowed)
+            {
+                return Forbid();
+            }
         }
 
         // Last-owner invariant: tenant must always have at least one owner.
         if (target.Role == "owner" && await _orgs.CountOwnersAsync(orgId, ct) <= 1)
+        {
             return _problems.ConflictAction("Cannot remove the last owner of an org.");
+        }
 
         await _orgs.RemoveOrgMemberAsync(orgId, userId, ct);
         await _audit.LogAsync("member_removed", orgId, GetUserId(),

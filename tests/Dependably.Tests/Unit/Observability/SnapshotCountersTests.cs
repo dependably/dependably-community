@@ -1,5 +1,4 @@
 using Dependably.Infrastructure.Observability;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Observability;
 
@@ -16,7 +15,7 @@ public sealed class SnapshotCountersTests
     [Fact]
     public void PublishCount_ReturnsValueAfterIncrement()
     {
-        var before = SnapshotCounters.PublishCount;
+        long before = SnapshotCounters.PublishCount;
         SnapshotCounters.IncrementPublish();
         Assert.True(SnapshotCounters.PublishCount >= before + 1);
     }
@@ -24,7 +23,7 @@ public sealed class SnapshotCountersTests
     [Fact]
     public void ProxyFetchCount_ReturnsValueAfterIncrement()
     {
-        var before = SnapshotCounters.ProxyFetchCount;
+        long before = SnapshotCounters.ProxyFetchCount;
         SnapshotCounters.IncrementProxyFetch();
         Assert.True(SnapshotCounters.ProxyFetchCount >= before + 1);
     }
@@ -32,7 +31,7 @@ public sealed class SnapshotCountersTests
     [Fact]
     public void CacheHits_ReturnsValueAfterIncrement()
     {
-        var before = SnapshotCounters.CacheHits;
+        long before = SnapshotCounters.CacheHits;
         SnapshotCounters.IncrementCacheHit();
         Assert.True(SnapshotCounters.CacheHits >= before + 1);
     }
@@ -40,7 +39,7 @@ public sealed class SnapshotCountersTests
     [Fact]
     public void CacheMisses_ReturnsValueAfterIncrement()
     {
-        var before = SnapshotCounters.CacheMisses;
+        long before = SnapshotCounters.CacheMisses;
         SnapshotCounters.IncrementCacheMiss();
         Assert.True(SnapshotCounters.CacheMisses >= before + 1);
     }
@@ -51,10 +50,13 @@ public sealed class SnapshotCountersTests
         // Interlocked.Increment guarantees atomicity — fan out 100 increments across
         // 10 threads. Use >= because xUnit runs collections in parallel and integration
         // code paths may also bump the counter; we just need to prove no increments are lost.
-        var before = SnapshotCounters.PublishCount;
+        long before = SnapshotCounters.PublishCount;
         var tasks = Enumerable.Range(0, 10).Select(_ => Task.Run(() =>
         {
-            for (var i = 0; i < 10; i++) SnapshotCounters.IncrementPublish();
+            for (int i = 0; i < 10; i++)
+            {
+                SnapshotCounters.IncrementPublish();
+            }
         }));
         await Task.WhenAll(tasks);
         Assert.True(SnapshotCounters.PublishCount >= before + 100);

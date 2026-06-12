@@ -46,7 +46,10 @@ public sealed class TenantHardDeleteService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             var next = schedule.GetNextOccurrence(DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
-            if (next is null) break;
+            if (next is null)
+            {
+                break;
+            }
 
             var delay = next.Value - DateTimeOffset.UtcNow;
             if (delay > TimeSpan.Zero)
@@ -55,7 +58,10 @@ public sealed class TenantHardDeleteService : BackgroundService
                 catch (OperationCanceledException) { break; }
             }
 
-            if (stoppingToken.IsCancellationRequested) break;
+            if (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
 
             await RunPassAsync(stoppingToken);
         }
@@ -63,16 +69,19 @@ public sealed class TenantHardDeleteService : BackgroundService
 
     public async Task RunPassAsync(CancellationToken ct)
     {
-        var graceDays = int.TryParse(_config["TENANT_HARD_DELETE_GRACE_DAYS"], out var g) ? g : 30;
+        int graceDays = int.TryParse(_config["TENANT_HARD_DELETE_GRACE_DAYS"], out int g) ? g : 30;
         var expired = await _orgs.ListExpiredSoftDeletedOrgIdsAsync(graceDays, ct);
-        if (expired.Count == 0) return;
+        if (expired.Count == 0)
+        {
+            return;
+        }
 
         _logger.LogInformation(
             "TenantHardDelete: {Count} tenant(s) past {Days}-day grace.",
             expired.Count, graceDays);
 
         await using var conn = await _db.OpenAsync(ct);
-        foreach (var orgId in expired)
+        foreach (string orgId in expired)
         {
             // Single statement; FK cascades remove per-tenant data.
             await conn.ExecuteAsync("DELETE FROM orgs WHERE id = @id", new { id = orgId });

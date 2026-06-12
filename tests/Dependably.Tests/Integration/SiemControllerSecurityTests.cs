@@ -4,7 +4,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -34,8 +33,8 @@ public sealed class SiemControllerSecurityTests : IClassFixture<DependablyFactor
     {
         // Members carry no read:audit cap; previously the handler let them through with a
         // null org filter, returning rows from every tenant. Now they get a clean 403.
-        var memberId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "pw", role: "member");
-        var jwt = await _factory.CreateUserJwt(memberId, role: "member");
+        string memberId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "pw", role: "member");
+        string jwt = await _factory.CreateUserJwt(memberId, role: "member");
 
         using var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
@@ -59,19 +58,19 @@ public sealed class SiemControllerSecurityTests : IClassFixture<DependablyFactor
                 "INSERT INTO audit_log (id, scope, org_id, action, actor_id, detail) " +
                 "VALUES (@id, 'tenant', @orgId, 'login.success', 'foreign-user', '{}')",
                 new { id = Guid.NewGuid().ToString("N"), orgId = "other-tenant" });
-            var defaultOrgId = await conn.ExecuteScalarAsync<string>("SELECT id FROM orgs WHERE slug = 'default'");
+            string? defaultOrgId = await conn.ExecuteScalarAsync<string>("SELECT id FROM orgs WHERE slug = 'default'");
             await conn.ExecuteAsync(
                 "INSERT INTO audit_log (id, scope, org_id, action, actor_id, detail) " +
                 "VALUES (@id, 'tenant', @orgId, 'login.success', 'home-user', '{}')",
                 new { id = Guid.NewGuid().ToString("N"), orgId = defaultOrgId });
         }
 
-        var jwt = await _factory.CreateAdminJwt(); // role=owner, scope=tenant on default
+        string jwt = await _factory.CreateAdminJwt(); // role=owner, scope=tenant on default
         using var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         var resp = await c.GetAsync("/api/v1/siem/events/auth");
         resp.EnsureSuccessStatusCode();
-        var body = await resp.Content.ReadAsStringAsync();
+        string body = await resp.Content.ReadAsStringAsync();
 
         Assert.Contains("home-user", body);
         Assert.DoesNotContain("foreign-user", body);

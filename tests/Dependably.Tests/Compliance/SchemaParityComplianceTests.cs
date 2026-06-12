@@ -1,4 +1,3 @@
-using Xunit;
 using Xunit.Abstractions;
 
 namespace Dependably.Tests.Compliance;
@@ -30,10 +29,16 @@ public sealed class SchemaParityComplianceTests
     {
         var (sqlite, pg) = ParseBoth();
         var violations = new List<string>();
-        foreach (var t in sqlite.Keys.Except(pg.Keys, StringComparer.OrdinalIgnoreCase))
+        foreach (string? t in sqlite.Keys.Except(pg.Keys, StringComparer.OrdinalIgnoreCase))
+        {
             violations.Add($"table `{t}` is in Schema.sql but missing from Schema.pg.sql");
-        foreach (var t in pg.Keys.Except(sqlite.Keys, StringComparer.OrdinalIgnoreCase))
+        }
+
+        foreach (string? t in pg.Keys.Except(sqlite.Keys, StringComparer.OrdinalIgnoreCase))
+        {
             violations.Add($"table `{t}` is in Schema.pg.sql but missing from Schema.sql");
+        }
+
         Report(violations);
     }
 
@@ -42,14 +47,25 @@ public sealed class SchemaParityComplianceTests
     {
         var (sqlite, pg) = ParseBoth();
         var violations = new List<string>();
-        foreach (var table in sqlite.Keys.Intersect(pg.Keys, StringComparer.OrdinalIgnoreCase))
+        foreach (string? table in sqlite.Keys.Intersect(pg.Keys, StringComparer.OrdinalIgnoreCase))
         {
             var s = new HashSet<string>(sqlite[table], StringComparer.OrdinalIgnoreCase);
             var p = new HashSet<string>(pg[table], StringComparer.OrdinalIgnoreCase);
-            foreach (var c in s.Except(p))
-                if (!IsAllowed(table, c)) violations.Add($"{table}.{c}: declared in Schema.sql, missing from Schema.pg.sql");
-            foreach (var c in p.Except(s))
-                if (!IsAllowed(table, c)) violations.Add($"{table}.{c}: declared in Schema.pg.sql, missing from Schema.sql");
+            foreach (string? c in s.Except(p))
+            {
+                if (!IsAllowed(table, c))
+                {
+                    violations.Add($"{table}.{c}: declared in Schema.sql, missing from Schema.pg.sql");
+                }
+            }
+
+            foreach (string? c in p.Except(s))
+            {
+                if (!IsAllowed(table, c))
+                {
+                    violations.Add($"{table}.{c}: declared in Schema.pg.sql, missing from Schema.sql");
+                }
+            }
         }
         Report(violations);
     }
@@ -59,15 +75,23 @@ public sealed class SchemaParityComplianceTests
 
     private static (Dictionary<string, List<string>> Sqlite, Dictionary<string, List<string>> Pg) ParseBoth()
     {
-        var src = SchemaTestPaths.SourceRoot();
+        string src = SchemaTestPaths.SourceRoot();
         return (SchemaSqlParser.ParseTables(File.ReadAllText(SchemaTestPaths.SqliteSchema(src))),
                 SchemaSqlParser.ParseTables(File.ReadAllText(SchemaTestPaths.PostgresSchema(src))));
     }
 
     private void Report(List<string> violations)
     {
-        if (violations.Count == 0) return;
-        foreach (var v in violations) _output.WriteLine(v);
+        if (violations.Count == 0)
+        {
+            return;
+        }
+
+        foreach (string v in violations)
+        {
+            _output.WriteLine(v);
+        }
+
         Assert.Fail($"{violations.Count} schema parity violation(s) between Schema.sql and Schema.pg.sql. See test output.");
     }
 }

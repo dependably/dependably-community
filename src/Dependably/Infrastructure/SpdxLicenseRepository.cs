@@ -22,7 +22,7 @@ public sealed class SpdxLicenseRepository
     {
         await using var conn = await _db.OpenAsync(ct);
 
-        var filter = string.IsNullOrWhiteSpace(query) ? null : $"%{query.Trim()}%";
+        string? filter = string.IsNullOrWhiteSpace(query) ? null : $"%{query.Trim()}%";
 
         var rows = await conn.QueryAsync<SpdxLicense>(
             """
@@ -73,7 +73,10 @@ public sealed class SpdxLicenseRepository
         IEnumerable<string> identifiers, CancellationToken ct = default)
     {
         var ids = identifiers.Distinct(StringComparer.Ordinal).ToList();
-        if (ids.Count == 0) return new Dictionary<string, SpdxLicense>();
+        if (ids.Count == 0)
+        {
+            return new Dictionary<string, SpdxLicense>();
+        }
 
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<SpdxLicense>(

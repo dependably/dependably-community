@@ -12,10 +12,11 @@ public static class ArchiveExtractor
 
     public static ArchiveFormat Detect(byte[] bytes)
     {
-        if (bytes.Length >= 2 && bytes[0] == 0x1F && bytes[1] == 0x8B) return ArchiveFormat.GzippedTar;
-        if (bytes.Length >= 4 && bytes[0] == 'P' && bytes[1] == 'K'
-            && (bytes[2] == 0x03 || bytes[2] == 0x05) && (bytes[3] == 0x04 || bytes[3] == 0x06))
-            return ArchiveFormat.Zip;
-        return ArchiveFormat.Unknown;
+        return bytes.Length >= 2 && bytes[0] == 0x1F && bytes[1] == 0x8B
+            ? ArchiveFormat.GzippedTar
+            : bytes.Length >= 4 && bytes[0] == 'P' && bytes[1] == 'K'
+            && (bytes[2] == 0x03 || bytes[2] == 0x05) && (bytes[3] == 0x04 || bytes[3] == 0x06)
+            ? ArchiveFormat.Zip
+            : ArchiveFormat.Unknown;
     }
 }

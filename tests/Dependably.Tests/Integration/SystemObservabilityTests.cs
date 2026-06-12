@@ -2,7 +2,6 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -51,9 +50,9 @@ public sealed class SystemObservabilityTests : IClassFixture<DependablyMultiFact
         // tests in this class fixture, so specific values would be
         // brittle. Source is one of env/db/default; allowlist is a
         // non-empty array of strings.
-        Assert.True(json.GetProperty("enabled").ValueKind == JsonValueKind.True
-                 || json.GetProperty("enabled").ValueKind == JsonValueKind.False);
-        var source = json.GetProperty("allowlistSource").GetString();
+        Assert.True(json.GetProperty("enabled").ValueKind is JsonValueKind.True
+                 or JsonValueKind.False);
+        string? source = json.GetProperty("allowlistSource").GetString();
         Assert.Contains(source, new[] { "env", "db", "default" });
         Assert.True(json.GetProperty("allowedIps").GetArrayLength() > 0);
     }

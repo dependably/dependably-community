@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using System.Security.Cryptography;
+using System.Xml.Linq;
 using Dapper;
 using Dependably.Api;
 using Dependably.Infrastructure;
@@ -14,7 +15,6 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -96,9 +96,9 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     {
         await EnableAnonPullAsync();
         await SeedRpmRegistryAsync();
-        var bytes = RandomBytes(256);
-        var sha256 = Sha256Hex(bytes);
-        var filename = "tree-2.1.1-1.fc40.x86_64.rpm";
+        byte[] bytes = RandomBytes(256);
+        string sha256 = Sha256Hex(bytes);
+        string filename = "tree-2.1.1-1.fc40.x86_64.rpm";
         var resolution = new PackageResolution(
             PackageUrl: $"https://mirror.example.com/Packages/t/{filename}",
             Sha256: sha256,
@@ -152,9 +152,9 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         // so the nested route must resolve to the same flat-filename download flow.
         await EnableAnonPullAsync();
         await SeedRpmRegistryAsync();
-        var bytes = RandomBytes(256);
-        var sha256 = Sha256Hex(bytes);
-        var filename = "tree-2.1.1-1.fc40.x86_64.rpm";
+        byte[] bytes = RandomBytes(256);
+        string sha256 = Sha256Hex(bytes);
+        string filename = "tree-2.1.1-1.fc40.x86_64.rpm";
         var resolution = new PackageResolution(
             PackageUrl: $"https://mirror.example.com/Packages/t/{filename}",
             Sha256: sha256,
@@ -275,7 +275,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     {
         await EnableAnonPullAsync();
         await SeedRpmRegistryAsync();
-        var repomdBytes = System.Text.Encoding.UTF8.GetBytes("<repomd/>");
+        byte[] repomdBytes = System.Text.Encoding.UTF8.GetBytes("<repomd/>");
         var repodata = new RepodataResult(repomdBytes, "application/xml", "\"abc\"", null, NotModified: false);
         var stubProxy = new StubProxy(repodataResult: repodata);
         var ctl = BuildController(proxy: stubProxy);
@@ -307,9 +307,9 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     {
         await EnableAnonPullAsync();
         await SeedRpmRegistryAsync();
-        var sha256 = new string('a', 64);
-        var filename = $"{sha256}-primary.xml.gz";
-        var body = new byte[] { 1, 2, 3 };
+        string sha256 = new('a', 64);
+        string filename = $"{sha256}-primary.xml.gz";
+        byte[] body = new byte[] { 1, 2, 3 };
         var repodata = new RepodataResult(body, "application/x-gzip", null, null, NotModified: false);
         var stubProxy = new StubProxy(repodataResult: repodata);
         var ctl = BuildController(proxy: stubProxy);
@@ -340,7 +340,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     public async Task GpgKey_ProxyReturnsKey_Returns200WithCorrectContentType()
     {
         await SeedRpmRegistryAsync();
-        var keyBytes = System.Text.Encoding.ASCII.GetBytes("-----BEGIN PGP PUBLIC KEY BLOCK-----\n");
+        byte[] keyBytes = System.Text.Encoding.ASCII.GetBytes("-----BEGIN PGP PUBLIC KEY BLOCK-----\n");
         var stubProxy = new StubProxy(gpgKey: keyBytes);
         var ctl = BuildController(proxy: stubProxy);
 
@@ -378,6 +378,322 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         Assert.Contains("Rpm:UpstreamMode", problem.Detail);
     }
 
+    // ── Merged mode ─────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Repodata_MergedMode_RepomdAndPrimary_UnionLocalAndUpstream_Consistent()
+    {
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        await SeedLocalRpmAsync("hello", "2.10", "1.el9", "x86_64");
+
+        // Upstream advertises a colliding hello (must be shadowed) + a unique tree (must survive).
+        byte[] upstreamGz = BuildUpstreamPrimaryGz(
+            ("hello", "2.10", "1.el9", "x86_64", "Packages/h/hello-2.10-1.el9.x86_64.rpm"),
+            ("tree", "2.1.1", "1.el9", "x86_64", "Packages/t/tree-2.1.1-1.el9.x86_64.rpm"));
+        var stubProxy = new StubProxy(isPassthrough: false, isMerged: true, upstreamPrimaryGz: upstreamGz);
+
+        // Same controller instance for both calls so they share the merged-primary cache —
+        // dnf fetches repomd.xml first, then the primary.xml.gz it points at.
+        var ctl = BuildController(proxy: stubProxy);
+
+        var repomdResult = Assert.IsType<FileContentResult>(await ctl.Repodata("repomd.xml", default));
+        var primaryResult = Assert.IsType<FileContentResult>(await ctl.Repodata("primary.xml.gz", default));
+
+        // The SHA-256 repomd seals must match the exact primary.xml.gz bytes served.
+        XNamespace repo = "http://linux.duke.edu/metadata/repo";
+        var repomd = XDocument.Parse(System.Text.Encoding.UTF8.GetString(repomdResult.FileContents));
+        string sealedSha = repomd.Descendants(repo + "checksum").First().Value;
+        Assert.Equal(Sha256Hex(primaryResult.FileContents), sealedSha);
+
+        // The served primary unions local hello (flat href, shadowing upstream) + upstream tree.
+        XNamespace common = "http://linux.duke.edu/metadata/common";
+        var primaryDoc = XDocument.Parse(Gunzip(primaryResult.FileContents));
+        var names = primaryDoc.Root!.Elements(common + "package")
+            .Select(p => p.Element(common + "name")!.Value).OrderBy(n => n).ToList();
+        Assert.Equal(new[] { "hello", "tree" }, names);
+
+        var hello = primaryDoc.Root.Elements(common + "package")
+            .Single(p => p.Element(common + "name")!.Value == "hello");
+        Assert.Equal("packages/hello-2.10-1.el9.x86_64.rpm",
+            hello.Element(common + "location")!.Attribute("href")!.Value);
+        var tree = primaryDoc.Root.Elements(common + "package")
+            .Single(p => p.Element(common + "name")!.Value == "tree");
+        Assert.Equal("packages/tree-2.1.1-1.el9.x86_64.rpm",
+            tree.Element(common + "location")!.Attribute("href")!.Value);
+    }
+
+    [Fact]
+    public async Task Repodata_MergedMode_UpstreamUnreachable_FallsBackToLocalRepomd()
+    {
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        // upstreamPrimaryGz null ⇒ GetUpstreamPrimaryXmlGzAsync returns null ⇒ fall back to local.
+        var stubProxy = new StubProxy(isPassthrough: false, isMerged: true, upstreamPrimaryGz: null);
+        var ctl = BuildController(proxy: stubProxy);
+
+        var result = Assert.IsType<FileContentResult>(await ctl.Repodata("repomd.xml", default));
+        Assert.Equal("application/xml", result.ContentType);
+    }
+
+    [Fact]
+    public async Task Repodata_MergedMode_RepomdContainsPrimaryAndFilelistsEntries()
+    {
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        await SeedLocalRpmAsync("hello", "2.10", "1.el9", "x86_64");
+
+        byte[] upstreamGz = BuildUpstreamPrimaryGz(
+            ("tree", "2.1.1", "1.el9", "x86_64", "Packages/t/tree-2.1.1-1.el9.x86_64.rpm"));
+        var stubProxy = new StubProxy(isPassthrough: false, isMerged: true, upstreamPrimaryGz: upstreamGz);
+        var ctl = BuildController(proxy: stubProxy);
+
+        var repomdResult = Assert.IsType<FileContentResult>(await ctl.Repodata("repomd.xml", default));
+        var filelistsResult = Assert.IsType<FileContentResult>(await ctl.Repodata("filelists.xml.gz", default));
+
+        XNamespace repo = "http://linux.duke.edu/metadata/repo";
+        var repomdDoc = XDocument.Parse(System.Text.Encoding.UTF8.GetString(repomdResult.FileContents));
+
+        var types = repomdDoc.Root!.Elements(repo + "data")
+            .Select(e => (string?)e.Attribute("type")).ToList();
+        Assert.Contains("primary", types);
+        Assert.Contains("filelists", types);
+
+        // The filelists sha256 in repomd must match the actual bytes served.
+        var filelistsEntry = repomdDoc.Root.Elements(repo + "data")
+            .Single(e => (string?)e.Attribute("type") == "filelists");
+        string sealedSha = filelistsEntry.Element(repo + "checksum")!.Value;
+        Assert.Equal(
+            Convert.ToHexString(SHA256.HashData(filelistsResult.FileContents)).ToLowerInvariant(),
+            sealedSha);
+    }
+
+    [Fact]
+    public async Task Repodata_MergedMode_UpstreamNonPrimaryEntriesPreserved()
+    {
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+
+        XNamespace repo = "http://linux.duke.edu/metadata/repo";
+        var updateinfoEntry = new XElement(repo + "data",
+            new XAttribute("type", "updateinfo"),
+            new XElement(repo + "location",
+                new XAttribute("href", $"repodata/{new string('a', 64)}-updateinfo.xml.gz")));
+
+        byte[] upstreamGz = BuildUpstreamPrimaryGz(
+            ("tree", "2.1.1", "1.el9", "x86_64", "Packages/t/tree-2.1.1-1.el9.x86_64.rpm"));
+        var stubProxy = new StubProxy(
+            isPassthrough: false,
+            isMerged: true,
+            upstreamPrimaryGz: upstreamGz,
+            upstreamNonPrimaryEntries: new[] { updateinfoEntry });
+        var ctl = BuildController(proxy: stubProxy);
+
+        var repomdResult = Assert.IsType<FileContentResult>(await ctl.Repodata("repomd.xml", default));
+        var repomdDoc = XDocument.Parse(System.Text.Encoding.UTF8.GetString(repomdResult.FileContents));
+
+        var types = repomdDoc.Root!.Elements(repo + "data")
+            .Select(e => (string?)e.Attribute("type")).ToList();
+        Assert.Contains("updateinfo", types);
+    }
+
+    [Fact]
+    public async Task Repodata_MergedMode_AdvertisedHrefs_AllServable_UpstreamEntryProxied()
+    {
+        // Merged repomd advertises an upstream updateinfo entry. dnf fetches repomd.xml and then
+        // follows every advertised href — none may 404, and the hash-prefixed updateinfo href
+        // must be proxied through the upstream fetch path with the upstream's exact bytes.
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+
+        string sha256 = new('c', 64);
+        string updateinfoFilename = $"{sha256}-updateinfo.xml.gz";
+        byte[] updateinfoBytes = System.Text.Encoding.UTF8.GetBytes("<updates/>");
+
+        XNamespace repo = "http://linux.duke.edu/metadata/repo";
+        var updateinfoEntry = new XElement(repo + "data",
+            new XAttribute("type", "updateinfo"),
+            new XElement(repo + "location",
+                new XAttribute("href", $"repodata/{updateinfoFilename}")));
+
+        byte[] upstreamGz = BuildUpstreamPrimaryGz(
+            ("tree", "2.1.1", "1.el9", "x86_64", "Packages/t/tree-2.1.1-1.el9.x86_64.rpm"));
+
+        // The stub returns the updateinfo bytes for hash-prefixed GetRepodataAsync calls only,
+        // mirroring the real proxy's filename gate.
+        var repodataResult = new RepodataResult(updateinfoBytes, "application/x-gzip", null, null, NotModified: false);
+        var stubProxy = new StubProxy(
+            isPassthrough: false,
+            isMerged: true,
+            upstreamPrimaryGz: upstreamGz,
+            upstreamNonPrimaryEntries: new[] { updateinfoEntry },
+            repodataResult: repodataResult);
+        var ctl = BuildController(proxy: stubProxy);
+
+        var repomdResult = Assert.IsType<FileContentResult>(await ctl.Repodata("repomd.xml", default));
+        var repomdDoc = XDocument.Parse(System.Text.Encoding.UTF8.GetString(repomdResult.FileContents));
+
+        var hrefs = repomdDoc.Root!.Elements(repo + "data")
+            .Select(e => e.Element(repo + "location")!.Attribute("href")!.Value)
+            .ToList();
+        Assert.Contains($"repodata/{updateinfoFilename}", hrefs);
+
+        // Every advertised href must be fetchable — the contract dnf relies on.
+        foreach (string href in hrefs)
+        {
+            string filename = href[(href.LastIndexOf('/') + 1)..];
+            var fetched = await ctl.Repodata(filename, default);
+            Assert.IsNotType<NotFoundResult>(fetched);
+        }
+
+        // The advertised updateinfo href serves the upstream stub's exact bytes.
+        var result = Assert.IsType<FileContentResult>(await ctl.Repodata(updateinfoFilename, default));
+        Assert.Equal("application/x-gzip", result.ContentType);
+        Assert.Equal(updateinfoBytes, result.FileContents);
+    }
+
+    [Fact]
+    public async Task Repodata_MergedMode_PlainNamedUpstreamEntry_DroppedFromMergedRepomd()
+    {
+        // An upstream entry with a plain (non-content-addressed) href — e.g. classic-createrepo
+        // comps.xml.gz — cannot be proxied by the repodata dispatch. It must be dropped from the
+        // merged repomd rather than advertised as an href that would 404; dnf treats absent
+        // supplemental metadata as non-fatal.
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+
+        XNamespace repo = "http://linux.duke.edu/metadata/repo";
+        var compsEntry = new XElement(repo + "data",
+            new XAttribute("type", "group"),
+            new XElement(repo + "location",
+                new XAttribute("href", "repodata/comps.xml.gz")));
+
+        byte[] upstreamGz = BuildUpstreamPrimaryGz(
+            ("tree", "2.1.1", "1.el9", "x86_64", "Packages/t/tree-2.1.1-1.el9.x86_64.rpm"));
+        var stubProxy = new StubProxy(
+            isPassthrough: false,
+            isMerged: true,
+            upstreamPrimaryGz: upstreamGz,
+            upstreamNonPrimaryEntries: new[] { compsEntry });
+        var ctl = BuildController(proxy: stubProxy);
+
+        var repomdResult = Assert.IsType<FileContentResult>(await ctl.Repodata("repomd.xml", default));
+        var repomdDoc = XDocument.Parse(System.Text.Encoding.UTF8.GetString(repomdResult.FileContents));
+
+        var types = repomdDoc.Root!.Elements(repo + "data")
+            .Select(e => (string?)e.Attribute("type")).ToList();
+        Assert.DoesNotContain("group", types);
+    }
+
+    [Fact]
+    public async Task Repodata_LocalMode_ServesFilelistsAndOtherXmlGz()
+    {
+        await EnableAnonPullAsync();
+
+        var ctl = BuildController(proxy: null);
+
+        var filelistsResult = Assert.IsType<FileContentResult>(await ctl.Repodata("filelists.xml.gz", default));
+        Assert.Equal("application/x-gzip", filelistsResult.ContentType);
+
+        var otherResult = Assert.IsType<FileContentResult>(await ctl.Repodata("other.xml.gz", default));
+        Assert.Equal("application/x-gzip", otherResult.ContentType);
+    }
+
+    [Fact]
+    public async Task Repodata_LocalMode_RepomdContainsPrimaryFilelistsOther()
+    {
+        await EnableAnonPullAsync();
+
+        var ctl = BuildController(proxy: null);
+
+        var repomdResult = Assert.IsType<FileContentResult>(await ctl.Repodata("repomd.xml", default));
+        XNamespace repo = "http://linux.duke.edu/metadata/repo";
+        var doc = XDocument.Parse(System.Text.Encoding.UTF8.GetString(repomdResult.FileContents));
+
+        var types = doc.Root!.Elements(repo + "data")
+            .Select(e => (string?)e.Attribute("type")).OrderBy(t => t).ToList();
+        Assert.Equal(new[] { "filelists", "other", "primary" }, types);
+    }
+
+    [Fact]
+    public async Task Upload_MergedMode_NotBlockedByPassthroughGuard()
+    {
+        // Merged mode must NOT trip the passthrough publish guard. With a valid token the request
+        // flows past the guard into the normal upload pipeline (here a too-small body → 400),
+        // proving it is no longer the 409 conflict passthrough returns.
+        await SeedRpmRegistryAsync();
+        string raw = await SeedPublishTokenAsync();
+        var stubProxy = new StubProxy(isPassthrough: false, isMerged: true);
+        var ctl = BuildController(proxy: stubProxy);
+        ctl.ControllerContext.HttpContext.Request.Headers.Authorization = $"Bearer {raw}";
+        ctl.ControllerContext.HttpContext.Request.Body = new MemoryStream(new byte[10]);
+
+        var result = await ctl.Upload(default);
+
+        Assert.IsNotType<ConflictObjectResult>(result);
+        var bad = Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Contains("too small", bad.Value?.ToString() ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task<string> SeedPublishTokenAsync()
+    {
+        var (raw, _) = await _tokens.CreateUserTokenAsync(
+            _orgId, _userId, """["publish:rpm"]""", expiresAt: null);
+        return raw;
+    }
+
+    private async Task SeedLocalRpmAsync(string name, string ver, string rel, string arch)
+    {
+        string pkgId = await PackageSeeder.InsertAsync(_db, _orgId, "rpm", name, purlName: name);
+        string pvId = await PackageSeeder.InsertVersionAsync(
+            _db, pkgId,
+            version: $"{ver}-{rel}",
+            purl: $"pkg:rpm/{name}@{ver}-{rel}?arch={arch}",
+            blobKey: $"rpm/registry/{name}-{ver}-{rel}.{arch}.rpm",
+            checksumSha256: new string('a', 64));
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("""
+            INSERT INTO rpm_metadata
+                (package_version_id, rpm_name, epoch, rpm_version, rpm_release, arch,
+                 summary, description, installed_size, archive_size, header_start, header_end, rpm_license)
+            VALUES (@pvId, @name, 0, @ver, @rel, @arch, 'sum', 'desc', 1, 1, 0, 1, 'MIT')
+            """,
+            new { pvId, name, ver, rel, arch });
+    }
+
+    private static byte[] BuildUpstreamPrimaryGz(
+        params (string Name, string Ver, string Rel, string Arch, string Href)[] pkgs)
+    {
+        XNamespace common = "http://linux.duke.edu/metadata/common";
+        XNamespace rpm = "http://linux.duke.edu/metadata/rpm";
+        var doc = new XDocument(
+            new XElement(common + "metadata",
+                new XAttribute(XNamespace.Xmlns + "rpm", rpm.NamespaceName),
+                new XAttribute("packages", pkgs.Length),
+                pkgs.Select(p => new XElement(common + "package",
+                    new XAttribute("type", "rpm"),
+                    new XElement(common + "name", p.Name),
+                    new XElement(common + "arch", p.Arch),
+                    new XElement(common + "version",
+                        new XAttribute("epoch", 0), new XAttribute("ver", p.Ver), new XAttribute("rel", p.Rel)),
+                    new XElement(common + "checksum",
+                        new XAttribute("type", "sha256"), new XAttribute("pkgid", "YES"), new string('b', 64)),
+                    new XElement(common + "size",
+                        new XAttribute("package", 1), new XAttribute("installed", 1), new XAttribute("archive", 1)),
+                    new XElement(common + "location", new XAttribute("href", p.Href)),
+                    new XElement(common + "format", new XElement(rpm + "license", "MIT"))))));
+        return RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(doc.ToString()));
+    }
+
+    private static string Gunzip(byte[] gz)
+    {
+        using var input = new System.IO.Compression.GZipStream(
+            new MemoryStream(gz), System.IO.Compression.CompressionMode.Decompress);
+        using var ms = new MemoryStream();
+        input.CopyTo(ms);
+        return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+    }
+
     // ── Controller builder ────────────────────────────────────────────────────
 
     private RpmController BuildController(IRpmUpstreamProxy? proxy = null)
@@ -412,8 +728,9 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             Orgs: _orgs,
             BlobStore: new TieredBlobStorage(_blobs, _blobs),
             Db: _db,
-            Repodata: new RpmRepodataService(_db),
+            Repodata: new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance),
             Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db)),
+            MemoryCache: new MemoryCache(new MemoryCacheOptions()),
             UpstreamClient: upstreamClient,
             Proxy: proxy);
 
@@ -433,13 +750,14 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             _audit,
             new AllowAllValidator(),
             new DisabledAirGap(),
+            new Dependably.Infrastructure.DriveInfoStagingDiskInfo(Path.GetTempPath()),
             new ConfigurationBuilder().Build(),
             NullLogger<UpstreamClient>.Instance);
     }
 
     private static byte[] RandomBytes(int n = 64)
     {
-        var b = new byte[n];
+        byte[] b = new byte[n];
         Random.Shared.NextBytes(b);
         return b;
     }
@@ -460,8 +778,9 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         private readonly bool _negativeCache;
         private readonly RepodataResult? _repodataResult;
         private readonly byte[]? _gpgKey;
-        private readonly bool _isPassthrough;
+        private readonly byte[]? _upstreamPrimaryGz;
         private readonly bool _assertNotCalled;
+        private readonly IReadOnlyList<XElement> _upstreamNonPrimaryEntries;
 
         public bool NegativeRecorded { get; private set; }
         public bool ResolveWasCalled { get; private set; }
@@ -474,22 +793,44 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             RepodataResult? repodataResult = null,
             byte[]? gpgKey = null,
             bool isPassthrough = true,
-            bool assertNotCalled = false)
+            bool isMerged = false,
+            byte[]? upstreamPrimaryGz = null,
+            bool assertNotCalled = false,
+            IReadOnlyList<XElement>? upstreamNonPrimaryEntries = null)
         {
             _resolution = resolution;
             _negativeCache = negativeCache;
             _repodataResult = repodataResult;
             _gpgKey = gpgKey;
-            _isPassthrough = isPassthrough;
+            IsPassthroughModeSelected = isPassthrough;
+            IsMergedModeSelected = isMerged;
+            _upstreamPrimaryGz = upstreamPrimaryGz;
             _assertNotCalled = assertNotCalled;
+            _upstreamNonPrimaryEntries = upstreamNonPrimaryEntries ?? Array.Empty<XElement>();
         }
 
-        public bool IsPassthroughModeSelected => _isPassthrough;
+        public bool IsPassthroughModeSelected { get; }
+        public bool IsMergedModeSelected { get; }
+
+        public Task<byte[]?> GetUpstreamPrimaryXmlGzAsync(string upstreamBase, CancellationToken ct)
+        {
+            LastUpstreamBase = upstreamBase;
+            return Task.FromResult(_upstreamPrimaryGz);
+        }
+
+        public Task<byte[]?> GetUpstreamFilelistsXmlGzAsync(string upstreamBase, CancellationToken ct)
+            => Task.FromResult<byte[]?>(null);
+
+        public Task<IReadOnlyList<XElement>> GetUpstreamNonPrimaryRepomdEntriesAsync(string upstreamBase, CancellationToken ct)
+            => Task.FromResult(_upstreamNonPrimaryEntries);
 
         public Task<PackageResolution?> ResolvePackageUrlAsync(string upstreamBase, string filename, CancellationToken ct)
         {
             if (_assertNotCalled)
+            {
                 throw new InvalidOperationException($"ResolvePackageUrlAsync must not be called (filename={filename})");
+            }
+
             ResolveWasCalled = true;
             LastResolvedFilename = filename;
             LastUpstreamBase = upstreamBase;
@@ -508,7 +849,13 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         public Task<RepodataResult?> GetRepodataAsync(string upstreamBase, string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
         {
             LastUpstreamBase = upstreamBase;
-            return Task.FromResult(_repodataResult);
+
+            // Mirror the real proxy's filename gate: only repomd passthrough names and
+            // hash-prefixed (content-addressed) filenames are fetchable upstream.
+            bool servable = filename.Equals("repomd.xml", StringComparison.OrdinalIgnoreCase)
+                || filename.Equals("repomd.xml.asc", StringComparison.OrdinalIgnoreCase)
+                || RpmUpstreamProxy.IsHashPrefixedFilename(filename);
+            return Task.FromResult(servable ? _repodataResult : null);
         }
 
         public Task<byte[]?> GetGpgKeyAsync(string upstreamBase, CancellationToken ct)

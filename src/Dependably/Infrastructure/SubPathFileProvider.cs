@@ -31,8 +31,6 @@ internal sealed class SubPathFileProvider : IFileProvider
 
     private string Combine(string subpath)
     {
-        if (string.IsNullOrEmpty(subpath) || subpath == "/")
-            return _root;
-        return _root + "/" + subpath.TrimStart('/');
+        return string.IsNullOrEmpty(subpath) || subpath == "/" ? _root : _root + "/" + subpath.TrimStart('/');
     }
 }

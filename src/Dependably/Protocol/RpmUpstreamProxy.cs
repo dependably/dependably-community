@@ -9,7 +9,6 @@ using Dependably.Infrastructure.Observability;
 using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.Logging;
 using Org.BouncyCastle.Bcpg.OpenPgp;
 
 namespace Dependably.Protocol;
@@ -65,8 +64,27 @@ public sealed record PackageResolution(
 public interface IRpmUpstreamProxy
 {
     bool IsPassthroughModeSelected { get; }
+    bool IsMergedModeSelected { get; }
     Task<RepodataResult?> GetRepodataAsync(string upstreamBase, string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct);
     Task<PackageResolution?> ResolvePackageUrlAsync(string upstreamBase, string filename, CancellationToken ct);
+    /// <summary>
+    /// Returns the upstream <c>primary.xml.gz</c> bytes (checksum-verified, blob-cached), or null
+    /// when the upstream repomd / primary cannot be fetched or verified. Merged mode unions this
+    /// upstream package set with locally published RPMs. Throws <see cref="AirGappedException"/>
+    /// in air-gapped deployments.
+    /// </summary>
+    Task<byte[]?> GetUpstreamPrimaryXmlGzAsync(string upstreamBase, CancellationToken ct);
+    /// <summary>
+    /// Returns the upstream <c>filelists.xml.gz</c> bytes (blob-cached), or null when the
+    /// upstream repomd has no filelists entry or the file cannot be fetched.
+    /// </summary>
+    Task<byte[]?> GetUpstreamFilelistsXmlGzAsync(string upstreamBase, CancellationToken ct);
+    /// <summary>
+    /// Parses the upstream <c>repomd.xml</c> and returns the non-primary <c>&lt;data&gt;</c>
+    /// elements verbatim (filelists, other, group, modules, updateinfo, …) so the merged
+    /// repomd can pass them through. Returns an empty list when repomd cannot be fetched.
+    /// </summary>
+    Task<IReadOnlyList<System.Xml.Linq.XElement>> GetUpstreamNonPrimaryRepomdEntriesAsync(string upstreamBase, CancellationToken ct);
     Task<byte[]?> GetGpgKeyAsync(string upstreamBase, CancellationToken ct);
     Task<bool> IsNegativelyCachedAsync(string upstreamPath, CancellationToken ct);
     Task RecordNegativeAsync(string upstreamPath, CancellationToken ct);
@@ -111,6 +129,14 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     public bool IsPassthroughModeSelected => string.Equals(_upstreamMode, "passthrough", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// True when the instance-level mode is 'merged'. In this mode hosted publishing is allowed
+    /// and the controller serves a combined repodata document (local ∪ upstream); local versions
+    /// shadow upstream on collision. Like passthrough, the controller still requires the org to
+    /// have at least one rpm registry before the merge actually engages.
+    /// </summary>
+    public bool IsMergedModeSelected => string.Equals(_upstreamMode, "merged", StringComparison.OrdinalIgnoreCase);
+
     public RpmUpstreamProxy(RpmUpstreamProxyServices svc)
     {
         _http = svc.HttpClientFactory;
@@ -130,7 +156,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
 
         _repomdGpgKeyRing = LoadKeyRingOrNull(configuration["Rpm:GpgKey"]);
         // Enforce when explicitly set; otherwise enforce iff a trust anchor was provided.
-        _verifyRepomdSignature = bool.TryParse(configuration["Rpm:VerifyRepomdSignature"], out var vf)
+        _verifyRepomdSignature = bool.TryParse(configuration["Rpm:VerifyRepomdSignature"], out bool vf)
             ? vf
             : _repomdGpgKeyRing is not null;
     }
@@ -143,7 +169,11 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     private PgpPublicKeyRingBundle? LoadKeyRingOrNull(string? keyConfig)
     {
-        if (string.IsNullOrWhiteSpace(keyConfig)) return null;
+        if (string.IsNullOrWhiteSpace(keyConfig))
+        {
+            return null;
+        }
+
         try
         {
             byte[] armored;
@@ -153,7 +183,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
             }
             else
             {
-                var keyPath = keyConfig.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+                string keyPath = keyConfig.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
                     ? new Uri(keyConfig).LocalPath
                     : keyConfig;
                 armored = File.ReadAllBytes(keyPath);
@@ -191,16 +221,12 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     public async Task<RepodataResult?> GetRepodataAsync(
         string upstreamBase, string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
     {
-        if (_airGap.IsEnabled) throw new AirGappedException($"rpm:repodata:{filename}");
-
-        if (filename.Equals("repomd.xml", StringComparison.OrdinalIgnoreCase)
-         || filename.Equals("repomd.xml.asc", StringComparison.OrdinalIgnoreCase))
-            return await GetRepomdAsync(upstreamBase, filename, ifNoneMatch, ifModifiedSince, ct);
-
-        if (IsHashPrefixedFilename(filename))
-            return await GetHashPrefixedAsync(upstreamBase, filename, ct);
-
-        return null;
+        return _airGap.IsEnabled
+            ? throw new AirGappedException($"rpm:repodata:{filename}")
+            : filename.Equals("repomd.xml", StringComparison.OrdinalIgnoreCase)
+         || filename.Equals("repomd.xml.asc", StringComparison.OrdinalIgnoreCase)
+            ? await GetRepomdAsync(upstreamBase, filename, ifNoneMatch, ifModifiedSince, ct)
+            : IsHashPrefixedFilename(filename) ? await GetHashPrefixedAsync(upstreamBase, filename, ct) : null;
     }
 
     // ── Package resolution ────────────────────────────────────────────────────
@@ -218,31 +244,105 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     public async Task<PackageResolution?> ResolvePackageUrlAsync(string upstreamBase, string filename, CancellationToken ct)
     {
-        if (_airGap.IsEnabled) throw new AirGappedException($"rpm:resolve:{filename}");
+        if (_airGap.IsEnabled)
+        {
+            throw new AirGappedException($"rpm:resolve:{filename}");
+        }
 
-        // 1. Get current repomd.xml bytes (from memory cache or upstream)
-        var repomdBytes = await GetRepomdBodyAsync(upstreamBase, ct);
-        if (repomdBytes is null) return null;
+        var primary = await GetUpstreamPrimaryGzAsync(upstreamBase, ct);
+        if (primary is null)
+        {
+            return null;
+        }
 
-        // 2. Parse repomd.xml to find primary.xml.gz href + checksum
-        var (primaryFilename, primarySha256) = ParsePrimaryFromRepomd(repomdBytes);
-        if (primaryFilename is null || primarySha256 is null) return null;
+        var (primaryGzBytes, primarySha256) = primary.Value;
 
-        // 3. Get primary.xml.gz bytes (from blob cache or upstream)
-        var primaryGzBytes = await GetOrFetchRepodataBlobAsync(upstreamBase, primaryFilename, primarySha256, ct);
-        if (primaryGzBytes is null) return null;
-
-        // 4. Parse primary.xml.gz (cached by sha256 so it automatically tracks repodata rotation)
-        var mapKey = $"rpm:primary-map:{primarySha256}";
+        // Parse primary.xml.gz (cached by sha256 so it automatically tracks repodata rotation)
+        string mapKey = $"rpm:primary-map:{primarySha256}";
         if (!_memCache.TryGetValue<Dictionary<string, PackageResolution>>(mapKey, out var packageMap))
         {
             packageMap = ParsePrimaryXmlGz(primaryGzBytes, upstreamBase);
             // Long TTL is fine — the map invalidates naturally when repomd.xml rotates to a
             // new primary.xml.gz sha256, creating a new cache slot and letting the old one GC.
-            _memCache.Set(mapKey, packageMap, TimeSpan.FromHours(4));
+            _memCache.Set(mapKey, packageMap, new MemoryCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(4),
+                Size = 1,
+            });
         }
 
         return packageMap!.GetValueOrDefault(filename);
+    }
+
+    /// <inheritdoc />
+    public async Task<byte[]?> GetUpstreamPrimaryXmlGzAsync(string upstreamBase, CancellationToken ct)
+    {
+        if (_airGap.IsEnabled)
+        {
+            throw new AirGappedException("rpm:primary");
+        }
+
+        var primary = await GetUpstreamPrimaryGzAsync(upstreamBase, ct);
+        return primary?.Bytes;
+    }
+
+    /// <inheritdoc />
+    public async Task<byte[]?> GetUpstreamFilelistsXmlGzAsync(string upstreamBase, CancellationToken ct)
+    {
+        if (_airGap.IsEnabled)
+        {
+            throw new AirGappedException("rpm:filelists");
+        }
+
+        byte[]? repomdBytes = await GetRepomdBodyAsync(upstreamBase, ct);
+        if (repomdBytes is null)
+        {
+            return null;
+        }
+
+        var (filelistsFilename, filelistsSha256) = ParseRepodataEntryFromRepomd(repomdBytes, "filelists");
+        return filelistsFilename is null || filelistsSha256 is null
+            ? null
+            : await GetOrFetchRepodataBlobAsync(upstreamBase, filelistsFilename, filelistsSha256, ct);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<XElement>> GetUpstreamNonPrimaryRepomdEntriesAsync(string upstreamBase, CancellationToken ct)
+    {
+        if (_airGap.IsEnabled)
+        {
+            throw new AirGappedException("rpm:repomd-entries");
+        }
+
+        byte[]? repomdBytes = await GetRepomdBodyAsync(upstreamBase, ct);
+        return repomdBytes is null
+            ? Array.Empty<XElement>()
+            : ParseNonPrimaryRepomdEntries(repomdBytes);
+    }
+
+    /// <summary>
+    /// Fetches the current upstream <c>primary.xml.gz</c>: read <c>repomd.xml</c> (memory cache
+    /// or upstream, signature-verified when a trust anchor is pinned), locate the primary href +
+    /// checksum, then fetch the content-addressed primary blob (blob cache or upstream,
+    /// checksum-verified). Returns the bytes together with the primary's SHA-256 (used as a
+    /// cache key by callers), or null on any fetch/verification failure.
+    /// </summary>
+    private async Task<(byte[] Bytes, string Sha256)?> GetUpstreamPrimaryGzAsync(string upstreamBase, CancellationToken ct)
+    {
+        byte[]? repomdBytes = await GetRepomdBodyAsync(upstreamBase, ct);
+        if (repomdBytes is null)
+        {
+            return null;
+        }
+
+        var (primaryFilename, primarySha256) = ParsePrimaryFromRepomd(repomdBytes);
+        if (primaryFilename is null || primarySha256 is null)
+        {
+            return null;
+        }
+
+        byte[]? primaryGzBytes = await GetOrFetchRepodataBlobAsync(upstreamBase, primaryFilename, primarySha256, ct);
+        return primaryGzBytes is null ? null : (primaryGzBytes, primarySha256);
     }
 
     // ── GPG key ────────────────────────────────────────────────────────────────
@@ -256,25 +356,51 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     public async Task<byte[]?> GetGpgKeyAsync(string upstreamBase, CancellationToken ct)
     {
-        if (_airGap.IsEnabled) throw new AirGappedException("rpm:gpg-key");
+        if (_airGap.IsEnabled)
+        {
+            throw new AirGappedException("rpm:gpg-key");
+        }
 
-        var cacheKey = $"rpm:gpgkey:{upstreamBase}";
-        if (_memCache.TryGetValue<byte[]>(cacheKey, out var cached))
+        string cacheKey = $"rpm:gpgkey:{upstreamBase}";
+        if (_memCache.TryGetValue<byte[]>(cacheKey, out byte[]? cached))
+        {
             return cached;
+        }
 
         // Fedora / EPEL mirrors serve the key at one of these paths.
-        var paths = new[] { "RPM-GPG-KEY", "repodata/repomd.xml.key" };
+        string[] paths = ["RPM-GPG-KEY", "repodata/repomd.xml.key"];
         var client = _http.CreateClient("upstream");
-        foreach (var path in paths)
+        foreach (string? path in paths)
         {
-            var url = $"{upstreamBase}/{path}";
-            if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct)) continue;
+            string url = $"{upstreamBase}/{path}";
+            if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct))
+            {
+                continue;
+            }
 
             using var resp = await client.GetAsync(url, ct);
-            if (!resp.IsSuccessStatusCode) continue;
+            if (!resp.IsSuccessStatusCode)
+            {
+                continue;
+            }
 
-            var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
-            _memCache.Set(cacheKey, bytes, _gpgKeyTtl);
+            byte[] bytes;
+            try
+            {
+                bytes = await UpstreamClient.ReadBodyCappedAsync(
+                    resp, UpstreamClient.MaxMetadataResponseBytes, url, ct);
+            }
+            catch (UpstreamResponseTooLargeException ex)
+            {
+                _logger.LogWarning(ex,
+                    "RPM GPG key response exceeded the metadata cap for {Url}; trying next key path.", url);
+                continue;
+            }
+            _memCache.Set(cacheKey, bytes, new MemoryCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = _gpgKeyTtl,
+                Size = bytes.Length,
+            });
             return bytes;
         }
 
@@ -289,12 +415,12 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     public async Task<bool> IsNegativelyCachedAsync(string upstreamPath, CancellationToken ct)
     {
-        var urlKey = UrlKey(upstreamPath);
-        var cutoff = DateTime.UtcNow.Add(-_negativeCacheTtl).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string urlKey = UrlKey(upstreamPath);
+        string cutoff = DateTime.UtcNow.Add(-_negativeCacheTtl).ToString("yyyy-MM-ddTHH:mm:ssZ");
         // xtenant: upstream_negative_cache is content-addressed (SHA-256 of URL → 404) and
         // intentionally shared across tenants. A URL either 404s or it doesn't.
         await using var conn = await _db.OpenAsync(ct);
-        var hit = await conn.ExecuteScalarAsync<string?>(
+        string? hit = await conn.ExecuteScalarAsync<string?>(
             "SELECT url_key FROM upstream_negative_cache WHERE url_key = @key AND ecosystem = 'rpm' AND fetched_at >= @cutoff",
             new { key = urlKey, cutoff });
         return hit is not null;
@@ -303,8 +429,8 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// <summary>Records a 404 response for <paramref name="upstreamPath"/> in the negative cache.</summary>
     public async Task RecordNegativeAsync(string upstreamPath, CancellationToken ct)
     {
-        var urlKey = UrlKey(upstreamPath);
-        var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string urlKey = UrlKey(upstreamPath);
+        string now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
         // xtenant: see IsNegativelyCachedAsync.
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
@@ -329,16 +455,15 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     private async Task<RepodataResult?> GetRepomdAsync(
         string upstreamBase, string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
     {
-        var cacheKey = $"rpm:repomd:{upstreamBase}:{filename}";
+        string cacheKey = $"rpm:repomd:{upstreamBase}:{filename}";
 
         // Memory cache hit — serve immediately, propagating 304 if client's ETag matches.
         if (_memCache.TryGetValue<CachedRepomd>(cacheKey, out var cached))
         {
-            if (ifNoneMatch is not null && cached!.ETag is not null &&
-                ifNoneMatch.Contains(cached.ETag))
-                return new RepodataResult([], ContentTypeFor(filename), cached.ETag, cached.LastModified, NotModified: true);
-
-            return new RepodataResult(cached!.Body, ContentTypeFor(filename), cached.ETag, cached.LastModified, NotModified: false);
+            return ifNoneMatch is not null && cached!.ETag is not null &&
+                ifNoneMatch.Contains(cached.ETag)
+                ? new RepodataResult([], ContentTypeFor(filename), cached.ETag, cached.LastModified, NotModified: true)
+                : new RepodataResult(cached!.Body, ContentTypeFor(filename), cached.ETag, cached.LastModified, NotModified: false);
         }
 
         // Cache miss — single-flight fetch to avoid thundering herd.
@@ -365,37 +490,65 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
                 : new RepodataResult([], ContentTypeFor(filename), result.etag, result.lastModified, NotModified: true);
         }
 
-        _memCache.Set(cacheKey, new CachedRepomd(result.body, result.etag, result.lastModified), _repomdTtl);
+        _memCache.Set(cacheKey, new CachedRepomd(result.body, result.etag, result.lastModified), new MemoryCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = _repomdTtl,
+            Size = result.body.Length,
+        });
         return new RepodataResult(result.body, ContentTypeFor(filename), result.etag, result.lastModified, NotModified: false);
     }
 
     private async Task<(byte[] Body, string? ETag, string? LastModified)> FetchRepomdFromUpstreamAsync(
         string upstreamBase, string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct)
     {
-        var url = $"{upstreamBase}/repodata/{filename}";
+        string url = $"{upstreamBase}/repodata/{filename}";
         if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct))
+        {
             return ([], null, null);
+        }
 
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         if (!string.IsNullOrEmpty(ifNoneMatch))
+        {
             req.Headers.TryAddWithoutValidation("If-None-Match", ifNoneMatch);
+        }
+
         if (!string.IsNullOrEmpty(ifModifiedSince))
+        {
             req.Headers.TryAddWithoutValidation("If-Modified-Since", ifModifiedSince);
+        }
 
         var client = _http.CreateClient("upstream");
         using var resp = await client.SendAsync(req, ct);
 
         if (resp.StatusCode == System.Net.HttpStatusCode.NotModified)
+        {
             return ([], resp.Headers.ETag?.ToString() ?? "304", null); // etag acts as sentinel
+        }
 
         if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
             return ([], null, null); // null ETag = 404
+        }
 
         resp.EnsureSuccessStatusCode();
 
-        var body = await resp.Content.ReadAsByteArrayAsync(ct);
-        var etag = resp.Headers.ETag?.ToString();
-        var lastMod = resp.Content.Headers.LastModified?.ToString("R");
+        byte[] body;
+        try
+        {
+            body = await UpstreamClient.ReadBodyCappedAsync(
+                resp, UpstreamClient.MaxMetadataResponseBytes, url, ct);
+        }
+        catch (UpstreamResponseTooLargeException ex)
+        {
+            // Treat an over-cap repomd like an unavailable upstream (the 404 sentinel)
+            // rather than buffering an attacker-inflatable body.
+            _logger.LogWarning(ex,
+                "RPM repomd response exceeded the metadata cap for {Url}; treating as unavailable.", url);
+            return ([], null, null);
+        }
+        string? etag = resp.Headers.ETag?.ToString();
+        string? lastMod = resp.Content.Headers.LastModified?.ToString("R");
         return (body, etag, lastMod);
     }
 
@@ -405,7 +558,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     private async Task<byte[]?> GetRepomdBodyAsync(string upstreamBase, CancellationToken ct)
     {
-        var cacheKey = $"rpm:repomd:{upstreamBase}:repomd.xml";
+        string cacheKey = $"rpm:repomd:{upstreamBase}:repomd.xml";
         byte[]? body;
         if (_memCache.TryGetValue<CachedRepomd>(cacheKey, out var cached))
         {
@@ -416,7 +569,10 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
             var result = await GetRepomdAsync(upstreamBase, "repomd.xml", null, null, ct);
             body = result?.NotModified == false ? result.Body : null;
         }
-        if (body is null) return null;
+        if (body is null)
+        {
+            return null;
+        }
 
         // Gate the proxy's OWN trust: when a trust anchor is pinned, verify repomd.xml's detached
         // OpenPGP signature before these bytes are parsed into the package-checksum map. A failure
@@ -430,7 +586,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
                 RecordRepomdSignatureFailure("no_trusted_key", upstreamBase);
                 return null;
             }
-            var asc = await GetRepomdAscBytesAsync(upstreamBase, ct);
+            byte[]? asc = await GetRepomdAscBytesAsync(upstreamBase, ct);
             if (asc is null)
             {
                 RecordRepomdSignatureFailure("missing_signature", upstreamBase);
@@ -461,18 +617,44 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     private async Task<byte[]?> GetRepomdAscBytesAsync(string upstreamBase, CancellationToken ct)
     {
-        var cacheKey = $"rpm:repomd-asc:{upstreamBase}";
-        if (_memCache.TryGetValue<byte[]>(cacheKey, out var cached)) return cached;
+        string cacheKey = $"rpm:repomd-asc:{upstreamBase}";
+        if (_memCache.TryGetValue<byte[]>(cacheKey, out byte[]? cached))
+        {
+            return cached;
+        }
 
-        var url = $"{upstreamBase}/repodata/repomd.xml.asc";
-        if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct)) return null;
+        string url = $"{upstreamBase}/repodata/repomd.xml.asc";
+        if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct))
+        {
+            return null;
+        }
 
         var client = _http.CreateClient("upstream");
         using var resp = await client.GetAsync(url, ct);
-        if (!resp.IsSuccessStatusCode) return null;
+        if (!resp.IsSuccessStatusCode)
+        {
+            return null;
+        }
 
-        var asc = await resp.Content.ReadAsByteArrayAsync(ct);
-        _memCache.Set(cacheKey, asc, _repomdTtl);
+        byte[] asc;
+        try
+        {
+            asc = await UpstreamClient.ReadBodyCappedAsync(
+                resp, UpstreamClient.MaxMetadataResponseBytes, url, ct);
+        }
+        catch (UpstreamResponseTooLargeException ex)
+        {
+            // A detached signature is a few hundred bytes; an over-cap body is treated as
+            // missing (verification then fails closed when a trust anchor is pinned).
+            _logger.LogWarning(ex,
+                "RPM repomd.xml.asc response exceeded the metadata cap for {Url}; treating as missing.", url);
+            return null;
+        }
+        _memCache.Set(cacheKey, asc, new MemoryCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = _repomdTtl,
+            Size = asc.Length,
+        });
         return asc;
     }
 
@@ -489,13 +671,22 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
             var factory = new PgpObjectFactory(sigStream);
             var obj = factory.NextPgpObject();
             if (obj is PgpCompressedData compressed)
+            {
                 obj = new PgpObjectFactory(compressed.GetDataStream()).NextPgpObject();
+            }
 
-            if (obj is not PgpSignatureList { Count: > 0 } sigList) return false;
+            if (obj is not PgpSignatureList { Count: > 0 } sigList)
+            {
+                return false;
+            }
+
             var sig = sigList[0];
 
             var publicKey = keyRing.GetPublicKey(sig.KeyId);  // null when signed by an untrusted key
-            if (publicKey is null) return false;
+            if (publicKey is null)
+            {
+                return false;
+            }
 
             sig.InitVerify(publicKey);
             sig.Update(repomd);
@@ -511,23 +702,25 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
 
     private async Task<RepodataResult?> GetHashPrefixedAsync(string upstreamBase, string filename, CancellationToken ct)
     {
-        var sha256 = ExtractSha256Prefix(filename);
-        if (sha256 is null) return null;
+        string? sha256 = ExtractSha256Prefix(filename);
+        if (sha256 is null)
+        {
+            return null;
+        }
 
-        var blobKey = BlobKeys.RpmRepodataProxy(sha256);
+        string blobKey = BlobKeys.RpmRepodataProxy(sha256);
 
         // Blob store hit — serve from cache tier forever (content-addressed = immutable).
         var existing = await _cacheStore.GetAsync(blobKey, ct);
         if (existing is not null)
         {
-            var bytes = await ReadStreamAsync(existing, ct);
+            byte[] bytes = await ReadStreamAsync(existing, ct);
             return new RepodataResult(bytes, ContentTypeFor(filename), ETag: null, LastModified: null, NotModified: false);
         }
 
         // Fetch from upstream, cache, serve.
-        var body = await GetOrFetchRepodataBlobAsync(upstreamBase, filename, sha256, ct);
-        if (body is null) return null;
-        return new RepodataResult(body, ContentTypeFor(filename), ETag: null, LastModified: null, NotModified: false);
+        byte[]? body = await GetOrFetchRepodataBlobAsync(upstreamBase, filename, sha256, ct);
+        return body is null ? null : new RepodataResult(body, ContentTypeFor(filename), ETag: null, LastModified: null, NotModified: false);
     }
 
     /// <summary>
@@ -536,19 +729,41 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     private async Task<byte[]?> GetOrFetchRepodataBlobAsync(string upstreamBase, string filename, string sha256, CancellationToken ct)
     {
-        var blobKey = BlobKeys.RpmRepodataProxy(sha256);
+        string blobKey = BlobKeys.RpmRepodataProxy(sha256);
         var existing = await _cacheStore.GetAsync(blobKey, ct);
         if (existing is not null)
+        {
             return await ReadStreamAsync(existing, ct);
+        }
 
-        var url = $"{upstreamBase}/repodata/{filename}";
-        if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct)) return null;
+        string url = $"{upstreamBase}/repodata/{filename}";
+        if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct))
+        {
+            return null;
+        }
 
         var client = _http.CreateClient("upstream");
         using var resp = await client.GetAsync(url, ct);
-        if (!resp.IsSuccessStatusCode) return null;
+        if (!resp.IsSuccessStatusCode)
+        {
+            return null;
+        }
 
-        var body = await resp.Content.ReadAsByteArrayAsync(ct);
+        byte[] body;
+        try
+        {
+            // Hash-prefixed repodata (primary.xml.gz et al.) can legitimately reach tens of
+            // megabytes on large distro repos, so the cap here is the artifact limit; the
+            // SHA-256 verification below still rejects any body that isn't the expected file.
+            body = await UpstreamClient.ReadBodyCappedAsync(
+                resp, UpstreamClient.MaxUpstreamResponseBytes, url, ct);
+        }
+        catch (UpstreamResponseTooLargeException ex)
+        {
+            _logger.LogWarning(ex,
+                "RPM repodata response exceeded the artifact cap for {Url}; treating as unavailable.", url);
+            return null;
+        }
 
         // Verify the fetched bytes against the expected SHA-256 before caching. RPM repodata
         // is content-addressed and cached "forever", and ResolvePackageUrlAsync lifts the
@@ -576,18 +791,23 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     private static bool RepodataBodyMatches(byte[] body, string expectedSha256)
     {
         if (Sha256Hex(body).Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
+        {
             return true;
+        }
 
         try
         {
-            using var gz = new GZipStream(new MemoryStream(body), CompressionMode.Decompress);
+            using var limited = new LimitedReadStream(
+                new GZipStream(new MemoryStream(body), CompressionMode.Decompress),
+                RepodataDecompressLimits.MaxDecompressedBytes, "repodata checksum probe");
             using var ms = new MemoryStream();
-            gz.CopyTo(ms);
+            limited.CopyTo(ms);
             return Sha256Hex(ms.ToArray()).Equals(expectedSha256, StringComparison.OrdinalIgnoreCase);
         }
         catch
         {
-            // Not gzip / corrupt: only the compressed-form check applies, and it already failed.
+            // Not gzip / corrupt / over decompression limit: only the compressed-form check applies,
+            // and it already failed.
             return false;
         }
     }
@@ -602,31 +822,70 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// data element. Returns <c>(null, null)</c> on any parse failure.
     /// </summary>
     internal static (string? Filename, string? Sha256) ParsePrimaryFromRepomd(byte[] repomdBytes)
+        => ParseRepodataEntryFromRepomd(repomdBytes, "primary");
+
+    /// <summary>
+    /// Parses <c>repomd.xml</c> and returns the href + SHA-256 for the <c>&lt;data
+    /// type="<paramref name="dataType"/>"&gt;</c> entry. Returns <c>(null, null)</c> when
+    /// the entry is absent or on any parse failure.
+    /// </summary>
+    internal static (string? Filename, string? Sha256) ParseRepodataEntryFromRepomd(byte[] repomdBytes, string dataType)
     {
         try
         {
             XNamespace ns = "http://linux.duke.edu/metadata/repo";
             var doc = XDocument.Load(new MemoryStream(repomdBytes));
 
-            var primaryData = doc.Descendants(ns + "data")
-                .FirstOrDefault(e => (string?)e.Attribute("type") == "primary");
-            if (primaryData is null) return (null, null);
+            var dataEl = doc.Descendants(ns + "data")
+                .FirstOrDefault(e => (string?)e.Attribute("type") == dataType);
+            if (dataEl is null)
+            {
+                return (null, null);
+            }
 
-            var href = (string?)primaryData.Element(ns + "location")?.Attribute("href");
-            if (href is null) return (null, null);
+            string? href = (string?)dataEl.Element(ns + "location")?.Attribute("href");
+            if (href is null)
+            {
+                return (null, null);
+            }
 
             // Try both <checksum> (sha256 type) and <open-checksum>
-            var sha256 = primaryData.Elements(ns + "checksum")
+            var sha256 = dataEl.Elements(ns + "checksum")
                              .FirstOrDefault(e => (string?)e.Attribute("type") == "sha256")
-                         ?? primaryData.Elements(ns + "open-checksum")
+                         ?? dataEl.Elements(ns + "open-checksum")
                              .FirstOrDefault(e => (string?)e.Attribute("type") == "sha256");
 
-            var filename = href.Contains('/') ? href[(href.LastIndexOf('/') + 1)..] : href;
+            string filename = href.Contains('/') ? href[(href.LastIndexOf('/') + 1)..] : href;
             return (filename, (string?)sha256);
         }
         catch
         {
             return (null, null);
+        }
+    }
+
+    /// <summary>
+    /// Parses <c>repomd.xml</c> and returns all non-primary <c>&lt;data&gt;</c> elements verbatim
+    /// (filelists, other, group, modules, updateinfo, …). The caller filters these down to
+    /// servable hash-prefixed entries before including them in the merged repomd, so upstream's
+    /// supplemental metadata remains reachable via hash-prefixed routes.
+    /// Returns an empty list on any parse failure.
+    /// </summary>
+    internal static IReadOnlyList<XElement> ParseNonPrimaryRepomdEntries(byte[] repomdBytes)
+    {
+        try
+        {
+            XNamespace ns = "http://linux.duke.edu/metadata/repo";
+            var doc = XDocument.Load(new MemoryStream(repomdBytes));
+
+            return doc.Descendants(ns + "data")
+                .Where(e => (string?)e.Attribute("type") != "primary")
+                .Select(e => new XElement(e))
+                .ToArray();
+        }
+        catch
+        {
+            return Array.Empty<XElement>();
         }
     }
 
@@ -638,10 +897,12 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     internal static Dictionary<string, PackageResolution> ParsePrimaryXmlGz(byte[] gzBytes, string upstreamBase)
     {
         byte[] xmlBytes;
-        using (var gz = new GZipStream(new MemoryStream(gzBytes), CompressionMode.Decompress))
+        using (var limited = new LimitedReadStream(
+            new GZipStream(new MemoryStream(gzBytes), CompressionMode.Decompress),
+            RepodataDecompressLimits.MaxDecompressedBytes, "primary.xml.gz parse"))
         using (var ms = new MemoryStream())
         {
-            gz.CopyTo(ms);
+            limited.CopyTo(ms);
             xmlBytes = ms.ToArray();
         }
 
@@ -653,29 +914,39 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
 
         foreach (var pkg in doc.Descendants(common + "package"))
         {
-            if ((string?)pkg.Attribute("type") != "rpm") continue;
+            if ((string?)pkg.Attribute("type") != "rpm")
+            {
+                continue;
+            }
 
-            var href = (string?)pkg.Element(common + "location")?.Attribute("href");
-            if (href is null) continue;
-            var filename = href.Contains('/') ? href[(href.LastIndexOf('/') + 1)..] : href;
+            string? href = (string?)pkg.Element(common + "location")?.Attribute("href");
+            if (href is null)
+            {
+                continue;
+            }
 
-            var sha256 = (string?)pkg.Elements(common + "checksum")
+            string filename = href.Contains('/') ? href[(href.LastIndexOf('/') + 1)..] : href;
+
+            string? sha256 = (string?)pkg.Elements(common + "checksum")
                 .FirstOrDefault(e => (string?)e.Attribute("type") == "sha256");
-            if (sha256 is null) continue;
+            if (sha256 is null)
+            {
+                continue;
+            }
 
-            var name = (string?)pkg.Element(common + "name") ?? "";
-            var arch = (string?)pkg.Element(common + "arch") ?? "";
+            string name = (string?)pkg.Element(common + "name") ?? "";
+            string arch = (string?)pkg.Element(common + "arch") ?? "";
             var versionEl = pkg.Element(common + "version");
-            var epoch = int.TryParse((string?)versionEl?.Attribute("epoch"), out var e) ? e : 0;
-            var ver = (string?)versionEl?.Attribute("ver") ?? "";
-            var rel = (string?)versionEl?.Attribute("rel") ?? "";
-            var summary = (string?)pkg.Element(common + "summary");
-            var description = (string?)pkg.Element(common + "description");
-            var license = (string?)pkg.Element(common + "format")
+            int epoch = int.TryParse((string?)versionEl?.Attribute("epoch"), out int e) ? e : 0;
+            string ver = (string?)versionEl?.Attribute("ver") ?? "";
+            string rel = (string?)versionEl?.Attribute("rel") ?? "";
+            string? summary = (string?)pkg.Element(common + "summary");
+            string? description = (string?)pkg.Element(common + "description");
+            string? license = (string?)pkg.Element(common + "format")
                 ?.Element(rpmNs + "license");
 
             // href may be relative (Packages/t/tree-...) or absolute; normalise to absolute.
-            var packageUrl = href.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            string packageUrl = href.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
                           || href.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
                 ? href
                 : $"{upstreamBase}/{href.TrimStart('/')}";
@@ -695,21 +966,19 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     internal static bool IsHashPrefixedFilename(string filename)
     {
-        if (filename.Length < 66) return false; // 64 hex + '-' + at least one char
-        var dashIdx = filename.IndexOf('-');
-        if (dashIdx != 64) return false;
-        var prefix = filename.AsSpan(0, 64);
-        foreach (var c in prefix)
-            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-                return false;
-        return true;
+        if (filename.Length < 66)
+        {
+            return false; // 64 hex + '-' + at least one char
+        }
+
+        int dashIdx = filename.IndexOf('-');
+        return dashIdx == 64 && filename[..64].All(static c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
     }
 
     /// <summary>Extracts the 64-char lowercase hex prefix from a hash-prefixed filename, or null.</summary>
     private static string? ExtractSha256Prefix(string filename)
     {
-        if (!IsHashPrefixedFilename(filename)) return null;
-        return filename[..64];
+        return !IsHashPrefixedFilename(filename) ? null : filename[..64];
     }
 
     /// <summary>
@@ -717,18 +986,18 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     internal static string UrlKey(string url)
     {
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(url));
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(url));
         return Convert.ToHexString(hash).ToLowerInvariant()[..32];
     }
 
     private static string ContentTypeFor(string filename)
     {
-        if (filename.EndsWith(".gz", StringComparison.OrdinalIgnoreCase)) return "application/x-gzip";
-        if (filename.EndsWith(".bz2", StringComparison.OrdinalIgnoreCase)) return "application/x-bzip2";
-        if (filename.EndsWith(".zst", StringComparison.OrdinalIgnoreCase)) return "application/zstd";
-        if (filename.EndsWith(".asc", StringComparison.OrdinalIgnoreCase) ||
-            filename.EndsWith(".key", StringComparison.OrdinalIgnoreCase)) return "application/pgp-keys";
-        return "application/xml";
+        return filename.EndsWith(".gz", StringComparison.OrdinalIgnoreCase) ? "application/x-gzip"
+            : filename.EndsWith(".bz2", StringComparison.OrdinalIgnoreCase) ? "application/x-bzip2"
+            : filename.EndsWith(".zst", StringComparison.OrdinalIgnoreCase) ? "application/zstd"
+            : filename.EndsWith(".asc", StringComparison.OrdinalIgnoreCase) ||
+            filename.EndsWith(".key", StringComparison.OrdinalIgnoreCase) ? "application/pgp-keys"
+            : "application/xml";
     }
 
     private static async Task<byte[]> ReadStreamAsync(Stream stream, CancellationToken ct)
@@ -737,7 +1006,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         {
             if (stream.CanSeek && stream.Length > 0 && stream.Length <= int.MaxValue)
             {
-                var buf = new byte[stream.Length];
+                byte[] buf = new byte[stream.Length];
                 await stream.ReadExactlyAsync(buf, ct);
                 return buf;
             }

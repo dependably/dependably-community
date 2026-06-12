@@ -1,6 +1,5 @@
 using Dependably.Protocol;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -17,14 +16,17 @@ public sealed class LocalOsvSourceTests : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(_dir)) Directory.Delete(_dir, recursive: true);
+        if (Directory.Exists(_dir))
+        {
+            Directory.Delete(_dir, recursive: true);
+        }
     }
 
     private void WriteAdvisory(string id, string ecosystem, string name, string[] versions, string? severity = null)
     {
-        var sevBlock = severity is null ? "" : $@",
+        string sevBlock = severity is null ? "" : $@",
   ""severity"": [{{ ""type"": ""CVSS_V3"", ""score"": ""{severity}"" }}]";
-        var json = $@"{{
+        string json = $@"{{
   ""id"": ""{id}"",
   ""summary"": ""test advisory"",
   ""affected"": [{{
@@ -97,7 +99,7 @@ public sealed class LocalOsvSourceTests : IDisposable
     public async Task QueryBatch_ParallelToInputs_PreservesOrder()
     {
         WriteAdvisory("GHSA-A", "npm", "lodash", ["4.17.20"]);
-        WriteAdvisory("GHSA-B", "npm", "react",  ["18.0.0"]);
+        WriteAdvisory("GHSA-B", "npm", "react", ["18.0.0"]);
         var src = Build();
 
         var results = await src.QueryBatchAsync([

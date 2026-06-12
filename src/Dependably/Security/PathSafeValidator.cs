@@ -8,28 +8,42 @@ public static class PathSafeValidator
 {
     private const int MaxLength = 200;
 
+    // Ordered safety rules — first violation wins, so the message matches the most
+    // specific failure (empty before length, etc.). A flat table keeps each check
+    // independent and the method's cognitive complexity low.
+    private static readonly (Func<string, bool> Violates, string Message)[] Rules =
+    [
+        (static v => string.IsNullOrEmpty(v), "must not be empty"),
+        (static v => v.Length > MaxLength, $"must not exceed {MaxLength} characters"),
+        (static v => v.Contains(".."), "must not contain '..'"),
+        (static v => v.Contains('/') || v.Contains('\\'), "must not contain path separators"),
+        (static v => v.Contains('\0'), "must not contain null bytes"),
+        (static v => v.Any(char.IsControl), "must not contain control characters"),
+    ];
+
     public static ValidationResult Validate(string value, string fieldName)
     {
-        if (string.IsNullOrEmpty(value))
-            return ValidationResult.Fail(fieldName, "must not be empty");
-
-        if (value.Length > MaxLength)
-            return ValidationResult.Fail(fieldName, $"must not exceed {MaxLength} characters");
-
-        if (value.Contains(".."))
-            return ValidationResult.Fail(fieldName, "must not contain '..'");
-
-        if (value.Contains('/') || value.Contains('\\'))
-            return ValidationResult.Fail(fieldName, "must not contain path separators");
-
-        if (value.Contains('\0'))
-            return ValidationResult.Fail(fieldName, "must not contain null bytes");
-
-        if (value.Any(char.IsControl))
-            return ValidationResult.Fail(fieldName, "must not contain control characters");
-
+        foreach (var (violates, message) in Rules)
+        {
+            if (violates(value))
+            {
+                return ValidationResult.Fail(fieldName, message);
+            }
+        }
         return ValidationResult.Ok();
     }
+
+    /// <summary>
+    /// Validates a route value that is embedded as a single path segment of an upstream
+    /// proxy URL. Applies all the base path-safety rules plus a ban on <c>%</c>: ASP.NET
+    /// keeps <c>%2F</c> (and other encoded sequences) undecoded in route values, so an
+    /// encoded slash or traversal would survive into the composed upstream request and be
+    /// decoded there. No package ecosystem allows <c>%</c> in names, versions, or filenames.
+    /// </summary>
+    public static ValidationResult ValidateUpstreamSegment(string value, string fieldName)
+        => value.Contains('%')
+            ? ValidationResult.Fail(fieldName, "must not contain percent-encoded sequences")
+            : Validate(value, fieldName);
 }
 
 public readonly record struct ValidationResult(bool IsValid, string? FieldName, string? Message)

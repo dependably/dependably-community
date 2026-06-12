@@ -3,7 +3,6 @@ using System.IO.Compression;
 using System.Text;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -29,7 +28,7 @@ public sealed class PyPiArtifactValidatorTests
     public void ValidateWheel_RealFixture_Succeeds()
     {
         var (bytes, _) = PyPiFixtures.RealWheel();
-        var result = PyPiArtifactValidator.ValidateWheel(bytes, out var name, out var version);
+        var result = PyPiArtifactValidator.ValidateWheel(bytes, out string? name, out string? version);
         Assert.True(result.IsValid);
         Assert.Equal("mypy-extensions", name);
         Assert.Equal("1.0.0", version);
@@ -39,7 +38,7 @@ public sealed class PyPiArtifactValidatorTests
     public void ValidateWheel_SyntheticWheel_Succeeds_AndNormalisesName()
     {
         var (bytes, _) = PyPiFixtures.BuildWheel("My.Package", "2.3.4");
-        var result = PyPiArtifactValidator.ValidateWheel(bytes, out var name, out var version);
+        var result = PyPiArtifactValidator.ValidateWheel(bytes, out string? name, out string? version);
         Assert.True(result.IsValid);
         Assert.Equal("my-package", name);
         Assert.Equal("2.3.4", version);
@@ -49,8 +48,8 @@ public sealed class PyPiArtifactValidatorTests
     public void ValidateWheel_MissingMetadata_FailsWithContentField()
     {
         // ZIP with no dist-info/METADATA entry.
-        var bytes = BuildZip(("README.txt", "no metadata here"));
-        var result = PyPiArtifactValidator.ValidateWheel(bytes, out var name, out var version);
+        byte[] bytes = BuildZip(("README.txt", "no metadata here"));
+        var result = PyPiArtifactValidator.ValidateWheel(bytes, out string? name, out string? version);
         Assert.False(result.IsValid);
         Assert.Equal("content", result.FieldName);
         Assert.Null(name);
@@ -69,12 +68,12 @@ public sealed class PyPiArtifactValidatorTests
     public void ValidateWheel_InvalidPep508Name_Fails()
     {
         // Name starts with a space, breaks PEP 508.
-        var bytes = BuildWheelWithMetadata("Name:  has-leading-space\nVersion: 1.0.0\n");
-        var result = PyPiArtifactValidator.ValidateWheel(bytes, out _, out _);
+        byte[] bytes = BuildWheelWithMetadata("Name:  has-leading-space\nVersion: 1.0.0\n");
+        _ = PyPiArtifactValidator.ValidateWheel(bytes, out _, out _);
         // The name with leading whitespace gets trimmed; what we really care about is
         // that names containing forbidden characters are rejected. Use a clear violation:
         bytes = BuildWheelWithMetadata("Name: bad name with spaces\nVersion: 1.0.0\n");
-        result = PyPiArtifactValidator.ValidateWheel(bytes, out _, out _);
+        var result = PyPiArtifactValidator.ValidateWheel(bytes, out _, out _);
         Assert.False(result.IsValid);
         Assert.Equal("content", result.FieldName);
     }
@@ -82,7 +81,7 @@ public sealed class PyPiArtifactValidatorTests
     [Fact]
     public void ValidateWheel_InvalidPep440Version_Fails()
     {
-        var bytes = BuildWheelWithMetadata("Name: pkg\nVersion: not-a-version\n");
+        byte[] bytes = BuildWheelWithMetadata("Name: pkg\nVersion: not-a-version\n");
         var result = PyPiArtifactValidator.ValidateWheel(bytes, out _, out _);
         Assert.False(result.IsValid);
         Assert.Equal("content", result.FieldName);
@@ -91,7 +90,7 @@ public sealed class PyPiArtifactValidatorTests
     [Fact]
     public void ValidateWheel_MissingNameHeader_Fails()
     {
-        var bytes = BuildWheelWithMetadata("Version: 1.0.0\n");
+        byte[] bytes = BuildWheelWithMetadata("Version: 1.0.0\n");
         var result = PyPiArtifactValidator.ValidateWheel(bytes, out _, out _);
         Assert.False(result.IsValid);
     }
@@ -99,7 +98,7 @@ public sealed class PyPiArtifactValidatorTests
     [Fact]
     public void ValidateWheel_MissingVersionHeader_Fails()
     {
-        var bytes = BuildWheelWithMetadata("Name: pkg\n");
+        byte[] bytes = BuildWheelWithMetadata("Name: pkg\n");
         var result = PyPiArtifactValidator.ValidateWheel(bytes, out _, out _);
         Assert.False(result.IsValid);
     }
@@ -110,7 +109,7 @@ public sealed class PyPiArtifactValidatorTests
     public void ValidateSdist_RealFixture_Succeeds()
     {
         var (bytes, _) = PyPiFixtures.RealSdist();
-        var result = PyPiArtifactValidator.ValidateSdist(bytes, out var name, out var version);
+        var result = PyPiArtifactValidator.ValidateSdist(bytes, out string? name, out string? version);
         Assert.True(result.IsValid);
         Assert.Equal("mypy-extensions", name);
         Assert.Equal("1.0.0", version);
@@ -120,7 +119,7 @@ public sealed class PyPiArtifactValidatorTests
     public void ValidateSdist_Synthetic_Succeeds()
     {
         var (bytes, _) = PyPiFixtures.BuildSdist("pkg", "0.1.0");
-        var result = PyPiArtifactValidator.ValidateSdist(bytes, out var name, out var version);
+        var result = PyPiArtifactValidator.ValidateSdist(bytes, out string? name, out string? version);
         Assert.True(result.IsValid);
         Assert.Equal("pkg", name);
         Assert.Equal("0.1.0", version);
@@ -129,7 +128,7 @@ public sealed class PyPiArtifactValidatorTests
     [Fact]
     public void ValidateSdist_MissingPkgInfo_Fails()
     {
-        var bytes = BuildSdistWithEntries(("only-readme.txt", "no PKG-INFO here"));
+        byte[] bytes = BuildSdistWithEntries(("only-readme.txt", "no PKG-INFO here"));
         var result = PyPiArtifactValidator.ValidateSdist(bytes, out _, out _);
         Assert.False(result.IsValid);
         Assert.Equal("content", result.FieldName);
@@ -149,7 +148,7 @@ public sealed class PyPiArtifactValidatorTests
     public void ValidateEgg_Synthetic_Succeeds_AndNormalisesName()
     {
         var (bytes, _) = PyPiFixtures.BuildEgg("My.Package", "2.3.4");
-        var result = PyPiArtifactValidator.ValidateEgg(bytes, out var name, out var version);
+        var result = PyPiArtifactValidator.ValidateEgg(bytes, out string? name, out string? version);
         Assert.True(result.IsValid);
         Assert.Equal("my-package", name);
         Assert.Equal("2.3.4", version);
@@ -159,8 +158,8 @@ public sealed class PyPiArtifactValidatorTests
     public void ValidateEgg_MissingEggInfo_FailsWithContentField()
     {
         // ZIP with no EGG-INFO/PKG-INFO entry.
-        var bytes = BuildZip(("README.txt", "no egg metadata here"));
-        var result = PyPiArtifactValidator.ValidateEgg(bytes, out var name, out var version);
+        byte[] bytes = BuildZip(("README.txt", "no egg metadata here"));
+        var result = PyPiArtifactValidator.ValidateEgg(bytes, out string? name, out string? version);
         Assert.False(result.IsValid);
         Assert.Equal("content", result.FieldName);
         Assert.Null(name);
@@ -180,7 +179,7 @@ public sealed class PyPiArtifactValidatorTests
     {
         var (bytes, _) = PyPiFixtures.BuildEgg("acme", "1.0.0");
         var result = PyPiArtifactValidator.Validate(
-            "acme-1.0.0-py3.11.egg", bytes, out var name, out var version);
+            "acme-1.0.0-py3.11.egg", bytes, out string? name, out string? version);
         Assert.True(result.IsValid);
         Assert.Equal("acme", name);
         Assert.Equal("1.0.0", version);
@@ -191,7 +190,7 @@ public sealed class PyPiArtifactValidatorTests
     {
         // Eggs without a -py{X.Y} tag have exactly two dash segments.
         var (bytes, _) = PyPiFixtures.BuildEgg("acme", "1.0.0");
-        var result = PyPiArtifactValidator.Validate("acme-1.0.0.egg", bytes, out var name, out var version);
+        var result = PyPiArtifactValidator.Validate("acme-1.0.0.egg", bytes, out string? name, out string? version);
         Assert.True(result.IsValid);
         Assert.Equal("acme", name);
         Assert.Equal("1.0.0", version);
@@ -233,7 +232,7 @@ public sealed class PyPiArtifactValidatorTests
     {
         var (bytes, _) = PyPiFixtures.BuildWheel("acme", "1.0.0");
         var result = PyPiArtifactValidator.Validate(
-            "acme-1.0.0-py3-none-any.whl", bytes, out var name, out var version);
+            "acme-1.0.0-py3-none-any.whl", bytes, out string? name, out string? version);
         Assert.True(result.IsValid);
         Assert.Equal("acme", name);
         Assert.Equal("1.0.0", version);
@@ -274,7 +273,7 @@ public sealed class PyPiArtifactValidatorTests
     public void Validate_Sdist_TarGz_Succeeds()
     {
         var (bytes, _) = PyPiFixtures.BuildSdist("acme", "1.2.3");
-        var result = PyPiArtifactValidator.Validate("acme-1.2.3.tar.gz", bytes, out var name, out var version);
+        var result = PyPiArtifactValidator.Validate("acme-1.2.3.tar.gz", bytes, out string? name, out string? version);
         Assert.True(result.IsValid);
         Assert.Equal("acme", name);
         Assert.Equal("1.2.3", version);
@@ -321,7 +320,7 @@ public sealed class PyPiArtifactValidatorTests
     [InlineData("my_pkg-2.5.0-py3.11-linux-x86_64.egg", "my-pkg", "2.5.0")]
     public void TryParseFilename_HappyPath(string filename, string expectedName, string expectedVersion)
     {
-        Assert.True(PyPiArtifactValidator.TryParseFilename(filename, out var name, out var version));
+        Assert.True(PyPiArtifactValidator.TryParseFilename(filename, out string? name, out string? version));
         Assert.Equal(expectedName, name);
         Assert.Equal(expectedVersion, version);
     }
@@ -336,7 +335,7 @@ public sealed class PyPiArtifactValidatorTests
     [InlineData("")]                         // empty
     public void TryParseFilename_Rejects(string filename)
     {
-        Assert.False(PyPiArtifactValidator.TryParseFilename(filename, out var name, out var version));
+        Assert.False(PyPiArtifactValidator.TryParseFilename(filename, out string? name, out string? version));
         Assert.Null(name);
         Assert.Null(version);
     }
@@ -348,7 +347,7 @@ public sealed class PyPiArtifactValidatorTests
         // is not PEP 440-shaped — exercises the Pep440VersionRegex().IsMatch(parts[1])
         // false branch on line 242 of the SUT.
         Assert.False(PyPiArtifactValidator.TryParseFilename(
-            "pkg-notaversion-py3-none-any.whl", out var name, out var version));
+            "pkg-notaversion-py3-none-any.whl", out string? name, out string? version));
         Assert.Null(name);
         Assert.Null(version);
     }
@@ -361,7 +360,7 @@ public sealed class PyPiArtifactValidatorTests
         // Existing tests only cover .tar.gz; .tgz hits the second branch of the
         // extension check in Validate (line 45).
         var (bytes, _) = PyPiFixtures.BuildSdist("acme", "1.2.3");
-        var result = PyPiArtifactValidator.Validate("acme-1.2.3.tgz", bytes, out var name, out var version);
+        var result = PyPiArtifactValidator.Validate("acme-1.2.3.tgz", bytes, out string? name, out string? version);
         Assert.True(result.IsValid);
         Assert.Equal("acme", name);
         Assert.Equal("1.2.3", version);
@@ -373,9 +372,9 @@ public sealed class PyPiArtifactValidatorTests
         // Build an sdist whose PKG-INFO has a bad version header. This exercises
         // line 147 (ValidationResult.Fail("content", error) inside ValidateSdist)
         // and the false branch of ValidateNameVersion on line 146.
-        var pkgInfo = "Metadata-Version: 2.1\nName: pkg\nVersion: not-a-version\n";
-        var bytes = BuildSdistWithEntries(("pkg-0.0.0/PKG-INFO", pkgInfo));
-        var result = PyPiArtifactValidator.ValidateSdist(bytes, out var name, out var version);
+        string pkgInfo = "Metadata-Version: 2.1\nName: pkg\nVersion: not-a-version\n";
+        byte[] bytes = BuildSdistWithEntries(("pkg-0.0.0/PKG-INFO", pkgInfo));
+        var result = PyPiArtifactValidator.ValidateSdist(bytes, out string? name, out string? version);
         Assert.False(result.IsValid);
         Assert.Equal("content", result.FieldName);
         Assert.Contains("Invalid PEP 440 version", result.Message);

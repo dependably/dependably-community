@@ -12,6 +12,7 @@
     "audit": "Audit",
     "settings": "Settings",
     "vulnerabilities": "Vulnerabilities",
+    "quarantine": "Quarantine",
     "licensePolicy": "Licenses",
     "setup": "Setup",
     "admin": "Admin",
@@ -50,7 +51,8 @@
     "never": "never",
     "notSet": "not set",
     "notAvailable": "Not available.",
-    "allEcosystems": "All ecosystems"
+    "allEcosystems": "All ecosystems",
+    "clearSearch": "Clear search"
   },
   "password": {
     "tooShort": "Use at least {min} characters.",
@@ -100,8 +102,15 @@
       "ecosystem": "Ecosystem",
       "purl": "PURL",
       "versions": "Versions",
+      "downloads": "Downloads",
+      "latest": "Latest",
       "vulns": "Vulns",
       "created": "Created"
+    },
+    "latest": {
+      "current": "Latest upstream version is cached",
+      "stale": "A newer upstream version is not cached",
+      "unknown": "No upstream version to compare"
     },
     "empty": "No packages found"
   },
@@ -330,6 +339,8 @@
       "saml.config_updated": "SAML config updated",
       "saml.metadata_uploaded": "SAML metadata uploaded",
       "saml.config_deleted": "SAML config deleted",
+      "saml.signing_cert_expiring": "SAML signing cert expiring",
+      "saml.signing_cert_expired": "SAML signing cert expired",
       "license_policy_mode_changed": "License policy mode changed",
       "license_allowlist_added": "License allowlist entry added",
       "license_allowlist_removed": "License allowlist entry removed",
@@ -522,7 +533,12 @@
       "roleMappingSaved": "Role mapping saved.",
       "testPopupBlocked": "The browser blocked the SAML test popup. Allow popups for this site and try again.",
       "testSucceeded": "SAML test succeeded (asserted email: {email}). Forms login can now be safely disabled within the next 10 minutes.",
-      "testFailed": "SAML test failed: {reason}"
+      "testFailed": "SAML test failed: {reason}",
+      "certExpiryWarningTitle": "IdP signing certificate expiring soon",
+      "certExpiryExpiredTitle": "IdP signing certificate has expired",
+      "certExpiryWarningBody": "The SAML IdP signing certificate expires in {days} day(s) ({notAfter}). Replace it in Settings → Authentication before it expires to avoid SAML login disruption.",
+      "certExpiryExpiredBody": "The SAML IdP signing certificate expired on {notAfter}. SAML logins may fail. Replace the certificate in Settings → Authentication immediately.",
+      "certExpiryReplace": "Replace certificate"
     },
     "saved": "Settings saved.",
     "retentionSaved": "Retention settings saved.",
@@ -564,12 +580,27 @@
       "minReleaseAgeUnitDays": "Days",
       "allowlistSection": "Allowlist",
       "blocklistSection": "Blocklist",
+      "reservedSection": "Reserved namespaces",
+      "reservedHint": "Dependency-confusion guard: names matching these per-ecosystem patterns are never fetched or merged from upstream — only your hosted content serves. Names you have published are protected automatically; reserve patterns here to also cover names you haven't published yet.",
       "blockDeprecated": "Deprecated package policy",
       "blockDeprecatedHint": "How upstream-deprecated versions are handled. Warn surfaces a 'deprecated' status in the UI and API. Block new refuses a deprecated version on cache miss — it is never fetched, cached, or served — while already-cached versions keep serving. Block all additionally returns 403 for already-cached versions once deprecated. Deprecation data is captured at proxy fetch and refreshed daily by the deprecation-refresh job.",
       "blockDeprecatedOff": "Off — allow deprecated",
       "blockDeprecatedWarn": "Warn — flag only",
       "blockDeprecatedBlockNew": "Block new — refuse new deprecated fetches",
       "blockDeprecatedBlockAll": "Block all — also stop serving cached",
+      "blockMalicious": "Malicious package policy",
+      "blockMaliciousHint": "How versions carrying a malicious-package advisory (OSV MAL- reports from the OpenSSF malicious-packages feed, gathered by the regular vulnerability scan) are handled. These advisories usually carry no CVSS score, so the OSV score tolerance never applies to them. Block returns 403 on fetch and serve; Warn surfaces the advisory in the vulnerability report only. A per-version manual allow override still wins, as the escape hatch for false-positive reports.",
+      "blockMaliciousOff": "Off — ignore malware advisories",
+      "blockMaliciousWarn": "Warn — flag only",
+      "blockMaliciousBlock": "Block — refuse flagged versions",
+      "blockKev": "Known-exploited (KEV) policy",
+      "blockKevHint": "How versions are handled when one of their advisories aliases a CVE in the CISA Known Exploited Vulnerabilities catalog — confirmed exploited in the wild, independent of CVSS score. The catalog is refreshed daily by the threat-feed job. Block returns 403 on fetch and serve; Warn surfaces the KEV flag in the vulnerability report only. A per-version manual allow override still wins.",
+      "blockKevOff": "Off — ignore KEV listings",
+      "blockKevWarn": "Warn — flag only",
+      "blockKevBlock": "Block — refuse exploited-in-the-wild",
+      "maxEpssTolerance": "EPSS probability ceiling",
+      "maxEpssToleranceHint": "Maximum FIRST.org EPSS exploitation probability (0.0–1.0) tolerated across a version's advisories. EPSS estimates the likelihood a CVE is exploited within 30 days; for example 0.5 blocks versions with an advisory considered more likely than not to be exploited. Scores are refreshed daily by the threat-feed job. Leave empty to disable.",
+      "maxEpssTolerancePlaceholder": "Off",
       "saved": "Proxy settings saved.",
       "upstreamRegistries": {
         "section": "Upstream registries",
@@ -666,6 +697,23 @@
       "pattern": "Regex Pattern",
       "patternPlaceholder": "e.g. ^pkg:npm/evil-.*",
       "patternHint": "Regex matched against the full package PURL — anchor with ^pkg:npm/ (or pypi, nuget) to scope to one ecosystem."
+    }
+  },
+  "reservedNamespaces": {
+    "addEntry": "Reserve namespace",
+    "removeConfirm": "Remove this reserved namespace? Matching names become proxyable from upstream again.",
+    "columns": {
+      "ecosystem": "Ecosystem",
+      "pattern": "Pattern",
+      "added": "Added"
+    },
+    "empty": "No reserved namespaces",
+    "modal": {
+      "title": "Reserve a Namespace",
+      "ecosystem": "Ecosystem",
+      "pattern": "Pattern",
+      "patternPlaceholder": "e.g. @acme/* or com.acme",
+      "patternHint": "Exact name or trailing-* glob ('@acme/*', 'Acme.*'). Maven patterns are dot-boundary groupId prefixes: 'com.acme' also reserves every 'com.acme.*' groupId, but never 'com.acmecorp'."
     }
   },
   "users": {
@@ -768,10 +816,46 @@
     "vulns": "Vulnerabilities",
     "packageBreakdown": "Packages by ecosystem",
     "donutEmpty": "No packages",
-    "unscored": "UNSCORED"
+    "unscored": "UNSCORED",
+    "samlCertExpiryCard": "SAML cert expiring",
+    "samlCertExpiredCard": "SAML cert expired",
+    "samlCertDays": "{days} day(s) remaining",
+    "samlCertNotAfter": "Expires {notAfter}"
+  },
+  "quarantine": {
+    "title": "Quarantine",
+    "intro": "Every automatic policy block (deprecated, release age, malicious, KEV, EPSS, vulnerability score) lands here for review while downloads keep returning 403. Approving sets the version's manual allow override — it outranks every policy gate; denying records a manual block. Decisions are written to the audit log.",
+    "empty": "No entries.",
+    "approve": "Approve",
+    "deny": "Deny",
+    "filters": {
+      "pending": "Pending",
+      "approved": "Approved",
+      "denied": "Denied",
+      "all": "All"
+    },
+    "states": {
+      "approved": "Approved",
+      "denied": "Denied"
+    },
+    "gates": {
+      "deprecated": "deprecated",
+      "release_age": "release age",
+      "malicious": "malicious",
+      "kev": "KEV",
+      "epss": "EPSS",
+      "vuln_score": "vuln score"
+    },
+    "columns": {
+      "package": "Package",
+      "gate": "Gate",
+      "detail": "Detail",
+      "updated": "Updated"
+    }
   },
   "vulnerabilities": {
     "title": "Vulnerabilities",
+    "malicious": "MALICIOUS",
     "columns": {
       "package": "Package",
       "version": "Version",

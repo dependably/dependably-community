@@ -16,7 +16,7 @@ namespace Dependably.Infrastructure;
 ///
 /// The action branches by <c>DEPLOYMENT_MODE</c>:
 ///   - <c>single</c> (default): create one tenant + the bootstrap admin as that tenant's owner.
-///   - <c>multi</c>:            create the system_admin only. No tenant is auto-created.
+///   - <c>multi</c> or <c>header</c>: create the system_admin only. No tenant is auto-created.
 /// </summary>
 public sealed class FirstBootService
 {
@@ -42,7 +42,7 @@ public sealed class FirstBootService
         {
             // xtenant: instance-wide first-boot check; the whole point is to find whether
             // any tenant or admin exists at all before seeding the default org.
-            var totalRows = await conn.ExecuteScalarAsync<int>(
+            int totalRows = await conn.ExecuteScalarAsync<int>(
                 """
                 SELECT
                     (SELECT COUNT(*) FROM users) +
@@ -59,7 +59,7 @@ public sealed class FirstBootService
             _logger.LogInformation("First boot detected — initializing instance.");
 
             // JWT secret is needed in both modes — generate once per install.
-            var jwtSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+            string jwtSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
             await conn.ExecuteAsync(
                 """
                 INSERT INTO instance_settings (key, value) VALUES ('jwt_secret', @value)
@@ -69,9 +69,9 @@ public sealed class FirstBootService
 
             await SeedInstanceSettingsAsync(conn);
 
-            var mode = (_config["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
+            string mode = (_config["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
 
-            if (mode == "multi")
+            if (mode is "multi" or "header")
             {
                 BootstrapMulti(conn, _config);
             }
@@ -91,8 +91,8 @@ public sealed class FirstBootService
 
     private static async Task BootstrapSingleAsync(DbConnection conn, IConfiguration config)
     {
-        var orgSlug = config["DEFAULT_TENANT_SLUG"] ?? config["DEFAULT_ORG_SLUG"] ?? "default";
-        var orgId = NewId();
+        string orgSlug = config["DEFAULT_TENANT_SLUG"] ?? config["DEFAULT_ORG_SLUG"] ?? "default";
+        string orgId = NewId();
 
         conn.Execute(
             "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
@@ -105,11 +105,11 @@ public sealed class FirstBootService
         // Seed the standard public upstreams so the default org keeps proxying out of the box.
         await UpstreamRegistrySeeder.SeedForOrgAsync(conn, orgId, config);
 
-        var rawPassword = config["FIRST_BOOT_ADMIN_PASSWORD"]
+        string rawPassword = config["FIRST_BOOT_ADMIN_PASSWORD"]
             ?? Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));
-        var passwordHash = BCrypt.Net.BCrypt.HashPassword(rawPassword, workFactor: 12);
-        var adminEmail = config["FIRST_BOOT_ADMIN_EMAIL"] ?? "admin@dependably.local";
-        var adminId = NewId();
+        string passwordHash = BCrypt.Net.BCrypt.HashPassword(rawPassword, workFactor: 12);
+        string adminEmail = config["FIRST_BOOT_ADMIN_EMAIL"] ?? "admin@dependably.local";
+        string adminId = NewId();
 
         // 1:1 user:tenant model — tenant_id and role live on the user row directly.
         // must_change_password = 1 forces rotation since the seeded password may have been
@@ -126,13 +126,14 @@ public sealed class FirstBootService
 
     private static void BootstrapMulti(DbConnection conn, IConfiguration config)
     {
-        // Multi mode bootstrap: create only the system_admin. No tenant. No tenant user.
-        var rawPassword = config["FIRST_BOOT_SYSTEM_ADMIN_PASSWORD"]
+        // Multi-tenant mode bootstrap (multi and header): create only the system_admin.
+        // No tenant is auto-created — tenants are provisioned through the management API.
+        string rawPassword = config["FIRST_BOOT_SYSTEM_ADMIN_PASSWORD"]
             ?? config["FIRST_BOOT_ADMIN_PASSWORD"]
             ?? Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));
-        var passwordHash = BCrypt.Net.BCrypt.HashPassword(rawPassword, workFactor: 12);
-        var email = config["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] ?? "system@dependably.local";
-        var id = NewId();
+        string passwordHash = BCrypt.Net.BCrypt.HashPassword(rawPassword, workFactor: 12);
+        string email = config["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] ?? "system@dependably.local";
+        string id = NewId();
 
         conn.Execute(
             """
@@ -141,7 +142,7 @@ public sealed class FirstBootService
             """,
             new { id, email, hash = passwordHash });
 
-        PrintCredentials(email, rawPassword, "system_admin (multi mode)");
+        PrintCredentials(email, rawPassword, "system_admin (multi-tenant mode)");
     }
 
     private async Task SeedInstanceSettingsAsync(DbConnection conn)
@@ -157,7 +158,16 @@ public sealed class FirstBootService
             ["max_upload_bytes_nuget"] = _config["MAX_UPLOAD_BYTES_NUGET"] ?? InstanceSettingDefaults.MaxUploadBytesNuGet,
             ["gc_schedule"] = _config["GC_SCHEDULE"] ?? InstanceSettingDefaults.GcSchedule,
             ["siem_max_lookback_days"] = _config["SIEM_MAX_LOOKBACK_DAYS"] ?? InstanceSettingDefaults.SiemMaxLookbackDays,
+            ["max_active_tokens_per_tenant"] = _config["MAX_ACTIVE_TOKENS_PER_TENANT"] ?? InstanceSettingDefaults.MaxActiveTokensPerTenant,
         };
+
+        // Storage quota default is optional: only seed when the env var is set so
+        // existing installs that upgrade do not suddenly acquire an arbitrary ceiling.
+        string? quotaEnv = _config["DEFAULT_STORAGE_QUOTA_BYTES"];
+        if (!string.IsNullOrWhiteSpace(quotaEnv))
+        {
+            settings["default_storage_quota_bytes"] = quotaEnv;
+        }
 
         foreach (var (key, value) in settings)
         {
@@ -172,7 +182,7 @@ public sealed class FirstBootService
 
     private static void PrintCredentials(string email, string password, string label)
     {
-        var border = new string('=', 60);
+        string border = new('=', 60);
         Console.WriteLine();
         Console.WriteLine(border);
         Console.WriteLine($"  DEPENDABLY FIRST BOOT — {label.ToUpperInvariant()}");

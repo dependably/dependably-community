@@ -1,6 +1,5 @@
 using Dependably.Storage;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Storage;
 
@@ -26,7 +25,7 @@ public sealed class BlobStoreFactoryTests
     {
         // Supply a writable path so LocalBlobStore can create the root directory; the default
         // /data/blobs is read-only outside Docker.
-        var dir = Path.Combine(Path.GetTempPath(), "bsf_default_" + Guid.NewGuid().ToString("N"));
+        string dir = Path.Combine(Path.GetTempPath(), "bsf_default_" + Guid.NewGuid().ToString("N"));
         try
         {
             var cfg = Cfg(new Dictionary<string, string?>
@@ -41,7 +40,10 @@ public sealed class BlobStoreFactoryTests
         }
         finally
         {
-            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
         }
     }
 
@@ -255,7 +257,7 @@ public sealed class BlobStoreFactoryTests
     {
         // The factory lowercases the backend value before the switch, so "LOCAL",
         // "Local", and "local" must all route to LocalBlobStore.
-        var dir = Path.Combine(Path.GetTempPath(), "bsf_case_" + Guid.NewGuid().ToString("N"));
+        string dir = Path.Combine(Path.GetTempPath(), "bsf_case_" + Guid.NewGuid().ToString("N"));
         try
         {
             var cfg = Cfg(new Dictionary<string, string?>
@@ -270,7 +272,10 @@ public sealed class BlobStoreFactoryTests
         }
         finally
         {
-            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
         }
     }
 

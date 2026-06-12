@@ -15,7 +15,7 @@ Pick a [BCP 47](https://www.rfc-editor.org/rfc/rfc5646) language tag. Use the ba
 
 Regional variants are supported by the fallback chain (`pt-BR` → `pt` → `en`), but maintaining separate variant files doubles translation work. Discuss with stakeholders before committing to a variant.
 
-Consult [docs/i18n.md](../i18n.md#locale-codes) for the full locale policy.
+Consult [i18n/README.md](README.md#locale-codes) for the full locale policy.
 
 Throughout this guide, replace `xx` with your chosen locale code.
 
@@ -41,15 +41,13 @@ Add your locale tag to the `supported` array:
 var supported = new[] { "en", "fr", "xx" };
 ```
 
-If this block does not yet exist in `Program.cs` (i18n middleware not yet wired), add it inside `ConfigureBuilder` after the auth services block, and also add `app.UseRequestLocalization();` inside `ConfigureApp` before `app.UseAuthentication()`.
-
 ---
 
 ## Step 3 — Register the locale in the frontend
 
 ### 3a. Register in i18n initializer
 
-Open `web/src/i18n/index.js` (create it if it does not exist — see [docs/i18n.md](../i18n.md#setup) for the template). Add a `register` call for the new locale:
+Open `web/src/i18n/index.js` and add a `register` call for the new locale:
 
 ```js
 register('xx', () => import('../locales/xx.json'));
@@ -59,14 +57,14 @@ Place it alongside the existing `register('en', ...)` and `register('fr', ...)` 
 
 ### 3b. Add to the locale switcher
 
-Open `web/src/lib/LocaleSwitcher.svelte`. Find the `locales` array and add an entry:
+Open `web/src/lib/locale.js`. Find the exported `locales` array and add an entry:
 
 ```js
-const locales = [
+export const locales = [
   { code: 'en', label: 'English' },
   { code: 'fr', label: 'Français' },
-  { code: 'xx', label: 'Your Language Name' },  // add this
-];
+  { code: 'xx', label: 'Your Language Name' }  // add this
+]
 ```
 
 Use the native name of the language (e.g. `Deutsch` for German, `日本語` for Japanese), not the English name.
@@ -155,12 +153,12 @@ Export the English source strings to XLIFF 2.0 for translator delivery:
 i18n/scripts/i18n-export.sh
 ```
 
-This writes two files to `docs/i18n/handoff/`:
+This writes two files to `i18n/handoff/`:
 
 - `frontend.en.xlf` — UI strings
 - `backend.en.xlf` — backend strings
 
-Package these two files together with `docs/i18n/glossary.md` and send to the translation team. The translator README at [docs/i18n/handoff/README.md](handoff/README.md) explains the handoff format and glossary requirements — include it in the delivery package.
+Package these two files together with `i18n/glossary.md` and send to the translation team. The translator README at [i18n/handoff/README.md](handoff/README.md) explains the handoff format and glossary requirements — include it in the delivery package.
 
 The export is idempotent — re-running produces the same output.
 
@@ -209,16 +207,16 @@ Before shipping, perform a full walkthrough of the UI in the new locale:
 
 Once QA is complete:
 
-1. Open a pull request with all changed files:
+1. Open a merge request with all changed files:
    - `src/Dependably/Program.cs` (locale registration)
    - `src/Dependably/Resources/SharedResource.xx.resx` (backend translations)
    - `web/src/locales/xx.json` (frontend translations)
    - `web/src/i18n/index.js` (locale registration)
-   - `web/src/lib/LocaleSwitcher.svelte` (switcher entry)
+   - `web/src/lib/locale.js` (switcher entry)
 
-2. The CI pipeline runs `node i18n/scripts/i18n-validate.js` automatically. The PR cannot merge if there are missing keys.
+2. The CI pipeline runs `node i18n/scripts/i18n-validate.js` automatically. The MR cannot merge if there are missing keys.
 
-3. After merge, update [docs/i18n.md](../i18n.md#locale-codes) to list the new locale in the supported locales table.
+3. After merge, update [i18n/README.md](README.md#locale-codes) to list the new locale in the supported locales table.
 
 ---
 

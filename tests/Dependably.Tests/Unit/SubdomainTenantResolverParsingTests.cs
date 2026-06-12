@@ -3,7 +3,6 @@ using Dependably.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Primitives;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -20,11 +19,22 @@ public sealed class SubdomainTenantResolverParsingTests
             .AddInMemoryCollection(entries.Select(e => new KeyValuePair<string, string?>(e.Key, e.Value)))
             .Build();
 
-    private static DefaultHttpContext WithHost(string? host, string? forwardedHost = null)
+    // Simulates the Request.Host value *after* ForwardedHeadersMiddleware has run.
+    // The optional rawForwardedHost parameter places a raw header to confirm the resolver
+    // reads Request.Host and not the raw X-Forwarded-Host header.
+    private static DefaultHttpContext WithHost(string? host, string? rawForwardedHost = null)
     {
         var ctx = new DefaultHttpContext();
-        if (host is not null) ctx.Request.Host = new HostString(host);
-        if (forwardedHost is not null) ctx.Request.Headers["X-Forwarded-Host"] = new StringValues(forwardedHost);
+        if (host is not null)
+        {
+            ctx.Request.Host = new HostString(host);
+        }
+
+        if (rawForwardedHost is not null)
+        {
+            ctx.Request.Headers["X-Forwarded-Host"] = new StringValues(rawForwardedHost);
+        }
+
         return ctx;
     }
 
@@ -100,18 +110,38 @@ public sealed class SubdomainTenantResolverParsingTests
     }
 
     [Fact]
-    public async Task ForwardedHostHeader_WinsOverHostHeader()
+    public async Task RequestHost_SubSubdomain_Uninitialized()
     {
-        // Host header points at apex; X-Forwarded-Host names a sub-subdomain → resolver
-        // must pick the forwarded host and reject the sub-subdomain instead of falsely
-        // returning Apex from the Host header. Apex-match would be `IsApex`; we expect
-        // Uninitialized because the forwarded host has too many labels.
+        // ForwardedHeadersMiddleware rewrites Request.Host from X-Forwarded-Host when the
+        // request arrives from a trusted proxy. This test covers the case where the rewritten
+        // Request.Host is a sub-subdomain: the resolver must reject it because only
+        // single-label slugs are valid tenants. The raw X-Forwarded-Host header is also set
+        // (pointing at the apex) to confirm the resolver does not fall back to the raw header
+        // when Request.Host is already the authoritative value.
         var resolver = New("example.com");
 
+        // Request.Host = sub-subdomain (post-ForwardedHeaders rewrite from trusted proxy).
         var result = await resolver.ResolveAsync(
-            WithHost("example.com", forwardedHost: "foo.bar.example.com"));
+            WithHost("foo.bar.example.com", rawForwardedHost: "example.com"));
 
         Assert.True(result.IsUninitialized);
+    }
+
+    [Fact]
+    public async Task RawForwardedHostHeader_FromUntrustedClient_DoesNotOverrideRequestHost()
+    {
+        // When the client is not in TRUSTED_PROXIES, ForwardedHeadersMiddleware leaves
+        // Request.Host unchanged. A raw X-Forwarded-Host injected by the client must not
+        // affect the resolution result. The resolver reads Request.Host (the apex), so the
+        // result is Apex — not the sub-subdomain the client tried to inject.
+        var resolver = New("example.com");
+
+        // Request.Host = apex (not rewritten because client is not trusted);
+        // raw X-Forwarded-Host carries a sub-subdomain the client is trying to inject.
+        var result = await resolver.ResolveAsync(
+            WithHost("example.com", rawForwardedHost: "foo.bar.example.com"));
+
+        Assert.True(result.IsApex);
     }
 
     private sealed class ThrowingStore : IMetadataStore

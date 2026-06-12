@@ -4,7 +4,6 @@ using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -71,7 +70,7 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
     {
         // Unreferenced hosted blob with mtime safely outside the 1-minute grace window
         // must be reaped on the next pass.
-        var orphanKey = BlobKeys.Hosted("o1", "npm", "ghost", "1.0.0", "ghost-1.0.0.tgz");
+        string orphanKey = BlobKeys.Hosted("o1", "npm", "ghost", "1.0.0", "ghost-1.0.0.tgz");
         _registry.SeedWithLastModified(orphanKey, new byte[] { 9, 9, 9 },
             DateTimeOffset.UtcNow.AddMinutes(-10));
 
@@ -88,7 +87,7 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
         // A blob whose mtime is more recent than (now - grace) could be from a publish
         // still committing its row. Skip it; the next pass will catch it if it's still
         // unreferenced.
-        var freshOrphanKey = BlobKeys.Hosted("o1", "npm", "wip", "1.0.0", "wip-1.0.0.tgz");
+        string freshOrphanKey = BlobKeys.Hosted("o1", "npm", "wip", "1.0.0", "wip-1.0.0.tgz");
         _registry.SeedWithLastModified(freshOrphanKey, new byte[] { 7, 7, 7 },
             DateTimeOffset.UtcNow);  // brand new — well inside the 1-minute grace
 
@@ -116,15 +115,15 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
     public async Task MixedSet_ReferencedAreKept_OrphansAreDeleted_FreshOrphansSurvive()
     {
         // End-to-end: one of each kind in the same pass.
-        var refKey = BlobKeys.Hosted("o1", "npm", "keep", "1.0.0", "keep-1.0.0.tgz");
+        string refKey = BlobKeys.Hosted("o1", "npm", "keep", "1.0.0", "keep-1.0.0.tgz");
         await SeedReferencedAsync("1.0.0", refKey, new byte[] { 1, 2 },
             DateTimeOffset.UtcNow.AddDays(-1));
 
-        var oldOrphan = BlobKeys.Hosted("o1", "npm", "old", "1.0.0", "old-1.0.0.tgz");
+        string oldOrphan = BlobKeys.Hosted("o1", "npm", "old", "1.0.0", "old-1.0.0.tgz");
         _registry.SeedWithLastModified(oldOrphan, new byte[] { 3, 4, 5 },
             DateTimeOffset.UtcNow.AddMinutes(-10));
 
-        var freshOrphan = BlobKeys.Hosted("o1", "npm", "fresh", "1.0.0", "fresh-1.0.0.tgz");
+        string freshOrphan = BlobKeys.Hosted("o1", "npm", "fresh", "1.0.0", "fresh-1.0.0.tgz");
         _registry.SeedWithLastModified(freshOrphan, new byte[] { 6 },
             DateTimeOffset.UtcNow);
 
@@ -132,9 +131,9 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
 
         Assert.Equal(1, summary.OrphansDeleted);
         Assert.Equal(3, summary.BytesFreed);
-        Assert.True(await _registry.ExistsAsync(refKey),       "referenced blob must survive");
-        Assert.False(await _registry.ExistsAsync(oldOrphan),   "old orphan must be deleted");
-        Assert.True(await _registry.ExistsAsync(freshOrphan),  "in-grace orphan must survive");
+        Assert.True(await _registry.ExistsAsync(refKey), "referenced blob must survive");
+        Assert.False(await _registry.ExistsAsync(oldOrphan), "old orphan must be deleted");
+        Assert.True(await _registry.ExistsAsync(freshOrphan), "in-grace orphan must survive");
     }
 
     [Fact]
@@ -143,11 +142,11 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
         // If one delete fails, the reconciler must keep going for the rest of the listing
         // and report the failure count. Simulate via a wrapper store that throws on a
         // specific key's DeleteAsync.
-        var poisonKey = BlobKeys.Hosted("o1", "npm", "poison", "1.0.0", "poison-1.0.0.tgz");
-        var goodKey   = BlobKeys.Hosted("o1", "npm", "good",   "1.0.0", "good-1.0.0.tgz");
+        string poisonKey = BlobKeys.Hosted("o1", "npm", "poison", "1.0.0", "poison-1.0.0.tgz");
+        string goodKey = BlobKeys.Hosted("o1", "npm", "good", "1.0.0", "good-1.0.0.tgz");
         var oldTime = DateTimeOffset.UtcNow.AddMinutes(-10);
         _registry.SeedWithLastModified(poisonKey, new byte[] { 1 }, oldTime);
-        _registry.SeedWithLastModified(goodKey,   new byte[] { 2 }, oldTime);
+        _registry.SeedWithLastModified(goodKey, new byte[] { 2 }, oldTime);
 
         var failing = new DeleteFailsForKeyStore(_registry, poisonKey);
         var tiered = new TieredBlobStorage(_cache, failing);
@@ -184,6 +183,8 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
             => _inner.PutAsync(key, data, ct);
         public Task<Stream?> GetAsync(string key, CancellationToken ct = default)
             => _inner.GetAsync(key, ct);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+            => _inner.GetRangeAsync(key, from, to, ct);
         public Task<bool> ExistsAsync(string key, CancellationToken ct = default)
             => _inner.ExistsAsync(key, ct);
         public Task DeleteAsync(string key, CancellationToken ct = default)

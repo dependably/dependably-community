@@ -1,6 +1,5 @@
 using Dependably.Infrastructure;
 using Microsoft.AspNetCore.Http;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 

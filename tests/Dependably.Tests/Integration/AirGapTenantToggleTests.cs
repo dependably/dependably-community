@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -12,10 +13,8 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
-using Dependably.Storage;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -36,7 +35,7 @@ public sealed class AirGapTenantToggleTests : IClassFixture<DependablyFactory>, 
 
     private async Task<HttpClient> AdminJwtClient()
     {
-        var jwt = await _factory.CreateAdminJwt();
+        string jwt = await _factory.CreateAdminJwt();
         var c = _factory.CreateClient();
         c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
         return c;
@@ -62,12 +61,16 @@ public sealed class AirGapTenantToggleTests : IClassFixture<DependablyFactory>, 
         // Start from a known-off state so the toggle change is observable + audited.
         (await client.PutAsJsonAsync("/api/v1/settings", new
         {
-            anonymousPull = true, allowlistMode = false, airGapped = false,
+            anonymousPull = true,
+            allowlistMode = false,
+            airGapped = false,
         })).EnsureSuccessStatusCode();
 
         var put = await client.PutAsJsonAsync("/api/v1/settings", new
         {
-            anonymousPull = true, allowlistMode = false, airGapped = true,
+            anonymousPull = true,
+            allowlistMode = false,
+            airGapped = true,
         });
         Assert.Equal(HttpStatusCode.NoContent, put.StatusCode);
 
@@ -80,7 +83,7 @@ public sealed class AirGapTenantToggleTests : IClassFixture<DependablyFactory>, 
 
         var db = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await db.OpenAsync();
-        var detail = await conn.ExecuteScalarAsync<string>(
+        string? detail = await conn.ExecuteScalarAsync<string>(
             "SELECT detail FROM audit_log WHERE action = 'tenant.setting.change' AND detail LIKE '%air_gapped%' ORDER BY created_at DESC LIMIT 1");
         Assert.False(string.IsNullOrEmpty(detail));
         Assert.Contains("\"new_value\":true", detail);
@@ -92,14 +95,14 @@ public sealed class AirGapTenantToggleTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task NpmMetadata_AirGapped_UncachedUpstreamReturns404_EvenWhenUpstreamHasIt()
     {
-        var pkg = $"airgap-npm-{Guid.NewGuid():N}";
+        string pkg = $"airgap-npm-{Guid.NewGuid():N}";
         StubNpmPackument(pkg);
 
         try
         {
             await SetDefaultAirGapped(true);
 
-            var token = await _factory.CreateToken("pull");
+            string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBearer(token);
             var resp = await client.GetAsync($"/npm/{pkg}");
             // Upstream WOULD serve it, but air-gap forces passthrough off → not found.
@@ -114,7 +117,7 @@ public sealed class AirGapTenantToggleTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task PyPiSimpleIndex_AirGapped_UncachedUpstreamReturns404_EvenWhenUpstreamHasIt()
     {
-        var name = $"airgap-pypi-{Guid.NewGuid():N}";
+        string name = $"airgap-pypi-{Guid.NewGuid():N}";
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
             .RespondWith(Response.Create()
@@ -126,7 +129,7 @@ public sealed class AirGapTenantToggleTests : IClassFixture<DependablyFactory>, 
         {
             await SetDefaultAirGapped(true);
 
-            var token = await _factory.CreateToken("pull");
+            string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBasic(token);
             var resp = await client.GetAsync($"/simple/{name}/");
             Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
@@ -140,7 +143,7 @@ public sealed class AirGapTenantToggleTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task MultiTenant_OneAirGapped_OtherUnaffected()
     {
-        var pkg = $"airgap-multi-{Guid.NewGuid():N}";
+        string pkg = $"airgap-multi-{Guid.NewGuid():N}";
         StubNpmPackument(pkg);
 
         // A second org that is NOT air-gapped.
@@ -152,7 +155,7 @@ public sealed class AirGapTenantToggleTests : IClassFixture<DependablyFactory>, 
             await SetDefaultAirGapped(true);
 
             // Default (air-gapped) tenant: passthrough off → 404 for the uncached package.
-            var defaultToken = await _factory.CreateToken("pull");
+            string defaultToken = await _factory.CreateToken("pull");
             using (var c1 = _factory.CreateClientWithBearer(defaultToken))
             {
                 var r1 = await c1.GetAsync($"/npm/{pkg}");
@@ -162,12 +165,10 @@ public sealed class AirGapTenantToggleTests : IClassFixture<DependablyFactory>, 
             // Second tenant: not air-gapped → passthrough reaches upstream and serves the
             // package (200), in contrast to the air-gapped tenant's 404 above. The status
             // contrast is the per-tenant-isolation signal.
-            var otherToken = await _factory.CreateToken("pull", other.Slug);
-            using (var c2 = _factory.CreateClientWithBearer(otherToken))
-            {
-                var r2 = await c2.GetAsync($"/o/{other.Slug}/npm/{pkg}");
-                Assert.Equal(HttpStatusCode.OK, r2.StatusCode);
-            }
+            string otherToken = await _factory.CreateToken("pull", other.Slug);
+            using var c2 = _factory.CreateClientWithBearer(otherToken);
+            var r2 = await c2.GetAsync($"/o/{other.Slug}/npm/{pkg}");
+            Assert.Equal(HttpStatusCode.OK, r2.StatusCode);
         }
         finally
         {
@@ -178,7 +179,7 @@ public sealed class AirGapTenantToggleTests : IClassFixture<DependablyFactory>, 
     // Stubs the upstream npm packument so a connected tenant's metadata GET resolves to 200.
     private void StubNpmPackument(string pkg)
     {
-        var packument = JsonSerializer.Serialize(new
+        string packument = JsonSerializer.Serialize(new
         {
             name = pkg,
             versions = new Dictionary<string, object>
@@ -215,7 +216,7 @@ public sealed class AirGapEnforcedSettingsTests : IAsyncLifetime
     [Fact]
     public async Task GetSettings_InstanceAirGapped_ReportsEnforced()
     {
-        var jwt = await _factory.CreateAdminJwt();
+        string jwt = await _factory.CreateAdminJwt();
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
 
@@ -273,10 +274,10 @@ public sealed class AirGapEnforcedSettingsTests : IAsyncLifetime
         public async Task<string> CreateAdminJwt()
         {
             await using var conn = await _metadataStore.OpenAsync();
-            var orgId = await conn.ExecuteScalarAsync<string>(
+            string orgId = await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
                 ?? throw new InvalidOperationException("Default org not found.");
-            var adminId = await conn.ExecuteScalarAsync<string>(
+            string adminId = await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM users WHERE tenant_id = @orgId AND role = 'owner' LIMIT 1",
                 new { orgId })
                 ?? throw new InvalidOperationException("Bootstrap owner not found.");
@@ -284,7 +285,7 @@ public sealed class AirGapEnforcedSettingsTests : IAsyncLifetime
             // PasswordRotationGuard doesn't 403 non-allowlisted /api/v1 calls.
             await conn.ExecuteAsync(
                 "UPDATE users SET must_change_password = 0 WHERE id = @adminId", new { adminId });
-            var jwtSecret = await conn.ExecuteScalarAsync<string>(
+            string jwtSecret = await conn.ExecuteScalarAsync<string>(
                 "SELECT value FROM instance_settings WHERE key = 'jwt_secret' LIMIT 1")
                 ?? throw new InvalidOperationException("JWT secret not found.");
 

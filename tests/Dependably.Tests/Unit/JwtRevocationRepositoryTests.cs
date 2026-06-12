@@ -2,7 +2,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Caching.Memory;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -10,7 +9,7 @@ namespace Dependably.Tests.Unit;
 public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
-    private readonly MemoryCache _cache = new MemoryCache(new MemoryCacheOptions());
+    private readonly MemoryCache _cache = new(new MemoryCacheOptions());
 
     public async Task InitializeAsync() =>
         await new SchemaInitializer(_db).InitializeAsync();
@@ -35,7 +34,7 @@ public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
             new { jti = "x", now = "2026-01-01T00:00:00Z" })).ToList();
 
         Assert.NotEmpty(plan);
-        var detail = string.Join("\n", plan.Select(p => p.Detail));
+        string detail = string.Join("\n", plan.Select(p => p.Detail));
         Assert.Contains("SEARCH", detail);
         Assert.DoesNotContain("SCAN jwt_revocations", detail);
     }

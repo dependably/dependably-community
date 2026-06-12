@@ -118,6 +118,8 @@
   $: newVulns7d = stats?.newVulns?.week ?? 0
   $: newVulns30d = stats?.newVulns?.month ?? 0
   $: vulnsHot = newVulns1d > 0 || newVulns7d > 0 || newVulns30d > 0
+  $: samlCertExpiry = stats?.samlCertExpiry ?? null
+  $: samlCertHot = samlCertExpiry && samlCertExpiry.status !== 'ok'
 
   // ── Download chart ───────────────────────────────────────────────────────────
 
@@ -169,6 +171,22 @@
   {#if loading}
     <span class="spinner"></span>
   {:else if stats}
+
+    <!-- ── SAML cert-expiry alert card (admins/owners only; hot when ≤7d or expired) ── -->
+    {#if samlCertHot}
+      <div class="saml-cert-alert" class:expired={samlCertExpiry.status === 'expired'} role="alert">
+        <strong>
+          {samlCertExpiry.status === 'expired'
+            ? $t('dashboard.samlCertExpiredCard')
+            : $t('dashboard.samlCertExpiryCard')}
+        </strong>
+        <span class="saml-cert-detail">
+          {samlCertExpiry.status === 'expired'
+            ? $t('dashboard.samlCertNotAfter', { values: { notAfter: samlCertExpiry.notAfter } })
+            : $t('dashboard.samlCertDays', { values: { days: samlCertExpiry.daysRemaining } })}
+        </span>
+      </div>
+    {/if}
 
     <!-- ── Summary stats ─────────────────────────────────────────────────────── -->
     <div class="stat-grid">
@@ -297,6 +315,25 @@
 </div>
 
 <style>
+  /* SAML cert-expiry alert card */
+  .saml-cert-alert {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    margin-bottom: 20px;
+    border-left: 4px solid var(--warning-border);
+    background: var(--warning-bg);
+    border-radius: 4px;
+    font-size: 14px;
+  }
+  .saml-cert-alert.expired {
+    border-left-color: var(--danger-border);
+    background: var(--danger-bg);
+  }
+  .saml-cert-alert strong { font-weight: 600; }
+  .saml-cert-detail { color: var(--text2); font-size: 13px; }
+
   /* Stat grid bottom margin */
   .stat-grid { margin-bottom: 32px; }
 

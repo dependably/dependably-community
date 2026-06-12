@@ -1,14 +1,13 @@
 using System.Security.Cryptography;
 using System.Text;
-using System.Xml.Linq;
 using Dapper;
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.RateLimiting;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Dependably.Api;
 
@@ -21,8 +20,8 @@ namespace Dependably.Api;
 ///
 /// Proxy: on a local cache miss the controller falls through to the configured upstream
 /// (default Maven Central). Locally published artifacts always win over upstream — dependency
-/// confusion protection per spec §11. GroupId prefixes listed in
-/// <c>org_settings.maven_reserved_prefixes</c> never consult upstream.
+/// confusion protection per spec §11. GroupId prefixes reserved in the shared
+/// <c>reserved_namespace</c> table (ecosystem 'maven') never consult upstream.
 ///
 /// Maven differs from npm/PyPI/NuGet in that a single coordinate can carry multiple files
 /// (JAR + POM + sources JAR + javadoc + checksum sidecars). The <c>package_versions</c>
@@ -40,17 +39,23 @@ public sealed class MavenController : OrgScopedControllerBase
 
     public MavenController(MavenControllerServices svc) => _svc = svc;
 
-    /// <summary>GET /o/{org}/maven/{**path} — artifact, sidecar, or metadata download.</summary>
+    /// <summary>GET /maven/{**path} — artifact, sidecar, or metadata download.</summary>
     [HttpGet("/maven/{**path}")]
     [EnableRateLimiting("download")]
     public async Task<IActionResult> Download(string path, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(path)) return NotFound();
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return NotFound();
+        }
 
         var coords = MavenPathParser.Parse(path);
-        if (coords is null) return BadRequest("Invalid Maven path.");
+        if (coords is null)
+        {
+            return BadRequest("Invalid Maven path.");
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
         var token = await Request.ResolveTokenAsync(_svc.Tokens, orgId, ct);
 
@@ -60,13 +65,10 @@ public sealed class MavenController : OrgScopedControllerBase
             return Unauthorized();
         }
 
-        if (coords.IsMetadata)
-            return await ServeMetadataAsync(orgId, coords, ct);
-
-        return await ServeArtifactAsync(orgId, coords, settings, token, ct);
+        return coords.IsMetadata ? await ServeMetadataAsync(orgId, coords, ct) : await ServeArtifactAsync(orgId, coords, settings, token, ct);
     }
 
-    /// <summary>HEAD /o/{org}/maven/{**path} — existence check.</summary>
+    /// <summary>HEAD /maven/{**path} — existence check.</summary>
     [HttpHead("/maven/{**path}")]
     [EnableRateLimiting("download")]
     public async Task<IActionResult> Head(string path, CancellationToken ct)
@@ -76,7 +78,10 @@ public sealed class MavenController : OrgScopedControllerBase
         // compute checksum sidecars on-the-fly is fine on the HEAD path.
         var result = await Download(path, ct);
         if (result is FileContentResult fc)
+        {
             return new ContentResult { StatusCode = 200, ContentType = fc.ContentType };
+        }
+
         if (result is FileStreamResult fs)
         {
             fs.FileStream.Dispose();
@@ -85,7 +90,7 @@ public sealed class MavenController : OrgScopedControllerBase
         return result;
     }
 
-    /// <summary>PUT /o/{org}/maven/{**path} — publish an artifact, sidecar, or metadata file.</summary>
+    /// <summary>PUT /maven/{**path} — publish an artifact, sidecar, or metadata file.</summary>
     [HttpPut("/maven/{**path}")]
     [Authorize(AuthenticationSchemes = "Bearer," + Dependably.Security.TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishMaven)]
@@ -93,13 +98,23 @@ public sealed class MavenController : OrgScopedControllerBase
     [RequestSizeLimit(500 * 1024 * 1024)]
     public async Task<IActionResult> Publish(string path, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(path)) return BadRequest();
-        var coords = MavenPathParser.Parse(path);
-        if (coords is null) return BadRequest("Invalid Maven path.");
-        if (coords.Version is null && !coords.IsMetadata)
-            return BadRequest("Maven artifact publishes require a version segment.");
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return BadRequest();
+        }
 
-        var orgId = CurrentTenantId();
+        var coords = MavenPathParser.Parse(path);
+        if (coords is null)
+        {
+            return BadRequest("Invalid Maven path.");
+        }
+
+        if (coords.Version is null && !coords.IsMetadata)
+        {
+            return BadRequest("Maven artifact publishes require a version segment.");
+        }
+
+        string orgId = CurrentTenantId();
         var token = await Request.ResolveTokenAsync(_svc.Tokens, orgId, ct);
         if (token is null || token.OrgId != orgId)
         {
@@ -110,31 +125,33 @@ public sealed class MavenController : OrgScopedControllerBase
         // Path-traversal / control-character defence: reject anything PathSafeValidator
         // wouldn't let into a blob key. Maven's slashed group form lands as path
         // segments so we validate each one separately.
-        foreach (var seg in path.Split('/'))
+        foreach (string seg in path.Split('/'))
         {
             var r = PathSafeValidator.Validate(seg, "path");
-            if (!r.IsValid) return BadRequest(r.Message);
+            if (!r.IsValid)
+            {
+                return BadRequest(r.Message);
+            }
         }
 
         // Buffer the request body. Maven uploads are typically small — JARs a few MB,
         // POMs a few KB. The 500 MB ceiling above is the absolute cap.
         using var ms = new MemoryStream();
         await Request.Body.CopyToAsync(ms, ct);
-        var bytes = ms.ToArray();
+        byte[] bytes = ms.ToArray();
 
         // Per-tenant Maven cap → instance Maven cap → instance global cap → reject.
-        var sizeCap = await ResolveSizeCapAsync(orgId, ct);
+        long? sizeCap = await ResolveSizeCapAsync(orgId, ct);
         if (sizeCap is { } cap && bytes.LongLength > cap)
+        {
             return StatusCode(413, $"Maven upload exceeds size limit ({cap} bytes).");
+        }
 
         // Metadata uploads (maven-metadata.xml) are deploy-time bookkeeping the client
         // computes locally. We accept and discard — the metadata we serve is generated
         // server-side from package_versions / maven_version_files so trusting client
         // input here would let a misbehaving client poison the index for everyone.
-        if (coords.IsMetadata)
-            return StatusCode(201);
-
-        return await StoreFileAsync(orgId, coords!, bytes, token, ct);
+        return coords.IsMetadata ? StatusCode(201) : await StoreFileAsync(orgId, coords!, bytes, token, ct);
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -147,7 +164,7 @@ public sealed class MavenController : OrgScopedControllerBase
         // checksum_* columns. This means we don't have to store sidecars as their own
         // blobs and the answer stays consistent even when the client uploaded only the
         // primary file.
-        var primaryFilename = coords.IsChecksumSidecar
+        string primaryFilename = coords.IsChecksumSidecar
             ? MavenPathParser.PrimaryFilename(coords.Filename)
             : coords.Filename;
 
@@ -194,15 +211,20 @@ public sealed class MavenController : OrgScopedControllerBase
                         PublishedAt: row.PublishedAt,
                         ActorKind: token?.ActorKind,
                         Deprecated: row.Deprecated,
-                        BlockDeprecatedMode: settings?.BlockDeprecated), ct)
-                == BlockDecision.Blocked) return StatusCode(403);
+                        BlockDeprecatedMode: settings?.BlockDeprecated,
+                        BlockMaliciousMode: settings?.BlockMalicious,
+                        BlockKevMode: settings?.BlockKev,
+                        MaxEpssTolerance: settings?.MaxEpssTolerance), ct)
+                == BlockDecision.Blocked)
+            {
+                return StatusCode(403);
+            }
 
             Response.Headers["X-Cache"] = "HIT";
 
-            if (coords.IsChecksumSidecar)
-                return await ServeChecksumSidecarAsync(coords, row, ct);
-
-            return await ServePrimaryFromCacheAsync(orgId, coords, token?.UserId, row, ct);
+            return coords.IsChecksumSidecar
+                ? await ServeChecksumSidecarAsync(coords, row, ct)
+                : await ServePrimaryFromCacheAsync(orgId, coords, token?.UserId, row, ct);
         }
 
         // ── Cache miss: proxy upstream ──────────────────────────────────
@@ -212,12 +234,12 @@ public sealed class MavenController : OrgScopedControllerBase
     private async Task<IActionResult> ServeChecksumSidecarAsync(
         MavenCoordinates coords, MavenFileRow row, CancellationToken ct)
     {
-        var hex = coords.ChecksumAlgorithm switch
+        string? hex = coords.ChecksumAlgorithm switch
         {
             "sha512" => null, // not stored; computed on the fly below
             "sha256" => row.ChecksumSha256,
-            "sha1"   => row.ChecksumSha1,
-            "md5"    => row.ChecksumMd5,
+            "sha1" => row.ChecksumSha1,
+            "md5" => row.ChecksumMd5,
             _ => null,
         };
         if (hex is null && coords.ChecksumAlgorithm is { } algo)
@@ -225,26 +247,41 @@ public sealed class MavenController : OrgScopedControllerBase
             // Compute from the primary artifact's bytes — costs one blob read; cached
             // results would be nice but live in a follow-up if it shows up in profiles.
             var blob = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(row.BlobKey), ct);
-            if (blob is null) return NotFound();
+            if (blob is null)
+            {
+                return NotFound();
+            }
+
             hex = await ComputeChecksumAsync(blob, algo, ct);
         }
 
-        if (hex is null) return NotFound();
-        return new ContentResult
-        {
-            Content = hex,
-            ContentType = "text/plain",
-            StatusCode = 200,
-        };
+        return hex is null
+            ? NotFound()
+            : new ContentResult
+            {
+                Content = hex,
+                ContentType = "text/plain",
+                StatusCode = 200,
+            };
     }
 
     private async Task<IActionResult> ServePrimaryFromCacheAsync(
         string orgId, MavenCoordinates coords, string? actorId, MavenFileRow row, CancellationToken ct)
     {
         var stream = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(row.BlobKey), ct);
-        if (stream is null) return NotFound();
+        if (stream is null)
+        {
+            return NotFound();
+        }
 
-        var purl = PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version ?? "unknown");
+        string purl = PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version ?? "unknown");
+        if (row.ChecksumSha256 is not null)
+        {
+            Response.Headers.ETag = $"\"sha256:{row.ChecksumSha256}\"";
+            Response.Headers.CacheControl = coords.IsSnapshot
+                ? "private, max-age=60"
+                : "private, max-age=31536000, immutable";
+        }
         await _svc.Audit.LogActivityAsync(
             orgId, "maven", purl,
             "download", actorId,
@@ -265,39 +302,52 @@ public sealed class MavenController : OrgScopedControllerBase
         string orgId, MavenCoordinates coords, OrgSettings? settings, TokenRecord? token, CancellationToken ct)
     {
         // No upstream service registered — treat as local-only.
-        if (_svc.Upstream is null) return NotFound();
+        if (_svc.Upstream is null)
+        {
+            return NotFound();
+        }
 
         // Resolve the org's priority-ordered upstream registries. Empty ⇒ proxying disabled.
         var bases = await _svc.Registries.ResolveAsync(orgId, "maven", ct);
-        if (bases.Count == 0) return NotFound();
+        if (bases.Count == 0)
+        {
+            return NotFound();
+        }
 
         // Dep-confusion guard: locally-reserved prefixes never go upstream.
-        var reservedPrefixes = await GetReservedPrefixesAsync(orgId, ct);
-        if (IsReservedPrefix(coords.GroupId, reservedPrefixes))
+        if (await _svc.ReservedNamespaces.IsReservedAsync(orgId, "maven", coords.GroupId, ct))
+        {
             return NotFound();
+        }
 
         // Snapshot proxying is out of scope for v1.
-        if (coords.IsSnapshot) return NotFound();
+        if (coords.IsSnapshot)
+        {
+            return NotFound();
+        }
 
         // For sidecar requests on a proxied primary: if the primary isn't cached yet,
         // we don't try to proxy the sidecar independently — let the client retry the
         // primary first, then the sidecar will be served from stored checksum columns.
         // The recursive-primary-fetch approach described in the ticket is deferred — the
         // common client pattern of requesting primary before sidecar makes this safe.
-        if (coords.IsChecksumSidecar) return NotFound();
+        if (coords.IsChecksumSidecar)
+        {
+            return NotFound();
+        }
 
         // Build the upstream path: convert groupId dots to slashes for the URL.
-        var groupPath = coords.GroupId.Replace('.', '/');
-        var upstreamPath = $"{groupPath}/{coords.ArtifactId}/{coords.Version}/{coords.Filename}";
+        string groupPath = coords.GroupId.Replace('.', '/');
+        string upstreamPath = $"{groupPath}/{coords.ArtifactId}/{coords.Version}/{coords.Filename}";
 
-        var purlForLog = coords.Version is not null
+        string? purlForLog = coords.Version is not null
             ? PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version)
             : null;
 
         // Walk the configured upstreams in priority order; the first that yields the
         // artifact wins. A single configured registry behaves identically to before.
         MavenArtifactFetchResult? result = null;
-        foreach (var upstreamBase in bases)
+        foreach (string upstreamBase in bases)
         {
             try
             {
@@ -309,12 +359,18 @@ public sealed class MavenController : OrgScopedControllerBase
                 return StatusCode(502);
             }
 
-            if (result is not null) break;
+            if (result is not null)
+            {
+                break;
+            }
         }
 
-        if (result is null) return NotFound();
+        if (result is null)
+        {
+            return NotFound();
+        }
 
-        var purl = PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version!);
+        string purl = PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version!);
 
         // Run the shared proxy pipeline: record the package_versions row, synchronously
         // scan OSV, and evaluate the block gate so a vulnerable artifact is refused on the
@@ -338,15 +394,23 @@ public sealed class MavenController : OrgScopedControllerBase
             CacheAccess: null,
             MinReleaseAgeHours: settings?.MinReleaseAgeHours,
             Sha1Hex: result.Sha1,
-            BlockDeprecatedMode: settings?.BlockDeprecated), ct);
+            BlockDeprecatedMode: settings?.BlockDeprecated,
+            BlockMaliciousMode: settings?.BlockMalicious,
+            BlockKevMode: settings?.BlockKev,
+            MaxEpssTolerance: settings?.MaxEpssTolerance), ct);
 
-        if (fetch.Decision == BlockDecision.Blocked) return StatusCode(403);
+        if (fetch.Decision == BlockDecision.Blocked)
+        {
+            return StatusCode(403);
+        }
 
         // The shared pipeline owns package_versions + the first_fetch activity; Maven owns
         // its per-file mapping. Record it only when the gate allowed the artifact — a
         // refused version never gets a serve-row, and a later attempt re-fetches + re-gates.
         if (fetch.VersionId is not null)
+        {
             await RecordMavenFileAsync(fetch.VersionId, coords, result, ct);
+        }
 
         Response.Headers["X-Cache"] = "MISS";
         return File(result.Bytes, ContentTypeFor(coords.Extension), coords.Filename);
@@ -389,31 +453,6 @@ public sealed class MavenController : OrgScopedControllerBase
             });
     }
 
-    private static bool IsReservedPrefix(string groupId, IReadOnlyList<string> reserved)
-    {
-        foreach (var prefix in reserved)
-        {
-            var normalized = prefix.EndsWith('.') ? prefix : prefix + ".";
-            if (groupId == prefix || groupId.StartsWith(normalized, StringComparison.Ordinal))
-                return true;
-        }
-        return false;
-    }
-
-    private async Task<List<string>> GetReservedPrefixesAsync(string orgId, CancellationToken ct)
-    {
-        await using var conn = await _svc.Db.OpenAsync(ct);
-        var json = await conn.ExecuteScalarAsync<string?>(
-            "SELECT maven_reserved_prefixes FROM org_settings WHERE org_id = @orgId",
-            new { orgId });
-        if (string.IsNullOrEmpty(json) || json == "[]") return [];
-        try
-        {
-            return System.Text.Json.JsonSerializer.Deserialize<List<string>>(json) ?? [];
-        }
-        catch { return []; }
-    }
-
     private async Task<IActionResult> ServeMetadataAsync(
         string orgId, MavenCoordinates coords, CancellationToken ct)
     {
@@ -430,18 +469,17 @@ public sealed class MavenController : OrgScopedControllerBase
 
         // Merge upstream versions unless this groupId is reserved. An empty registry list
         // (proxying disabled for maven) leaves mergedVersions local-only.
-        var reservedPrefixes = await GetReservedPrefixesAsync(orgId, ct);
         var mergedVersions = localVersions;
         var bases = await _svc.Registries.ResolveAsync(orgId, "maven", ct);
         if (_svc.Upstream is not null &&
             bases.Count > 0 &&
-            !IsReservedPrefix(coords.GroupId, reservedPrefixes))
+            !await _svc.ReservedNamespaces.IsReservedAsync(orgId, "maven", coords.GroupId, ct))
         {
-            var groupPath = coords.GroupId.Replace('.', '/');
-            var artifactPath = $"{groupPath}/{coords.ArtifactId}";
+            string groupPath = coords.GroupId.Replace('.', '/');
+            string artifactPath = $"{groupPath}/{coords.ArtifactId}";
 
             // Walk upstreams in priority order; the first that returns versions wins.
-            foreach (var upstreamBase in bases)
+            foreach (string upstreamBase in bases)
             {
                 var upstreamVersions = await _svc.Upstream.FetchUpstreamVersionsAsync(upstreamBase, artifactPath, ct);
                 if (upstreamVersions is { Count: > 0 })
@@ -454,12 +492,15 @@ public sealed class MavenController : OrgScopedControllerBase
             }
         }
 
-        if (mergedVersions.Count == 0) return NotFound();
+        if (mergedVersions.Count == 0)
+        {
+            return NotFound();
+        }
 
         if (coords.IsChecksumSidecar)
         {
-            var xml = MavenMetadataBuilder.Build(coords.GroupId, coords.ArtifactId, mergedVersions);
-            var hex = ComputeHex(coords.ChecksumAlgorithm!, Encoding.UTF8.GetBytes(xml));
+            string xml = MavenMetadataBuilder.Build(coords.GroupId, coords.ArtifactId, mergedVersions);
+            string hex = ComputeHex(coords.ChecksumAlgorithm!, Encoding.UTF8.GetBytes(xml));
             return new ContentResult
             {
                 Content = hex,
@@ -468,7 +509,20 @@ public sealed class MavenController : OrgScopedControllerBase
             };
         }
 
-        var body = MavenMetadataBuilder.Build(coords.GroupId, coords.ArtifactId, mergedVersions);
+        string body = MavenMetadataBuilder.Build(coords.GroupId, coords.ArtifactId, mergedVersions);
+        byte[] bodyBytes = Encoding.UTF8.GetBytes(body);
+        string metaETag = ComputeETagFromBytes(bodyBytes);
+        if (Request.Headers.IfNoneMatch.FirstOrDefault() == metaETag)
+        {
+            Response.Headers.ETag = metaETag;
+            return StatusCode(304);
+        }
+        Response.Headers.ETag = metaETag;
+        // Proxy-merged responses may include upstream versions; short TTL so changes propagate.
+        // Local-only (no upstream configured) responses are stable; longer TTL is appropriate.
+        Response.Headers.CacheControl = (_svc.Upstream is not null && bases.Count > 0)
+            ? "private, max-age=60"
+            : "private, max-age=300";
         return Content(body, "application/xml", Encoding.UTF8);
     }
 
@@ -480,17 +534,19 @@ public sealed class MavenController : OrgScopedControllerBase
         // and discard. This keeps sidecars consistent with the primary artifact in the
         // happy case and rejects a deliberately mismatched upload.
         if (coords.IsChecksumSidecar)
+        {
             return await ValidateAndAcknowledgeSidecarAsync(orgId, coords, bytes, ct);
+        }
 
-        var purl = PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version!);
-        var sha256Hex = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string purl = PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version!);
+        string sha256Hex = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         // deepcode ignore InsecureHash: Maven repo spec requires .sha1/.md5 sidecar files for
         // mvn/gradle client compatibility — these are not used for security decisions.
-        var sha1Hex = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
+        string sha1Hex = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
         // deepcode ignore InsecureHash: Maven repo spec requires .md5 sidecar files.
-        var md5Hex = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
+        string md5Hex = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
 
-        var blobKey = BlobKeys.Hosted(
+        string blobKey = BlobKeys.Hosted(
             orgId, "maven",
             coords.PackageName.Replace(':', '/'),  // groupId/artifactId in the blob path
             coords.Version!,
@@ -509,12 +565,12 @@ public sealed class MavenController : OrgScopedControllerBase
         // xtenant: pkg.Id came from GetOrCreateAsync(orgId, ...), so this lookup is keyed
         // by a tenant-scoped FK target. package_versions joins through packages.org_id.
         // Get-or-create the package_versions row.
-        var versionRow = await conn.QuerySingleOrDefaultAsync<(string Id, string BlobKey)>(
+        var (Id, _) = await conn.QuerySingleOrDefaultAsync<(string Id, string BlobKey)>(
             "SELECT id AS Id, blob_key AS BlobKey FROM package_versions WHERE package_id = @pkgId AND version = @version",
             new { pkgId = pkg.Id, version = coords.Version });
 
         string versionId;
-        if (versionRow.Id is null)
+        if (Id is null)
         {
             versionId = Guid.NewGuid().ToString("N");
             // xtenant: package_id was just obtained via GetOrCreateAsync(orgId,...), so the
@@ -540,7 +596,7 @@ public sealed class MavenController : OrgScopedControllerBase
         }
         else
         {
-            versionId = versionRow.Id;
+            versionId = Id;
         }
 
         // xtenant: maven_version_files FKs into package_versions(id), which FKs into
@@ -589,9 +645,9 @@ public sealed class MavenController : OrgScopedControllerBase
         // We don't persist sidecar bytes — they're a function of the primary file's
         // content, which we already store. But we DO sanity-check the hex matches our
         // record so a mismatched sidecar can't pollute the index.
-        var primaryFilename = MavenPathParser.PrimaryFilename(coords.Filename);
+        string primaryFilename = MavenPathParser.PrimaryFilename(coords.Filename);
         await using var conn = await _svc.Db.OpenAsync(ct);
-        var row = await conn.QuerySingleOrDefaultAsync<(string Sha256, string? Sha1, string? Md5)>(
+        var (Sha256, Sha1, Md5) = await conn.QuerySingleOrDefaultAsync<(string Sha256, string? Sha1, string? Md5)>(
             """
             SELECT mvf.checksum_sha256 AS Sha256, mvf.checksum_sha1 AS Sha1, mvf.checksum_md5 AS Md5
             FROM maven_version_files mvf
@@ -610,7 +666,7 @@ public sealed class MavenController : OrgScopedControllerBase
                 filename = primaryFilename,
             });
 
-        if (row.Sha256 is null)
+        if (Sha256 is null)
         {
             // No primary yet — Maven clients usually upload the primary first, but we
             // accept the sidecar order-of-arrival anyway. The next primary upload will
@@ -618,32 +674,34 @@ public sealed class MavenController : OrgScopedControllerBase
             return StatusCode(201);
         }
 
-        var uploadedHex = Encoding.UTF8.GetString(bytes).Trim().ToLowerInvariant();
+        string uploadedHex = Encoding.UTF8.GetString(bytes).Trim().ToLowerInvariant();
         // Some Maven clients prefix or suffix the hex with garbage; pull out the first
         // continuous hex run.
-        var hex = ExtractHex(uploadedHex);
-        var expected = coords.ChecksumAlgorithm switch
+        string hex = ExtractHex(uploadedHex);
+        string? expected = coords.ChecksumAlgorithm switch
         {
-            "sha256" => row.Sha256,
-            "sha1"   => row.Sha1,
-            "md5"    => row.Md5,
-            _        => null,
+            "sha256" => Sha256,
+            "sha1" => Sha1,
+            "md5" => Md5,
+            _ => null,
         };
-        if (expected is not null && !string.Equals(hex, expected, StringComparison.OrdinalIgnoreCase))
-            return BadRequest("Maven checksum sidecar mismatch.");
-
-        return StatusCode(201);
+        return expected is not null && !string.Equals(hex, expected, StringComparison.OrdinalIgnoreCase)
+            ? BadRequest("Maven checksum sidecar mismatch.")
+            : StatusCode(201);
     }
 
     private async Task<long?> ResolveSizeCapAsync(string orgId, CancellationToken ct)
     {
         var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
-        if (settings is null) return null;
+        if (settings is null)
+        {
+            return null;
+        }
 
         // Read max_upload_bytes_maven dynamically because the column was added after the
         // strongly-typed OrgSettings model, which doesn't surface it yet.
         await using var conn = await _svc.Db.OpenAsync(ct);
-        var orgMaven = await conn.ExecuteScalarAsync<long?>(
+        long? orgMaven = await conn.ExecuteScalarAsync<long?>(
             "SELECT max_upload_bytes_maven FROM org_settings WHERE org_id = @orgId",
             new { orgId });
 
@@ -657,14 +715,14 @@ public sealed class MavenController : OrgScopedControllerBase
             "sha512" => SHA512.Create(),
             "sha256" => SHA256.Create(),
             // deepcode ignore InsecureHash: Maven sidecar spec — see class-level SuppressMessage.
-            "sha1"   => SHA1.Create(),
+            "sha1" => SHA1.Create(),
             // deepcode ignore InsecureHash: Maven sidecar spec — see class-level SuppressMessage.
-            "md5"    => MD5.Create(),
+            "md5" => MD5.Create(),
             _ => SHA256.Create(),
         };
         await using (stream.ConfigureAwait(false))
         {
-            var hash = await hasher.ComputeHashAsync(stream, ct);
+            byte[] hash = await hasher.ComputeHashAsync(stream, ct);
             return Convert.ToHexString(hash).ToLowerInvariant();
         }
     }
@@ -676,9 +734,9 @@ public sealed class MavenController : OrgScopedControllerBase
             "sha512" => SHA512.Create(),
             "sha256" => SHA256.Create(),
             // deepcode ignore InsecureHash: Maven sidecar spec — see class-level SuppressMessage.
-            "sha1"   => SHA1.Create(),
+            "sha1" => SHA1.Create(),
             // deepcode ignore InsecureHash: Maven sidecar spec — see class-level SuppressMessage.
-            "md5"    => MD5.Create(),
+            "md5" => MD5.Create(),
             _ => SHA256.Create(),
         };
         return Convert.ToHexString(hasher.ComputeHash(bytes)).ToLowerInvariant();
@@ -687,12 +745,24 @@ public sealed class MavenController : OrgScopedControllerBase
     private static string ExtractHex(string input)
     {
         var sb = new StringBuilder();
-        foreach (var c in input)
+        foreach (char c in input)
         {
-            if (Uri.IsHexDigit(c)) sb.Append(c);
-            else if (sb.Length > 0) break;
+            if (Uri.IsHexDigit(c))
+            {
+                sb.Append(c);
+            }
+            else if (sb.Length > 0)
+            {
+                break;
+            }
         }
         return sb.ToString();
+    }
+
+    private static string ComputeETagFromBytes(byte[] bytes)
+    {
+        byte[] hash = SHA256.HashData(bytes);
+        return "\"" + Convert.ToHexString(hash)[..16].ToLowerInvariant() + "\"";
     }
 
     private static string ContentTypeFor(string? extension) => extension switch
@@ -731,4 +801,5 @@ public sealed record MavenControllerServices(
     IConfiguration Config,
     ProxyFetchService ProxyFetch,
     BlockGateService BlockGate,
+    ReservedNamespaceService ReservedNamespaces,
     UpstreamRegistryResolver Registries);

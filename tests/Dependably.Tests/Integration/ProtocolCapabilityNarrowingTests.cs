@@ -4,7 +4,6 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -31,36 +30,36 @@ public sealed class ProtocolCapabilityNarrowingTests : IClassFixture<DependablyF
     /// </summary>
     private async Task<string> SeedServiceTokenAsync(string capabilities)
     {
-        var raw = Dependably.Security.TokenGenerator.Generate();
-        var hash = TokenRepository.HashToken(raw);
+        string raw = Dependably.Security.TokenGenerator.Generate();
+        string hash = TokenRepository.HashToken(raw);
 
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var orgId = await conn.ExecuteScalarAsync<string>(
+        string? orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1");
         await conn.ExecuteAsync("""
             INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities)
             VALUES (@id, @orgId, @name, @hash, @capabilities)
             """, new
-            {
-                id = Guid.NewGuid().ToString("N"),
-                orgId,
-                name = $"narrow-{Guid.NewGuid():N}",
-                hash,
-                capabilities,
-            });
+        {
+            id = Guid.NewGuid().ToString("N"),
+            orgId,
+            name = $"narrow-{Guid.NewGuid():N}",
+            hash,
+            capabilities,
+        });
         return raw;
     }
 
     [Fact]
     public async Task NpmOnlyToken_PublishesNpm_RejectedByPyPi()
     {
-        var token = await SeedServiceTokenAsync("""["publish:npm","read:metadata","read:artifact"]""");
+        string token = await SeedServiceTokenAsync("""["publish:npm","read:metadata","read:artifact"]""");
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
         // npm publish: capability matches → expect success.
-        var npmBody = NpmFixtures.BuildPublishBody("acme-narrow-npm", "1.0.0");
+        string npmBody = NpmFixtures.BuildPublishBody("acme-narrow-npm", "1.0.0");
         using var npmContent = new StringContent(npmBody, System.Text.Encoding.UTF8, "application/json");
         var npmResp = await client.PutAsync("/npm/acme-narrow-npm", npmContent);
         Assert.Equal(HttpStatusCode.OK, npmResp.StatusCode);
@@ -68,7 +67,7 @@ public sealed class ProtocolCapabilityNarrowingTests : IClassFixture<DependablyF
         // PyPI publish: capability missing → 403.
         // PyPI takes Basic auth, not Bearer. Build a Basic header from the token.
         using var pypiClient = _factory.CreateClient();
-        var basic = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"__token__:{token}"));
+        string basic = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"__token__:{token}"));
         pypiClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", basic);
 
         var (sdistBytes, _) = PyPiFixtures.BuildSdist("acme-narrow-pypi", "1.0.0");
@@ -86,7 +85,7 @@ public sealed class ProtocolCapabilityNarrowingTests : IClassFixture<DependablyF
     [Fact]
     public async Task NugetOnlyToken_PublishesNuget_RejectedByNpm()
     {
-        var token = await SeedServiceTokenAsync("""["publish:nuget","read:metadata","read:artifact"]""");
+        string token = await SeedServiceTokenAsync("""["publish:nuget","read:metadata","read:artifact"]""");
 
         // NuGet publish: capability matches → expect success.
         using var nugetClient = _factory.CreateClient();
@@ -105,7 +104,7 @@ public sealed class ProtocolCapabilityNarrowingTests : IClassFixture<DependablyF
         using var npmClient = _factory.CreateClient();
         npmClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-        var npmBody = NpmFixtures.BuildPublishBody("acme-narrow-by-nuget", "1.0.0");
+        string npmBody = NpmFixtures.BuildPublishBody("acme-narrow-by-nuget", "1.0.0");
         using var npmContent = new StringContent(npmBody, System.Text.Encoding.UTF8, "application/json");
         var npmResp = await npmClient.PutAsync("/npm/acme-narrow-by-nuget", npmContent);
         Assert.Equal(HttpStatusCode.Forbidden, npmResp.StatusCode);
@@ -118,30 +117,30 @@ public sealed class ProtocolCapabilityNarrowingTests : IClassFixture<DependablyF
         // (issuance always stamps the column). If such a row is produced anyway (direct
         // INSERT below — corrupted row, migration miss), it must deny every protocol
         // publish rather than silently allowing anything.
-        var raw = Dependably.Security.TokenGenerator.Generate();
-        var hash = TokenRepository.HashToken(raw);
+        string raw = Dependably.Security.TokenGenerator.Generate();
+        string hash = TokenRepository.HashToken(raw);
 
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using (var conn = await store.OpenAsync())
         {
-            var orgId = await conn.ExecuteScalarAsync<string>(
+            string? orgId = await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1");
             await conn.ExecuteAsync("""
                 INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities)
                 VALUES (@id, @orgId, @name, @hash, NULL)
                 """, new
-                {
-                    id = Guid.NewGuid().ToString("N"),
-                    orgId,
-                    name = $"nullcaps-{Guid.NewGuid():N}",
-                    hash,
-                });
+            {
+                id = Guid.NewGuid().ToString("N"),
+                orgId,
+                name = $"nullcaps-{Guid.NewGuid():N}",
+                hash,
+            });
         }
 
         // npm publish — denied.
         using var npmClient = _factory.CreateClient();
         npmClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", raw);
-        var npmBody = NpmFixtures.BuildPublishBody("acme-nullcaps-npm", "1.0.0");
+        string npmBody = NpmFixtures.BuildPublishBody("acme-nullcaps-npm", "1.0.0");
         using var npmContent = new StringContent(npmBody, System.Text.Encoding.UTF8, "application/json");
         var npmResp = await npmClient.PutAsync("/npm/acme-nullcaps-npm", npmContent);
         Assert.Equal(HttpStatusCode.Forbidden, npmResp.StatusCode);

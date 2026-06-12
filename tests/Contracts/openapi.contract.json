@@ -22,7 +22,7 @@
         "post": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "201"
           ]
         }
       }
@@ -35,7 +35,7 @@
             "name"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         },
         "get": {
@@ -89,7 +89,7 @@
         "post": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "201"
           ]
         }
       }
@@ -101,7 +101,7 @@
             "id"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -121,7 +121,7 @@
         "delete": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "204"
           ]
         },
         "get": {
@@ -133,7 +133,7 @@
         "put": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -153,7 +153,7 @@
         "delete": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "204"
           ]
         },
         "post": {
@@ -215,7 +215,7 @@
         "post": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "201"
           ]
         }
       }
@@ -227,7 +227,7 @@
             "id"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -263,7 +263,7 @@
         "put": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -301,7 +301,7 @@
             "id"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -327,7 +327,7 @@
         "post": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "201"
           ]
         }
       }
@@ -339,7 +339,7 @@
             "spdx"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -355,7 +355,7 @@
         "post": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "201"
           ]
         }
       }
@@ -367,7 +367,7 @@
             "spdx"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -434,7 +434,7 @@
             "version"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -506,6 +506,56 @@
         "put": {
           "requiredParams": [],
           "responseCodes": [
+            "204"
+          ]
+        }
+      }
+    },
+    "/api/v1/quarantine": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/quarantine/{id}/decide": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/reserved-namespaces": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/reserved-namespaces/{id}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
             "200"
           ]
         }
@@ -522,7 +572,7 @@
         "put": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -550,7 +600,7 @@
             "id"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -566,7 +616,7 @@
         "put": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -646,7 +696,7 @@
         "post": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "201"
           ]
         }
       }
@@ -658,7 +708,7 @@
             "id"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         },
         "get": {
@@ -678,7 +728,7 @@
             "id"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -760,7 +810,7 @@
         "post": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -770,7 +820,7 @@
         "post": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -812,7 +862,7 @@
         "put": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -840,7 +890,7 @@
             "slug"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -852,7 +902,7 @@
             "slug"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -864,7 +914,7 @@
             "slug"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -898,7 +948,7 @@
             "email"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -938,7 +988,7 @@
             "id"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -954,7 +1004,7 @@
         "post": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "201"
           ]
         }
       }
@@ -966,7 +1016,7 @@
             "ecosystem"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -978,7 +1028,7 @@
             "id"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -998,7 +1048,7 @@
         "post": {
           "requiredParams": [],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -1020,7 +1070,7 @@
             "userId"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -1032,7 +1082,7 @@
             "userId"
           ],
           "responseCodes": [
-            "200"
+            "204"
           ]
         }
       }
@@ -1052,6 +1102,40 @@
         "get": {
           "requiredParams": [
             "osvId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/cargo/config.json": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/cargo/{path}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/go/{path}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "path"
           ],
           "responseCodes": [
             "200"
@@ -1097,7 +1181,88 @@
         }
       }
     },
+    "/npm/-/package/@{scope}/{pkg}/dist-tags": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "pkg",
+            "scope"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/npm/-/package/@{scope}/{pkg}/dist-tags/{tag}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "pkg",
+            "scope",
+            "tag"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [
+            "pkg",
+            "scope",
+            "tag"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/npm/-/package/{pkg}/dist-tags": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "pkg"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/npm/-/package/{pkg}/dist-tags/{tag}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "pkg",
+            "tag"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [
+            "pkg",
+            "tag"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/npm/-/ping": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/npm/-/v1/search": {
       "operations": {
         "get": {
           "requiredParams": [],
@@ -1145,6 +1310,20 @@
           "requiredParams": [
             "file",
             "pkg",
+            "scope"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/npm/@{scope}/{pkg}/-rev/{rev}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "pkg",
+            "rev",
             "scope"
           ],
           "responseCodes": [
@@ -1220,6 +1399,29 @@
             "file",
             "pkg"
           ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/npm/{pkg}/-rev/{rev}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "pkg",
+            "rev"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/nuget/autocomplete": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
           "responseCodes": [
             "200"
           ]
@@ -1536,6 +1738,31 @@
         }
       }
     },
+    "/pypi/{package}/json": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "package"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/pypi/{package}/{version}/json": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "package",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/ready": {
       "operations": {
         "get": {
@@ -1707,6 +1934,14 @@
     },
     "/v2/{path}": {
       "operations": {
+        "delete": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
         "get": {
           "requiredParams": [
             "path"
@@ -1716,6 +1951,30 @@
           ]
         },
         "head": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "patch": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
           "requiredParams": [
             "path"
           ],

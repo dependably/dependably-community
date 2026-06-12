@@ -140,6 +140,22 @@ describe('navigate + takePendingRoute', () => {
     expect(url).toContain('?foo=bar')
   })
 
+  it('re-navigating to the current route keeps the query string', async () => {
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { hostname: 'localhost', search: '?q=react&page=2' },
+    })
+    const { navigate } = await import('./store.js')
+    navigate('packages', {})
+    const spy = vi.spyOn(window.history, 'replaceState')
+    // Same route again (nav-link click on the page already shown): the component is
+    // not remounted, so the table-state query params must survive in the URL.
+    navigate('packages', {})
+    expect(spy).toHaveBeenCalled()
+    const url = spy.mock.calls[spy.mock.calls.length - 1][2]
+    expect(url).toContain('?q=react&page=2')
+  })
+
   it('navigate is a no-op on history when window.history is unavailable', async () => {
     const originalHistory = window.history
     // Force `window.history` to be falsy so the history branch is skipped.

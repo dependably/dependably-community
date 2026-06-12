@@ -41,29 +41,34 @@ public sealed class AirGapMode : IAirGapMode
 
     public AirGapMode(IConfiguration config, ILogger<AirGapMode>? logger = null)
     {
-        var raw = config["AIR_GAPPED"];
+        string? raw = config["AIR_GAPPED"];
         IsEnabled = string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase)
                  || string.Equals(raw, "1", StringComparison.OrdinalIgnoreCase);
 
-        var disableRaw = config["DISABLE_BACKGROUND_JOBS"] ?? "";
+        string disableRaw = config["DISABLE_BACKGROUND_JOBS"] ?? "";
         var parsed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var token in disableRaw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        foreach (string token in disableRaw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             if (!KnownJobNames.Contains(token))
+            {
                 logger?.LogWarning("DISABLE_BACKGROUND_JOBS contains unknown job name '{JobName}'. Known names: {KnownNames}",
                     token, string.Join(", ", KnownJobNames));
+            }
+
             parsed.Add(token);
         }
         DisabledJobs = parsed;
 
         if (IsEnabled)
         {
-            var osvMode = config["OSV_MODE"];
+            string? osvMode = config["OSV_MODE"];
             if (!string.Equals(osvMode, "local", StringComparison.OrdinalIgnoreCase))
+            {
                 logger?.LogWarning(
                     "AIR_GAPPED=true but OSV_MODE is not set to 'local' (current: '{OsvMode}'). " +
                     "Set OSV_MODE=local to prevent outbound OSV.dev requests.",
                     string.IsNullOrWhiteSpace(osvMode) ? "(not set)" : osvMode);
+            }
         }
     }
 

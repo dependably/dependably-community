@@ -4,7 +4,6 @@ using System.Text;
 using System.Text.Json;
 using Dependably.Configuration;
 using Dependably.Infrastructure;
-using Dependably.Security;
 using Microsoft.Extensions.Options;
 
 namespace Dependably.Protocol;
@@ -63,17 +62,17 @@ public sealed class OciUpstreamAuthService : IDisposable
         string scope,
         CancellationToken ct)
     {
-        if (_airGap.IsEnabled) throw new AirGappedException($"oci-auth::{upstream.Host}");
-
-        return upstream.AuthType switch
-        {
-            OciAuthType.Anonymous => null,
-            OciAuthType.Basic => "Basic " + Convert.ToBase64String(
-                Encoding.UTF8.GetBytes($"{upstream.Username}:{upstream.Password}")),
-            OciAuthType.DockerHubTokenExchange => await GetDockerHubTokenAsync(upstream, repository, scope, ct),
-            OciAuthType.AwsEcr => await GetEcrTokenAsync(upstream, ct),
-            _ => null,
-        };
+        return _airGap.IsEnabled
+            ? throw new AirGappedException($"oci-auth::{upstream.Host}")
+            : upstream.AuthType switch
+            {
+                OciAuthType.Anonymous => null,
+                OciAuthType.Basic => "Basic " + Convert.ToBase64String(
+                    Encoding.UTF8.GetBytes($"{upstream.Username}:{upstream.Password}")),
+                OciAuthType.DockerHubTokenExchange => await GetDockerHubTokenAsync(upstream, repository, scope, ct),
+                OciAuthType.AwsEcr => await GetEcrTokenAsync(upstream, ct),
+                _ => null,
+            };
     }
 
     /// <summary>
@@ -117,35 +116,70 @@ public sealed class OciUpstreamAuthService : IDisposable
             // Step 1: probe /v2/ to get the Www-Authenticate challenge.
             using var probe = await client.GetAsync($"https://{upstream.Host}/v2/", ct);
             if (probe.StatusCode != System.Net.HttpStatusCode.Unauthorized)
+            {
                 return null; // no challenge needed (e.g. if the registry allows anonymous)
+            }
 
             var challenge = probe.Headers.WwwAuthenticate.FirstOrDefault();
-            if (challenge is null) return null;
+            if (challenge is null)
+            {
+                return null;
+            }
 
             var (realm, service, _) = ParseWwwAuthenticate(challenge);
-            if (realm is null) return null;
+            if (realm is null)
+            {
+                return null;
+            }
+
+            // The realm comes verbatim from the upstream's challenge. Refuse the exchange
+            // unless it is HTTPS and on the upstream's own host / registrable domain (or the
+            // operator-pinned TokenEndpoint) — otherwise a MITM'd or hostile upstream could
+            // point the realm at an attacker host and harvest the configured credentials.
+            if (!IsTrustedRealm(realm, upstream))
+            {
+                _logger.LogWarning(
+                    "OCI token exchange refused for upstream {Host}: challenge realm {Realm} is not HTTPS " +
+                    "on the upstream's own host or registrable domain. Set Oci:Upstreams TokenEndpoint to " +
+                    "pin an auth realm hosted on a different domain.",
+                    upstream.Host, realm);
+                throw new OciUnauthorizedException(
+                    $"Token exchange realm '{realm}' is not trusted for upstream {upstream.Host}");
+            }
 
             // Step 2: exchange at the realm endpoint.
-            var tokenUrl = $"{realm}?service={Uri.EscapeDataString(service ?? upstream.Host)}&scope=repository:{repository}:{scope}";
+            string tokenUrl = $"{realm}?service={Uri.EscapeDataString(service ?? upstream.Host)}&scope=repository:{repository}:{scope}";
             var tokenRequest = new HttpRequestMessage(HttpMethod.Get, tokenUrl);
             if (!string.IsNullOrEmpty(upstream.Username) && !string.IsNullOrEmpty(upstream.Password))
+            {
                 tokenRequest.Headers.Authorization = new AuthenticationHeaderValue(
                     "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{upstream.Username}:{upstream.Password}")));
+            }
 
             using var tokenResponse = await client.SendAsync(tokenRequest, ct);
             if (!tokenResponse.IsSuccessStatusCode)
+            {
                 throw new OciUnauthorizedException($"Token exchange failed for {upstream.Host}: {tokenResponse.StatusCode}");
+            }
 
-            var json = await tokenResponse.Content.ReadAsStringAsync(ct);
+            string json = await tokenResponse.Content.ReadAsStringAsync(ct);
             var doc = JsonDocument.Parse(json);
             string? token = null;
             if (doc.RootElement.TryGetProperty("token", out var tp))
+            {
                 token = tp.GetString();
+            }
             else if (doc.RootElement.TryGetProperty("access_token", out var ap))
+            {
                 token = ap.GetString();
-            if (token is null) throw new OciUnauthorizedException($"No token in response from {realm}");
+            }
 
-            var expiresIn = doc.RootElement.TryGetProperty("expires_in", out var ep) ? ep.GetInt32() : 300;
+            if (token is null)
+            {
+                throw new OciUnauthorizedException($"No token in response from {realm}");
+            }
+
+            int expiresIn = doc.RootElement.TryGetProperty("expires_in", out var ep) ? ep.GetInt32() : 300;
             var expiresAt = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(
                 Math.Min(expiresIn, (int)_options.Value.TokenCacheDuration.TotalSeconds));
 
@@ -204,24 +238,78 @@ public sealed class OciUpstreamAuthService : IDisposable
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// True when a <c>Www-Authenticate</c> realm may receive this upstream's credentials.
+    /// The realm must be an absolute HTTPS URL and either:
+    /// <list type="bullet">
+    ///   <item>exactly match the operator-pinned <see cref="OciUpstreamRegistryOptions.TokenEndpoint"/>;</item>
+    ///   <item>be on the upstream's own host; or</item>
+    ///   <item>be on the upstream host's registrable domain (e.g. realm <c>auth.docker.io</c>
+    ///         for registry host <c>registry-1.docker.io</c> — both under <c>docker.io</c>).
+    ///         The parent domain is the upstream host minus its first label and must itself
+    ///         contain a dot, so a two-label host like <c>ghcr.io</c> never degrades to a
+    ///         bare-TLD match.</item>
+    /// </list>
+    /// </summary>
+    internal static bool IsTrustedRealm(string realm, OciUpstreamRegistryOptions upstream)
+    {
+        if (!Uri.TryCreate(realm, UriKind.Absolute, out var realmUri) ||
+            realmUri.Scheme != Uri.UriSchemeHttps)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(upstream.TokenEndpoint) &&
+            string.Equals(realm, upstream.TokenEndpoint, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        string realmHost = realmUri.Host;
+        // Upstream Host config may carry a port (e.g. "registry.internal:5000") — compare hosts only.
+        string upstreamHost = upstream.Host.Split(':')[0];
+        if (string.Equals(realmHost, upstreamHost, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        int firstDot = upstreamHost.IndexOf('.');
+        if (firstDot <= 0)
+        {
+            return false;
+        }
+
+        string parentDomain = upstreamHost[(firstDot + 1)..];
+        return parentDomain.Contains('.') &&
+            (string.Equals(realmHost, parentDomain, StringComparison.OrdinalIgnoreCase) ||
+             realmHost.EndsWith("." + parentDomain, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static (string? Realm, string? Service, string? Scope) ParseWwwAuthenticate(
         AuthenticationHeaderValue header)
     {
         string? realm = null, service = null, scope = null;
-        if (header.Parameter is null) return (null, null, null);
+        if (header.Parameter is null)
+        {
+            return (null, null, null);
+        }
 
         // Parse key="value" pairs from: Bearer realm="...",service="...",scope="..."
-        foreach (var part in header.Parameter.Split(','))
+        foreach (string part in header.Parameter.Split(','))
         {
-            var eq = part.IndexOf('=');
-            if (eq < 0) continue;
-            var k = part[..eq].Trim();
-            var v = part[(eq + 1)..].Trim().Trim('"');
+            int eq = part.IndexOf('=');
+            if (eq < 0)
+            {
+                continue;
+            }
+
+            string k = part[..eq].Trim();
+            string v = part[(eq + 1)..].Trim().Trim('"');
             switch (k.ToLowerInvariant())
             {
-                case "realm":   realm = v;   break;
+                case "realm": realm = v; break;
                 case "service": service = v; break;
-                case "scope":   scope = v;   break;
+                case "scope": scope = v; break;
             }
         }
 
@@ -230,7 +318,10 @@ public sealed class OciUpstreamAuthService : IDisposable
 
     public void Dispose()
     {
-        foreach (var sem in _sems.Values) sem.Dispose();
+        foreach (var sem in _sems.Values)
+        {
+            sem.Dispose();
+        }
     }
 }
 

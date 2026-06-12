@@ -1,8 +1,8 @@
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit;
-using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace Dependably.Api;
 
@@ -35,7 +35,10 @@ public sealed record UpdateProxySettingsRequest(
     bool ProxyPassthroughEnabled,
     double MaxOsvScoreTolerance,
     int? MinReleaseAgeHours = null,
-    string? BlockDeprecated = null);
+    string? BlockDeprecated = null,
+    string? BlockMalicious = null,
+    string? BlockKev = null,
+    double? MaxEpssTolerance = null);
 
 // Scope is retained as a nullable field purely so the controller can detect callers still
 // sending the retired field and return a clear 400. The repository never sees it.
@@ -58,6 +61,8 @@ public sealed record AllowlistRequest(string PurlPattern);
 
 public sealed record BlocklistRequest(string Pattern);
 
+public sealed record ReservedNamespaceRequest(string Ecosystem, string Pattern);
+
 public sealed record AddUpstreamRegistryRequest(string Ecosystem, string Url, string? Name = null);
 
 public sealed record ReorderUpstreamRegistryRequest(IReadOnlyList<string> Ids);
@@ -70,6 +75,7 @@ public sealed record OrgControllerServices(
     OrgRepository Orgs,
     PackageRepository Packages,
     PackageAnalyticsRepository PackageAnalytics,
+    StatsSnapshotRepository StatsSnapshots,
     TokenRepository Tokens,
     InviteRepository Invites,
     AllowlistRepository Allowlist,
@@ -84,4 +90,5 @@ public sealed record OrgControllerServices(
     LicenseRepository Licenses,
     VulnerabilityRepository Vulns,
     IPublicUrlBuilder Urls,
-    IAuditEmitter AuditEmitter);
+    IAuditEmitter AuditEmitter,
+    IMemoryCache Cache);

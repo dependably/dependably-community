@@ -78,11 +78,13 @@ public sealed class OciUpstreamResolver
     {
         foreach (var u in _options.Value.Upstreams)
         {
-            foreach (var prefix in u.Prefixes)
+            foreach (string prefix in u.Prefixes)
             {
                 if (string.IsNullOrEmpty(prefix) ||
                     repository.StartsWith(prefix, StringComparison.Ordinal))
+                {
                     return u;
+                }
             }
         }
         return null;
@@ -107,25 +109,32 @@ public sealed class OciUpstreamResolver
         bool isDigest,
         CancellationToken ct)
     {
-        if (_airGap.IsEnabled) throw new AirGappedException($"oci-manifest::{repository}/{reference}");
+        if (_airGap.IsEnabled)
+        {
+            throw new AirGappedException($"oci-manifest::{repository}/{reference}");
+        }
 
         // For digest references, the cache is authoritative (content-addressed).
         if (isDigest)
         {
             var cached = await TryGetCachedManifestByDigestAsync(orgId, reference, ct);
-            if (cached is not null) return cached;
+            if (cached is not null)
+            {
+                return cached;
+            }
         }
         else
         {
             // Tag reference: use cache only when within TTL.
             var cached = await TryGetCachedTagManifestAsync(orgId, repository, reference, ct);
-            if (cached is not null) return cached;
+            if (cached is not null)
+            {
+                return cached;
+            }
         }
 
         var upstream = MatchUpstream(repository);
-        if (upstream is null) return null;
-
-        return await FetchAndCacheManifestAsync(upstream, orgId, repository, reference, ct);
+        return upstream is null ? null : await FetchAndCacheManifestAsync(upstream, orgId, repository, reference, ct);
     }
 
     /// <summary>
@@ -142,13 +151,20 @@ public sealed class OciUpstreamResolver
         string digest,
         CancellationToken ct)
     {
-        if (_airGap.IsEnabled) throw new AirGappedException($"oci-blob::{repository}/{digest}");
+        if (_airGap.IsEnabled)
+        {
+            throw new AirGappedException($"oci-blob::{repository}/{digest}");
+        }
 
-        var parts = digest.Split(':', 2);
-        if (parts.Length != 2) return null;
-        var algo = parts[0];
-        var hex  = parts[1];
-        var blobKey = BlobKeys.OciBlob(algo, hex);
+        string[] parts = digest.Split(':', 2);
+        if (parts.Length != 2)
+        {
+            return null;
+        }
+
+        string algo = parts[0];
+        string hex = parts[1];
+        string blobKey = BlobKeys.OciBlob(algo, hex);
 
         // Blob may already be in cache from a prior org or prior request.
         var existing = await _blobs.Cache.GetAsync(blobKey, ct);
@@ -160,9 +176,7 @@ public sealed class OciUpstreamResolver
         }
 
         var upstream = MatchUpstream(repository);
-        if (upstream is null) return null;
-
-        return await FetchAndCacheBlobAsync(upstream, orgId, repository, digest, blobKey, ct);
+        return upstream is null ? null : await FetchAndCacheBlobAsync(upstream, orgId, repository, digest, blobKey, ct);
     }
 
     /// <summary>
@@ -173,30 +187,34 @@ public sealed class OciUpstreamResolver
     /// </summary>
     public async Task<List<string>?> FetchTagsAsync(string repository, CancellationToken ct)
     {
-        if (_airGap.IsEnabled) throw new AirGappedException($"oci-tags::{repository}");
+        if (_airGap.IsEnabled)
+        {
+            throw new AirGappedException($"oci-tags::{repository}");
+        }
 
         var upstream = MatchUpstream(repository);
-        if (upstream is null) return null;
+        if (upstream is null)
+        {
+            return null;
+        }
 
         var client = _http.CreateClient("OciUpstream");
-        var url   = $"https://{upstream.Host}/v2/{repository}/tags/list";
+        string url = $"https://{upstream.Host}/v2/{repository}/tags/list";
         const string scope = "pull";
 
-        for (var attempt = 0; attempt < 2; attempt++)
+        for (int attempt = 0; attempt < 2; attempt++)
         {
-            var authHeader = await _auth.GetAuthorizationAsync(upstream, repository, scope, ct);
-            using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            if (authHeader is not null)
-                req.Headers.TryAddWithoutValidation("Authorization", authHeader);
-
-            using var resp = await client.SendAsync(req, ct);
+            using var resp = await SendAuthenticatedTagRequestAsync(client, upstream, repository, url, scope, ct);
 
             if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized && attempt == 0)
             {
                 _auth.InvalidateToken(upstream, repository, scope);
                 continue;
             }
-            if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
+            if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return null;
+            }
             if (!resp.IsSuccessStatusCode)
             {
                 _logger.LogWarning("OCI tags/{Repository} upstream {Host} returned {Status}",
@@ -204,16 +222,54 @@ public sealed class OciUpstreamResolver
                 return null;
             }
 
-            var json = await resp.Content.ReadAsStringAsync(ct);
-            using var doc = JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("tags", out var tagsEl)) return null;
-            return tagsEl.EnumerateArray()
-                .Where(t => t.ValueKind == JsonValueKind.String)
-                .Select(t => t.GetString()!)
-                .ToList();
+            return await ReadTagListFromResponseAsync(resp, repository, upstream.Host, url, ct);
         }
 
         return null;
+    }
+
+    // Sends an authenticated GET request for the tags/list endpoint and returns the response.
+    private async Task<HttpResponseMessage> SendAuthenticatedTagRequestAsync(
+        HttpClient client, OciUpstreamRegistryOptions upstream,
+        string repository, string url, string scope, CancellationToken ct)
+    {
+        string? authHeader = await _auth.GetAuthorizationAsync(upstream, repository, scope, ct);
+        var req = new HttpRequestMessage(HttpMethod.Get, url);
+        if (authHeader is not null)
+        {
+            req.Headers.TryAddWithoutValidation("Authorization", authHeader);
+        }
+
+        return await client.SendAsync(req, ct);
+    }
+
+    // Reads the tags/list JSON response body and extracts the tags array as a string list.
+    // Returns null when the body exceeds the metadata cap or the tags property is absent.
+    private async Task<List<string>?> ReadTagListFromResponseAsync(
+        HttpResponseMessage resp, string repository, string host, string url, CancellationToken ct)
+    {
+        byte[] body;
+        try
+        {
+            // Tag lists are small JSON documents; cap the buffered read like manifests.
+            body = await UpstreamClient.ReadBodyCappedAsync(
+                resp, UpstreamClient.MaxMetadataResponseBytes, url, ct);
+        }
+        catch (UpstreamResponseTooLargeException ex)
+        {
+            _logger.LogWarning(ex,
+                "OCI tags/{Repository} from {Host} exceeded the metadata cap; refusing.",
+                repository, host);
+            return null;
+        }
+
+        using var doc = JsonDocument.Parse(body);
+        return !doc.RootElement.TryGetProperty("tags", out var tagsEl)
+            ? null
+            : tagsEl.EnumerateArray()
+            .Where(t => t.ValueKind == JsonValueKind.String)
+            .Select(t => t.GetString()!)
+            .ToList();
     }
 
     // ── Cache lookup helpers ───────────────────────────────────────────────────
@@ -223,16 +279,22 @@ public sealed class OciUpstreamResolver
     {
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: (digest, org_id) PK is already tenant-scoped.
-        var row = await conn.QuerySingleOrDefaultAsync<(string? MediaType, long SizeBytes, string? BlobKey)>(
+        var (MediaType, SizeBytes, BlobKey) = await conn.QuerySingleOrDefaultAsync<(string? MediaType, long SizeBytes, string? BlobKey)>(
             "SELECT media_type AS MediaType, size_bytes AS SizeBytes, blob_key AS BlobKey " +
             "FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
             new { digest, orgId });
-        if (row.BlobKey is null) return null;
+        if (BlobKey is null)
+        {
+            return null;
+        }
 
-        var stream = await _blobs.Cache.GetAsync(row.BlobKey, ct);
-        if (stream is null) return null; // evicted — fall through to upstream
+        var stream = await _blobs.Cache.GetAsync(BlobKey, ct);
+        if (stream is null)
+        {
+            return null; // evicted — fall through to upstream
+        }
 
-        return new OciManifestResult(stream, row.MediaType ?? "application/octet-stream", digest, row.SizeBytes);
+        return new OciManifestResult(stream, MediaType ?? "application/octet-stream", digest, SizeBytes);
     }
 
     private async Task<OciManifestResult?> TryGetCachedTagManifestAsync(
@@ -240,19 +302,22 @@ public sealed class OciUpstreamResolver
     {
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: (org_id, repository, tag) PK.
-        var row = await conn.QuerySingleOrDefaultAsync<(string? Digest, string? LastRevalidated)>(
+        var (Digest, LastRevalidated) = await conn.QuerySingleOrDefaultAsync<(string? Digest, string? LastRevalidated)>(
             "SELECT digest AS Digest, last_revalidated AS LastRevalidated " +
             "FROM oci_tags WHERE org_id = @orgId AND repository = @repo AND tag = @tag",
             new { orgId, repo = repository, tag });
 
-        if (row.Digest is null) return null;
+        if (Digest is null)
+        {
+            return null;
+        }
 
         var ttl = _options.Value.ManifestTagTtl;
-        if (row.LastRevalidated is not null &&
-            DateTimeOffset.TryParse(row.LastRevalidated, null, System.Globalization.DateTimeStyles.RoundtripKind, out var revalidated) &&
+        if (LastRevalidated is not null &&
+            DateTimeOffset.TryParse(LastRevalidated, null, System.Globalization.DateTimeStyles.RoundtripKind, out var revalidated) &&
             DateTimeOffset.UtcNow - revalidated < ttl)
         {
-            return await TryGetCachedManifestByDigestAsync(orgId, row.Digest, ct);
+            return await TryGetCachedManifestByDigestAsync(orgId, Digest, ct);
         }
 
         // Stale or missing — fall through to upstream.
@@ -268,16 +333,18 @@ public sealed class OciUpstreamResolver
         string reference,
         CancellationToken ct)
     {
-        var url = $"https://{upstream.Host}/v2/{repository}/manifests/{reference}";
+        string url = $"https://{upstream.Host}/v2/{repository}/manifests/{reference}";
         const string scope = "pull";
 
-        for (var attempt = 0; attempt < 2; attempt++)
+        for (int attempt = 0; attempt < 2; attempt++)
         {
-            var fetched = await TryFetchManifestAsync(upstream, repository, reference, scope, url, attempt, ct);
-            if (fetched.Retry) continue;
-            if (fetched.Result is null) return null;
+            var (Retry, Result) = await TryFetchManifestAsync(upstream, repository, reference, scope, url, attempt, ct);
+            if (Retry)
+            {
+                continue;
+            }
 
-            return await CacheAndReturnManifestAsync(upstream, orgId, repository, reference, fetched.Result, ct);
+            return Result is null ? null : await CacheAndReturnManifestAsync(upstream, orgId, repository, reference, Result, ct);
         }
 
         return null;
@@ -288,12 +355,17 @@ public sealed class OciUpstreamResolver
         string url, int attempt, CancellationToken ct)
     {
         var client = _http.CreateClient("OciUpstream");
-        var authHeader = await _auth.GetAuthorizationAsync(upstream, repository, scope, ct);
+        string? authHeader = await _auth.GetAuthorizationAsync(upstream, repository, scope, ct);
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
-        foreach (var mt in ManifestAcceptTypes)
+        foreach (string mt in ManifestAcceptTypes)
+        {
             req.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(mt));
+        }
+
         if (authHeader is not null)
+        {
             req.Headers.TryAddWithoutValidation("Authorization", authHeader);
+        }
 
         using var resp = await client.SendAsync(req, ct);
 
@@ -302,7 +374,10 @@ public sealed class OciUpstreamResolver
             _auth.InvalidateToken(upstream, repository, scope);
             return (Retry: true, Result: null);
         }
-        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return (false, null);
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return (false, null);
+        }
         // A non-success status here (e.g. Docker Hub returns 401 — not 404 — for a
         // nonexistent/unauthorized repository even after the token retry) must surface
         // as a clean OCI MANIFEST_UNKNOWN 404 from the controller, not an unhandled
@@ -314,9 +389,23 @@ public sealed class OciUpstreamResolver
             return (false, null);
         }
 
-        var mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
-        var bytes = await resp.Content.ReadAsByteArrayAsync(ct);
-        var digest = ResolveDigest(resp, repository, reference, bytes, out var sha256Hex);
+        string mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+        byte[] bytes;
+        try
+        {
+            // Manifests are small JSON documents (the spec recommends ≤ 4 MB); cap the buffered
+            // read so a hostile upstream cannot materialise an arbitrarily large body in memory.
+            bytes = await UpstreamClient.ReadBodyCappedAsync(
+                resp, UpstreamClient.MaxMetadataResponseBytes, url, ct);
+        }
+        catch (UpstreamResponseTooLargeException ex)
+        {
+            _logger.LogWarning(ex,
+                "OCI manifest {Repository}:{Reference} from {Host} exceeded the metadata cap; refusing.",
+                repository, reference, upstream.Host);
+            return (false, null);
+        }
+        string digest = ResolveDigest(resp, repository, reference, bytes, out string? sha256Hex);
 
         return (false, new FetchedManifest(bytes, mediaType, digest, sha256Hex));
     }
@@ -324,9 +413,9 @@ public sealed class OciUpstreamResolver
     private string ResolveDigest(
         HttpResponseMessage resp, string repository, string reference, byte[] bytes, out string sha256Hex)
     {
-        var sha256Bytes = SHA256.HashData(bytes);
+        byte[] sha256Bytes = SHA256.HashData(bytes);
         sha256Hex = Convert.ToHexString(sha256Bytes).ToLowerInvariant();
-        var digest = "sha256:" + sha256Hex;
+        string digest = "sha256:" + sha256Hex;
 
         // The content-addressed identity is the SHA-256 of the exact bytes cached and served, so
         // a by-digest fetch always returns bytes that hash to the requested digest (the OCI
@@ -335,7 +424,7 @@ public sealed class OciUpstreamResolver
         // unverified header as the stored digest identity.
         if (resp.Headers.TryGetValues("Docker-Content-Digest", out var dcdValues))
         {
-            var upstreamDigest = dcdValues.FirstOrDefault();
+            string? upstreamDigest = dcdValues.FirstOrDefault();
             if (!string.IsNullOrEmpty(upstreamDigest) && upstreamDigest != digest)
             {
                 _logger.LogWarning(
@@ -350,7 +439,7 @@ public sealed class OciUpstreamResolver
         OciUpstreamRegistryOptions upstream, string orgId, string repository, string reference,
         FetchedManifest m, CancellationToken ct)
     {
-        var blobKey = BlobKeys.OciBlob("sha256", m.Sha256Hex);
+        string blobKey = BlobKeys.OciBlob("sha256", m.Sha256Hex);
 
         // Write manifest bytes into the proxy cache tier.
         await _blobs.Cache.PutAsync(blobKey, new MemoryStream(m.Bytes), ct);
@@ -425,8 +514,8 @@ public sealed class OciUpstreamResolver
         {
             // purl_name == repository so the Packages-page detail route (/packages/oci/{name})
             // resolves; isProxy=true marks the package as upstream-backed.
-            var pkg  = await _packages.GetOrCreateAsync(orgId, "oci", entry.Repository, entry.Repository, isProxy: true, ct);
-            var purl = PurlNormalizer.Oci(entry.Repository, entry.Digest, entry.Tag);
+            var pkg = await _packages.GetOrCreateAsync(orgId, "oci", entry.Repository, entry.Repository, isProxy: true, ct);
+            string purl = PurlNormalizer.Oci(entry.Repository, entry.Digest, entry.Tag);
             await _packages.CreateVersionAsync(
                 new NewPackageVersion(pkg.Id, entry.Digest, purl, entry.BlobKey, entry.SizeBytes, entry.Sha256Hex, FirstFetch: true, Origin: "proxy"),
                 ct);
@@ -434,10 +523,12 @@ public sealed class OciUpstreamResolver
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             if (ex is not Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 19 })
+            {
                 _logger.LogWarning(
                     "{ExceptionType} cataloguing OCI version {Repository}@{Digest}; pull unaffected. BlobKey={BlobKey} TraceId={TraceId}",
                     ex.GetType().Name, entry.Repository, entry.Digest, entry.BlobKey,
                     System.Diagnostics.Activity.Current?.TraceId.ToString());
+            }
         }
     }
 
@@ -450,20 +541,22 @@ public sealed class OciUpstreamResolver
         CancellationToken ct)
     {
         var client = _http.CreateClient("OciUpstream");
-        var url    = $"https://{upstream.Host}/v2/{repository}/blobs/{digest}";
+        string url = $"https://{upstream.Host}/v2/{repository}/blobs/{digest}";
         const string scope = "pull";
 
         // Expected hex for post-download verification.
-        var digestParts = digest.Split(':', 2);
-        var expectedHex = digestParts.Length == 2 ? digestParts[1].ToLowerInvariant() : "";
+        string[] digestParts = digest.Split(':', 2);
+        string expectedHex = digestParts.Length == 2 ? digestParts[1].ToLowerInvariant() : "";
 
-        for (var attempt = 0; attempt < 2; attempt++)
+        for (int attempt = 0; attempt < 2; attempt++)
         {
-            var authHeader = await _auth.GetAuthorizationAsync(upstream, repository, scope, ct);
+            string? authHeader = await _auth.GetAuthorizationAsync(upstream, repository, scope, ct);
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
             req.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/octet-stream"));
             if (authHeader is not null)
+            {
                 req.Headers.TryAddWithoutValidation("Authorization", authHeader);
+            }
 
             // ResponseHeadersRead → don't buffer response in memory.
             var resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
@@ -487,7 +580,7 @@ public sealed class OciUpstreamResolver
                 return null;
             }
 
-            var mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+            string mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
             long bytesWritten;
 
             // Stream upstream → OciDigestVerifyStream → blob cache (zero-copy buffering).
@@ -497,7 +590,7 @@ public sealed class OciUpstreamResolver
                 await _blobs.Cache.PutAsync(blobKey, verifyStream, ct);
                 bytesWritten = verifyStream.BytesWritten;
 
-                var computedDigest = verifyStream.ComputedDigest;
+                string computedDigest = verifyStream.ComputedDigest;
                 if (!string.Equals(computedDigest, $"sha256:{expectedHex}", StringComparison.OrdinalIgnoreCase))
                 {
                     _logger.LogWarning(
@@ -516,7 +609,10 @@ public sealed class OciUpstreamResolver
 
             // Read back from cache for streaming to the controller.
             var cacheStream = await _blobs.Cache.GetAsync(blobKey, ct);
-            if (cacheStream is null) return null;
+            if (cacheStream is null)
+            {
+                return null;
+            }
 
             _logger.LogInformation(
                 "OCI blob proxy {Repository}/{Digest} ({Bytes} B) from {Host}",
@@ -563,20 +659,19 @@ internal sealed class OciDigestVerifyStream : Stream
 {
     private readonly Stream _inner;
     private readonly IncrementalHash _hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-    private long _bytesWritten;
 
     public OciDigestVerifyStream(Stream inner) => _inner = inner;
 
-    public long BytesWritten => _bytesWritten;
+    public long BytesWritten { get; private set; }
 
     /// <summary>Returns <c>sha256:{lowercaseHex}</c> of all bytes read so far.</summary>
     public string ComputedDigest
         => "sha256:" + Convert.ToHexString(_hasher.GetCurrentHash()).ToLowerInvariant();
 
-    public override bool CanRead  => true;
-    public override bool CanSeek  => false;
+    public override bool CanRead => true;
+    public override bool CanSeek => false;
     public override bool CanWrite => false;
-    public override long Length   => throw new NotSupportedException();
+    public override long Length => throw new NotSupportedException();
     public override long Position
     {
         get => throw new NotSupportedException();
@@ -585,33 +680,33 @@ internal sealed class OciDigestVerifyStream : Stream
 
     public override int Read(byte[] buffer, int offset, int count)
     {
-        var read = _inner.Read(buffer, offset, count);
+        int read = _inner.Read(buffer, offset, count);
         if (read > 0)
         {
             _hasher.AppendData(buffer, offset, read);
-            _bytesWritten += read;
+            BytesWritten += read;
         }
         return read;
     }
 
     public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
-        var read = await _inner.ReadAsync(buffer.AsMemory(offset, count), cancellationToken);
+        int read = await _inner.ReadAsync(buffer.AsMemory(offset, count), cancellationToken);
         if (read > 0)
         {
             _hasher.AppendData(buffer, offset, read);
-            _bytesWritten += read;
+            BytesWritten += read;
         }
         return read;
     }
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        var read = await _inner.ReadAsync(buffer, cancellationToken);
+        int read = await _inner.ReadAsync(buffer, cancellationToken);
         if (read > 0)
         {
             _hasher.AppendData(buffer.Span[..read]);
-            _bytesWritten += read;
+            BytesWritten += read;
         }
         return read;
     }

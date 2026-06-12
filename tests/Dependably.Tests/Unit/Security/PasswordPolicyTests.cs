@@ -1,5 +1,4 @@
 using Dependably.Security;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Security;
 
@@ -29,7 +28,7 @@ public sealed class PasswordPolicyTests
     [Fact]
     public void Rejects_passwords_exceeding_72_utf8_bytes()
     {
-        var pw = new string('a', 73);
+        string pw = new('a', 73);
         var result = Policy.Evaluate(pw, NoContext);
         Assert.Equal(PasswordPolicyVerdict.TooLong, result.Verdict);
     }
@@ -38,7 +37,7 @@ public sealed class PasswordPolicyTests
     public void Multi_byte_unicode_counts_by_bytes_not_chars()
     {
         // 36 four-byte emoji = 144 UTF-8 bytes, still 36 .NET char-pairs
-        var pw = string.Concat(Enumerable.Repeat("\U0001F600", 36));
+        string pw = string.Concat(Enumerable.Repeat("\U0001F600", 36));
         var result = Policy.Evaluate(pw, NoContext);
         Assert.Equal(PasswordPolicyVerdict.TooLong, result.Verdict);
     }
@@ -46,7 +45,7 @@ public sealed class PasswordPolicyTests
     [Fact]
     public void Accepts_strong_passphrase_at_exactly_72_bytes()
     {
-        var pw = new string('a', 60) + "-Battery!Staple";  // 75... trim
+        string pw = new string('a', 60) + "-Battery!Staple";  // 75... trim
         pw = pw[..72];  // exactly 72 ASCII bytes
         var result = Policy.Evaluate(pw, NoContext);
         // Length cap is satisfied; entropy depends on zxcvbn — but a 60-char
@@ -116,7 +115,7 @@ public sealed class PasswordPolicyTests
     {
         // The literal "dependably" rendered with NFD-decomposed accents elsewhere
         // would still match after NFC normalization.
-        var pw = "Dependably".Normalize(System.Text.NormalizationForm.FormD) + "-rocks-passphrase";
+        string pw = "Dependably".Normalize(System.Text.NormalizationForm.FormD) + "-rocks-passphrase";
         var result = Policy.Evaluate(pw, NoContext);
         Assert.Equal(PasswordPolicyVerdict.ContainsContext, result.Verdict);
     }
@@ -131,10 +130,10 @@ public sealed class PasswordPolicyTests
     [Fact]
     public void ToReason_does_not_throw_for_any_verdict()
     {
-        foreach (PasswordPolicyVerdict v in Enum.GetValues<PasswordPolicyVerdict>())
+        foreach (var v in Enum.GetValues<PasswordPolicyVerdict>())
         {
             var result = new PasswordPolicyResult(v, 12, "x");
-            var reason = result.ToReason();
+            string reason = result.ToReason();
             Assert.False(string.IsNullOrWhiteSpace(reason));
         }
     }

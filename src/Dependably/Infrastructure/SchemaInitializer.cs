@@ -3,7 +3,6 @@ using System.Data.Common;
 using System.Globalization;
 using Dapper;
 using Dependably.Protocol;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Infrastructure;
@@ -41,7 +40,7 @@ public sealed class SchemaInitializer
 
     public async Task InitializeAsync(CancellationToken ct = default)
     {
-        var sql = await ReadSchemaAsync(_db.Provider, ct);
+        string sql = await ReadSchemaAsync(_db.Provider, ct);
         await using var conn = await _db.OpenAsync(ct);
 
         // Table renames must happen BEFORE the CREATE TABLE IF NOT EXISTS pass — otherwise the
@@ -84,6 +83,48 @@ public sealed class SchemaInitializer
         // CHECK permits the 'block_all' value the data rewrite writes.
         await RunOnceAsync(conn, "expand_block_deprecated_check", ExpandBlockDeprecatedCheckAsync, transactional: false);
         await RunOnceAsync(conn, "migrate_block_deprecated_to_block_all", MigrateBlockDeprecatedToBlockAllAsync);
+        await RunOnceAsync(conn, "migrate_maven_reserved_prefixes_to_table", MigrateMavenReservedPrefixesToTableAsync);
+    }
+
+    // Copies each entry of the legacy org_settings.maven_reserved_prefixes JSON column into a
+    // reserved_namespace row (ecosystem 'maven'), the generalized never-proxy pattern table that
+    // all ecosystems share. The JSON column stays physically in place for back-compat but is no
+    // longer read anywhere. Unparseable JSON is skipped with a warning rather than failing boot.
+    // xtenant: one-shot data migration, runs across every tenant on the instance.
+    private async Task MigrateMavenReservedPrefixesToTableAsync(DbConnection conn)
+    {
+        var rows = (await conn.QueryAsync<(string OrgId, string Json)>(
+            """
+            SELECT org_id AS OrgId, maven_reserved_prefixes AS Json
+            FROM org_settings
+            WHERE maven_reserved_prefixes IS NOT NULL AND maven_reserved_prefixes != '[]'
+            """)).ToList();
+        foreach (var (OrgId, Json) in rows)
+        {
+            List<string> prefixes;
+            try
+            {
+                prefixes = System.Text.Json.JsonSerializer.Deserialize<List<string>>(Json) ?? [];
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                _logger.LogWarning(
+                    "Skipping unparseable maven_reserved_prefixes JSON for org {OrgId} during " +
+                    "migrate_maven_reserved_prefixes_to_table.", OrgId);
+                continue;
+            }
+
+            foreach (string prefix in prefixes.Where(p => !string.IsNullOrWhiteSpace(p)))
+            {
+                await conn.ExecuteAsync(
+                    """
+                    INSERT INTO reserved_namespace (id, org_id, ecosystem, pattern)
+                    VALUES (@id, @orgId, 'maven', @pattern)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    new { id = Guid.NewGuid().ToString("N"), orgId = OrgId, pattern = prefix.Trim() });
+            }
+        }
     }
 
     // Populate package_versions.filename for rows that pre-date the column. The new
@@ -96,13 +137,13 @@ public sealed class SchemaInitializer
         var rows = (await conn.QueryAsync<(string Id, string BlobKey)>(
             "SELECT id, blob_key FROM package_versions WHERE filename IS NULL"))
             .ToList();
-        foreach (var row in rows)
+        foreach (var (Id, BlobKey) in rows)
         {
-            var lastSlash = row.BlobKey.LastIndexOf('/');
-            var filename = lastSlash >= 0 ? row.BlobKey[(lastSlash + 1)..] : row.BlobKey;
+            int lastSlash = BlobKey.LastIndexOf('/');
+            string filename = lastSlash >= 0 ? BlobKey[(lastSlash + 1)..] : BlobKey;
             await conn.ExecuteAsync(
                 "UPDATE package_versions SET filename = @filename WHERE id = @id",
-                new { id = row.Id, filename });
+                new { id = Id, filename });
         }
     }
 
@@ -135,13 +176,13 @@ public sealed class SchemaInitializer
             JOIN oci_blobs b ON b.digest = t.digest AND b.org_id = t.org_id
             """)).ToList();
 
-        foreach (var row in rows)
+        foreach (var (OrgId, Repository, Tag, Digest, SizeBytes, BlobKey) in rows)
         {
             // get-or-create the parent package (one per org+repository); single-threaded migration,
             // so SELECT-then-INSERT needs no conflict guard.
-            var pkgId = await conn.ExecuteScalarAsync<string?>(
+            string? pkgId = await conn.ExecuteScalarAsync<string?>(
                 "SELECT id FROM packages WHERE org_id = @orgId AND ecosystem = 'oci' AND purl_name = @repo",
-                new { orgId = row.OrgId, repo = row.Repository });
+                new { orgId = OrgId, repo = Repository });
             if (pkgId is null)
             {
                 pkgId = Guid.NewGuid().ToString("N");
@@ -150,13 +191,13 @@ public sealed class SchemaInitializer
                     INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy)
                     VALUES (@id, @orgId, 'oci', @name, @purlName, 1)
                     """,
-                    new { id = pkgId, orgId = row.OrgId, name = row.Repository, purlName = row.Repository });
+                    new { id = pkgId, orgId = OrgId, name = Repository, purlName = Repository });
             }
 
-            var lastSlash = row.BlobKey.LastIndexOf('/');
-            var filename  = lastSlash >= 0 ? row.BlobKey[(lastSlash + 1)..] : row.BlobKey;
-            var sha256Hex = row.Digest.StartsWith("sha256:", StringComparison.Ordinal)
-                ? row.Digest["sha256:".Length..]
+            int lastSlash = BlobKey.LastIndexOf('/');
+            string filename = lastSlash >= 0 ? BlobKey[(lastSlash + 1)..] : BlobKey;
+            string? sha256Hex = Digest.StartsWith("sha256:", StringComparison.Ordinal)
+                ? Digest["sha256:".Length..]
                 : null;
             // xtenant: one-shot backfill across every tenant; package_id was just resolved/created
             // for this row's own org (packages.org_id), so the version inherits that org scope.
@@ -171,11 +212,11 @@ public sealed class SchemaInitializer
                 {
                     id = Guid.NewGuid().ToString("N"),
                     pkgId,
-                    version = row.Digest,
-                    purl = PurlNormalizer.Oci(row.Repository, row.Digest, row.Tag),
-                    blobKey = row.BlobKey,
+                    version = Digest,
+                    purl = PurlNormalizer.Oci(Repository, Digest, Tag),
+                    blobKey = BlobKey,
                     filename,
-                    sizeBytes = row.SizeBytes,
+                    sizeBytes = SizeBytes,
                     sha256 = sha256Hex,
                 });
         }
@@ -191,16 +232,19 @@ public sealed class SchemaInitializer
     private async Task SeedDefaultUpstreamRegistriesAsync(DbConnection conn)
     {
         var defaults = UpstreamRegistrySeeder.ResolveDefaults(_config);
-        if (defaults.Count == 0) return;
+        if (defaults.Count == 0)
+        {
+            return;
+        }
 
         var orgIds = (await conn.QueryAsync<string>("SELECT id FROM orgs")).ToList();
-        var seeded = 0;
-        var skipped = 0;
-        foreach (var orgId in orgIds)
+        int seeded = 0;
+        int skipped = 0;
+        foreach (string? orgId in orgIds)
         {
             foreach (var (eco, url) in defaults)
             {
-                var existing = await conn.ExecuteScalarAsync<int>(
+                int existing = await conn.ExecuteScalarAsync<int>(
                     "SELECT COUNT(*) FROM upstream_registry WHERE org_id = @orgId AND ecosystem = @eco",
                     new { orgId, eco });
                 if (existing > 0) { skipped++; continue; }
@@ -304,9 +348,14 @@ public sealed class SchemaInitializer
     private async Task DropLegacyTokenScopeColumnAsync(DbConnection conn)
     {
         if (await ColumnExistsAsync(conn, "user_tokens", "scope"))
+        {
             await conn.ExecuteAsync("ALTER TABLE user_tokens DROP COLUMN scope");
+        }
+
         if (await ColumnExistsAsync(conn, "service_tokens", "scope"))
+        {
             await conn.ExecuteAsync("ALTER TABLE service_tokens DROP COLUMN scope");
+        }
     }
 
     // Renames the legacy `tokens` table to `user_tokens` (and its index). Runs before the
@@ -314,7 +363,11 @@ public sealed class SchemaInitializer
     // installs hit the existence guard and no-op; the ledger then prevents re-execution.
     private static async Task RenameTokensTableAsync(DbConnection conn)
     {
-        if (!await TableExistsAsync(conn, "tokens")) return;
+        if (!await TableExistsAsync(conn, "tokens"))
+        {
+            return;
+        }
+
         await conn.ExecuteAsync("ALTER TABLE tokens RENAME TO user_tokens");
         // SQLite carries the old index name along with the renamed table; drop it so the
         // upcoming CREATE INDEX IF NOT EXISTS creates one with the correct new name.
@@ -323,7 +376,11 @@ public sealed class SchemaInitializer
 
     private static async Task RenameCicdTokensTableAsync(DbConnection conn)
     {
-        if (!await TableExistsAsync(conn, "cicd_tokens")) return;
+        if (!await TableExistsAsync(conn, "cicd_tokens"))
+        {
+            return;
+        }
+
         await conn.ExecuteAsync("ALTER TABLE cicd_tokens RENAME TO service_tokens");
         await conn.ExecuteAsync("DROP INDEX IF EXISTS idx_cicd_tokens_hash");
     }
@@ -334,7 +391,7 @@ public sealed class SchemaInitializer
         // (SQLite emulates it as a view since 3.39). For older SQLite we fall back below.
         try
         {
-            var count = await conn.ExecuteScalarAsync<long>(
+            long count = await conn.ExecuteScalarAsync<long>(
                 """
                 SELECT COUNT(*) FROM information_schema.tables
                 WHERE table_name = @table
@@ -344,7 +401,7 @@ public sealed class SchemaInitializer
         catch
         {
             // SQLite without information_schema view — query sqlite_master directly.
-            var hits = await conn.ExecuteScalarAsync<long>(
+            long hits = await conn.ExecuteScalarAsync<long>(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = @table",
                 new { table });
             return hits > 0;
@@ -358,7 +415,11 @@ public sealed class SchemaInitializer
     // build them — will come from manifest parsing on demand, not from this column.
     private async Task DropPackageVersionsSbomColumnAsync(DbConnection conn)
     {
-        if (!await ColumnExistsAsync(conn, "package_versions", "sbom")) return;
+        if (!await ColumnExistsAsync(conn, "package_versions", "sbom"))
+        {
+            return;
+        }
+
         await conn.ExecuteAsync("ALTER TABLE package_versions DROP COLUMN sbom");
     }
 
@@ -370,30 +431,41 @@ public sealed class SchemaInitializer
     // xtenant: one-shot data migration, runs across every tenant on the instance.
     private async Task DropOrgSettingsDisableJobColumnsAsync(DbConnection conn)
     {
-        var hasVulnScan = await ColumnExistsAsync(conn, "org_settings", "disable_vuln_scan");
-        var hasDeprecation = await ColumnExistsAsync(conn, "org_settings", "disable_deprecation_refresh");
+        bool hasVulnScan = await ColumnExistsAsync(conn, "org_settings", "disable_vuln_scan");
+        bool hasDeprecation = await ColumnExistsAsync(conn, "org_settings", "disable_deprecation_refresh");
 
         if (hasVulnScan && hasDeprecation)
+        {
             await conn.ExecuteAsync(
                 "UPDATE org_settings SET air_gapped = 1 WHERE disable_vuln_scan = 1 OR disable_deprecation_refresh = 1");
+        }
         else if (hasVulnScan)
+        {
             await conn.ExecuteAsync(
                 "UPDATE org_settings SET air_gapped = 1 WHERE disable_vuln_scan = 1");
+        }
         else if (hasDeprecation)
+        {
             await conn.ExecuteAsync(
                 "UPDATE org_settings SET air_gapped = 1 WHERE disable_deprecation_refresh = 1");
+        }
 
         if (hasVulnScan)
+        {
             await conn.ExecuteAsync("ALTER TABLE org_settings DROP COLUMN disable_vuln_scan");
+        }
+
         if (hasDeprecation)
+        {
             await conn.ExecuteAsync("ALTER TABLE org_settings DROP COLUMN disable_deprecation_refresh");
+        }
     }
 
     private async Task<bool> ColumnExistsAsync(DbConnection conn, string table, string column)
     {
         if (_db.Provider == DbProvider.Postgres)
         {
-            var count = await conn.ExecuteScalarAsync<long>(
+            long count = await conn.ExecuteScalarAsync<long>(
                 """
                 SELECT COUNT(*) FROM information_schema.columns
                 WHERE table_name = @table AND column_name = @column
@@ -402,7 +474,7 @@ public sealed class SchemaInitializer
         }
 
         // SQLite: pragma_table_info(...) returns one row per column.
-        var hits = await conn.ExecuteScalarAsync<long>(
+        long hits = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM pragma_table_info(@table) WHERE name = @column",
             new { table, column });
         return hits > 0;
@@ -421,7 +493,7 @@ public sealed class SchemaInitializer
         // SQLite has no native "if not exists" guard for column additions; MigrateSqliteAsync
         // swallows error 1 (duplicate column) instead. Postgres rewrites the same statements
         // to use native IF NOT EXISTS via the .Replace below.
-        var migrations = new[]
+        string[] migrations = new[]
         {
             "ALTER TABLE package_versions ADD COLUMN vuln_checked_at TEXT",
             "ALTER TABLE activity ADD COLUMN detail TEXT",
@@ -567,15 +639,78 @@ public sealed class SchemaInitializer
             // vulnerability detail panel; lets us surface fields beyond the extracted columns
             // without re-fetching. NULL on legacy rows — backfilled naturally on the next rescan.
             "ALTER TABLE vulnerabilities ADD COLUMN osv_json TEXT",
+            // Upstream's declared latest version (npm dist-tags.latest / PyPI info.version) and the
+            // timestamp of the last refresh. Set by DeprecationRefreshService on each pass. NULL =
+            // no upstream baseline known (uploaded-only packages, unsupported ecosystems, or not
+            // yet refreshed). Drives the packages-list "Latest" indicator.
+            "ALTER TABLE packages ADD COLUMN upstream_latest_version TEXT",
+            "ALTER TABLE packages ADD COLUMN upstream_latest_checked_at TEXT",
+            // Monotonic session-invalidation counter, embedded in tenant JWTs as the `tver`
+            // claim and bumped on password change so outstanding sessions go stale. Existing
+            // rows backfill to 1, matching the implicit version of pre-existing sessions.
+            "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1",
+            // Opt-in ceiling raise for SAML IdP-driven role assignment. 0 (default) caps
+            // IdP-assignable roles at member/auditor; 1 additionally permits admin. 'owner'
+            // is never IdP-assignable regardless of this flag.
+            "ALTER TABLE tenant_saml_config ADD COLUMN idp_can_assign_admin INTEGER NOT NULL DEFAULT 0",
+            // Policy for versions carrying a malicious-package advisory (OSV MAL- ids, sourced
+            // from the OpenSSF malicious-packages feed via the regular OSV scan). Those advisories
+            // usually have no CVSS score, so the max_osv_score_tolerance gate never sees them —
+            // this gate keys on the advisory id prefix instead. Defaults to 'block' on existing
+            // orgs deliberately: a known-malware advisory passing the gate is the security gap
+            // the column closes. Added without a CHECK (SQLite ALTER can't add one); upgraded DBs
+            // rely on controller validation, fresh installs get the CHECK from Schema.sql.
+            "ALTER TABLE org_settings ADD COLUMN block_malicious TEXT NOT NULL DEFAULT 'block'",
+            // Threat-feed enrichment on the shared vulnerabilities table: CISA KEV catalog
+            // membership (recomputed each refresh pass so removals clear it) and the max
+            // FIRST.org EPSS exploitation probability across the advisory's CVE aliases.
+            // NULL *_checked_at = never refreshed.
+            "ALTER TABLE vulnerabilities ADD COLUMN is_kev INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE vulnerabilities ADD COLUMN kev_checked_at TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN epss_score REAL",
+            "ALTER TABLE vulnerabilities ADD COLUMN epss_checked_at TEXT",
+            // KEV/EPSS proxy-gate policies. Both default off so existing orgs see no
+            // behaviour change until an operator opts in.
+            "ALTER TABLE org_settings ADD COLUMN block_kev TEXT NOT NULL DEFAULT 'off'",
+            "ALTER TABLE org_settings ADD COLUMN max_epss_tolerance REAL",
+            // Atomic storage-usage counter for the publish quota check. Replaces the live
+            // SUM aggregate that was subject to a TOCTOU race under concurrent publishes.
+            // New rows default to 0 (back-compat); the publish path backfills from
+            // SUM(package_versions.size_bytes) on first access when the counter is 0 and
+            // the real sum is positive.
+            "ALTER TABLE org_settings ADD COLUMN storage_used_bytes INTEGER NOT NULL DEFAULT 0",
+            // Tracks the stage of the most recently emitted SAML IdP cert-expiry audit event
+            // ('30','14','7','1','expired'). NULL = no alert emitted (or cert replaced). Reset
+            // to NULL by the cert-upload/clear paths so the sweep re-evaluates on the new cert.
+            "ALTER TABLE tenant_saml_config ADD COLUMN cert_expiry_alert_stage TEXT",
         };
 
-        foreach (var ddl in migrations)
+        foreach (string? ddl in migrations)
         {
             if (_db.Provider == DbProvider.Sqlite)
+            {
                 await MigrateSqliteAsync(conn, ddl);
+            }
             else
+            {
                 await conn.ExecuteAsync(ddl.Replace("ADD COLUMN ", "ADD COLUMN IF NOT EXISTS "));
+            }
         }
+
+        // Cargo sparse registry index metadata. CREATE TABLE syntax is provider-specific
+        // (SQLite uses AUTOINCREMENT; Postgres uses BIGSERIAL), so this migration runs
+        // outside the shared loop with explicit branching.
+        const string cargoSqlite = "CREATE TABLE IF NOT EXISTS cargo_metadata (id INTEGER PRIMARY KEY AUTOINCREMENT, version_id TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE, index_line TEXT NOT NULL, UNIQUE(version_id))";
+        const string cargoPg = "CREATE TABLE IF NOT EXISTS cargo_metadata (id BIGSERIAL PRIMARY KEY, version_id TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE, index_line TEXT NOT NULL, UNIQUE(version_id))";
+        if (_db.Provider == DbProvider.Sqlite)
+        {
+            await MigrateSqliteAsync(conn, cargoSqlite);
+        }
+        else
+        {
+            await conn.ExecuteAsync(cargoPg);
+        }
+        await conn.ExecuteAsync("CREATE INDEX IF NOT EXISTS idx_cargo_metadata_version ON cargo_metadata(version_id)");
     }
 
     private async Task EnsureMigrationsTableAsync(DbConnection conn)
@@ -613,7 +748,7 @@ public sealed class SchemaInitializer
     // internal (not private) so SchemaInitializerTests can drive the rollback path directly.
     internal async Task RunOnceAsync(DbConnection conn, string name, Func<DbConnection, Task> action, bool transactional = true)
     {
-        var already = await conn.ExecuteScalarAsync<int>(
+        int already = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM _applied_migrations WHERE name = @name", new { name });
         if (already > 0)
         {
@@ -622,9 +757,14 @@ public sealed class SchemaInitializer
         }
         _logger.LogInformation("Schema migration {Migration} applying…", name);
         if (transactional)
+        {
             await RunInTransactionAsync(conn, name, action);
+        }
         else
+        {
             await RunUnwrappedAsync(conn, name, action);
+        }
+
         _logger.LogInformation("Schema migration {Migration} applied.", name);
     }
 
@@ -694,11 +834,14 @@ public sealed class SchemaInitializer
                 !name.Contains("%2F", StringComparison.OrdinalIgnoreCase) &&
                 !purlName.Contains("%2F", StringComparison.OrdinalIgnoreCase) &&
                 !purlName.StartsWith('@'))
+            {
                 continue;
-            var fixedName = name
+            }
+
+            string fixedName = name
                 .Replace("%40", "@", StringComparison.OrdinalIgnoreCase)
                 .Replace("%2F", "/", StringComparison.OrdinalIgnoreCase);
-            var fixedPurlName = fixedName.StartsWith('@')
+            string fixedPurlName = fixedName.StartsWith('@')
                 ? "%40" + fixedName[1..]
                 : purlName.Replace("%2F", "/", StringComparison.OrdinalIgnoreCase);
             await conn.ExecuteAsync(
@@ -711,7 +854,11 @@ public sealed class SchemaInitializer
         foreach (var row in versionRows)
         {
             string purl = (string)row.purl;
-            if (!purl.Contains("%2F", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!purl.Contains("%2F", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             await conn.ExecuteAsync(
                 "UPDATE package_versions SET purl = @p WHERE id = @id",
                 new { p = purl.Replace("%2F", "/", StringComparison.OrdinalIgnoreCase), id = (string)row.id });
@@ -790,19 +937,16 @@ public sealed class SchemaInitializer
     // integrity_check is the documented SQLite recipe.
     private Task ExpandRoleCheckWithAuditorAsync(DbConnection conn)
     {
-        if (_db.Provider == DbProvider.Postgres)
-        {
-            return conn.ExecuteAsync("""
+        return _db.Provider == DbProvider.Postgres
+            ? conn.ExecuteAsync("""
                 ALTER TABLE users   DROP CONSTRAINT IF EXISTS users_role_check;
                 ALTER TABLE users   ADD  CONSTRAINT users_role_check
                     CHECK (role IN ('member','admin','owner','auditor'));
                 ALTER TABLE invites DROP CONSTRAINT IF EXISTS invites_role_check;
                 ALTER TABLE invites ADD  CONSTRAINT invites_role_check
                     CHECK (role IN ('member','admin','owner','auditor'));
-                """);
-        }
-
-        return ExpandRoleCheckSqliteAsync(conn);
+                """)
+            : ExpandRoleCheckSqliteAsync(conn);
     }
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatted SQL queries should be reviewed",
@@ -826,7 +970,7 @@ public sealed class SchemaInitializer
                 SET sql = REPLACE(sql, @old, @new)
                 WHERE type = 'table' AND name IN ('users','invites')
                 """, new { old = oldCheck, @new = newCheck });
-            var version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
+            long version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
             // SQLite doesn't permit parameter binding in PRAGMA values — they must be
             // literal tokens. `version` comes from PRAGMA schema_version itself (a long
             // we just read back), so concatenation is safe; no user input flows here.
@@ -857,16 +1001,13 @@ public sealed class SchemaInitializer
     // old constraint from a fresh CREATE TABLE.
     private Task ExpandBlockDeprecatedCheckAsync(DbConnection conn)
     {
-        if (_db.Provider == DbProvider.Postgres)
-        {
-            return conn.ExecuteAsync("""
+        return _db.Provider == DbProvider.Postgres
+            ? conn.ExecuteAsync("""
                 ALTER TABLE org_settings DROP CONSTRAINT IF EXISTS org_settings_block_deprecated_check;
                 ALTER TABLE org_settings ADD  CONSTRAINT org_settings_block_deprecated_check
                     CHECK (block_deprecated IN ('off', 'warn', 'block_new', 'block_all'));
-                """);
-        }
-
-        return ExpandBlockDeprecatedCheckSqliteAsync(conn);
+                """)
+            : ExpandBlockDeprecatedCheckSqliteAsync(conn);
     }
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatted SQL queries should be reviewed",
@@ -889,7 +1030,7 @@ public sealed class SchemaInitializer
                 SET sql = REPLACE(sql, @old, @new)
                 WHERE type = 'table' AND name = 'org_settings'
                 """, new { old = oldCheck, @new = newCheck });
-            var version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
+            long version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
             await conn.ExecuteAsync(
                 "PRAGMA schema_version = " + (version + 1).ToString(CultureInfo.InvariantCulture));
         }
@@ -936,8 +1077,8 @@ public sealed class SchemaInitializer
     private static async Task<string> ReadSchemaAsync(DbProvider provider, CancellationToken ct)
     {
         var assembly = typeof(SchemaInitializer).Assembly;
-        var suffix = provider == DbProvider.Postgres ? "Schema.pg.sql" : "Schema.sql";
-        var resourceName = assembly.GetManifestResourceNames()
+        string suffix = provider == DbProvider.Postgres ? "Schema.pg.sql" : "Schema.sql";
+        string resourceName = assembly.GetManifestResourceNames()
             .Single(n => n.EndsWith(suffix));
 
         await using var stream = assembly.GetManifestResourceStream(resourceName)!;

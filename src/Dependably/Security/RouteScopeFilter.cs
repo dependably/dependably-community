@@ -1,7 +1,7 @@
+using Dependably.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
-using Dependably.Infrastructure;
 
 namespace Dependably.Security;
 
@@ -28,22 +28,34 @@ public sealed class RouteScopeFilter : IAuthorizationFilter
     public void OnAuthorization(AuthorizationFilterContext context)
     {
         var endpoint = context.HttpContext.GetEndpoint();
-        if (endpoint?.Metadata.GetMetadata<IAllowAnonymous>() is not null) return;
+        if (endpoint?.Metadata.GetMetadata<IAllowAnonymous>() is not null)
+        {
+            return;
+        }
 
-        var path = context.HttpContext.Request.Path.Value ?? "";
+        string path = context.HttpContext.Request.Path.Value ?? "";
 
         // Bootstrap is the only [AllowAnonymous] /api/v1/ route; the metadata check above
         // already lets it pass. This explicit guard is defense-in-depth.
-        if (path.StartsWith("/api/v1/bootstrap", StringComparison.OrdinalIgnoreCase)) return;
+        if (path.StartsWith("/api/v1/bootstrap", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
 
-        // Only enforce scope on management API routes; leave package-manager routes (/o/{slug}/...,
-        // /simple/, /npm/, /nuget/) to their existing per-controller token resolution.
-        if (!path.StartsWith("/api/v1/", StringComparison.OrdinalIgnoreCase)) return;
+        // Only enforce scope on management API routes; leave package-manager routes (/simple/,
+        // /npm/, /nuget/, /maven/, /rpm/, /v2/) to their existing per-controller token resolution.
+        if (!path.StartsWith("/api/v1/", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
 
         var user = context.HttpContext.User;
-        if (user.Identity?.IsAuthenticated != true) return;
+        if (user.Identity?.IsAuthenticated != true)
+        {
+            return;
+        }
 
-        var scope = user.FindFirst("scope")?.Value;
+        string? scope = user.FindFirst("scope")?.Value;
 
         // Phase 2: missing scope claim = unauthorized. All freshly-issued JWTs (Phase 1+) carry
         // scope; tokens older than 8h have already expired by the time Phase 2 ships.
@@ -75,11 +87,14 @@ public sealed class RouteScopeFilter : IAuthorizationFilter
 
         // tid must match the resolved tenant. When no TenantContext is wired (e.g. bare unit
         // tests), allow through — per-controller OrgAccessGuard remains the safety net.
-        if (ctx is null) return;
+        if (ctx is null)
+        {
+            return;
+        }
 
         if (!ctx.IsTenant) { context.Result = new NotFoundResult(); return; }
 
-        var tid = user.FindFirst("tid")?.Value;
+        string? tid = user.FindFirst("tid")?.Value;
         if (tid is not null && tid != ctx.TenantId)
         {
             context.Result = new NotFoundResult();

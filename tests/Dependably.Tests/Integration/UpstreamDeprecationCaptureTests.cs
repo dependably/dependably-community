@@ -5,7 +5,6 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
-using Xunit;
 
 namespace Dependably.Tests.Integration;
 
@@ -45,12 +44,12 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
     [Fact]
     public async Task Npm_ProxyFirstFetch_CapturesDeprecatedFromPackument()
     {
-        var name = $"npmdep{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.0";
+        string name = $"npmdep{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
         var (bytes, _, _) = NpmFixtures.BuildTarball(name, version);
-        var filename = $"{name}-{version}.tgz";
+        string filename = $"{name}-{version}.tgz";
 
-        var packument = $$"""
+        string packument = $$"""
             {
               "name": "{{name}}",
               "versions": {
@@ -69,25 +68,25 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryDeprecatedAsync("npm", name, version);
+        string? stored = await QueryDeprecatedAsync("npm", name, version);
         Assert.Equal("use foo@2 instead", stored);
     }
 
     [Fact]
     public async Task Npm_ProxyFirstFetch_NotDeprecated_DeprecatedColumnNull()
     {
-        var name = $"npmlive{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.0";
+        string name = $"npmlive{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
         var (bytes, _, _) = NpmFixtures.BuildTarball(name, version);
-        var filename = $"{name}-{version}.tgz";
+        string filename = $"{name}-{version}.tgz";
 
-        var packument = $$"""
+        string packument = $$"""
             {
               "name": "{{name}}",
               "versions": {
@@ -103,25 +102,25 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryDeprecatedAsync("npm", name, version);
+        string? stored = await QueryDeprecatedAsync("npm", name, version);
         Assert.Null(stored);
     }
 
     [Fact]
     public async Task Npm_ProxyFirstFetch_DeprecatedEmptyString_DeprecatedColumnNull()
     {
-        var name = $"npmempty{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.0";
+        string name = $"npmempty{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
         var (bytes, _, _) = NpmFixtures.BuildTarball(name, version);
-        var filename = $"{name}-{version}.tgz";
+        string filename = $"{name}-{version}.tgz";
 
-        var packument = $$"""
+        string packument = $$"""
             {
               "name": "{{name}}",
               "versions": {
@@ -136,13 +135,13 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryDeprecatedAsync("npm", name, version);
+        string? stored = await QueryDeprecatedAsync("npm", name, version);
         Assert.Null(stored);
     }
 
@@ -151,12 +150,12 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
     [Fact]
     public async Task PyPi_ProxyFirstFetch_CapturesYankedReasonFromJsonApi()
     {
-        var name = $"pypiyank{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.0";
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-{version}-py3-none-any.whl";
+        string name = $"pypiyank{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-{version}-py3-none-any.whl";
         var (wheelBytes, _) = PyPiFixtures.BuildWheel(name, version);
-        var mockBase = _factory.MockUpstream.Urls[0];
+        string mockBase = _factory.MockUpstream.Urls[0];
 
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
@@ -168,7 +167,7 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(wheelBytes));
 
-        var jsonApi = $$"""
+        string jsonApi = $$"""
             {
               "info": { "name": "{{name}}", "version": "{{version}}" },
               "urls": [
@@ -181,24 +180,24 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(jsonApi));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryDeprecatedAsync("pypi", name, version);
+        string? stored = await QueryDeprecatedAsync("pypi", name, version);
         Assert.Equal("CVE-2024-9999 critical", stored);
     }
 
     [Fact]
     public async Task PyPi_ProxyFirstFetch_YankedWithEmptyReason_FallsBackToLiteralYanked()
     {
-        var name = $"pypiempty{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.0";
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-{version}-py3-none-any.whl";
+        string name = $"pypiempty{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-{version}-py3-none-any.whl";
         var (wheelBytes, _) = PyPiFixtures.BuildWheel(name, version);
-        var mockBase = _factory.MockUpstream.Urls[0];
+        string mockBase = _factory.MockUpstream.Urls[0];
 
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
@@ -210,7 +209,7 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(wheelBytes));
 
-        var jsonApi = $$"""
+        string jsonApi = $$"""
             {
               "info": { "name": "{{name}}", "version": "{{version}}" },
               "urls": [
@@ -223,24 +222,24 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(jsonApi));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryDeprecatedAsync("pypi", name, version);
+        string? stored = await QueryDeprecatedAsync("pypi", name, version);
         Assert.Equal("Yanked", stored);
     }
 
     [Fact]
     public async Task PyPi_ProxyFirstFetch_NotYanked_DeprecatedColumnNull()
     {
-        var name = $"pypilive{Guid.NewGuid():N}"[..18].ToLowerInvariant();
-        var version = "1.0.0";
-        var underscored = name.Replace('-', '_');
-        var filename = $"{underscored}-{version}-py3-none-any.whl";
+        string name = $"pypilive{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-{version}-py3-none-any.whl";
         var (wheelBytes, _) = PyPiFixtures.BuildWheel(name, version);
-        var mockBase = _factory.MockUpstream.Urls[0];
+        string mockBase = _factory.MockUpstream.Urls[0];
 
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/simple/{name}/").UsingGet())
@@ -252,7 +251,7 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(wheelBytes));
 
-        var jsonApi = $$"""
+        string jsonApi = $$"""
             {
               "info": { "name": "{{name}}", "version": "{{version}}" },
               "urls": [
@@ -265,12 +264,12 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(jsonApi));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryDeprecatedAsync("pypi", name, version);
+        string? stored = await QueryDeprecatedAsync("pypi", name, version);
         Assert.Null(stored);
     }
 
@@ -279,13 +278,13 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
     [Fact]
     public async Task NuGet_ProxyFirstFetch_UnlistedUpstream_CapturesUnlistedSentinel()
     {
-        var id = $"NuGetUnl{Guid.NewGuid():N}"[..18];
-        var version = "1.2.3";
-        var lowerId = id.ToLowerInvariant();
+        string id = $"NuGetUnl{Guid.NewGuid():N}"[..18];
+        string version = "1.2.3";
+        string lowerId = id.ToLowerInvariant();
         var (bytes, _) = NuGetFixtures.BuildNupkg(id, version);
-        var filename = $"{lowerId}.{version}.nupkg";
+        string filename = $"{lowerId}.{version}.nupkg";
 
-        var leaf = """{ "published": "2024-01-01T00:00:00+00:00", "listed": false }""";
+        string leaf = """{ "published": "2024-01-01T00:00:00+00:00", "listed": false }""";
         _factory.MockUpstream.Given(Request.Create()
                 .WithPath($"/registration5-semver1/{lowerId}/{version}.json").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
@@ -295,26 +294,26 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryDeprecatedAsync("nuget", lowerId, version);
+        string? stored = await QueryDeprecatedAsync("nuget", lowerId, version);
         Assert.Equal("Unlisted upstream", stored);
     }
 
     [Fact]
     public async Task NuGet_ProxyFirstFetch_Listed_DeprecatedColumnNull()
     {
-        var id = $"NuGetLst{Guid.NewGuid():N}"[..18];
-        var version = "1.2.3";
-        var lowerId = id.ToLowerInvariant();
+        string id = $"NuGetLst{Guid.NewGuid():N}"[..18];
+        string version = "1.2.3";
+        string lowerId = id.ToLowerInvariant();
         var (bytes, _) = NuGetFixtures.BuildNupkg(id, version);
-        var filename = $"{lowerId}.{version}.nupkg";
+        string filename = $"{lowerId}.{version}.nupkg";
 
-        var leaf = """{ "published": "2024-01-01T00:00:00+00:00", "listed": true }""";
+        string leaf = """{ "published": "2024-01-01T00:00:00+00:00", "listed": true }""";
         _factory.MockUpstream.Given(Request.Create()
                 .WithPath($"/registration5-semver1/{lowerId}/{version}.json").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
@@ -324,13 +323,13 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryDeprecatedAsync("nuget", lowerId, version);
+        string? stored = await QueryDeprecatedAsync("nuget", lowerId, version);
         Assert.Null(stored);
     }
 
@@ -340,11 +339,11 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
         // Partial-failure parallel: when the registration leaf is unreachable we still
         // serve the artefact, but the deprecation column stays NULL (we don't have a
         // signal). Mirrors the published-at fail-soft contract.
-        var id = $"NuGetReg{Guid.NewGuid():N}"[..18];
-        var version = "1.2.4";
-        var lowerId = id.ToLowerInvariant();
+        string id = $"NuGetReg{Guid.NewGuid():N}"[..18];
+        string version = "1.2.4";
+        string lowerId = id.ToLowerInvariant();
         var (bytes, _) = NuGetFixtures.BuildNupkg(id, version);
-        var filename = $"{lowerId}.{version}.nupkg";
+        string filename = $"{lowerId}.{version}.nupkg";
 
         _factory.MockUpstream.Given(Request.Create()
                 .WithPath($"/registration5-semver1/{lowerId}/{version}.json").UsingGet())
@@ -354,13 +353,13 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
 
-        var token = await _factory.CreateToken("pull");
+        string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        var stored = await QueryDeprecatedAsync("nuget", lowerId, version);
+        string? stored = await QueryDeprecatedAsync("nuget", lowerId, version);
         Assert.Null(stored);
     }
 }

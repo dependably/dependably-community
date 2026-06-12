@@ -2,7 +2,6 @@ using Dependably.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -19,7 +18,11 @@ public sealed class ShutdownOrchestratorTests
     private static IConfiguration BuildConfig(string? preStopDelay)
     {
         var dict = new Dictionary<string, string?>();
-        if (preStopDelay is not null) dict["SHUTDOWN_PRESTOP_DELAY"] = preStopDelay;
+        if (preStopDelay is not null)
+        {
+            dict["SHUTDOWN_PRESTOP_DELAY"] = preStopDelay;
+        }
+
         return new ConfigurationBuilder().AddInMemoryCollection(dict).Build();
     }
 

@@ -19,8 +19,8 @@ public static class UserSeeder
         string accountStatus = "active",
         CancellationToken ct = default)
     {
-        var id = Guid.NewGuid().ToString("N");
-        var passwordHash = BCrypt.Net.BCrypt.HashPassword(password, workFactor: 4);
+        string id = Guid.NewGuid().ToString("N");
+        string passwordHash = BCrypt.Net.BCrypt.HashPassword(password, workFactor: 4);
         await using var conn = await db.OpenAsync(ct);
         await conn.ExecuteAsync("""
             INSERT INTO users (id, tenant_id, email, password_hash, role, account_status)

@@ -4,7 +4,6 @@ using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
-using Xunit;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -46,7 +45,7 @@ public sealed class FirstBootServiceTests
 
         await using var conn = await fx.Store.OpenAsync();
 
-        var orgSlug = await conn.ExecuteScalarAsync<string>("SELECT slug FROM orgs LIMIT 1");
+        string? orgSlug = await conn.ExecuteScalarAsync<string>("SELECT slug FROM orgs LIMIT 1");
         Assert.Equal("acme-test", orgSlug);
 
         var (email, role, mustChange) = await conn.QuerySingleAsync<(string Email, string Role, long MustChange)>(
@@ -55,7 +54,7 @@ public sealed class FirstBootServiceTests
         Assert.Equal("owner", role);
         Assert.Equal(1, mustChange);   // forces rotation since seeded password may have been env-logged
 
-        var jwt = await conn.ExecuteScalarAsync<string>(
+        string? jwt = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret'");
         Assert.False(string.IsNullOrEmpty(jwt));
     }
@@ -74,7 +73,7 @@ public sealed class FirstBootServiceTests
         Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM orgs"));
         Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM users"));
 
-        var sysCount = await conn.ExecuteScalarAsync<long>(
+        long sysCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM system_admins WHERE email = 'ops@example.com'");
         Assert.Equal(1, sysCount);
     }
@@ -93,7 +92,7 @@ public sealed class FirstBootServiceTests
         Assert.Equal(1, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM orgs"));
         Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM users"));
         // JWT secret is not seeded on a no-op run.
-        var jwt = await conn.ExecuteScalarAsync<string?>(
+        string? jwt = await conn.ExecuteScalarAsync<string?>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret'");
         Assert.Null(jwt);
     }
@@ -105,10 +104,10 @@ public sealed class FirstBootServiceTests
         await NewSut(fx, Cfg()).RunAsync();
 
         await using var conn = await fx.Store.OpenAsync();
-        var slug = await conn.ExecuteScalarAsync<string>("SELECT slug FROM orgs LIMIT 1");
+        string? slug = await conn.ExecuteScalarAsync<string>("SELECT slug FROM orgs LIMIT 1");
         Assert.Equal("default", slug);
 
-        var email = await conn.ExecuteScalarAsync<string>("SELECT email FROM users LIMIT 1");
+        string? email = await conn.ExecuteScalarAsync<string>("SELECT email FROM users LIMIT 1");
         Assert.Equal("admin@dependably.local", email);
     }
 
@@ -121,7 +120,7 @@ public sealed class FirstBootServiceTests
         await NewSut(fx, Cfg(("DEFAULT_ORG_SLUG", "legacy-slug"))).RunAsync();
 
         await using var conn = await fx.Store.OpenAsync();
-        var slug = await conn.ExecuteScalarAsync<string>("SELECT slug FROM orgs LIMIT 1");
+        string? slug = await conn.ExecuteScalarAsync<string>("SELECT slug FROM orgs LIMIT 1");
         Assert.Equal("legacy-slug", slug);
     }
 
@@ -219,7 +218,7 @@ public sealed class FirstBootServiceTests
             ("FIRST_BOOT_SYSTEM_ADMIN_PASSWORD", "CorrectPass12345"))).RunAsync();
 
         await using var conn = await fx.Store.OpenAsync();
-        var hash = await conn.ExecuteScalarAsync<string>(
+        string? hash = await conn.ExecuteScalarAsync<string>(
             "SELECT password_hash FROM system_admins LIMIT 1");
         Assert.True(BCrypt.Net.BCrypt.Verify("CorrectPass12345", hash));
         Assert.False(BCrypt.Net.BCrypt.Verify("WrongPassword12345", hash));
@@ -236,7 +235,7 @@ public sealed class FirstBootServiceTests
             ("FIRST_BOOT_ADMIN_PASSWORD", "FallbackPass12345"))).RunAsync();
 
         await using var conn = await fx.Store.OpenAsync();
-        var hash = await conn.ExecuteScalarAsync<string>(
+        string? hash = await conn.ExecuteScalarAsync<string>(
             "SELECT password_hash FROM system_admins LIMIT 1");
         Assert.True(BCrypt.Net.BCrypt.Verify("FallbackPass12345", hash));
     }
@@ -250,12 +249,49 @@ public sealed class FirstBootServiceTests
         await NewSut(fx, Cfg(("DEPLOYMENT_MODE", "multi"))).RunAsync();
 
         await using var conn = await fx.Store.OpenAsync();
-        var email = await conn.ExecuteScalarAsync<string>(
+        string? email = await conn.ExecuteScalarAsync<string>(
             "SELECT email FROM system_admins LIMIT 1");
         Assert.Equal("system@dependably.local", email);
 
         // password_hash is populated even with no env override (random fallback path).
-        var hash = await conn.ExecuteScalarAsync<string>(
+        string? hash = await conn.ExecuteScalarAsync<string>(
+            "SELECT password_hash FROM system_admins LIMIT 1");
+        Assert.False(string.IsNullOrEmpty(hash));
+    }
+
+    [Fact]
+    public async Task RunAsync_EmptyDb_HeaderMode_CreatesSystemAdminOnly_NoOrgNoUser()
+    {
+        // header mode is a multi-tenant mode (HeaderTenantResolver); first boot must create
+        // a system_admin so operators can reach /api/v1/system/* to manage the instance.
+        await using var fx = await NewFixtureAsync();
+
+        await NewSut(fx, Cfg(
+            ("DEPLOYMENT_MODE", "header"),
+            ("FIRST_BOOT_SYSTEM_ADMIN_EMAIL", "ops@header.example"),
+            ("FIRST_BOOT_SYSTEM_ADMIN_PASSWORD", "HeaderPass12345"))).RunAsync();
+
+        await using var conn = await fx.Store.OpenAsync();
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM orgs"));
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM users"));
+
+        long sysCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM system_admins WHERE email = 'ops@header.example'");
+        Assert.Equal(1, sysCount);
+    }
+
+    [Fact]
+    public async Task RunAsync_HeaderMode_DefaultsSystemAdminEmail_WhenConfigOmitted()
+    {
+        await using var fx = await NewFixtureAsync();
+        await NewSut(fx, Cfg(("DEPLOYMENT_MODE", "header"))).RunAsync();
+
+        await using var conn = await fx.Store.OpenAsync();
+        string? email = await conn.ExecuteScalarAsync<string>(
+            "SELECT email FROM system_admins LIMIT 1");
+        Assert.Equal("system@dependably.local", email);
+
+        string? hash = await conn.ExecuteScalarAsync<string>(
             "SELECT password_hash FROM system_admins LIMIT 1");
         Assert.False(string.IsNullOrEmpty(hash));
     }

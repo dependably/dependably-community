@@ -5,15 +5,19 @@ using Dependably.Infrastructure;
 using Dependably.Infrastructure.Observability;
 using Dependably.Security;
 using Dependably.Storage;
-using Microsoft.Extensions.Configuration;
 
 namespace Dependably.Protocol;
+
 
 /// <summary>
 /// Fetches blobs from upstream registries with:
 ///   - Thundering herd prevention (ConcurrentDictionary + Lazy deduplication)
 ///   - Per-ecosystem checksum verification before caching
 ///   - OpenTelemetry counters and inflight gauge (see DependablyMeter)
+///   - Graceful shutdown: host-stopping token is linked into the actual HTTP fetch so
+///     a slow upstream pull (30-min client timeout) does not outlive the drain window.
+///     Client disconnects do NOT cancel the shared single-flight fetch — only host
+///     shutdown does.
 /// </summary>
 public sealed class UpstreamClient
 {
@@ -22,8 +26,11 @@ public sealed class UpstreamClient
     private readonly AuditRepository _audit;
     private readonly IUpstreamUrlValidator _urlValidator;
     private readonly IAirGapMode _airGap;
+    private readonly IStagingDiskInfo _stagingDiskInfo;
+    private readonly long _stagingDiskFloorBytes;
     private readonly ILogger<UpstreamClient> _logger;
     private readonly string _stagingPath;
+    private readonly CancellationToken _hostStopping;
 
     // Dedup in-flight blob fetches: only one upstream request per blob key at a time.
     // Single shared work item produces (sha, size, key) — no shared byte[]. Concurrent
@@ -35,14 +42,23 @@ public sealed class UpstreamClient
     // the key (URL, not blob key) are different — same single-flight pattern though.
     private readonly ConcurrentDictionary<string, Lazy<Task<UpstreamMetadataResponse>>> _metadataInflight = new();
 
+    // Dedup in-flight artifact fetches for the no-pre-known-SHA case (npm tarballs,
+    // NuGet flatcontainer). Keyed by upstream URL so concurrent first-fetches of the same
+    // coordinate share one streaming fetch rather than buffering N independent copies.
+    private readonly ConcurrentDictionary<string, Lazy<Task<UpstreamFetchResult>>> _urlInflight = new();
+
+#pragma warning disable S107 // Dependency-injection constructor: the parameter list is the declared dependency set; grouping it into an aggregate would hide dependencies without adding cohesion.
     public UpstreamClient(
         IHttpClientFactory httpClientFactory,
         TieredBlobStorage blobs,
         AuditRepository audit,
         IUpstreamUrlValidator urlValidator,
         IAirGapMode airGap,
+        IStagingDiskInfo stagingDiskInfo,
         IConfiguration configuration,
-        ILogger<UpstreamClient> logger)
+        ILogger<UpstreamClient> logger,
+        IHostApplicationLifetime? lifetime = null)
+#pragma warning restore S107
     {
         _httpClientFactory = httpClientFactory;
         // Proxy fetches always land on the cache tier — they're recoverable, eviction-friendly,
@@ -51,13 +67,15 @@ public sealed class UpstreamClient
         _audit = audit;
         _urlValidator = urlValidator;
         _airGap = airGap;
+        _stagingDiskInfo = stagingDiskInfo;
         _logger = logger;
+        _hostStopping = lifetime?.ApplicationStopping ?? CancellationToken.None;
 
         // Staging dir for hash-and-stage MISS path. Defaults to the OS temp
         // directory — operators expecting large artefacts on containerised deployments
         // should point this at a disk-backed volume (e.g. /data/staging), because /tmp
         // is often tmpfs (RAM-backed), which defeats the memory-bounding goal of streaming.
-        var configured = configuration["PROXY_STAGING_PATH"];
+        string? configured = configuration["PROXY_STAGING_PATH"];
         _stagingPath = string.IsNullOrWhiteSpace(configured) ? Path.GetTempPath() : configured;
         // deepcode ignore PT: PROXY_STAGING_PATH is set by the operator deploying the container
         // (env var, secret manager, or compose file). The process trust boundary already covers
@@ -69,6 +87,12 @@ public sealed class UpstreamClient
                 "Failed to create PROXY_STAGING_PATH directory {StagingPath}: {ExceptionType}",
                 _stagingPath, ex.GetType().Name);
         }
+
+        // Hard floor for available staging disk space. Reject new proxy fetches when
+        // available bytes fall below this threshold. Default: 512 MiB.
+        long defaultFloor = 512L * 1024 * 1024;
+        _stagingDiskFloorBytes = long.TryParse(configuration["STAGING_DISK_FLOOR_BYTES"], out long floor)
+            && floor > 0 ? floor : defaultFloor;
     }
 
     /// <summary>
@@ -110,7 +134,9 @@ public sealed class UpstreamClient
         // exception bubbles up to the AirGappedExceptionMiddleware which translates it
         // to a 503 with a clear body — better than a 504 timeout when egress is firewalled.
         if (_airGap.IsEnabled)
+        {
             throw new AirGappedException(blobKey);
+        }
 
         // Thundering herd dedup — only one fetch per blobKey in flight. The shared work
         // item produces (sha, size, blobKey) only; each waiter independently opens the
@@ -125,12 +151,18 @@ public sealed class UpstreamClient
         activity?.SetTag("dependably.ecosystem", ecosystem);
         activity?.SetTag("dependably.operation", "proxy.fetch");
         activity?.SetTag("dependably.tier", "cache");
-        if (purl is not null) activity?.SetTag("dependably.purl", purl);
+        if (purl is not null)
+        {
+            activity?.SetTag("dependably.purl", purl);
+        }
+
         if (checksumSpec is { Algorithm: ChecksumAlgorithm.Sha256, ExpectedValue: { } sha })
+        {
             activity?.SetTag("dependably.sha256", sha);
+        }
 
         var stopwatch = Stopwatch.StartNew();
-        var outcome = "success";
+        string outcome = "success";
 
         DependablyMeter.UpstreamInflightFetches.Add(1, new KeyValuePair<string, object?>("ecosystem", ecosystem));
         try
@@ -157,6 +189,12 @@ public sealed class UpstreamClient
         {
             outcome = "blocked";
             activity?.SetStatus(ActivityStatusCode.Error, "air-gapped");
+            throw;
+        }
+        catch (StagingDiskFullException)
+        {
+            outcome = "staging_disk_full";
+            activity?.SetStatus(ActivityStatusCode.Error, "staging disk full");
             throw;
         }
         catch (Exception ex)
@@ -188,7 +226,21 @@ public sealed class UpstreamClient
         }
     }
 
-    private const long MaxUpstreamResponseBytes = 600L * 1024 * 1024; // 600 MB
+    /// <summary>
+    /// Hard cap for upstream artifact bodies (streamed or buffered). Applied by the
+    /// hash-and-stage path and passed explicitly by callers that buffer artifact bytes
+    /// through <see cref="GetOrFetchMetadataAsync(string, long, CancellationToken)"/>.
+    /// </summary>
+    public const long MaxUpstreamResponseBytes = 600L * 1024 * 1024; // 600 MB
+
+    /// <summary>
+    /// Hard cap for buffered upstream metadata documents (packuments, simple-index HTML,
+    /// registration JSON, repodata indexes, OCI manifests). Deliberately far below the
+    /// artifact cap: the shared upstream client auto-decompresses, so an attacker-controlled
+    /// upstream could otherwise inflate a tiny gzip body into gigabytes of managed memory.
+    /// Real-world metadata documents are comfortably under this limit.
+    /// </summary>
+    public const long MaxMetadataResponseBytes = 32L * 1024 * 1024; // 32 MB
 
     /// <summary>
     /// Hash-and-stage MISS path: streams upstream → temp file (with SHA-256
@@ -209,24 +261,61 @@ public sealed class UpstreamClient
         CancellationToken ct)
     {
         if (!await _urlValidator.IsAllowedAsync(url, orgId, ct))
+        {
             throw new SsrfBlockedException(url);
+        }
+
+        // Hard floor check: reject the fetch before touching the network when the
+        // staging volume is critically low. The effective floor is the larger of the
+        // configured absolute minimum and 2× Content-Length (determined after the
+        // response headers arrive), so the check runs in two phases:
+        // Phase 1 — absolute floor before the HTTP GET.
+        try
+        {
+            long availableBeforeGet = _stagingDiskInfo.GetAvailableBytes();
+            if (availableBeforeGet < _stagingDiskFloorBytes)
+            {
+                throw new StagingDiskFullException(availableBeforeGet, _stagingDiskFloorBytes);
+            }
+        }
+        catch (StagingDiskFullException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not read staging disk space before fetch: {ExceptionType}",
+                ex.GetType().Name);
+            throw new StagingDiskFullException(0, _stagingDiskFloorBytes); // fail closed
+        }
+
+        // Link the host-stopping token into the fetch so a slow upstream pull does not
+        // outlive the graceful-shutdown drain window. The caller passes CancellationToken.None
+        // rather than the client request token, so client disconnects never cancel the shared
+        // fetch — only host shutdown does. The linked source is disposed once the fetch completes.
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _hostStopping);
+        var fetchCt = linked.Token;
 
         var client = _httpClientFactory.CreateClient("upstream");
         using var response = await UnwrapSsrfAsync(
-            () => client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct));
+            () => client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, fetchCt));
         response.EnsureSuccessStatusCode();
+
+        // Phase 2 — dynamic floor based on Content-Length, checked after response headers arrive.
+        EnsureStagingDiskFloorForContentLength(response.Content.Headers.ContentLength);
 
         // Abort early if Content-Length already exceeds 600MB limit (cheap fail-fast).
         // The HashingFileStream below still enforces the cap for chunked transfers.
         if (response.Content.Headers.ContentLength > MaxUpstreamResponseBytes)
         {
             await _audit.LogAsync("upstream_response_too_large", orgId: orgId, ecosystem: ecosystem, purl: purl,
-                detail: $"{{\"url\":\"{url}\",\"content_length\":{response.Content.Headers.ContentLength}}}", ct: ct);
-            throw new UpstreamResponseTooLargeException(url);
+                detail: $"{{\"url\":\"{url}\",\"content_length\":{response.Content.Headers.ContentLength}}}", ct: fetchCt);
+            throw new UpstreamResponseTooLargeException(url, MaxUpstreamResponseBytes);
         }
 
-        var tempPath = Path.Combine(_stagingPath, $"dependably-stage-{Guid.NewGuid():N}.tmp");
-        var sha256Hex = string.Empty;
+        string tempPath = Path.Combine(_stagingPath, $"dependably-stage-{Guid.NewGuid():N}.tmp");
+        string sha256Hex = string.Empty;
         long sizeBytes = 0;
 
         try
@@ -234,55 +323,101 @@ public sealed class UpstreamClient
             // Stream upstream → temp file, hashing inline. HashingFileStream wraps the
             // FileStream and forwards writes to disk AND to IncrementalHash, throwing on
             // the 600 MB cap.
-            await using (var responseStream = await response.Content.ReadAsStreamAsync(ct))
+            await using (var responseStream = await response.Content.ReadAsStreamAsync(fetchCt))
             {
                 var fileStream = new FileStream(
                     tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
                     bufferSize: 81920, useAsync: true);
-                await using (var staging = new HashingFileStream(fileStream, MaxUpstreamResponseBytes))
+                await using var staging = new HashingFileStream(fileStream, MaxUpstreamResponseBytes);
+                try
                 {
-                    try
-                    {
-                        await responseStream.CopyToAsync(staging, ct);
-                    }
-                    catch (UpstreamResponseTooLargeException)
-                    {
-                        await _audit.LogAsync(
-                            "upstream_response_too_large", orgId: orgId, ecosystem: ecosystem, purl: purl,
-                            detail: $"{{\"url\":\"{url}\",\"bytes_read\":{staging.BytesWritten}}}", ct: ct);
-                        throw new UpstreamResponseTooLargeException(url);
-                    }
-                    sha256Hex = staging.GetSha256Hex();
-                    sizeBytes = staging.BytesWritten;
+                    await responseStream.CopyToAsync(staging, fetchCt);
                 }
+                catch (UpstreamResponseTooLargeException)
+                {
+                    await _audit.LogAsync(
+                        "upstream_response_too_large", orgId: orgId, ecosystem: ecosystem, purl: purl,
+                        detail: $"{{\"url\":\"{url}\",\"bytes_read\":{staging.BytesWritten}}}", ct: fetchCt);
+                    throw new UpstreamResponseTooLargeException(url, MaxUpstreamResponseBytes);
+                }
+                sha256Hex = staging.GetSha256Hex();
+                sizeBytes = staging.BytesWritten;
             }
 
             // For SHA-256 specs we already computed the hash inline; for SHA-1/SHA-512
             // (npm shasum, NuGet packageHash) we re-read the staged file. Same temp file,
             // single disk write.
             if (spec is not null && !await VerifyChecksumAsync(
-                    new VerifyChecksumRequest(tempPath, sha256Hex, spec, url, ecosystem, orgId, purl), ct))
+                    new VerifyChecksumRequest(tempPath, sha256Hex, spec, url, ecosystem, orgId, purl), fetchCt))
+            {
                 throw new ChecksumException($"Upstream checksum mismatch for {url}");
+            }
 
             // Upload the verified bytes to the blob store.
             await using (var verified = new FileStream(
                 tempPath, FileMode.Open, FileAccess.Read, FileShare.Read,
                 bufferSize: 81920, useAsync: true))
             {
-                await _blobs.PutAsync(blobKey, verified, ct);
+                // LocalBlobStore.PutAsync writes directly to the final blob path without
+                // a write-then-rename; cancelling mid-write leaves a truncated file that
+                // is served as a cache HIT on subsequent requests (no integrity re-check
+                // at serve time). Use CancellationToken.None so the commit is atomic with
+                // respect to host shutdown; only the preceding fetch/stage steps use fetchCt.
+                await _blobs.PutAsync(blobKey, verified, CancellationToken.None);
             }
 
             return new UpstreamFetchResult(sha256Hex, sizeBytes, blobKey);
         }
         finally
         {
-            try { if (File.Exists(tempPath)) File.Delete(tempPath); }
+            try
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
                     "Failed to delete staging temp file {TempPath}: {ExceptionType}",
                     tempPath, ex.GetType().Name);
             }
+        }
+    }
+
+    /// <summary>
+    /// Phase 2 of the staging-disk floor check — runs after response headers arrive, when
+    /// the declared Content-Length is known. Requires the larger of the configured absolute
+    /// floor and 2× the declared body size, taking a fresh disk reading so transient writes
+    /// between the pre-GET check and the upstream GET are accounted for. Throws
+    /// <see cref="StagingDiskFullException"/> below the floor, and fails closed (reports
+    /// zero available bytes) when the disk reading itself fails. A missing or non-positive
+    /// Content-Length (chunked transfer) skips the check; the streaming cap still bounds it.
+    /// </summary>
+    private void EnsureStagingDiskFloorForContentLength(long? declaredContentLength)
+    {
+        if (declaredContentLength is not { } contentLength || contentLength <= 0)
+        {
+            return;
+        }
+
+        long availableAfterGet;
+        try
+        {
+            availableAfterGet = _stagingDiskInfo.GetAvailableBytes();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not read staging disk space after response headers: {ExceptionType}",
+                ex.GetType().Name);
+            throw new StagingDiskFullException(0, _stagingDiskFloorBytes); // fail closed
+        }
+        long dynamicFloor = Math.Max(_stagingDiskFloorBytes, contentLength * 2);
+        if (availableAfterGet < dynamicFloor)
+        {
+            throw new StagingDiskFullException(availableAfterGet, dynamicFloor);
         }
     }
 
@@ -326,7 +461,10 @@ public sealed class UpstreamClient
             ok = await ChecksumVerifier.VerifyAsync(fs, req.Spec, ct);
             actualForAudit = req.Sha256Hex; // SHA-256 of the bytes — still useful in the audit row
         }
-        if (ok) return true;
+        if (ok)
+        {
+            return true;
+        }
 
         _logger.LogWarning("Checksum mismatch for {Url}: expected {Expected}, sha256={Actual}",
             req.Url, req.Spec.ExpectedValue, actualForAudit);
@@ -353,6 +491,194 @@ public sealed class UpstreamClient
         string? Purl);
 
     /// <summary>
+    /// Streaming proxy fetch for artifacts whose SHA-256 is not known before the download
+    /// (npm tarballs, NuGet flatcontainer). Streams upstream → local temp file (hashing
+    /// inline) → stores under <see cref="BlobKeys.Proxy(string)"/> using the computed
+    /// SHA-256 → returns the <see cref="UpstreamFetchResult"/> with the content-addressed
+    /// key, SHA-256 hex, and byte count. Memory usage is bounded by the staging buffer
+    /// regardless of artifact size. Skips the upload when the blob already exists in the
+    /// store (idempotent). Uses the same thundering-herd dedup as
+    /// <see cref="GetOrFetchStreamAsync"/> — concurrent first-fetches of the same URL
+    /// share one upstream call.
+    /// </summary>
+    public async Task<UpstreamFetchResult> FetchAndCacheByUrlAsync(
+        string upstreamUrl,
+        ChecksumSpec? checksumSpec,
+        string ecosystem,
+        string? orgId = null,
+        CancellationToken ct = default)
+    {
+        if (_airGap.IsEnabled)
+        {
+            throw new AirGappedException(upstreamUrl);
+        }
+
+        // Dedup concurrent fetches by URL. The shared work item writes the blob and returns
+        // the content-addressed key; each caller receives the same UpstreamFetchResult and
+        // can independently open the cached blob. CancellationToken.None prevents a single
+        // caller disconnect from faulting the shared Lazy and cancelling all other waiters.
+        var lazy = _urlInflight.GetOrAdd(upstreamUrl, _ => new Lazy<Task<UpstreamFetchResult>>(
+            () => FetchAndStageToContentKeyAsync(upstreamUrl, checksumSpec, ecosystem, orgId, CancellationToken.None)));
+
+        using var activity = DependablyActivitySource.Source.StartActivity(
+            "proxy.fetch", ActivityKind.Client);
+        activity?.SetTag("dependably.ecosystem", ecosystem);
+        activity?.SetTag("dependably.operation", "proxy.fetch");
+        activity?.SetTag("dependably.tier", "cache");
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        string outcome = "success";
+
+        DependablyMeter.UpstreamInflightFetches.Add(1, new KeyValuePair<string, object?>("ecosystem", ecosystem));
+        try
+        {
+            return await lazy.Value.WaitAsync(ct);
+        }
+        catch (ChecksumException)
+        {
+            outcome = "upstream_error";
+            activity?.SetStatus(ActivityStatusCode.Error, "checksum mismatch");
+            throw;
+        }
+        catch (UpstreamResponseTooLargeException)
+        {
+            outcome = "upstream_error";
+            activity?.SetStatus(ActivityStatusCode.Error, "upstream response too large");
+            throw;
+        }
+        catch (AirGappedException)
+        {
+            outcome = "blocked";
+            activity?.SetStatus(ActivityStatusCode.Error, "air-gapped");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            outcome = "server_error";
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            _logger.LogWarning(
+                ex,
+                "Upstream fetch failed: {ExceptionType} for {Ecosystem} from {UpstreamUrl} after {Duration:F0}ms trace={TraceId}",
+                ex.GetType().Name,
+                ecosystem,
+                upstreamUrl,
+                stopwatch.Elapsed.TotalMilliseconds,
+                Activity.Current?.TraceId.ToString());
+            throw;
+        }
+        finally
+        {
+            DependablyMeter.UpstreamInflightFetches.Add(-1, new KeyValuePair<string, object?>("ecosystem", ecosystem));
+            _urlInflight.TryRemove(upstreamUrl, out _);
+
+            DependablyMeter.UpstreamFetchDuration.Record(
+                stopwatch.Elapsed.TotalSeconds,
+                new KeyValuePair<string, object?>("ecosystem", ecosystem),
+                new KeyValuePair<string, object?>("outcome", outcome));
+
+            activity?.SetTag("dependably.outcome", outcome);
+        }
+    }
+
+    /// <summary>
+    /// Hash-and-stage MISS path for the no-pre-known-SHA case (npm, NuGet). Streams
+    /// upstream → temp file → verifies optional checksum → writes the blob under
+    /// <see cref="BlobKeys.Proxy(string)"/> (the content-addressed key derived from the
+    /// inline-computed SHA-256) → returns the result. Skips the blob-store write when
+    /// the content-addressed key already exists (concurrent callers that lost the race
+    /// to the same artifact content).
+    /// </summary>
+    private async Task<UpstreamFetchResult> FetchAndStageToContentKeyAsync(
+        string url, ChecksumSpec? spec, string ecosystem, string? orgId, CancellationToken ct)
+    {
+        if (!await _urlValidator.IsAllowedAsync(url, orgId, ct))
+        {
+            throw new SsrfBlockedException(url);
+        }
+
+        var client = _httpClientFactory.CreateClient("upstream");
+        using var response = await UnwrapSsrfAsync(
+            () => client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct));
+        response.EnsureSuccessStatusCode();
+
+        if (response.Content.Headers.ContentLength > MaxUpstreamResponseBytes)
+        {
+            await _audit.LogAsync("upstream_response_too_large", orgId: orgId, ecosystem: ecosystem,
+                detail: $"{{\"url\":\"{url}\",\"content_length\":{response.Content.Headers.ContentLength}}}", ct: ct);
+            throw new UpstreamResponseTooLargeException(url, MaxUpstreamResponseBytes);
+        }
+
+        string tempPath = Path.Combine(_stagingPath, $"dependably-stage-{Guid.NewGuid():N}.tmp");
+        string sha256Hex = string.Empty;
+        long sizeBytes = 0;
+
+        try
+        {
+            await using (var responseStream = await response.Content.ReadAsStreamAsync(ct))
+            {
+                var fileStream = new FileStream(
+                    tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                    bufferSize: 81920, useAsync: true);
+                await using var staging = new HashingFileStream(fileStream, MaxUpstreamResponseBytes);
+                try
+                {
+                    await responseStream.CopyToAsync(staging, ct);
+                }
+                catch (UpstreamResponseTooLargeException)
+                {
+                    await _audit.LogAsync(
+                        "upstream_response_too_large", orgId: orgId, ecosystem: ecosystem,
+                        detail: $"{{\"url\":\"{url}\",\"bytes_read\":{staging.BytesWritten}}}", ct: ct);
+                    throw new UpstreamResponseTooLargeException(url, MaxUpstreamResponseBytes);
+                }
+                sha256Hex = staging.GetSha256Hex();
+                sizeBytes = staging.BytesWritten;
+            }
+
+            if (spec is not null && !await VerifyChecksumAsync(
+                    new VerifyChecksumRequest(tempPath, sha256Hex, spec, url, ecosystem, orgId, null), ct))
+            {
+                throw new ChecksumException($"Upstream checksum mismatch for {url}");
+            }
+
+            // Store under the content-addressed key derived from the computed SHA-256.
+            // Idempotent: concurrent callers that hashed the same content skip the write.
+            string blobKey = BlobKeys.Proxy(sha256Hex);
+            if (!await _blobs.ExistsAsync(blobKey, ct))
+            {
+                await using var verified = new FileStream(
+                    tempPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                    bufferSize: 81920, useAsync: true);
+                await _blobs.PutAsync(blobKey, verified, ct);
+            }
+
+            DependablyMeter.CacheLookups.Add(1,
+                new KeyValuePair<string, object?>("ecosystem", ecosystem),
+                new KeyValuePair<string, object?>("outcome", "miss"));
+            SnapshotCounters.IncrementCacheMiss();
+            SnapshotCounters.IncrementProxyFetch();
+
+            return new UpstreamFetchResult(sha256Hex, sizeBytes, blobKey);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Failed to delete staging temp file {TempPath}: {ExceptionType}",
+                    tempPath, ex.GetType().Name);
+            }
+        }
+    }
+
+    /// <summary>
     /// Fetches metadata without caching (simple index, registration JSON, etc.).
     /// </summary>
     public async Task<HttpResponseMessage> GetMetadataAsync(string url, CancellationToken ct = default)
@@ -360,10 +686,14 @@ public sealed class UpstreamClient
         // Air-gapped: also block uncached metadata fetches. Simple-index pages and npm
         // packuments are derived locally from the registry's own state in air-gap mode.
         if (_airGap.IsEnabled)
+        {
             throw new AirGappedException(url);
+        }
 
         if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct))
+        {
             throw new SsrfBlockedException(url);
+        }
 
         var client = _httpClientFactory.CreateClient("upstream");
         return await UnwrapSsrfAsync(() => client.GetAsync(url, ct));
@@ -378,18 +708,33 @@ public sealed class UpstreamClient
     /// returned an <see cref="HttpResponseMessage"/> whose stream could only be consumed
     /// once, which is why the controllers couldn't share fetches).
     /// </summary>
-    public async Task<UpstreamMetadataResponse> GetOrFetchMetadataAsync(string url, CancellationToken ct = default)
+    public Task<UpstreamMetadataResponse> GetOrFetchMetadataAsync(string url, CancellationToken ct = default)
+        => GetOrFetchMetadataAsync(url, MaxMetadataResponseBytes, ct);
+
+    /// <summary>
+    /// Variant of <see cref="GetOrFetchMetadataAsync(string, CancellationToken)"/> with an
+    /// explicit body cap. Callers that buffer artifact bytes through this path (npm tarballs,
+    /// NuGet flatcontainer, Maven fetch-then-hash, PyPI unknown-sha cold start) pass
+    /// <see cref="MaxUpstreamResponseBytes"/>; metadata callers use the default overload.
+    /// Throws <see cref="UpstreamResponseTooLargeException"/> when the body exceeds the cap.
+    /// </summary>
+    public async Task<UpstreamMetadataResponse> GetOrFetchMetadataAsync(
+        string url, long maxBytes, CancellationToken ct = default)
     {
         if (_airGap.IsEnabled)
+        {
             throw new AirGappedException(url);
+        }
 
         if (!await _urlValidator.IsAllowedAsync(url, orgId: null, ct))
+        {
             throw new SsrfBlockedException(url);
+        }
 
         // CancellationToken.None: a disconnect from the first caller must not fault the
         // shared Lazy and cancel every other waiter (mirrors the blob-fetch convention).
         var lazy = _metadataInflight.GetOrAdd(url, _ => new Lazy<Task<UpstreamMetadataResponse>>(
-            () => FetchMetadataBufferedAsync(url, CancellationToken.None)));
+            () => FetchMetadataBufferedAsync(url, maxBytes, CancellationToken.None)));
 
         try
         {
@@ -401,17 +746,54 @@ public sealed class UpstreamClient
         }
     }
 
-    private async Task<UpstreamMetadataResponse> FetchMetadataBufferedAsync(string url, CancellationToken ct)
+    private async Task<UpstreamMetadataResponse> FetchMetadataBufferedAsync(string url, long maxBytes, CancellationToken ct)
     {
         var client = _httpClientFactory.CreateClient("upstream");
-        using var response = await UnwrapSsrfAsync(() => client.GetAsync(url, ct));
-        var body = await response.Content.ReadAsByteArrayAsync(ct);
-        var contentType = response.Content.Headers.ContentType?.ToString();
+        // ResponseHeadersRead is load-bearing: the default (ResponseContentRead) would have
+        // HttpClient buffer the whole body before the cap check, defeating it.
+        using var response = await UnwrapSsrfAsync(
+            () => client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct));
+        byte[] body = await ReadBodyCappedAsync(response, maxBytes, url, ct);
+        string? contentType = response.Content.Headers.ContentType?.ToString();
         return new UpstreamMetadataResponse(
             (int)response.StatusCode,
             response.IsSuccessStatusCode,
             contentType,
             body);
+    }
+
+    /// <summary>
+    /// Buffers an upstream response body with a hard byte cap. The single place buffered
+    /// upstream reads are allowed to materialise bytes: fails fast when the declared
+    /// Content-Length already exceeds the cap (mirroring the streaming path), then copies
+    /// the body through a counted loop so chunked or auto-decompressed transfers — where
+    /// Content-Length is absent or describes the compressed size — cannot inflate past the
+    /// cap into managed memory. Throws <see cref="UpstreamResponseTooLargeException"/> when
+    /// the cap is crossed.
+    /// </summary>
+    public static async Task<byte[]> ReadBodyCappedAsync(
+        HttpResponseMessage response, long maxBytes, string url, CancellationToken ct)
+    {
+        if (response.Content.Headers.ContentLength > maxBytes)
+        {
+            throw new UpstreamResponseTooLargeException(url, maxBytes);
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var buffered = new MemoryStream();
+        byte[] buffer = new byte[81920];
+        int read;
+        while ((read = await stream.ReadAsync(buffer, ct)) > 0)
+        {
+            if (buffered.Length + read > maxBytes)
+            {
+                throw new UpstreamResponseTooLargeException(url, maxBytes);
+            }
+
+            buffered.Write(buffer, 0, read);
+        }
+
+        return buffered.ToArray();
     }
 }
 
@@ -436,7 +818,6 @@ internal sealed class HashingFileStream : Stream
     private readonly Stream _inner;
     private readonly IncrementalHash _hash;
     private readonly long _maxBytes;
-    private long _bytesWritten;
     private byte[]? _finalHash;
     private bool _disposed;
 
@@ -447,7 +828,7 @@ internal sealed class HashingFileStream : Stream
         _maxBytes = maxBytes;
     }
 
-    public long BytesWritten => _bytesWritten;
+    public long BytesWritten { get; private set; }
 
     public string GetSha256Hex()
     {
@@ -459,7 +840,7 @@ internal sealed class HashingFileStream : Stream
     public override bool CanSeek => false;
     public override bool CanWrite => true;
     public override long Length => throw new NotSupportedException();
-    public override long Position { get => _bytesWritten; set => throw new NotSupportedException(); }
+    public override long Position { get => BytesWritten; set => throw new NotSupportedException(); }
 
     public override void Flush() => _inner.Flush();
     public override Task FlushAsync(CancellationToken cancellationToken) => _inner.FlushAsync(cancellationToken);
@@ -477,7 +858,7 @@ internal sealed class HashingFileStream : Stream
         CheckCap(count);
         _hash.AppendData(buffer, offset, count);
         _inner.Write(buffer, offset, count);
-        _bytesWritten += count;
+        BytesWritten += count;
     }
 
     public override async ValueTask WriteAsync(
@@ -488,7 +869,7 @@ internal sealed class HashingFileStream : Stream
         // it so we hash the same bytes the file write consumes.
         _hash.AppendData(buffer.Span);
         await _inner.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
-        _bytesWritten += buffer.Length;
+        BytesWritten += buffer.Length;
     }
 
     public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
@@ -496,13 +877,19 @@ internal sealed class HashingFileStream : Stream
 
     private void CheckCap(int incoming)
     {
-        if (_bytesWritten + incoming > _maxBytes)
-            throw new UpstreamResponseTooLargeException("(staging)");
+        if (BytesWritten + incoming > _maxBytes)
+        {
+            throw new UpstreamResponseTooLargeException("(staging)", _maxBytes);
+        }
     }
 
     protected override void Dispose(bool disposing)
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
         if (disposing)
         {
@@ -553,8 +940,8 @@ public sealed class ChecksumException : Exception
     Justification = "Binary serialization ctor on Exception is obsolete in .NET 10 (SYSLIB0051); this exception is never serialized across an AppDomain or binary boundary.")]
 public sealed class UpstreamResponseTooLargeException : Exception
 {
-    public UpstreamResponseTooLargeException(string url)
-        : base($"Upstream response exceeded 600 MB limit: {url}") { }
+    public UpstreamResponseTooLargeException(string url, long maxBytes)
+        : base($"Upstream response exceeded the {maxBytes}-byte limit: {url}") { }
 }
 
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
@@ -581,5 +968,27 @@ public sealed class AirGappedException : Exception
         : base($"Upstream fetch refused: this deployment is air-gapped (resource: {resource}).")
     {
         Resource = resource;
+    }
+}
+
+/// <summary>
+/// Thrown by <see cref="UpstreamClient"/> when the staging volume does not have
+/// enough free space to safely accommodate the incoming proxy fetch. Caught by
+/// <c>StagingDiskFullExceptionMiddleware</c> and translated to
+/// <c>507 Insufficient Storage</c> so callers receive a standard HTTP response
+/// rather than a generic 500.
+/// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
+    Justification = "Binary serialization ctor on Exception is obsolete in .NET 10 (SYSLIB0051); this exception is never serialized across an AppDomain or binary boundary.")]
+public sealed class StagingDiskFullException : Exception
+{
+    public long AvailableBytes { get; }
+    public long FloorBytes { get; }
+
+    public StagingDiskFullException(long availableBytes, long floorBytes)
+        : base($"Staging disk too full to accept a new proxy fetch: {availableBytes} bytes available, floor is {floorBytes} bytes.")
+    {
+        AvailableBytes = availableBytes;
+        FloorBytes = floorBytes;
     }
 }

@@ -1,7 +1,8 @@
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
 using Dependably.Infrastructure;
 using Dependably.Security;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Api;
 
@@ -37,7 +38,10 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
     public async Task<IActionResult> List(CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadTenant, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
         var entries = await _registries.ListAsync(CurrentTenantId(), ct);
         return Ok(entries);
@@ -45,23 +49,31 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
 
     /// <summary>POST /api/v1/orgs/{org}/upstream-registries</summary>
     [HttpPost("api/v1/upstream-registries")]
+    [ProducesResponseType(StatusCodes.Status201Created)]
     public async Task<IActionResult> Add([FromBody] AddUpstreamRegistryRequest req, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var ecosystem = req.Ecosystem?.Trim().ToLowerInvariant() ?? "";
+        string ecosystem = req.Ecosystem?.Trim().ToLowerInvariant() ?? "";
         if (!UpstreamRegistryRepository.IsSupportedEcosystem(ecosystem))
+        {
             return _problems.ValidationErrorAction(
                 "ecosystem",
                 $"Must be one of: {string.Join(", ", UpstreamRegistryRepository.SupportedEcosystems)}.");
+        }
 
-        var urlProblem = UpstreamUrlValidator.ValidateUrl(req.Url);
+        string? urlProblem = UpstreamUrlValidator.ValidateUrl(req.Url);
         if (urlProblem is not null)
+        {
             return _problems.ValidationErrorAction("url", urlProblem);
+        }
 
-        var name = string.IsNullOrWhiteSpace(req.Name) ? null : req.Name.Trim();
-        var orgId = CurrentTenantId();
+        string? name = string.IsNullOrWhiteSpace(req.Name) ? null : req.Name.Trim();
+        string orgId = CurrentTenantId();
         var entry = await _registries.AddAsync(orgId, ecosystem, req.Url.Trim(), name, ct);
 
         await _audit.LogAsync("upstream_registry_added", orgId, GetUserId(),
@@ -78,12 +90,16 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
 
     /// <summary>DELETE /api/v1/orgs/{org}/upstream-registries/{id}</summary>
     [HttpDelete("api/v1/upstream-registries/{id}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> Delete(string id, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         await _registries.DeleteAsync(orgId, id, ct);
 
         await _audit.LogAsync("upstream_registry_removed", orgId, GetUserId(),
@@ -94,20 +110,26 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
 
     /// <summary>PUT /api/v1/orgs/{org}/upstream-registries/{ecosystem}/order</summary>
     [HttpPut("api/v1/upstream-registries/{ecosystem}/order")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> Reorder(
         string ecosystem, [FromBody] ReorderUpstreamRegistryRequest req, CancellationToken ct)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
-        if (result is not null) return result;
+        if (result is not null)
+        {
+            return result;
+        }
 
-        var eco = ecosystem?.Trim().ToLowerInvariant() ?? "";
+        string eco = ecosystem?.Trim().ToLowerInvariant() ?? "";
         if (!UpstreamRegistryRepository.IsSupportedEcosystem(eco))
+        {
             return _problems.ValidationErrorAction(
                 "ecosystem",
                 $"Must be one of: {string.Join(", ", UpstreamRegistryRepository.SupportedEcosystems)}.");
+        }
 
         var ids = req.Ids ?? [];
-        var orgId = CurrentTenantId();
+        string orgId = CurrentTenantId();
         await _registries.ReorderAsync(orgId, eco, ids, ct);
 
         await _audit.LogAsync("upstream_registry_reordered", orgId, GetUserId(),

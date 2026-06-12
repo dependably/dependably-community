@@ -1,7 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -26,7 +25,7 @@ public class SchemaAdditionsTests : IAsyncLifetime
     public async Task MultitenantTables_Exist(string table)
     {
         await using var conn = await _db.OpenAsync();
-        var name = await conn.QuerySingleOrDefaultAsync<string>(
+        string? name = await conn.QuerySingleOrDefaultAsync<string>(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=@table",
             new { table });
         Assert.Equal(table, name);
@@ -44,7 +43,7 @@ public class SchemaAdditionsTests : IAsyncLifetime
         await conn.ExecuteAsync(
             "INSERT INTO package_versions (id, package_id, version, purl, blob_key) VALUES ('v1','p1','1.0.0','pkg:npm/x@1.0.0','blob1')");
 
-        var origin = await conn.QuerySingleAsync<string>(
+        string origin = await conn.QuerySingleAsync<string>(
             "SELECT origin FROM package_versions WHERE id = 'v1'");
         Assert.Equal("proxy", origin);
     }
@@ -89,7 +88,7 @@ public class SchemaAdditionsTests : IAsyncLifetime
     {
         // _db is already initialized once by IAsyncLifetime.InitializeAsync
         await using var conn = await _db.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM _applied_migrations");
+        int count = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM _applied_migrations");
         Assert.True(count > 0);
     }
 
@@ -101,11 +100,11 @@ public class SchemaAdditionsTests : IAsyncLifetime
 
         await initializer.InitializeAsync();
         await using var conn1 = await db.OpenAsync();
-        var countAfterFirst = await conn1.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM _applied_migrations");
+        int countAfterFirst = await conn1.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM _applied_migrations");
 
         await initializer.InitializeAsync();
         await using var conn2 = await db.OpenAsync();
-        var countAfterSecond = await conn2.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM _applied_migrations");
+        int countAfterSecond = await conn2.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM _applied_migrations");
 
         Assert.Equal(countAfterFirst, countAfterSecond);
     }
@@ -126,7 +125,7 @@ public class SchemaAdditionsTests : IAsyncLifetime
     {
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-status', 'status-default')");
-        var status = await conn.QuerySingleAsync<string>(
+        string status = await conn.QuerySingleAsync<string>(
             "SELECT status FROM orgs WHERE id = 'o-status'");
         Assert.Equal("active", status);
     }
@@ -147,11 +146,11 @@ public class SchemaAdditionsTests : IAsyncLifetime
     public async Task Orgs_StatusCheckConstraint_AcceptsKnownStates(string state)
     {
         await using var conn = await _db.OpenAsync();
-        var id = $"o-{state}";
+        string id = $"o-{state}";
         await conn.ExecuteAsync(
             "INSERT INTO orgs (id, slug, status) VALUES (@id, @slug, @state)",
             new { id, slug = $"slug-{state}", state });
-        var stored = await conn.QuerySingleAsync<string>(
+        string stored = await conn.QuerySingleAsync<string>(
             "SELECT status FROM orgs WHERE id = @id", new { id });
         Assert.Equal(state, stored);
     }
@@ -161,7 +160,7 @@ public class SchemaAdditionsTests : IAsyncLifetime
     {
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-feat', 'features-default')");
-        var features = await conn.QuerySingleAsync<string>(
+        string features = await conn.QuerySingleAsync<string>(
             "SELECT features FROM orgs WHERE id = 'o-feat'");
         Assert.Equal("{}", features);
     }
@@ -171,7 +170,7 @@ public class SchemaAdditionsTests : IAsyncLifetime
     {
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-region', 'region-default')");
-        var region = await conn.QuerySingleAsync<string?>(
+        string? region = await conn.QuerySingleAsync<string?>(
             "SELECT region FROM orgs WHERE id = 'o-region'");
         Assert.Null(region);
     }
@@ -207,13 +206,13 @@ public class SchemaAdditionsTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-store', 'store')");
         await conn.ExecuteAsync("INSERT INTO tenant_storage (org_id) VALUES ('o-store')");
-        var row = await conn.QuerySingleAsync<(string? bucket, string? region, string? endpoint, int forcePathStyle)>(
+        var (bucket, region, endpoint, forcePathStyle) = await conn.QuerySingleAsync<(string? bucket, string? region, string? endpoint, int forcePathStyle)>(
             "SELECT registry_bucket, registry_region, registry_endpoint, registry_force_path_style " +
             "FROM tenant_storage WHERE org_id = 'o-store'");
-        Assert.Null(row.bucket);
-        Assert.Null(row.region);
-        Assert.Null(row.endpoint);
-        Assert.Equal(0, row.forcePathStyle);
+        Assert.Null(bucket);
+        Assert.Null(region);
+        Assert.Null(endpoint);
+        Assert.Equal(0, forcePathStyle);
     }
 
     [Fact]
@@ -221,21 +220,21 @@ public class SchemaAdditionsTests : IAsyncLifetime
     {
         await using var conn = await _db.OpenAsync();
 
-        var column = await conn.QuerySingleOrDefaultAsync<(string name, int notnull)>(
+        var (name, notnull) = await conn.QuerySingleOrDefaultAsync<(string name, int notnull)>(
             "SELECT name, \"notnull\" FROM pragma_table_info('orgs') WHERE name = 'parent_tenant_id'");
-        Assert.Equal("parent_tenant_id", column.name);
-        Assert.Equal(0, column.notnull);
+        Assert.Equal("parent_tenant_id", name);
+        Assert.Equal(0, notnull);
 
-        var fkCount = await conn.ExecuteScalarAsync<int>(
+        int fkCount = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM pragma_foreign_key_list('orgs') WHERE \"from\" = 'parent_tenant_id'");
         Assert.Equal(0, fkCount);
 
-        var indexName = await conn.QuerySingleOrDefaultAsync<string>(
+        string? indexName = await conn.QuerySingleOrDefaultAsync<string>(
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_orgs_parent_tenant_id'");
         Assert.Equal("idx_orgs_parent_tenant_id", indexName);
 
         await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-null', 'parent-null')");
-        var stored = await conn.QuerySingleAsync<string?>(
+        string? stored = await conn.QuerySingleAsync<string?>(
             "SELECT parent_tenant_id FROM orgs WHERE id = 'o-null'");
         Assert.Null(stored);
     }

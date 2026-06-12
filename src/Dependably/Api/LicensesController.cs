@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Dependably.Api;
 
@@ -11,12 +12,13 @@ namespace Dependably.Api;
 /// </summary>
 [ApiController]
 [AllowAnonymous]
+[EnableRateLimiting("anon")]
 public sealed class LicensesController : ControllerBase
 {
     [HttpGet("api/v1/licenses")]
     public async Task<IActionResult> Get(CancellationToken ct)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "notices.json");
+        string path = Path.Combine(AppContext.BaseDirectory, "notices.json");
         if (!System.IO.File.Exists(path))
         {
             return Ok(new
@@ -28,7 +30,7 @@ public sealed class LicensesController : ControllerBase
             });
         }
 
-        var json = await System.IO.File.ReadAllTextAsync(path, ct);
+        string json = await System.IO.File.ReadAllTextAsync(path, ct);
         return Content(json, "application/json; charset=utf-8");
     }
 }

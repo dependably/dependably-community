@@ -1,14 +1,19 @@
-using Microsoft.AspNetCore.Http.Features;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
+using Microsoft.AspNetCore.Http.Features;
 
 namespace Dependably.Security;
 
 /// <summary>
-/// Must be registered first in the middleware pipeline (before routing).
-/// Resolves the org from the URL path and sets IHttpMaxRequestBodySizeFeature
-/// to the effective per-org, per-ecosystem upload limit before the request body is read.
-/// Returns 413 Problem Details if the request declares a Content-Length that already exceeds the limit.
+/// Registered after <see cref="SubdomainTenantMiddleware"/> (which resolves the tenant from the
+/// host/subdomain into <c>HttpContext.Items["TenantContext"]</c>) and after
+/// <see cref="Infrastructure.TransparentInterceptMiddleware"/> (which rewrites bare-host paths to
+/// their ecosystem prefix), but before routing. Reads the resolved tenant, keys the ecosystem off
+/// the host-relative path prefix (<c>/pypi</c>, <c>/npm</c>, <c>/nuget</c>, <c>/maven</c>,
+/// <c>/rpm</c>, <c>/v2</c>), and sets <see cref="IHttpMaxRequestBodySizeFeature"/> to the
+/// effective per-org, per-ecosystem upload limit before the request body is read.
+/// Returns 413 Problem Details if the request declares a Content-Length that already exceeds
+/// the limit — before any body bytes are buffered.
 /// </summary>
 public sealed class UploadSizeLimitMiddleware
 {
@@ -19,25 +24,31 @@ public sealed class UploadSizeLimitMiddleware
         _next = next;
     }
 
-    public async Task InvokeAsync(
-        HttpContext ctx,
-        OrgRepository orgs,
-        IUploadLimitResolver limitResolver)
+    public async Task InvokeAsync(HttpContext ctx, IUploadLimitResolver limitResolver)
     {
-        if (ctx.Request.Method is "POST" or "PUT" && await TryApplyLimitAsync(ctx, orgs, limitResolver))
+        // PATCH is included for OCI chunked blob uploads (/v2/.../blobs/uploads/{id}).
+        if (ctx.Request.Method is "POST" or "PUT" or "PATCH" && await TryApplyLimitAsync(ctx, limitResolver))
+        {
             return;
+        }
 
         await _next(ctx);
     }
 
     // Returns true if the request was short-circuited with 413; false otherwise.
-    private static async Task<bool> TryApplyLimitAsync(HttpContext ctx, OrgRepository orgs, IUploadLimitResolver limitResolver)
+    private static async Task<bool> TryApplyLimitAsync(HttpContext ctx, IUploadLimitResolver limitResolver)
     {
-        var (orgId, ecosystem) = await ResolveOrgAndEcosystemAsync(ctx, orgs);
-        if (orgId is null || ecosystem is null) return false;
+        var (orgId, ecosystem) = ResolveOrgAndEcosystem(ctx);
+        if (orgId is null || ecosystem is null)
+        {
+            return false;
+        }
 
-        var limit = await limitResolver.ResolveAsync(orgId, ecosystem, ctx.RequestAborted);
-        if (limit is null) return false;
+        long? limit = await limitResolver.ResolveAsync(orgId, ecosystem, ctx.RequestAborted);
+        if (limit is null)
+        {
+            return false;
+        }
 
         if (ctx.Request.ContentLength > limit)
         {
@@ -47,7 +58,10 @@ public sealed class UploadSizeLimitMiddleware
 
         var bodySizeFeature = ctx.Features.Get<IHttpMaxRequestBodySizeFeature>();
         if (bodySizeFeature is not null && !bodySizeFeature.IsReadOnly)
+        {
             bodySizeFeature.MaxRequestBodySize = limit;
+        }
+
         return false;
     }
 
@@ -61,34 +75,36 @@ public sealed class UploadSizeLimitMiddleware
             ctx.RequestAborted);
     }
 
-    private static async Task<(string? OrgId, string? Ecosystem)> ResolveOrgAndEcosystemAsync(
-        HttpContext ctx, OrgRepository orgs)
+    private static (string? OrgId, string? Ecosystem) ResolveOrgAndEcosystem(HttpContext ctx)
     {
-        // Matches /o/{orgSlug}/...
-        var path = ctx.Request.Path.Value ?? string.Empty;
-        var segments = path.TrimStart('/').Split('/', 3);
-        if (segments.Length < 3 || segments[0] != "o")
-            return (null, null);
-
-        var slug = segments[1];
-        var rest = segments[2];
-
-        var ecosystem = rest switch
+        // Tenant identity comes from SubdomainTenantMiddleware, which has already run and
+        // stashed the resolved TenantContext. Apex / uninitialized requests have no tenant
+        // and therefore no per-tenant limit (those surfaces carry no protocol uploads).
+        if (ctx.Items.TryGetValue(TenantContext.HttpItemsKey, out object? item)
+            && item is TenantContext { IsTenant: true, TenantId: { } orgId })
         {
-            var s when s.StartsWith("simple/", StringComparison.OrdinalIgnoreCase) => "pypi",
-            var s when s.StartsWith("npm/", StringComparison.OrdinalIgnoreCase) => "npm",
-            var s when s.StartsWith("nuget/", StringComparison.OrdinalIgnoreCase) => "nuget",
-            var s when s.StartsWith("maven/", StringComparison.OrdinalIgnoreCase) => "maven",
-            var s when s.StartsWith("rpm/", StringComparison.OrdinalIgnoreCase) => "rpm",
-            // OCI Distribution Spec mandates /v2/ — the path differs from the ecosystem key.
-            var s when s.StartsWith("v2/", StringComparison.OrdinalIgnoreCase) => "oci",
-            _ => null
-        };
+            return (orgId, EcosystemForPath(ctx.Request.Path.Value ?? string.Empty));
+        }
 
-        if (ecosystem is null)
-            return (null, null);
-
-        var org = await orgs.GetBySlugAsync(slug, ct: ctx.RequestAborted);
-        return (org?.Id, ecosystem);
+        return (null, null);
     }
+
+    // Protocol routes are host-relative (tenancy is host-resolved, not path-resolved), so the
+    // ecosystem is keyed off the first path segment. TransparentInterceptMiddleware has already
+    // prepended the prefix for bare-host (transparent intercept) deployments.
+    private static string? EcosystemForPath(string path) => path switch
+    {
+        _ when StartsWithSegment(path, "/pypi") || StartsWithSegment(path, "/simple") => "pypi",
+        _ when StartsWithSegment(path, "/npm") => "npm",
+        _ when StartsWithSegment(path, "/nuget") => "nuget",
+        _ when StartsWithSegment(path, "/maven") => "maven",
+        _ when StartsWithSegment(path, "/rpm") => "rpm",
+        // OCI Distribution Spec mandates /v2/ — the path differs from the ecosystem key.
+        _ when StartsWithSegment(path, "/v2") => "oci",
+        _ => null,
+    };
+
+    private static bool StartsWithSegment(string path, string prefix) =>
+        path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+        && (path.Length == prefix.Length || path[prefix.Length] == '/');
 }

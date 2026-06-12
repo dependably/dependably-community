@@ -27,6 +27,19 @@ public static class SsrfGuard
         IPAddressRange.Parse("fe80::/10"),
     ];
 
+    // Loopback, link-local (incl. cloud metadata), CGNAT, and IPv6 special ranges that
+    // are always blocked — even when RFC 1918 private ranges are permitted (e.g. for
+    // on-premise SIEM collectors). Does NOT include 10/8, 172.16/12, or 192.168/16.
+    private static readonly IPAddressRange[] AlwaysBlockedRanges =
+    [
+        IPAddressRange.Parse("127.0.0.0/8"),
+        IPAddressRange.Parse("169.254.0.0/16"),
+        IPAddressRange.Parse("100.64.0.0/10"),
+        IPAddressRange.Parse("::1/128"),
+        IPAddressRange.Parse("fc00::/7"),
+        IPAddressRange.Parse("fe80::/10"),
+    ];
+
     /// <summary>
     /// Returns true if the address falls in a blocked (private/internal/metadata) range.
     /// IPv4-mapped IPv6 forms (<c>::ffff:a.b.c.d</c>) are collapsed to their IPv4 address
@@ -36,5 +49,18 @@ public static class SsrfGuard
     {
         var candidate = ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip;
         return BlockedRanges.Any(range => range.Contains(candidate));
+    }
+
+    /// <summary>
+    /// Returns true if the address is in a range that is always blocked regardless of
+    /// private-IP opt-in. Blocks loopback, link-local (including cloud metadata at
+    /// 169.254.169.254), CGNAT, and IPv6 special ranges, but allows RFC 1918 addresses
+    /// (10/8, 172.16/12, 192.168/16) for on-premise deployments that route to self-hosted
+    /// collectors inside the private network.
+    /// </summary>
+    public static bool IsBlockedIpExcludingPrivate(IPAddress ip)
+    {
+        var candidate = ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip;
+        return AlwaysBlockedRanges.Any(range => range.Contains(candidate));
     }
 }

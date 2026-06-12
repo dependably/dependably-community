@@ -29,7 +29,7 @@ public sealed class SystemAdminRepository
     public async Task<bool> IsPasswordChangeRequiredAsync(string adminId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var flag = await conn.ExecuteScalarAsync<long?>(
+        long? flag = await conn.ExecuteScalarAsync<long?>(
             "SELECT must_change_password FROM system_admins WHERE id = @id", new { id = adminId });
         return flag == 1;
     }
@@ -73,7 +73,7 @@ public sealed class SystemAdminRepository
         string email, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var row = await conn.QuerySingleOrDefaultAsync<(string? Id, string? Email, string? PasswordHash, int MustChangePassword, string? AccountStatus)>(
+        var (Id, Email, PasswordHash, MustChangePassword, AccountStatus) = await conn.QuerySingleOrDefaultAsync<(string? Id, string? Email, string? PasswordHash, int MustChangePassword, string? AccountStatus)>(
             """
             SELECT id, email, password_hash, must_change_password, account_status
             FROM system_admins
@@ -82,8 +82,7 @@ public sealed class SystemAdminRepository
             """,
             new { email });
 
-        if (row.Id is null) return null;
-        return (row.Id, row.Email!, row.PasswordHash!, row.MustChangePassword == 1, row.AccountStatus ?? "active");
+        return Id is null ? null : (Id, Email!, PasswordHash!, MustChangePassword == 1, AccountStatus ?? "active");
     }
 
     public async Task<SystemAdmin?> GetByIdAsync(string id, CancellationToken ct = default)
@@ -149,7 +148,7 @@ public sealed class SystemAdminRepository
     public async Task<bool> SetAccountStatusAsync(string id, string status, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var affected = await conn.ExecuteAsync(
+        int affected = await conn.ExecuteAsync(
             "UPDATE system_admins SET account_status = @status WHERE id = @id",
             new { id, status });
         return affected > 0;
@@ -163,7 +162,7 @@ public sealed class SystemAdminRepository
     public async Task<bool> ResetPasswordAsync(string id, string newPasswordHash, DateTimeOffset issuedAt, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var affected = await conn.ExecuteAsync(
+        int affected = await conn.ExecuteAsync(
             """
             UPDATE system_admins
             SET password_hash = @hash,
@@ -203,7 +202,7 @@ public sealed class SystemAdminRepository
     public async Task<string> CreateAsync(
         string email, string passwordHash, bool mustChangePassword = true, CancellationToken ct = default)
     {
-        var id = Guid.NewGuid().ToString("N");
+        string id = Guid.NewGuid().ToString("N");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
@@ -231,10 +230,17 @@ public sealed class SystemAdminRepository
         string id, string currentPassword, string newPasswordHash, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var existing = await conn.QuerySingleOrDefaultAsync<string>(
+        string? existing = await conn.QuerySingleOrDefaultAsync<string>(
             "SELECT password_hash FROM system_admins WHERE id = @id", new { id });
-        if (existing is null) return false;
-        if (!BCrypt.Net.BCrypt.Verify(currentPassword, existing)) return false;
+        if (existing is null)
+        {
+            return false;
+        }
+
+        if (!BCrypt.Net.BCrypt.Verify(currentPassword, existing))
+        {
+            return false;
+        }
 
         await conn.ExecuteAsync(
             """

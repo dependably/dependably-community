@@ -69,13 +69,19 @@ public sealed class TokenAuthenticationHandler : AuthenticationHandler<TokenAuth
 
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
     {
-        var raw = ExtractRawToken(Request);
-        if (raw is null) return AuthenticateResult.NoResult();
+        string? raw = ExtractRawToken(Request);
+        if (raw is null)
+        {
+            return AuthenticateResult.NoResult();
+        }
 
         var token = await _tokens.ResolveAsync(raw, Context.RequestAborted);
-        if (token is null) return AuthenticateResult.Fail("Invalid or expired API token.");
+        if (token is null)
+        {
+            return AuthenticateResult.Fail("Invalid or expired API token.");
+        }
 
-        var role = await LookupUserRoleAsync(token, Context.RequestAborted);
+        string role = await LookupUserRoleAsync(token, Context.RequestAborted);
         var identity = new ClaimsIdentity(BuildClaims(token, role), Scheme.Name);
         var ticket = new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name);
         return AuthenticateResult.Success(ticket);
@@ -90,24 +96,30 @@ public sealed class TokenAuthenticationHandler : AuthenticationHandler<TokenAuth
     /// </summary>
     private static string? ExtractRawToken(HttpRequest request)
     {
-        var auth = request.Headers.Authorization.FirstOrDefault();
+        string? auth = request.Headers.Authorization.FirstOrDefault();
         if (auth is not null)
         {
             if (auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            {
                 return auth["Bearer ".Length..].Trim();
+            }
+
             if (auth.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
             {
-                var encoded = auth["Basic ".Length..].Trim();
+                string encoded = auth["Basic ".Length..].Trim();
                 try
                 {
-                    var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
-                    var colon = decoded.IndexOf(':');
-                    if (colon >= 0) return decoded[(colon + 1)..];
+                    string decoded = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+                    int colon = decoded.IndexOf(':');
+                    if (colon >= 0)
+                    {
+                        return decoded[(colon + 1)..];
+                    }
                 }
                 catch (FormatException) { return null; }
             }
         }
-        var nuget = request.Headers["X-NuGet-ApiKey"].FirstOrDefault();
+        string? nuget = request.Headers["X-NuGet-ApiKey"].FirstOrDefault();
         return string.IsNullOrEmpty(nuget) ? null : nuget;
     }
 
@@ -120,9 +132,13 @@ public sealed class TokenAuthenticationHandler : AuthenticationHandler<TokenAuth
     /// </summary>
     private async Task<string> LookupUserRoleAsync(TokenRecord token, CancellationToken ct)
     {
-        if (token.UserId is null) return "ci";
+        if (token.UserId is null)
+        {
+            return "ci";
+        }
+
         await using var conn = await _db.OpenAsync(ct);
-        var role = await conn.QuerySingleOrDefaultAsync<string>(
+        string? role = await conn.QuerySingleOrDefaultAsync<string>(
             "SELECT role FROM users WHERE id = @id", new { id = token.UserId });
         return role ?? "member";
     }
@@ -135,6 +151,11 @@ public sealed class TokenAuthenticationHandler : AuthenticationHandler<TokenAuth
             new("org_id", token.OrgId),
             new("tid", token.OrgId),
             new("role", role),
+            // API tokens are always tenant-realm credentials (user_tokens / service_tokens are
+            // org-bound; system_admins hold none). Emit scope=tenant so RouteScopeFilter admits
+            // token-authenticated principals on tenant /api/v1/ routes — without it, the filter
+            // 401s every authenticated /api/v1/ request that lacks a scope claim.
+            new("scope", "tenant"),
         };
 
         // Token-narrowed principals always emit explicit `cap` claims so that
@@ -143,8 +164,10 @@ public sealed class TokenAuthenticationHandler : AuthenticationHandler<TokenAuth
         // owner happens to be an owner-role user. Every token row carries an explicit
         // capabilities JSON array; NULL/malformed values deny all (no scope fallback).
         var caps = ResolveTokenCapabilities(token);
-        foreach (var c in caps)
+        foreach (string c in caps)
+        {
             claims.Add(new Claim("cap", c));
+        }
 
         return claims;
     }

@@ -1,7 +1,7 @@
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
 using Dependably.Infrastructure;
 using Dependably.Security;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Api;
 
@@ -36,10 +36,13 @@ public sealed class SpdxLicenseController : ControllerBase
         CancellationToken ct)
     {
         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
-        if (authResult is not null) return authResult;
+        if (authResult is not null)
+        {
+            return authResult;
+        }
 
         // Clamp limit to a sane upper bound — picker dropdowns shouldn't render thousands.
-        var clamped = Math.Clamp(limit ?? 200, 1, 500);
+        int clamped = Math.Clamp(limit ?? 200, 1, 500);
 
         var rows = await _repo.ListAsync(q, includeDeprecated, clamped, ct);
         return Ok(rows);
@@ -49,7 +52,10 @@ public sealed class SpdxLicenseController : ControllerBase
     public async Task<IActionResult> Get(string identifier, CancellationToken ct)
     {
         var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
-        if (authResult is not null) return authResult;
+        if (authResult is not null)
+        {
+            return authResult;
+        }
 
         var row = await _repo.GetAsync(identifier, ct);
         return row is null ? NotFound() : Ok(row);

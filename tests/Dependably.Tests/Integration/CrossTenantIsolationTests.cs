@@ -52,11 +52,11 @@ public sealed class CrossTenantIsolationTests : IClassFixture<DependablyFactory>
     [Fact]
     public async Task PyPi_Publish_TokenFromOtherOrg_Returns401()
     {
-        var name = $"cross_pypi_{Guid.NewGuid():N}"[..16];
+        string name = $"cross_pypi_{Guid.NewGuid():N}"[..16];
         var (bytes, sha256) = PyPiFixtures.BuildWheel(name, "1.0.0");
-        var filename = $"{name.Replace('-', '_')}-1.0.0-py3-none-any.whl";
+        string filename = $"{name.Replace('-', '_')}-1.0.0-py3-none-any.whl";
 
-        var crossToken = await CreateOtherOrgPushTokenAsync();
+        string crossToken = await CreateOtherOrgPushTokenAsync();
         using var client = _factory.CreateClient();
         using var content = new MultipartFormDataContent
         {
@@ -70,7 +70,7 @@ public sealed class CrossTenantIsolationTests : IClassFixture<DependablyFactory>
         fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
         content.Add(fileContent, "content", filename);
 
-        var credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"user:{crossToken}"));
+        string credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"user:{crossToken}"));
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", credentials);
 
         var resp = await client.PostAsync("/pypi/legacy/", content);
@@ -80,7 +80,7 @@ public sealed class CrossTenantIsolationTests : IClassFixture<DependablyFactory>
         // No package row must have been created in the default org.
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM packages WHERE purl_name = @name", new { name });
         Assert.Equal(0, count);
     }
@@ -90,11 +90,11 @@ public sealed class CrossTenantIsolationTests : IClassFixture<DependablyFactory>
     [Fact]
     public async Task NuGet_Push_TokenFromOtherOrg_Returns401()
     {
-        var id = $"CrossNug{Guid.NewGuid():N}"[..16];
+        string id = $"CrossNug{Guid.NewGuid():N}"[..16];
         var (bytes, _) = NuGetFixtures.BuildNupkg(id, "1.0.0");
-        var filename = $"{id}.1.0.0.nupkg";
+        string filename = $"{id}.1.0.0.nupkg";
 
-        var crossToken = await CreateOtherOrgPushTokenAsync();
+        string crossToken = await CreateOtherOrgPushTokenAsync();
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-NuGet-ApiKey", crossToken);
 
@@ -109,7 +109,7 @@ public sealed class CrossTenantIsolationTests : IClassFixture<DependablyFactory>
 
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var count = await conn.ExecuteScalarAsync<long>(
+        long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM packages WHERE purl_name = @id", new { id = id.ToLowerInvariant() });
         Assert.Equal(0, count);
     }
@@ -123,10 +123,10 @@ public sealed class CrossTenantIsolationTests : IClassFixture<DependablyFactory>
         // match the request's org. A cross-org token must NOT yield a 200 — the controller
         // either 401s (unauth/realm mismatch) or 404s; the only outcome we forbid is
         // successful disclosure of another tenant's hosted metadata.
-        var name = $"cross-npm-read-{Guid.NewGuid():N}"[..20];
+        string name = $"cross-npm-read-{Guid.NewGuid():N}"[..20];
         await _factory.PushNpmPackage(name, "1.0.0");
 
-        var crossToken = await CreateOtherOrgPushTokenAsync();
+        string crossToken = await CreateOtherOrgPushTokenAsync();
         using var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", crossToken);
 
@@ -134,7 +134,7 @@ public sealed class CrossTenantIsolationTests : IClassFixture<DependablyFactory>
 
         Assert.NotEqual(HttpStatusCode.OK, resp.StatusCode);
         Assert.True(
-            resp.StatusCode == HttpStatusCode.Unauthorized || resp.StatusCode == HttpStatusCode.NotFound,
+            resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.NotFound,
             $"Cross-org GET should be 401 or 404; got {(int)resp.StatusCode}.");
     }
 }

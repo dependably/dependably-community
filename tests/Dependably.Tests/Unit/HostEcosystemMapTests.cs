@@ -1,6 +1,5 @@
 using Dependably.Infrastructure;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -27,8 +26,8 @@ public class HostEcosystemMapTests
     public void Mapped_ReturnsEcosystemPrefix()
     {
         var m = Build("registry.npmjs.org=npm,pypi.org=pypi,api.nuget.org=nuget");
-        Assert.Equal("/npm",   m.PrefixForHost("registry.npmjs.org"));
-        Assert.Equal("/pypi",  m.PrefixForHost("pypi.org"));
+        Assert.Equal("/npm", m.PrefixForHost("registry.npmjs.org"));
+        Assert.Equal("/pypi", m.PrefixForHost("pypi.org"));
         Assert.Equal("/nuget", m.PrefixForHost("api.nuget.org"));
     }
 

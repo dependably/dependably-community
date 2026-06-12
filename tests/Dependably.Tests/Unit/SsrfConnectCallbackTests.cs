@@ -2,7 +2,6 @@ using System.Net;
 using System.Net.Sockets;
 using Dependably.Protocol;
 using Dependably.Security;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -40,7 +39,7 @@ public class SsrfConnectCallbackTests
         // loopback even though SsrfGuard would block 127.0.0.0/8.
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
         var acceptTask = listener.AcceptTcpClientAsync();
 
         try

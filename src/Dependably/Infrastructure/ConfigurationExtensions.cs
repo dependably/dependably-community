@@ -18,7 +18,7 @@ public static class ConfigurationExtensions
     /// </summary>
     public static string? PublicBaseUrl(this IConfiguration config)
     {
-        var raw = config["BASE_URL"];
+        string? raw = config["BASE_URL"];
         return string.IsNullOrWhiteSpace(raw) ? null : raw.TrimEnd('/');
     }
 
@@ -34,12 +34,21 @@ public static class ConfigurationExtensions
     {
         var networks = new List<System.Net.IPNetwork>();
         var proxies = new List<System.Net.IPAddress>();
-        if (string.IsNullOrWhiteSpace(value)) return (networks, proxies);
-
-        foreach (var entry in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        if (string.IsNullOrWhiteSpace(value))
         {
-            if (entry.Contains('/')) networks.Add(System.Net.IPNetwork.Parse(entry));
-            else proxies.Add(System.Net.IPAddress.Parse(entry));
+            return (networks, proxies);
+        }
+
+        foreach (string entry in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (entry.Contains('/'))
+            {
+                networks.Add(System.Net.IPNetwork.Parse(entry));
+            }
+            else
+            {
+                proxies.Add(System.Net.IPAddress.Parse(entry));
+            }
         }
         return (networks, proxies);
     }

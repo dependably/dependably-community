@@ -13,14 +13,20 @@ public sealed class LoginService
     private const int LockoutMinutes = 15;
 
     /// <summary>
-    /// Sentinel bcrypt-shaped string used to keep <c>BCrypt.Verify</c> work identical when
-    /// the user record is missing — closes a timing oracle that would otherwise distinguish
-    /// "unknown email" from "wrong password". Deliberately not a valid bcrypt hash, so it
-    /// will never match any password. Not a credential.
+    /// Valid bcrypt (cost 12) hash of a random, unguessable, immediately-discarded value,
+    /// computed once per process. Substituted as the stored hash when the user record is
+    /// missing (or carries no usable hash) so <c>BCrypt.Verify</c> performs identical work for
+    /// "unknown email" and "wrong password" — closing the timing oracle that would otherwise
+    /// let a remote probe enumerate valid emails. It can never match any password because its
+    /// preimage is 32 bytes of CSPRNG output that is never stored. Not a credential.
     /// </summary>
-    // deepcode ignore HardcodedNonCryptoSecret,NoHardcodedCredentials: sentinel for constant-time
-    // verification, not a usable credential.
-    private const string TimingSentinelHash = "$2a$12$invalidhashpaddingtomakebcryptrunfulltime000000000000000";
+    internal static readonly string TimingSentinelHash = CreateTimingSentinelHash();
+
+    private static string CreateTimingSentinelHash()
+    {
+        string preimage = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        return BCrypt.Net.BCrypt.HashPassword(preimage, workFactor: 12);
+    }
 
     private readonly IMetadataStore _db;
     private readonly OrgRepository _orgs;
@@ -56,12 +62,12 @@ public sealed class LoginService
     public async Task<(string? Token, string? Error, int? RetryAfterSeconds)> LoginTenantAsync(
         string email, string password, string tenantId, string? sourceIp = null, CancellationToken ct = default)
     {
-        var emailHash = HashEmail(email);
+        string emailHash = HashEmail(email);
 
         var (failedCount, lockedUntil) = await _lockout.GetAsync(emailHash, ct);
         if (lockedUntil.HasValue && DateTimeOffset.UtcNow < lockedUntil.Value)
         {
-            var retryAfter = (int)(lockedUntil.Value - DateTimeOffset.UtcNow).TotalSeconds + 1;
+            int retryAfter = (int)(lockedUntil.Value - DateTimeOffset.UtcNow).TotalSeconds + 1;
             await _audit.LogAsync("lockout.triggered",
                 detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "tenant" }),
                 sourceIp: sourceIp, ct: ct);
@@ -75,19 +81,21 @@ public sealed class LoginService
         }
 
         await using var conn = await _db.OpenAsync(ct);
-        var user = await conn.QuerySingleOrDefaultAsync<(string Id, string Email, string PasswordHash, string TenantId, string Role, int AccountLocked)>(
+        var (Id, _, PasswordHash, TenantId, Role, AccountLocked, TokenVersion) = await conn.QuerySingleOrDefaultAsync<(string Id, string Email, string PasswordHash, string TenantId, string Role, int AccountLocked, long TokenVersion)>(
             """
             SELECT id, email, password_hash, tenant_id AS TenantId, role,
-                   CASE WHEN account_status IN ('locked','disabled') THEN 1 ELSE 0 END AS AccountLocked
+                   CASE WHEN account_status IN ('locked','disabled') THEN 1 ELSE 0 END AS AccountLocked,
+                   token_version AS TokenVersion
             FROM users
             WHERE lower(email) = lower(@email) AND tenant_id = @tenantId
             LIMIT 1
             """,
             new { email, tenantId });
 
-        var passwordHash = user.PasswordHash ?? TimingSentinelHash;
-        var valid = user.Id is not null && user.AccountLocked == 0
-            && BCrypt.Net.BCrypt.Verify(password, passwordHash);
+        // BCrypt.Verify runs unconditionally (first operand) so unknown-email, locked, and
+        // wrong-password rejections all pay the same hashing cost — no timing oracle.
+        bool valid = VerifyPasswordConstantTime(password, PasswordHash)
+            && Id is not null && AccountLocked == 0;
 
         if (!valid)
         {
@@ -96,26 +104,40 @@ public sealed class LoginService
         }
 
         await _lockout.ClearAsync(emailHash, ct);
-        await _audit.LogAsync("login.success", actorId: user.Id, sourceIp: sourceIp, ct: ct);
-        await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: user.Id,
+        await _audit.LogAsync("login.success", actorId: Id, sourceIp: sourceIp, ct: ct);
+        await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: Id,
             detail: System.Text.Json.JsonSerializer.Serialize(new { method = "forms" }),
             sourceIp: sourceIp, ct: ct);
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginSuccess,
-            tenantId, "user", user.Id, "accepted",
+            tenantId, "user", Id, "accepted",
             new Dependably.Infrastructure.Audit.Events.AuthEvents.LoginSuccess("tenant", "forms").ToJson(), ct);
 
         // Stamp last_login_at on the user row so the system_admin lookup endpoint can surface
         // it without a separate auth audit query.
         await conn.ExecuteAsync(
             "UPDATE users SET last_login_at = @now WHERE id = @id",
-            new { id = user.Id, now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { id = Id, now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") });
 
-        var jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", ct)
+        string jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", ct)
             ?? throw new InvalidOperationException("JWT secret not found in instance_settings.");
 
-        var token = IssueTenantJwt(user.Id!, user.TenantId, user.Role, jwtSecret);
+        string token = IssueTenantJwt(Id!, TenantId, Role, jwtSecret, TokenVersion);
         return (token, null, null);
+    }
+
+    /// <summary>
+    /// Runs <c>BCrypt.Verify</c> against the stored hash, substituting the per-process
+    /// <see cref="TimingSentinelHash"/> when no usable hash exists (unknown account, or a
+    /// SAML-only user whose <c>password_hash</c> is empty). Verify always executes, so the
+    /// caller's response time does not reveal whether the account exists. Returns true only
+    /// when a real stored hash matched.
+    /// </summary>
+    internal static bool VerifyPasswordConstantTime(string password, string? storedHash)
+    {
+        bool usable = !string.IsNullOrEmpty(storedHash);
+        bool hashOk = BCrypt.Net.BCrypt.Verify(password, usable ? storedHash : TimingSentinelHash);
+        return hashOk && usable;
     }
 
     /// <summary>
@@ -126,12 +148,12 @@ public sealed class LoginService
     public async Task<(string? Token, string? Error, int? RetryAfterSeconds)> LoginSystemAsync(
         string email, string password, string? sourceIp = null, CancellationToken ct = default)
     {
-        var emailHash = HashEmail(email);
+        string emailHash = HashEmail(email);
 
         var (failedCount, lockedUntil) = await _lockout.GetAsync(emailHash, ct);
         if (lockedUntil.HasValue && DateTimeOffset.UtcNow < lockedUntil.Value)
         {
-            var retryAfter = (int)(lockedUntil.Value - DateTimeOffset.UtcNow).TotalSeconds + 1;
+            int retryAfter = (int)(lockedUntil.Value - DateTimeOffset.UtcNow).TotalSeconds + 1;
             await _audit.LogAsync("lockout.triggered",
                 detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "system" }),
                 sourceIp: sourceIp, ct: ct);
@@ -143,11 +165,10 @@ public sealed class LoginService
         }
 
         var creds = await _systemAdmins.GetCredentialsByEmailAsync(email, ct);
-        var passwordHash = creds?.PasswordHash ?? TimingSentinelHash;
-        // Verify hash before checking account_status so the timing of "wrong password" and
-        // "locked/disabled" responses is indistinguishable to a probe.
-        var hashOk = creds is not null && BCrypt.Net.BCrypt.Verify(password, passwordHash);
-        var valid = hashOk && creds!.Value.AccountStatus == "active";
+        // BCrypt.Verify runs unconditionally (first operand) so unknown-email, locked, and
+        // wrong-password rejections all pay the same hashing cost — no timing oracle.
+        bool hashOk = VerifyPasswordConstantTime(password, creds?.PasswordHash);
+        bool valid = hashOk && creds is not null && creds.Value.AccountStatus == "active";
 
         if (!valid)
         {
@@ -168,10 +189,10 @@ public sealed class LoginService
             new Dependably.Infrastructure.Audit.Events.AuthEvents.LoginSuccess("system", "forms").ToJson(), ct);
         await _systemAdmins.UpdateLastLoginAsync(creds.Value.Id, DateTimeOffset.UtcNow, ct);
 
-        var jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", ct)
+        string jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", ct)
             ?? throw new InvalidOperationException("JWT secret not found in instance_settings.");
 
-        var token = IssueSystemJwt(creds.Value.Id, jwtSecret);
+        string token = IssueSystemJwt(creds.Value.Id, jwtSecret);
         return (token, null, null);
     }
 
@@ -198,68 +219,107 @@ public sealed class LoginService
         string idpEntityId,
         string nameId,
         string? assertionEmail,
-        string? mappedRole = null,
-        string? sourceIp = null,
+        SamlLoginOptions options = default,
         CancellationToken ct = default)
     {
-        var ctx = new SamlLoginContext(tenantId, idpEntityId, nameId, assertionEmail, mappedRole, sourceIp);
+        var ctx = new SamlLoginContext(tenantId, idpEntityId, nameId, assertionEmail, options.MappedRole, options.IdpCanAssignAdmin, options.SourceIp);
         await using var conn = await _db.OpenAsync(ct);
 
         // 1. Primary lookup: by external identity. This is the stable path — if the IdP
         //    rotates the user's email, we still find them here.
         var existing = await _externalIdentities.FindAsync(tenantId, idpEntityId, nameId, ct);
         if (existing is not null)
+        {
             return await LoginViaExternalIdentityAsync(conn, existing, ctx, ct);
+        }
 
         // 2. No external identity yet. Try to link by email.
         if (!string.IsNullOrWhiteSpace(assertionEmail))
         {
             var linked = await TryLoginViaEmailLinkAsync(conn, ctx, ct);
-            if (linked is not null) return linked.Value;
+            if (linked is not null)
+            {
+                return linked.Value;
+            }
         }
 
         // 3. First-time JIT user.
         return await ProvisionJitUserAsync(conn, ctx, ct);
     }
 
-    // The (entityId, nameId, email) tuple plus role/source-IP that every SAML login branch
-    // threads through. Bundled so branch helpers stay within a sane parameter count.
+    // The (entityId, nameId, email) tuple plus role/ceiling/source-IP that every SAML login
+    // branch threads through. Bundled so branch helpers stay within a sane parameter count.
     private readonly record struct SamlLoginContext(
         string TenantId,
         string IdpEntityId,
         string NameId,
         string? AssertionEmail,
         string? MappedRole,
+        bool IdpCanAssignAdmin,
         string? SourceIp);
+
+    // ── IdP role ceiling ──────────────────────────────────────────────────────
+    // The IdP may never auto-assign 'owner'; 'admin' requires the per-tenant
+    // idp_can_assign_admin opt-in. member/auditor are always assignable.
+
+    private static int RoleRank(string role) => role switch
+    {
+        "owner" => 3,
+        "admin" => 2,
+        _ => 1,
+    };
+
+    private static string IdpRoleCeiling(in SamlLoginContext ctx) =>
+        ctx.IdpCanAssignAdmin ? "admin" : "member";
+
+    private static bool ExceedsIdpRoleCeiling(in SamlLoginContext ctx, string role) =>
+        RoleRank(role) > RoleRank(IdpRoleCeiling(ctx));
+
+    private Task AuditRoleMappingBlockedAsync(
+        SamlLoginContext ctx, string? userId, string attemptedRole, string effectiveRole, CancellationToken ct) =>
+        _audit.LogAsync("auth.saml.role_mapping_blocked", orgId: ctx.TenantId, actorId: userId,
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                attempted_role = attemptedRole,
+                effective_role = effectiveRole,
+                ceiling = IdpRoleCeiling(ctx),
+                idp_can_assign_admin = ctx.IdpCanAssignAdmin,
+                idp_entity_id = ctx.IdpEntityId,
+                nameid = ctx.NameId,
+            }),
+            sourceIp: ctx.SourceIp, ct: ct);
 
     // Branch 1: an external identity (idpEntityId, nameId) already maps to a local user.
     private async Task<SamlLoginResult> LoginViaExternalIdentityAsync(
         System.Data.Common.DbConnection conn, ExternalIdentity existing, SamlLoginContext ctx, CancellationToken ct)
     {
-        var user = await conn.QuerySingleOrDefaultAsync<(string Id, string Role, string AccountStatus, string Email)>(
-            "SELECT id AS Id, role AS Role, account_status AS AccountStatus, email AS Email FROM users WHERE id = @id",
+        var (Id, Role, AccountStatus, Email, TokenVersion) = await conn.QuerySingleOrDefaultAsync<(string Id, string Role, string AccountStatus, string Email, long TokenVersion)>(
+            "SELECT id AS Id, role AS Role, account_status AS AccountStatus, email AS Email, token_version AS TokenVersion FROM users WHERE id = @id",
             new { id = existing.UserId });
-        if (user.Id is null)
+        if (Id is null)
+        {
             return new SamlLoginResult(null, "Linked user not found.", null, null, false, false);
-        if (user.AccountStatus is "locked" or "disabled")
+        }
+
+        if (AccountStatus is "locked" or "disabled")
         {
             await _audit.LogAsync("auth.saml.login.failure",
-                orgId: ctx.TenantId, actorId: user.Id,
-                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = user.AccountStatus }),
+                orgId: ctx.TenantId, actorId: Id,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = AccountStatus }),
                 sourceIp: ctx.SourceIp, ct: ct);
-            await EmitSamlFailureAsync(ctx.TenantId, user.Id, "account_status_" + user.AccountStatus, ctx.IdpEntityId, ctx.NameId, ct);
+            await EmitSamlFailureAsync(ctx.TenantId, Id, "account_status_" + AccountStatus, ctx.IdpEntityId, ctx.NameId, ct);
             return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
         }
 
         await _externalIdentities.UpdateLastLoginAsync(existing.Id, ctx.AssertionEmail, ct);
-        await StampUserLoginAsync(conn, user.Id, ctx.AssertionEmail, user.Email);
+        await StampUserLoginAsync(conn, Id, ctx.AssertionEmail, Email);
 
-        await LogSamlSuccessAsync(ctx.TenantId, user.Id, ctx.IdpEntityId, ctx.NameId, "external_identity", ctx.SourceIp, ct);
+        await LogSamlSuccessAsync(ctx.TenantId, Id, ctx.IdpEntityId, ctx.NameId, "external_identity", ctx.SourceIp, ct);
 
-        var effectiveRole = await ResyncRoleAsync(ctx, user.Id, user.Role, logRefusal: true, ct);
+        string effectiveRole = await ResyncRoleAsync(ctx, Id, Role, logRefusal: true, ct);
 
-        return new SamlLoginResult(IssueJwt(user.Id, ctx.TenantId, effectiveRole, await JwtSecretAsync(ct)),
-            null, user.Id, effectiveRole, false, false);
+        return new SamlLoginResult(IssueJwt(Id, ctx.TenantId, effectiveRole, await JwtSecretAsync(ct), TokenVersion),
+            null, Id, effectiveRole, false, false);
     }
 
     // Branch 2: no external identity, but a local user shares the asserted email — link them.
@@ -267,41 +327,43 @@ public sealed class LoginService
     private async Task<SamlLoginResult?> TryLoginViaEmailLinkAsync(
         System.Data.Common.DbConnection conn, SamlLoginContext ctx, CancellationToken ct)
     {
-        var existingByEmail = await conn.QuerySingleOrDefaultAsync<(string Id, string Role, string AccountStatus)>(
+        var (Id, Role, AccountStatus, TokenVersion) = await conn.QuerySingleOrDefaultAsync<(string Id, string Role, string AccountStatus, long TokenVersion)>(
             """
-            SELECT id AS Id, role AS Role, account_status AS AccountStatus
+            SELECT id AS Id, role AS Role, account_status AS AccountStatus, token_version AS TokenVersion
             FROM users
             WHERE lower(email) = lower(@email) AND tenant_id = @tenantId
             LIMIT 1
             """,
             new { email = ctx.AssertionEmail, tenantId = ctx.TenantId });
-        if (existingByEmail.Id is null)
+        if (Id is null)
+        {
             return null;
+        }
 
-        if (existingByEmail.AccountStatus is "locked" or "disabled")
+        if (AccountStatus is "locked" or "disabled")
         {
             await _audit.LogAsync("auth.saml.login.failure",
-                orgId: ctx.TenantId, actorId: existingByEmail.Id,
-                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = existingByEmail.AccountStatus }),
+                orgId: ctx.TenantId, actorId: Id,
+                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = AccountStatus }),
                 sourceIp: ctx.SourceIp, ct: ct);
-            await EmitSamlFailureAsync(ctx.TenantId, existingByEmail.Id,
-                "account_status_" + existingByEmail.AccountStatus, ctx.IdpEntityId, ctx.NameId, ct);
+            await EmitSamlFailureAsync(ctx.TenantId, Id,
+                "account_status_" + AccountStatus, ctx.IdpEntityId, ctx.NameId, ct);
             return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
         }
 
-        await _externalIdentities.LinkAsync(ctx.TenantId, existingByEmail.Id, ctx.IdpEntityId, ctx.NameId, ctx.AssertionEmail, ct);
-        await StampUserLoginAsync(conn, existingByEmail.Id, ctx.AssertionEmail, currentEmail: ctx.AssertionEmail);
+        await _externalIdentities.LinkAsync(ctx.TenantId, Id, ctx.IdpEntityId, ctx.NameId, ctx.AssertionEmail, ct);
+        await StampUserLoginAsync(conn, Id, ctx.AssertionEmail, currentEmail: ctx.AssertionEmail);
 
         await _audit.LogAsync("auth.saml.user_linked",
-            orgId: ctx.TenantId, actorId: existingByEmail.Id,
+            orgId: ctx.TenantId, actorId: Id,
             detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId, email = ctx.AssertionEmail }),
             sourceIp: ctx.SourceIp, ct: ct);
-        await LogSamlSuccessAsync(ctx.TenantId, existingByEmail.Id, ctx.IdpEntityId, ctx.NameId, "email_link", ctx.SourceIp, ct);
+        await LogSamlSuccessAsync(ctx.TenantId, Id, ctx.IdpEntityId, ctx.NameId, "email_link", ctx.SourceIp, ct);
 
-        var finalRole = await ResyncRoleAsync(ctx, existingByEmail.Id, existingByEmail.Role, logRefusal: false, ct);
+        string finalRole = await ResyncRoleAsync(ctx, Id, Role, logRefusal: false, ct);
 
-        return new SamlLoginResult(IssueJwt(existingByEmail.Id, ctx.TenantId, finalRole, await JwtSecretAsync(ct)),
-            null, existingByEmail.Id, finalRole, false, true);
+        return new SamlLoginResult(IssueJwt(Id, ctx.TenantId, finalRole, await JwtSecretAsync(ct), TokenVersion),
+            null, Id, finalRole, false, true);
     }
 
     // Branch 3: first-time JIT user. Default role is 'member'. password_hash is empty (BCrypt
@@ -319,8 +381,12 @@ public sealed class LoginService
             return new SamlLoginResult(null, "Assertion did not include an email and no existing user matches.", null, null, false, false);
         }
 
-        var jitRole = ctx.MappedRole ?? "member";
-        var newUserId = Guid.NewGuid().ToString("N");
+        // Apply the IdP role ceiling before the role is persisted: 'owner' is never
+        // IdP-assignable, 'admin' only with the per-tenant opt-in.
+        string requestedRole = ctx.MappedRole ?? "member";
+        bool roleCapped = ExceedsIdpRoleCeiling(ctx, requestedRole);
+        string jitRole = roleCapped ? IdpRoleCeiling(ctx) : requestedRole;
+        string newUserId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             """
             INSERT INTO users (id, tenant_id, email, password_hash, role, account_type)
@@ -330,32 +396,51 @@ public sealed class LoginService
         await _externalIdentities.LinkAsync(ctx.TenantId, newUserId, ctx.IdpEntityId, ctx.NameId, ctx.AssertionEmail, ct);
         await StampUserLoginAsync(conn, newUserId, ctx.AssertionEmail, currentEmail: ctx.AssertionEmail);
 
+        if (roleCapped)
+        {
+            await AuditRoleMappingBlockedAsync(ctx, newUserId, requestedRole, jitRole, ct);
+        }
+
         await _audit.LogAsync("auth.saml.user_provisioned",
             orgId: ctx.TenantId, actorId: newUserId,
             detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId, email = ctx.AssertionEmail, role = jitRole }),
             sourceIp: ctx.SourceIp, ct: ct);
 
         if (ctx.MappedRole is not null)
+        {
             await _audit.LogAsync("auth.saml.role_assigned", orgId: ctx.TenantId, actorId: newUserId,
                 detail: System.Text.Json.JsonSerializer.Serialize(new { role = jitRole, idp_entity_id = ctx.IdpEntityId }),
                 sourceIp: ctx.SourceIp, ct: ct);
+        }
 
         await LogSamlSuccessAsync(ctx.TenantId, newUserId, ctx.IdpEntityId, ctx.NameId, "jit_provisioned", ctx.SourceIp, ct);
 
-        return new SamlLoginResult(IssueJwt(newUserId, ctx.TenantId, jitRole, await JwtSecretAsync(ct)),
+        // Freshly inserted users start at token_version 1 (schema default).
+        return new SamlLoginResult(IssueJwt(newUserId, ctx.TenantId, jitRole, await JwtSecretAsync(ct), tokenVersion: 1),
             null, newUserId, jitRole, true, false);
     }
 
-    // Re-syncs the user's role to the IdP-mapped role, with last-owner protection: never demote
-    // the last owner. Returns the role in effect after the attempt. When logRefusal is set, a
-    // blocked demotion is audited as auth.saml.role_change_refused.
+    // Re-syncs the user's role to the IdP-mapped role, with two guards: the IdP role ceiling
+    // (an over-ceiling mapping never changes the role — a tenant-admin demotion must not be
+    // silently re-promoted by the IdP) and last-owner protection (never demote the last owner).
+    // Returns the role in effect after the attempt. When logRefusal is set, a blocked demotion
+    // is audited as auth.saml.role_change_refused; over-ceiling attempts are always audited as
+    // auth.saml.role_mapping_blocked.
     private async Task<string> ResyncRoleAsync(
         SamlLoginContext ctx, string userId, string currentRole, bool logRefusal, CancellationToken ct)
     {
         if (ctx.MappedRole is null || ctx.MappedRole == currentRole)
+        {
             return currentRole;
+        }
 
-        var canResync = !(currentRole == "owner" && await _orgs.CountOwnersAsync(ctx.TenantId, ct) <= 1);
+        if (ExceedsIdpRoleCeiling(ctx, ctx.MappedRole))
+        {
+            await AuditRoleMappingBlockedAsync(ctx, userId, ctx.MappedRole, currentRole, ct);
+            return currentRole;
+        }
+
+        bool canResync = !(currentRole == "owner" && await _orgs.CountOwnersAsync(ctx.TenantId, ct) <= 1);
         if (canResync)
         {
             await _orgs.UpdateMemberRoleAsync(ctx.TenantId, userId, ctx.MappedRole, ct);
@@ -366,9 +451,12 @@ public sealed class LoginService
         }
 
         if (logRefusal)
+        {
             await _audit.LogAsync("auth.saml.role_change_refused", orgId: ctx.TenantId, actorId: userId,
                 detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "last_owner_protection", attempted_role = ctx.MappedRole }),
                 sourceIp: ctx.SourceIp, ct: ct);
+        }
+
         return currentRole;
     }
 
@@ -384,8 +472,8 @@ public sealed class LoginService
     private static async Task StampUserLoginAsync(
         System.Data.Common.DbConnection conn, string userId, string? assertionEmail, string? currentEmail)
     {
-        var nowStr = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-        var emailChanged = !string.IsNullOrWhiteSpace(assertionEmail)
+        string nowStr = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        bool emailChanged = !string.IsNullOrWhiteSpace(assertionEmail)
             && !string.Equals(assertionEmail, currentEmail, StringComparison.OrdinalIgnoreCase);
         if (emailChanged)
         {
@@ -435,16 +523,25 @@ public sealed class LoginService
     }
 
     /// <summary>Issues a tenant JWT for a user that has already been authenticated by SAML.</summary>
-    public string IssueTenantJwtForUser(string userId, string tenantId, string role, string secret) =>
-        IssueJwt(userId, tenantId, role, secret);
+    public string IssueTenantJwtForUser(string userId, string tenantId, string role, string secret, long tokenVersion = 1) =>
+        IssueJwt(userId, tenantId, role, secret, tokenVersion);
 
-    private static string IssueJwt(string userId, string tenantId, string role, string secret) =>
-        IssueTenantJwt(userId, tenantId, role, secret);
+    /// <summary>
+    /// Mints a fresh tenant session JWT for an already-authenticated user, resolving the
+    /// signing secret internally. Used to re-issue the caller's own session cookie after a
+    /// password change bumps <c>users.token_version</c> and stales every outstanding JWT.
+    /// </summary>
+    public async Task<string> IssueTenantSessionAsync(
+        string userId, string tenantId, string role, long tokenVersion, CancellationToken ct = default) =>
+        IssueTenantJwt(userId, tenantId, role, await JwtSecretAsync(ct), tokenVersion);
+
+    private static string IssueJwt(string userId, string tenantId, string role, string secret, long tokenVersion) =>
+        IssueTenantJwt(userId, tenantId, role, secret, tokenVersion);
 
     private async Task RecordFailureAsync(
         string emailHash, int currentFailedCount, string realm, string? orgIdForActivity, string? sourceIp, CancellationToken ct)
     {
-        var newCount = currentFailedCount + 1;
+        int newCount = currentFailedCount + 1;
         DateTimeOffset? lockExpiry = newCount >= MaxFailedAttempts
             ? DateTimeOffset.UtcNow.AddMinutes(LockoutMinutes)
             : null;
@@ -458,18 +555,22 @@ public sealed class LoginService
             new Dependably.Infrastructure.Audit.Events.AuthEvents.LoginFailure(realm, emailHash).ToJson(), ct);
 
         if (orgIdForActivity is not null)
+        {
             await _audit.LogActivityAsync(orgIdForActivity, "auth", purl: null, "login.failure",
                 sourceIp: sourceIp, ct: ct);
+        }
     }
 
-    internal static string IssueTenantJwt(string userId, string tenantId, string role, string secret)
+    internal static string IssueTenantJwt(string userId, string tenantId, string role, string secret, long tokenVersion = 1)
     {
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
         var now = DateTime.UtcNow;
 
         // Tenant-scoped JWT. `org_id` carries the same value as `tid` for compatibility with
-        // controllers that read the legacy claim name directly.
+        // controllers that read the legacy claim name directly. `tver` snapshots
+        // users.token_version at issuance; JwtBearer OnTokenValidated rejects the session when
+        // the stored version has moved on (password change).
         var claims = new List<Claim>
         {
             new(JwtRegisteredClaimNames.Sub, userId),
@@ -478,6 +579,7 @@ public sealed class LoginService
             new("tid", tenantId ?? ""),
             new("role", role ?? "member"),
             new("scope", "tenant"),
+            new("tver", tokenVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)),
         };
 
         var token = new JwtSecurityToken(
@@ -514,7 +616,17 @@ public sealed class LoginService
 
     private static string HashEmail(string email)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(email.ToLowerInvariant()));
+        byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(email.ToLowerInvariant()));
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 }
+
+/// <summary>
+/// Policy options for <see cref="LoginService.LoginSamlAsync"/>: the IdP-assigned role, the
+/// admin-assignment opt-in flag, and the caller's source IP for audit logging.
+/// Grouped to keep the method within a sane parameter count.
+/// </summary>
+public readonly record struct SamlLoginOptions(
+    string? MappedRole = null,
+    bool IdpCanAssignAdmin = false,
+    string? SourceIp = null);

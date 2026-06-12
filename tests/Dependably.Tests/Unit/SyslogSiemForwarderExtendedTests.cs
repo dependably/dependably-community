@@ -3,7 +3,6 @@ using System.Net.Sockets;
 using System.Text;
 using Dependably.Infrastructure.Siem;
 using Microsoft.Extensions.Configuration;
-using Xunit;
 
 namespace Dependably.Tests.Unit;
 
@@ -72,23 +71,23 @@ public sealed class SyslogSiemForwarderExtendedTests
     // ── FormatCef: friendly-name + severity branch coverage ──────────────────
 
     [Theory]
-    [InlineData("login.failure",       "Login Failure",   5)]
-    [InlineData("token.created",       "Token Created",   3)]  // unknown sev defaults to 3
-    [InlineData("token.revoked",       "Token Revoked",   4)]
-    [InlineData("rbac.role_changed",   "Role Changed",    6)]
-    [InlineData("rbac.member_added",   "Member Added",    3)]  // unknown sev defaults to 3
-    [InlineData("rbac.member_removed", "Member Removed",  3)]
-    [InlineData("unmapped.event",      "unmapped.event",  3)]  // fallback uses action verbatim
+    [InlineData("login.failure", "Login Failure", 5)]
+    [InlineData("token.created", "Token Created", 3)]  // unknown sev defaults to 3
+    [InlineData("token.revoked", "Token Revoked", 4)]
+    [InlineData("rbac.role_changed", "Role Changed", 6)]
+    [InlineData("rbac.member_added", "Member Added", 3)]  // unknown sev defaults to 3
+    [InlineData("rbac.member_removed", "Member Removed", 3)]
+    [InlineData("unmapped.event", "unmapped.event", 3)]  // fallback uses action verbatim
     public void FormatCef_FriendlyNameAndSeverity_FollowMap(string action, string friendly, int sev)
     {
-        var line = SyslogSiemForwarder.FormatCef(Sample(action: action));
+        string line = SyslogSiemForwarder.FormatCef(Sample(action: action));
         Assert.Contains($"|{action}|{friendly}|{sev}|", line);
     }
 
     [Fact]
     public void FormatCef_OmitsOptionalFields_WhenNull()
     {
-        var line = SyslogSiemForwarder.FormatCef(Sample(
+        string line = SyslogSiemForwarder.FormatCef(Sample(
             actorId: null, ecosystem: null, purl: null, orgId: null));
         Assert.DoesNotContain(" suid=", line);
         Assert.DoesNotContain(" cs1=", line);
@@ -99,7 +98,7 @@ public sealed class SyslogSiemForwarderExtendedTests
     [Fact]
     public void FormatCef_IncludesDetail_WhenPresent()
     {
-        var line = SyslogSiemForwarder.FormatCef(Sample(detail: "extra context"));
+        string line = SyslogSiemForwarder.FormatCef(Sample(detail: "extra context"));
         Assert.Contains("msg=extra context", line);
     }
 
@@ -108,7 +107,7 @@ public sealed class SyslogSiemForwarderExtendedTests
     [Fact]
     public void FormatRfc5424_OmitsSdFields_WhenNull()
     {
-        var line = SyslogSiemForwarder.FormatRfc5424(Sample(
+        string line = SyslogSiemForwarder.FormatRfc5424(Sample(
             orgId: null, actorId: null, ecosystem: null, purl: null));
         // Only the SDID stays; no org=/actor=/etc.
         Assert.Contains("[dependably@0]", line);
@@ -119,7 +118,7 @@ public sealed class SyslogSiemForwarderExtendedTests
     [Fact]
     public void FormatRfc5424_EmptyDetail_DoesNotBreakStructure()
     {
-        var line = SyslogSiemForwarder.FormatRfc5424(Sample(detail: null));
+        string line = SyslogSiemForwarder.FormatRfc5424(Sample(detail: null));
         // Trailing message segment is empty but the structured-data + space prefix remain.
         Assert.Contains("] ", line);
     }
@@ -131,7 +130,7 @@ public sealed class SyslogSiemForwarderExtendedTests
     {
         // Bind the receiver first so the datagram has somewhere to land.
         using var receiver = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
-        var port = ((IPEndPoint)receiver.Client.LocalEndPoint!).Port;
+        int port = ((IPEndPoint)receiver.Client.LocalEndPoint!).Port;
 
         var sut = new SyslogSiemForwarder(Cfg(new Dictionary<string, string?>
         {
@@ -148,7 +147,7 @@ public sealed class SyslogSiemForwarderExtendedTests
         var done = await Task.WhenAny(recvTask, Task.Delay(TimeSpan.FromSeconds(5)));
         Assert.Same(recvTask, done);
         var result = await recvTask;
-        var payload = Encoding.UTF8.GetString(result.Buffer);
+        string payload = Encoding.UTF8.GetString(result.Buffer);
         Assert.Contains("login.success", payload);
         Assert.EndsWith("\n", payload);
     }
@@ -160,7 +159,7 @@ public sealed class SyslogSiemForwarderExtendedTests
         listener.Start();
         try
         {
-            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
             var acceptTask = listener.AcceptTcpClientAsync();
 
             var sut = new SyslogSiemForwarder(Cfg(new Dictionary<string, string?>
@@ -175,14 +174,16 @@ public sealed class SyslogSiemForwarderExtendedTests
 
             using var server = await acceptTask.WaitAsync(TimeSpan.FromSeconds(5));
             using var ns = server.GetStream();
-            var buf = new byte[1024];
+            byte[] buf = new byte[1024];
             // Read until the writer side has closed (forwarder disposes its TcpClient).
             using var ms = new MemoryStream();
             int read;
             while ((read = await ns.ReadAsync(buf).AsTask().WaitAsync(TimeSpan.FromSeconds(5))) > 0)
+            {
                 ms.Write(buf, 0, read);
+            }
 
-            var line = Encoding.UTF8.GetString(ms.ToArray());
+            string line = Encoding.UTF8.GetString(ms.ToArray());
             Assert.StartsWith("CEF:0|Dependably|dependably|1.0|", line);
             Assert.Contains("|lockout.triggered|Account Lockout|7|", line);
             Assert.EndsWith("\n", line);
@@ -202,7 +203,7 @@ public sealed class SyslogSiemForwarderExtendedTests
         listener.Start();
         try
         {
-            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
 
             // Accept and immediately close to terminate the handshake quickly.
             _ = Task.Run(async () =>

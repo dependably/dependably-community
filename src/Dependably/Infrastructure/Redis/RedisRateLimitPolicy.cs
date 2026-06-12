@@ -1,6 +1,6 @@
 using System.Threading.RateLimiting;
-using Microsoft.AspNetCore.RateLimiting;
 using Dependably.Security;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Dependably.Infrastructure.Redis;
 
@@ -13,9 +13,9 @@ public sealed class RedisRateLimitPolicy : IRateLimiterPolicy<string>
 {
     private static readonly Dictionary<string, (int Limit, int WindowSeconds)> PolicyConfig = new()
     {
-        ["login"]        = (10,  60),       // 10 requests / min
-        ["invite"]       = (20,  3600),     // 20 requests / hour
-        ["token-create"] = (60,  3600),     // 60 requests / hour
+        ["login"] = (10, 60),       // 10 requests / min
+        ["invite"] = (20, 3600),     // 20 requests / hour
+        ["token-create"] = (60, 3600),     // 60 requests / hour
     };
 
     private readonly IRedisClient _redis;
@@ -27,18 +27,20 @@ public sealed class RedisRateLimitPolicy : IRateLimiterPolicy<string>
     public RateLimitPartition<string> GetPartition(HttpContext httpContext)
     {
         // Determine policy name from the endpoint metadata (set by [EnableRateLimiting("name")]).
-        var policyName = httpContext.GetEndpoint()
+        string policyName = httpContext.GetEndpoint()
             ?.Metadata.GetMetadata<EnableRateLimitingAttribute>()
             ?.PolicyName ?? "unknown";
 
-        var ip = httpContext.GetNormalizedRemoteIp() ?? "unknown";
-        var bucket = $"{ip}:{policyName}";
+        string ip = httpContext.GetNormalizedRemoteIp() ?? "unknown";
+        string bucket = $"{ip}:{policyName}";
 
         if (!PolicyConfig.TryGetValue(policyName, out var cfg))
+        {
             cfg = (100, 60); // safe default
+        }
 
         var db = _redis.GetDatabase();
-        var prefix = _redis.ApplyPrefix("");
+        string prefix = _redis.ApplyPrefix("");
 
         return RateLimitPartition.Get(bucket, key =>
             new RedisFixedWindowRateLimiter(db, prefix, policyName, key, cfg.Limit, cfg.WindowSeconds));

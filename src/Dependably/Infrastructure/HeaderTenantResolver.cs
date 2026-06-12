@@ -24,25 +24,30 @@ public sealed class HeaderTenantResolver : ITenantResolver
     public HeaderTenantResolver(IMetadataStore db, IConfiguration config)
     {
         _db = db;
-        var configured = config["TENANT_HEADER_NAME"];
+        string? configured = config["TENANT_HEADER_NAME"];
         _headerName = string.IsNullOrWhiteSpace(configured) ? DefaultHeaderName : configured.Trim();
         _extraReserved = ReservedSlugs.ParseExtra(config["RESERVED_SUBDOMAINS"]);
     }
 
     public async Task<TenantContext> ResolveAsync(HttpContext context, CancellationToken ct = default)
     {
-        var raw = context.Request.Headers[_headerName].FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(raw)) return TenantContext.Uninitialized;
+        string? raw = context.Request.Headers[_headerName].FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return TenantContext.Uninitialized;
+        }
 
-        var slug = ReservedSlugs.Normalize(raw, _extraReserved);
-        if (slug is null) return TenantContext.Uninitialized;
+        string? slug = ReservedSlugs.Normalize(raw, _extraReserved);
+        if (slug is null)
+        {
+            return TenantContext.Uninitialized;
+        }
 
         await using var conn = await _db.OpenAsync(ct);
-        var row = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug)>(
+        var (Id, Slug) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug)>(
             "SELECT id, slug FROM orgs WHERE slug = @slug AND deleted_at IS NULL LIMIT 1",
             new { slug });
 
-        if (row.Id is null) return TenantContext.Uninitialized;
-        return TenantContext.ForTenant(row.Id, row.Slug);
+        return Id is null ? TenantContext.Uninitialized : TenantContext.ForTenant(Id, Slug);
     }
 }
