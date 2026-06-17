@@ -400,6 +400,105 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
             new { count, id = versionId });
     }
 
+    // ── Malicious / advisory derived flags ───────────────────────────────────
+
+    [Fact]
+    public async Task GetVersionsAsync_MalAdvisory_SetsIsMaliciousAndHasAdvisory()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "evil");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl());
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, osvId: "MAL-2024-" + Guid.NewGuid().ToString("N")[..8], severity: null, cvssScore: null);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, verId, vulnId);
+
+        var ver = Assert.Single(await _repo.GetVersionsAsync(pkgId));
+        Assert.True(ver.IsMalicious);
+        Assert.True(ver.HasAdvisory);
+    }
+
+    [Fact]
+    public async Task GetVersionsAsync_NonMalAdvisory_HasAdvisoryButNotMalicious()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "vuln");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl());
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, osvId: "GHSA-" + Guid.NewGuid().ToString("N")[..8], cvssScore: 5.0);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, verId, vulnId);
+
+        var ver = Assert.Single(await _repo.GetVersionsAsync(pkgId));
+        Assert.False(ver.IsMalicious);
+        Assert.True(ver.HasAdvisory);
+    }
+
+    [Fact]
+    public async Task GetVersionsAsync_NoAdvisory_BothFlagsFalse()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl());
+
+        var ver = Assert.Single(await _repo.GetVersionsAsync(pkgId));
+        Assert.False(ver.IsMalicious);
+        Assert.False(ver.HasAdvisory);
+    }
+
+    [Fact]
+    public async Task ListPaginatedAsync_HasMaliciousVersion_TrueWhenAnyVersionLinkedToMal()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "evil");
+        // First version clean; second version carries the MAL- advisory.
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0"));
+        string malVerId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0"));
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, osvId: "MAL-2024-" + Guid.NewGuid().ToString("N")[..8], severity: null, cvssScore: null);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, malVerId, vulnId);
+
+        var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+        Assert.True(Assert.Single(items).HasMaliciousVersion);
+    }
+
+    [Fact]
+    public async Task ListPaginatedAsync_HasMaliciousVersion_FalseForCleanPackage()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "good");
+        string verId = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl());
+        // A non-MAL advisory does not flip the malicious flag.
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, osvId: "GHSA-" + Guid.NewGuid().ToString("N")[..8], cvssScore: 5.0);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, verId, vulnId);
+
+        var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+        Assert.False(Assert.Single(items).HasMaliciousVersion);
+    }
+
+    [Fact]
+    public async Task MaliciousFlags_DoNotLeakAcrossOrgs()
+    {
+        // Org B's package shares a name with org A's malicious package but has no MAL link;
+        // the flag must stay scoped to the org that actually owns the malicious version.
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"orgA-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"orgB-{Guid.NewGuid():N}");
+        string pkgA = await PackageSeeder.InsertAsync(_fixture.Store, orgA, "npm", "shared");
+        string pkgB = await PackageSeeder.InsertAsync(_fixture.Store, orgB, "npm", "shared");
+        string verA = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgA, "1.0.0", Purl("1.0.0", "a"));
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgB, "1.0.0", Purl("1.0.0", "b"));
+        string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, osvId: "MAL-2024-" + Guid.NewGuid().ToString("N")[..8], severity: null, cvssScore: null);
+        await VulnerabilitySeeder.LinkAsync(_fixture.Store, verA, vulnId);
+
+        var (itemsA, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgA, Limit: 10, Offset: 0, Ecosystem: "npm"));
+        var (itemsB, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgB, Limit: 10, Offset: 0, Ecosystem: "npm"));
+        Assert.True(Assert.Single(itemsA).HasMaliciousVersion);
+        Assert.False(Assert.Single(itemsB).HasMaliciousVersion);
+
+        Assert.True(Assert.Single(await _repo.GetVersionsAsync(pkgA)).IsMalicious);
+        Assert.False(Assert.Single(await _repo.GetVersionsAsync(pkgB)).IsMalicious);
+    }
+
     // ── Delete + proxy-purge ─────────────────────────────────────────────────
 
     [Fact]

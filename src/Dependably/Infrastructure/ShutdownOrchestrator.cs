@@ -12,6 +12,9 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed class ShutdownOrchestrator : IHostedService
 {
+    // Default pre-stop delay seconds; allows the load balancer to drain this replica.
+    private const int DefaultPreStopDelaySeconds = 10;
+
     private readonly ShutdownState _state;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<ShutdownOrchestrator> _logger;
@@ -27,7 +30,7 @@ public sealed class ShutdownOrchestrator : IHostedService
         _lifetime = lifetime;
         _logger = logger;
         _preStopDelay = TimeSpan.FromSeconds(
-            int.TryParse(config["SHUTDOWN_PRESTOP_DELAY"], out int d) ? d : 10);
+            int.TryParse(config["SHUTDOWN_PRESTOP_DELAY"], out int d) ? d : DefaultPreStopDelaySeconds);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)

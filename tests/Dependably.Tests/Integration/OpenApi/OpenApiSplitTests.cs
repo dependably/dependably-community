@@ -24,7 +24,7 @@ public sealed class OpenApiSplitTests : IClassFixture<DependablyFactory>, IAsync
     public Task DisposeAsync() => Task.CompletedTask;
 
     [Fact]
-    public async Task ManagementDocument_OnlyContainsApiV1Paths()
+    public async Task ManagementDocument_OnlyContainsManagementPaths()
     {
         using var client = _factory.CreateClient();
         var resp = await client.GetAsync("/openapi/management.json");
@@ -32,12 +32,16 @@ public sealed class OpenApiSplitTests : IClassFixture<DependablyFactory>, IAsync
 
         var paths = await ReadPathsAsync(resp);
         Assert.NotEmpty(paths);
+        // Management paths are /api/v1/… (versioned REST) and /saml/… (SSO browser flows).
         Assert.All(paths, p =>
-            Assert.StartsWith("/api/v1/", p, StringComparison.OrdinalIgnoreCase));
+            Assert.True(
+                p.StartsWith("/api/v1/", StringComparison.OrdinalIgnoreCase)
+                || p.StartsWith("/saml/", StringComparison.OrdinalIgnoreCase),
+                $"Unexpected path in management document: {p}"));
     }
 
     [Fact]
-    public async Task ProtocolDocument_ExcludesApiV1AndIncludesProtocolSurfaces()
+    public async Task ProtocolDocument_ExcludesManagementPathsAndIncludesProtocolSurfaces()
     {
         using var client = _factory.CreateClient();
         var resp = await client.GetAsync("/openapi/protocol.json");
@@ -47,6 +51,9 @@ public sealed class OpenApiSplitTests : IClassFixture<DependablyFactory>, IAsync
         Assert.NotEmpty(paths);
         Assert.DoesNotContain(paths, p =>
             p.StartsWith("/api/v1/", StringComparison.OrdinalIgnoreCase));
+        // SAML SSO flows are management routes, not package-client protocol surfaces.
+        Assert.DoesNotContain(paths, p =>
+            p.StartsWith("/saml/", StringComparison.OrdinalIgnoreCase));
 
         // Must include canonical protocol roots — these are the surfaces the split exists to expose.
         Assert.Contains(paths, p => p.StartsWith("/v2", StringComparison.OrdinalIgnoreCase));

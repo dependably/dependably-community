@@ -64,16 +64,6 @@ public sealed class InstanceController : ControllerBase
         return Ok(settings);
     }
 
-    private static readonly HashSet<string> AllowedSettingKeys = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "max_upload_bytes",
-        "max_upload_bytes_pypi",
-        "max_upload_bytes_npm",
-        "max_upload_bytes_nuget",
-        "gc_schedule",
-        "siem_max_lookback_days",
-    };
-
     [HttpPut("api/v1/instance/settings")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> UpdateSettings([FromBody] Dictionary<string, string> settings, CancellationToken ct)
@@ -91,7 +81,7 @@ public sealed class InstanceController : ControllerBase
 
         foreach (string key in settings.Keys)
         {
-            if (!AllowedSettingKeys.Contains(key))
+            if (!InstanceSettingDefaults.AllowedKeys.Contains(key))
             {
                 return BadRequest(new { error = $"Unknown setting key: {key}" });
             }
@@ -115,6 +105,127 @@ public sealed class InstanceController : ControllerBase
             ct: ct);
 
         return NoContent();
+    }
+
+    // ── /metrics access config ─────────────────────────────────────────────────
+    //
+    // Single-mode counterpart of the system-realm /api/v1/system/metrics-access. The /metrics
+    // gate (MetricsAccessConfig + MetricsAccessMiddleware) reads instance_settings regardless of
+    // deployment mode, so the single-tenant owner-operator needs an editing surface too. The
+    // request/response shapes and validation match the system surface (shared via
+    // MetricsAccessEditing) so the same Svelte form drives both.
+
+    /// <summary>GET /api/v1/instance/metrics-access — resolved /metrics access config + sources.</summary>
+    [HttpGet("api/v1/instance/metrics-access")]
+    public async Task<IActionResult> GetMetricsAccess(
+        [FromServices] MetricsAccessConfig access,
+        [FromServices] ScrapeDiagnostics diagnostics,
+        CancellationToken ct)
+    {
+        if (_isMultiMode)
+        {
+            return NotFound();
+        }
+
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        if (deny is not null)
+        {
+            return deny;
+        }
+
+        var resolved = await access.ResolveAsync(ct);
+        var denied = diagnostics.RecentDeniedIps(10)
+            .Select(e => new { ip = e.Ip, lastSeen = e.LastSeen });
+        return Ok(new
+        {
+            enabled = resolved.Enabled,
+            enabledSource = resolved.EnabledSource.ToString().ToLowerInvariant(),
+            enabledLockedByEnv = resolved.EnabledLockedByEnv,
+            allowedIps = resolved.AllowedRaw,
+            allowlistSource = resolved.AllowlistSource.ToString().ToLowerInvariant(),
+            allowlistLockedByEnv = resolved.AllowlistLockedByEnv,
+            recentDeniedIps = denied,
+        });
+    }
+
+    /// <summary>
+    /// PUT /api/v1/instance/metrics-access — update the /metrics access config in
+    /// instance_settings. Returns 409 when the corresponding env var locks the knob, 400 on a
+    /// malformed CIDR, and 200 with any broad-allowlist warnings on success.
+    /// </summary>
+    [HttpPut("api/v1/instance/metrics-access")]
+    public async Task<IActionResult> UpdateMetricsAccess(
+        [FromBody] UpdateMetricsAccessRequest req,
+        [FromServices] MetricsAccessConfig access,
+        [FromServices] ProblemResults problems,
+        CancellationToken ct)
+    {
+        if (_isMultiMode)
+        {
+            return NotFound();
+        }
+
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantAdmin, ct);
+        if (deny is not null)
+        {
+            return deny;
+        }
+
+        if (req is null)
+        {
+            return problems.ValidationErrorAction("body", "Request body required.");
+        }
+
+        var resolved = await access.ResolveAsync(ct);
+
+        if (req.Enabled.HasValue && resolved.EnabledLockedByEnv)
+        {
+            return Conflict(MetricsAccessEditing.EnvLockedConflictBody("metrics_enabled", "METRICS_ENABLED"));
+        }
+
+        if (req.AllowedIps is not null && resolved.AllowlistLockedByEnv)
+        {
+            return Conflict(MetricsAccessEditing.EnvLockedConflictBody("metrics_allowed_ips", "METRICS_ALLOWED_IPS"));
+        }
+
+        var warnings = new List<string>();
+        if (req.AllowedIps is not null)
+        {
+            string? invalid = MetricsAccessEditing.FindInvalidEntry(req.AllowedIps, warnings);
+            if (invalid is not null)
+            {
+                return problems.ValidationErrorAction("allowedIps", $"\"{invalid}\" is not a valid IP or CIDR.");
+            }
+        }
+
+        if (req.Enabled.HasValue)
+        {
+            await _orgs.SetInstanceSettingAsync("metrics_enabled", req.Enabled.Value ? "1" : "0", ct);
+        }
+
+        if (req.AllowedIps is not null)
+        {
+            await _orgs.SetInstanceSettingAsync(
+                "metrics_allowed_ips",
+                System.Text.Json.JsonSerializer.Serialize(req.AllowedIps),
+                ct);
+        }
+
+        access.Invalidate();
+
+        string? actor = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+            ?? User.FindFirst("sub")?.Value;
+        await _audit.LogSystemAsync(
+            action: "instance_metrics_access_updated",
+            actorId: actor,
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                enabled = req.Enabled,
+                allowedIps = req.AllowedIps,
+            }),
+            ct: ct);
+
+        return Ok(new { warnings });
     }
 
     // ── Background Jobs ──────────────────────────────────────────────────────────

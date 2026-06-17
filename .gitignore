@@ -9,6 +9,7 @@ src/Dependably/wwwroot/*
 dotnet-install.sh
 **/.DS_Store
 .claude/
+CLAUDE.local.md
 *.binlog
 sbom-backend.json
 web/sbom-frontend.json

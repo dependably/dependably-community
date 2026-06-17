@@ -112,7 +112,7 @@ public sealed class AuthController : ControllerBase
         if (result.retryAfter.HasValue)
         {
             Response.Headers.RetryAfter = result.retryAfter.Value.ToString();
-            return StatusCode(429, new { detail = result.error });
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { detail = result.error });
         }
 
         if (result.token is null)
@@ -148,7 +148,7 @@ public sealed class AuthController : ControllerBase
         var invite = await _invites.AcceptAsync(req.Token, ct);
         if (invite is null)
         {
-            return StatusCode(410, new { detail = "Invite token is invalid, expired, or already used." });
+            return StatusCode(StatusCodes.Status410Gone, new { detail = "Invite token is invalid, expired, or already used." });
         }
 
         // 1:1 user:tenant — invite carries the tenant the user is joining; UserService inserts
@@ -236,24 +236,32 @@ public sealed class AuthController : ControllerBase
         string? sessionCookie = Request.Cookies["dependably_session"];
         if (sessionCookie is not null)
         {
-            try
-            {
-                var handler = new JwtSecurityTokenHandler();
-                if (handler.CanReadToken(sessionCookie))
-                {
-                    var jwt = handler.ReadJwtToken(sessionCookie);
-                    string jti = jwt.Id;
-                    if (!string.IsNullOrEmpty(jti))
-                    {
-                        await _revocations.RevokeAsync(jti, jwt.ValidTo, ct);
-                    }
-                }
-            }
-            catch { /* malformed token — still delete the cookie */ }
+            await TryRevokeSessionCookieAsync(sessionCookie, ct);
         }
 
         Response.Cookies.Delete("dependably_session");
         return Ok(new { message = "Logged out." });
+    }
+
+    // Parses and revokes the session JWT embedded in the cookie. Ignores malformed tokens
+    // so a corrupt or stale cookie never blocks the logout flow.
+    private async Task TryRevokeSessionCookieAsync(string sessionCookie, CancellationToken ct)
+    {
+        try
+        {
+            var handler = new JwtSecurityTokenHandler();
+            if (!handler.CanReadToken(sessionCookie))
+            {
+                return;
+            }
+            var jwt = handler.ReadJwtToken(sessionCookie);
+            string jti = jwt.Id;
+            if (!string.IsNullOrEmpty(jti))
+            {
+                await _revocations.RevokeAsync(jti, jwt.ValidTo, ct);
+            }
+        }
+        catch { /* malformed token — still delete the cookie */ }
     }
 
     /// <summary>GET /api/v1/auth/me</summary>

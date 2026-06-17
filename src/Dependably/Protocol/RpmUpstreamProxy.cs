@@ -98,6 +98,15 @@ public interface IRpmUpstreamProxy
     Justification = "XML namespace identifiers from the repodata schema, not HTTP request targets.")]
 public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
 {
+    // SHA-256 produces a 64-character lowercase hex string.
+    private const int Sha256HexLength = 64;
+
+    // Minimum length of a hash-prefixed filename: 64-char hex + '-' + at least one char.
+    private const int HashPrefixedFilenameMinLength = Sha256HexLength + 2;
+
+    // Length of the hex prefix used as the URL negative-cache key (first 32 hex chars of SHA-256).
+    private const int UrlKeyPrefixLength = 32;
+
     private readonly IHttpClientFactory _http;
     private readonly IBlobStore _cacheStore;  // blobs.Cache
     private readonly IMetadataStore _db;
@@ -105,6 +114,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     private readonly IAirGapMode _airGap;
     private readonly IUpstreamUrlValidator _urlValidator;
     private readonly ILogger<RpmUpstreamProxy> _logger;
+    private readonly TimeProvider _time;
 
     private readonly string _upstreamMode;  // "passthrough" | "merged"
     private readonly TimeSpan _repomdTtl;
@@ -146,6 +156,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         _airGap = svc.AirGap;
         _urlValidator = svc.UrlValidator;
         _logger = svc.Logger;
+        _time = svc.Time;
 
         var configuration = svc.Configuration;
         _upstreamMode = configuration["Rpm:UpstreamMode"] ?? "passthrough";
@@ -416,7 +427,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     public async Task<bool> IsNegativelyCachedAsync(string upstreamPath, CancellationToken ct)
     {
         string urlKey = UrlKey(upstreamPath);
-        string cutoff = DateTime.UtcNow.Add(-_negativeCacheTtl).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = _time.GetUtcNow().UtcDateTime.Add(-_negativeCacheTtl).ToString("yyyy-MM-ddTHH:mm:ssZ");
         // xtenant: upstream_negative_cache is content-addressed (SHA-256 of URL → 404) and
         // intentionally shared across tenants. A URL either 404s or it doesn't.
         await using var conn = await _db.OpenAsync(ct);
@@ -430,7 +441,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     public async Task RecordNegativeAsync(string upstreamPath, CancellationToken ct)
     {
         string urlKey = UrlKey(upstreamPath);
-        string now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
         // xtenant: see IsNegativelyCachedAsync.
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
@@ -966,19 +977,19 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     internal static bool IsHashPrefixedFilename(string filename)
     {
-        if (filename.Length < 66)
+        if (filename.Length < HashPrefixedFilenameMinLength)
         {
             return false; // 64 hex + '-' + at least one char
         }
 
         int dashIdx = filename.IndexOf('-');
-        return dashIdx == 64 && filename[..64].All(static c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+        return dashIdx == Sha256HexLength && filename[..Sha256HexLength].All(static c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
     }
 
     /// <summary>Extracts the 64-char lowercase hex prefix from a hash-prefixed filename, or null.</summary>
     private static string? ExtractSha256Prefix(string filename)
     {
-        return !IsHashPrefixedFilename(filename) ? null : filename[..64];
+        return !IsHashPrefixedFilename(filename) ? null : filename[..Sha256HexLength];
     }
 
     /// <summary>
@@ -987,7 +998,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     internal static string UrlKey(string url)
     {
         byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(url));
-        return Convert.ToHexString(hash).ToLowerInvariant()[..32];
+        return Convert.ToHexString(hash).ToLowerInvariant()[..UrlKeyPrefixLength];
     }
 
     private static string ContentTypeFor(string filename)
@@ -1028,4 +1039,5 @@ public sealed record RpmUpstreamProxyServices(
     IConfiguration Configuration,
     IAirGapMode AirGap,
     IUpstreamUrlValidator UrlValidator,
-    ILogger<RpmUpstreamProxy> Logger);
+    ILogger<RpmUpstreamProxy> Logger,
+    TimeProvider Time);

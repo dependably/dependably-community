@@ -20,6 +20,7 @@ public sealed class RedisFixedWindowRateLimiter : RateLimiter
     private readonly string _bucket;
     private readonly int _permitLimit;
     private readonly int _windowSeconds;
+    private readonly TimeProvider _time;
 
     private static readonly RedisScript IncrScript = new(
         """
@@ -35,7 +36,7 @@ public sealed class RedisFixedWindowRateLimiter : RateLimiter
 
     public RedisFixedWindowRateLimiter(
         IDatabase db, string keyPrefix, string scope, string bucket,
-        int permitLimit, int windowSeconds)
+        int permitLimit, int windowSeconds, TimeProvider time)
     {
         _db = db;
         _keyPrefix = keyPrefix;
@@ -43,6 +44,7 @@ public sealed class RedisFixedWindowRateLimiter : RateLimiter
         _bucket = bucket;
         _permitLimit = permitLimit;
         _windowSeconds = windowSeconds;
+        _time = time;
     }
 
     public override RateLimiterStatistics? GetStatistics() => null;
@@ -57,7 +59,7 @@ public sealed class RedisFixedWindowRateLimiter : RateLimiter
     // No CancellationToken — StackExchange.Redis honors its own command timeout, not CTs.
     private async Task<RateLimitLease> AcquireAsync()
     {
-        long windowId = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / _windowSeconds;
+        long windowId = _time.GetUtcNow().ToUnixTimeSeconds() / _windowSeconds;
         string key = $"{_keyPrefix}ratelimit:{_scope}:{_bucket}:{windowId}";
 
         RedisResult result;

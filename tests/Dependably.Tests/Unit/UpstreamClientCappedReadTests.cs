@@ -158,7 +158,7 @@ public class UpstreamClientCappedReadTests
             new PermissiveValidator(),
             new DisabledAirGap(),
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir),
-            config,
+            Dependably.Infrastructure.StagingOptions.Resolve(config),
             NullLogger<UpstreamClient>.Instance);
     }
 

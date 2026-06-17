@@ -27,7 +27,7 @@ public sealed class ProblemResults
             problem.Extensions["field"] = field;
         }
 
-        return Results.Json(problem, statusCode: 422);
+        return Results.Json(problem, statusCode: StatusCodes.Status422UnprocessableEntity);
     }
 
     public IResult Conflict(string detail)
@@ -38,7 +38,7 @@ public sealed class ProblemResults
             Title = _localizer["error.conflict.title"],
             Detail = detail,
         };
-        return Results.Json(problem, statusCode: 409);
+        return Results.Json(problem, statusCode: StatusCodes.Status409Conflict);
     }
 
     public IResult PayloadTooLarge(string detail)
@@ -49,7 +49,7 @@ public sealed class ProblemResults
             Title = _localizer["error.payloadTooLarge.title"],
             Detail = detail,
         };
-        return Results.Json(problem, statusCode: 413);
+        return Results.Json(problem, statusCode: StatusCodes.Status413PayloadTooLarge);
     }
 
     public IResult NotFound(string detail)
@@ -60,7 +60,7 @@ public sealed class ProblemResults
             Title = _localizer["error.notFound.title"],
             Detail = detail,
         };
-        return Results.Json(problem, statusCode: 404);
+        return Results.Json(problem, statusCode: StatusCodes.Status404NotFound);
     }
 
     public IResult OrgNotFound() => NotFound(_localizer["error.org.notFound"]);
@@ -74,7 +74,7 @@ public sealed class ProblemResults
             Detail = _localizer["error.auth.required"],
         };
         // Note: callers must set WWW-Authenticate header directly; Results.Json doesn't support headers
-        return Results.Json(problem, statusCode: 401);
+        return Results.Json(problem, statusCode: StatusCodes.Status401Unauthorized);
     }
 
     public IResult Forbidden(string? detail = null)
@@ -85,7 +85,7 @@ public sealed class ProblemResults
             Title = _localizer["error.forbidden.title"],
             Detail = detail ?? _localizer["error.auth.forbidden"],
         };
-        return Results.Json(problem, statusCode: 403);
+        return Results.Json(problem, statusCode: StatusCodes.Status403Forbidden);
     }
 
     // ── IActionResult variants for use in [ApiController] controllers ─────────
@@ -99,7 +99,7 @@ public sealed class ProblemResults
             Detail = detail,
         };
         problem.Extensions["field"] = fieldName;
-        return new ObjectResult(problem) { StatusCode = 422 };
+        return new ObjectResult(problem) { StatusCode = StatusCodes.Status422UnprocessableEntity };
     }
 
     public IActionResult ConflictAction(string detail, string? reason = null)
@@ -115,7 +115,7 @@ public sealed class ProblemResults
             problem.Extensions["reason"] = reason;
         }
 
-        return new ObjectResult(problem) { StatusCode = 409 };
+        return new ObjectResult(problem) { StatusCode = StatusCodes.Status409Conflict };
     }
 
     public IActionResult ForbiddenAction(string detail, string? reason = null)
@@ -131,6 +131,6 @@ public sealed class ProblemResults
             problem.Extensions["reason"] = reason;
         }
 
-        return new ObjectResult(problem) { StatusCode = 403 };
+        return new ObjectResult(problem) { StatusCode = StatusCodes.Status403Forbidden };
     }
 }

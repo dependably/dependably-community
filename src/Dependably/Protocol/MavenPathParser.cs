@@ -14,6 +14,26 @@ namespace Dependably.Protocol;
 /// </summary>
 public static partial class MavenPathParser
 {
+    // Maven timestamp snapshot format: "yyyyMMdd.HHmmss" (15 characters, dot at index 8).
+    private const int MavenTimestampLength = 15;
+    private const int MavenTimestampDotIndex = 8;
+
+    // Minimum parts in a snapshot timestamp suffix: timestamp and build number (classifier is optional).
+    private const int SnapshotTimestampMinParts = 2;
+
+    // Minimum Maven path segment count for a version-level path (group/artifact/version/file).
+    private const int MavenVersionPathMinSegments = 4;
+
+    // Minimum segment count for a metadata path (group/artifact/metadata-file).
+    private const int MavenMetadataPathMinSegments = 3;
+
+    // Offset from the end of the segment array to each coordinate component in a parsed path.
+    // VersionLevelOffset points at the version directory (e.g. "1.0.0"); ArtifactLevelOffset
+    // points at the artifactId; both are used consistently across the metadata and artifact
+    // path parsers.
+    private const int MavenSegmentVersionOffset = 2;
+    private const int MavenSegmentArtifactOffset = 3;
+
     public static readonly string[] ChecksumExtensions = [".sha512", ".sha256", ".sha1", ".md5"];
 
     [GeneratedRegex(@"^(?<ts>\d{8}\.\d{6})-(?<bn>\d+)$")]
@@ -33,7 +53,7 @@ public static partial class MavenPathParser
         }
 
         string[] segments = path.Split('/');
-        if (segments.Length < 3)
+        if (segments.Length < MavenMetadataPathMinSegments)
         {
             return null;
         }
@@ -52,11 +72,11 @@ public static partial class MavenPathParser
         string? checksumAlg = ChecksumAlgorithmOf(lastSegment);
         bool isChecksum = checksumAlg is not null;
 
-        if (segments.Length >= 4 && LooksLikeVersion(segments[^2]))
+        if (segments.Length >= MavenVersionPathMinSegments && LooksLikeVersion(segments[^MavenSegmentVersionOffset]))
         {
-            string version = segments[^2];
-            string artifactId = segments[^3];
-            string groupId = string.Join('.', segments[..^3]);
+            string version = segments[^MavenSegmentVersionOffset];
+            string artifactId = segments[^MavenSegmentArtifactOffset];
+            string groupId = string.Join('.', segments[..^MavenSegmentArtifactOffset]);
             return string.IsNullOrEmpty(groupId)
                 ? null
                 : new MavenCoordinates(
@@ -69,8 +89,8 @@ public static partial class MavenPathParser
                 SnapshotTimestamp: null, SnapshotBuildNumber: null);
         }
 
-        string artifactIdOnly = segments[^2];
-        string groupIdOnly = string.Join('.', segments[..^2]);
+        string artifactIdOnly = segments[^MavenSegmentVersionOffset];
+        string groupIdOnly = string.Join('.', segments[..^MavenSegmentVersionOffset]);
         return string.IsNullOrEmpty(groupIdOnly)
             ? null
             : new MavenCoordinates(
@@ -85,15 +105,15 @@ public static partial class MavenPathParser
 
     private static MavenCoordinates? ParseArtifactPath(string[] segments)
     {
-        if (segments.Length < 4)
+        if (segments.Length < MavenVersionPathMinSegments)
         {
             return null;
         }
 
         string filename = segments[^1];
-        string versionDir = segments[^2];
-        string artifactIdSeg = segments[^3];
-        string groupIdStr = string.Join('.', segments[..^3]);
+        string versionDir = segments[^MavenSegmentVersionOffset];
+        string artifactIdSeg = segments[^MavenSegmentArtifactOffset];
+        string groupIdStr = string.Join('.', segments[..^MavenSegmentArtifactOffset]);
         if (string.IsNullOrEmpty(groupIdStr))
         {
             return null;
@@ -210,10 +230,10 @@ public static partial class MavenPathParser
 
         // Timestamp + classifier: "{ts}-{bn}-{classifier}"
         string[] parts = afterBaseVersion.Split('-');
-        if (parts.Length >= 2 && parts[0].Length == 15 && parts[0][8] == '.'
+        if (parts.Length >= SnapshotTimestampMinParts && parts[0].Length == MavenTimestampLength && parts[0][MavenTimestampDotIndex] == '.'
             && int.TryParse(parts[1], out int bn))
         {
-            string? classifier = parts.Length > 2 ? string.Join('-', parts[2..]) : null;
+            string? classifier = parts.Length > SnapshotTimestampMinParts ? string.Join('-', parts[SnapshotTimestampMinParts..]) : null;
             return (classifier, parts[0], bn);
         }
         return null;

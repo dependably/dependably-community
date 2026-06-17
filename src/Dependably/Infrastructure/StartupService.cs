@@ -19,6 +19,7 @@ public sealed class StartupService : IHostedService
     private readonly OrgRepository _orgs;
     private readonly IOptionsMonitor<JwtBearerOptions> _jwtOptions;
     private readonly IConfiguration _config;
+    private readonly StagingOptions _staging;
     private readonly ILogger<StartupService> _logger;
 
     public StartupService(
@@ -27,6 +28,7 @@ public sealed class StartupService : IHostedService
         OrgRepository orgs,
         IOptionsMonitor<JwtBearerOptions> jwtOptions,
         IConfiguration config,
+        StagingOptions staging,
         ILogger<StartupService> logger)
     {
         _schema = schema;
@@ -34,6 +36,7 @@ public sealed class StartupService : IHostedService
         _orgs = orgs;
         _jwtOptions = jwtOptions;
         _config = config;
+        _staging = staging;
         _logger = logger;
     }
 
@@ -53,58 +56,8 @@ public sealed class StartupService : IHostedService
         await _schema.InitializeAsync(cancellationToken);
         await _firstBoot.RunAsync(cancellationToken);
 
+        LogEnvironmentWarnings();
         string? baseUrl = _config["BASE_URL"];
-        if (baseUrl is null)
-        {
-            _logger.LogWarning(
-                "BASE_URL is not set. Session cookies will not be marked Secure. " +
-                "UseForwardedHeaders is enabled — if a TLS-terminating proxy is in front, " +
-                "ensure it forwards X-Forwarded-Proto: https and set BASE_URL to https://...");
-        }
-        else if (!baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-        {
-            _logger.LogWarning(
-                "BASE_URL {BaseUrl} is plain HTTP. Session cookies will not be marked Secure. " +
-                "UseForwardedHeaders is enabled — if a TLS-terminating proxy is in front, " +
-                "ensure it forwards X-Forwarded-Proto: https and update BASE_URL to https://...",
-                baseUrl);
-        }
-
-        if (string.IsNullOrWhiteSpace(_config["TRUSTED_PROXIES"]))
-        {
-            _logger.LogWarning(
-                "TRUSTED_PROXIES is not set. X-Forwarded-For, X-Forwarded-Proto, and " +
-                "X-Forwarded-Host are accepted from any client. Concrete consequences: " +
-                "(1) the /metrics and /version IP allowlist can be bypassed by forging " +
-                "X-Forwarded-For; (2) rate-limit buckets are keyed by the spoofable client IP, " +
-                "so per-IP limits are ineffective; (3) audit source_ip records the attacker-supplied " +
-                "value rather than the real connection address; (4) in DEPLOYMENT_MODE=multi, " +
-                "X-Forwarded-Host can spoof tenant resolution. " +
-                "Set TRUSTED_PROXIES to your reverse proxy's IP(s)/CIDR(s) to restrict this.");
-        }
-
-        bool isReplica =
-            string.Equals(_config["REPLICA_HINT"], "true", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(_config["INSTANCE_ROLE"], "replica", StringComparison.OrdinalIgnoreCase);
-        if (isReplica)
-        {
-            _logger.LogWarning(
-                "Multi-replica deployment detected (REPLICA_HINT or INSTANCE_ROLE=replica). " +
-                "OCI chunked uploads (/v2/*/blobs/uploads/*) append to a local staging file — " +
-                "PATCH requests for an active upload session must reach the same replica that " +
-                "issued the session UUID. Configure session affinity on your load balancer keyed " +
-                "on the upload UUID path segment before routing OCI push traffic.");
-        }
-
-        if (!string.IsNullOrWhiteSpace(_config["Rpm:Upstream"])
-            && string.IsNullOrWhiteSpace(_config["Rpm:GpgKey"]))
-        {
-            _logger.LogWarning(
-                "Rpm:GpgKey is not set. The RPM proxy fetches repomd.xml from upstream but does NOT " +
-                "verify its detached OpenPGP signature (repomd.xml.asc), so a hostile or MITM upstream " +
-                "can serve tampered metadata that poisons the package-checksum chain. Set Rpm:GpgKey to " +
-                "your repo's pinned public key to enforce signature verification.");
-        }
 
         string? jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", cancellationToken);
         if (jwtSecret is not null)
@@ -137,4 +90,85 @@ public sealed class StartupService : IHostedService
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    // Logs operator-facing warnings for missing or misconfigured environment variables.
+    // None of these abort startup — they surface as LogWarning so the operator can act
+    // without a restart. Called once per startup after schema init and first-boot.
+    private void LogEnvironmentWarnings()
+    {
+        string? baseUrl = _config["BASE_URL"];
+        if (baseUrl is null)
+        {
+            _logger.LogWarning(
+                "BASE_URL is not set. Session cookies will not be marked Secure. " +
+                "UseForwardedHeaders is enabled — if a TLS-terminating proxy is in front, " +
+                "ensure it forwards X-Forwarded-Proto: https and set BASE_URL to https://...");
+        }
+        else if (!baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "BASE_URL {BaseUrl} is plain HTTP. Session cookies will not be marked Secure. " +
+                "UseForwardedHeaders is enabled — if a TLS-terminating proxy is in front, " +
+                "ensure it forwards X-Forwarded-Proto: https and update BASE_URL to https://...",
+                baseUrl);
+        }
+
+        if (string.IsNullOrWhiteSpace(_config["TRUSTED_PROXIES"]))
+        {
+            _logger.LogWarning(
+                "TRUSTED_PROXIES is not set. X-Forwarded-For, X-Forwarded-Proto, and " +
+                "X-Forwarded-Host are ignored (fail-closed). Connection.RemoteIpAddress, " +
+                "Request.Host, and Request.Scheme reflect the real socket peer. " +
+                "If a TLS-terminating reverse proxy is in front, set TRUSTED_PROXIES to the " +
+                "proxy's IP(s)/CIDR(s) so forwarded headers from that proxy are trusted and the " +
+                "client-facing scheme and source IP are visible to the application.");
+        }
+
+        bool hasApexHost = !string.IsNullOrWhiteSpace(_config["APEX_HOST"])
+            || (!string.IsNullOrWhiteSpace(_config["BASE_URL"])
+                && Uri.TryCreate(_config["BASE_URL"], UriKind.Absolute, out var baseUri)
+                && baseUri.Host is not "localhost" and not "127.0.0.1" and not "[::1]");
+        if (!hasApexHost)
+        {
+            _logger.LogWarning(
+                "APEX_HOST (and BASE_URL with a non-localhost host) is not set. Host header " +
+                "filtering is permissive (AllowedHosts=*): any Host value is accepted. This " +
+                "allows Host header injection into SAML SP entity IDs / ACS URLs, absolute links, " +
+                "and CSRF Origin comparisons. In production, set APEX_HOST to your public domain " +
+                "(e.g. repo.example.com) so unknown Host headers are rejected before reaching " +
+                "tenant resolution.");
+        }
+
+        bool isReplica =
+            string.Equals(_config["REPLICA_HINT"], "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(_config["INSTANCE_ROLE"], "replica", StringComparison.OrdinalIgnoreCase);
+        if (isReplica)
+        {
+            _logger.LogWarning(
+                "Multi-replica deployment detected (REPLICA_HINT or INSTANCE_ROLE=replica). " +
+                "OCI chunked uploads (/v2/*/blobs/uploads/*) append to a local staging file — " +
+                "PATCH requests for an active upload session must reach the same replica that " +
+                "issued the session UUID. Configure session affinity on your load balancer keyed " +
+                "on the upload UUID path segment before routing OCI push traffic.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_config["Rpm:Upstream"])
+            && string.IsNullOrWhiteSpace(_config["Rpm:GpgKey"]))
+        {
+            _logger.LogWarning(
+                "Rpm:GpgKey is not set. The RPM proxy fetches repomd.xml from upstream but does NOT " +
+                "verify its detached OpenPGP signature (repomd.xml.asc), so a hostile or MITM upstream " +
+                "can serve tampered metadata that poisons the package-checksum chain. Set Rpm:GpgKey to " +
+                "your repo's pinned public key to enforce signature verification.");
+        }
+
+        if (_staging.FloorBytes == 0)
+        {
+            _logger.LogWarning(
+                "STAGING_DISK_FLOOR_BYTES is set to 0. Staging-disk-full protection is disabled: " +
+                "proxy fetches will no longer be rejected when the staging volume runs low, so a " +
+                "full disk can cause partial writes and failed cache stores. This is a deliberate " +
+                "operator opt-out. Unset the variable to restore the default 512 MiB floor.");
+        }
+    }
 }

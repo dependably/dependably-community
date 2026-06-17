@@ -55,6 +55,17 @@ public static partial class BlobKeys
         => $"oci/{digestAlgorithm}/{digestHex}";
 
     /// <summary>
+    /// Ephemeral staging key for OCI blobs during verify-then-commit. The upstream
+    /// response is streamed here first; the digest is verified before promotion to the
+    /// content-addressed <see cref="OciBlob"/> key. The token is a collision-free random
+    /// identifier (e.g. <c>Guid.ToString("N")</c>) so concurrent in-flight fetches never
+    /// share a staging slot. Staging entries are always deleted — on success, after
+    /// promotion to the content-addressed key; on mismatch, immediately.
+    /// </summary>
+    public static string OciStaging(string token)
+        => $"oci/_staging/{token}";
+
+    /// <summary>
     /// Org-scoped key for a Go module proxy artifact.
     /// <paramref name="ext"/> is one of <c>info</c>, <c>mod</c>, or <c>zip</c>.
     /// The module path may contain slashes (e.g. <c>github.com/user/pkg</c>); callers must

@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest'
 import { ECOSYSTEMS, ECO_LABEL } from './ecosystems.js'
 
 describe('ecosystems vocabulary', () => {
-  it('exposes the six supported ecosystem keys in priority order', () => {
-    expect(ECOSYSTEMS).toEqual(['pypi', 'npm', 'nuget', 'maven', 'rpm', 'oci'])
+  it('exposes the supported ecosystem keys in priority order', () => {
+    expect(ECOSYSTEMS).toEqual(['pypi', 'npm', 'nuget', 'maven', 'rpm', 'oci', 'golang', 'cargo'])
   })
 
   it('has a display label for every ecosystem key', () => {

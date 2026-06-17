@@ -4,6 +4,9 @@ namespace Dependably.Infrastructure.Redis;
 
 public sealed class RedisOptions
 {
+    // Number of initial connect attempts before StackExchange.Redis declares the connection failed.
+    private const int RedisConnectRetryCount = 5;
+
     /// <summary>
     /// StackExchange.Redis connection string.
     /// Plain: "localhost:6379"
@@ -40,7 +43,7 @@ public sealed class RedisOptions
         opts.Ssl = Ssl;
         opts.DefaultDatabase = Database;
         opts.AbortOnConnectFail = false;
-        opts.ConnectRetry = 5;
+        opts.ConnectRetry = RedisConnectRetryCount;
         opts.ReconnectRetryPolicy = new ExponentialRetry(500, 10_000);
 
         return opts;

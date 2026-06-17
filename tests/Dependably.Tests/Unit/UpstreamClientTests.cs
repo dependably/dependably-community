@@ -54,7 +54,7 @@ public class UpstreamClientTests : IAsyncLifetime
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { ["PROXY_STAGING_PATH"] = stagingDir })
             .Build();
-        var client = new UpstreamClient(factory, tiered, audit, validator, airGap, new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir), config, log);
+        var client = new UpstreamClient(factory, tiered, audit, validator, airGap, new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir), Dependably.Infrastructure.StagingOptions.Resolve(config), log);
         return (client, handler);
     }
 
@@ -281,7 +281,7 @@ public class UpstreamClientTests : IAsyncLifetime
             .Build();
         var airGap = new StubAirGapMode(false);
         var v = validator ?? new AllowAllValidator();
-        var client = new UpstreamClient(factory, tiered, audit, v, airGap, diskInfo, config, NullLogger<UpstreamClient>.Instance);
+        var client = new UpstreamClient(factory, tiered, audit, v, airGap, diskInfo, Dependably.Infrastructure.StagingOptions.Resolve(config), NullLogger<UpstreamClient>.Instance);
         return (client, handler);
     }
 
@@ -388,6 +388,295 @@ public class UpstreamClientTests : IAsyncLifetime
         Assert.Equal("http://upstream.test/pkg-1.0.tgz", record.Properties["UpstreamUrl"]);
         Assert.True(record.Properties.ContainsKey("Duration"));
         Assert.True(record.Properties.ContainsKey("TraceId"));
+    }
+}
+
+// ── Retry + UpstreamFetchFailedException tests ────────────────────────────────
+
+/// <summary>
+/// Pins the retry contract for transient upstream errors: on a transient non-success
+/// (403/429/5xx) the client retries up to MaxUpstreamFetchAttempts times; if a later
+/// attempt succeeds the artifact is served normally; if retries are exhausted the client
+/// throws <see cref="UpstreamFetchFailedException"/> so the middleware can map it to a
+/// retryable status code instead of a fatal policy block (403) or absence (404).
+/// </summary>
+[Trait("Category", "Unit")]
+public sealed class UpstreamFetchRetryTests : IAsyncLifetime
+{
+    private readonly TestMetadataStore _db = new();
+
+    public async Task InitializeAsync()
+    {
+        var initializer = new SchemaInitializer(_db);
+        await initializer.InitializeAsync();
+    }
+
+    public async Task DisposeAsync() => await _db.DisposeAsync();
+
+    private static byte[] RandomBytes(int length = 64)
+    {
+        byte[] b = new byte[length];
+        Random.Shared.NextBytes(b);
+        return b;
+    }
+
+    private static string Sha256Hex(byte[] data)
+        => Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
+
+    private static async Task<byte[]> DrainAsync(Stream stream)
+    {
+        await using (stream.ConfigureAwait(false))
+        {
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms);
+            return ms.ToArray();
+        }
+    }
+
+    private static (UpstreamClient Client, SequencedHttpHandler Handler) BuildRetryClient(
+        IUpstreamUrlValidator? validator = null,
+        IBlobStore? blobs = null)
+    {
+        var handler = new SequencedHttpHandler();
+        var factory = new FakeSequencedHttpClientFactory(handler);
+        var store = blobs ?? new InMemoryBlobStore();
+        var audit = new AuditRepository(new NullMetadataStore());
+        var tiered = new TieredBlobStorage(store, store);
+        string stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-retry-{Guid.NewGuid():N}");
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["PROXY_STAGING_PATH"] = stagingDir })
+            .Build();
+        var v = validator ?? new AllowAllRetryValidator();
+        var client = new UpstreamClient(
+            factory, tiered, audit, v,
+            new StubRetryAirGapMode(), new DriveInfoStagingDiskInfo(stagingDir),
+            StagingOptions.Resolve(config),
+            NullLogger<UpstreamClient>.Instance);
+        return (client, handler);
+    }
+
+    // ── GetOrFetchStreamAsync: transient 403, then 200 → succeeds ────────────
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_Transient403ThenSuccess_RetriesAndServes()
+    {
+        byte[] data = RandomBytes();
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(data));
+        var (client, handler) = BuildRetryClient();
+
+        // First attempt → 403 (transient). Second attempt → 200.
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.OK)
+        { Content = new ByteArrayContent(data) });
+
+        var (stream, isHit) = await client.GetOrFetchStreamAsync(
+            "blobs/retry-key", "http://upstream.test/pkg-retry.tgz", spec, "npm");
+
+        Assert.False(isHit);
+        Assert.Equal(data, await DrainAsync(stream));
+        Assert.Equal(2, handler.CallCount);
+    }
+
+    // ── GetOrFetchStreamAsync: persistent 403 → UpstreamFetchFailedException ─
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_Persistent403_ThrowsUpstreamFetchFailed()
+    {
+        var (client, handler) = BuildRetryClient();
+
+        // All three attempts return 403 — retries exhausted.
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+
+        var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(() =>
+            client.GetOrFetchStreamAsync(
+                "blobs/exhaust-key", "http://upstream.test/blocked.tgz", null, "pypi"));
+
+        Assert.True(ex.Transient);
+        Assert.Equal(403, ex.StatusCode);
+        Assert.Equal("http://upstream.test/blocked.tgz", ex.Url);
+        Assert.Equal(3, handler.CallCount);
+    }
+
+    // ── GetOrFetchStreamAsync: persistent 429 with Retry-After ──────────────
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_Persistent429_PropagatesRetryAfter()
+    {
+        var (client, handler) = BuildRetryClient();
+
+        for (int i = 0; i < 3; i++)
+        {
+            var tooMany = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+            tooMany.Headers.Add("Retry-After", "30");
+            handler.Enqueue(tooMany);
+        }
+
+        var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(() =>
+            client.GetOrFetchStreamAsync(
+                "blobs/throttle-key", "http://upstream.test/throttled.tgz", null, "nuget"));
+
+        Assert.True(ex.Transient);
+        Assert.Equal(429, ex.StatusCode);
+        Assert.Equal(TimeSpan.FromSeconds(30), ex.RetryAfter);
+    }
+
+    // ── GetOrFetchStreamAsync: genuine 404 → HttpRequestException (unchanged) ─
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_Genuine404_ThrowsHttpRequestException_NotUpstreamFetchFailed()
+    {
+        // 404 is non-transient — it must NOT be wrapped in UpstreamFetchFailedException.
+        // The controller's multi-base loop relies on HttpRequestException to fall through to
+        // the next upstream registry. Returning 404 to the client is correct.
+        var (client, handler) = BuildRetryClient();
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.NotFound));
+
+        await Assert.ThrowsAsync<HttpRequestException>(() =>
+            client.GetOrFetchStreamAsync(
+                "blobs/not-found-key", "http://upstream.test/missing.tgz", null, "npm"));
+
+        Assert.Equal(1, handler.CallCount);
+    }
+
+    // ── FetchAndCacheByUrlAsync: persistent 403 → UpstreamFetchFailedException ─
+
+    [Fact]
+    public async Task FetchAndCacheByUrlAsync_Persistent403_ThrowsUpstreamFetchFailed()
+    {
+        var (client, handler) = BuildRetryClient();
+        for (int i = 0; i < 3; i++)
+        {
+            handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+        }
+
+        var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(() =>
+            client.FetchAndCacheByUrlAsync("http://upstream.test/blocked.nupkg", null, "nuget"));
+
+        Assert.True(ex.Transient);
+        Assert.Equal(403, ex.StatusCode);
+        Assert.Equal(3, handler.CallCount);
+    }
+
+    // ── Mixed partial-failure: first upstream 403 (transient exhausted), second succeeds ─
+
+    [Fact]
+    public async Task FetchAndCacheByUrlAsync_MixedPartialFailure_FirstUpstreamExhausted_SecondSucceeds()
+    {
+        // Simulates the real multi-base controller loop: first upstream returns persistent 403
+        // (UpstreamFetchFailedException), second upstream returns 200. The exception from the
+        // first must propagate out of FetchAndCacheByUrlAsync; the controller loop catches it
+        // and the controller propagates it to the middleware (which returns 503). To test the
+        // mixed scenario at the UpstreamClient level, we assert that the first call throws and
+        // that a second independent call (simulating the next upstream) succeeds.
+        byte[] data = RandomBytes();
+        var store = new InMemoryBlobStore();
+
+        // First client: returns 3× 403
+        var (client1, handler1) = BuildRetryClient(blobs: store);
+        for (int i = 0; i < 3; i++)
+        {
+            handler1.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+        }
+
+        var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(() =>
+            client1.FetchAndCacheByUrlAsync("http://upstream-a.test/pkg.nupkg", null, "nuget"));
+        Assert.True(ex.Transient);
+
+        // Second client (different upstream base): returns 200 — succeeds.
+        var (client2, handler2) = BuildRetryClient(blobs: store);
+        handler2.Enqueue(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(data) });
+
+        var result2 = await client2.FetchAndCacheByUrlAsync("http://upstream-b.test/pkg.nupkg", null, "nuget");
+        Assert.NotNull(result2);
+        Assert.Equal(1, handler2.CallCount);
+    }
+}
+
+/// <summary>
+/// Unit tests for <see cref="UpstreamFetchFailedExceptionMiddleware"/> mapping:
+/// transient exhaustion → 503 with Retry-After; non-transient → 502.
+/// </summary>
+[Trait("Category", "Unit")]
+public sealed class UpstreamFetchFailedExceptionMiddlewareTests
+{
+    private static DefaultHttpContext BuildContext()
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Response.Body = new MemoryStream();
+        return ctx;
+    }
+
+    [Fact]
+    public async Task Transient_MapsTo503_WithRetryAfterHeader()
+    {
+        var middleware = new UpstreamFetchFailedExceptionMiddleware(
+            _ => throw new UpstreamFetchFailedException
+            { Url = "http://cdn.example.com/pkg.tgz", StatusCode = 403, Transient = true, RetryAfter = TimeSpan.FromSeconds(10) },
+            NullLogger<UpstreamFetchFailedExceptionMiddleware>.Instance);
+
+        var ctx = BuildContext();
+        await middleware.InvokeAsync(ctx);
+
+        Assert.Equal(503, ctx.Response.StatusCode);
+        Assert.Equal("10", ctx.Response.Headers.RetryAfter.ToString());
+
+        ctx.Response.Body.Seek(0, SeekOrigin.Begin);
+        string body = await new StreamReader(ctx.Response.Body).ReadToEndAsync();
+        Assert.Contains("Upstream temporarily unavailable", body);
+        Assert.DoesNotContain("cdn.example.com", body);
+    }
+
+    [Fact]
+    public async Task Transient_NoRetryAfterOnException_UsesDefaultFallback()
+    {
+        var middleware = new UpstreamFetchFailedExceptionMiddleware(
+            _ => throw new UpstreamFetchFailedException
+            { Url = "http://upstream.test/pkg.tgz", StatusCode = 503, Transient = true },
+            NullLogger<UpstreamFetchFailedExceptionMiddleware>.Instance);
+
+        var ctx = BuildContext();
+        await middleware.InvokeAsync(ctx);
+
+        Assert.Equal(503, ctx.Response.StatusCode);
+        // Default fallback Retry-After must be a non-empty positive hint.
+        Assert.True(int.TryParse(ctx.Response.Headers.RetryAfter.ToString(), out int retryAfterSecs)
+                    && retryAfterSecs > 0);
+    }
+
+    [Fact]
+    public async Task NonTransient_MapsTo502_NoRetryAfter()
+    {
+        var middleware = new UpstreamFetchFailedExceptionMiddleware(
+            _ => throw new UpstreamFetchFailedException
+            { Url = "http://upstream.test/pkg.tgz", StatusCode = 400, Transient = false },
+            NullLogger<UpstreamFetchFailedExceptionMiddleware>.Instance);
+
+        var ctx = BuildContext();
+        await middleware.InvokeAsync(ctx);
+
+        Assert.Equal(502, ctx.Response.StatusCode);
+        Assert.True(string.IsNullOrEmpty(ctx.Response.Headers.RetryAfter.ToString()));
+
+        ctx.Response.Body.Seek(0, SeekOrigin.Begin);
+        string body = await new StreamReader(ctx.Response.Body).ReadToEndAsync();
+        Assert.Contains("Upstream fetch failed", body);
+    }
+
+    [Fact]
+    public async Task NoException_PassesThrough()
+    {
+        bool nextCalled = false;
+        var middleware = new UpstreamFetchFailedExceptionMiddleware(
+            _ => { nextCalled = true; return Task.CompletedTask; },
+            NullLogger<UpstreamFetchFailedExceptionMiddleware>.Instance);
+
+        var ctx = BuildContext();
+        await middleware.InvokeAsync(ctx);
+
+        Assert.True(nextCalled);
+        Assert.Equal(200, ctx.Response.StatusCode);
     }
 }
 
@@ -516,4 +805,51 @@ file sealed class NullMetadataStore : IMetadataStore
         cmd.ExecuteNonQuery();
         return Task.FromResult<System.Data.Common.DbConnection>(conn);
     }
+}
+
+/// <summary>
+/// HttpMessageHandler that dequeues pre-loaded responses in order, one per call.
+/// Used for retry tests where the first attempt fails and a later attempt succeeds.
+/// </summary>
+internal sealed class SequencedHttpHandler : HttpMessageHandler
+{
+    private readonly Queue<HttpResponseMessage> _responses = new();
+    public int CallCount { get; private set; }
+
+    public void Enqueue(HttpResponseMessage response) => _responses.Enqueue(response);
+
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        CallCount++;
+        return _responses.Count > 0
+            ? Task.FromResult(_responses.Dequeue())
+            : Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError));
+    }
+}
+
+/// <summary>IHttpClientFactory that always returns a client backed by SequencedHttpHandler.</summary>
+internal sealed class FakeSequencedHttpClientFactory : IHttpClientFactory
+{
+    private readonly HttpClient _client;
+
+    public FakeSequencedHttpClientFactory(SequencedHttpHandler handler)
+        => _client = new HttpClient(handler);
+
+    public HttpClient CreateClient(string name) => _client;
+}
+
+/// <summary>Allows all URLs — used by retry test helpers.</summary>
+file sealed class AllowAllRetryValidator : IUpstreamUrlValidator
+{
+    public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
+        => Task.FromResult(true);
+}
+
+/// <summary>Not air-gapped — used by retry test helpers.</summary>
+file sealed class StubRetryAirGapMode : IAirGapMode
+{
+    public bool IsEnabled => false;
+    public IReadOnlySet<string> DisabledJobs => new HashSet<string>();
+    public bool IsJobDisabled(string jobName) => false;
 }

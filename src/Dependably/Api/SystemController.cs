@@ -27,6 +27,15 @@ namespace Dependably.Api;
 [Route("api/v1/system")]
 public sealed class SystemController : ControllerBase
 {
+    // Maximum page size for system admin list responses.
+    private const int MaxSystemAdminPageSize = 200;
+
+    // Random byte count for generated admin passwords (produces a base64 string ≈ 22 chars).
+    private const int GeneratedPasswordByteLength = 16;
+
+    // Number of recent diagnostic events surfaced on the diagnostics endpoint.
+    private const int DiagnosticsRecentEventCount = 50;
+
     private readonly OrgRepository _orgs;
     private readonly SystemAdminRepository _systemAdmins;
     private readonly IMetadataStore _db;
@@ -34,6 +43,7 @@ public sealed class SystemController : ControllerBase
     private readonly ProblemResults _problems;
     private readonly IConfiguration _config;
     private readonly Dependably.Security.PasswordPolicy _passwordPolicy;
+    private readonly TimeProvider _time;
     private readonly ITenantSlugCacheInvalidator? _tenantCache;
 
     // Static vocabulary surfaced on the background-jobs facets endpoint. Mirrors the
@@ -41,7 +51,9 @@ public sealed class SystemController : ControllerBase
     private static readonly string[] BackgroundJobOutcomes = ["success", "server_error", "cancelled"];
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
-        Justification = "Controller aggregates 8 independent DI-resolved services (3 repos, metadata store, problem-results helper, configuration, password policy, optional cache invalidator). Bundling into a wrapper record would obscure the DI graph and force every test setup to materialise the wrapper for unrelated callers.")]
+        Justification = "Controller aggregates 9 independent DI-resolved services (3 repos, metadata store, problem-results helper, " +
+            "configuration, password policy, clock, optional cache invalidator). Bundling into a wrapper record would obscure the DI " +
+            "graph and force every test setup to materialise the wrapper for unrelated callers.")]
     public SystemController(
         OrgRepository orgs,
         SystemAdminRepository systemAdmins,
@@ -50,6 +62,7 @@ public sealed class SystemController : ControllerBase
         ProblemResults problems,
         IConfiguration config,
         Dependably.Security.PasswordPolicy passwordPolicy,
+        TimeProvider time,
         ITenantSlugCacheInvalidator? tenantCache = null)
     {
         _orgs = orgs;
@@ -59,6 +72,7 @@ public sealed class SystemController : ControllerBase
         _problems = problems;
         _config = config;
         _passwordPolicy = passwordPolicy;
+        _time = time;
         _tenantCache = tenantCache;
     }
 
@@ -67,7 +81,7 @@ public sealed class SystemController : ControllerBase
     public async Task<IActionResult> ListTenants(
         [FromQuery] int limit = 50, [FromQuery] int page = 1, CancellationToken ct = default)
     {
-        limit = Math.Clamp(limit, 1, 200);
+        limit = Math.Clamp(limit, 1, MaxSystemAdminPageSize);
         page = Math.Max(page, 1);
         int offset = (page - 1) * limit;
         var (items, total) = await _orgs.ListOrgsAsync(limit, offset, ct: ct);
@@ -93,7 +107,7 @@ public sealed class SystemController : ControllerBase
             total,
             limit,
             offset,
-            aggregatesComputedAt = DateTimeOffset.UtcNow,
+            aggregatesComputedAt = _time.GetUtcNow(),
         });
     }
 
@@ -149,7 +163,7 @@ public sealed class SystemController : ControllerBase
                 await Dependably.Infrastructure.UpstreamRegistrySeeder.SeedForOrgAsync(conn, orgId, _config, ct: ct);
 
                 ownerPassword = Convert.ToBase64String(
-                    System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+                    System.Security.Cryptography.RandomNumberGenerator.GetBytes(GeneratedPasswordByteLength));
                 string hash = BCrypt.Net.BCrypt.HashPassword(ownerPassword, workFactor: 12);
                 string userId = Guid.NewGuid().ToString("N");
 
@@ -375,7 +389,7 @@ public sealed class SystemController : ControllerBase
             return _problems.ValidationErrorAction("query", "Provide at least one of: email, tenantSlug.");
         }
 
-        limit = Math.Clamp(limit, 1, 200);
+        limit = Math.Clamp(limit, 1, MaxSystemAdminPageSize);
         var items = await _orgs.LookupUsersAsync(
             string.IsNullOrWhiteSpace(email) ? null : email,
             string.IsNullOrWhiteSpace(tenantSlug) ? null : tenantSlug,
@@ -396,7 +410,7 @@ public sealed class SystemController : ControllerBase
         [FromQuery] string? sortBy = null, [FromQuery] string? sortDir = null,
         CancellationToken ct = default)
     {
-        limit = Math.Clamp(limit, 1, 200);
+        limit = Math.Clamp(limit, 1, MaxSystemAdminPageSize);
         page = Math.Max(page, 1);
         int offset = (page - 1) * limit;
         var (items, total) = await _audit.ListSystemAuditAsync(
@@ -507,18 +521,6 @@ public sealed class SystemController : ControllerBase
         return Ok(settings);
     }
 
-    private static readonly HashSet<string> AllowedInstanceSettingKeys = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "max_upload_bytes",
-        "max_upload_bytes_pypi",
-        "max_upload_bytes_npm",
-        "max_upload_bytes_nuget",
-        "gc_schedule",
-        "siem_max_lookback_days",
-        "default_storage_quota_bytes",
-        "max_active_tokens_per_tenant",
-    };
-
     /// <summary>PUT /api/v1/system/settings — update instance-wide settings.</summary>
     [HttpPut("settings")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
@@ -527,7 +529,7 @@ public sealed class SystemController : ControllerBase
     {
         foreach (string key in settings.Keys)
         {
-            if (!AllowedInstanceSettingKeys.Contains(key))
+            if (!InstanceSettingDefaults.AllowedKeys.Contains(key))
             {
                 return _problems.ValidationErrorAction("settings", $"Unknown setting key: {key}");
             }
@@ -743,9 +745,12 @@ public sealed class SystemController : ControllerBase
     [HttpGet("metrics-access")]
     public async Task<IActionResult> GetMetricsAccess(
         [FromServices] Dependably.Security.MetricsAccessConfig access,
+        [FromServices] Dependably.Security.ScrapeDiagnostics diagnostics,
         CancellationToken ct)
     {
         var resolved = await access.ResolveAsync(ct);
+        var denied = diagnostics.RecentDeniedIps(10)
+            .Select(e => new { ip = e.Ip, lastSeen = e.LastSeen });
         return Ok(new
         {
             enabled = resolved.Enabled,
@@ -754,6 +759,7 @@ public sealed class SystemController : ControllerBase
             allowedIps = resolved.AllowedRaw,
             allowlistSource = resolved.AllowlistSource.ToString().ToLowerInvariant(),
             allowlistLockedByEnv = resolved.AllowlistLockedByEnv,
+            recentDeniedIps = denied,
         });
     }
 
@@ -779,21 +785,21 @@ public sealed class SystemController : ControllerBase
 
         if (req.Enabled.HasValue && resolved.EnabledLockedByEnv)
         {
-            return EnvLockedConflict("metrics_enabled", "METRICS_ENABLED");
+            return Conflict(Dependably.Security.MetricsAccessEditing.EnvLockedConflictBody("metrics_enabled", "METRICS_ENABLED"));
         }
 
         if (req.AllowedIps is not null && resolved.AllowlistLockedByEnv)
         {
-            return EnvLockedConflict("metrics_allowed_ips", "METRICS_ALLOWED_IPS");
+            return Conflict(Dependably.Security.MetricsAccessEditing.EnvLockedConflictBody("metrics_allowed_ips", "METRICS_ALLOWED_IPS"));
         }
 
         var warnings = new List<string>();
         if (req.AllowedIps is not null)
         {
-            var validationError = ValidateAllowedIps(req.AllowedIps, warnings);
-            if (validationError is not null)
+            string? invalid = Dependably.Security.MetricsAccessEditing.FindInvalidEntry(req.AllowedIps, warnings);
+            if (invalid is not null)
             {
-                return validationError;
+                return _problems.ValidationErrorAction("allowedIps", $"\"{invalid}\" is not a valid IP or CIDR.");
             }
         }
 
@@ -827,35 +833,6 @@ public sealed class SystemController : ControllerBase
         return Ok(new { warnings });
     }
 
-    private ConflictObjectResult EnvLockedConflict(string field, string envVar) =>
-        Conflict(new
-        {
-            type = "/problems/env-var-locked",
-            title = $"{field} is locked by env var",
-            detail = $"{envVar} is set; unset the env var to manage via UI.",
-        });
-
-    // Strict CIDR validation — malformed entries reject the whole request so
-    // the DB never contains junk that MetricsAccessConfig has to silently drop.
-    private IActionResult? ValidateAllowedIps(IReadOnlyList<string> allowed, List<string> warnings)
-    {
-        foreach (string raw in allowed)
-        {
-            if (!NetTools.IPAddressRange.TryParse(raw, out _))
-            {
-                return _problems.ValidationErrorAction(
-                    "allowedIps",
-                    $"\"{raw}\" is not a valid IP or CIDR.");
-            }
-
-            if (raw is "0.0.0.0/0" or "::/0")
-            {
-                warnings.Add($"Allowlist entry \"{raw}\" matches all addresses — this disables the IP gate entirely.");
-            }
-        }
-        return null;
-    }
-
     /// <summary>
     /// GET /api/v1/system/observability — Tier 1 in-app operator view.
     /// Reads in-memory snapshot + scrape diagnostics + metrics-access
@@ -872,7 +849,7 @@ public sealed class SystemController : ControllerBase
         var snap = snapshots.Capture();
         var (allowedTotal, deniedIpTotal, deniedDisabledTotal) = diagnostics.LifetimeCounts();
         var resolved = await access.ResolveAsync(ct);
-        var now = DateTimeOffset.UtcNow;
+        var now = _time.GetUtcNow();
 
         return Ok(new
         {
@@ -898,7 +875,7 @@ public sealed class SystemController : ControllerBase
             },
             scrapeDiagnostics = new
             {
-                recent = diagnostics.Recent(50).Select(e => new
+                recent = diagnostics.Recent(DiagnosticsRecentEventCount).Select(e => new
                 {
                     timestamp = e.Timestamp,
                     remoteIp = e.RemoteIp,
@@ -989,7 +966,7 @@ public sealed class SystemController : ControllerBase
             return _problems.ConflictAction("A system_admin with that email already exists.", reason: "duplicate_email");
         }
 
-        string rawPassword = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        string rawPassword = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(GeneratedPasswordByteLength));
         string hash = BCrypt.Net.BCrypt.HashPassword(rawPassword, workFactor: 12);
         string id = await _systemAdmins.CreateAsync(req.Email, hash, mustChangePassword: true, ct);
 
@@ -1007,7 +984,7 @@ public sealed class SystemController : ControllerBase
             email = req.Email,
             accountStatus = "active",
             temporaryPassword = rawPassword,
-            issuedAt = DateTimeOffset.UtcNow,
+            issuedAt = _time.GetUtcNow(),
             mustChangePassword = true,
         });
     }
@@ -1089,9 +1066,9 @@ public sealed class SystemController : ControllerBase
             return NotFound();
         }
 
-        string rawPassword = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        string rawPassword = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(GeneratedPasswordByteLength));
         string hash = BCrypt.Net.BCrypt.HashPassword(rawPassword, workFactor: 12);
-        var issuedAt = DateTimeOffset.UtcNow;
+        var issuedAt = _time.GetUtcNow();
         bool ok = await _systemAdmins.ResetPasswordAsync(id, hash, issuedAt, ct);
         if (!ok)
         {

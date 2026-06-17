@@ -29,7 +29,7 @@ public sealed class TokenAuthenticationTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await new SchemaInitializer(_db).InitializeAsync();
-        _tokens = new TokenRepository(_db);
+        _tokens = new TokenRepository(_db, TimeProvider.System);
 
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");

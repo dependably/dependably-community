@@ -1,4 +1,5 @@
 using Dependably.Security;
+using Dependably.Tests.Infrastructure;
 using Serilog.Core;
 using Serilog.Events;
 using Serilog.Parsing;
@@ -20,7 +21,7 @@ public sealed class SensitivePropertyEnricherTests
         var template = new MessageTemplateParser().Parse("test");
         var props = properties.Select(kv =>
             new LogEventProperty(kv.Key, new ScalarValue(kv.Value))).ToArray();
-        return new LogEvent(DateTimeOffset.UtcNow, LogEventLevel.Information, exception: null,
+        return new LogEvent(TestTime.KnownNow, LogEventLevel.Information, exception: null,
             template, props);
     }
 

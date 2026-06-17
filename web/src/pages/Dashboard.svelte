@@ -2,7 +2,7 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
-  import { currentOrg } from '../lib/store.js'
+  import { currentOrg, navigate } from '../lib/store.js'
   import { formatBytes } from '../lib/format.js'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
 
@@ -64,6 +64,23 @@
     if (!stats) return 0
     return SEVERITIES.reduce((s, sev) => s + vulnCount(eco, sev), 0)
   }
+
+  // Ecosystems worth a table row: any with packages, or with vulns even at 0 packages (never
+  // hide a vulnerability). Keeps the table compact as the ecosystem vocabulary grows.
+  $: visibleEcos = stats ? ECOSYSTEMS.filter(e => ecoCount(e) > 0 || totalVulns(e) > 0) : []
+
+  // ── Supply-chain metric cards ────────────────────────────────────────────────
+
+  $: blockedByGate = stats?.blockedByGate30d ?? []
+  $: maliciousBlocked = blockedByGate.find(g => g.gate === 'malicious')?.count ?? 0
+  // Per-gate tooltip for the Blocked-pulls card, e.g. "malicious: 2 · KEV: 1".
+  $: blockedBreakdown = blockedByGate
+    .map(g => `${$t('dashboard.gates.' + g.gate)}: ${g.count}`)
+    .join(' · ')
+  $: quarantinePending = stats?.quarantinePending ?? 0
+  $: hostedPackages = stats?.hostedPackages ?? 0
+  $: proxiedPackages = stats?.proxiedPackages ?? 0
+  $: storageQuotaBytes = stats?.storageQuotaBytes ?? null
 
   // ── Donut chart ──────────────────────────────────────────────────────────────
 
@@ -152,7 +169,13 @@
     <h1 class="page-title">{$t('dashboard.title')}</h1>
 
     {#if stats}
-      <div class="ribbon" class:hot={vulnsHot} role="status" aria-live="polite">
+      <button
+        type="button"
+        class="ribbon"
+        class:hot={vulnsHot}
+        title={$t('dashboard.newVulnsViewAll')}
+        on:click={() => navigate('vulnerabilities', { sort: 'published', dir: 'desc' })}
+      >
         <span class="dot" aria-hidden="true"></span>
         <span class="label">
           {vulnsHot ? $t('dashboard.newVulnsTitle') : $t('dashboard.noNewVulns')}
@@ -162,7 +185,7 @@
           <span class="split"><b>{newVulns7d}</b>{$t('dashboard.window7d')}</span>
           <span class="split"><b>{newVulns30d}</b>{$t('dashboard.window30d')}</span>
         </span>
-      </div>
+      </button>
     {/if}
   </div>
 
@@ -193,10 +216,16 @@
       <div class="stat-card">
         <div class="eyebrow">{$t('dashboard.totalPackages')}</div>
         <div class="stat-value">{totalPackages().toLocaleString()}</div>
+        {#if hostedPackages > 0 || proxiedPackages > 0}
+          <div class="stat-sub">{$t('dashboard.hostedProxied', { values: { hosted: hostedPackages.toLocaleString(), proxied: proxiedPackages.toLocaleString() } })}</div>
+        {/if}
       </div>
       <div class="stat-card">
         <div class="eyebrow">{$t('dashboard.totalDisk')}</div>
         <div class="stat-value">{$formatBytes(stats.totalDiskBytes)}</div>
+        {#if storageQuotaBytes}
+          <div class="stat-sub">{$t('dashboard.quotaUsage', { values: { total: $formatBytes(storageQuotaBytes) } })}</div>
+        {/if}
       </div>
       <div class="stat-card">
         <div class="eyebrow">{$t('dashboard.activeUsers')}</div>
@@ -206,10 +235,23 @@
         <div class="eyebrow">{$t('dashboard.totalDownloads')}</div>
         <div class="stat-value">{(stats.totalDownloads30d ?? 0).toLocaleString()}</div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card" title={blockedBreakdown}>
         <div class="eyebrow">{$t('dashboard.blockedPulls')}</div>
-        <div class="stat-value" class:warn={stats.blockedPulls30d > 0}>{stats.blockedPulls30d ?? 0}</div>
+        <div class="stat-value" class:warn={stats.blockedPulls30d > 0}>{(stats.blockedPulls30d ?? 0).toLocaleString()}</div>
       </div>
+      <div class="stat-card">
+        <div class="eyebrow">{$t('dashboard.blockedMalicious')}</div>
+        <div class="stat-value" class:danger={maliciousBlocked > 0}>{maliciousBlocked.toLocaleString()}</div>
+      </div>
+      <button
+        class="stat-card stat-link"
+        class:hot={quarantinePending > 0}
+        on:click={() => navigate('quarantine')}
+        aria-label={$t('dashboard.quarantinePending')}
+      >
+        <div class="eyebrow">{$t('dashboard.quarantinePending')}</div>
+        <div class="stat-value" class:warn={quarantinePending > 0}>{quarantinePending.toLocaleString()}</div>
+      </button>
     </div>
 
     <!-- ── Package breakdown: pie + table ────────────────────────────────────── -->
@@ -259,7 +301,7 @@
               </tr>
             </thead>
             <tbody>
-              {#each ECOSYSTEMS as eco (eco)}
+              {#each visibleEcos as eco (eco)}
                 {@const total = totalVulns(eco)}
                 <tr>
                   <td>
@@ -281,6 +323,10 @@
                     </td>
                   {/each}
                   <td class="text-right total-cell">{total > 0 ? total : '—'}</td>
+                </tr>
+              {:else}
+                <tr>
+                  <td colspan="9" class="eco-empty">{$t('dashboard.donutEmpty')}</td>
                 </tr>
               {/each}
             </tbody>
@@ -336,6 +382,35 @@
 
   /* Stat grid bottom margin */
   .stat-grid { margin-bottom: 32px; }
+
+  /* Secondary line under a stat value (hosted/proxied split, quota, gate breakdown). */
+  .stat-sub {
+    font-size: 12px;
+    color: var(--text2);
+    line-height: 1.3;
+  }
+
+  /* Quarantine card doubles as a link to the review queue. Reset the button chrome so it
+     reads as a card, not a control (global button{min-height:36px} would otherwise inflate it). */
+  .stat-link {
+    text-align: left;
+    align-items: flex-start;
+    font: inherit;
+    min-height: 0;
+    cursor: pointer;
+    transition: border-color 0.12s, background 0.12s;
+  }
+  .stat-link:hover { border-color: var(--accent); }
+  .stat-link.hot {
+    border-color: var(--warning-border);
+    background: var(--warning-bg);
+  }
+
+  .eco-empty {
+    text-align: center;
+    color: var(--text2);
+    padding: 16px;
+  }
 
   /* Sections */
   .section {
@@ -405,6 +480,8 @@
   .slice-maven { fill: var(--eco-maven); }
   .slice-rpm   { fill: var(--eco-rpm); }
   .slice-oci   { fill: var(--eco-oci); }
+  .slice-golang { fill: var(--eco-golang); }
+  .slice-cargo { fill: var(--eco-cargo); }
 
   .zero {
     color: var(--text2);

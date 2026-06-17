@@ -153,7 +153,7 @@ Snyk Code (SAST) runs against the source. Most of its findings on this repo are 
 
 The catch: inline `deepcode ignore` markers are honoured by Snyk's **IDE plugin and merge-request integration**, but **not** by the `snyk code test` CLI — and therefore not by the MCP `snyk_code_scan` or any CI invocation. Snyk Code also has **no per-finding `.snyk` ignore** (`.snyk` only excludes whole files via `exclude.code`, which would blind production controllers to real future bugs). So the CLI re-reports every false positive, drowning genuinely new findings.
 
-To keep the CLI/CI signal clean **without weakening detection**, [`ci/snyk-code-scan.sh`](ci/snyk-code-scan.sh) runs the scan and diffs it against [`ci/snyk-code-baseline.json`](ci/snyk-code-baseline.json) — a committed set of content **fingerprints** for the known false positives. It fails only on findings **not** on the baseline; a new finding in any file (including a real bug in a file that also hosts a baselined FP) still surfaces.
+To keep the CLI/CI signal clean **without weakening detection**, [`ci/snyk-code-scan.sh`](ci/snyk-code-scan.sh) runs the scan and diffs it against [`ci/snyk-code-baseline.json`](ci/snyk-code-baseline.json) — a committed set of **identities** for the known false positives, each keyed on `rule | file | <Snyk path-based identity fingerprint>`. That identity (Snyk's `fingerprints["1"]`) is **line-independent**, so editing a file that hosts a baselined FP no longer drifts the baseline — unlike the primary content fingerprint, which folds in surrounding lines and shifts on any cosmetic move. It fails only on findings **not** on the baseline; a new finding in any file (including a real bug in a file that also hosts a baselined FP) still surfaces. The one accepted trade-off: a second finding of the same rule in the same file with an identical data-flow shape shares one identity, so an extra instance of an already-baselined benign FP class can be absorbed silently.
 
 ```bash
 ci/snyk-code-scan.sh            # exit 1 if any finding is not on the baseline
@@ -260,7 +260,7 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 | `DEFAULT_ORG_SLUG` | `default` | Slug of the org created on first boot |
 | `DEPLOYMENT_MODE` | `single` | Tenancy mode: `single` or `multi`. `multi` requires a usable `APEX_HOST` (or a non-localhost `BASE_URL`). `bound` pins every request to `BOUND_TENANT_SLUG` regardless of host (single-tenant intercept mode). |
 | `BOUND_TENANT_SLUG` | — | Required when `DEPLOYMENT_MODE=bound`. Every request resolves to this tenant slug; the request host is ignored. |
-| `APEX_HOST` | — | Apex domain for subdomain-routed tenancy when `DEPLOYMENT_MODE=multi` |
+| `APEX_HOST` | — | Apex domain for subdomain-routed tenancy when `DEPLOYMENT_MODE=multi`. Also gates host-header filtering: when set (or when `BASE_URL` contains a non-localhost host), the `AllowedHosts` allowlist is derived at startup — unknown `Host` headers are rejected before tenant resolution. In `DEPLOYMENT_MODE=single`, only the apex host and localhost are permitted. In `DEPLOYMENT_MODE=multi`, the apex host, `*.apex` (all tenant subdomains), and localhost are permitted. When unset and `BASE_URL` is localhost (local/dev), filtering is permissive (`AllowedHosts=*`) and a startup warning is logged. |
 | `RESERVED_SUBDOMAINS` | — | Comma-separated slugs to add to the built-in reserved list (e.g. `api,status,docs`). Prevents those subdomains from being claimed as tenant slugs in multi-tenant mode. |
 | `DEPENDABLY_DEPLOYMENT_MODE` | `standalone` | Set to `ha` to require Redis and enable distributed locking |
 | `DEPENDABLY_INSTANCE_ROLE` | `single` | Attached to OTel resource attributes as `dependably.instance.role`. Use to distinguish control-plane vs data-plane replicas in distributed traces. |
@@ -270,7 +270,7 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 | `REDIS_SSL` | `false` | Set `true` to require TLS for the Redis connection. |
 | `REDIS_DATABASE` | `0` | Redis logical database index. |
 | `REDIS_KEY_PREFIX` | `dependably:` | Prefix for all Redis keys written by Dependably. Change when sharing a Redis instance with other applications. |
-| `TRUSTED_PROXIES` | — (trust all forwarders) | Comma-separated IPs/CIDRs allowed to set `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` (e.g. `10.0.0.0/8,172.18.0.1`). When unset, all three forwarded headers are accepted from any client and a startup warning is logged. **Consequences of leaving this unset in production:** the `/metrics` and `/version` IP allowlist can be bypassed by forging `X-Forwarded-For`; rate-limit buckets are keyed on the spoofable client IP so per-IP throttling is ineffective; audit `source_ip` records the attacker-supplied value; in `DEPLOYMENT_MODE=multi`, `X-Forwarded-Host` can be forged to spoof tenant resolution. Set this to your reverse proxy's address(es) in any internet-facing deployment. In production, also pin `AllowedHosts` in `appsettings.json` (or via `ASPNETCORE_ALLOWEDHOSTS`) to your apex domain rather than leaving it as `*` to prevent Host header injection. |
+| `TRUSTED_PROXIES` | — (fail-closed: forwarded headers ignored) | Comma-separated IPs/CIDRs whose `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` headers are trusted (e.g. `10.0.0.0/8,172.18.0.1`). **When unset, all three forwarded headers are ignored** (fail-closed): `Connection.RemoteIpAddress`, `Request.Host`, and `Request.Scheme` reflect the real socket peer. A startup warning is logged. Set this to your reverse proxy's address(es) in any deployment that sits behind a TLS-terminating or IP-forwarding proxy — without it, `X-Forwarded-*` from the proxy are discarded, so `/metrics`/`/version` see the proxy's socket address, HSTS is not emitted, and scheme-dependent redirects may break. |
 | `HOST_ROUTING` | — | Comma-separated `host=ecosystem` pairs that map incoming `Host` headers to an ecosystem prefix (e.g. `registry.npmjs.org=npm,pypi.org=pypi`). When set, requests whose `Host` matches an entry are treated as if the ecosystem path prefix were present, enabling clients that hardcode ecosystem registry hostnames to work without path rewriting. |
 | `TENANT_HEADER_NAME` | `X-Dependably-Tenant` | Header name used by `HeaderTenantResolver` to identify the tenant in reverse-proxy deployments that inject a trusted tenant slug. |
 | `CLAIM_ENFORCEMENT` | `off` | Set `on` to require packages to carry an upstream-provenance claim before publish is accepted. `off` (default) disables the gate; `on` enforces it on every push handler. |
@@ -304,8 +304,8 @@ Storage has two tiers: **cache** (proxy artefacts, eviction-friendly) and **regi
 | `AZURE_CONTAINER` | — | Azure blob container name (required when `STORAGE_BACKEND=azure`) |
 | `PROXY_STAGING_PATH` | OS temp dir | Hash-and-stage directory for the proxy-fetch MISS path. Container deployments expecting large artefacts should set this to a disk-backed volume (e.g. `/data/staging`) — `/tmp` is often tmpfs (RAM-backed), which defeats the memory-bounding goal. |
 | `STAGING_DISK_WARN_THRESHOLD_PERCENT` | `10` | Serilog `Warning` is emitted when available space on the staging volume falls below this percentage of total volume size. Set `0` to disable the warning. |
-| `STAGING_DISK_FLOOR_BYTES` | `536870912` (512 MiB) | Hard floor: proxy fetches are rejected with 507 Insufficient Storage when available staging disk space falls below this value. When `Content-Length` is present the effective floor is `max(STAGING_DISK_FLOOR_BYTES, 2 × Content-Length)`. Set to `0` to disable (not recommended). |
-| `DOTNET_GCHeapHardLimit` | — | Hex byte count; caps the .NET GC heap to protect the host from GC death-spiral on memory-constrained hosts (Raspberry Pi, small containers). Set to ~75 % of the container `mem_limit`, e.g. `0xC0000000` (3 GiB) for a 4 GiB host. This is a runtime hint — no code reads it; it is consumed by the .NET runtime at process start. |
+| `STAGING_DISK_FLOOR_BYTES` | `536870912` (512 MiB) | Hard floor: proxy fetches are rejected with 507 Insufficient Storage when available staging disk space falls below this value. When `Content-Length` is present the effective floor is `max(STAGING_DISK_FLOOR_BYTES, 2 × Content-Length)`. An explicit `0` is a deliberate opt-out that disables the guardrail entirely — both the absolute floor and the dynamic `2 × Content-Length` floor are skipped, and a startup `Warning` is logged (not recommended). A negative or unparseable value falls back to the default rather than disabling. |
+| `DOTNET_GCHeapHardLimit` | — | Hex byte count; caps the .NET GC heap to protect the host from OOM-kill on memory-constrained hosts (Raspberry Pi, small ARM64 containers). Set to ~75 % of the container `mem_limit`; for a 1 GiB host use `0x30000000` (768 MiB), for 2 GiB use `0x60000000` (1.5 GiB), for 4 GiB use `0xC0000000` (3 GiB). See the `docker-compose.yml` environment block for a ready-to-uncomment example. This is a runtime hint — no code reads it; it is consumed by the .NET runtime before the process starts. |
 | `CACHE_EVICT_SCHEDULE` | `0 * * * *` | Cron schedule (standard 5-field) for the cache eviction pass. Defaults to hourly. The job is a no-op when none of `CACHE_MAX_AGE_DAYS`, `CACHE_MAX_SIZE_BYTES`, or `CACHE_MAX_ARTIFACTS` are set. |
 | `CACHE_MAX_AGE_DAYS` | — (no limit) | Evict proxy-cache artefacts not accessed within this many days. Unset means no age-based eviction. |
 | `CACHE_MAX_SIZE_BYTES` | — (no limit) | Evict oldest-accessed proxy-cache artefacts until total cache size is at or below this byte count. |
@@ -331,8 +331,11 @@ Storage has two tiers: **cache** (proxy artefacts, eviction-friendly) and **regi
 | `Maven__Upstream` | `https://repo1.maven.org/maven2` | Upstream Maven registry (Maven Central) for proxy cache |
 | `Maven__NegativeCacheTtl` | `01:00:00` | TTL (`TimeSpan` format) for negative (not-found) cache entries in the Maven proxy |
 | `Maven__VerifyWithUpstreamSha256` | `true` | Verify Maven artifacts against the upstream-published `.sha256` sidecar |
+| `Go__Upstream` | `https://proxy.golang.org` | Upstream Go module proxy (GOPROXY) seeded for new orgs. Override to point at a corporate mirror or GOPROXY-compatible proxy (e.g. `https://goproxy.cn`). Per-org registries are managed from the web UI; this value seeds the initial row. |
+| `Go__SumDb` | `sum.golang.org` | The single Go checksum database (sumdb) proxied at `/go/sumdb/{name}/…` per the GOPROXY spec. A request naming any other sumdb returns 404 so the go client falls back to verifying directly; only this configured host is fetched (never a client-chosen host). Accepts a bare host or a full URL. To consume private modules whose checksums are not in the public sumdb, clients still set `GOPRIVATE` (or `GONOSUMDB`/`GONOSUMCHECK`) for those module prefixes so the go toolchain skips checksum-database verification for them. |
+| `Cargo__Upstream` | `https://index.crates.io` | Upstream Cargo sparse registry index seeded for new orgs. Override to point at a mirror (the value must be a sparse index base URL, not the crates.io git index). Per-org registries are managed from the web UI; this value seeds the initial row. |
 | `Rpm__Upstream` | — (no default URL) | Upstream RPM repo base URL. Proxy passthrough is enabled by default per-org (`ProxyPassthroughEnabled`), like every ecosystem — RPM is not disabled by default. It just has **no built-in default upstream** (RPM repos are distro/release-specific), so set this to give RPM a fetch target. |
-| `Rpm__UpstreamMode` | `passthrough` | `passthrough` forwards upstream repodata verbatim and refuses hosted publish (a local package would shadow upstream); `merged` serves a combined `repomd.xml`/`primary.xml.gz` (local ∪ upstream, local shadows on NEVRA collision) and allows hosted publish alongside proxying. |
+| `Rpm__UpstreamMode` | `passthrough` | `passthrough` forwards upstream repodata verbatim and refuses hosted publish (a local package would shadow upstream); `merged` serves a combined `repomd.xml`/`primary.xml.gz` (local ∪ upstream, local shadows on NEVRA collision) and allows hosted publish alongside proxying. **Group (comps) and module (modulemd) metadata limitation**: Dependably does not generate comps or modulemd documents for locally published RPMs — group definitions and module streams are authored independently of packages. In merged mode, upstream group/module entries with content-addressed (hash-prefixed) hrefs are forwarded verbatim; plain-named entries (e.g. `comps.xml.gz` from classic createrepo) are dropped from the merged repomd so no unreachable href is advertised. In local/hosted-only mode, `comps.xml.gz`, `modules.yaml`, and similar requests return 404. `dnf install` works for all published RPMs; `dnf group install` and modular stream installs work only for packages that have definitions in the upstream repo. |
 | `Rpm__GpgKey` | — (verification off) | Operator-pinned trust anchor for the RPM proxy: an inline ASCII-armored OpenPGP public key block, or a file path / `file:` URL the operator trusts out of band. When set, the proxy verifies `repomd.xml`'s detached signature (`repomd.xml.asc`) before trusting upstream metadata; on failure it refuses to resolve (fail closed). When unset, verification is skipped and a startup warning is logged. The anchor must be operator-provided — the upstream-fetched GPG key is not used as the trust root (circular against a MITM). |
 | `Rpm__VerifyRepomdSignature` | derived | Force RPM signature verification on/off. When unset, verification is enabled iff `Rpm__GpgKey` is set. Setting `true` with no parseable key fails every resolution closed. |
 | `Oci__Upstreams` | Docker Hub (`registry-1.docker.io`) | Array of upstream OCI registries (prefix-routed, per-registry auth). Set via `appsettings.json` `Oci:Upstreams`, not a flat env var. |
@@ -436,9 +439,24 @@ Org invite emails are sent when `SMTP_HOST` is set. When absent, the invite link
 | `METRICS_ENABLED` | `true` | Whether the `/metrics` Prometheus endpoint is enabled. Env var overrides the DB `instance_settings.metrics_enabled` value. Setting this locks out the API from changing the value — the system controller returns `409 Conflict` when this env var is set. Accepted values: `true`/`1`/`yes` or `false`/`0`/`no`. |
 | `METRICS_ALLOWED_IPS` | `127.0.0.1,::1` | Comma-separated IPs/CIDRs allowed to scrape `/metrics`. Env var overrides the DB allowlist and locks out the API from changing the value. When empty the endpoint is unreachable from any address. |
 
+### Network limits
+
+| Variable | Default | Description |
+|---|---|---|
+| `KESTREL_MAX_CONNECTIONS` | `10000` | Maximum number of concurrent open TCP connections Kestrel accepts. Prevents connection-table exhaustion under a slow-client (slowloris) flood. Set `0` to remove the limit (not recommended on constrained hosts). Increase for high-traffic deployments with many simultaneous clients. |
+
+### Background write queues
+
+The activity and download-count writers buffer DB inserts off the hot path via bounded in-process channels. Watch `dependably.activity_writer.dropped` and `dependably.download_count_writer.dropped` (OTel counters) to detect sustained writer backpressure; a rising value means the drainer is falling behind the ingest rate and rows are being shed.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ACTIVITY_WRITER_QUEUE_CAPACITY` | `50000` | Bounded-channel capacity for the async activity-row writer. At 200 RPS the default gives ~250 s of runway before the channel saturates and rows are shed. Raise for sustained high-burst environments; each slot holds ~600 bytes. |
+| `DOWNLOAD_COUNT_WRITER_QUEUE_CAPACITY` | `50000` | Bounded-channel capacity for the async download-count increment writer. Same sizing guidance as `ACTIVITY_WRITER_QUEUE_CAPACITY`. |
+
 ### Rate limiting
 
-All limiters are per-token (download/push) or per-source-IP (login/anonymous). Defaults are sized for a single developer's worst burst; increase for larger fleets or stricter abuse budgets.
+All limiters are per-token (download/push) or per-source-IP (login/anonymous/metadata). Defaults are sized for a single developer's worst burst; increase for larger fleets or stricter abuse budgets.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -448,6 +466,11 @@ All limiters are per-token (download/push) or per-source-IP (login/anonymous). D
 | `LOGIN_RATE_LIMIT_PERMITS` | `10` | Fixed-window permits per minute per IP for the login endpoint. |
 | `TOKEN_CREATE_RATE_LIMIT_PERMITS` | `60` | Fixed-window permits per hour per IP for token-creation endpoints. |
 | `ANON_RATE_LIMIT_PERMITS` | `120` | Fixed-window permits per minute per IP for unauthenticated probe endpoints (`/health`, `/ready`, `/version`, `/api/v1/bootstrap`, `/api/v1/auth/methods`, `/api/v1/licenses`). |
+| `IMPORT_RATE_LIMIT_PERMITS` | `5` | Sliding-window permits per minute per token for bulk import requests. Queue depth is `0` (burst is rejected immediately). |
+| `MANAGEMENT_RATE_LIMIT_PERMITS` | `300` | Sliding-window permits per minute per principal for authenticated management endpoints (`/api/v1/*`) not covered by a more specific policy. `/api/v1/docs/` is exempt. |
+| `METADATA_RATE_LIMIT_PERMITS` | `500` | Sliding-window permits per second per source IP for metadata GET endpoints (npm packument, PyPI simple index, NuGet registration). |
+| `METADATA_RATE_LIMIT_QUEUE` | `100` | Queue depth for the metadata rate limiter. Short bursts are absorbed; sustained floods return `429` once the queue fills. |
+| `METADATA_REBUILD_CONCURRENCY` | `8` | Maximum number of simultaneous cache-MISS metadata rebuilds (upstream fetches that buffer a full response). Limits peak in-flight memory allocation. Cache HITs are unaffected. |
 
 ---
 
@@ -510,6 +533,29 @@ Upstreams can be configured per org from the web UI, or globally via environment
 
 Multi-replica deployments require Redis (`DEPENDABLY_DEPLOYMENT_MODE=ha`, `REDIS_CONNECTION_STRING`). Redis backs distributed locking, rate-limit state (login / invite / token-create limiters), and ASP.NET Core Data Protection key sharing.
 
+The sections below call out constraints that are silent data-loss or security risks when violated. Read these before running more than one instance.
+
+### SQLite metadata store — do not share over NFS
+
+`SqliteMetadataStore` opens a single SQLite file (configured via `DB_PATH`). SQLite uses file-system locking for its write-serialization guarantee. **Network file systems (NFS, CIFS/SMB, most distributed POSIX mounts) do not implement POSIX advisory locks correctly**, and SQLite's documentation explicitly states that its locking is unsupported over NFS. Running two or more Dependably instances pointed at the same SQLite file over NFS risks write-lock corruption, WAL file divergence, and silent data loss.
+
+**Do not:**
+- Point multiple instances at a shared `DB_PATH` on an NFS/CIFS mount.
+- Use SQLite (`DB_PROVIDER=sqlite`) in any multi-instance deployment.
+
+**Do:**
+- Use `DB_PROVIDER=postgres` with a shared Postgres connection string (`DB_CONNECTION_STRING`) for multi-instance deployments. Each instance connects to the same Postgres database; Postgres handles concurrent writers correctly.
+
+### Local blob store — do not share LOCAL_STORAGE_PATH over NFS
+
+`LocalBlobStore` reads and writes files under `LOCAL_STORAGE_PATH`. Atomic publish operations rely on `File.Move` for the final rename (which is atomic on a local POSIX filesystem). NFS does not guarantee atomic cross-directory renames, and cross-instance visibility of partial writes is undefined.
+
+**Do not:**
+- Mount the same `LOCAL_STORAGE_PATH` on an NFS volume and run more than one instance against it.
+
+**Do:**
+- Use `STORAGE_BACKEND=s3` (S3-compatible object store) or `STORAGE_BACKEND=azure` (Azure Blob Storage) for multi-instance deployments. Both backends are designed for concurrent multi-writer access. Refer to the [Blob storage backends](#blob-storage-backends) section for configuration.
+
 ### OCI chunked uploads — session affinity required
 
 OCI clients push image layers via a two-step chunked upload: a `POST /v2/{name}/blobs/uploads/` creates a session UUID, then one or more `PATCH` requests append data to a local staging file on the replica that owns the session. **If a subsequent PATCH is routed to a different replica, that replica has no staging file and returns 404.**
@@ -524,6 +570,26 @@ The affinity key is the upload UUID, which is the last path segment of the `Loca
 
 Set `REPLICA_HINT=true` (or `INSTANCE_ROLE=replica`) on each replica instance; Dependably logs a startup warning reminding operators that session affinity is required.
 
+### In-process rate limiters — per-tenant limits are per-replica without Redis
+
+The download, push, import, management-API, and anonymous-probe rate limiters maintain their sliding-window counters in process memory on each replica. Without a shared backing store, each replica enforces the configured limit independently. A client that distributes requests across N replicas can exceed the nominal per-tenant limit by up to a factor of N before any single replica returns `429`.
+
+The login, invite, and token-create limiters are Redis-backed when `REDIS_CONNECTION_STRING` is set (`DEPENDABLY_DEPLOYMENT_MODE=ha`), so those abuse-prevention limits hold across replicas in HA mode.
+
+**The download and push limiters remain in-process even when Redis is configured.** These are per-second sliding-window limiters on the very hot path; adding Redis round-trips to every artefact download and every package push would increase latency on the path most sensitive to it. The practical risk in a typical multi-instance deployment is proportional to the number of replicas and the configured permit ceiling — two replicas at the default 1000 permits/sec per token gives an effective ceiling of ~2000 before both replicas 429 simultaneously.
+
+Remediation options, in order of preference:
+
+1. **Redis + sticky sessions (recommended for HA):** Set `REDIS_CONNECTION_STRING` and configure your load balancer to route each token/IP to a consistent replica (hash on the `Authorization` header or source IP). Sticky routing keeps the per-second sliding window accurate on the hot path without Redis round-trips; Redis covers the slower abuse paths (login, token-create, invite).
+2. **Sticky sessions only:** If Redis is unavailable, sticky-route all traffic for a given token to a single replica. The in-process limiter on that replica then enforces the full configured limit.
+3. **Reduce the per-replica permit ceiling:** If sticky routing is not possible, set `DOWNLOAD_RATE_LIMIT_PERMITS` and `PUSH_RATE_LIMIT_PERMITS` to `ceiling / N` (where N is your replica count) so the aggregate effective limit across replicas matches the intended value. This is a coarse approximation — uneven load distribution means individual replicas may still diverge — but it bounds the worst case.
+
+See [`DOWNLOAD_RATE_LIMIT_PERMITS`](#rate-limiting), [`PUSH_RATE_LIMIT_PERMITS`](#rate-limiting), and [`REDIS_CONNECTION_STRING`](#core) for the relevant environment variables.
+
+### Metadata caches are per-instance
+
+Ecosystem metadata responses (the npm/PyPI/NuGet/Maven index and registration documents) are cached in an in-process `MemoryCache` on each instance. The cache is not shared across replicas and there is no cross-instance invalidation. After a push that lands on one instance, other instances continue serving their own cached metadata until that entry's TTL expires, so a client routed to a different replica can briefly see a stale index. Convergence relies on the short cache TTLs rather than active invalidation. Out-of-process cache invalidation (for example, a Redis pub/sub fan-out on push) is future work; until then, keep metadata TTLs short in multi-instance deployments where post-push staleness matters.
+
 ---
 
 ## Security model
@@ -533,7 +599,7 @@ Set `REPLICA_HINT=true` (or `INSTANCE_ROLE=replica`) on each replica instance; D
 - **Scope enforcement**: `pull` and `push` scopes enforced at the HTTP handler level; scope mismatch returns 403, not 401
 - **Account lockout**: 10 failed login attempts → 15-minute lockout with `Retry-After` header
 - **Security headers**: `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Content-Security-Policy` (management API), `Strict-Transport-Security` (when behind HTTPS proxy)
-- **Trusted proxy / host hardening**: `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` are all gated by the `TRUSTED_PROXIES` allowlist (see environment variable reference above). In production, set `TRUSTED_PROXIES` to your reverse proxy's addresses and pin `AllowedHosts` in `appsettings.json` (or via `ASPNETCORE_ALLOWEDHOSTS`) to your apex domain rather than `*`.
+- **Trusted proxy / host hardening**: Forwarded-header processing is fail-closed — when `TRUSTED_PROXIES` is unset, `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` are ignored entirely so caller-supplied values cannot spoof `RemoteIpAddress`, scheme, or host. When `TRUSTED_PROXIES` is set, those headers are processed only from the listed IPs/CIDRs. Host-header filtering is derived at startup from `APEX_HOST` / `BASE_URL`: when an apex is configured, only that host (plus `*.apex` in multi mode) and localhost are accepted; unknown `Host` headers are rejected before tenant resolution prevents Host injection into SAML SP URLs, absolute links, and CSRF Origin comparisons. When no apex is configured (dev/local), filtering is permissive and a startup warning is logged.
 - **Schema**: idempotent `CREATE TABLE IF NOT EXISTS` applied on startup; one-shot data migrations are recorded in the `_applied_migrations` ledger (see [src/Dependably/Infrastructure/schema/schema-migrations.md](src/Dependably/Infrastructure/schema/schema-migrations.md))
 
 ---

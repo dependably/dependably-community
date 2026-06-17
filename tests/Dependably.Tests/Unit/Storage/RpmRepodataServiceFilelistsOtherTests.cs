@@ -194,7 +194,7 @@ public sealed class RpmRepodataServiceFilelistsOtherTests : IClassFixture<InMemo
         byte[] filelistsGz = new byte[] { 4, 5, 6 };
         byte[] otherGz = new byte[] { 7, 8, 9 };
 
-        string xml = RpmRepodataService.BuildRepomd(primaryGz, filelistsGz, otherGz);
+        string xml = RpmRepodataService.BuildRepomd(primaryGz, TimeProvider.System.GetUtcNow(), filelistsGz, otherGz);
         var doc = XDocument.Parse(xml);
 
         var dataElements = doc.Root!.Elements(Repo + "data").ToList();
@@ -219,7 +219,7 @@ public sealed class RpmRepodataServiceFilelistsOtherTests : IClassFixture<InMemo
         byte[] filelistsGz = new byte[] { 4, 5, 6 };
         byte[] otherGz = new byte[] { 7, 8, 9 };
 
-        string xml = RpmRepodataService.BuildRepomd(primaryGz, filelistsGz, otherGz);
+        string xml = RpmRepodataService.BuildRepomd(primaryGz, TimeProvider.System.GetUtcNow(), filelistsGz, otherGz);
         var doc = XDocument.Parse(xml);
 
         foreach (var data in doc.Root!.Elements(Repo + "data"))
@@ -242,7 +242,7 @@ public sealed class RpmRepodataServiceFilelistsOtherTests : IClassFixture<InMemo
     public void BuildRepomd_HrefsPointToRepodataDirectory()
     {
         byte[] gz = new byte[] { 1 };
-        string xml = RpmRepodataService.BuildRepomd(gz, gz, gz);
+        string xml = RpmRepodataService.BuildRepomd(gz, TimeProvider.System.GetUtcNow(), gz, gz);
         var doc = XDocument.Parse(xml);
 
         foreach (var data in doc.Root!.Elements(Repo + "data"))
@@ -258,7 +258,7 @@ public sealed class RpmRepodataServiceFilelistsOtherTests : IClassFixture<InMemo
     {
         byte[] primaryGz = new byte[] { 1, 2, 3 };
 
-        string xml = RpmRepodataService.BuildRepomd(primaryGz);
+        string xml = RpmRepodataService.BuildRepomd(primaryGz, TimeProvider.System.GetUtcNow());
         var doc = XDocument.Parse(xml);
 
         var dataElements = doc.Root!.Elements(Repo + "data").ToList();
@@ -274,7 +274,7 @@ public sealed class RpmRepodataServiceFilelistsOtherTests : IClassFixture<InMemo
             new XAttribute("type", "updateinfo"),
             new XElement(Repo + "location", new XAttribute("href", "repodata/abc123-updateinfo.xml.gz")));
 
-        string xml = RpmRepodataService.BuildRepomd(primaryGz, extraEntries: new[] { extraEntry });
+        string xml = RpmRepodataService.BuildRepomd(primaryGz, TimeProvider.System.GetUtcNow(), extraEntries: new[] { extraEntry });
         var doc = XDocument.Parse(xml);
 
         var types = doc.Root!.Elements(Repo + "data")
@@ -301,7 +301,7 @@ public sealed class RpmRepodataServiceFilelistsOtherTests : IClassFixture<InMemo
         string other = await svc.BuildOtherAsync(orgId, CancellationToken.None);
         byte[] otherGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(other));
 
-        string repomdXml = RpmRepodataService.BuildRepomd(primaryGz, filelistsGz, otherGz);
+        string repomdXml = RpmRepodataService.BuildRepomd(primaryGz, TimeProvider.System.GetUtcNow(), filelistsGz, otherGz);
         var doc = XDocument.Parse(repomdXml);
 
         var types = doc.Root!.Elements(Repo + "data")
@@ -392,7 +392,7 @@ public sealed class RpmRepodataServiceFilelistsOtherTests : IClassFixture<InMemo
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private RpmRepodataService MakeSvc()
-        => new(_fixture.Store, NullLogger<RpmRepodataService>.Instance);
+        => new(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
 
     private async Task<string> SeedPackageVersionAsync(
         string orgId,

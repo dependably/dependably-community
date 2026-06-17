@@ -36,17 +36,21 @@ namespace Dependably.Protocol;
 /// </summary>
 public sealed class MavenUpstreamFetcher
 {
+    // Hex character prefix length used as the url_key column (first 32 hex chars of SHA-256).
+    private const int UrlHashPrefixLength = 32;
+
     private readonly UpstreamClient _upstream;
     private readonly IBlobStore _blobs;   // cache tier — matches UpstreamClient
     private readonly IMetadataStore _db;
     private readonly IConfiguration _config;
     private readonly ILogger<MavenUpstreamFetcher> _logger;
+    private readonly TimeProvider _time;
 
     // SHA-256 of the upstream path (first 32 hex chars) is the url_key.
     private static string UrlHash(string upstreamPath)
     {
         byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(upstreamPath));
-        return Convert.ToHexString(hash).ToLowerInvariant()[..32];
+        return Convert.ToHexString(hash).ToLowerInvariant()[..UrlHashPrefixLength];
     }
 
     public MavenUpstreamFetcher(
@@ -54,7 +58,8 @@ public sealed class MavenUpstreamFetcher
         TieredBlobStorage blobs,
         IMetadataStore db,
         IConfiguration config,
-        ILogger<MavenUpstreamFetcher> logger)
+        ILogger<MavenUpstreamFetcher> logger,
+        TimeProvider time)
     {
         _upstream = upstream;
         // Proxy artefacts land on the cache tier (recoverable, eviction-friendly) — the
@@ -63,6 +68,7 @@ public sealed class MavenUpstreamFetcher
         _db = db;
         _config = config;
         _logger = logger;
+        _time = time;
     }
 
     private TimeSpan NegativeCacheTtl =>
@@ -89,7 +95,7 @@ public sealed class MavenUpstreamFetcher
             return false;
         }
 
-        var age = DateTimeOffset.UtcNow - DateTimeOffset.Parse(fetchedAt,
+        var age = _time.GetUtcNow() - DateTimeOffset.Parse(fetchedAt,
             null, System.Globalization.DateTimeStyles.RoundtripKind);
         return age < NegativeCacheTtl;
     }
@@ -199,6 +205,12 @@ public sealed class MavenUpstreamFetcher
             // UpstreamClient raises this when AIR_GAPPED=true. Middleware turns it into 503.
             throw;
         }
+        catch (UpstreamFetchFailedException)
+        {
+            // Transient upstream exhausted retries — propagate so middleware maps it to 503/502
+            // rather than the caller silently returning 404.
+            throw;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Transient upstream failure (network / 5xx / SSRF block / response-too-large).
@@ -229,10 +241,48 @@ public sealed class MavenUpstreamFetcher
         {
             // Artifact bytes flow through the buffered path here, so the cap is the artifact
             // limit, not the (much smaller) default metadata limit.
-            var resp = await _upstream.GetOrFetchMetadataAsync(
-                upstreamUrl, UpstreamClient.MaxUpstreamResponseBytes, ct);
-            if (!resp.IsSuccessStatusCode)
+            //
+            // The buffered metadata path does not itself classify/retry transient upstream
+            // statuses, so this loop does it — mirroring the blob-fetch paths in UpstreamClient.
+            // A transient CDN error (403/429/5xx) on a Maven cache-miss must be retried and,
+            // on exhaustion, surfaced as the retryable UpstreamFetchFailedException (the
+            // middleware maps it to 503/502). It must NOT be negative-cached or returned as a
+            // sticky 404: that would poison the artefact into a 404 (short-circuiting upstream
+            // on every later request) until the negative-cache entry expires. Only a genuine
+            // absence (404/410/…) is negative-cached.
+            const int MaxUpstreamFetchAttempts = 3;
+            // Initial backoff delay before first retry; doubled on each subsequent attempt.
+            const int RetryBackoffBaseMs = 200;
+            const double RetryBackoffExponent = 2.0;
+            UpstreamMetadataResponse resp;
+            int attempt = 0;
+            while (true)
             {
+                resp = await _upstream.GetOrFetchMetadataAsync(
+                    upstreamUrl, UpstreamClient.MaxUpstreamResponseBytes, ct);
+                if (resp.IsSuccessStatusCode)
+                {
+                    break;
+                }
+
+                bool transient = resp.StatusCode is 429 or 403 or >= 500;
+                if (transient && attempt < MaxUpstreamFetchAttempts - 1)
+                {
+                    attempt++;
+                    await Task.Delay(TimeSpan.FromMilliseconds(RetryBackoffBaseMs * Math.Pow(RetryBackoffExponent, attempt - 1)), ct);
+                    continue;
+                }
+                if (transient)
+                {
+                    throw new UpstreamFetchFailedException
+                    {
+                        Url = upstreamUrl,
+                        StatusCode = resp.StatusCode,
+                        RetryAfter = null,
+                        Transient = true,
+                    };
+                }
+
                 await RecordNegativeAsync(upstreamPath, ct);
                 return null;
             }
@@ -241,6 +291,10 @@ public sealed class MavenUpstreamFetcher
         catch (AirGappedException)
         {
             throw; // middleware turns it into 503
+        }
+        catch (UpstreamFetchFailedException)
+        {
+            throw; // middleware maps transient exhaustion to 503/502
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -353,6 +407,78 @@ public sealed class MavenUpstreamFetcher
         }
     }
 
+    /// <summary>
+    /// Resolves the timestamped artifact filename for a SNAPSHOT version by fetching the
+    /// version-level <c>maven-metadata.xml</c> from upstream. The metadata's
+    /// <c>snapshotVersions</c> section lists each classifier+extension with its current
+    /// timestamped value. Returns null when upstream returns a non-success response or the
+    /// document is missing. Propagates <see cref="AirGappedException"/> so middleware turns
+    /// it into 503.
+    /// </summary>
+    public async Task<MavenSnapshotMetadata?> FetchSnapshotMetadataAsync(
+        string upstreamBase,
+        string groupPath,
+        string artifactId,
+        string snapshotVersion,
+        CancellationToken ct)
+    {
+        string metaPath = $"{groupPath}/{artifactId}/{snapshotVersion}/maven-metadata.xml";
+        string upstreamUrl = $"{upstreamBase.TrimEnd('/')}/{metaPath.TrimStart('/')}";
+
+        try
+        {
+            var response = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            string xml = response.BodyAsString();
+            return ParseSnapshotMetadata(xml);
+        }
+        catch (AirGappedException)
+        {
+            throw; // middleware converts to 503
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "ExceptionType={ExceptionType} Maven SNAPSHOT metadata fetch failed for {Url}",
+                ex.GetType().Name, upstreamUrl);
+            return null;
+        }
+    }
+
+    private static MavenSnapshotMetadata? ParseSnapshotMetadata(string xml)
+    {
+        try
+        {
+            var doc = XDocument.Parse(xml);
+            var ns = doc.Root?.GetDefaultNamespace() ?? XNamespace.None;
+
+            // Read the snapshot timestamp and buildNumber from the top-level <snapshot> element.
+            var snapshotEl = doc.Descendants(ns + "snapshot").FirstOrDefault();
+            string? timestamp = snapshotEl?.Element(ns + "timestamp")?.Value?.Trim();
+            string? buildNumStr = snapshotEl?.Element(ns + "buildNumber")?.Value?.Trim();
+            int? buildNumber = int.TryParse(buildNumStr, out int bn) ? bn : null;
+
+            // Collect per-extension/classifier timestamped values from <snapshotVersions>.
+            var snapshotVersions = doc.Descendants(ns + "snapshotVersion")
+                .Select(el => new MavenSnapshotVersionEntry(
+                    Classifier: el.Element(ns + "classifier")?.Value?.Trim(),
+                    Extension: el.Element(ns + "extension")?.Value?.Trim() ?? "",
+                    Value: el.Element(ns + "value")?.Value?.Trim() ?? ""))
+                .Where(e => !string.IsNullOrEmpty(e.Value))
+                .ToList();
+
+            return new MavenSnapshotMetadata(timestamp, buildNumber, snapshotVersions);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static List<string> ParseVersionsFromMetadata(string xml)
     {
         try
@@ -461,3 +587,39 @@ public sealed record MavenArtifactFetchResult(
     string Sha1,
     string Md5,
     bool IsFromCache);
+
+/// <summary>
+/// Parsed representation of a SNAPSHOT version-level <c>maven-metadata.xml</c> document.
+/// Drives timestamped artifact filename resolution: the <c>snapshotVersions</c> entries map
+/// each classifier+extension to its current timestamped <c>value</c> (e.g.
+/// <c>1.0-20240101.120000-1</c>).
+/// </summary>
+public sealed record MavenSnapshotMetadata(
+    string? Timestamp,
+    int? BuildNumber,
+    IReadOnlyList<MavenSnapshotVersionEntry> SnapshotVersions)
+{
+    /// <summary>
+    /// Resolves the timestamped artifact filename for the given extension and optional
+    /// classifier. Returns null when no matching snapshotVersion entry exists.
+    /// </summary>
+    public string? ResolveTimestampedValue(string extension, string? classifier)
+    {
+        foreach (var entry in SnapshotVersions)
+        {
+            bool extMatch = string.Equals(entry.Extension, extension, StringComparison.OrdinalIgnoreCase);
+            bool classMatch = string.Equals(entry.Classifier ?? "", classifier ?? "", StringComparison.OrdinalIgnoreCase);
+            if (extMatch && classMatch)
+            {
+                return entry.Value;
+            }
+        }
+        return null;
+    }
+}
+
+/// <summary>One <c>snapshotVersion</c> entry from the version-level metadata document.</summary>
+public sealed record MavenSnapshotVersionEntry(
+    string? Classifier,
+    string Extension,
+    string Value);

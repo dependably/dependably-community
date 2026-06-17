@@ -27,8 +27,14 @@ services:
       # (archived tree, matching the fedora:40 integration-test fixture).
       Rpm__Upstream: ${RPM_UPSTREAM:-https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Everything/x86_64/os}
       Rpm__UpstreamMode: ${RPM_UPSTREAM_MODE:-passthrough}
-      # Memory guardrails for containers (set DOTNET_GCHeapHardLimit to ~75% of mem_limit)
-      # - DOTNET_GCHeapHardLimit=0xC0000000
+      # GC heap cap — prevents OOM-kill on memory-constrained hosts (ARM64, Raspberry Pi).
+      # Set to ~75 % of the container mem_limit. The .NET runtime reads this at process
+      # start; changing it while the container is running has no effect. Leave unset on
+      # large hosts (8 GiB+). Uncomment the line that matches your host:
+      #   1 GiB host  → 0x30000000  (768 MiB)
+      #   2 GiB host  → 0x60000000  (1.5 GiB)   <- typical Pi 4 / small VPS
+      #   4 GiB host  → 0xC0000000  (3 GiB)
+      # DOTNET_GCHeapHardLimit: "0x60000000"
       # - STAGING_DISK_WARN_THRESHOLD_PERCENT=10
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/ready"]

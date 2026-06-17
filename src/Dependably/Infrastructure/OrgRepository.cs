@@ -15,11 +15,13 @@ public sealed class OrgRepository
 
     private readonly IMetadataStore _db;
     private readonly IMemoryCache? _cache;
+    private readonly TimeProvider _time;
 
-    public OrgRepository(IMetadataStore db, IMemoryCache? cache = null)
+    public OrgRepository(IMetadataStore db, IMemoryCache? cache = null, TimeProvider? time = null)
     {
         _db = db;
         _cache = cache;
+        _time = time ?? TimeProvider.System;
     }
 
     private static string SettingsCacheKey(string orgId) => "org-settings:" + orgId;
@@ -65,6 +67,7 @@ public sealed class OrgRepository
                    max_upload_bytes_maven as MaxUploadBytesMaven,
                    max_upload_bytes_rpm as MaxUploadBytesRpm,
                    max_upload_bytes_oci as MaxUploadBytesOci,
+                   max_upload_bytes_cargo as MaxUploadBytesCargo,
                    keep_versions as KeepVersions, keep_days as KeepDays,
                    activity_retention_days as ActivityRetentionDays,
                    COALESCE(license_enforcement_mode, 'off') as LicenseEnforcementMode,
@@ -209,7 +212,7 @@ public sealed class OrgRepository
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE orgs SET deleted_at = @now WHERE id = @orgId",
-            new { orgId, now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { orgId, now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") });
     }
 
     /// <summary>Restore: clear deleted_at. Returns true if a row was restored.</summary>
@@ -226,7 +229,7 @@ public sealed class OrgRepository
     public async Task<IReadOnlyList<string>> ListExpiredSoftDeletedOrgIdsAsync(int graceDays, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        string cutoff = DateTimeOffset.UtcNow.AddDays(-graceDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = _time.GetUtcNow().AddDays(-graceDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
         var rows = await conn.QueryAsync<string>(
             "SELECT id FROM orgs WHERE deleted_at IS NOT NULL AND deleted_at < @cutoff",
             new { cutoff });
@@ -246,7 +249,7 @@ public sealed class OrgRepository
         // Seed the standard public upstreams so a new org proxies out of the box. No IConfiguration
         // here, so config overrides aren't visible — falls back to the hard-coded public defaults.
         await UpstreamRegistrySeeder.SeedForOrgAsync(conn, id, config: null, ct: ct);
-        return new Org { Id = id, Slug = slug, CreatedAt = DateTimeOffset.UtcNow };
+        return new Org { Id = id, Slug = slug, CreatedAt = _time.GetUtcNow() };
     }
 
     public async Task DeleteOrgAsync(string orgId, CancellationToken ct = default)
@@ -271,10 +274,10 @@ public sealed class OrgRepository
             """
             INSERT INTO org_settings (org_id, anonymous_pull, allowlist_mode,
                 max_upload_bytes, max_upload_bytes_pypi, max_upload_bytes_npm, max_upload_bytes_nuget,
-                max_upload_bytes_maven, max_upload_bytes_rpm, max_upload_bytes_oci,
+                max_upload_bytes_maven, max_upload_bytes_rpm, max_upload_bytes_oci, max_upload_bytes_cargo,
                 default_language, allow_version_overwrite)
             VALUES (@orgId, @anonPull, @allowlist, @maxBytes, @maxBytesPyPi, @maxBytesNpm, @maxBytesNuGet,
-                @maxBytesMaven, @maxBytesRpm, @maxBytesOci,
+                @maxBytesMaven, @maxBytesRpm, @maxBytesOci, @maxBytesCargo,
                 COALESCE(@lang, 'en'), COALESCE(@overwrite, 0))
             ON CONFLICT(org_id) DO UPDATE SET
                 anonymous_pull      = @anonPull,
@@ -286,6 +289,7 @@ public sealed class OrgRepository
                 max_upload_bytes_maven = @maxBytesMaven,
                 max_upload_bytes_rpm   = @maxBytesRpm,
                 max_upload_bytes_oci   = @maxBytesOci,
+                max_upload_bytes_cargo = @maxBytesCargo,
                 default_language    = COALESCE(@lang, default_language),
                 allow_version_overwrite = COALESCE(@overwrite, allow_version_overwrite)
             """,
@@ -301,6 +305,7 @@ public sealed class OrgRepository
                 maxBytesMaven = Clamp(update.MaxUploadBytesMaven, update.InstanceMaxUploadBytes),
                 maxBytesRpm = Clamp(update.MaxUploadBytesRpm, update.InstanceMaxUploadBytes),
                 maxBytesOci = Clamp(update.MaxUploadBytesOci, update.InstanceMaxUploadBytes),
+                maxBytesCargo = Clamp(update.MaxUploadBytesCargo, update.InstanceMaxUploadBytes),
                 lang,
                 overwrite = ToOverwriteFlag(update.AllowVersionOverwrite),
             });
@@ -390,7 +395,7 @@ public sealed class OrgRepository
     /// in-flight upload size against the returned value and return 413 on overflow.
     /// </summary>
     /// <param name="settings">Already-fetched <see cref="OrgSettings"/> for the org; null OK.</param>
-    /// <param name="ecosystem">One of <c>pypi</c>, <c>npm</c>, <c>nuget</c>, <c>maven</c>, <c>rpm</c>, <c>oci</c> (case-insensitive).</param>
+    /// <param name="ecosystem">One of <c>pypi</c>, <c>npm</c>, <c>nuget</c>, <c>maven</c>, <c>rpm</c>, <c>oci</c>, <c>cargo</c> (case-insensitive).</param>
     public async Task<long> GetUploadLimitAsync(OrgSettings? settings, string ecosystem, CancellationToken ct = default)
     {
         string eco = ecosystem.ToLowerInvariant();
@@ -402,6 +407,7 @@ public sealed class OrgRepository
             "maven" => settings?.MaxUploadBytesMaven,
             "rpm" => settings?.MaxUploadBytesRpm,
             "oci" => settings?.MaxUploadBytesOci,
+            "cargo" => settings?.MaxUploadBytesCargo,
             _ => null,
         };
         if (orgEco is { } orgEcoLimit)
@@ -422,6 +428,7 @@ public sealed class OrgRepository
             "maven" => "max_upload_bytes_maven",
             "rpm" => "max_upload_bytes_rpm",
             "oci" => "max_upload_bytes_oci",
+            "cargo" => "max_upload_bytes_cargo",
             _ => null,
         };
         if (instanceKey is null)
@@ -489,7 +496,7 @@ public sealed class OrgRepository
     {
         string raw = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
         string hash = BCrypt.Net.BCrypt.HashPassword(raw, workFactor: 12);
-        var now = DateTimeOffset.UtcNow;
+        var now = _time.GetUtcNow();
         string nowStr = now.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         await using var conn = await _db.OpenAsync(ct);
@@ -687,7 +694,7 @@ public sealed class OrgRepository
     /// </summary>
     public async Task<int> CountActiveTokensAsync(string orgId, CancellationToken ct = default)
     {
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         return await conn.ExecuteScalarAsync<int>(
             """
@@ -712,6 +719,45 @@ public sealed class OrgRepository
             ? cap
             : int.Parse(InstanceSettingDefaults.MaxActiveTokensPerTenant);
     }
+
+    /// <summary>
+    /// Returns the maximum number of pending (unexpired, unconsumed) invites allowed per
+    /// tenant. Reads <c>instance_settings.max_pending_invites_per_tenant</c>, falling back
+    /// to <see cref="InstanceSettingDefaults.MaxPendingInvitesPerTenant"/> when not set.
+    /// </summary>
+    public async Task<int> GetMaxPendingInvitesPerTenantAsync(CancellationToken ct = default)
+    {
+        string? raw = await GetInstanceSettingAsync("max_pending_invites_per_tenant", ct);
+        return raw is not null && int.TryParse(raw, out int cap) && cap > 0
+            ? cap
+            : int.Parse(InstanceSettingDefaults.MaxPendingInvitesPerTenant);
+    }
+
+    /// <summary>
+    /// Returns the maximum number of concurrent open OCI upload sessions allowed per tenant.
+    /// Reads <c>instance_settings.max_concurrent_oci_uploads_per_tenant</c>, falling back to
+    /// <see cref="InstanceSettingDefaults.MaxConcurrentOciUploadsPerTenant"/> when not set.
+    /// </summary>
+    public async Task<int> GetMaxConcurrentOciUploadsPerTenantAsync(CancellationToken ct = default)
+    {
+        string? raw = await GetInstanceSettingAsync("max_concurrent_oci_uploads_per_tenant", ct);
+        return raw is not null && int.TryParse(raw, out int cap) && cap > 0
+            ? cap
+            : int.Parse(InstanceSettingDefaults.MaxConcurrentOciUploadsPerTenant);
+    }
+
+    /// <summary>
+    /// Returns the number of open OCI upload sessions for the given tenant. Used to enforce
+    /// the per-tenant concurrent-session cap before allowing a new session to be created.
+    /// </summary>
+    public async Task<long> GetActiveOciUploadCountAsync(string orgId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: counted per org_id — cap applies per tenant, not fleet-wide.
+        return await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(1) FROM oci_uploads WHERE org_id = @orgId",
+            new { orgId });
+    }
 }
 
 public sealed record OrgSettingsUpdate(
@@ -731,6 +777,7 @@ public sealed record OrgSettingsUpdate(
     long? MaxUploadBytesMaven = null,
     long? MaxUploadBytesRpm = null,
     long? MaxUploadBytesOci = null,
+    long? MaxUploadBytesCargo = null,
     // Per-tenant air-gap posture. null = leave unchanged (the controller passes the request
     // value through; tristate matches AllowVersionOverwrite). Only OrgSettingsRepository's
     // upsert persists it — see OrgSettings.AirGapped.

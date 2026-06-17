@@ -50,6 +50,8 @@ public sealed partial class SamlAcsHardeningTests : IClassFixture<DependablyFact
         _factory = factory;
         using var rsa = RSA.Create(2048);
         var req = new CertificateRequest("CN=acs-test-idp", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        // now-ok: ITfoxtec validates the signing-cert window against the real clock inside
+        // the host, so the validity period must straddle real now (−1d .. +365d is ample).
         _idpCert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
         _idpPublicCertBase64 = Convert.ToBase64String(_idpCert.Export(X509ContentType.Cert));
     }
@@ -102,6 +104,40 @@ public sealed partial class SamlAcsHardeningTests : IClassFixture<DependablyFact
             .SelectMany(h => h.Value)
             .ToList();
         Assert.Contains(setCookies, c => c.Contains("dependably_session"));
+    }
+
+    /// <summary>
+    /// Pins that a successful ACS login sets the session cookie with SameSite=Strict and
+    /// HttpOnly. SetSessionCookie passes SameSiteMode.Strict to SessionCookieOptions; this
+    /// test fails when that is reverted to Lax because the Set-Cookie header then carries
+    /// "SameSite=Lax" instead of "SameSite=Strict". Secure is omitted here because the
+    /// test factory runs over HTTP (TestServer); that attribute is covered by the
+    /// SessionCookieOptions unit test which uses an HTTPS request context directly.
+    /// </summary>
+    [Fact]
+    public async Task Acs_SuccessfulLogin_SessionCookieIsStrictAndHttpOnly()
+    {
+        string requestId = "_" + Guid.NewGuid().ToString("N");
+        await IssuePendingRequestAsync(requestId);
+
+        string samlResponse = BuildSignedSamlResponse(inResponseTo: requestId, nameId: UniqueNameId());
+
+        using var client = CreateNoRedirectClient();
+        var resp = await PostAcsAsync(client, samlResponse);
+
+        Assert.Equal(HttpStatusCode.Redirect, resp.StatusCode);
+
+        // The session cookie is set on the ACS response itself (before the 302); it must be
+        // present on this response, not deferred to a redirect target.
+        string? sessionCookie = resp.Headers
+            .Where(h => h.Key.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(h => h.Value)
+            .FirstOrDefault(c => c.Contains("dependably_session", StringComparison.OrdinalIgnoreCase));
+
+        Assert.NotNull(sessionCookie);
+        Assert.Contains("SameSite=Strict", sessionCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("HttpOnly", sessionCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SameSite=Lax", sessionCookie, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -279,6 +315,8 @@ public sealed partial class SamlAcsHardeningTests : IClassFixture<DependablyFact
     private async Task IssuePendingRequestAsync(string requestId)
     {
         string orgId = await GetDefaultOrgIdAsync();
+        // now-ok: the DI-resolved repository consumes this window against the host's real
+        // clock during the ACS round-trip, so the expiry must be future relative to real now.
         await _factory.Services.GetRequiredService<SamlConfigRepository>()
             .IssuePendingRequestAsync(requestId, orgId, DateTimeOffset.UtcNow.AddMinutes(10));
     }

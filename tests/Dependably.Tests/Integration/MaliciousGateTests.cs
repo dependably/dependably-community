@@ -216,12 +216,9 @@ public sealed class MaliciousGateTests : IClassFixture<DependablyFactory>, IAsyn
         string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
-        string json = await client.GetStringAsync($"/npm/{pkgName}");
-        using var doc = JsonDocument.Parse(json);
-        string tarballUrl = doc.RootElement
-            .GetProperty("versions").GetProperty(version)
-            .GetProperty("dist").GetProperty("tarball").GetString()!;
-
-        return await client.GetAsync(new Uri(tarballUrl).PathAndQuery);
+        // Construct the tarball URL directly — blocked versions are absent from the packument
+        // after block-gate filtering, so reading tarball from the packument would fail.
+        string tarballPath = $"/npm/tarballs/{pkgName}/{pkgName}-{version}.tgz";
+        return await client.GetAsync(tarballPath);
     }
 }

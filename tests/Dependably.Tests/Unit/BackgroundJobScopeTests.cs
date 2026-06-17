@@ -34,7 +34,7 @@ public sealed class BackgroundJobScopeTests : IAsyncLifetime
     [Fact]
     public void Begin_SetsIdentityFields()
     {
-        using var scope = BackgroundJobScope.Begin("reaper", "audit.reap");
+        using var scope = BackgroundJobScope.Begin("reaper", "audit.reap", TimeProvider.System);
         Assert.Equal("reaper", scope.JobName);
         Assert.Equal("audit.reap", scope.Operation);
         Assert.False(string.IsNullOrWhiteSpace(scope.JobRunId));
@@ -45,12 +45,12 @@ public sealed class BackgroundJobScopeTests : IAsyncLifetime
     {
         var ex = Record.Exception(() =>
         {
-            using (var ok = BackgroundJobScope.Begin("j", "op"))
+            using (var ok = BackgroundJobScope.Begin("j", "op", TimeProvider.System))
             {
                 ok.Complete(); // default "success" — records the success counter
             }
 
-            using var noop = BackgroundJobScope.Begin("j", "op");
+            using var noop = BackgroundJobScope.Begin("j", "op", TimeProvider.System);
             noop.Complete("noop"); // non-success branch
         });
         Assert.Null(ex);
@@ -61,12 +61,12 @@ public sealed class BackgroundJobScopeTests : IAsyncLifetime
     {
         var ex = Record.Exception(() =>
         {
-            using (var s1 = BackgroundJobScope.Begin("j", "op"))
+            using (var s1 = BackgroundJobScope.Begin("j", "op", TimeProvider.System))
             {
                 s1.Fail();
             }
 
-            using var s2 = BackgroundJobScope.Begin("j", "op");
+            using var s2 = BackgroundJobScope.Begin("j", "op", TimeProvider.System);
             s2.Fail(new InvalidOperationException("boom"), "server_error");
         });
         Assert.Null(ex);
@@ -79,7 +79,7 @@ public sealed class BackgroundJobScopeTests : IAsyncLifetime
         // Disposing must not throw even though no provider is wired to persist the run.
         var ex = Record.Exception(() =>
         {
-            using var scope = BackgroundJobScope.Begin("j", "op");
+            using var scope = BackgroundJobScope.Begin("j", "op", TimeProvider.System);
             scope.Complete();
         });
         Assert.Null(ex);
@@ -93,7 +93,7 @@ public sealed class BackgroundJobScopeTests : IAsyncLifetime
         // branch must complete without throwing. Give the background write a beat to run.
         var ex = await Record.ExceptionAsync(async () =>
         {
-            using (var scope = BackgroundJobScope.Begin("orphan", "op"))
+            using (var scope = BackgroundJobScope.Begin("orphan", "op", TimeProvider.System))
             {
                 scope.Complete();
             }
@@ -110,7 +110,7 @@ public sealed class BackgroundJobScopeTests : IAsyncLifetime
         services.AddSingleton(new BackgroundJobRunRepository(_db));
         BackgroundJobScope.Services = services.BuildServiceProvider();
 
-        using (var scope = BackgroundJobScope.Begin("persisted", "op.persist"))
+        using (var scope = BackgroundJobScope.Begin("persisted", "op.persist", TimeProvider.System))
         {
             scope.Complete();
         }
@@ -125,7 +125,7 @@ public sealed class BackgroundJobScopeTests : IAsyncLifetime
         services.AddSingleton(new BackgroundJobRunRepository(_db));
         BackgroundJobScope.Services = services.BuildServiceProvider();
 
-        using (var scope = BackgroundJobScope.Begin("failing", "op.fail"))
+        using (var scope = BackgroundJobScope.Begin("failing", "op.fail", TimeProvider.System))
         {
             scope.Fail(new InvalidOperationException("kaboom"));
         }

@@ -110,7 +110,12 @@
     "latest": {
       "current": "La dernière version amont est en cache",
       "stale": "Une version amont plus récente n'est pas en cache",
-      "unknown": "Aucune version amont à comparer"
+      "unknown": "Aucune version amont à comparer",
+      "versionLabel": "Dernière : {version}"
+    },
+    "malicious": {
+      "label": "Malveillant",
+      "help": "Ce paquet a une version signalée comme malveillante (avis OSV MAL-)."
     },
     "empty": "Aucun paquet trouvé"
   },
@@ -186,6 +191,7 @@
   "versionDetail": {
     "columns": {
       "version": "Version",
+      "latest": "Dernière",
       "checksum": "Somme de contrôle",
       "size": "Taille",
       "pushed": "Reçu le",
@@ -211,9 +217,18 @@
     },
     "status": {
       "blocked": "Bloqué",
-      "allowed": "Autorisé",
-      "clean": "Sain",
-      "unscanned": "Non analysé"
+      "allowed": "Autorisé (vulnérable)",
+      "vulnerable": "Vulnérable",
+      "deprecated": "Obsolète",
+      "clean": "Aucun avis",
+      "unscanned": "Non analysé",
+      "malicious": "Malveillant",
+      "maliciousHelp": "Lié à un avis de paquet malveillant connu (OSV MAL-)."
+    },
+    "statusHelp": "Le statut correspond au contrôle de service (version bloquée ou servable), et non à un verdict sur les vulnérabilités. Une version servable peut tout de même comporter des avis — voir le badge Vulnérable et le décompte par sévérité.",
+    "latestBanner": {
+      "stale": "En retard sur l'amont — la dernière version {version} n'est pas mise en cache ici.",
+      "current": "À jour avec l'amont — la dernière version {version} est mise en cache."
     },
     "vulnNever": "Jamais",
     "rescan": "Relancer",
@@ -254,6 +269,7 @@
   "activity": {
     "title": "Activité",
     "allEvents": "Tous les événements",
+    "searchPlaceholder": "Rechercher PURL, événement, acteur, détail…",
     "export": "Exporter CSV",
     "events": {
       "firstFetch": "Premier accès",
@@ -266,9 +282,14 @@
       "delete": "Suppression",
       "manualBlock": "Blocage manuel",
       "manualUnblock": "Déblocage manuel",
-      "blocked": "Bloqué",
+      "blocked": "Bloqué (tous)",
       "blockedManual": "Bloqué (manuel)",
+      "blockedReleaseAge": "Bloqué (âge de version)",
+      "blockedMalicious": "Bloqué (malveillant)",
+      "blockedKev": "Bloqué (KEV)",
+      "blockedEpss": "Bloqué (EPSS)",
       "blockedVulnScore": "Bloqué (score vuln.)",
+      "blockedDeprecated": "Bloqué (déprécié)",
       "loginSuccess": "Connexion (réussie)",
       "loginFailure": "Connexion (échec)",
       "loginLocked": "Connexion (verrouillée)"
@@ -300,6 +321,7 @@
       "detail": "Détail"
     },
     "allActions": "Toutes les actions",
+    "searchPlaceholder": "Rechercher action, acteur, PURL, détail…",
     "export": "Exporter CSV",
     "groups": {
       "tenantConfig": "Configuration du locataire",
@@ -430,7 +452,15 @@
       "licenses": "Licences",
       "proxy": "Proxy",
       "claims": "Revendications",
-      "serviceTokens": "Jetons de service"
+      "serviceTokens": "Jetons de service",
+      "instance": "Paramètres de l'instance",
+      "metrics": "Accès aux métriques"
+    },
+    "instance": {
+      "intro": "Limites et planifications à l'échelle de l'instance pour ce déploiement. En mode mono-locataire, le propriétaire est aussi l'opérateur, donc ils sont gérés ici."
+    },
+    "metrics": {
+      "intro": "Contrôle l'accès au point de terminaison Prometheus /metrics pour ce déploiement."
     },
     "auth": {
       "methodsTitle": "Méthodes de connexion",
@@ -628,9 +658,18 @@
       "blockEmptyWarn": "L'application est définie sur Bloquer mais aucune licence n'est autorisée. Toutes les publications et tous les téléchargements proxy seront rejetés tant que vous n'aurez pas approuvé au moins une licence ci-dessous.",
       "mode": {
         "title": "Mode d'application",
-        "off":   { "label": "Désactivé", "hint": "Les métadonnées de licence sont enregistrées mais aucune politique n'est appliquée." },
-        "warn":  { "label": "Avertir",   "hint": "Les violations sont consignées et visibles dans l'audit, mais les téléchargements aboutissent." },
-        "block": { "label": "Bloquer",   "hint": "Les versions dont la licence enfreint cette politique sont bloquées au téléchargement." }
+        "off": {
+          "label": "Désactivé",
+          "hint": "Les métadonnées de licence sont enregistrées mais aucune politique n'est appliquée."
+        },
+        "warn": {
+          "label": "Avertir",
+          "hint": "Les violations sont consignées et visibles dans l'audit, mais les téléchargements aboutissent."
+        },
+        "block": {
+          "label": "Bloquer",
+          "hint": "Les versions dont la licence enfreint cette politique sont bloquées au téléchargement."
+        }
       },
       "review": {
         "title": "Revue",
@@ -809,12 +848,26 @@
     "total": "Total",
     "newVulnsTitle": "Nouvelles vulnérabilités détectées",
     "noNewVulns": "Aucune nouvelle vulnérabilité",
+    "newVulnsViewAll": "Voir toutes les vulnérabilités, des plus récentes aux plus anciennes",
     "window24h": "24 h",
     "window7d": "7 j",
     "window30d": "30 j",
     "activeUsers": "Utilisateurs actifs (7j)",
-    "totalDownloads": "Total (30j)",
-    "blockedPulls": "Bloqués (30j)",
+    "totalDownloads": "Téléchargements (30j)",
+    "blockedPulls": "Récupérations bloquées (30j)",
+    "blockedMalicious": "Paquets malveillants bloqués (30j)",
+    "quarantinePending": "Quarantaine en attente",
+    "hostedProxied": "{hosted} hébergés · {proxied} relayés",
+    "quotaUsage": "sur {total} de quota",
+    "gates": {
+      "deprecated": "obsolète",
+      "release_age": "âge de publication",
+      "malicious": "malveillant",
+      "kev": "KEV",
+      "epss": "EPSS",
+      "vuln_score": "score de vuln.",
+      "manual": "manuel"
+    },
     "packages": "Paquets",
     "diskUsed": "Espace disque",
     "vulns": "Vulnérabilités",
@@ -839,6 +892,7 @@
       "all": "Toutes"
     },
     "states": {
+      "pending": "En attente",
       "approved": "Approuvée",
       "denied": "Refusée"
     },
@@ -855,6 +909,17 @@
       "gate": "Politique",
       "detail": "Détail",
       "updated": "Mis à jour"
+    },
+    "actions": {
+      "menuLabel": "Changer la décision",
+      "resetToPending": "Remettre en attente"
+    },
+    "detail": {
+      "policyDetail": "Détail de la politique",
+      "created": "Créée",
+      "decidedBy": "Décidée par",
+      "decidedAt": "Décidée le",
+      "note": "Note"
     }
   },
   "vulnerabilities": {
@@ -891,13 +956,13 @@
     "title": "Politique de licences",
     "mode": "Application",
     "modes": {
-      "off":   "Désactivée",
-      "warn":  "Avertir",
+      "off": "Désactivée",
+      "warn": "Avertir",
       "block": "Bloquer"
     },
     "intro": {
-      "off":   "Votre locataire enregistre la licence SPDX de chaque paquet sans appliquer de politique. Les listes ci-dessous montrent ce qui serait autorisé ou bloqué si l'application était activée.",
-      "warn":  "Votre locataire journalise les violations de la politique dans l'audit mais sert toujours les paquets. Utilisez les listes ci-dessous pour comprendre quelles licences un administrateur a autorisées ou bloquées.",
+      "off": "Votre locataire enregistre la licence SPDX de chaque paquet sans appliquer de politique. Les listes ci-dessous montrent ce qui serait autorisé ou bloqué si l'application était activée.",
+      "warn": "Votre locataire journalise les violations de la politique dans l'audit mais sert toujours les paquets. Utilisez les listes ci-dessous pour comprendre quelles licences un administrateur a autorisées ou bloquées.",
       "block": "Votre locataire bloque la publication et la récupération proxy des paquets dont la licence ne figure pas dans la liste d'autorisation ou se trouve sur la liste de blocage."
     },
     "allow": {
@@ -1199,8 +1264,11 @@
         "maxUploadBytesMaven": "Taille max. d'envoi — Maven",
         "maxUploadBytesRpm": "Taille max. d'envoi — RPM",
         "maxUploadBytesOci": "Taille max. d'envoi — Docker",
+        "maxUploadBytesCargo": "Taille max. d'envoi — Cargo",
         "gcSchedule": "Planification GC (cron)",
-        "siemMaxLookbackDays": "Lookback SIEM max (jours)"
+        "siemMaxLookbackDays": "Lookback SIEM max (jours)",
+        "defaultStorageQuotaBytes": "Quota de stockage par défaut — nouveaux locataires",
+        "maxActiveTokensPerTenant": "Jetons actifs max par locataire"
       },
       "placeholders": {
         "string": "non défini",
@@ -1215,12 +1283,36 @@
         "maxUploadBytesMaven": "100 Mo",
         "maxUploadBytesRpm": "250 Mo",
         "maxUploadBytesOci": "2048 Mo — adapté aux images conteneur multicouches",
+        "maxUploadBytesCargo": "100 Mo",
         "gcSchedule": "0 3 * * * (03:00 UTC, quotidien)",
-        "siemMaxLookbackDays": "90 jours"
+        "siemMaxLookbackDays": "90 jours",
+        "defaultStorageQuotaBytes": "illimité (non défini — aucun quota appliqué aux nouveaux locataires)",
+        "maxActiveTokensPerTenant": "1000 jetons"
       },
       "save": "Enregistrer",
       "saving": "Enregistrement…",
-      "savedAt": "Enregistré à {time}."
+      "savedAt": "Enregistré à {time}.",
+      "metrics": {
+        "title": "Accès au point de terminaison /metrics",
+        "subtitle": "Activez ou désactivez /metrics et configurez la liste d'adresses IP autorisées. Les variables d'environnement ont priorité sur ces valeurs lorsqu'elles sont définies.",
+        "envLocked": "Un ou plusieurs paramètres sont verrouillés par des variables d'environnement (METRICS_ENABLED / METRICS_ALLOWED_IPS). Supprimez la variable d'environnement pour gérer via l'interface.",
+        "enabled": "Point de terminaison activé",
+        "enabledHint": "Désactivé : /metrics renvoie 404 — le point de terminaison disparaît entièrement (pas un 403). Activé : la liste d'adresses IP contrôle l'accès ; les adresses autorisées reçoivent un 200 (anonyme), toutes les autres reçoivent un 403.",
+        "allowedIps": "Adresses IP / CIDRs autorisées",
+        "allowedIpsHint": "Une entrée par ligne. Par défaut si non défini : boucle locale uniquement (127.0.0.1, ::1). Exemples : 10.0.0.0/8, 2001:db8::/32.",
+        "broadCidrWarn": "⚠ 0.0.0.0/0 ou ::/0 désactive entièrement le filtrage IP. À utiliser uniquement si /metrics est protégé par ailleurs (réseau privé, authentification par proxy inverse).",
+        "save": "Enregistrer l'accès aux métriques",
+        "recentDenied": {
+          "title": "Recently denied scrapes",
+          "hint": "Source IPs blocked by the allowlist in this session. Click + Add to append to the allowlist above.",
+          "add": "+ Add",
+          "addTitle": "Append this IP to the allowlist",
+          "justNow": "just now",
+          "minutesAgo": "{n}m ago",
+          "hoursAgo": "{n}h ago",
+          "daysAgo": "{n}d ago"
+        }
+      }
     },
     "profile": {
       "title": "Profil"

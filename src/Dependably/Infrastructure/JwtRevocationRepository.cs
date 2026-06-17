@@ -23,11 +23,13 @@ public sealed class JwtRevocationRepository
 
     private readonly IMetadataStore _db;
     private readonly IMemoryCache? _cache;
+    private readonly TimeProvider _time;
 
-    public JwtRevocationRepository(IMetadataStore db, IMemoryCache? cache = null)
+    public JwtRevocationRepository(IMetadataStore db, IMemoryCache? cache = null, TimeProvider? time = null)
     {
         _db = db;
         _cache = cache;
+        _time = time ?? TimeProvider.System;
     }
 
     private static string CacheKey(string jti) => $"jwt-revocation:{jti}";
@@ -53,7 +55,7 @@ public sealed class JwtRevocationRepository
         }
 
         await using var conn = await _db.OpenAsync(ct);
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         int count = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM jwt_revocations WHERE jti = @jti AND expires_at > @now",
             new { jti, now });
@@ -77,7 +79,7 @@ public sealed class JwtRevocationRepository
     public async Task PruneExpiredAsync(CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await conn.ExecuteAsync("DELETE FROM jwt_revocations WHERE expires_at <= @now", new { now });
     }
 }

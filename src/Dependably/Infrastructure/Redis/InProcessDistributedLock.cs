@@ -10,12 +10,15 @@ namespace Dependably.Infrastructure.Redis;
 public sealed class InProcessDistributedLock : IDistributedLock
 {
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
+    private readonly TimeProvider _time;
+
+    public InProcessDistributedLock(TimeProvider time) => _time = time;
 
     public async Task<ILockHandle?> TryAcquireAsync(string name, TimeSpan ttl, CancellationToken ct = default)
     {
         var sem = _locks.GetOrAdd(name, _ => new SemaphoreSlim(1, 1));
         bool acquired = await sem.WaitAsync(0, ct);
-        return !acquired ? null : (ILockHandle)new LockHandle(name, sem, ttl);
+        return !acquired ? null : (ILockHandle)new LockHandle(name, sem, ttl, _time.GetUtcNow());
     }
 
     public async Task<ILockHandle> AcquireAsync(
@@ -25,7 +28,7 @@ public sealed class InProcessDistributedLock : IDistributedLock
         bool acquired = await sem.WaitAsync(wait, ct);
         return !acquired
             ? throw new TimeoutException($"Could not acquire in-process lock '{name}' within {wait}.")
-            : (ILockHandle)new LockHandle(name, sem, ttl);
+            : (ILockHandle)new LockHandle(name, sem, ttl, _time.GetUtcNow());
     }
 
     private sealed class LockHandle : ILockHandle
@@ -34,12 +37,13 @@ public sealed class InProcessDistributedLock : IDistributedLock
         private bool _released;
 
         public string Name { get; }
-        public DateTimeOffset AcquiredAt { get; } = DateTimeOffset.UtcNow;
+        public DateTimeOffset AcquiredAt { get; }
 
-        public LockHandle(string name, SemaphoreSlim sem, TimeSpan ttl)
+        public LockHandle(string name, SemaphoreSlim sem, TimeSpan ttl, DateTimeOffset acquiredAt)
         {
             Name = name;
             _sem = sem;
+            AcquiredAt = acquiredAt;
             // Auto-release after TTL if not explicitly disposed.
             _ = Task.Delay(ttl).ContinueWith(_ => Release());
         }

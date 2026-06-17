@@ -43,8 +43,8 @@ public sealed class OsvScoringMoreTests
     {
         // The trailing "junk" fails TryParse, so the method computes from the vector
         // (parts[0] still parses as a valid CVSS:3.1 vector).
-        double? s = OsvScoring.ParseCvssBaseScore(
-            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H junk", out string? sev);
+        var (s, sev) = OsvScoring.ParseCvssBaseScore(
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H junk");
         Assert.NotNull(s);
         Assert.Equal("CRITICAL", sev);
     }
@@ -54,7 +54,7 @@ public sealed class OsvScoringMoreTests
     {
         // Whitespace splits to multiple parts; trailing token isn't numeric, parts[0]
         // isn't a CVSS:3.x prefix → compute returns null and severity stays null.
-        double? s = OsvScoring.ParseCvssBaseScore("garbage trailing", out string? sev);
+        var (s, sev) = OsvScoring.ParseCvssBaseScore("garbage trailing");
         Assert.Null(s);
         Assert.Null(sev);
     }
@@ -63,7 +63,7 @@ public sealed class OsvScoringMoreTests
     public void ParseCvssBaseScore_EmptyString_ReturnsNull()
     {
         // Single token after trim/split: parts[0] = "", which does not start with CVSS:3.
-        double? s = OsvScoring.ParseCvssBaseScore("", out string? sev);
+        var (s, sev) = OsvScoring.ParseCvssBaseScore("");
         Assert.Null(s);
         Assert.Null(sev);
     }
@@ -72,8 +72,8 @@ public sealed class OsvScoringMoreTests
     public void ParseCvssBaseScore_AppendedZero_SeverityNone()
     {
         // Score 0.0 maps to NONE band — exercises the `_ => "NONE"` arm via append path.
-        double? s = OsvScoring.ParseCvssBaseScore(
-            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N 0.0", out string? sev);
+        var (s, sev) = OsvScoring.ParseCvssBaseScore(
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N 0.0");
         Assert.Equal(0.0, s);
         Assert.Equal("NONE", sev);
     }
@@ -140,10 +140,10 @@ public sealed class OsvScoringMoreTests
     {
         // The SUT scores ONE vector at a time; the OSV pipeline picks the max. This
         // simulates the caller's selection over two entries and asserts band mapping.
-        double? a = OsvScoring.ParseCvssBaseScore(
-            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L 5.4", out string? sevA);
-        double? b = OsvScoring.ParseCvssBaseScore(
-            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H 9.8", out string? sevB);
+        var (a, sevA) = OsvScoring.ParseCvssBaseScore(
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L 5.4");
+        var (b, sevB) = OsvScoring.ParseCvssBaseScore(
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H 9.8");
         Assert.Equal(5.4, a);
         Assert.Equal("MEDIUM", sevA);
         Assert.Equal(9.8, b);

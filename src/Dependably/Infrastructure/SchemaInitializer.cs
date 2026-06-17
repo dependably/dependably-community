@@ -76,6 +76,7 @@ public sealed class SchemaInitializer
         await RunOnceAsync(conn, "backfill_package_versions_filename", BackfillPackageVersionsFilenameAsync);
         await RunOnceAsync(conn, "backfill_oci_catalog", BackfillOciCatalogAsync);
         await RunOnceAsync(conn, "seed_default_upstream_registries", SeedDefaultUpstreamRegistriesAsync);
+        await RunOnceAsync(conn, "seed_go_cargo_upstream_registries", SeedGoCargoUpstreamRegistriesAsync);
         // transactional: false — the SQLite branch drives PRAGMA writable_schema + a schema_version
         // bump that don't compose with an enclosing transaction (same shape as the auditor CHECK
         // rewrite above). Idempotent on both providers, so an un-recorded partial run is repeated
@@ -261,6 +262,54 @@ public sealed class SchemaInitializer
         }
         _logger.LogInformation(
             "Backfilled upstream registries: {Seeded} seeded, {Skipped} already-configured across {Orgs} orgs.",
+            seeded, skipped, orgIds.Count);
+    }
+
+    // Targeted backfill for the golang and cargo upstreams. These two ecosystems were added to the
+    // default sources after the original seed_default_upstream_registries backfill already ran, so
+    // existing orgs never received their default rows and silently had Go/Cargo proxying disabled.
+    // This seeds ONLY golang and cargo — not the full default set — because an operator may have
+    // deliberately deleted an upstream row (e.g. removed npm to disable npm proxying) since
+    // configurable upstreams shipped; re-running the full backfill would resurrect such a removal.
+    // golang and cargo are safe to seed unconditionally: no existing org could have deliberately
+    // removed a row it never had. Config overrides (Go:Upstream / Cargo:Upstream) are honoured via
+    // ResolveDefaults. Idempotent via the per-(org, ecosystem) existence check and the
+    // (org_id, ecosystem, url) unique constraint.
+    // xtenant: one-shot backfill across every tenant on the instance.
+    private async Task SeedGoCargoUpstreamRegistriesAsync(DbConnection conn)
+    {
+        var defaults = UpstreamRegistrySeeder.ResolveDefaults(_config)
+            .Where(d => d.Ecosystem is "golang" or "cargo")
+            .ToList();
+        if (defaults.Count == 0)
+        {
+            return;
+        }
+
+        var orgIds = (await conn.QueryAsync<string>("SELECT id FROM orgs")).ToList();
+        int seeded = 0;
+        int skipped = 0;
+        foreach (string? orgId in orgIds)
+        {
+            foreach (var (eco, url) in defaults)
+            {
+                int existing = await conn.ExecuteScalarAsync<int>(
+                    "SELECT COUNT(*) FROM upstream_registry WHERE org_id = @orgId AND ecosystem = @eco",
+                    new { orgId, eco });
+                if (existing > 0) { skipped++; continue; }
+
+                await conn.ExecuteAsync(
+                    """
+                    INSERT INTO upstream_registry (id, org_id, ecosystem, url, position)
+                    VALUES (@id, @orgId, @eco, @url, 0)
+                    ON CONFLICT (org_id, ecosystem, url) DO NOTHING
+                    """,
+                    new { id = Guid.NewGuid().ToString("N"), orgId, eco, url });
+                seeded++;
+            }
+        }
+        _logger.LogInformation(
+            "Backfilled Go/Cargo upstream registries: {Seeded} seeded, {Skipped} already-configured across {Orgs} orgs.",
             seeded, skipped, orgIds.Count);
     }
 
@@ -488,13 +537,11 @@ public sealed class SchemaInitializer
         conn.ExecuteAsync(
             "UPDATE package_versions SET origin = 'uploaded' WHERE origin IN ('imported','private')");
 
-    private async Task RunAdditiveMigrationsAsync(DbConnection conn)
+    // Each DDL statement is a single additive change (column add or index create). SQLite
+    // has no native "IF NOT EXISTS" guard for column additions; MigrateSqliteAsync swallows
+    // error 1 (duplicate column) instead. Postgres rewrites ADD COLUMN to ADD COLUMN IF NOT EXISTS.
+    private static string[] BuildAdditiveMigrations() => new[]
     {
-        // SQLite has no native "if not exists" guard for column additions; MigrateSqliteAsync
-        // swallows error 1 (duplicate column) instead. Postgres rewrites the same statements
-        // to use native IF NOT EXISTS via the .Replace below.
-        string[] migrations = new[]
-        {
             "ALTER TABLE package_versions ADD COLUMN vuln_checked_at TEXT",
             "ALTER TABLE activity ADD COLUMN detail TEXT",
             "ALTER TABLE activity ADD COLUMN source_ip TEXT",
@@ -580,6 +627,10 @@ public sealed class SchemaInitializer
             // (multi-layer ML / CUDA bases); the column is INTEGER so SQLite stores a 64-bit
             // value transparently, and every consumer carries long? end-to-end.
             "ALTER TABLE org_settings ADD COLUMN max_upload_bytes_oci INTEGER",
+            // Cargo per-ecosystem upload cap. Cargo gained hosted publish without a per-ecosystem
+            // cap (only the org global limit applied); this column gives it parity with every other
+            // publishable ecosystem. Falls back to max_upload_bytes when null.
+            "ALTER TABLE org_settings ADD COLUMN max_upload_bytes_cargo INTEGER",
             // Trailing path segment of blob_key, populated at insert time so the
             // PyPI/npm/NuGet download lookups can equality-probe an index instead of
             // running a leading-wildcard LIKE. Backfilled by
@@ -683,9 +734,11 @@ public sealed class SchemaInitializer
             // ('30','14','7','1','expired'). NULL = no alert emitted (or cert replaced). Reset
             // to NULL by the cert-upload/clear paths so the sweep re-evaluates on the new cert.
             "ALTER TABLE tenant_saml_config ADD COLUMN cert_expiry_alert_stage TEXT",
-        };
+    };
 
-        foreach (string? ddl in migrations)
+    private async Task RunAdditiveMigrationsAsync(DbConnection conn)
+    {
+        foreach (string? ddl in BuildAdditiveMigrations())
         {
             if (_db.Provider == DbProvider.Sqlite)
             {
@@ -700,8 +753,14 @@ public sealed class SchemaInitializer
         // Cargo sparse registry index metadata. CREATE TABLE syntax is provider-specific
         // (SQLite uses AUTOINCREMENT; Postgres uses BIGSERIAL), so this migration runs
         // outside the shared loop with explicit branching.
-        const string cargoSqlite = "CREATE TABLE IF NOT EXISTS cargo_metadata (id INTEGER PRIMARY KEY AUTOINCREMENT, version_id TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE, index_line TEXT NOT NULL, UNIQUE(version_id))";
-        const string cargoPg = "CREATE TABLE IF NOT EXISTS cargo_metadata (id BIGSERIAL PRIMARY KEY, version_id TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE, index_line TEXT NOT NULL, UNIQUE(version_id))";
+        const string cargoSqlite =
+            "CREATE TABLE IF NOT EXISTS cargo_metadata " +
+            "(id INTEGER PRIMARY KEY AUTOINCREMENT, version_id TEXT NOT NULL " +
+            "REFERENCES package_versions(id) ON DELETE CASCADE, index_line TEXT NOT NULL, UNIQUE(version_id))";
+        const string cargoPg =
+            "CREATE TABLE IF NOT EXISTS cargo_metadata " +
+            "(id BIGSERIAL PRIMARY KEY, version_id TEXT NOT NULL " +
+            "REFERENCES package_versions(id) ON DELETE CASCADE, index_line TEXT NOT NULL, UNIQUE(version_id))";
         if (_db.Provider == DbProvider.Sqlite)
         {
             await MigrateSqliteAsync(conn, cargoSqlite);

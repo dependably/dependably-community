@@ -30,8 +30,8 @@ public class MetricsAccessMiddlewareTests
         // the DB path is never exercised.
         static Task<string?> NoDb(string key, CancellationToken _) => Task.FromResult<string?>(null);
 
-        var accessConfig = new MetricsAccessConfig(NoDb, config);
-        var diagnostics = new ScrapeDiagnostics();
+        var accessConfig = new MetricsAccessConfig(NoDb, config, TimeProvider.System);
+        var diagnostics = new ScrapeDiagnostics(TimeProvider.System);
         return new MetricsAccessMiddleware(next, accessConfig, diagnostics);
     }
 

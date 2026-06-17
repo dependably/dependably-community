@@ -110,7 +110,7 @@ public sealed class OrgAuthConfigControllerTests
                 {
                     org = b.PrimaryOrgId,
                     cert = SampleIdpCertBase64,
-                    now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    now = s.Clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 });
         }
 
@@ -324,7 +324,9 @@ public sealed class OrgAuthConfigControllerTests
         await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        string recent = DateTimeOffset.UtcNow.AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        // "Recent" relative to the scenario's frozen clock — the controller compares
+        // last_test_at against the same injected clock.
+        string recent = s.Clock.GetUtcNow().AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using (var conn = await b.Db.OpenAsync())
         {
             await conn.ExecuteAsync(

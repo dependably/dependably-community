@@ -810,6 +810,118 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         }
     }
 
+    // ── Registration: upstream merge not poisoned by stale local-only cache ──────
+    //
+    // Regression: after the caching layer was added, the local-only path and the
+    // proxy-merged path shared the same IMemoryCache key. A package pushed before an
+    // operator added the mixed claim caused the local-only bytes to be cached; subsequent
+    // requests (now on the proxy-merged path after the claim was added) hit that stale
+    // entry and returned only the local versions, dropping all upstream history.
+    //
+    // The fix assigns a distinct IsProxy:true key to the proxy-merged path so the two
+    // paths can never collide even when the claim changes between requests.
+
+    [Fact]
+    public async Task RegistrationIndex_LocalCacheNotPoisoned_AfterMixedClaimAdded()
+    {
+        // 1. Push a local version — this creates an uploaded-origin row, making the package
+        //    implicitly local_only. The first registration request hits ServeLocalRegistrationAsync
+        //    and caches local-only bytes under the local key.
+        string id = $"cachepois{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        await _factory.PushNuGetPackage(id, "13.0.3");
+
+        string upstreamJson = "{\"count\":1,\"items\":[{\"count\":2,\"items\":["
+            + $"{{\"@id\":\"x\",\"catalogEntry\":{{\"id\":\"{id}\",\"version\":\"3.5.8\",\"listed\":true}}}},"
+            + $"{{\"@id\":\"y\",\"catalogEntry\":{{\"id\":\"{id}\",\"version\":\"10.0.0\",\"listed\":true}}}}"
+            + "]}]}";
+        _factory.MockUpstream.Given(
+                Request.Create()
+                    .WithPath($"/registration5-semver1/{id}/index.json")
+                    .UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/json").WithBody(upstreamJson));
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        // 2. First request: package is implicitly local_only (uploaded version, no claim).
+        //    This populates the local-only cache entry. Only local version 13.0.3 is returned.
+        var firstResp = await client.GetAsync($"/nuget/registration/{id}/");
+        Assert.Equal(HttpStatusCode.OK, firstResp.StatusCode);
+        string firstBody = await firstResp.Content.ReadAsStringAsync();
+        var firstVersions = ExtractVersionsFromRegistration(firstBody);
+        Assert.Contains("13.0.3", firstVersions);
+
+        // 3. Operator adds an explicit mixed claim, enabling upstream merging.
+        await _factory.SeedMixedClaim("nuget", id);
+
+        // 4. Second request: now on the proxy-merged path. Must NOT return the stale
+        //    local-only bytes. Upstream versions 3.5.8 and 10.0.0 must appear alongside 13.0.3.
+        var secondResp = await client.GetAsync($"/nuget/registration/{id}/");
+        Assert.Equal(HttpStatusCode.OK, secondResp.StatusCode);
+        string secondBody = await secondResp.Content.ReadAsStringAsync();
+        var secondVersions = ExtractVersionsFromRegistration(secondBody);
+
+        Assert.Contains("13.0.3", secondVersions);   // local version still present
+        Assert.Contains("3.5.8", secondVersions);    // upstream version — missing before fix
+        Assert.Contains("10.0.0", secondVersions);   // upstream version — missing before fix
+    }
+
+    // Mixed/partial-failure scenario: all 5 registration alias paths must return the
+    // merged catalog after a claim change. Before the fix, the shared cache key meant
+    // that whichever alias fired first could poison the cache for the others. Verify
+    // that sv1 and sv2 paths independently merge upstream without cross-contamination.
+    [Theory]
+    [InlineData("registration", "registration5-semver1")]
+    [InlineData("registration5-gz-semver2", "registration5-gz-semver2")]
+    public async Task RegistrationIndex_AllAliases_MergeUpstreamAfterClaimAdded(
+        string clientBase, string upstreamVariant)
+    {
+        string id = $"aliaspois{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        await _factory.PushNuGetPackage(id, "99.0.0");
+
+        string upstreamJson = "{\"count\":1,\"items\":[{\"count\":1,\"items\":["
+            + $"{{\"@id\":\"z\",\"catalogEntry\":{{\"id\":\"{id}\",\"version\":\"1.0.0\",\"listed\":true}}}}"
+            + "]}]}";
+        _factory.MockUpstream.Given(
+                Request.Create()
+                    .WithPath($"/{upstreamVariant}/{id}/index.json")
+                    .UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/json").WithBody(upstreamJson));
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        // Prime the local-only cache by issuing a first request before the claim is set.
+        // For this id+variant the package is implicitly local_only.
+        var primeResp = await client.GetAsync($"/nuget/{clientBase}/{id}/");
+        Assert.Equal(HttpStatusCode.OK, primeResp.StatusCode);
+        var primeVersions = ExtractVersionsFromRegistration(await primeResp.Content.ReadAsStringAsync());
+        // Upstream 1.0.0 must NOT be present yet (local_only path, no upstream fetch).
+        Assert.DoesNotContain("1.0.0", primeVersions);
+
+        // Operator adds the mixed claim.
+        await _factory.SeedMixedClaim("nuget", id);
+
+        // Post-claim: the merged response must include both the local and upstream version.
+        var mergedResp = await client.GetAsync($"/nuget/{clientBase}/{id}/");
+        Assert.Equal(HttpStatusCode.OK, mergedResp.StatusCode);
+        var mergedVersions = ExtractVersionsFromRegistration(await mergedResp.Content.ReadAsStringAsync());
+
+        Assert.Contains("99.0.0", mergedVersions);  // local version
+        Assert.Contains("1.0.0", mergedVersions);   // upstream version — poisoned before fix
+    }
+
+    private static HashSet<string> ExtractVersionsFromRegistration(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.GetProperty("items").EnumerateArray()
+            .SelectMany(p => p.GetProperty("items").EnumerateArray())
+            .Select(e => e.GetProperty("catalogEntry").GetProperty("version").GetString()!)
+            .ToHashSet();
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private static string NuspecXml(string id, string version) => $"""

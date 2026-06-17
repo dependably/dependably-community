@@ -14,7 +14,7 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
     public OrgRepositoryTests(InMemoryDbFixture fixture)
     {
         _fixture = fixture;
-        _repo = new OrgRepository(_fixture.Store);
+        _repo = new OrgRepository(_fixture.Store, time: TestTime.Frozen());
     }
 
     // ── Get / soft-delete cycle ──────────────────────────────────────────────
@@ -55,7 +55,7 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         // Force the stale one's deleted_at to 60 days ago.
         await using (var conn = await _fixture.Store.OpenAsync())
         {
-            string sixtyDaysAgo = DateTimeOffset.UtcNow.AddDays(-60).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string sixtyDaysAgo = TestTime.KnownNow.AddDays(-60).ToString("yyyy-MM-ddTHH:mm:ssZ");
             await conn.ExecuteAsync(
                 "UPDATE orgs SET deleted_at = @t WHERE id = @id", new { t = sixtyDaysAgo, id = staleId });
         }

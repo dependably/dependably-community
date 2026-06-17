@@ -11,9 +11,21 @@
 #
 # This script closes that gap for the CLI and CI: it runs `snyk code test`, then
 # fails ONLY on findings absent from ci/snyk-code-baseline.json — a committed set
-# of fingerprints for the known, already-triaged false positives. A NEW finding
+# of identities for the known, already-triaged false positives. A NEW finding
 # in any file (including a real bug in a file that also hosts a baselined FP)
 # still surfaces and fails the gate, so detection is not weakened.
+#
+# Identity key: rule + file + Snyk's path-based identity fingerprint
+# (`fingerprints["1"]`), NOT the primary content fingerprint (`fingerprints["0"]`).
+# The content fingerprint folds in surrounding lines, so any edit to a file that
+# hosts a baselined FP shifts that finding's hash — making it read as "new" and
+# the old one as "stale", failing the gate on cosmetic line moves. The identity
+# fingerprint encodes the data-flow path structure and is line-independent, so
+# routine edits no longer drift the baseline. Trade-off: two findings of the SAME
+# rule in the SAME file with an identical flow shape share one identity, so an
+# extra instance of an already-baselined FP class can be absorbed silently — an
+# accepted weakening, since every baselined rule here is a benign FP class. A new
+# finding of any non-baselined rule has no identity to collide with and surfaces.
 #
 # Usage:
 #   ci/snyk-code-scan.sh           Scan; exit 1 if any finding is NOT on the baseline.
@@ -45,9 +57,11 @@ if ! jq -e '.runs[0].results' "$SARIF" >/dev/null 2>&1; then
   exit 2
 fi
 
-# One compact record per finding, keyed on the stable content fingerprint.
+# One compact record per finding. `id` is the matching key: rule + file + Snyk's
+# line-independent identity fingerprint (`fingerprints["1"]`). `line` is retained
+# for human triage only — it is not part of the key, so line moves don't drift it.
 jq '[ .runs[0].results[] | {
-        id:   .fingerprints["0"],
+        id:   "\(.ruleId)|\(.locations[0].physicalLocation.artifactLocation.uri)|\(.fingerprints["1"])",
         rule: .ruleId,
         file: .locations[0].physicalLocation.artifactLocation.uri,
         line: .locations[0].physicalLocation.region.startLine,
@@ -55,7 +69,7 @@ jq '[ .runs[0].results[] | {
       } ] | sort_by(.file, .line)' "$SARIF" > "$CUR"
 
 if [[ "${1:-}" == "--update" ]]; then
-  jq '{ _comment: "Known Snyk Code false positives — each already triaged, with an inline // deepcode ignore at the site. The snyk CLI does not honour those inline markers, so this fingerprint set keeps ci/snyk-code-scan.sh from re-flagging them. Per-rule rationale: CONTRIBUTING.md > Static analysis (Snyk Code). Regenerate after re-triage: ci/snyk-code-scan.sh --update.",
+  jq '{ _comment: "Known Snyk Code false positives — each already triaged, with an inline // deepcode ignore at the site. The snyk CLI does not honour those inline markers, so this identity set keeps ci/snyk-code-scan.sh from re-flagging them. Each id is rule|file|<line-independent identity fingerprint>, so cosmetic line moves do not drift the baseline. Per-rule rationale: CONTRIBUTING.md > Static analysis (Snyk Code). Regenerate after re-triage: ci/snyk-code-scan.sh --update.",
         count: length,
         fingerprints: . }' "$CUR" > "$BASELINE"
   echo "baseline written: $(jq 'length' "$CUR") finding(s) -> ci/snyk-code-baseline.json"

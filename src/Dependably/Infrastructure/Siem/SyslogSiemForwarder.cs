@@ -20,6 +20,16 @@ namespace Dependably.Infrastructure.Siem;
 /// </summary>
 public sealed class SyslogSiemForwarder : ISiemForwarder
 {
+    // Default syslog port (UDP/TCP plaintext per RFC 5426/6587).
+    private const int DefaultSyslogPort = 514;
+
+    // CEF severity levels for specific event types (0-10 scale per CEF specification).
+    private const int CefSeverityHigh = 7;
+    private const int CefSeverityMedium = 5;
+    private const int CefSeverityLow = 3;
+    private const int CefSeverityMediumLow = 4;
+    private const int CefSeverityMediumHigh = 6;
+
     private readonly string _host;
     private readonly int _port;
     private readonly Transport _transport;
@@ -29,7 +39,7 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
     {
         _host = config["SIEM_SYSLOG_HOST"]
             ?? throw new InvalidOperationException("SIEM_SYSLOG_HOST is required for SyslogSiemForwarder.");
-        _port = int.TryParse(config["SIEM_SYSLOG_PORT"], out int p) && p > 0 ? p : 514;
+        _port = int.TryParse(config["SIEM_SYSLOG_PORT"], out int p) && p > 0 ? p : DefaultSyslogPort;
         _transport = (config["SIEM_SYSLOG_PROTO"] ?? "udp").Trim().ToLowerInvariant() switch
         {
             "udp" => Transport.Udp,
@@ -198,12 +208,12 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
 
     private static int CefSeverity(string action) => action switch
     {
-        "lockout.triggered" => 7,
-        "login.failure" => 5,
-        "login.success" => 3,
-        "token.revoked" => 4,
-        "rbac.role_changed" => 6,
-        _ => 3,
+        "lockout.triggered" => CefSeverityHigh,
+        "login.failure" => CefSeverityMedium,
+        "login.success" => CefSeverityLow,
+        "token.revoked" => CefSeverityMediumLow,
+        "rbac.role_changed" => CefSeverityMediumHigh,
+        _ => CefSeverityLow,
     };
 
     private enum Transport { Udp, Tcp, Tls }

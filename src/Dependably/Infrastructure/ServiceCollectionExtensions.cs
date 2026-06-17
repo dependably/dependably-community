@@ -19,7 +19,8 @@ public static class ServiceCollectionExtensions
     /// repositories. Singleton because repositories hold no per-request state — they
     /// take <see cref="IMetadataStore"/> and open a fresh connection per call.
     /// </summary>
-    public static IServiceCollection AddDependablyRepositories(this IServiceCollection services)
+    public static IServiceCollection AddDependablyRepositories(
+        this IServiceCollection services, IConfiguration config)
     {
         // Core repositories
         services.AddSingleton<JwtRevocationRepository>();
@@ -34,14 +35,20 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<TokenRepository>();
         // Async batched activity writer. The hosted service drains the channel into
         // batched INSERTs so the download/push hot paths no longer block on a SQLite
-        // writer-lock acquisition per row.
-        services.AddSingleton<ActivityWriter>();
+        // writer-lock acquisition per row. Capacity is operator-configurable via
+        // ACTIVITY_WRITER_QUEUE_CAPACITY; defaults to ActivityWriter.DefaultChannelCapacity.
+        int activityCapacity = int.TryParse(config["ACTIVITY_WRITER_QUEUE_CAPACITY"], out int ac) && ac > 0
+            ? ac : ActivityWriter.DefaultChannelCapacity;
+        services.AddSingleton(new ActivityWriter(activityCapacity));
         services.AddSingleton<ActivityWriterHostedService>();
         services.AddHostedService(sp => sp.GetRequiredService<ActivityWriterHostedService>());
         // Async batched download-count writer. The hosted service aggregates increments
         // per versionId/purl within each drain batch and issues one UPDATE per unique key,
-        // removing synchronous DB writes from every download-serve path.
-        services.AddSingleton<DownloadCountWriter>();
+        // removing synchronous DB writes from every download-serve path. Capacity is
+        // configurable via DOWNLOAD_COUNT_WRITER_QUEUE_CAPACITY.
+        int downloadCapacity = int.TryParse(config["DOWNLOAD_COUNT_WRITER_QUEUE_CAPACITY"], out int dc) && dc > 0
+            ? dc : DownloadCountWriter.DefaultChannelCapacity;
+        services.AddSingleton(new DownloadCountWriter(downloadCapacity));
         services.AddSingleton<DownloadCountWriterHostedService>();
         services.AddHostedService(sp => sp.GetRequiredService<DownloadCountWriterHostedService>());
         services.AddSingleton<AuditRepository>();
@@ -196,6 +203,7 @@ public static class ServiceCollectionExtensions
             });
         }
 
+        services.AddSingleton<VulnerabilityScanService.Dependencies>();
         services.AddSingleton<VulnerabilityScanService>();
         services.AddHostedService(sp => sp.GetRequiredService<VulnerabilityScanService>());
         return services;

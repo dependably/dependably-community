@@ -33,6 +33,13 @@ namespace Dependably.Tests.Infrastructure;
 /// </summary>
 public sealed class ControllerScenario : IAsyncDisposable
 {
+    /// <summary>
+    /// Frozen scenario clock injected into every constructed repository, service, and
+    /// controller. Tests read it for "now"-relative assertions and advance it to cross
+    /// time windows deterministically.
+    /// </summary>
+    public Microsoft.Extensions.Time.Testing.FakeTimeProvider Clock { get; } = TestTime.Frozen();
+
     private readonly InMemoryDbFixture _fixture = new();
     private readonly Dictionary<string, string> _orgIdsBySlug = new();
     private readonly Dictionary<string, string> _userIdsByEmail = new();
@@ -279,9 +286,9 @@ public sealed class ControllerScenario : IAsyncDisposable
         var orgs = new OrgRepository(db);
         var audit = new AuditRepository(db);
         var guard = new OrgAccessGuard(db);
-        var licenses = new LicenseRepository(db);
+        var licenses = new LicenseRepository(db, Clock);
         var packages = new PackageRepository(db);
-        var vulns = new VulnerabilityRepository(db);
+        var vulns = new VulnerabilityRepository(db, Clock);
         var problems = new ProblemResults(new EchoLocalizer());
 
         // Real VulnerabilityScanService over a no-op IOsvSource — the SUT is the controller,
@@ -293,21 +300,22 @@ public sealed class ControllerScenario : IAsyncDisposable
         noAirGap.IsEnabled.Returns(false);
         noAirGap.DisabledJobs.Returns(new System.Collections.Generic.HashSet<string>());
         noAirGap.IsJobDisabled(Arg.Any<string>()).Returns(false);
-        var scanner = new VulnerabilityScanService(
+        var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
             db, osv, vulns, audit,
             new ConfigurationBuilder().Build(),
             noAirGap,
-            NullLogger<VulnerabilityScanService>.Instance);
+            NullLogger<VulnerabilityScanService>.Instance,
+            Clock));
 
         var systemAdmins = new SystemAdminRepository(db);
-        var tokens = new TokenRepository(db);
-        var invites = new InviteRepository(db);
-        var allowlist = new AllowlistRepository(db);
+        var tokens = new TokenRepository(db, Clock);
+        var invites = new InviteRepository(db, Clock);
+        var allowlist = new AllowlistRepository(db, Clock);
         var blocklist = new BlocklistRepository(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
-            new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
+            new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), Clock);
         var reservedNamespaces = new ReservedNamespaceService(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
-            new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
-        var samlConfig = new SamlConfigRepository(db);
+            new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), Clock);
+        var samlConfig = new SamlConfigRepository(db, Clock);
         var blobs = new Dependably.Storage.InMemoryBlobStore();
         var publicUrl = new RequestPublicUrlBuilder(new ConfigurationBuilder().Build());
         var orgAuditEmitter = Substitute.For<Dependably.Infrastructure.Audit.IAuditEmitter>();
@@ -317,17 +325,19 @@ public sealed class ControllerScenario : IAsyncDisposable
         var instance = new InstanceController(orgs, audit, guard, noAirGap, jobRuns,
             new ConfigurationBuilder().Build())
         { ControllerContext = ctx };
-        var vuln = new VulnerabilityController(vulns, packages, scanner, audit,
-            new QuarantineRepository(db), guard,
-            NullLogger<VulnerabilityController>.Instance)
+        var vuln = new VulnerabilityController(new VulnerabilityControllerDependencies(
+            vulns, packages, scanner, audit,
+            new QuarantineRepository(db, Clock), guard,
+            NullLogger<VulnerabilityController>.Instance, Clock))
         { ControllerContext = ctx };
         var system = new SystemController(orgs, systemAdmins, db, audit, problems,
             new ConfigurationBuilder().Build(),
-            new Dependably.Security.PasswordPolicy())
+            new Dependably.Security.PasswordPolicy(), Clock)
         { ControllerContext = ctx };
 
         var packageAnalytics = new PackageAnalyticsRepository(db);
         var statsSnapshots = new StatsSnapshotRepository(db);
+        var scenarioCache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
         var orgSvc = new OrgControllerServices(
             Orgs: orgs, Packages: packages, PackageAnalytics: packageAnalytics,
             StatsSnapshots: statsSnapshots,
@@ -338,7 +348,11 @@ public sealed class ControllerScenario : IAsyncDisposable
             Logger: NullLogger<OrgController>.Instance, Problems: problems,
             Licenses: licenses, Vulns: vulns, Urls: publicUrl,
             AuditEmitter: orgAuditEmitter,
-            Cache: new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
+            Cache: scenarioCache,
+            RpmMergedCache: new Dependably.Infrastructure.Caching.MetadataResponseCache<Dependably.Infrastructure.Caching.RpmMergedRepodataKey, Dependably.Infrastructure.Caching.MergedRepodataCache>(
+                scenarioCache, Dependably.Infrastructure.Caching.MetadataCacheKeys.RpmMergedRepodata),
+            RpmLocalCache: new Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.RpmLocalRepodataKey>(
+                scenarioCache, Dependably.Infrastructure.Caching.MetadataCacheKeys.RpmLocalRepodata));
         var org = new OrgController(orgSvc) { ControllerContext = ctx };
         var orgSettingsRepo = new OrgSettingsRepository(db);
         var orgSettings = new OrgSettingsController(
@@ -350,7 +364,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             tokens, orgs, guard, audit, orgAuditEmitter, problems)
         { ControllerContext = ctx };
         var orgInvites = new OrgInvitesController(
-            invites, guard, audit, new ConfigurationBuilder().Build(),
+            invites, orgs, guard, audit, new ConfigurationBuilder().Build(),
             NullLogger<OrgInvitesController>.Instance, publicUrl, problems,
             mailer: mailer)
         { ControllerContext = ctx };
@@ -360,9 +374,9 @@ public sealed class ControllerScenario : IAsyncDisposable
         var orgLists = new OrgListsController(
             allowlist, blocklist, reservedNamespaces, guard, audit, problems)
         { ControllerContext = ctx };
-        var orgAudit = new OrgAuditController(audit, guard) { ControllerContext = ctx };
+        var orgAudit = new OrgAuditController(audit, guard, Clock) { ControllerContext = ctx };
         var orgAuthConfig = new OrgAuthConfigController(
-            guard, samlConfig, audit, publicUrl, problems)
+            guard, samlConfig, audit, publicUrl, problems, Clock)
         { ControllerContext = ctx };
 
         var claimRepo = new ClaimRepository(db);
@@ -372,11 +386,11 @@ public sealed class ControllerScenario : IAsyncDisposable
         var claimSvc = new ClaimsControllerServices(
             Guard: guard, Claims: claimRepo, Resolver: claimResolver, Audit: audit,
             AuditEmitter: orgAuditEmitter, Packages: packages, Blobs: blobs,
-            Logger: NullLogger<ClaimsController>.Instance);
+            Logger: NullLogger<ClaimsController>.Instance, Time: Clock);
         var claims = new ClaimsController(claimSvc) { ControllerContext = ctx };
 
         var siem = new SiemController(audit, vulns, orgs, tokens,
-            new ConfigurationBuilder().Build())
+            new ConfigurationBuilder().Build(), Clock)
         { ControllerContext = ctx };
 
         // ImportController: the heavy publish pipeline (IPackagePublishService) gets mocked

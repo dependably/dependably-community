@@ -16,6 +16,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
     private readonly InMemoryBlobStore _blobs = new();
+    private readonly Microsoft.Extensions.Time.Testing.FakeTimeProvider _clock = TestTime.Frozen();
     private RecordingOsvSource _osv = null!;
 
     public async Task InitializeAsync()
@@ -44,7 +45,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             NullLogger<Dependably.Infrastructure.Audit.AuditEmitter>.Instance, cfg,
             // SIEM queue is opt-in; empty service provider yields a null forwarder
             // and the emit path becomes a no-op for SIEM, which is correct for unit tests.
-            new Microsoft.Extensions.DependencyInjection.ServiceCollection().BuildServiceProvider());
+            new Microsoft.Extensions.DependencyInjection.ServiceCollection().BuildServiceProvider(), _clock);
         // Tier-shared bootstrap: PackagePublishService writes to Registry; in unit tests
         // both tiers point to the same in-memory store. Wrap in the community resolver so
         // the status + provisioning gates run on the real path.
@@ -53,10 +54,12 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         // Post-publish vuln scan runs synchronously; route it at a recording test double so
         // we can assert it fired (and so individual tests can swap it for a throwing variant).
         _osv = new RecordingOsvSource();
-        var scanner = new VulnerabilityScanService(_db, _osv,
-            new VulnerabilityRepository(_db), audit, cfg,
+        var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
+            _db, _osv,
+            new VulnerabilityRepository(_db, _clock), audit, cfg,
             new NoAirGap(),
-            NullLogger<VulnerabilityScanService>.Instance);
+            NullLogger<VulnerabilityScanService>.Instance,
+            _clock));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
             auditor, scanner, NullLogger<PackagePublishService>.Instance);
@@ -199,7 +202,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             PriorState = null,
             NewState = ClaimStateMachine.LocalOnly,
             Reason = "test",
-            OccurredAt = DateTimeOffset.UtcNow,
+            OccurredAt = TestTime.KnownNow,
         });
         var svc = Build(claimEnforcement: "on");
         var result = await svc.StoreAndRecordAsync(Sample(name: "internal-lib"));
@@ -661,14 +664,16 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             new Dependably.Infrastructure.Audit.AuditEventRepository(_db),
             new Microsoft.AspNetCore.Http.HttpContextAccessor(),
             NullLogger<Dependably.Infrastructure.Audit.AuditEmitter>.Instance, cfg,
-            new Microsoft.Extensions.DependencyInjection.ServiceCollection().BuildServiceProvider());
+            new Microsoft.Extensions.DependencyInjection.ServiceCollection().BuildServiceProvider(), _clock);
         var tiered = new TieredBlobStorage(_blobs, registry);
         var storage = new GlobalTenantStorageResolver(_db, tiered);
         _osv ??= new RecordingOsvSource();
-        var scanner = new VulnerabilityScanService(_db, _osv,
-            new VulnerabilityRepository(_db), audit, cfg,
+        var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
+            _db, _osv,
+            new VulnerabilityRepository(_db, _clock), audit, cfg,
             new NoAirGap(),
-            NullLogger<VulnerabilityScanService>.Instance);
+            NullLogger<VulnerabilityScanService>.Instance,
+            _clock));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
             auditor, scanner, NullLogger<PackagePublishService>.Instance);

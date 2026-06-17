@@ -35,7 +35,7 @@ public class LicenseReviewQueueTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
 
-    private LicenseRepository Repo() => new(_db);
+    private LicenseRepository Repo() => new(_db, TimeProvider.System);
 
     private async Task SeenAsync(string pvId, string spdx)
     {

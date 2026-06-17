@@ -24,7 +24,7 @@ public sealed class BackgroundJobRunRepositoryTests : IClassFixture<InMemoryDbFi
         long durationMs = 42)
     {
         string id = Guid.NewGuid().ToString("N");
-        var start = startedAt ?? DateTimeOffset.UtcNow;
+        var start = startedAt ?? TestTime.KnownNow;
         await _repo.RecordAsync(new BackgroundJobRunRecord(
             Id: id, JobName: jobName, Operation: operation, RunId: Guid.NewGuid().ToString("N"),
             StartedAt: start, FinishedAt: start.AddMilliseconds(durationMs),
@@ -35,7 +35,7 @@ public sealed class BackgroundJobRunRepositoryTests : IClassFixture<InMemoryDbFi
     [Fact]
     public async Task RecordAsync_PersistsAllColumns()
     {
-        var started = DateTimeOffset.UtcNow.AddSeconds(-5);
+        var started = TestTime.KnownNow.AddSeconds(-5);
         string id = await SeedAsync(
             jobName: "vuln-scan", operation: "scheduled",
             outcome: "server_error", errorMessage: "OSV 500",
@@ -83,7 +83,7 @@ public sealed class BackgroundJobRunRepositoryTests : IClassFixture<InMemoryDbFi
     [Fact]
     public async Task ListAsync_SortByDurationDesc_PutsLongestFirst()
     {
-        var t = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var t = TestTime.KnownNow.AddMinutes(-1);
         await SeedAsync(jobName: "sort-a", startedAt: t, durationMs: 100);
         await SeedAsync(jobName: "sort-a", startedAt: t.AddSeconds(1), durationMs: 9000);
         await SeedAsync(jobName: "sort-a", startedAt: t.AddSeconds(2), durationMs: 2500);

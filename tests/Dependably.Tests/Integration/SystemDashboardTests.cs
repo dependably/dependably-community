@@ -43,6 +43,9 @@ public sealed class SystemDashboardTests : IClassFixture<DependablyMultiFactory>
         // would otherwise route the write to whichever factory most recently set the hook.)
         var repo = _factory.Services.GetRequiredService<BackgroundJobRunRepository>();
         string jobName = "dashboard-test-" + Guid.NewGuid().ToString("N")[..6];
+        // now-ok: startedAt must be the most recent row relative to the host's real clock —
+        // background-job rows written by the live host carry real timestamps, and the
+        // dashboard's recent-jobs window orders by startedAt.
         var startedAt = DateTimeOffset.UtcNow;
         await repo.RecordAsync(new BackgroundJobRunRecord(
             Id: Guid.NewGuid().ToString("N"),

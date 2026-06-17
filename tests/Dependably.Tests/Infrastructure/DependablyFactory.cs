@@ -1,4 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Claims;
 using System.Text;
@@ -15,6 +16,8 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.IdentityModel.Tokens;
 using WireMock.Server;
+using IApplicationBuilder = Microsoft.AspNetCore.Builder.IApplicationBuilder;
+using IStartupFilter = Microsoft.AspNetCore.Hosting.IStartupFilter;
 
 namespace Dependably.Tests.Infrastructure;
 
@@ -33,11 +36,38 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
 
     private readonly TestMetadataStore _metadataStore = new();
 
+    /// <summary>
+    /// Opt-in frozen host clock. The default stays the system clock because third-party
+    /// validators inside the host (ITfoxtec SAML NotOnOrAfter, JwtBearer lifetime checks
+    /// on externally minted tokens) compare against real time — freezing the whole host
+    /// breaks those flows. Set before the first client is created; tests that freeze the
+    /// host control time via this provider.
+    /// </summary>
+    public Microsoft.Extensions.Time.Testing.FakeTimeProvider? FrozenClock { get; init; }
+
+    /// <summary>
+    /// Opt-in override for PROXY_STAGING_PATH. When set, the host resolves staging files
+    /// to this directory instead of the OS temp path. Tests that assert staging-file cleanup
+    /// set this to a unique per-run directory so file-count checks are isolated.
+    /// </summary>
+    public string? StagingPath { get; init; }
+
     protected override IHost CreateHost(IHostBuilder _)
     {
         var builder = WebApplication.CreateBuilder();
 
         Program.ConfigureBuilder(builder);
+
+        if (FrozenClock is not null)
+        {
+            builder.Services.RemoveAll<TimeProvider>();
+            builder.Services.AddSingleton<TimeProvider>(FrozenClock);
+        }
+
+        if (StagingPath is not null)
+        {
+            builder.WebHost.UseSetting("PROXY_STAGING_PATH", StagingPath);
+        }
 
         // Test overrides: replace real stores with in-memory equivalents. Both the legacy
         // IBlobStore registration AND the new TieredBlobStorage registration must be
@@ -64,12 +94,22 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         builder.Services.RemoveAll<SsrfConnectCallback>();
         builder.Services.AddSingleton(new SsrfConnectCallback(_ => false));
 
+        // TestServer does not set Connection.RemoteIpAddress — it stays null. The metrics
+        // IP allowlist gate (used by /version, /metrics, and the management OpenAPI docs)
+        // treats null as denied. Inject loopback so the default allowlist (127.0.0.1/::1)
+        // permits the test client to reach IP-gated endpoints without extra configuration.
+        builder.Services.AddSingleton<IStartupFilter, LoopbackRemoteIpFilter>();
+
         builder.WebHost.UseTestServer();
 
         builder.WebHost.UseSetting("PyPI:Upstream", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("Npm:Upstream", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("NuGet:Upstream", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("Go:Upstream", MockUpstream.Urls[0]);
+        // Go checksum-database passthrough: point the single supported sumdb at the WireMock
+        // host so /go/sumdb/{host}/... proxies to the mock. The requested sumdb name in tests is
+        // the WireMock host (matched case-insensitively against this value's host).
+        builder.WebHost.UseSetting("Go:SumDb", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
         // Tests share the factory; the default 10/min login rate limit otherwise leaks
@@ -83,6 +123,12 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         // TestServer requests land in the same "unknown" bucket, so the shared fixture
         // needs a budget high enough for all /api/v1 calls across every test class.
         builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+        // Metadata limiter (npm packument, PyPI simple index, NuGet registration GETs)
+        // partitions by remote IP; TestServer requests all share the same "unknown" bucket.
+        // Bump the budget so unrelated test classes do not exhaust each other's quota.
+        // Tests that explicitly exercise the 429 behaviour create a dedicated factory
+        // instance with a tight limit.
+        builder.WebHost.UseSetting("METADATA_RATE_LIMIT_PERMITS", "100000");
 
         var app = builder.Build();
         Program.ConfigureApp(app);
@@ -217,6 +263,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        // now-ok: mints a JWT the host validates against its (default: real) clock.
         var now = DateTime.UtcNow;
 
         var token = new JwtSecurityToken(
@@ -256,6 +303,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        // now-ok: mints a JWT the host validates against its (default: real) clock.
         var now = DateTime.UtcNow;
 
         var token = new JwtSecurityToken(
@@ -396,6 +444,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
             PriorState = null,
             NewState = ClaimStateMachine.Mixed,
             Reason = "test: opt in to upstream merging",
+            // now-ok: claim-event provenance stamp; no test asserts on this instant.
             OccurredAt = DateTimeOffset.UtcNow,
         });
     }
@@ -583,5 +632,24 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         string credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"user:{token}"));
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", credentials);
         return client;
+    }
+
+    // ── Startup filters ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Sets <c>Connection.RemoteIpAddress</c> to loopback for every TestServer
+    /// request. TestServer leaves it null, which IP-gated endpoints (metrics
+    /// allowlist, management OpenAPI docs) treat as denied. Loopback matches the
+    /// default allowlist (127.0.0.1/::1) so tests can reach those endpoints
+    /// without additional configuration.
+    /// </summary>
+    private sealed class LoopbackRemoteIpFilter : IStartupFilter
+    {
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next)
+            => app =>
+            {
+                app.Use(async (ctx, n) => { ctx.Connection.RemoteIpAddress = IPAddress.Loopback; await n(); });
+                next(app);
+            };
     }
 }

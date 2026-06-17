@@ -94,12 +94,12 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         var upstreamClient = new UpstreamClient(
             httpFactory, tiered, audit, urlValidator, airGap,
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(Path.GetTempPath()),
-            config,
+            Dependably.Infrastructure.StagingOptions.Resolve(config),
             NullLogger<UpstreamClient>.Instance);
 
         return new MavenUpstreamFetcher(
             upstreamClient, tiered, _db, config,
-            NullLogger<MavenUpstreamFetcher>.Instance);
+            NullLogger<MavenUpstreamFetcher>.Instance, TimeProvider.System);
     }
 
     private static string Sha256Hex(byte[] data)
@@ -336,8 +336,10 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task FetchArtifactAsync_Upstream5xx_NoStaleBlob_ReturnsNull()
+    public async Task FetchArtifactAsync_Upstream5xx_NoStaleBlob_ThrowsUpstreamFetchFailed()
     {
+        // A transient upstream 5xx exhausts retries and must propagate as
+        // UpstreamFetchFailedException so the middleware maps it to 503/502 — never 404.
         string sha = new('a', 64);
         string path = "com/example/transient/1.0/transient-1.0.jar";
         StubSidecar(path, sha);
@@ -346,9 +348,83 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
 
         var fetcher = BuildFetcher(); // empty cache
 
+        var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(
+            () => fetcher.FetchArtifactAsync(_upstream, path, default));
+
+        Assert.True(ex.Transient);
+        Assert.Equal(503, ex.StatusCode);
+    }
+
+    [Fact]
+    public async Task FetchArtifactAsync_FetchThenHash_Persistent403_Throws_AndDoesNotNegativeCache()
+    {
+        // The COMMON Maven path: no .sha256 sidecar → fetch-then-hash via the buffered
+        // metadata path. A transient upstream 403 there must be classified as retryable
+        // (UpstreamFetchFailedException → 503), NOT negative-cached. Negative-caching it
+        // would poison the artefact into a sticky 404 until the entry expires.
+        string path = "com/example/fbd403/1.0/fbd403-1.0.jar";
+        _server.Given(Request.Create().WithPath("/" + path).UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(403));
+
+        var fetcher = BuildFetcher(verifyWithSha256: false); // forces fetch-then-hash
+
+        var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(
+            () => fetcher.FetchArtifactAsync(_upstream, path, default));
+        Assert.True(ex.Transient);
+        Assert.Equal(403, ex.StatusCode);
+
+        // Not negative-cached: a second request still contacts upstream (throws again),
+        // rather than short-circuiting to a sticky null/404.
+        await Assert.ThrowsAsync<UpstreamFetchFailedException>(
+            () => fetcher.FetchArtifactAsync(_upstream, path, default));
+        Assert.True(_server.LogEntries.Count(
+            e => e.RequestMessage?.Path?.EndsWith("fbd403-1.0.jar") == true) >= 2);
+    }
+
+    [Fact]
+    public async Task FetchArtifactAsync_FetchThenHash_Transient403ThenSuccess_RetriesAndReturnsBytes()
+    {
+        // A transient 403 that heals within the retry window must be retried in-request,
+        // so the caller never even sees an error: first attempt 403, second attempt 200.
+        byte[] bytes = Encoding.UTF8.GetBytes("healed-after-retry");
+        string path = "com/example/heal403/1.0/heal403-1.0.jar";
+        _server.Given(Request.Create().WithPath("/" + path).UsingGet())
+               .InScenario("heal").WillSetStateTo("recovered")
+               .RespondWith(Response.Create().WithStatusCode(403));
+        _server.Given(Request.Create().WithPath("/" + path).UsingGet())
+               .InScenario("heal").WhenStateIs("recovered")
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(bytes));
+
+        var blobs = new InMemoryBlobStore();
+        var fetcher = BuildFetcher(blobs, verifyWithSha256: false);
+
         var result = await fetcher.FetchArtifactAsync(_upstream, path, default);
 
-        Assert.Null(result);
+        Assert.NotNull(result);
+        Assert.Equal(bytes, result!.Bytes);
+        Assert.True(await blobs.ExistsAsync(BlobKeys.Proxy(Sha256Hex(bytes)), default));
+    }
+
+    [Fact]
+    public async Task FetchArtifactAsync_FetchThenHash_Genuine404_ReturnsNull_AndNegativeCaches()
+    {
+        // Genuine absence (404) on the fetch-then-hash path stays a 404 and IS negative-cached
+        // — only transient statuses are exempted from the negative cache.
+        string path = "com/example/fbd404/1.0/fbd404-1.0.jar";
+        _server.Given(Request.Create().WithPath("/" + path).UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(404));
+
+        var fetcher = BuildFetcher(verifyWithSha256: false);
+
+        Assert.Null(await fetcher.FetchArtifactAsync(_upstream, path, default));
+        int afterFirst = _server.LogEntries.Count(
+            e => e.RequestMessage?.Path?.EndsWith("fbd404-1.0.jar") == true);
+
+        // Negative-cached: the second call short-circuits with no further upstream contact.
+        Assert.Null(await fetcher.FetchArtifactAsync(_upstream, path, default));
+        int afterSecond = _server.LogEntries.Count(
+            e => e.RequestMessage?.Path?.EndsWith("fbd404-1.0.jar") == true);
+        Assert.Equal(afterFirst, afterSecond);
     }
 
     [Fact]

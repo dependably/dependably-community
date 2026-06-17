@@ -30,6 +30,9 @@ public sealed class SamlReplayGuardTests : IClassFixture<DependablyFactory>, IAs
     private SamlConfigRepository Repo => _factory.Services.GetRequiredService<SamlConfigRepository>();
 
     private static string NewId() => "_" + Guid.NewGuid().ToString("N");
+
+    // now-ok: the DI-resolved repository prunes/compares expiry against the host's real
+    // clock, so seeds must stay relative to real now to land inside the window.
     private static DateTimeOffset SoonExpiry => DateTimeOffset.UtcNow.AddMinutes(5);
 
     private async Task<string> DefaultOrgIdAsync()
@@ -92,7 +95,9 @@ public sealed class SamlReplayGuardTests : IClassFixture<DependablyFactory>, IAs
         // conflict check, so the id is consumable again — proving the cache self-trims rather
         // than growing unbounded. (Production never reaches here: an assertion past its
         // NotOnOrAfter is rejected by the SAML library before the guard runs.)
-        Assert.True(await Repo.TryConsumeAssertionAsync(org, "idp", assertionId, DateTimeOffset.UtcNow.AddSeconds(-1)));
+        // now-ok: backdated relative to the host's real clock the repository prunes against;
+        // 5 minutes keeps the seed decisively past the second-granularity cutoff.
+        Assert.True(await Repo.TryConsumeAssertionAsync(org, "idp", assertionId, DateTimeOffset.UtcNow.AddMinutes(-5)));
         Assert.True(await Repo.TryConsumeAssertionAsync(org, "idp", assertionId, SoonExpiry));
     }
 
@@ -103,6 +108,7 @@ public sealed class SamlReplayGuardTests : IClassFixture<DependablyFactory>, IAs
     {
         string org = await DefaultOrgIdAsync();
         string reqId = NewId();
+        // now-ok: window must be future relative to the host's real clock (see SoonExpiry).
         await Repo.IssuePendingRequestAsync(reqId, org, DateTimeOffset.UtcNow.AddMinutes(10));
 
         Assert.True(await Repo.TryConsumePendingRequestAsync(reqId, org));
@@ -123,6 +129,7 @@ public sealed class SamlReplayGuardTests : IClassFixture<DependablyFactory>, IAs
         string orgA = await DefaultOrgIdAsync();
         string orgB = await CreateOrgAsync();
         string reqId = NewId();
+        // now-ok: window must be future relative to the host's real clock (see SoonExpiry).
         await Repo.IssuePendingRequestAsync(reqId, orgA, DateTimeOffset.UtcNow.AddMinutes(10));
 
         Assert.False(await Repo.TryConsumePendingRequestAsync(reqId, orgB));
@@ -134,7 +141,9 @@ public sealed class SamlReplayGuardTests : IClassFixture<DependablyFactory>, IAs
     {
         string org = await DefaultOrgIdAsync();
         string reqId = NewId();
-        await Repo.IssuePendingRequestAsync(reqId, org, DateTimeOffset.UtcNow.AddSeconds(-1));
+        // now-ok: backdated relative to the host's real clock the repository checks against;
+        // 5 minutes keeps the seed decisively past the second-granularity cutoff.
+        await Repo.IssuePendingRequestAsync(reqId, org, DateTimeOffset.UtcNow.AddMinutes(-5));
         Assert.False(await Repo.TryConsumePendingRequestAsync(reqId, org));
     }
 }

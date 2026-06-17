@@ -252,6 +252,22 @@
         }
       }
     },
+    "/api/v1/instance/metrics-access": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/instance/settings": {
       "operations": {
         "get": {
@@ -1109,6 +1125,80 @@
         }
       }
     },
+    "/cargo/api/v1/crates": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/cargo/api/v1/crates/new": {
+      "operations": {
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/cargo/api/v1/crates/{name}/owners": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "name"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "get": {
+          "requiredParams": [
+            "name"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [
+            "name"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/cargo/api/v1/crates/{name}/{version}/unyank": {
+      "operations": {
+        "put": {
+          "requiredParams": [
+            "name",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/cargo/api/v1/crates/{name}/{version}/yank": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "name",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/cargo/config.json": {
       "operations": {
         "get": {
@@ -1315,6 +1405,16 @@
           "responseCodes": [
             "200"
           ]
+        },
+        "head": {
+          "requiredParams": [
+            "file",
+            "pkg",
+            "scope"
+          ],
+          "responseCodes": [
+            "200"
+          ]
         }
       }
     },
@@ -1343,12 +1443,31 @@
           "responseCodes": [
             "200"
           ]
+        },
+        "head": {
+          "requiredParams": [
+            "file",
+            "pkg",
+            "scope"
+          ],
+          "responseCodes": [
+            "200"
+          ]
         }
       }
     },
     "/npm/tarballs/{pkg}/{file}": {
       "operations": {
         "get": {
+          "requiredParams": [
+            "file",
+            "pkg"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "head": {
           "requiredParams": [
             "file",
             "pkg"
@@ -1402,6 +1521,15 @@
           "responseCodes": [
             "200"
           ]
+        },
+        "head": {
+          "requiredParams": [
+            "file",
+            "pkg"
+          ],
+          "responseCodes": [
+            "200"
+          ]
         }
       }
     },
@@ -1443,6 +1571,16 @@
     "/nuget/flatcontainer/{id}/{version}/{file}": {
       "operations": {
         "get": {
+          "requiredParams": [
+            "file",
+            "id",
+            "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "head": {
           "requiredParams": [
             "file",
             "id",
@@ -1719,6 +1857,14 @@
     "/packages/{file}": {
       "operations": {
         "get": {
+          "requiredParams": [
+            "file"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "head": {
           "requiredParams": [
             "file"
           ],

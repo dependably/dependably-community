@@ -15,6 +15,9 @@ namespace Dependably.Security;
 /// </summary>
 public static class RateLimitPartitions
 {
+    // Number of SHA-256 bytes taken for the token partition key prefix (6 bytes = 12 hex chars).
+    private const int TokenHashPrefixBytes = 6;
+
     /// <summary>
     /// Returns a partition key for the request: either <c>token:HHHHHHHHHHHH</c> (first 12
     /// hex chars of the SHA-256 of the bearer/basic credential) or <c>ip:1.2.3.4</c>.
@@ -30,7 +33,7 @@ public static class RateLimitPartitions
             byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
             // 12 hex chars = 48 bits — collision-resistant enough for partitioning while
             // staying short in metric labels.
-            return "token:" + Convert.ToHexString(hashBytes, 0, 6).ToLowerInvariant();
+            return "token:" + Convert.ToHexString(hashBytes, 0, TokenHashPrefixBytes).ToLowerInvariant();
         }
 
         string? ip = httpContext.GetNormalizedRemoteIp();
@@ -59,7 +62,7 @@ public static class RateLimitPartitions
         if (raw is not null)
         {
             byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
-            return "token:" + Convert.ToHexString(hashBytes, 0, 6).ToLowerInvariant();
+            return "token:" + Convert.ToHexString(hashBytes, 0, TokenHashPrefixBytes).ToLowerInvariant();
         }
 
         // Authenticated SPA session: UseAuthentication runs before the GlobalLimiter, so

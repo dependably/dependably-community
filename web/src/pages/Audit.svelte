@@ -6,18 +6,19 @@
   import { formatDate } from '../lib/format.js'
   import DataTable from '../lib/DataTable.svelte'
   import Pagination from '../lib/Pagination.svelte'
+  import SearchInput from '../lib/SearchInput.svelte'
   import { readQuery, writeQuery } from '../lib/tableState.js'
 
   // Tab + filter state lives in the URL query string so it survives route changes,
-  // reloads, and copied links. Lifecycle keys: type/page/limit; admin keys: action/apage/alimit.
-  const DEFAULTS = { tab: 'lifecycle', type: '', page: 1, limit: 50, action: '', apage: 1, alimit: 50 }
+  // reloads, and copied links. Lifecycle keys: type/q/page/limit; admin keys: action/aq/apage/alimit.
+  const DEFAULTS = { tab: 'lifecycle', type: '', q: '', page: 1, limit: 50, action: '', aq: '', apage: 1, alimit: 50 }
   const init = readQuery(DEFAULTS)
 
   function sync() {
     writeQuery({
       tab: activeTab,
-      type: lcFilterType, page: lcPage, limit: lcLimit,
-      action: adFilterAction, apage: adPage, alimit: adLimit,
+      type: lcFilterType, q: lcSearch, page: lcPage, limit: lcLimit,
+      action: adFilterAction, aq: adSearch, apage: adPage, alimit: adLimit,
     }, DEFAULTS)
   }
 
@@ -27,6 +28,7 @@
   // ── Lifecycle tab (activity) ─────────────────────────────────────────────
   let lcItems = [], lcLoading = true, lcError = ''
   let lcFilterType = init.type
+  let lcSearch = init.q
   let lcPage = init.page, lcLimit = init.limit, lcTotal = 0
 
   $: lcColumns = [
@@ -43,6 +45,7 @@
     try {
       const p = { page: lcPage, limit: lcLimit }
       if (lcFilterType) p.event_type = lcFilterType
+      if (lcSearch) p.search = lcSearch
       const data = await api.getActivity(p)
       lcItems = data.items
       lcTotal = data.total
@@ -53,11 +56,13 @@
   function lcOnPageChange(e) { lcPage = e.detail.page; sync(); loadLifecycle() }
   function lcOnLimitChange(e) { lcLimit = e.detail.limit; lcPage = 1; sync(); loadLifecycle() }
   function lcOnFilterChange() { lcPage = 1; sync(); loadLifecycle() }
+  function lcOnSearch() { lcPage = 1; sync(); loadLifecycle() }
 
   async function lcExport() {
     try {
       const p = {}
       if (lcFilterType) p.event_type = lcFilterType
+      if (lcSearch) p.search = lcSearch
       await api.exportActivity(p)
     } catch (e) { lcError = e.message }
   }
@@ -65,6 +70,7 @@
     try {
       const p = {}
       if (adFilterAction) p.action = adFilterAction
+      if (adSearch) p.search = adSearch
       await api.exportAudit(p)
     } catch (e) { adError = e.message }
   }
@@ -81,6 +87,11 @@
     blocked: 'yanked',
     blocked_vuln_score: 'yanked',
     blocked_manual: 'yanked',
+    blocked_release_age: 'yanked',
+    blocked_malicious: 'yanked',
+    blocked_kev: 'yanked',
+    blocked_epss: 'yanked',
+    blocked_deprecated: 'yanked',
     manual_block: 'warning',
     manual_unblock: 'unblock',
   }
@@ -89,6 +100,7 @@
   // ── Admin actions tab (audit_log scope='tenant') ─────────────────────────
   let adItems = [], adLoading = false, adError = ''
   let adFilterAction = init.action
+  let adSearch = init.aq
   let adPage = init.apage, adLimit = init.alimit, adTotal = 0
 
   // Tenant audit actions, grouped for the filter dropdown. Backend uses exact-match
@@ -122,6 +134,7 @@
     try {
       const p = { page: adPage, limit: adLimit }
       if (adFilterAction) p.action = adFilterAction
+      if (adSearch) p.search = adSearch
       const data = await api.getAudit(p)
       adItems = data.items
       adTotal = data.total
@@ -132,6 +145,7 @@
   function adOnPageChange(e) { adPage = e.detail.page; sync(); loadAdmin() }
   function adOnLimitChange(e) { adLimit = e.detail.limit; adPage = 1; sync(); loadAdmin() }
   function adOnFilterChange() { adPage = 1; sync(); loadAdmin() }
+  function adOnSearch() { adPage = 1; sync(); loadAdmin() }
 
   function selectTab(tab) {
     activeTab = tab
@@ -164,6 +178,8 @@
 
   {#if activeTab === 'lifecycle'}
     <div class="tab-toolbar">
+      <SearchInput class="audit-search" placeholder={$t('activity.searchPlaceholder')}
+        bind:value={lcSearch} on:search={lcOnSearch} />
       <select bind:value={lcFilterType} on:change={lcOnFilterChange} class="event-select">
         <option value="">{$t('activity.allEvents')}</option>
         <option value="first_fetch">{$t('activity.events.firstFetch')}</option>
@@ -178,7 +194,12 @@
         <option value="manual_unblock">{$t('activity.events.manualUnblock')}</option>
         <option value="blocked">{$t('activity.events.blocked')}</option>
         <option value="blocked_manual">{$t('activity.events.blockedManual')}</option>
+        <option value="blocked_release_age">{$t('activity.events.blockedReleaseAge')}</option>
+        <option value="blocked_malicious">{$t('activity.events.blockedMalicious')}</option>
+        <option value="blocked_kev">{$t('activity.events.blockedKev')}</option>
+        <option value="blocked_epss">{$t('activity.events.blockedEpss')}</option>
         <option value="blocked_vuln_score">{$t('activity.events.blockedVulnScore')}</option>
+        <option value="blocked_deprecated">{$t('activity.events.blockedDeprecated')}</option>
         <option value="login.success">{$t('activity.events.loginSuccess')}</option>
         <option value="login.failure">{$t('activity.events.loginFailure')}</option>
         <option value="login.locked">{$t('activity.events.loginLocked')}</option>
@@ -217,6 +238,8 @@
     {/if}
   {:else}
     <div class="tab-toolbar">
+      <SearchInput class="audit-search" placeholder={$t('audit.searchPlaceholder')}
+        bind:value={adSearch} on:search={adOnSearch} />
       <select bind:value={adFilterAction} on:change={adOnFilterChange} class="event-select">
         <option value="">{$t('audit.allActions')}</option>
         {#each TENANT_AUDIT_ACTION_GROUPS as g (g.labelKey)}
@@ -272,6 +295,7 @@
   .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
   .tab-toolbar { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px; }
+  .tab-toolbar :global(.audit-search) { margin-right: auto; width: 260px; }
 
   .first-fetch-row td { background: var(--badge-warning-bg) !important; color: var(--badge-warning-text); }
   .nowrap { white-space: nowrap; }

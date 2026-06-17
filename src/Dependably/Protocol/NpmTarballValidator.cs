@@ -16,13 +16,16 @@ namespace Dependably.Protocol;
 /// <c>{name}-{version}/</c> shape or no wrapper at all — npm itself strips one leading
 /// directory on install, so the wrapper name is not significant).</para>
 /// </summary>
+/// <summary>
+/// Combines the validation outcome with the extracted package name and version so
+/// callers receive all three values in a single return without out-parameters.
+/// </summary>
+public sealed record NpmTarballParsed(ValidationResult Validation, string? Name, string? Version);
+
 public static class NpmTarballValidator
 {
-    public static ValidationResult Validate(byte[] bytes, out string? name, out string? version)
+    public static NpmTarballParsed Validate(byte[] bytes)
     {
-        name = null;
-        version = null;
-
         try
         {
             // Zip-bomb guard: the compressed input is bounded by upload limits, but the
@@ -38,8 +41,9 @@ public static class NpmTarballValidator
             {
                 if (++entryCount > TarScanLimits.MaxEntries)
                 {
-                    return ValidationResult.Fail("content",
-                        $"Tarball exceeds the {TarScanLimits.MaxEntries}-entry limit.");
+                    return new NpmTarballParsed(
+                        ValidationResult.Fail("content", $"Tarball exceeds the {TarScanLimits.MaxEntries}-entry limit."),
+                        null, null);
                 }
 
                 if (!IsTopLevelPackageJson(entry.Name))
@@ -47,30 +51,37 @@ public static class NpmTarballValidator
                     continue;
                 }
 
-                return ParseManifestEntry(entry, out name, out version);
+                return ParseManifestEntry(entry);
             }
 
-            return ValidationResult.Fail("content", "Tarball is missing a top-level package.json");
+            return new NpmTarballParsed(
+                ValidationResult.Fail("content", "Tarball is missing a top-level package.json"),
+                null, null);
         }
         catch (Exception ex)
         {
-            return ValidationResult.Fail("content", $"Invalid gzip tar: {ex.Message}");
+            return new NpmTarballParsed(
+                ValidationResult.Fail("content", $"Invalid gzip tar: {ex.Message}"),
+                null, null);
         }
     }
 
     // Reads the package.json entry, validates the name and version fields, and applies the
     // outer-label override for GitHub-style source archives.
-    private static ValidationResult ParseManifestEntry(TarEntry entry, out string? name, out string? version)
+    private static NpmTarballParsed ParseManifestEntry(TarEntry entry)
     {
         using var entryStream = new LimitedReadStream(
             entry.DataStream!, TarScanLimits.MaxManifestBytes, "package.json");
         var json = JsonNode.Parse(entryStream);
-        name = json?["name"]?.GetValue<string>();
-        version = json?["version"]?.GetValue<string>();
+        string? name = json?["name"]?.GetValue<string>();
+        string? version = json?["version"]?.GetValue<string>();
 
         if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(version))
         {
-            return ValidationResult.Fail("content", "package.json missing name or version");
+            // Return partially-extracted values so callers can observe what was present.
+            return new NpmTarballParsed(
+                ValidationResult.Fail("content", "package.json missing name or version"),
+                name, version);
         }
 
         // Name shape gate (same rules as the npm publish controller). The import
@@ -78,7 +89,9 @@ public static class NpmTarballValidator
         // manifest names other than a single @scope/ prefix must be rejected here.
         if (!NpmNameValidator.IsValidFullName(name))
         {
-            return ValidationResult.Fail("content", $"Invalid npm package name: {name}");
+            return new NpmTarballParsed(
+                ValidationResult.Fail("content", $"Invalid npm package name: {name}"),
+                null, null);
         }
 
         // Outer-label override: when the wrapper directory looks like
@@ -92,7 +105,7 @@ public static class NpmTarballValidator
             version = labelled;
         }
 
-        return ValidationResult.Ok();
+        return new NpmTarballParsed(ValidationResult.Ok(), name, version);
     }
 
     // Matches `package.json` at the root or inside exactly one wrapper directory of any name.

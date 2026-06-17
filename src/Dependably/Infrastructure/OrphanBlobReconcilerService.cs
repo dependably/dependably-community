@@ -27,17 +27,20 @@ public sealed class OrphanBlobReconcilerService : BackgroundService
     private readonly PackageRepository _packages;
     private readonly IConfiguration _config;
     private readonly ILogger<OrphanBlobReconcilerService> _logger;
+    private readonly TimeProvider _time;
 
     public OrphanBlobReconcilerService(
         TieredBlobStorage blobs,
         PackageRepository packages,
         IConfiguration config,
-        ILogger<OrphanBlobReconcilerService> logger)
+        ILogger<OrphanBlobReconcilerService> logger,
+        TimeProvider time)
     {
         _blobs = blobs;
         _packages = packages;
         _config = config;
         _logger = logger;
+        _time = time;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -55,13 +58,13 @@ public sealed class OrphanBlobReconcilerService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var next = schedule.GetNextOccurrence(DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
+            var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
             if (next is null)
             {
                 break;
             }
 
-            var delay = next.Value - DateTimeOffset.UtcNow;
+            var delay = next.Value - _time.GetUtcNow();
             if (delay > TimeSpan.Zero)
             {
                 try { await Task.Delay(delay, stoppingToken); }
@@ -73,7 +76,7 @@ public sealed class OrphanBlobReconcilerService : BackgroundService
             }
 
             using var scope = Dependably.Infrastructure.Observability.BackgroundJobScope.Begin(
-                "orphan-reconciler", "blob_store.reconcile");
+                "orphan-reconciler", "blob_store.reconcile", _time);
             try
             {
                 await RunOnceAsync(stoppingToken);
@@ -95,7 +98,7 @@ public sealed class OrphanBlobReconcilerService : BackgroundService
     {
         int graceMinutes = int.TryParse(_config["ORPHAN_RECONCILE_GRACE_MINUTES"], out int g) && g > 0
             ? g : 30;
-        var cutoff = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(graceMinutes);
+        var cutoff = _time.GetUtcNow() - TimeSpan.FromMinutes(graceMinutes);
 
         // Materialize the referenced-keys set first. For a tenant with millions of versions
         // this hits memory but is bounded by metadata size, not blob size; for community

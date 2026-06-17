@@ -50,7 +50,27 @@ public sealed record PublishRequest
     /// <summary>Pre-computed PURL.</summary>
     public required string Purl { get; init; }
 
-    public required byte[] ArtifactBytes { get; init; }
+    /// <summary>
+    /// In-memory artifact bytes. Legacy callers (Cargo, Import) set this; protocol
+    /// publish callers (npm, NuGet, PyPI) set <see cref="ArtifactStagingPath"/> +
+    /// <see cref="ArtifactSizeBytes"/> so large uploads are never fully materialized
+    /// in managed memory. Exactly one of ArtifactBytes or ArtifactStagingPath must be set.
+    /// </summary>
+    public byte[]? ArtifactBytes { get; init; }
+
+    /// <summary>
+    /// Absolute path to a pre-staged temp file holding the artifact bytes. When set, the
+    /// publish service streams from this file instead of ArtifactBytes. The caller is
+    /// responsible for deleting the file after StoreAndRecordAsync returns.
+    /// </summary>
+    public string? ArtifactStagingPath { get; init; }
+
+    /// <summary>
+    /// Byte count of the staged artifact when <see cref="ArtifactStagingPath"/> is set.
+    /// Must be accurate: used for size-cap enforcement, quota-delta reservation, and the
+    /// version-row size column.
+    /// </summary>
+    public long ArtifactSizeBytes { get; init; }
 
     /// <summary>'proxy' (upstream cache) | 'uploaded' (user-pushed file).</summary>
     public required string Origin { get; init; }

@@ -48,6 +48,13 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
     private AuditRepository _audit = null!;
     private PackageRepository _packages = null!;
 
+    // Shared across BuildController calls so the metadata cache (single-flight + TTL) persists
+    // between the first and second GET — that's what makes the second metadata poll a cache hit.
+    private readonly Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.MavenMetadataKey> _metadataCache =
+        new(new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions { SizeLimit = 8 * 1024 * 1024 }),
+            Dependably.Infrastructure.Caching.MetadataCacheKeys.MavenMetadata);
+
     public async Task InitializeAsync()
     {
         await new SchemaInitializer(_db).InitializeAsync();
@@ -55,7 +62,7 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         _upstream = _server.Urls[0].TrimEnd('/');
 
         _orgs = new OrgRepository(_db);
-        _tokens = new TokenRepository(_db);
+        _tokens = new TokenRepository(_db, TimeProvider.System);
         _audit = new AuditRepository(_db);
         _packages = new PackageRepository(_db);
 
@@ -96,6 +103,42 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
     private void StubSidecar(string path, string sha256)
         => _server.Given(Request.Create().WithPath("/" + path + ".sha256").UsingGet())
                   .RespondWith(Response.Create().WithStatusCode(200).WithBody(sha256 + "  some-file.jar\n"));
+
+    private void StubUpstreamMetadata(string artifactPath, params string[] versions)
+    {
+        string versionXml = string.Concat(versions.Select(v => $"<version>{v}</version>"));
+        string xml =
+            "<metadata><groupId>com.example</groupId><artifactId>meta</artifactId>" +
+            $"<versioning><versions>{versionXml}</versions></versioning></metadata>";
+        _server.Given(Request.Create().WithPath("/" + artifactPath + "/maven-metadata.xml").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(xml));
+    }
+
+    private long UpstreamMetadataGetCount(string artifactPath)
+        => _server.LogEntries.Count(e =>
+            e.RequestMessage?.Path?.EndsWith(artifactPath + "/maven-metadata.xml") == true);
+
+    private async Task PublishLocalVersionAsync(string groupId, string artifactId, string version)
+    {
+        string purlName = $"{groupId}:{artifactId}";
+        var pkg = await _packages.GetOrCreateAsync(_orgId, "maven", purlName, purlName, isProxy: false);
+        await using var conn = await _db.OpenAsync();
+        string pvId = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO package_versions (id, package_id, version, purl, blob_key, filename, size_bytes, checksum_sha256, origin)
+            VALUES (@id, @pkgId, @version, @purl, @blobKey, @filename, 1, 'deadbeef', 'uploaded')
+            """,
+            new
+            {
+                id = pvId,
+                pkgId = pkg.Id,
+                version,
+                purl = PurlNormalizer.Maven(groupId, artifactId, version),
+                blobKey = $"hosted/{_orgId}/maven/{groupId}/{artifactId}/{version}/{artifactId}-{version}.jar",
+                filename = $"{artifactId}-{version}.jar",
+            });
+    }
 
     private async Task SetAnonymousPullAsync(bool enabled)
     {
@@ -160,23 +203,24 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         var upstreamClient = new UpstreamClient(
             httpFactory, tiered, _audit, new AllowAllValidator(), new StubAirGapMode(false),
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(Path.GetTempPath()),
-            config, NullLogger<UpstreamClient>.Instance);
+            Dependably.Infrastructure.StagingOptions.Resolve(config), NullLogger<UpstreamClient>.Instance);
         var upstream = new MavenUpstreamFetcher(
-            upstreamClient, tiered, _db, config, NullLogger<MavenUpstreamFetcher>.Instance);
+            upstreamClient, tiered, _db, config, NullLogger<MavenUpstreamFetcher>.Instance, TimeProvider.System);
 
-        var vulns = new VulnerabilityRepository(_db);
-        var licenses = new LicenseRepository(_db);
-        var scanner = new VulnerabilityScanService(
+        var vulns = new VulnerabilityRepository(_db, TimeProvider.System);
+        var licenses = new LicenseRepository(_db, TimeProvider.System);
+        var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
             _db, osv, vulns, _audit, config,
             new StubAirGapMode(false),
-            NullLogger<VulnerabilityScanService>.Instance);
+            NullLogger<VulnerabilityScanService>.Instance,
+            TimeProvider.System));
         var proxyVersions = new ProxyVersionRecorder(_packages, _audit, licenses);
-        var blockGate = new BlockGateService(vulns, _audit, new QuarantineRepository(_db), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance);
+        var blockGate = new BlockGateService(vulns, _audit, new QuarantineRepository(_db, TimeProvider.System), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, TimeProvider.System);
         var cacheRecorder = new CacheAccessRecorder(
             new CacheArtifactRepository(_db), new TenantArtifactAccessRepository(_db),
-            NullLogger<CacheAccessRecorder>.Instance);
+            NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         var proxyFetch = new ProxyFetchService(
-            cacheRecorder, proxyVersions, scanner, blockGate, _packages, _audit);
+            cacheRecorder, proxyVersions, scanner, blockGate, _packages, _audit, TimeProvider.System);
 
         var svc = new MavenControllerServices(
             Packages: _packages, Tokens: _tokens, Audit: _audit, Orgs: _orgs,
@@ -184,8 +228,10 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             ProxyFetch: proxyFetch, BlockGate: blockGate,
             ReservedNamespaces: new ReservedNamespaceService(
                 _db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
-                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
-            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db)));
+                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System),
+            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System)),
+            MetadataCache: _metadataCache,
+            Log: NullLogger<MavenController>.Instance);
 
         return new MavenController(svc)
         {
@@ -264,6 +310,91 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         Assert.Equal("HIT", ctl2.Response.Headers["X-Cache"].ToString());
 
         Assert.Equal(artifactCallsAfterMiss, ArtifactGetCount("clean-1.0.jar"));
+    }
+
+    [Fact]
+    public async Task Metadata_SecondGet_IsCacheHit_NoSecondUpstreamMetadataFetch()
+    {
+        const string artifactPath = "com/example/meta";
+        StubUpstreamMetadata(artifactPath, "1.0", "2.0");
+
+        var ctl1 = BuildController(CleanOsv());
+        var first = await ctl1.Download(artifactPath + "/maven-metadata.xml", CancellationToken.None);
+        var content1 = Assert.IsType<ContentResult>(first);
+        Assert.Contains("2.0", content1.Content);
+        Assert.Equal(1, UpstreamMetadataGetCount(artifactPath));
+
+        // Second poll is served from the rendered-body cache — no further upstream metadata fetch.
+        var ctl2 = BuildController(CleanOsv());
+        var second = await ctl2.Download(artifactPath + "/maven-metadata.xml", CancellationToken.None);
+        var content2 = Assert.IsType<ContentResult>(second);
+        Assert.Equal(content1.Content, content2.Content);
+        Assert.Equal(1, UpstreamMetadataGetCount(artifactPath));
+    }
+
+    [Fact]
+    public async Task Metadata_PublishEvictsCache_NewVersionAppearsImmediately()
+    {
+        // No upstream stub for this coordinate → local-only metadata; isolates eviction from TTL.
+        await PublishLocalVersionAsync("com.example", "evict", "1.0");
+
+        var ctl1 = BuildController(CleanOsv());
+        var first = await ctl1.Download("com/example/evict/maven-metadata.xml", CancellationToken.None);
+        var content1 = Assert.IsType<ContentResult>(first);
+        Assert.Contains("1.0", content1.Content);
+        Assert.DoesNotContain("2.0", content1.Content);
+
+        // Publishing a second version through the controller must evict the warmed cache entry.
+        var (raw, _) = await _tokens.CreateUserTokenAsync(
+            _orgId, _userId, """["publish:maven"]""", expiresAt: null);
+        var ctlPub = BuildController(CleanOsv());
+        ctlPub.Request.Headers.Authorization = $"Bearer {raw}";
+        ctlPub.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes("jar-bytes-v2"));
+        ctlPub.Request.ContentLength = 12;
+        var put = await ctlPub.Publish(
+            "com/example/evict/2.0/evict-2.0.jar", CancellationToken.None);
+        Assert.Equal(201, Assert.IsType<StatusCodeResult>(put).StatusCode);
+
+        var ctl2 = BuildController(CleanOsv());
+        var second = await ctl2.Download("com/example/evict/maven-metadata.xml", CancellationToken.None);
+        var content2 = Assert.IsType<ContentResult>(second);
+        Assert.Contains("2.0", content2.Content);
+    }
+
+    [Fact]
+    public async Task Metadata_SidecarHashesSameServedBytes()
+    {
+        const string artifactPath = "com/example/meta";
+        StubUpstreamMetadata(artifactPath, "1.0", "2.0");
+
+        var ctl1 = BuildController(CleanOsv());
+        var doc = Assert.IsType<ContentResult>(
+            await ctl1.Download(artifactPath + "/maven-metadata.xml", CancellationToken.None));
+        byte[] served = Encoding.UTF8.GetBytes(doc.Content!);
+
+        var ctl2 = BuildController(CleanOsv());
+        var sidecar = Assert.IsType<ContentResult>(
+            await ctl2.Download(artifactPath + "/maven-metadata.xml.sha1", CancellationToken.None));
+
+        string expected = Convert.ToHexString(SHA1.HashData(served)).ToLowerInvariant();
+        Assert.Equal(expected, sidecar.Content);
+    }
+
+    [Fact]
+    public async Task Metadata_ETag_HonorsIfNoneMatch_AgainstCachedBody()
+    {
+        const string artifactPath = "com/example/meta";
+        StubUpstreamMetadata(artifactPath, "1.0", "2.0");
+
+        var ctl1 = BuildController(CleanOsv());
+        await ctl1.Download(artifactPath + "/maven-metadata.xml", CancellationToken.None);
+        string etag = ctl1.Response.Headers.ETag.ToString();
+        Assert.False(string.IsNullOrEmpty(etag));
+
+        var ctl2 = BuildController(CleanOsv());
+        ctl2.Request.Headers.IfNoneMatch = etag;
+        var second = await ctl2.Download(artifactPath + "/maven-metadata.xml", CancellationToken.None);
+        Assert.Equal(304, Assert.IsType<StatusCodeResult>(second).StatusCode);
     }
 
     // ── test doubles (mirror MavenUpstreamFetcherTests) ─────────────────────────

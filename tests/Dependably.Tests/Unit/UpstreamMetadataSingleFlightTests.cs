@@ -116,7 +116,7 @@ public sealed class UpstreamMetadataSingleFlightTests
             validator ?? new AllowEverythingValidator(),
             airGap,
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir),
-            config,
+            Dependably.Infrastructure.StagingOptions.Resolve(config),
             NullLogger<UpstreamClient>.Instance);
         return (client, handler);
     }

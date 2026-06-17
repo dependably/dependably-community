@@ -41,7 +41,7 @@ public class AuditEventRepositoryTests : IAsyncLifetime
     public async Task InsertAndList_RoundTrip()
     {
         var repo = new AuditEventRepository(_db);
-        var ev = Sample("o1", "package.publish", DateTimeOffset.UtcNow);
+        var ev = Sample("o1", "package.publish", TestTime.KnownNow);
         await repo.InsertAsync(ev);
 
         var list = await repo.ListByTenantAsync("o1", limit: 10);
@@ -55,8 +55,8 @@ public class AuditEventRepositoryTests : IAsyncLifetime
     public async Task ListByTenant_ScopedToOrg()
     {
         var repo = new AuditEventRepository(_db);
-        await repo.InsertAsync(Sample("o1", "a", DateTimeOffset.UtcNow));
-        await repo.InsertAsync(Sample("o2", "b", DateTimeOffset.UtcNow));
+        await repo.InsertAsync(Sample("o1", "a", TestTime.KnownNow));
+        await repo.InsertAsync(Sample("o2", "b", TestTime.KnownNow));
 
         var list = await repo.ListByTenantAsync("o1", limit: 10);
         Assert.Single(list);
@@ -67,7 +67,7 @@ public class AuditEventRepositoryTests : IAsyncLifetime
     public async Task ListByTenant_OrderedDescByOccurredAt()
     {
         var repo = new AuditEventRepository(_db);
-        var t = DateTimeOffset.UtcNow;
+        var t = TestTime.KnownNow;
         await repo.InsertAsync(Sample("o1", "old", t.AddMinutes(-10)));
         await repo.InsertAsync(Sample("o1", "new", t));
 
@@ -81,7 +81,7 @@ public class AuditEventRepositoryTests : IAsyncLifetime
     public async Task Insert_RejectsInvalidOutcomeViaCheckConstraint()
     {
         var repo = new AuditEventRepository(_db);
-        var ev = Sample("o1", "x", DateTimeOffset.UtcNow);
+        var ev = Sample("o1", "x", TestTime.KnownNow);
         var bad = new AuditEvent
         {
             EventId = ev.EventId,

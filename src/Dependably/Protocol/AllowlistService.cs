@@ -11,6 +11,9 @@ namespace Dependably.Protocol;
 /// </summary>
 public sealed class AllowlistService
 {
+    // Byte offset past the "pkg:" PURL scheme prefix.
+    private const int PurlSchemeLength = 4;
+
     private readonly IMetadataStore _db;
     private readonly AuditRepository _audit;
 
@@ -64,8 +67,8 @@ public sealed class AllowlistService
             return "";
         }
 
-        int slash = purl.IndexOf('/', 4);
-        return slash > 4 ? purl[4..slash] : "";
+        int slash = purl.IndexOf('/', PurlSchemeLength);
+        return slash > PurlSchemeLength ? purl[PurlSchemeLength..slash] : "";
     }
 
     /// <summary>

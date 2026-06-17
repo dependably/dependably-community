@@ -35,6 +35,7 @@ public sealed class StartupServiceTests : IAsyncLifetime
             new OrgRepository(_db),
             _jwtOptions,
             config,
+            StagingOptions.Resolve(config),
             NullLogger<StartupService>.Instance);
     }
 

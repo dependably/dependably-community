@@ -36,7 +36,7 @@ public sealed class BackgroundJobScopeTests : IDisposable
     {
         string jobName = $"unit-success-{Guid.NewGuid():N}";
 
-        using (var scope = BackgroundJobScope.Begin(jobName, "test_op"))
+        using (var scope = BackgroundJobScope.Begin(jobName, "test_op", TimeProvider.System))
         {
             scope.Complete();
         }
@@ -55,7 +55,7 @@ public sealed class BackgroundJobScopeTests : IDisposable
         // A non-default outcome (e.g. "skipped") sets the activity tag but leaves the gauge alone.
         string jobName = $"unit-skipped-{Guid.NewGuid():N}";
 
-        using (var scope = BackgroundJobScope.Begin(jobName, "test_op"))
+        using (var scope = BackgroundJobScope.Begin(jobName, "test_op", TimeProvider.System))
         {
             scope.Complete("skipped");
         }
@@ -71,7 +71,7 @@ public sealed class BackgroundJobScopeTests : IDisposable
         string jobName = $"unit-fail-{Guid.NewGuid():N}";
         var ex = new InvalidOperationException("boom");
 
-        using (var scope = BackgroundJobScope.Begin(jobName, "test_op"))
+        using (var scope = BackgroundJobScope.Begin(jobName, "test_op", TimeProvider.System))
         {
             scope.Fail(ex);
         }
@@ -90,7 +90,7 @@ public sealed class BackgroundJobScopeTests : IDisposable
         // both branches must fire — this test hits the null-exception branch of both.
         string jobName = $"unit-fail-nullex-{Guid.NewGuid():N}";
 
-        using (var scope = BackgroundJobScope.Begin(jobName, "test_op"))
+        using (var scope = BackgroundJobScope.Begin(jobName, "test_op", TimeProvider.System))
         {
             scope.Fail();
         }
@@ -108,7 +108,7 @@ public sealed class BackgroundJobScopeTests : IDisposable
         // assert the value propagates.
         string jobName = $"unit-fail-custom-{Guid.NewGuid():N}";
 
-        using (var scope = BackgroundJobScope.Begin(jobName, "test_op"))
+        using (var scope = BackgroundJobScope.Begin(jobName, "test_op", TimeProvider.System))
         {
             scope.Fail(outcome: "throttled");
         }
@@ -125,7 +125,7 @@ public sealed class BackgroundJobScopeTests : IDisposable
         // no explicit outcome tag (since it's set inside Complete/Fail).
         string jobName = $"unit-cancelled-{Guid.NewGuid():N}";
 
-        using (BackgroundJobScope.Begin(jobName, "test_op")) { }
+        using (BackgroundJobScope.Begin(jobName, "test_op", TimeProvider.System)) { }
 
         // Activity is recorded but never received the outcome tag.
         var activity = Assert.Single(_stoppedActivities, a => (string?)a.GetTagItem("dependably.job_name") == jobName);

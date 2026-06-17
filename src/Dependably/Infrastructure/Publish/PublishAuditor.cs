@@ -21,11 +21,12 @@ public sealed class PublishAuditor
         _auditEmitter = auditEmitter;
     }
 
-    public async Task RecordAsync(PublishRequest request, string sha256, PackageVersion? existing, CancellationToken ct)
+    public async Task RecordAsync(PublishRequest request, string sha256, PackageVersion? existing,
+        long sizeBytes, CancellationToken ct)
     {
         // Imports are per-version operator events and belong in `activity` only —
-        // `audit_log` is the tenant-level config/security sink. Never dual-write (5f6e1f0).
-        // `push` still dual-writes pending the separate sweep called out in that commit.
+        // `audit_log` is the tenant-level config/security sink. Never dual-write.
+        // `push` still dual-writes pending the separate sweep.
         if (request.AuditAction != "import")
         {
             await _audit.LogAsync(request.AuditAction, request.OrgId, request.ActorUserId,
@@ -36,22 +37,23 @@ public sealed class PublishAuditor
             detail: request.AuditDetail, sourceIp: request.SourceIp, ct: ct);
 
         string actorType = request.ActorUserId is null ? "system" : "user";
-        await EmitTypedAsync(request, sha256, actorType, ct);
+        await EmitTypedAsync(request, sha256, sizeBytes, actorType, ct);
 
         if (existing is not null)
         {
-            await RecordReplaceAsync(request, sha256, existing, actorType, ct);
+            await RecordReplaceAsync(request, sha256, sizeBytes, existing, actorType, ct);
         }
     }
 
-    private async Task EmitTypedAsync(PublishRequest request, string sha256, string actorType, CancellationToken ct)
+    private async Task EmitTypedAsync(PublishRequest request, string sha256,
+        long sizeBytes, string actorType, CancellationToken ct)
     {
         if (request.AuditAction == "import")
         {
             var (batchId, importMode) = ExtractBatchInfo(request.AuditDetail);
             string payload = new PackageEvents.Import(
                 request.Ecosystem, request.PurlName, request.Version, request.Filename,
-                "sha256:" + sha256, request.ArtifactBytes.LongLength, request.Origin,
+                "sha256:" + sha256, sizeBytes, request.Origin,
                 batchId, importMode, request.ClaimState).ToJson();
             await _auditEmitter.EmitAsync(PackageEvents.TypeImport,
                 request.OrgId, actorType, request.ActorUserId, "accepted", payload, ct);
@@ -60,15 +62,15 @@ public sealed class PublishAuditor
         {
             string payload = new PackageEvents.Publish(
                 request.Ecosystem, request.PurlName, request.Version, request.Filename,
-                "sha256:" + sha256, request.ArtifactBytes.LongLength, request.Origin,
+                "sha256:" + sha256, sizeBytes, request.Origin,
                 request.ClaimState).ToJson();
             await _auditEmitter.EmitAsync(PackageEvents.TypePublish,
                 request.OrgId, actorType, request.ActorUserId, "accepted", payload, ct);
         }
     }
 
-    private async Task RecordReplaceAsync(PublishRequest request, string sha256, PackageVersion existing,
-        string actorType, CancellationToken ct)
+    private async Task RecordReplaceAsync(PublishRequest request, string sha256, long sizeBytes,
+        PackageVersion existing, string actorType, CancellationToken ct)
     {
         string priorHash = "sha256:" + (existing.ChecksumSha256 ?? "");
         string newHash = "sha256:" + sha256;
@@ -83,7 +85,7 @@ public sealed class PublishAuditor
 
         string replacePayload = new PackageEvents.Replace(
             request.Ecosystem, request.PurlName, request.Version, request.Filename,
-            newHash, priorHash, request.ArtifactBytes.LongLength, request.Origin,
+            newHash, priorHash, sizeBytes, request.Origin,
             request.ClaimState).ToJson();
         await _auditEmitter.EmitAsync(PackageEvents.TypeReplace,
             request.OrgId, actorType, request.ActorUserId, "accepted", replacePayload, ct);

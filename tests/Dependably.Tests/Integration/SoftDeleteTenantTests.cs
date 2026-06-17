@@ -124,14 +124,17 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
         var createDoc = JsonDocument.Parse(await createResp.Content.ReadAsStringAsync());
         string orgId = createDoc.RootElement.GetProperty("tenant").GetProperty("id").GetString()!;
 
-        // Force deleted_at to 31 days ago so the hard-delete service treats it as expired.
+        // Force deleted_at to 90 days ago so the hard-delete service treats it as expired.
         var db = _factory.Services.GetRequiredService<IMetadataStore>();
         await using (var conn = await db.OpenAsync())
         {
-            string thirtyOneDaysAgo = DateTimeOffset.UtcNow.AddDays(-31).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            // now-ok: seeds relative to the host's real clock so the server-side 30-day
+            // grace cutoff lands as intended; 90 days clears it with 3x margin instead of
+            // sitting one day past it (leap-year/month-length safe).
+            string ninetyDaysAgo = DateTimeOffset.UtcNow.AddDays(-90).ToString("yyyy-MM-ddTHH:mm:ssZ");
             await conn.ExecuteAsync(
                 "UPDATE orgs SET deleted_at = @t WHERE id = @id",
-                new { id = orgId, t = thirtyOneDaysAgo });
+                new { id = orgId, t = ninetyDaysAgo });
         }
 
         // Run the hard-delete pass directly (not waiting on cron).

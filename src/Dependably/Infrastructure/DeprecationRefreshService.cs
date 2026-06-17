@@ -25,6 +25,7 @@ public sealed class DeprecationRefreshService : BackgroundService
     private readonly IAirGapMode _airGap;
     private readonly IConfiguration _config;
     private readonly ILogger<DeprecationRefreshService> _logger;
+    private readonly TimeProvider _time;
 
     public DeprecationRefreshService(
         PackageRepository packages,
@@ -32,7 +33,8 @@ public sealed class DeprecationRefreshService : BackgroundService
         UpstreamClient upstream,
         IAirGapMode airGap,
         IConfiguration config,
-        ILogger<DeprecationRefreshService> logger)
+        ILogger<DeprecationRefreshService> logger,
+        TimeProvider time)
     {
         _packages = packages;
         _audit = audit;
@@ -40,6 +42,7 @@ public sealed class DeprecationRefreshService : BackgroundService
         _airGap = airGap;
         _config = config;
         _logger = logger;
+        _time = time;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -52,7 +55,7 @@ public sealed class DeprecationRefreshService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var next = schedule.GetNextOccurrence(DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
+            var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
             if (next is null)
             {
                 break;
@@ -65,7 +68,7 @@ public sealed class DeprecationRefreshService : BackgroundService
                 ? TimeSpan.FromSeconds(Random.Shared.Next(0, jitterMaxSeconds + 1))
                 : TimeSpan.Zero;
 #pragma warning restore SCS0005
-            var delay = (next.Value - DateTimeOffset.UtcNow) + jitter;
+            var delay = (next.Value - _time.GetUtcNow()) + jitter;
             if (delay > TimeSpan.Zero)
             {
                 try { await Task.Delay(delay, stoppingToken); }
@@ -83,7 +86,7 @@ public sealed class DeprecationRefreshService : BackgroundService
 
     internal async Task RunRefreshPassAsync(CancellationToken ct)
     {
-        using var scope = BackgroundJobScope.Begin("deprecation-refresh", "deprecation.refresh_pass");
+        using var scope = BackgroundJobScope.Begin("deprecation-refresh", "deprecation.refresh_pass", _time);
         try
         {
             await RunRefreshPassInnerAsync(ct);

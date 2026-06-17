@@ -7,17 +7,19 @@ public sealed class AuditRepository
 {
     private readonly IMetadataStore _db;
     private readonly ActivityWriter? _activityWriter;
+    private readonly TimeProvider _time;
 
-    public AuditRepository(IMetadataStore db, ActivityWriter? activityWriter = null)
+    public AuditRepository(IMetadataStore db, ActivityWriter? activityWriter = null, TimeProvider? time = null)
     {
         _db = db;
         _activityWriter = activityWriter;
+        _time = time ?? TimeProvider.System;
     }
 
     // Millisecond-precision UTC ISO-8601, so multiple events emitted in the same wall-clock
     // second still order deterministically (e.g. first_fetch → vuln_scan → blocked_vuln_score).
-    private static string NowMs() =>
-        DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
+    private string NowMs() =>
+        _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
 
     // Convenience overload for tenant-scope events. Most call sites use this; the action plus
     // a handful of optional named arguments (orgId, actorId, actorKind, ecosystem, purl, detail,
@@ -131,16 +133,34 @@ public sealed class AuditRepository
     /// can never surface operator events to a tenant user.
     /// </summary>
     public async Task<(IReadOnlyList<AuditEntry> Items, int Total)> ListAuditAsync(
-        string orgId, int limit, int offset, string? action = null, CancellationToken ct = default)
+        string orgId, int limit, int offset, string? action = null, string? search = null,
+        CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        string? searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
+        // The COUNT carries the same actor joins as the list so a search on actor email keeps
+        // the total in step with the rows returned (no paging drift).
         int total = await conn.ExecuteScalarAsync<int>(
             """
-            SELECT COUNT(*) FROM audit_log
-            WHERE org_id = @orgId AND scope = 'tenant'
-              AND (@action IS NULL OR action = @action)
+            SELECT COUNT(*)
+            FROM audit_log a
+            LEFT JOIN users u
+                ON u.id = a.actor_id
+                AND (a.actor_kind IS NULL OR a.actor_kind = 'user')
+            LEFT JOIN service_tokens st
+                ON st.id = a.actor_id
+                AND a.actor_kind = 'service'
+            WHERE a.org_id = @orgId AND a.scope = 'tenant'
+              AND (@action IS NULL OR a.action = @action)
+              AND (@searchPattern IS NULL
+                   OR lower(a.action) LIKE @searchPattern
+                   OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
+                   OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
+                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
+                   OR lower(COALESCE(u.email, '')) LIKE @searchPattern
+                   OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
             """,
-            new { orgId, action });
+            new { orgId, action, searchPattern });
         // Service-token actors live in a different table than users; resolve both and pick
         // by actor_kind. NULL actor_kind = legacy row (pre-migration) — fall back to the
         // users join for back-compat. The 'service:<name>' prefix matches the npm whoami
@@ -164,9 +184,16 @@ public sealed class AuditRepository
                 AND a.actor_kind = 'service'
             WHERE a.org_id = @orgId AND a.scope = 'tenant'
               AND (@action IS NULL OR a.action = @action)
+              AND (@searchPattern IS NULL
+                   OR lower(a.action) LIKE @searchPattern
+                   OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
+                   OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
+                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
+                   OR lower(COALESCE(u.email, '')) LIKE @searchPattern
+                   OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
             ORDER BY a.created_at DESC, a.id DESC LIMIT @limit OFFSET @offset
             """,
-            new { orgId, limit, offset, action });
+            new { orgId, limit, offset, action, searchPattern });
         return (rows.ToList(), total);
     }
 
@@ -341,16 +368,38 @@ public sealed class AuditRepository
     }
 
     public async Task<(IReadOnlyList<ActivityEntry> Items, int Total)> ListActivityAsync(
-        string orgId, int limit, int offset, string? eventType = null, CancellationToken ct = default)
+        string orgId, int limit, int offset, string? eventType = null, string? search = null,
+        CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        string? searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
+        // The 'blocked' token selects the whole block-gate family (blocked, blocked_release_age,
+        // blocked_malicious, …) so the filter agrees with the dashboard's 'blocked%' tally; any
+        // specific 'blocked_<gate>' value still matches exactly. The COUNT carries the same actor
+        // joins as the list so a search on actor email keeps the total in step (no paging drift).
         int total = await conn.ExecuteScalarAsync<int>(
             """
-            SELECT COUNT(*) FROM activity
-            WHERE org_id = @orgId
-              AND (@eventType IS NULL OR event_type = @eventType)
+            SELECT COUNT(*)
+            FROM activity a
+            LEFT JOIN users u
+                ON u.id = a.actor_id
+                AND (a.actor_kind IS NULL OR a.actor_kind = 'user')
+            LEFT JOIN service_tokens st
+                ON st.id = a.actor_id
+                AND a.actor_kind = 'service'
+            WHERE a.org_id = @orgId
+              AND (@eventType IS NULL
+                   OR (@eventType = 'blocked' AND a.event_type LIKE 'blocked%')
+                   OR (@eventType <> 'blocked' AND a.event_type = @eventType))
+              AND (@searchPattern IS NULL
+                   OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
+                   OR lower(a.event_type) LIKE @searchPattern
+                   OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
+                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
+                   OR lower(COALESCE(u.email, '')) LIKE @searchPattern
+                   OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
             """,
-            new { orgId, eventType });
+            new { orgId, eventType, searchPattern });
         // See ListAuditAsync for the actor_kind branching rationale.
         var rows = await conn.QueryAsync<ActivityEntry>(
             """
@@ -368,11 +417,20 @@ public sealed class AuditRepository
                 ON st.id = a.actor_id
                 AND a.actor_kind = 'service'
             WHERE a.org_id = @orgId
-              AND (@eventType IS NULL OR a.event_type = @eventType)
+              AND (@eventType IS NULL
+                   OR (@eventType = 'blocked' AND a.event_type LIKE 'blocked%')
+                   OR (@eventType <> 'blocked' AND a.event_type = @eventType))
+              AND (@searchPattern IS NULL
+                   OR lower(COALESCE(a.purl, '')) LIKE @searchPattern
+                   OR lower(a.event_type) LIKE @searchPattern
+                   OR lower(COALESCE(a.ecosystem, '')) LIKE @searchPattern
+                   OR lower(COALESCE(a.detail, '')) LIKE @searchPattern
+                   OR lower(COALESCE(u.email, '')) LIKE @searchPattern
+                   OR lower(COALESCE(st.name, '')) LIKE @searchPattern)
             ORDER BY a.created_at DESC, a.id DESC
             LIMIT @limit OFFSET @offset
             """,
-            new { orgId, limit, offset, eventType });
+            new { orgId, limit, offset, eventType, searchPattern });
         return (rows.ToList(), total);
     }
 }

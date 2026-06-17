@@ -91,10 +91,13 @@ public sealed class JwtSigningTests
     {
         string secret = FreshSecret();
         // Hand-craft an alg=none token with the same claims a legitimate one would carry.
+        // exp is a fixed far-future instant: IdentityModel validates lifetime against its
+        // internal real clock, and the rejection must be attributable to alg=none, not expiry.
+        var farFuture = new DateTimeOffset(2123, 1, 1, 0, 0, 0, TimeSpan.Zero);
         string header = Base64UrlEncode("{\"alg\":\"none\",\"typ\":\"JWT\"}"u8);
         string payload = Base64UrlEncode(Encoding.UTF8.GetBytes(
             $"{{\"sub\":\"user-id\",\"tid\":\"tenant-id\",\"role\":\"member\",\"scope\":\"tenant\"," +
-            $"\"exp\":{DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds()}}}"));
+            $"\"exp\":{farFuture.ToUnixTimeSeconds()}}}"));
         string unsigned = $"{header}.{payload}.";
 
         var handler = new JwtSecurityTokenHandler();
@@ -108,8 +111,10 @@ public sealed class JwtSigningTests
         string secret = FreshSecret();
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-        var pastIssued = DateTime.UtcNow.AddHours(-9);
-        var pastExpired = DateTime.UtcNow.AddHours(-1);
+        // Fixed long-past instants: IdentityModel validates lifetime against its internal
+        // real clock, and these are unconditionally expired for any run.
+        var pastIssued = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var pastExpired = new DateTime(2020, 1, 1, 8, 0, 0, DateTimeKind.Utc);
 
         var expired = new JwtSecurityToken(
             claims: new[]

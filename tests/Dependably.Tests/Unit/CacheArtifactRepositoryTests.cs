@@ -36,7 +36,7 @@ public class CacheArtifactRepositoryTests : IAsyncLifetime
     public async Task GetByCoordinate_RoundTrip()
     {
         var repo = new CacheArtifactRepository(_db);
-        var a = Sample("1.0.0", DateTimeOffset.UtcNow);
+        var a = Sample("1.0.0", TestTime.KnownNow);
         await repo.InsertAsync(a);
 
         var loaded = await repo.GetByCoordinateAsync("npm", "lodash", "1.0.0", "lodash-1.0.0.tgz");
@@ -49,7 +49,7 @@ public class CacheArtifactRepositoryTests : IAsyncLifetime
     public async Task ListLruCandidates_ReturnsOldestFirst()
     {
         var repo = new CacheArtifactRepository(_db);
-        var t = DateTimeOffset.UtcNow;
+        var t = TestTime.KnownNow;
         await repo.InsertAsync(Sample("1.0.0", t.AddDays(-30)));
         await repo.InsertAsync(Sample("2.0.0", t.AddDays(-10)));
         await repo.InsertAsync(Sample("3.0.0", t.AddDays(-1)));
@@ -64,8 +64,8 @@ public class CacheArtifactRepositoryTests : IAsyncLifetime
     public async Task GetTotalSizeBytes_SumsAll()
     {
         var repo = new CacheArtifactRepository(_db);
-        await repo.InsertAsync(Sample("1.0.0", DateTimeOffset.UtcNow));
-        await repo.InsertAsync(Sample("2.0.0", DateTimeOffset.UtcNow));
+        await repo.InsertAsync(Sample("1.0.0", TestTime.KnownNow));
+        await repo.InsertAsync(Sample("2.0.0", TestTime.KnownNow));
         long total = await repo.GetTotalSizeBytesAsync();
         Assert.Equal(200, total);
     }
@@ -74,10 +74,10 @@ public class CacheArtifactRepositoryTests : IAsyncLifetime
     public async Task TouchAccess_UpdatesLastAccessedAt()
     {
         var repo = new CacheArtifactRepository(_db);
-        var a = Sample("1.0.0", DateTimeOffset.UtcNow.AddDays(-100));
+        var a = Sample("1.0.0", TestTime.KnownNow.AddDays(-100));
         await repo.InsertAsync(a);
 
-        var newer = DateTimeOffset.UtcNow;
+        var newer = TestTime.KnownNow;
         await repo.TouchAccessAsync(a.Id, newer);
 
         var loaded = await repo.GetByCoordinateAsync("npm", "lodash", "1.0.0", "lodash-1.0.0.tgz");
@@ -88,7 +88,7 @@ public class CacheArtifactRepositoryTests : IAsyncLifetime
     public async Task Delete_Removes()
     {
         var repo = new CacheArtifactRepository(_db);
-        var a = Sample("1.0.0", DateTimeOffset.UtcNow);
+        var a = Sample("1.0.0", TestTime.KnownNow);
         await repo.InsertAsync(a);
         await repo.DeleteAsync(a.Id);
         Assert.Null(await repo.GetByCoordinateAsync("npm", "lodash", "1.0.0", "lodash-1.0.0.tgz"));

@@ -35,6 +35,7 @@ public sealed class TokenIssuanceCapabilityTests : IClassFixture<DependablyFacto
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret!));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        // now-ok: mints a JWT the host validates against its (default: real) clock.
         var now = DateTime.UtcNow;
         var token = new JwtSecurityToken(
             claims:

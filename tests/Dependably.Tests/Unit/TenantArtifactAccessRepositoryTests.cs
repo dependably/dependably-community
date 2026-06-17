@@ -35,7 +35,7 @@ public class TenantArtifactAccessRepositoryTests : IAsyncLifetime
     {
         string caId = await InsertCacheArtifact("1.0.0");
         var repo = new TenantArtifactAccessRepository(_db);
-        var t = DateTimeOffset.UtcNow;
+        var t = TestTime.KnownNow;
 
         await repo.UpsertAsync("o1", caId, t);
         await repo.UpsertAsync("o1", caId, t.AddMinutes(1));
@@ -55,7 +55,7 @@ public class TenantArtifactAccessRepositoryTests : IAsyncLifetime
     {
         string caId = await InsertCacheArtifact("4.17.21");
         var repo = new TenantArtifactAccessRepository(_db);
-        var t = DateTimeOffset.UtcNow;
+        var t = TestTime.KnownNow;
 
         await repo.UpsertAsync("o1", caId, t);
         await repo.UpsertAsync("o2", caId, t);

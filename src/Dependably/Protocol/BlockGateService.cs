@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Observability;
@@ -43,17 +44,20 @@ public sealed class BlockGateService
     private readonly AuditRepository _audit;
     private readonly QuarantineRepository _quarantine;
     private readonly ILogger<BlockGateService> _logger;
+    private readonly TimeProvider _time;
 
     public BlockGateService(
         VulnerabilityRepository vulns,
         AuditRepository audit,
         QuarantineRepository quarantine,
-        ILogger<BlockGateService> logger)
+        ILogger<BlockGateService> logger,
+        TimeProvider time)
     {
         _vulns = vulns;
         _audit = audit;
         _quarantine = quarantine;
         _logger = logger;
+        _time = time;
     }
 
     // Best-effort review-queue write beside each policy block's activity row. Failures are
@@ -80,147 +84,134 @@ public sealed class BlockGateService
 
     public async Task<BlockDecision> EvaluateAsync(BlockGateRequest request, CancellationToken ct = default)
     {
-        if (request.ManualState == "blocked")
+        // Load vuln signals when the version has been scanned — same condition as today.
+        VulnGateSignals? signals = null;
+        if (request.VulnCheckedAt is not null)
         {
-            await _audit.LogActivityAsync(
-                request.OrgId, request.Ecosystem, request.Purl,
-                "blocked_manual", request.UserId, actorKind: request.ActorKind,
-                sourceIp: request.SourceIp, ct: ct);
+            signals = await _vulns.GetGateSignalsForVersionAsync(request.VersionId, ct);
+        }
+
+        var facts = new VersionFacts(
+            ManualState: request.ManualState,
+            Deprecated: request.Deprecated,
+            PublishedAt: request.PublishedAt,
+            Scanned: request.VulnCheckedAt is not null,
+            // Download path: use the aggregate signals flag (HasMalicious), not the row flag.
+            HasMalicious: signals?.HasMalicious ?? false,
+            HasKev: signals?.HasKev ?? false,
+            MaxEpss: signals?.MaxEpss,
+            MaxCvss: signals?.MaxCvss);
+
+        var policy = new BlockPolicy(
+            MinReleaseAgeHours: request.MinReleaseAgeHours,
+            BlockDeprecatedMode: request.BlockDeprecatedMode,
+            BlockMaliciousMode: request.BlockMaliciousMode,
+            BlockKevMode: request.BlockKevMode,
+            MaxEpssTolerance: request.MaxEpssTolerance,
+            MaxOsvScoreTolerance: request.MaxOsvScoreTolerance);
+
+        var verdict = Evaluate(facts, policy, _time.GetUtcNow());
+
+        if (!verdict.Servable)
+        {
+            await ApplySideEffectsAsync(verdict.Arm, request, signals, ct);
             return BlockDecision.Blocked;
         }
-        if (request.ManualState == "allowed")
-        {
-            return BlockDecision.Allowed;
-        }
 
-        // Cache-hit / serve path: only block_all denies an already-cached deprecated version.
-        // block_new lets cached versions keep serving — its blocking happens earlier, on the
-        // cache-miss first-fetch path (EvaluateFirstFetchDeprecationAsync).
-        if (request.Deprecated is not null && IsBlockAll(request.BlockDeprecatedMode))
-        {
-            return await RecordDeprecatedBlockAsync(request, ct);
-        }
-
-        // Release-age hold runs ahead of the OSV check so a fresh upload that already trips
-        // a CVE still surfaces as "too new" first — the supply-chain story (community hasn't
-        // had time to assess this version yet) matches the operator's mental model better
-        // than a vuln-score block on a version they would have rejected on age alone.
-        var ageDecision = await EvaluateReleaseAgeAsync(request, ct);
-        if (ageDecision == BlockDecision.Blocked)
-        {
-            return BlockDecision.Blocked;
-        }
-
-        if (request.VulnCheckedAt is null)
-        {
-            return BlockDecision.Allowed;
-        }
-
-        var signals = await _vulns.GetGateSignalsForVersionAsync(request.VersionId, ct);
-        return await EvaluateVulnGatesAsync(request, signals, ct);
+        return BlockDecision.Allowed;
     }
 
-    // Release-age hold: blocks versions younger than the configured hold period, measured
-    // against the upstream publish timestamp. Fail-open when the timestamp is absent.
-    private async Task<BlockDecision> EvaluateReleaseAgeAsync(BlockGateRequest request, CancellationToken ct)
+    // Performs the audit-log, meter, and quarantine side effects for each blocking arm.
+    // Called only when the pure core signals a block; routes to the matching side-effect
+    // body preserving all existing meter names, event types, and detail JSON shapes.
+    private async Task ApplySideEffectsAsync(
+        BlockArm arm, BlockGateRequest request, VulnGateSignals? signals, CancellationToken ct)
     {
-        if (request.MinReleaseAgeHours is not { } minHours || minHours <= 0 || request.PublishedAt is not { } publishedAt)
+        switch (arm)
         {
-            return BlockDecision.Allowed;
+            case BlockArm.Manual:
+                await _audit.LogActivityAsync(
+                    request.OrgId, request.Ecosystem, request.Purl,
+                    "blocked_manual", request.UserId, actorKind: request.ActorKind,
+                    sourceIp: request.SourceIp, ct: ct);
+                // Manual block is a human decision — no quarantine row needed.
+                break;
+
+            case BlockArm.Deprecated:
+                await RecordDeprecatedBlockAsync(request, ct);
+                break;
+
+            case BlockArm.ReleaseAge:
+                var publishedAt = request.PublishedAt!.Value;
+                double ageHours = (_time.GetUtcNow() - publishedAt).TotalHours;
+                string publishedIso = publishedAt.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+                double ageRounded = Math.Round(ageHours, 2);
+                string ageDetail = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{{\"published_at\":\"{0}\",\"min_age_hours\":{1},\"age_at_block_hours\":{2}}}",
+                    publishedIso, request.MinReleaseAgeHours!.Value, ageRounded);
+                await _audit.LogActivityAsync(
+                    request.OrgId, request.Ecosystem, request.Purl,
+                    "blocked_release_age", request.UserId, actorKind: request.ActorKind,
+                    detail: ageDetail,
+                    sourceIp: request.SourceIp, ct: ct);
+                await QueueForReviewAsync(request, "release_age", ageDetail, ct);
+                break;
+
+            case BlockArm.Malicious:
+                DependablyMeter.MaliciousBlocks.Add(1,
+                    new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
+                // Advisory ids fetched only on the (rare) block path so the hot-path aggregate
+                // stays free of per-row string assembly.
+                var malIds = await _vulns.GetMaliciousOsvIdsForVersionAsync(request.VersionId, ct);
+                string malDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = malIds });
+                await _audit.LogActivityAsync(
+                    request.OrgId, request.Ecosystem, request.Purl,
+                    "blocked_malicious", request.UserId, actorKind: request.ActorKind,
+                    detail: malDetail,
+                    sourceIp: request.SourceIp, ct: ct);
+                await QueueForReviewAsync(request, "malicious", malDetail, ct);
+                break;
+
+            case BlockArm.Kev:
+                DependablyMeter.KevBlocks.Add(1,
+                    new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
+                // KEV ids fetched only on the block path, same pattern as malicious above.
+                var kevIds = await _vulns.GetKevOsvIdsForVersionAsync(request.VersionId, ct);
+                string kevDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = kevIds });
+                await _audit.LogActivityAsync(
+                    request.OrgId, request.Ecosystem, request.Purl,
+                    "blocked_kev", request.UserId, actorKind: request.ActorKind,
+                    detail: kevDetail,
+                    sourceIp: request.SourceIp, ct: ct);
+                await QueueForReviewAsync(request, "kev", kevDetail, ct);
+                break;
+
+            case BlockArm.Epss:
+                DependablyMeter.EpssBlocks.Add(1,
+                    new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
+                double maxEpss = signals!.MaxEpss!.Value;
+                double epssTolerance = request.MaxEpssTolerance!.Value;
+                string epssDetail = $"{{\"max_epss\":{maxEpss.ToString(CultureInfo.InvariantCulture)},\"tolerance\":{epssTolerance.ToString(CultureInfo.InvariantCulture)}}}";
+                await _audit.LogActivityAsync(
+                    request.OrgId, request.Ecosystem, request.Purl,
+                    "blocked_epss", request.UserId, actorKind: request.ActorKind,
+                    detail: epssDetail,
+                    sourceIp: request.SourceIp, ct: ct);
+                await QueueForReviewAsync(request, "epss", epssDetail, ct);
+                break;
+
+            case BlockArm.VulnScore:
+                double maxScore = signals!.MaxCvss!.Value;
+                string scoreDetail = $"{{\"max_score\":{maxScore},\"tolerance\":{request.MaxOsvScoreTolerance}}}";
+                await _audit.LogActivityAsync(
+                    request.OrgId, request.Ecosystem, request.Purl,
+                    "blocked_vuln_score", request.UserId, actorKind: request.ActorKind,
+                    detail: scoreDetail,
+                    sourceIp: request.SourceIp, ct: ct);
+                await QueueForReviewAsync(request, "vuln_score", scoreDetail, ct);
+                break;
         }
-
-        double ageHours = (DateTimeOffset.UtcNow - publishedAt).TotalHours;
-        if (ageHours >= minHours)
-        {
-            return BlockDecision.Allowed;
-        }
-
-        string publishedIso = publishedAt.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
-        double ageRounded = Math.Round(ageHours, 2);
-        string ageDetail = string.Format(
-            CultureInfo.InvariantCulture,
-            "{{\"published_at\":\"{0}\",\"min_age_hours\":{1},\"age_at_block_hours\":{2}}}",
-            publishedIso, minHours, ageRounded);
-        await _audit.LogActivityAsync(
-            request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_release_age", request.UserId, actorKind: request.ActorKind,
-            detail: ageDetail,
-            sourceIp: request.SourceIp, ct: ct);
-        await QueueForReviewAsync(request, "release_age", ageDetail, ct);
-        return BlockDecision.Blocked;
-    }
-
-    // Evaluates the malicious-advisory, KEV, EPSS, and CVSS score gates in priority order.
-    // Called only when vuln data has been checked (VulnCheckedAt is not null).
-    private async Task<BlockDecision> EvaluateVulnGatesAsync(
-        BlockGateRequest request, VulnGateSignals signals, CancellationToken ct)
-    {
-        // Malicious-advisory gate runs before the score comparison: MAL- advisories usually
-        // carry no CVSS score, so the score aggregate alone would let known malware through.
-        // 'warn' and 'off' fall through — the advisory still surfaces in the vuln report UI.
-        if (signals.HasMalicious && request.BlockMaliciousMode == "block")
-        {
-            DependablyMeter.MaliciousBlocks.Add(1,
-                new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
-            // Advisory ids fetched only on the (rare) block path so the hot-path aggregate
-            // stays free of per-row string assembly.
-            var malIds = await _vulns.GetMaliciousOsvIdsForVersionAsync(request.VersionId, ct);
-            string malDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = malIds });
-            await _audit.LogActivityAsync(
-                request.OrgId, request.Ecosystem, request.Purl,
-                "blocked_malicious", request.UserId, actorKind: request.ActorKind,
-                detail: malDetail,
-                sourceIp: request.SourceIp, ct: ct);
-            await QueueForReviewAsync(request, "malicious", malDetail, ct);
-            return BlockDecision.Blocked;
-        }
-
-        // KEV gate: exploited-in-the-wild beats any score-based reasoning, so it runs ahead of
-        // the EPSS and CVSS comparisons. 'warn' and 'off' fall through.
-        if (signals.HasKev && request.BlockKevMode == "block")
-        {
-            DependablyMeter.KevBlocks.Add(1,
-                new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
-            var kevIds = await _vulns.GetKevOsvIdsForVersionAsync(request.VersionId, ct);
-            string kevDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = kevIds });
-            await _audit.LogActivityAsync(
-                request.OrgId, request.Ecosystem, request.Purl,
-                "blocked_kev", request.UserId, actorKind: request.ActorKind,
-                detail: kevDetail,
-                sourceIp: request.SourceIp, ct: ct);
-            await QueueForReviewAsync(request, "kev", kevDetail, ct);
-            return BlockDecision.Blocked;
-        }
-
-        // EPSS gate: probability ceiling, same pass-on-equal convention as the CVSS tolerance.
-        if (request.MaxEpssTolerance is { } epssTolerance
-            && signals.MaxEpss is { } maxEpss && maxEpss > epssTolerance)
-        {
-            DependablyMeter.EpssBlocks.Add(1,
-                new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
-            string epssDetail = $"{{\"max_epss\":{maxEpss.ToString(CultureInfo.InvariantCulture)},\"tolerance\":{epssTolerance.ToString(CultureInfo.InvariantCulture)}}}";
-            await _audit.LogActivityAsync(
-                request.OrgId, request.Ecosystem, request.Purl,
-                "blocked_epss", request.UserId, actorKind: request.ActorKind,
-                detail: epssDetail,
-                sourceIp: request.SourceIp, ct: ct);
-            await QueueForReviewAsync(request, "epss", epssDetail, ct);
-            return BlockDecision.Blocked;
-        }
-
-        if (signals.MaxCvss is not { } maxScore || maxScore <= request.MaxOsvScoreTolerance)
-        {
-            return BlockDecision.Allowed;
-        }
-
-        string scoreDetail = $"{{\"max_score\":{maxScore},\"tolerance\":{request.MaxOsvScoreTolerance}}}";
-        await _audit.LogActivityAsync(
-            request.OrgId, request.Ecosystem, request.Purl,
-            "blocked_vuln_score", request.UserId, actorKind: request.ActorKind,
-            detail: scoreDetail,
-            sourceIp: request.SourceIp, ct: ct);
-        await QueueForReviewAsync(request, "vuln_score", scoreDetail, ct);
-        return BlockDecision.Blocked;
     }
 
     /// <summary>
@@ -270,7 +261,182 @@ public sealed class BlockGateService
     // Any deprecated-blocking mode — used only on the first-fetch path, where block_new and
     // block_all behave identically (both refuse a brand-new deprecated version).
     private static bool IsAnyDeprecatedBlock(string? mode) => mode is "block_new" or "block_all" or "block";
+
+    /// <summary>
+    /// Pure, synchronous predicate: returns <see langword="true"/> when a version is hard-blocked
+    /// by any policy arm that is evaluable from already-loaded per-version state, so the simple-index
+    /// renderers can filter an entire version list with a single call per version without per-version
+    /// I/O. Delegates to <see cref="Evaluate"/> after projecting the row and settings into
+    /// <see cref="VersionFacts"/> and <see cref="BlockPolicy"/> so the policy lives in one place.
+    ///
+    /// Arms covered (same priority order as <see cref="EvaluateAsync"/>):
+    ///   1. Manual block — <c>ManualBlockState == "blocked"</c>.
+    ///   2. Deprecated block_all — <c>Deprecated</c> set and policy is <c>block_all</c>/<c>block</c>.
+    ///      <c>block_new</c> is NOT included: already-cached deprecated versions still serve under
+    ///      that mode, so hiding them from the index would create the opposite inconsistency.
+    ///   3. Release-age hold — version is younger than <c>MinReleaseAgeHours</c>. Fail-open when
+    ///      <c>PublishedAt</c> is null (same behaviour as <see cref="EvaluateAsync"/>).
+    ///   4. Malicious advisory — <c>IsMalicious</c> and policy is <c>block</c>.
+    ///   5. KEV gate — <c>HasKev</c> in <paramref name="signals"/> and policy is <c>block</c>.
+    ///   6. EPSS ceiling — <c>MaxEpss</c> exceeds <c>MaxEpssTolerance</c>.
+    ///   7. CVSS score ceiling — <c>MaxCvss</c> exceeds <c>MaxOsvScoreTolerance</c>.
+    ///   Arms 4–7 are skipped when <c>VulnCheckedAt</c> is null (version not yet scanned),
+    ///   matching the fail-open behaviour of <see cref="EvaluateAsync"/>.
+    ///
+    /// Upstream-only (not-yet-cached) versions cannot be filtered here because stored state
+    /// does not exist for them — first-fetch dynamic blocks remain listed until first-fetch.
+    /// </summary>
+    public static bool IsHardBlockedByStoredState(
+        PackageVersion v, OrgSettings settings, VulnGateSignals? signals, DateTimeOffset now)
+    {
+        var facts = new VersionFacts(
+            ManualState: v.ManualBlockState,
+            Deprecated: v.Deprecated,
+            PublishedAt: v.PublishedAt,
+            Scanned: v.VulnCheckedAt is not null,
+            // Index path: use the pre-computed row flag (IsMalicious), not the aggregate signal.
+            HasMalicious: v.IsMalicious,
+            HasKev: signals?.HasKev ?? false,
+            MaxEpss: signals?.MaxEpss,
+            MaxCvss: signals?.MaxCvss);
+
+        var policy = new BlockPolicy(
+            MinReleaseAgeHours: settings.MinReleaseAgeHours,
+            BlockDeprecatedMode: settings.BlockDeprecated,
+            BlockMaliciousMode: settings.BlockMalicious,
+            BlockKevMode: settings.BlockKev,
+            MaxEpssTolerance: settings.MaxEpssTolerance,
+            MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance);
+
+        return !Evaluate(facts, policy, now).Servable;
+    }
+
+    /// <summary>
+    /// Pure policy core: maps <see cref="VersionFacts"/> + <see cref="BlockPolicy"/> to a
+    /// <see cref="BlockVerdict"/> with no I/O or side effects. Applies the eight arms in
+    /// priority order (Manual > Deprecated > ReleaseAge > Malicious > Kev > Epss > VulnScore).
+    /// Both <see cref="EvaluateAsync"/> and <see cref="IsHardBlockedByStoredState"/> project
+    /// their inputs into these types and delegate here so the policy logic has one home.
+    /// </summary>
+    public static BlockVerdict Evaluate(VersionFacts facts, BlockPolicy policy, DateTimeOffset now)
+    {
+        // Arm 1: manual block — always wins.
+        if (facts.ManualState == "blocked")
+        {
+            return new BlockVerdict(Servable: false, Arm: BlockArm.Manual);
+        }
+
+        // Manual allow is an operator override that short-circuits all automatic gates.
+        if (facts.ManualState == "allowed")
+        {
+            return new BlockVerdict(Servable: true, Arm: BlockArm.None);
+        }
+
+        // Arm 2: deprecated block_all / legacy block — only modes that deny the serve path.
+        // block_new is intentionally excluded: it only fires on the first-fetch path and
+        // lets already-cached deprecated versions keep serving (and stay listed).
+        if (facts.Deprecated is not null && IsBlockAll(policy.BlockDeprecatedMode))
+        {
+            return new BlockVerdict(Servable: false, Arm: BlockArm.Deprecated);
+        }
+
+        // Arm 3: release-age hold. Fail-open when PublishedAt is absent.
+        if (policy.MinReleaseAgeHours is { } minHours && minHours > 0 && facts.PublishedAt is { } publishedAt)
+        {
+            double ageHours = (now - publishedAt).TotalHours;
+            if (ageHours < minHours)
+            {
+                return new BlockVerdict(Servable: false, Arm: BlockArm.ReleaseAge);
+            }
+        }
+
+        // Arms 4–7 require vuln data. Scanned false means not yet scanned — fail-open.
+        // Extracted into a separate helper so this method stays below the S3776 threshold.
+        return EvaluateVulnArms(facts, policy);
+    }
+
+    // Arms 4–7: malicious, KEV, EPSS, and CVSS score gates. All require a scanned version row;
+    // the caller guards with !facts.Scanned before delegating here.
+    [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Descriptive documentation comment, not commented-out code.")]
+    private static BlockVerdict EvaluateVulnArms(VersionFacts facts, BlockPolicy policy)
+    {
+        if (!facts.Scanned)
+        {
+            return new BlockVerdict(Servable: true, Arm: BlockArm.None);
+        }
+
+        // Arm 4: malicious advisory. Runs before score comparison; MAL- advisories usually
+        // carry no CVSS score so the score gate alone would let known malware through.
+        if (facts.HasMalicious && policy.BlockMaliciousMode == "block")
+        {
+            return new BlockVerdict(Servable: false, Arm: BlockArm.Malicious);
+        }
+
+        // Arms 5–7 need aggregate signals; null signals means no linked advisories — all pass.
+        // When HasKev is false and MaxEpss/MaxCvss are both null, no score arm can fire.
+        if (!facts.HasKev && facts.MaxEpss is null && facts.MaxCvss is null)
+        {
+            return new BlockVerdict(Servable: true, Arm: BlockArm.None);
+        }
+
+        // Arm 5: KEV gate — exploited-in-the-wild beats score-based reasoning.
+        if (facts.HasKev && policy.BlockKevMode == "block")
+        {
+            return new BlockVerdict(Servable: false, Arm: BlockArm.Kev);
+        }
+
+        // Arm 6: EPSS probability ceiling, pass-on-equal.
+        if (policy.MaxEpssTolerance is { } epssTol && facts.MaxEpss is { } maxEpss && maxEpss > epssTol)
+        {
+            return new BlockVerdict(Servable: false, Arm: BlockArm.Epss);
+        }
+
+        // Arm 7: CVSS score ceiling, pass-on-equal.
+        return facts.MaxCvss is { } maxCvss && maxCvss > policy.MaxOsvScoreTolerance
+            ? new BlockVerdict(Servable: false, Arm: BlockArm.VulnScore)
+            : new BlockVerdict(Servable: true, Arm: BlockArm.None);
+    }
 }
+
+/// <summary>
+/// Identifies which policy arm triggered a block verdict. <see cref="None"/> means the
+/// version is servable (no arm fired).
+/// </summary>
+public enum BlockArm { None, Manual, Deprecated, ReleaseAge, Malicious, Kev, Epss, VulnScore }
+
+/// <summary>
+/// Outcome of the pure policy core: whether the version is servable and, if not, which arm
+/// triggered the block.
+/// </summary>
+public readonly record struct BlockVerdict(bool Servable, BlockArm Arm);
+
+/// <summary>
+/// Immutable projection of the per-version facts that every policy arm reads. Built from
+/// either a DB row (<see cref="BlockGateService.IsHardBlockedByStoredState"/>) or the
+/// download-path request (<see cref="BlockGateService.EvaluateAsync"/>).
+/// </summary>
+public readonly record struct VersionFacts(
+    string? ManualState,
+    string? Deprecated,
+    DateTimeOffset? PublishedAt,
+    bool Scanned,
+    bool HasMalicious,
+    bool HasKev,
+    double? MaxEpss,
+    double? MaxCvss);
+
+/// <summary>
+/// Immutable projection of the tenant policy knobs that every arm reads. Built from
+/// <see cref="OrgSettings"/> on the index path or from <see cref="BlockGateRequest"/> on the
+/// download path so the pure core is decoupled from both call shapes.
+/// </summary>
+public readonly record struct BlockPolicy(
+    int? MinReleaseAgeHours,
+    string? BlockDeprecatedMode,
+    string? BlockMaliciousMode,
+    string? BlockKevMode,
+    double? MaxEpssTolerance,
+    double MaxOsvScoreTolerance);
 
 public enum BlockDecision
 {

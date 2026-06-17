@@ -49,7 +49,7 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     {
         await new SchemaInitializer(_db).InitializeAsync();
         _orgs = new OrgRepository(_db);
-        _tokens = new TokenRepository(_db);
+        _tokens = new TokenRepository(_db, TimeProvider.System);
         _audit = new AuditRepository(_db);
 
         _orgId = await OrgSeeder.InsertAsync(_db, "oci-proxy-org");
@@ -158,11 +158,15 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
             BlobStore: new TieredBlobStorage(_cacheBlobs, _registryBlobs),
             Db: _db,
             Upstream: upstream,
-            Uploads: new OciUploadService(
+            Uploads: new OciUploadService(new OciUploadService.Dependencies(
                 _db,
                 new TieredBlobStorage(_cacheBlobs, _registryBlobs),
+                _orgs,
+                new UnlimitedDisk(),
+                new StagingOptions(Path.GetTempPath(), FloorBytes: 0),
                 new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<OciUploadService>.Instance));
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<OciUploadService>.Instance,
+                TimeProvider.System)));
 
         return new OciController(svc, NullLogger<OciController>.Instance)
         {
@@ -188,11 +192,15 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
             BlobStore: new TieredBlobStorage(_cacheBlobs, _registryBlobs),
             Db: _db,
             Upstream: upstream,
-            Uploads: new OciUploadService(
+            Uploads: new OciUploadService(new OciUploadService.Dependencies(
                 _db,
                 new TieredBlobStorage(_cacheBlobs, _registryBlobs),
+                _orgs,
+                new UnlimitedDisk(),
+                new StagingOptions(Path.GetTempPath(), FloorBytes: 0),
                 new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<OciUploadService>.Instance));
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<OciUploadService>.Instance,
+                TimeProvider.System)));
 
         return new OciController(svc, NullLogger<OciController>.Instance)
         {
@@ -221,11 +229,11 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
 
         http ??= new NeverCallFactory();
         var authSvc = new OciUpstreamAuthService(
-            http, options, new DisabledAirGap(), NullLogger<OciUpstreamAuthService>.Instance);
+            http, options, new DisabledAirGap(), NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
         return new OciUpstreamResolver(
             http, authSvc, options, blobs, _db,
-            new DisabledAirGap(), NullLogger<OciUpstreamResolver>.Instance);
+            new DisabledAirGap(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
     }
 
     private OciUpstreamResolver BuildResolverNoUpstream()
@@ -699,11 +707,11 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         // must be caught so the local listing is still returned.
         var airGap = new EnabledAirGap();
         var authSvc = new OciUpstreamAuthService(
-            new NeverCallFactory(), options, airGap, NullLogger<OciUpstreamAuthService>.Instance);
+            new NeverCallFactory(), options, airGap, NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
         var resolver = new OciUpstreamResolver(
             new NeverCallFactory(), authSvc, options, blobs, _db,
-            airGap, NullLogger<OciUpstreamResolver>.Instance);
+            airGap, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
 
         var ctl = BuildController(resolver);
         var result = await ctl.Get("library/ubuntu/tags/list", default);
@@ -716,4 +724,12 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         var tags = tagsProperty!.GetValue(obj) as IEnumerable<string>;
         Assert.Contains("air-local", tags!);
     }
+}
+
+/// <summary>Unlimited disk stub for tests — floor check always passes.</summary>
+file sealed class UnlimitedDisk : IStagingDiskInfo
+{
+    public long GetAvailableBytes() => long.MaxValue;
+    public long GetTotalBytes() => long.MaxValue;
+    public long GetStagingDirectoryUsedBytes() => 0;
 }

@@ -6,9 +6,13 @@ namespace Dependably.Tests.Unit;
 /// <summary>
 /// The token-exchange realm comes verbatim from the upstream's Www-Authenticate challenge,
 /// and the operator-configured credentials are attached to whatever it names — so the realm
-/// must be HTTPS and constrained to the upstream's own host / registrable domain (or the
+/// must be HTTPS and constrained to exactly the upstream's own host (or the
 /// operator-pinned TokenEndpoint) before any exchange happens. Otherwise a hostile or
 /// MITM'd upstream could harvest the registry credentials.
+///
+/// Registrable-domain matching is intentionally absent: a challenge that redirects to a
+/// sibling domain (e.g. auth.docker.io for registry-1.docker.io) is rejected unless the
+/// operator explicitly pins that endpoint via TokenEndpoint.
 /// </summary>
 [Trait("Category", "Unit")]
 public class OciUpstreamAuthRealmTests
@@ -53,8 +57,8 @@ public class OciUpstreamAuthRealmTests
     [Fact]
     public void TwoLabelUpstreamHost_DoesNotDegradeToTldMatch()
     {
-        // For "ghcr.io" the parent would be the bare TLD "io" — sibling .io domains must
-        // never qualify.
+        // For "ghcr.io" a registrable-domain check would produce the bare TLD "io" —
+        // sibling .io domains must never qualify.
         Assert.False(OciUpstreamAuthService.IsTrustedRealm(
             "https://evil.io/token", Upstream("ghcr.io")));
     }
@@ -77,16 +81,45 @@ public class OciUpstreamAuthRealmTests
                 "registry.internal.example", tokenEndpoint: "https://auth.partner.example/token")));
     }
 
-    // ── Allowed ───────────────────────────────────────────────────────────────
-
+    /// <summary>
+    /// Regression: sibling-domain realm that shares a registrable domain with the upstream
+    /// host (e.g. auth.docker.io vs registry-1.docker.io) must be rejected when no
+    /// TokenEndpoint is pinned. Without the fix, the registrable-domain fallback allowed
+    /// a hostile upstream to redirect credentials to attacker-auth.attacker.com by
+    /// configuring the upstream host as registry.attacker.com.
+    /// </summary>
     [Fact]
-    public void DockerHubRealm_ForDockerHubRegistry_IsAllowed()
+    public void SiblingDomainRealm_WithoutPinnedEndpoint_IsRejected()
     {
-        // Docker Hub's challenge realm (auth.docker.io) is a sibling of the registry host
-        // (registry-1.docker.io) under the same registrable domain — must keep working.
-        Assert.True(OciUpstreamAuthService.IsTrustedRealm(
+        // Demonstrates the pre-fix vulnerability: attacker controls registry.attacker.com
+        // and returns realm="https://harvest.attacker.com/token". The registrable-domain
+        // fallback (parentDomain = "attacker.com") previously allowed this.
+        Assert.False(OciUpstreamAuthService.IsTrustedRealm(
+            "https://harvest.attacker.com/token", Upstream("registry.attacker.com")));
+
+        // Docker Hub's own sibling-domain pattern is also rejected without a pinned endpoint.
+        Assert.False(OciUpstreamAuthService.IsTrustedRealm(
             "https://auth.docker.io/token", Upstream("registry-1.docker.io")));
     }
+
+    /// <summary>
+    /// Mixed scenario: two upstreams share the same registrable domain but only one has a
+    /// matching pinned endpoint. The pinned one succeeds; the unpinned one fails even though
+    /// the realm is on the same parent domain.
+    /// </summary>
+    [Fact]
+    public void MixedUpstreams_PinnedSucceeds_UnpinnedFails()
+    {
+        const string siblingRealm = "https://auth.docker.io/token";
+
+        var pinnedUpstream = Upstream("registry-1.docker.io", tokenEndpoint: siblingRealm);
+        var unpinnedUpstream = Upstream("registry-1.docker.io", tokenEndpoint: null);
+
+        Assert.True(OciUpstreamAuthService.IsTrustedRealm(siblingRealm, pinnedUpstream));
+        Assert.False(OciUpstreamAuthService.IsTrustedRealm(siblingRealm, unpinnedUpstream));
+    }
+
+    // ── Allowed ───────────────────────────────────────────────────────────────
 
     [Fact]
     public void RealmOnUpstreamsOwnHost_IsAllowed()
@@ -109,6 +142,17 @@ public class OciUpstreamAuthRealmTests
         Assert.True(OciUpstreamAuthService.IsTrustedRealm(
             "https://auth.partner.example/token", Upstream(
                 "registry.internal.example", tokenEndpoint: "https://auth.partner.example/token")));
+    }
+
+    [Fact]
+    public void DockerHubRealm_WithPinnedTokenEndpoint_IsAllowed()
+    {
+        // Docker Hub's auth realm (auth.docker.io) is on a different host than the registry
+        // (registry-1.docker.io). Credentials reach it only when the operator explicitly
+        // pins the endpoint, making the trust decision auditable and intentional.
+        Assert.True(OciUpstreamAuthService.IsTrustedRealm(
+            "https://auth.docker.io/token", Upstream(
+                "registry-1.docker.io", tokenEndpoint: "https://auth.docker.io/token")));
     }
 
     [Fact]

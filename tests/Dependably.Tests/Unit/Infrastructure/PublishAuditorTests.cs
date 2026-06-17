@@ -86,7 +86,7 @@ public sealed class PublishAuditorTests : IAsyncLifetime
     {
         var auditor = Build();
         await auditor.RecordAsync(Sample(auditAction: "push", auditDetail: "{\"foo\":\"bar\"}"),
-            sha256: "abc123", existing: null, ct: default);
+            sha256: "abc123", existing: null, sizeBytes: 42L, ct: default);
 
         // Both tables hit (push dual-writes).
         Assert.Equal(1, await CountAsync("audit_log"));
@@ -116,7 +116,7 @@ public sealed class PublishAuditorTests : IAsyncLifetime
     {
         var auditor = Build();
         await auditor.RecordAsync(Sample(auditAction: "push", actorUserId: null),
-            sha256: "deadbeef", existing: null, ct: default);
+            sha256: "deadbeef", existing: null, sizeBytes: 42L, ct: default);
 
         var typed = Assert.Single(_emitter.Emitted);
         Assert.Equal("system", typed.ActorType);
@@ -134,7 +134,7 @@ public sealed class PublishAuditorTests : IAsyncLifetime
         var auditor = Build();
         string detail = JsonSerializer.Serialize(new { batch_id = "b-99", import_mode = "bulk" });
         await auditor.RecordAsync(Sample(auditAction: "import", auditDetail: detail),
-            sha256: "ff00", existing: null, ct: default);
+            sha256: "ff00", existing: null, sizeBytes: 42L, ct: default);
 
         // The invariant: import is per-version only; audit_log stays empty.
         Assert.Equal(0, await CountAsync("audit_log"));
@@ -155,7 +155,7 @@ public sealed class PublishAuditorTests : IAsyncLifetime
     {
         var auditor = Build();
         await auditor.RecordAsync(Sample(auditAction: "import", auditDetail: null),
-            sha256: "11", existing: null, ct: default);
+            sha256: "11", existing: null, sizeBytes: 42L, ct: default);
 
         var typed = Assert.Single(_emitter.Emitted);
         Assert.Equal(PackageEvents.TypeImport, typed.EventType);
@@ -169,7 +169,7 @@ public sealed class PublishAuditorTests : IAsyncLifetime
     {
         var auditor = Build();
         await auditor.RecordAsync(Sample(auditAction: "import", auditDetail: "not-json{"),
-            sha256: "22", existing: null, ct: default);
+            sha256: "22", existing: null, sizeBytes: 42L, ct: default);
 
         var typed = Assert.Single(_emitter.Emitted);
         using var doc = JsonDocument.Parse(typed.PayloadJson);
@@ -184,7 +184,7 @@ public sealed class PublishAuditorTests : IAsyncLifetime
         var auditor = Build();
         string detail = JsonSerializer.Serialize(new { batch_id = 7, import_mode = 9 });
         await auditor.RecordAsync(Sample(auditAction: "import", auditDetail: detail),
-            sha256: "33", existing: null, ct: default);
+            sha256: "33", existing: null, sizeBytes: 42L, ct: default);
 
         var typed = Assert.Single(_emitter.Emitted);
         using var doc = JsonDocument.Parse(typed.PayloadJson);
@@ -199,7 +199,7 @@ public sealed class PublishAuditorTests : IAsyncLifetime
         var auditor = Build();
         string detail = JsonSerializer.Serialize(new { batch_id = "only-batch" });
         await auditor.RecordAsync(Sample(auditAction: "import", auditDetail: detail),
-            sha256: "44", existing: null, ct: default);
+            sha256: "44", existing: null, sizeBytes: 42L, ct: default);
 
         var typed = Assert.Single(_emitter.Emitted);
         using var doc = JsonDocument.Parse(typed.PayloadJson);
@@ -215,7 +215,7 @@ public sealed class PublishAuditorTests : IAsyncLifetime
         var auditor = Build();
         var existing = new PackageVersion { ChecksumSha256 = "oldhash" };
         await auditor.RecordAsync(Sample(auditAction: "push"),
-            sha256: "newhash", existing: existing, ct: default);
+            sha256: "newhash", existing: existing, sizeBytes: 42L, ct: default);
 
         // Two audit_log rows: 'push' + 'package.replace'. activity stays at 1.
         var audit = await AuditRowsAsync();
@@ -246,7 +246,7 @@ public sealed class PublishAuditorTests : IAsyncLifetime
         var auditor = Build();
         var existing = new PackageVersion { ChecksumSha256 = null };
         await auditor.RecordAsync(Sample(auditAction: "push", actorUserId: null),
-            sha256: "newhash", existing: existing, ct: default);
+            sha256: "newhash", existing: existing, sizeBytes: 42L, ct: default);
 
         var replace = (await AuditRowsAsync()).Single(a => a.Action == "package.replace");
         using var doc = JsonDocument.Parse(replace.Detail!);
@@ -266,7 +266,7 @@ public sealed class PublishAuditorTests : IAsyncLifetime
         var auditor = Build();
         var existing = new PackageVersion { ChecksumSha256 = "prior" };
         await auditor.RecordAsync(Sample(auditAction: "import", auditDetail: null),
-            sha256: "newer", existing: existing, ct: default);
+            sha256: "newer", existing: existing, sizeBytes: 42L, ct: default);
 
         var audit = await AuditRowsAsync();
         Assert.Single(audit);

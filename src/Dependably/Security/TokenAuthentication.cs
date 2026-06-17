@@ -106,21 +106,25 @@ public sealed class TokenAuthenticationHandler : AuthenticationHandler<TokenAuth
 
             if (auth.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
             {
-                string encoded = auth["Basic ".Length..].Trim();
-                try
-                {
-                    string decoded = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
-                    int colon = decoded.IndexOf(':');
-                    if (colon >= 0)
-                    {
-                        return decoded[(colon + 1)..];
-                    }
-                }
-                catch (FormatException) { return null; }
+                return ExtractBasicPassword(auth);
             }
         }
         string? nuget = request.Headers["X-NuGet-ApiKey"].FirstOrDefault();
         return string.IsNullOrEmpty(nuget) ? null : nuget;
+    }
+
+    // Decodes a Basic Authorization header value and returns the password component
+    // (the token). Returns null if the header is malformed or base64-invalid.
+    private static string? ExtractBasicPassword(string basicAuth)
+    {
+        string encoded = basicAuth["Basic ".Length..].Trim();
+        try
+        {
+            string decoded = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+            int colon = decoded.IndexOf(':');
+            return colon >= 0 ? decoded[(colon + 1)..] : null;
+        }
+        catch (FormatException) { return null; }
     }
 
     /// <summary>

@@ -101,19 +101,7 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
                 if (doc.RootElement.TryGetProperty("data", out var data)
                     && data.ValueKind == JsonValueKind.Array)
                 {
-                    foreach (var entry in data.EnumerateArray())
-                    {
-                        // EPSS encodes scores as strings ("0.97558"); skip anything malformed.
-                        if (entry.ValueKind == JsonValueKind.Object
-                            && entry.TryGetProperty("cve", out var cve)
-                            && cve.ValueKind == JsonValueKind.String
-                            && entry.TryGetProperty("epss", out var epss)
-                            && epss.ValueKind == JsonValueKind.String
-                            && double.TryParse(epss.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out double score))
-                        {
-                            scores[cve.GetString()!] = score;
-                        }
-                    }
+                    ParseEpssDataArray(data, scores);
                 }
 
                 // The whole batch counts as queried even for CVEs the API didn't return —
@@ -132,5 +120,32 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
             "EPSS query complete: {Scored} scored of {Queried} queried ({Total} requested).",
             scores.Count, queried.Count, cveIds.Count);
         return new EpssQueryResult(scores, queried);
+    }
+
+    // Iterates the EPSS "data" array and populates the scores dictionary.
+    // EPSS encodes scores as strings ("0.97558"); entries missing either property
+    // or carrying a non-numeric value are skipped silently.
+    private static void ParseEpssDataArray(JsonElement data, Dictionary<string, double> scores)
+    {
+        foreach (var entry in data.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+            if (!entry.TryGetProperty("cve", out var cve) || cve.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+            if (!entry.TryGetProperty("epss", out var epss) || epss.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+            if (!double.TryParse(epss.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out double score))
+            {
+                continue;
+            }
+            scores[cve.GetString()!] = score;
+        }
     }
 }

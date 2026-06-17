@@ -1,7 +1,9 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
@@ -389,6 +391,148 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         string privateTarball = $"{name}-99.0.0.tgz";
         var anonPrivateResp = await anonClient.GetAsync($"/npm/tarballs/{name}/{privateTarball}");
         Assert.Equal(HttpStatusCode.Unauthorized, anonPrivateResp.StatusCode);
+    }
+
+    // ── Maven: download routes by per-version origin ──────────────────────────
+
+    [Fact]
+    public async Task Maven_Download_UploadedArtifact_AnonRequest_Returns401_EvenWithAnonymousPullOn()
+    {
+        string groupId = "com.example";
+        string artifactId = $"mvnpriv{Guid.NewGuid():N}"[..12].ToLowerInvariant();
+        string version = "1.0.0";
+
+        // Push an artifact — creates origin='uploaded' row.
+        string filename = await _factory.PushMavenArtifact(groupId, artifactId, version);
+        string path = $"/maven/{groupId.Replace('.', '/')}/{artifactId}/{version}/{filename}";
+
+        // Enable AnonymousPull so the tenant-level gate does not block the request.
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn0 = await store.OpenAsync();
+        string orgId = await conn0.ExecuteScalarAsync<string>(
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
+            ?? throw new InvalidOperationException("Default org not found.");
+        await conn0.ExecuteAsync(
+            "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId",
+            new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        try
+        {
+            // Anonymous request for the uploaded artifact → 401 even though AnonymousPull is on.
+            using var anonClient = _factory.CreateClient();
+            var anonResp = await anonClient.GetAsync(path);
+            Assert.Equal(HttpStatusCode.Unauthorized, anonResp.StatusCode);
+        }
+        finally
+        {
+            await conn0.ExecuteAsync(
+                "UPDATE org_settings SET anonymous_pull = 0 WHERE org_id = @orgId",
+                new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        }
+    }
+
+    [Fact]
+    public async Task Maven_Download_UploadedArtifact_WithReadArtifactToken_Returns200()
+    {
+        string groupId = "com.example";
+        string artifactId = $"mvnauth{Guid.NewGuid():N}"[..12].ToLowerInvariant();
+        string version = "1.0.0";
+
+        string filename = await _factory.PushMavenArtifact(groupId, artifactId, version);
+        string path = $"/maven/{groupId.Replace('.', '/')}/{artifactId}/{version}/{filename}";
+
+        // A token carrying read:artifact is allowed through the origin gate.
+        string token = await _factory.CreateToken("pull");
+        using var authClient = _factory.CreateClientWithBasic(token);
+        var resp = await authClient.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Maven_Download_MixedOrigin_UploadedDenied_ProxyCachedAllowed_InSameFlow()
+    {
+        // House-rule mixed/partial-failure scenario: an uploaded artifact is denied to an
+        // anonymous caller while a proxy-cached artifact from the same package namespace
+        // is served without auth — both handled in a single flow, same org, same AnonymousPull
+        // setting. Validates that the origin gate is per-version, not per-package.
+        string groupId = "com.example";
+        string artifactId = $"mvnmixed{Guid.NewGuid():N}"[..12].ToLowerInvariant();
+
+        // Push a private version (origin='uploaded').
+        string filename99 = await _factory.PushMavenArtifact(groupId, artifactId, "99.0.0");
+        string uploadedPath = $"/maven/{groupId.Replace('.', '/')}/{artifactId}/99.0.0/{filename99}";
+
+        // Directly seed a proxy-cached version in the DB so we don't need an upstream HTTP stub.
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
+            ?? throw new InvalidOperationException("Default org not found.");
+        string purlName = $"{groupId}:{artifactId}";
+        string pkgId = await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM packages WHERE org_id = @orgId AND purl_name = @purl AND ecosystem = 'maven' LIMIT 1",
+            new { orgId, purl = purlName })
+            ?? throw new InvalidOperationException("Package row not found after push.");
+
+        // Add a proxy version row and its maven_version_files record.
+        string proxyFilename = $"{artifactId}-1.0.0.jar";
+        byte[] proxyBytes = [0x50, 0x4B];
+        string proxySha256 = Convert.ToHexString(SHA256.HashData(proxyBytes)).ToLowerInvariant();
+        // deepcode ignore InsecureHash: Maven sidecar compatibility — SHA-1 and MD5 are required by the Maven repo spec.
+        string proxySha1 = Convert.ToHexString(SHA1.HashData(proxyBytes)).ToLowerInvariant();
+        // deepcode ignore InsecureHash: Maven sidecar compatibility — see above.
+        string proxyMd5 = Convert.ToHexString(MD5.HashData(proxyBytes)).ToLowerInvariant();
+
+        // Write the proxy blob so the cache-hit serve path can stream it. The DB key for a
+        // proxy artifact is proxy/{sha256}/{filename}; StoreKey strips the filename suffix
+        // to get proxy/{sha256}, which is what the blob store holds.
+        string proxyStoreKey = BlobKeys.Proxy(proxySha256);
+        string proxyDbKey = $"{proxyStoreKey}/{proxyFilename}";
+        await _factory.BlobStore.PutAsync(proxyStoreKey, new System.IO.MemoryStream(proxyBytes), CancellationToken.None);
+
+        string proxyVersionId = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO package_versions (id, package_id, version, purl, blob_key, filename, size_bytes, checksum_sha256, origin)
+            VALUES (@id, @pkgId, '1.0.0', @purl, @blobKey, @filename, 2, @sha256, 'proxy')
+            """,
+            new { id = proxyVersionId, pkgId, purl = $"pkg:maven/{groupId}/{artifactId}@1.0.0", blobKey = proxyDbKey, filename = proxyFilename, sha256 = proxySha256 });
+        string proxyFileId = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO maven_version_files
+                (id, package_version_id, filename, classifier, extension, blob_key, size_bytes,
+                 checksum_sha256, checksum_sha1, checksum_md5, origin)
+            VALUES (@id, @pvId, @filename, NULL, 'jar', @blobKey, 2, @sha256, @sha1, @md5, 'proxy')
+            """,
+            new { id = proxyFileId, pvId = proxyVersionId, filename = proxyFilename, blobKey = proxyDbKey, sha256 = proxySha256, sha1 = proxySha1, md5 = proxyMd5 });
+
+        // Enable AnonymousPull to confirm the per-version gate fires independently.
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId",
+            new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        try
+        {
+            using var anonClient = _factory.CreateClient();
+
+            // Uploaded version → 401 despite AnonymousPull.
+            var anonUploadedResp = await anonClient.GetAsync(uploadedPath);
+            Assert.Equal(HttpStatusCode.Unauthorized, anonUploadedResp.StatusCode);
+
+            // Proxy-cached version → 200 (cache hit, anon-OK under AnonymousPull).
+            string proxyPath = $"/maven/{groupId.Replace('.', '/')}/{artifactId}/1.0.0/{proxyFilename}";
+            var anonProxyResp = await anonClient.GetAsync(proxyPath);
+            Assert.Equal(HttpStatusCode.OK, anonProxyResp.StatusCode);
+        }
+        finally
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET anonymous_pull = 0 WHERE org_id = @orgId",
+                new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        }
     }
 
     // ── Cross-cutting: ProxyPassthroughDisabled honors the gate ─────────────────

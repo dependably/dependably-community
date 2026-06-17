@@ -3,6 +3,7 @@ using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
+using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 
 namespace Dependably.Tests.Unit.Infrastructure;
@@ -18,20 +19,22 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
 {
     private readonly InMemoryDbFixture _fixture;
     private readonly IAuditEmitter _emitter = Substitute.For<IAuditEmitter>();
+    private readonly FakeTimeProvider _clock = TestTime.Frozen();
 
     public LoginServiceUnitTests(InMemoryDbFixture fixture) => _fixture = fixture;
 
     private LoginService NewSut()
     {
         var orgs = new OrgRepository(_fixture.Store);
-        return new LoginService(
+        return new LoginService(new LoginService.Dependencies(
             _fixture.Store,
             orgs,
             new SystemAdminRepository(_fixture.Store),
-            new SqliteLockoutStore(_fixture.Store),
+            new SqliteLockoutStore(_fixture.Store, _clock),
             new AuditRepository(_fixture.Store),
-            new ExternalIdentityRepository(_fixture.Store),
-            _emitter);
+            new ExternalIdentityRepository(_fixture.Store, _clock),
+            _emitter,
+            _clock));
     }
 
     private async Task EnsureJwtSecretAsync()
@@ -90,11 +93,11 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         Assert.NotNull(Error);
         Assert.Null(second.Token);
 
-        // Lockout counter rose to 2.
+        // Lockout counter rose to 2. The key is realm+tenant scoped.
         await using var conn = await _fixture.Store.OpenAsync();
         long count = await conn.ExecuteScalarAsync<long>(
             "SELECT failed_count FROM login_attempts WHERE email_hash = @h",
-            new { h = HashEmail(email) });
+            new { h = HashLockoutKey("tenant", orgId, email) });
         Assert.Equal(2, count);
     }
 
@@ -173,14 +176,14 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         string email = $"lo-{Guid.NewGuid():N}@x.test";
         await UserSeeder.InsertAsync(_fixture.Store, orgId, email, password: "Correct12345");
 
-        // Stamp lockout state directly.
-        string emailHash = HashEmail(email);
-        string lockedUntil = DateTimeOffset.UtcNow.AddMinutes(5).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        // Stamp lockout state directly using the realm+tenant scoped key.
+        string lockoutKey = HashLockoutKey("tenant", orgId, email);
+        string lockedUntil = _clock.GetUtcNow().AddMinutes(5).ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using (var conn = await _fixture.Store.OpenAsync())
         {
             await conn.ExecuteAsync(
                 "INSERT INTO login_attempts (email_hash, failed_count, locked_until) VALUES (@h, 10, @t)",
-                new { h = emailHash, t = lockedUntil });
+                new { h = lockoutKey, t = lockedUntil });
         }
 
         var (token, error, retry) = await NewSut().LoginTenantAsync(email, "Correct12345", orgId);
@@ -188,7 +191,8 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         Assert.Null(token);
         Assert.NotNull(error);
         Assert.NotNull(retry);
-        Assert.True(retry!.Value > 0);
+        // Frozen clock: lockout ends exactly 5 minutes from "now", +1s rounding guard.
+        Assert.Equal(301, retry!.Value);
     }
 
     // ── LoginSystemAsync ────────────────────────────────────────────────────
@@ -223,6 +227,75 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         Assert.Null(token);
         Assert.NotNull(error);
         Assert.DoesNotContain("not found", error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── login.failure audit scoping (tenant-isolation guarantee) ─────────────
+
+    /// <summary>
+    /// A tenant login failure is pinned to that tenant's audit list at scope='tenant' with
+    /// org_id=<that tenant>: only that tenant's admin sees it. It must never surface to another
+    /// tenant's audit list, nor to the system/operator audit list.
+    /// </summary>
+    [Fact]
+    public async Task LoginTenantAsync_BadCredentials_AuditFailureScopedToThatTenantOnly()
+    {
+        await EnsureJwtSecretAsync();
+        string tenantOrg = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string otherOrg = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string email = $"u-{Guid.NewGuid():N}@x.test";
+        await UserSeeder.InsertAsync(_fixture.Store, tenantOrg, email, password: "Correct12345");
+
+        var (token, error, _) = await NewSut().LoginTenantAsync(email, "wrong-pass", tenantOrg);
+        Assert.Null(token);
+        Assert.NotNull(error);
+
+        var audit = new AuditRepository(_fixture.Store);
+
+        // Visible to the owning tenant.
+        var (ownItems, _) = await audit.ListAuditAsync(tenantOrg, limit: 50, offset: 0, action: "login.failure");
+        Assert.Single(ownItems);
+        Assert.All(ownItems, e => Assert.Equal(tenantOrg, e.OrgId));
+
+        // Not visible to a different tenant.
+        var (otherItems, otherTotal) = await audit.ListAuditAsync(otherOrg, limit: 50, offset: 0, action: "login.failure");
+        Assert.Empty(otherItems);
+        Assert.Equal(0, otherTotal);
+
+        // Not visible on the system/operator audit list. The shared fixture may hold system-realm
+        // login.failure rows from other tests, but a tenant-realm failure must never appear there.
+        var (sysItems, _) = await audit.ListSystemAuditAsync(limit: 200, offset: 0, action: "login.failure");
+        Assert.DoesNotContain(sysItems, e => e.Detail is not null && e.Detail.Contains("\"realm\":\"tenant\"", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A system/master login failure is recorded at scope='system' (org_id NULL) so only system
+    /// admins see it on the operator audit list. It must never leak into any tenant's audit list.
+    /// </summary>
+    [Fact]
+    public async Task LoginSystemAsync_BadCredentials_AuditFailureScopedToSystemOnly()
+    {
+        await EnsureJwtSecretAsync();
+        string tenantOrg = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string adminEmail = $"sys-{Guid.NewGuid():N}@example.com";
+        await SystemAdminSeeder.InsertAsync(_fixture.Store, adminEmail, "SysPass12345");
+
+        var (token, error, _) = await NewSut().LoginSystemAsync(adminEmail, "wrong-pass");
+        Assert.Null(token);
+        Assert.NotNull(error);
+
+        var audit = new AuditRepository(_fixture.Store);
+
+        // Visible on the system/operator audit list, with no org binding. The class shares an
+        // in-memory DB fixture, so other system-login-failure tests may add rows — assert the
+        // category is present and every system-scoped login.failure row stays org-unbound.
+        var (sysItems, _) = await audit.ListSystemAuditAsync(limit: 50, offset: 0, action: "login.failure");
+        Assert.NotEmpty(sysItems);
+        Assert.All(sysItems, e => Assert.Null(e.OrgId));
+
+        // Not visible to any tenant's audit list.
+        var (tenantItems, tenantTotal) = await audit.ListAuditAsync(tenantOrg, limit: 50, offset: 0, action: "login.failure");
+        Assert.Empty(tenantItems);
+        Assert.Equal(0, tenantTotal);
     }
 
     // ── LoginSamlAsync — three branches ──────────────────────────────────────
@@ -405,6 +478,174 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal(newEmail, storedEmail);
     }
 
+    // ── LoginSamlAsync — email-link privilege escalation gate ────────────────
+
+    /// <summary>
+    /// Owner account is never silently linked via email: no external_identities row is
+    /// created and the attempt is audited as a login failure with reason
+    /// "email_link_privileged_account_blocked". The owner's role is unchanged.
+    /// </summary>
+    [Fact]
+    public async Task LoginSamlAsync_EmailLinkPath_OwnerAccount_Blocked_NotLinked_Audited()
+    {
+        await EnsureJwtSecretAsync();
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string ownerEmail = $"owner-elink-{Guid.NewGuid():N}@x.test";
+        string ownerId = await UserSeeder.InsertAsync(_fixture.Store, orgId, ownerEmail, role: "owner");
+
+        var result = await NewSut().LoginSamlAsync(orgId, "https://idp", "new-nameid-owner", ownerEmail);
+
+        Assert.Null(result.Token);
+        Assert.NotNull(result.Error);
+        Assert.False(result.Provisioned);
+        Assert.False(result.Linked);
+
+        await using var conn = await _fixture.Store.OpenAsync();
+
+        // No external_identities row was created.
+        long linked = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM external_identities WHERE user_id = @id", new { id = ownerId });
+        Assert.Equal(0, linked);
+
+        // Owner's role is unchanged.
+        string? storedRole = await conn.ExecuteScalarAsync<string>(
+            "SELECT role FROM users WHERE id = @id", new { id = ownerId });
+        Assert.Equal("owner", storedRole);
+
+        // Audit event with the new reason code was emitted.
+        long auditCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'auth.saml.login.failure' AND org_id = @orgId AND actor_id = @actor",
+            new { orgId, actor = ownerId });
+        Assert.Equal(1, auditCount);
+
+        string? detail = await conn.ExecuteScalarAsync<string?>(
+            "SELECT detail FROM audit_log WHERE action = 'auth.saml.login.failure' AND actor_id = @actor",
+            new { actor = ownerId });
+        Assert.Contains("email_link_privileged_account_blocked", detail, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Admin account is blocked without the idp_can_assign_admin opt-in.
+    /// </summary>
+    [Fact]
+    public async Task LoginSamlAsync_EmailLinkPath_AdminAccount_WithoutOptIn_Blocked()
+    {
+        await EnsureJwtSecretAsync();
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string adminEmail = $"admin-elink-{Guid.NewGuid():N}@x.test";
+        string adminId = await UserSeeder.InsertAsync(_fixture.Store, orgId, adminEmail, role: "admin");
+
+        var result = await NewSut().LoginSamlAsync(orgId, "https://idp", "new-nameid-admin", adminEmail);
+
+        Assert.Null(result.Token);
+        Assert.NotNull(result.Error);
+        Assert.False(result.Linked);
+
+        await using var conn = await _fixture.Store.OpenAsync();
+        long linked = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM external_identities WHERE user_id = @id", new { id = adminId });
+        Assert.Equal(0, linked);
+    }
+
+    /// <summary>
+    /// Admin account is allowed when idp_can_assign_admin is set — parallels the JIT ceiling test.
+    /// </summary>
+    [Fact]
+    public async Task LoginSamlAsync_EmailLinkPath_AdminAccount_WithOptIn_Linked()
+    {
+        await EnsureJwtSecretAsync();
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string adminEmail = $"admin-elink-optin-{Guid.NewGuid():N}@x.test";
+        await UserSeeder.InsertAsync(_fixture.Store, orgId, adminEmail, role: "admin");
+
+        var result = await NewSut().LoginSamlAsync(
+            orgId, "https://idp", "new-nameid-admin-optin", adminEmail,
+            new SamlLoginOptions(IdpCanAssignAdmin: true));
+
+        Assert.NotNull(result.Token);
+        Assert.True(result.Linked);
+    }
+
+    /// <summary>
+    /// Member/auditor accounts are still silently linked — the fix must not over-block
+    /// non-privileged accounts (regression guard).
+    /// </summary>
+    [Fact]
+    public async Task LoginSamlAsync_EmailLinkPath_MemberAccount_StillLinks()
+    {
+        await EnsureJwtSecretAsync();
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string memberEmail = $"member-elink-{Guid.NewGuid():N}@x.test";
+        string memberId = await UserSeeder.InsertAsync(_fixture.Store, orgId, memberEmail, role: "member");
+
+        var result = await NewSut().LoginSamlAsync(orgId, "https://idp", "new-nameid-member", memberEmail);
+
+        Assert.NotNull(result.Token);
+        Assert.True(result.Linked);
+
+        await using var conn = await _fixture.Store.OpenAsync();
+        long linked = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM external_identities WHERE user_id = @id", new { id = memberId });
+        Assert.Equal(1, linked);
+    }
+
+    /// <summary>
+    /// Mixed scenario (house rule): one tenant has a member and an owner both matching
+    /// different assertions in the same login flow. The member links successfully; the
+    /// owner is blocked. Both are verified in a single test run.
+    /// </summary>
+    [Fact]
+    public async Task LoginSamlAsync_EmailLinkPath_MixedPrivilege_MemberLinksOwnerBlocked()
+    {
+        await EnsureJwtSecretAsync();
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+
+        string memberEmail = $"member-mixed-{Guid.NewGuid():N}@x.test";
+        string memberId = await UserSeeder.InsertAsync(_fixture.Store, orgId, memberEmail, role: "member");
+
+        string ownerEmail = $"owner-mixed-{Guid.NewGuid():N}@x.test";
+        string ownerId = await UserSeeder.InsertAsync(_fixture.Store, orgId, ownerEmail, role: "owner");
+
+        var sut = NewSut();
+
+        // Member assertion — should link and receive a session.
+        var memberResult = await sut.LoginSamlAsync(orgId, "https://idp", "mixed-nameid-member", memberEmail);
+        Assert.NotNull(memberResult.Token);
+        Assert.True(memberResult.Linked);
+
+        // Owner assertion — should be blocked with no link.
+        var ownerResult = await sut.LoginSamlAsync(orgId, "https://idp", "mixed-nameid-owner", ownerEmail);
+        Assert.Null(ownerResult.Token);
+        Assert.False(ownerResult.Linked);
+
+        await using var conn = await _fixture.Store.OpenAsync();
+
+        // Member has an external_identities row; owner does not.
+        long memberLinks = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM external_identities WHERE user_id = @id", new { id = memberId });
+        Assert.Equal(1, memberLinks);
+
+        long ownerLinks = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM external_identities WHERE user_id = @id", new { id = ownerId });
+        Assert.Equal(0, ownerLinks);
+
+        // Owner's role is unchanged.
+        string? ownerRole = await conn.ExecuteScalarAsync<string>(
+            "SELECT role FROM users WHERE id = @id", new { id = ownerId });
+        Assert.Equal("owner", ownerRole);
+
+        // An audit failure was emitted for the owner attempt, none for the member.
+        long ownerFailures = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'auth.saml.login.failure' AND actor_id = @id",
+            new { id = ownerId });
+        Assert.Equal(1, ownerFailures);
+
+        long memberFailures = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'auth.saml.login.failure' AND actor_id = @id",
+            new { id = memberId });
+        Assert.Equal(0, memberFailures);
+    }
+
     // ── LoginSamlAsync — IdP role ceiling ────────────────────────────────────
 
     [Fact]
@@ -577,5 +818,222 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
     {
         byte[] bytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(email.ToLowerInvariant()));
         return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    private static string HashLockoutKey(string realm, string? tenantId, string email) =>
+        LoginService.HashLockoutKey(realm, tenantId, email);
+
+    // ── HashLockoutKey — realm+tenant isolation invariants ───────────────────
+
+    /// <summary>
+    /// Three identities sharing an email in different realms/tenants must produce distinct
+    /// lockout keys so their counters never collide in login_attempts.
+    /// </summary>
+    [Fact]
+    public void HashLockoutKey_DifferentRealmsAndTenants_ProduceDifferentKeys()
+    {
+        const string email = "alice@corp.com";
+        const string tenant1 = "t1";
+        const string tenant2 = "t2";
+
+        string keyTenant1 = LoginService.HashLockoutKey("tenant", tenant1, email);
+        string keyTenant2 = LoginService.HashLockoutKey("tenant", tenant2, email);
+        string keySystem = LoginService.HashLockoutKey("system", null, email);
+
+        Assert.NotEqual(keyTenant1, keyTenant2);
+        Assert.NotEqual(keyTenant1, keySystem);
+        Assert.NotEqual(keyTenant2, keySystem);
+    }
+
+    /// <summary>Same inputs always produce the same output (determinism) and email is case-folded.</summary>
+    [Fact]
+    public void HashLockoutKey_IsStableAndCaseInsensitiveOnEmail()
+    {
+        string a = LoginService.HashLockoutKey("tenant", "t1", "Alice@CORP.COM");
+        string b = LoginService.HashLockoutKey("tenant", "t1", "alice@corp.com");
+        string c = LoginService.HashLockoutKey("tenant", "t1", "ALICE@corp.com");
+
+        Assert.Equal(a, b);
+        Assert.Equal(b, c);
+
+        // Stable across two calls.
+        Assert.Equal(a, LoginService.HashLockoutKey("tenant", "t1", "Alice@CORP.COM"));
+    }
+
+    /// <summary>
+    /// Delimiter-safety: a pipe in the email must not collide with the same bytes formed by
+    /// splitting the tenantId field differently (guards against ambiguous concatenation).
+    /// </summary>
+    [Fact]
+    public void HashLockoutKey_DelimiterSafe_NoPipeAmbiguityCollision()
+    {
+        // "tenant|a" + "|" + "b|c@x" vs "tenant|a|b" + "|" + "c@x"
+        // These two inputs differ in where the tenantId/email boundary falls.
+        string key1 = LoginService.HashLockoutKey("tenant", "a", "b|c@x");
+        string key2 = LoginService.HashLockoutKey("tenant", "a|b", "c@x");
+
+        Assert.NotEqual(key1, key2);
+    }
+
+    // ── Lockout isolation: one tenant's failures must not lock another ────────
+
+    /// <summary>
+    /// Ten wrong-password attempts against tenant A must not lock tenant B's counter for the
+    /// same email. This is the cross-tenant lockout-isolation correctness test.
+    /// </summary>
+    [Fact]
+    public async Task LoginTenantAsync_TenantA_Lockout_DoesNotLockTenantB()
+    {
+        await EnsureJwtSecretAsync();
+        string tenantA = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string tenantB = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string email = $"shared-{Guid.NewGuid():N}@x.test";
+
+        // Create the same email in both tenants.
+        await UserSeeder.InsertAsync(_fixture.Store, tenantA, email, password: "PassA12345");
+        await UserSeeder.InsertAsync(_fixture.Store, tenantB, email, password: "PassB12345");
+
+        var sut = NewSut();
+
+        // Drive tenant A to full lockout with 10 wrong-password attempts.
+        for (int i = 0; i < 10; i++)
+        {
+            await sut.LoginTenantAsync(email, "wrong", tenantA);
+        }
+
+        // Tenant A is now locked — even correct password is refused.
+        var (tokenA, errorA, retryA) = await sut.LoginTenantAsync(email, "PassA12345", tenantA);
+        Assert.Null(tokenA);
+        Assert.NotNull(errorA);
+        Assert.NotNull(retryA);
+
+        // Tenant B is completely unaffected — correct password still works.
+        var (tokenB, errorB, _) = await sut.LoginTenantAsync(email, "PassB12345", tenantB);
+        Assert.NotNull(tokenB);
+        Assert.Null(errorB);
+    }
+
+    /// <summary>
+    /// Failed system-realm logins for an email must not lock the same-email tenant identity.
+    /// </summary>
+    [Fact]
+    public async Task LoginSystemAsync_Lockout_DoesNotLockTenantIdentity()
+    {
+        await EnsureJwtSecretAsync();
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string email = $"shared-{Guid.NewGuid():N}@x.test";
+
+        await UserSeeder.InsertAsync(_fixture.Store, orgId, email, password: "TenantPass12345");
+        await SystemAdminSeeder.InsertAsync(_fixture.Store, email, "SysPass12345");
+
+        var sut = NewSut();
+
+        // Drive the system realm to full lockout with 10 wrong-password attempts.
+        for (int i = 0; i < 10; i++)
+        {
+            await sut.LoginSystemAsync(email, "wrong");
+        }
+
+        // System realm is now locked.
+        var (sysToken, _, sysRetry) = await sut.LoginSystemAsync(email, "SysPass12345");
+        Assert.Null(sysToken);
+        Assert.NotNull(sysRetry);
+
+        // Tenant identity with the same email is completely unaffected.
+        var (tenantToken, tenantError, _) = await sut.LoginTenantAsync(email, "TenantPass12345", orgId);
+        Assert.NotNull(tenantToken);
+        Assert.Null(tenantError);
+    }
+
+    /// <summary>
+    /// A successful login in tenant A must not clear tenant B's failure counter for the same
+    /// email.
+    /// </summary>
+    [Fact]
+    public async Task LoginTenantAsync_SuccessInTenantA_DoesNotClearTenantBCounter()
+    {
+        await EnsureJwtSecretAsync();
+        string tenantA = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string tenantB = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string email = $"shared-clear-{Guid.NewGuid():N}@x.test";
+
+        await UserSeeder.InsertAsync(_fixture.Store, tenantA, email, password: "PassA12345");
+        await UserSeeder.InsertAsync(_fixture.Store, tenantB, email, password: "PassB12345");
+
+        var sut = NewSut();
+
+        // Accumulate 5 failures for tenant B.
+        for (int i = 0; i < 5; i++)
+        {
+            await sut.LoginTenantAsync(email, "wrong", tenantB);
+        }
+
+        // Successful login for tenant A.
+        var (tokenA, _, _) = await sut.LoginTenantAsync(email, "PassA12345", tenantA);
+        Assert.NotNull(tokenA);
+
+        // Tenant B's counter is still at 5 — not zeroed by A's success.
+        await using var conn = await _fixture.Store.OpenAsync();
+        long bCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT failed_count FROM login_attempts WHERE email_hash = @h",
+            new { h = HashLockoutKey("tenant", tenantB, email) });
+        Assert.Equal(5, bCount);
+    }
+
+    /// <summary>
+    /// Mixed partial-failure scenario (house rule): interleave failures across three
+    /// identities (tenant A, tenant B, system) that share an email. After 9 failures in
+    /// each realm, no identity should be locked. Then drive tenant A to exactly 10 and assert
+    /// only tenant A is locked while tenant B and system remain usable.
+    /// </summary>
+    [Fact]
+    public async Task LockoutCounters_PartialFailure_OnlyOverThresholdIdentityIsLocked()
+    {
+        await EnsureJwtSecretAsync();
+        string tenantA = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string tenantB = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string email = $"partial-{Guid.NewGuid():N}@x.test";
+
+        await UserSeeder.InsertAsync(_fixture.Store, tenantA, email, password: "PassA12345");
+        await UserSeeder.InsertAsync(_fixture.Store, tenantB, email, password: "PassB12345");
+        await SystemAdminSeeder.InsertAsync(_fixture.Store, email, "SysPass12345");
+
+        var sut = NewSut();
+
+        // Interleave: 9 failures for each identity.
+        for (int i = 0; i < 9; i++)
+        {
+            await sut.LoginTenantAsync(email, "wrong", tenantA);
+            await sut.LoginTenantAsync(email, "wrong", tenantB);
+            await sut.LoginSystemAsync(email, "wrong");
+        }
+
+        // At 9 failures each, no identity is locked yet.
+        var (tA_9, _, _) = await sut.LoginTenantAsync(email, "PassA12345", tenantA);
+        // 9th tenant-A failure was already recorded above; this is the 10th attempt with
+        // correct password: it is still before the threshold fires (threshold is >= 10
+        // failures). Counter starts at 0 and 9 wrongs means the counter is at 9; the
+        // 10th wrong would fire it. Correct password on 10th attempt should succeed.
+        Assert.NotNull(tA_9);
+
+        // Reset tenant A's counter (success clears it), then inflict exactly 10 wrong.
+        for (int i = 0; i < 10; i++)
+        {
+            await sut.LoginTenantAsync(email, "wrong", tenantA);
+        }
+
+        // Tenant A is now locked.
+        var (lockedTokenA, _, lockedRetryA) = await sut.LoginTenantAsync(email, "PassA12345", tenantA);
+        Assert.Null(lockedTokenA);
+        Assert.NotNull(lockedRetryA);
+
+        // Tenant B and system remain unlocked and usable despite the same email.
+        var (tokenB, errorB, _) = await sut.LoginTenantAsync(email, "PassB12345", tenantB);
+        Assert.NotNull(tokenB);
+        Assert.Null(errorB);
+
+        var (sysToken, sysError, _) = await sut.LoginSystemAsync(email, "SysPass12345");
+        Assert.NotNull(sysToken);
+        Assert.Null(sysError);
     }
 }

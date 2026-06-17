@@ -31,9 +31,11 @@ public sealed class AuditEventReaperTests : IAsyncLifetime
                 ["AUDIT_EVENT_RETENTION_DAYS"] = retentionDays,
             })
             .Build();
-        var jwt = new JwtRevocationRepository(_db);
-        var samlConfig = new SamlConfigRepository(_db);
-        return new RetentionService(_db, _blobs, jwt, samlConfig, cfg, NullLogger<RetentionService>.Instance);
+        var clock = TestTime.Frozen();
+        var jwt = new JwtRevocationRepository(_db, time: clock);
+        var invites = new InviteRepository(_db, clock);
+        var samlConfig = new SamlConfigRepository(_db, clock);
+        return new RetentionService(new RetentionService.Dependencies(_db, _blobs, jwt, invites, samlConfig, cfg, NullLogger<RetentionService>.Instance, clock));
     }
 
     private async Task SeedEventAsync(string id, DateTimeOffset occurredAt)
@@ -57,7 +59,9 @@ public sealed class AuditEventReaperTests : IAsyncLifetime
     [Fact]
     public async Task PrunePastRetentionWindow_DeletesOldRowsOnly()
     {
-        var now = DateTimeOffset.UtcNow;
+        // Seeds and the reaper's cutoff both derive from the same frozen instant, so the
+        // -366/-364 margins around the 365-day window are exact regardless of calendar.
+        var now = TestTime.KnownNow;
         await SeedEventAsync("old1", now.AddDays(-400));
         await SeedEventAsync("old2", now.AddDays(-366));
         await SeedEventAsync("borderline", now.AddDays(-364));   // inside default 365-day window
@@ -76,7 +80,7 @@ public sealed class AuditEventReaperTests : IAsyncLifetime
     [Fact]
     public async Task ConfigurableRetentionWindow_HonoursOverride()
     {
-        var now = DateTimeOffset.UtcNow;
+        var now = TestTime.KnownNow;
         await SeedEventAsync("five-days-old", now.AddDays(-5));
         await SeedEventAsync("two-days-old", now.AddDays(-2));
 
@@ -96,7 +100,7 @@ public sealed class AuditEventReaperTests : IAsyncLifetime
     [Fact]
     public async Task NothingPastWindow_NoOp()
     {
-        var now = DateTimeOffset.UtcNow;
+        var now = TestTime.KnownNow;
         await SeedEventAsync("recent1", now.AddHours(-1));
         await SeedEventAsync("recent2", now.AddHours(-2));
 

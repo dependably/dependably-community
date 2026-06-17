@@ -42,6 +42,12 @@ public sealed class OciController : OrgScopedControllerBase
         _logger = logger;
     }
 
+    // Route-level hard ceiling for OCI upload requests (2048 MiB matches the OCI default).
+    private const long OciUploadSizeLimitBytes = 2048L * 1024 * 1024;
+
+    // Referrer scan cap: repositories with more manifests return an incomplete list (valid per OCI 1.1).
+    private const int OciReferrersScanCap = 10000;
+
     /// <summary>
     /// GET dispatcher — parses the v2 path suffix and routes to manifest / blob / tags
     /// handlers. An empty or null <paramref name="path"/> is the Distribution Spec auth probe
@@ -98,7 +104,7 @@ public sealed class OciController : OrgScopedControllerBase
     /// </summary>
     [HttpPost("/v2/{**path}")]
     [EnableRateLimiting("push")]
-    [RequestSizeLimit(2048L * 1024 * 1024)] // hard ceiling matching the 2048 MB OCI default; UploadSizeLimitMiddleware + the cumulative check enforce tighter per-tenant caps
+    [RequestSizeLimit(OciUploadSizeLimitBytes)] // hard ceiling matching the 2048 MB OCI default; UploadSizeLimitMiddleware + the cumulative check enforce tighter per-tenant caps
     public async Task<IActionResult> Post(string? path, CancellationToken ct)
     {
         var route = string.IsNullOrEmpty(path) ? null : OciRoute.Parse(path);
@@ -114,7 +120,7 @@ public sealed class OciController : OrgScopedControllerBase
     /// <summary>PATCH dispatcher — appends a chunk to an open blob upload session.</summary>
     [HttpPatch("/v2/{**path}")]
     [EnableRateLimiting("push")]
-    [RequestSizeLimit(2048L * 1024 * 1024)] // hard ceiling matching the 2048 MB OCI default; UploadSizeLimitMiddleware + the cumulative check enforce tighter per-tenant caps
+    [RequestSizeLimit(OciUploadSizeLimitBytes)] // hard ceiling matching the 2048 MB OCI default; UploadSizeLimitMiddleware + the cumulative check enforce tighter per-tenant caps
     public async Task<IActionResult> Patch(string? path, CancellationToken ct)
     {
         var route = string.IsNullOrEmpty(path) ? null : OciRoute.Parse(path);
@@ -133,7 +139,7 @@ public sealed class OciController : OrgScopedControllerBase
     /// </summary>
     [HttpPut("/v2/{**path}")]
     [EnableRateLimiting("push")]
-    [RequestSizeLimit(2048L * 1024 * 1024)] // hard ceiling matching the 2048 MB OCI default; UploadSizeLimitMiddleware + the cumulative check enforce tighter per-tenant caps
+    [RequestSizeLimit(OciUploadSizeLimitBytes)] // hard ceiling matching the 2048 MB OCI default; UploadSizeLimitMiddleware + the cumulative check enforce tighter per-tenant caps
     public async Task<IActionResult> Put(string? path, CancellationToken ct)
     {
         var route = string.IsNullOrEmpty(path) ? null : OciRoute.Parse(path);
@@ -220,6 +226,20 @@ public sealed class OciController : OrgScopedControllerBase
             return null;
         }
 
+        if (headOnly)
+        {
+            // HEAD: confirm the blob is still present without opening a stream.
+            bool exists = await BlobTierFor(Origin).ExistsAsync(BlobKey, ct);
+            if (!exists)
+            {
+                // Blob evicted — fall through to upstream.
+                return null;
+            }
+
+            SetManifestHeaders(resolved, SizeBytes, MediaType, "HIT", coords.IsDigest);
+            return Ok();
+        }
+
         var stream = await BlobTierFor(Origin).GetAsync(BlobKey, ct);
         if (stream is null)
         {
@@ -228,10 +248,6 @@ public sealed class OciController : OrgScopedControllerBase
         }
 
         SetManifestHeaders(resolved, SizeBytes, MediaType, "HIT", coords.IsDigest);
-        if (headOnly)
-        {
-            return Ok();
-        }
 
         // "download" is the canonical fetch event across ecosystems (npm/PyPI/NuGet)
         // and the only one the Audit page filter knows; the PURL digest distinguishes
@@ -249,11 +265,30 @@ public sealed class OciController : OrgScopedControllerBase
 
     /// <summary>
     /// Fetches a manifest through the upstream proxy on a local cache miss; the resolver
-    /// caches it so subsequent requests are served locally.
+    /// caches it so subsequent requests are served locally. On HEAD, only the manifest
+    /// metadata (digest, size, media type) is fetched — no body is downloaded.
     /// </summary>
     private async Task<IActionResult> ServeUpstreamManifestAsync(
         string orgId, string name, string reference, bool isDigest, bool headOnly, TokenRecord? token, CancellationToken ct)
     {
+        if (headOnly)
+        {
+            // HEAD: fetch only response headers from upstream to avoid downloading the full
+            // manifest body. The resolver issues a HEAD request; the response headers carry
+            // Docker-Content-Digest and Content-Length which are sufficient to satisfy the
+            // OCI spec HEAD contract.
+            var meta = await _svc.Upstream.FetchManifestMetadataAsync(
+                orgId, name, reference, isDigest, ct);
+            if (meta is null)
+            {
+                return OciError(StatusCodes.Status404NotFound, OciErrorCode.MANIFEST_UNKNOWN,
+                    $"Manifest unknown: {reference}");
+            }
+
+            SetManifestHeaders(meta.Digest, meta.SizeBytes, meta.MediaType, "MISS", isDigest);
+            return Ok();
+        }
+
         var upstreamResult = await _svc.Upstream.FetchManifestAsync(
             orgId, name, reference, isDigest, ct);
         if (upstreamResult is null)
@@ -263,11 +298,6 @@ public sealed class OciController : OrgScopedControllerBase
         }
 
         SetManifestHeaders(upstreamResult.Digest, upstreamResult.SizeBytes, upstreamResult.MediaType, "MISS", isDigest);
-        if (headOnly)
-        {
-            return Ok();
-        }
-
         await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{upstreamResult.Digest}", "download",
             actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(upstreamResult.Content, upstreamResult.MediaType);
@@ -429,13 +459,33 @@ public sealed class OciController : OrgScopedControllerBase
     }
 
     /// <summary>
-    /// Fetches a blob through the upstream proxy on a local cache miss. Range requests
-    /// against upstream blobs fall back to a full 200 — the upstream fetch stores the blob
+    /// Fetches a blob through the upstream proxy on a local cache miss. On HEAD, only
+    /// upstream headers are fetched — no body is downloaded. Range requests against
+    /// upstream blobs fall back to a full 200 — the upstream fetch stores the blob
     /// locally, so a retry after the cache-miss uses the ranged path.
     /// </summary>
     private async Task<IActionResult> ServeUpstreamBlobAsync(
         string orgId, string name, string digest, bool headOnly, TokenRecord? token, CancellationToken ct)
     {
+        if (headOnly)
+        {
+            // HEAD: issue a HEAD request to upstream to confirm existence without
+            // downloading the full blob body (which may be gigabytes for large layers).
+            var meta = await _svc.Upstream.FetchBlobMetadataAsync(orgId, name, digest, ct);
+            if (meta is null)
+            {
+                return OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN, $"Blob unknown: {digest}");
+            }
+
+            Response.Headers.AcceptRanges = "bytes";
+            Response.Headers["Docker-Content-Digest"] = digest;
+            Response.Headers["X-Cache"] = "MISS";
+            Response.ContentType = meta.MediaType;
+            Response.Headers.ETag = $"\"{digest}\"";
+            Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            return Ok();
+        }
+
         var upstreamResult = await _svc.Upstream.FetchBlobAsync(orgId, name, digest, ct);
         if (upstreamResult is null)
         {
@@ -448,11 +498,6 @@ public sealed class OciController : OrgScopedControllerBase
         Response.ContentType = upstreamResult.MediaType;
         Response.Headers.ETag = $"\"{digest}\"";
         Response.Headers.CacheControl = "private, max-age=31536000, immutable";
-        if (headOnly)
-        {
-            return Ok();
-        }
-
         await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{digest}", "download",
             actorId: token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(upstreamResult.Content, upstreamResult.MediaType);
@@ -699,14 +744,14 @@ public sealed class OciController : OrgScopedControllerBase
         // xtenant: org_id filters ensure only this tenant's manifests are examined.
         await using var conn = await _svc.Db.OpenAsync(ct);
         // Collect distinct manifest digests associated with this repository (via tags).
-        // Cap at 10,000 to bound scan time; repositories with more manifests than this cap
-        // return an incomplete referrers list, which is valid per the OCI 1.1 spec
+        // Cap at OciReferrersScanCap to bound scan time; repositories with more manifests than
+        // this cap return an incomplete referrers list, which is valid per the OCI 1.1 spec
         // (clients follow pagination, but here we return a single page with what we have).
         // rawsql: ORDER BY + LIMIT on a constant; not user input.
         var candidateDigests = (await conn.QueryAsync<string>(
-            "SELECT DISTINCT digest FROM oci_tags WHERE org_id = @orgId AND repository = @repo LIMIT 10001",
+            "SELECT DISTINCT digest FROM oci_tags WHERE org_id = @orgId AND repository = @repo LIMIT " + (OciReferrersScanCap + 1),
             new { orgId, repo = name })).ToList();
-        if (candidateDigests.Count > 10000)
+        if (candidateDigests.Count > OciReferrersScanCap)
         {
             candidateDigests.RemoveAt(candidateDigests.Count - 1);
             // deepcode ignore LogForging: name is a repository route segment; Serilog structured logging sanitises it.
@@ -715,8 +760,38 @@ public sealed class OciController : OrgScopedControllerBase
                 name);
         }
 
-        var descriptors = new List<OciReferrerDescriptor>();
+        var descriptors = await ScanManifestsForReferrersAsync(
+            orgId, conn, candidateDigests, digest, artifactTypeFilter, ct);
 
+        if (!string.IsNullOrEmpty(artifactTypeFilter))
+        {
+            Response.Headers["OCI-Filters-Applied"] = "artifactType";
+        }
+
+        Response.ContentType = OciImageIndexMediaType;
+        var index = new
+        {
+            schemaVersion = 2,
+            mediaType = OciImageIndexMediaType,
+            manifests = descriptors.Select(d => new
+            {
+                mediaType = d.MediaType,
+                digest = d.Digest,
+                size = d.SizeBytes,
+                artifactType = d.ArtifactType,
+                annotations = d.Annotations,
+            }).ToArray(),
+        };
+        return new JsonResult(index);
+    }
+
+    // Scans candidate manifest digests for entries whose subject.digest matches the target
+    // digest, applying the optional artifactType filter. Returns the matching referrer descriptors.
+    private async Task<List<OciReferrerDescriptor>> ScanManifestsForReferrersAsync(
+        string orgId, System.Data.Common.DbConnection conn, List<string> candidateDigests,
+        string targetDigest, string? artifactTypeFilter, CancellationToken ct)
+    {
+        var descriptors = new List<OciReferrerDescriptor>();
         foreach (string candidateDigest in candidateDigests)
         {
             // xtenant: (digest, org_id) PK is tenant-scoped.
@@ -746,13 +821,13 @@ public sealed class OciController : OrgScopedControllerBase
                 bytes = ms.ToArray();
             }
 
-            var referrer = OciReferrerParser.TryParseReferrer(bytes, candidateDigest, MediaType ?? OciImageIndexMediaType, SizeBytes, digest);
+            var referrer = OciReferrerParser.TryParseReferrer(
+                bytes, candidateDigest, MediaType ?? OciImageIndexMediaType, SizeBytes, targetDigest);
             if (referrer is null)
             {
                 continue;
             }
 
-            // Apply optional artifactType filter.
             if (!string.IsNullOrEmpty(artifactTypeFilter) &&
                 !string.Equals(referrer.ArtifactType, artifactTypeFilter, StringComparison.Ordinal))
             {
@@ -761,27 +836,7 @@ public sealed class OciController : OrgScopedControllerBase
 
             descriptors.Add(referrer);
         }
-
-        if (!string.IsNullOrEmpty(artifactTypeFilter))
-        {
-            Response.Headers["OCI-Filters-Applied"] = "artifactType";
-        }
-
-        Response.ContentType = OciImageIndexMediaType;
-        var index = new
-        {
-            schemaVersion = 2,
-            mediaType = OciImageIndexMediaType,
-            manifests = descriptors.Select(d => new
-            {
-                mediaType = d.MediaType,
-                digest = d.Digest,
-                size = d.SizeBytes,
-                artifactType = d.ArtifactType,
-                annotations = d.Annotations,
-            }).ToArray(),
-        };
-        return new JsonResult(index);
+        return descriptors;
     }
 
     /// <summary>
@@ -957,7 +1012,19 @@ public sealed class OciController : OrgScopedControllerBase
         }
 
         string orgId = CurrentTenantId();
-        var session = await _svc.Uploads.StartUploadAsync(orgId, name, ct);
+        OciUploadSession session;
+        try
+        {
+            session = await _svc.Uploads.StartUploadAsync(orgId, name, ct);
+        }
+        catch (OciSessionCapExceededException ex)
+        {
+            _logger.LogWarning(
+                "OCI upload session cap reached for org {OrgId}: {Active}/{Cap}",
+                ex.OrgId, ex.ActiveCount, ex.Cap);
+            return OciError(StatusCodes.Status429TooManyRequests, OciErrorCode.DENIED,
+                $"Too many concurrent upload sessions for this tenant (cap: {ex.Cap}).");
+        }
 
         // Monolithic single-POST: ?digest=sha256:... carries the full blob in this request.
         string? digest = Request.Query["digest"].FirstOrDefault();
@@ -1052,6 +1119,9 @@ public sealed class OciController : OrgScopedControllerBase
             case OciFinalizeStatus.DigestMismatch:
                 return OciError(StatusCodes.Status400BadRequest, OciErrorCode.DIGEST_INVALID,
                     "Uploaded content does not match the provided digest.");
+            case OciFinalizeStatus.QuotaExceeded:
+                return OciError(StatusCodes.Status413RequestEntityTooLarge, OciErrorCode.SIZE_INVALID,
+                    "Tenant storage quota would be exceeded by this blob upload.");
             default:
                 return OciError(StatusCodes.Status500InternalServerError, OciErrorCode.BLOB_UPLOAD_INVALID, "Upload failed.");
         }
@@ -1115,6 +1185,9 @@ public sealed class OciController : OrgScopedControllerBase
             case OciManifestStatus.MissingBlob:
                 return OciError(StatusCodes.Status404NotFound, OciErrorCode.MANIFEST_BLOB_UNKNOWN,
                     $"Referenced blob not present: {result.MissingDigest}");
+            case OciManifestStatus.QuotaExceeded:
+                return OciError(StatusCodes.Status413RequestEntityTooLarge, OciErrorCode.SIZE_INVALID,
+                    "Tenant storage quota would be exceeded by this manifest push.");
             default:
                 return OciError(StatusCodes.Status400BadRequest, OciErrorCode.MANIFEST_INVALID,
                     "Manifest is not valid JSON or has no recognizable structure.");

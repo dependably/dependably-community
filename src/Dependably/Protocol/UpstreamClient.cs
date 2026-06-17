@@ -55,7 +55,7 @@ public sealed class UpstreamClient
         IUpstreamUrlValidator urlValidator,
         IAirGapMode airGap,
         IStagingDiskInfo stagingDiskInfo,
-        IConfiguration configuration,
+        StagingOptions stagingOptions,
         ILogger<UpstreamClient> logger,
         IHostApplicationLifetime? lifetime = null)
 #pragma warning restore S107
@@ -71,12 +71,11 @@ public sealed class UpstreamClient
         _logger = logger;
         _hostStopping = lifetime?.ApplicationStopping ?? CancellationToken.None;
 
-        // Staging dir for hash-and-stage MISS path. Defaults to the OS temp
-        // directory — operators expecting large artefacts on containerised deployments
-        // should point this at a disk-backed volume (e.g. /data/staging), because /tmp
-        // is often tmpfs (RAM-backed), which defeats the memory-bounding goal of streaming.
-        string? configured = configuration["PROXY_STAGING_PATH"];
-        _stagingPath = string.IsNullOrWhiteSpace(configured) ? Path.GetTempPath() : configured;
+        // Staging dir for hash-and-stage MISS path, plus the hard floor for available
+        // staging disk space — both resolved by StagingOptions so the path probed by
+        // IStagingDiskInfo and the floor enforced here can't diverge.
+        _stagingPath = stagingOptions.Path;
+        _stagingDiskFloorBytes = stagingOptions.FloorBytes;
         // deepcode ignore PT: PROXY_STAGING_PATH is set by the operator deploying the container
         // (env var, secret manager, or compose file). The process trust boundary already covers
         // anyone who can set this env var — no further tenant-side input reaches the path.
@@ -87,12 +86,6 @@ public sealed class UpstreamClient
                 "Failed to create PROXY_STAGING_PATH directory {StagingPath}: {ExceptionType}",
                 _stagingPath, ex.GetType().Name);
         }
-
-        // Hard floor for available staging disk space. Reject new proxy fetches when
-        // available bytes fall below this threshold. Default: 512 MiB.
-        long defaultFloor = 512L * 1024 * 1024;
-        _stagingDiskFloorBytes = long.TryParse(configuration["STAGING_DISK_FLOOR_BYTES"], out long floor)
-            && floor > 0 ? floor : defaultFloor;
     }
 
     /// <summary>
@@ -146,6 +139,16 @@ public sealed class UpstreamClient
         var lazy = _inflight.GetOrAdd(blobKey, _ => new Lazy<Task<UpstreamFetchResult>>(
             () => FetchAndStageAsync(upstreamUrl, checksumSpec, blobKey, ecosystem, orgId, purl, CancellationToken.None)));
 
+        return await FetchWithTelemetryAsync(lazy, blobKey, ecosystem, upstreamUrl, checksumSpec, purl, ct);
+    }
+
+    // Awaits the deduped lazy fetch, emits OTel activity + metrics, and opens the cached blob
+    // for the caller. All exception handling lives here to keep GetOrFetchStreamAsync linear.
+    private async Task<(Stream Body, bool IsHit)> FetchWithTelemetryAsync(
+        Lazy<Task<UpstreamFetchResult>> lazy,
+        string blobKey, string ecosystem, string upstreamUrl,
+        ChecksumSpec? checksumSpec, string? purl, CancellationToken ct)
+    {
         using var activity = DependablyActivitySource.Source.StartActivity(
             "proxy.fetch", ActivityKind.Client);
         activity?.SetTag("dependably.ecosystem", ecosystem);
@@ -195,6 +198,12 @@ public sealed class UpstreamClient
         {
             outcome = "staging_disk_full";
             activity?.SetStatus(ActivityStatusCode.Error, "staging disk full");
+            throw;
+        }
+        catch (UpstreamFetchFailedException)
+        {
+            outcome = "upstream_error";
+            activity?.SetStatus(ActivityStatusCode.Error, "upstream fetch failed");
             throw;
         }
         catch (Exception ex)
@@ -251,6 +260,12 @@ public sealed class UpstreamClient
     /// receives (sha, size, blobKey); concurrent waiters each independently re-open
     /// the cached blob.
     /// </summary>
+    // Initial backoff before first retry; doubled each subsequent attempt (capped at 400ms
+    // for MaxUpstreamFetchAttempts=3, i.e. 200ms then 400ms between the two retries).
+    private const int RetryBackoffBaseMs = 200;
+    private const double RetryBackoffExponent = 2.0;
+    private const int MaxUpstreamFetchAttempts = 3;
+
     private async Task<UpstreamFetchResult> FetchAndStageAsync(
         string url,
         ChecksumSpec? spec,
@@ -269,25 +284,30 @@ public sealed class UpstreamClient
         // staging volume is critically low. The effective floor is the larger of the
         // configured absolute minimum and 2× Content-Length (determined after the
         // response headers arrive), so the check runs in two phases:
-        // Phase 1 — absolute floor before the HTTP GET.
-        try
+        // Phase 1 — absolute floor before the HTTP GET. STAGING_DISK_FLOOR_BYTES=0 is the
+        // operator opt-out: the whole check (including the fail-closed read-failure path) is
+        // skipped so disk-full protection is fully off.
+        if (_stagingDiskFloorBytes > 0)
         {
-            long availableBeforeGet = _stagingDiskInfo.GetAvailableBytes();
-            if (availableBeforeGet < _stagingDiskFloorBytes)
+            try
             {
-                throw new StagingDiskFullException(availableBeforeGet, _stagingDiskFloorBytes);
+                long availableBeforeGet = _stagingDiskInfo.GetAvailableBytes();
+                if (availableBeforeGet < _stagingDiskFloorBytes)
+                {
+                    throw new StagingDiskFullException(availableBeforeGet, _stagingDiskFloorBytes);
+                }
             }
-        }
-        catch (StagingDiskFullException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Could not read staging disk space before fetch: {ExceptionType}",
-                ex.GetType().Name);
-            throw new StagingDiskFullException(0, _stagingDiskFloorBytes); // fail closed
+            catch (StagingDiskFullException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Could not read staging disk space before fetch: {ExceptionType}",
+                    ex.GetType().Name);
+                throw new StagingDiskFullException(0, _stagingDiskFloorBytes); // fail closed
+            }
         }
 
         // Link the host-stopping token into the fetch so a slow upstream pull does not
@@ -298,22 +318,125 @@ public sealed class UpstreamClient
         var fetchCt = linked.Token;
 
         var client = _httpClientFactory.CreateClient("upstream");
-        using var response = await UnwrapSsrfAsync(
-            () => client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, fetchCt));
-        response.EnsureSuccessStatusCode();
+        // Retry loop for transient upstream failures; exits on first success or throws.
+        using var successResponse = await FetchWithRetryAsync(client, url, orgId, fetchCt);
 
         // Phase 2 — dynamic floor based on Content-Length, checked after response headers arrive.
-        EnsureStagingDiskFloorForContentLength(response.Content.Headers.ContentLength);
+        EnsureStagingDiskFloorForContentLength(successResponse.Content.Headers.ContentLength);
 
         // Abort early if Content-Length already exceeds 600MB limit (cheap fail-fast).
         // The HashingFileStream below still enforces the cap for chunked transfers.
-        if (response.Content.Headers.ContentLength > MaxUpstreamResponseBytes)
+        if (successResponse.Content.Headers.ContentLength > MaxUpstreamResponseBytes)
         {
             await _audit.LogAsync("upstream_response_too_large", orgId: orgId, ecosystem: ecosystem, purl: purl,
-                detail: $"{{\"url\":\"{url}\",\"content_length\":{response.Content.Headers.ContentLength}}}", ct: fetchCt);
+                detail: $"{{\"url\":\"{url}\",\"content_length\":{successResponse.Content.Headers.ContentLength}}}", ct: fetchCt);
             throw new UpstreamResponseTooLargeException(url, MaxUpstreamResponseBytes);
         }
 
+        return await StreamVerifyAndStoreAsync(
+            new UpstreamStagingContext(successResponse, blobKey, spec, url, ecosystem, orgId, purl), fetchCt);
+    }
+
+    // Sends a GET request to url with transient-failure retries (429, 403, 5xx).
+    // A fresh HttpRequestMessage is created per attempt — HttpClient rejects a reused one.
+    // Exits on first 2xx response or throws: UpstreamFetchFailedException on exhausted
+    // transient retries, HttpRequestException on non-transient failures (404/410/…) so the
+    // caller's multi-base loop can try the next upstream registry.
+    private async Task<HttpResponseMessage> FetchWithRetryAsync(
+        HttpClient client, string url, string? orgId, CancellationToken ct)
+    {
+        for (int attempt = 0; attempt < MaxUpstreamFetchAttempts; attempt++)
+        {
+            // Pass org context via request options so SsrfAwareRedirectHandler can attribute
+            // blocked-redirect audit events to the correct tenant.
+            using var fetchRequest = new HttpRequestMessage(HttpMethod.Get, url);
+            if (orgId is not null)
+            {
+                fetchRequest.Options.Set(SsrfAwareRedirectHandler.OrgIdOption, orgId);
+            }
+
+            var response = await UnwrapSsrfAsync(
+                () => client.SendAsync(fetchRequest, HttpCompletionOption.ResponseHeadersRead, ct));
+
+            if (response.IsSuccessStatusCode)
+            {
+                return response;
+            }
+
+            int statusInt = (int)response.StatusCode;
+            bool transient = statusInt is 429 or 403 or >= 500;
+
+            var (diagRetryAfter, diagCfRay, diagXServedBy, diagVia, diagUserAgent) = GetResponseDiagHeaders(response, fetchRequest);
+            // Structured boundary log on every non-success response for diagnosability.
+            // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes all structured fields.
+            _logger.LogWarning(
+                "Upstream fetch non-success: Status={StatusCode} Url={Url} Transient={Transient} Attempt={Attempt}/{MaxAttempts} " +
+                "RetryAfter={RetryAfterHeader} CfRay={CfRay} XServedBy={XServedBy} Via={Via} UserAgent={UserAgent} SingleFlighted=true",
+                (int)response.StatusCode, url, transient, attempt + 1, MaxUpstreamFetchAttempts,
+                diagRetryAfter, diagCfRay, diagXServedBy, diagVia, diagUserAgent);
+
+            if (transient && attempt < MaxUpstreamFetchAttempts - 1)
+            {
+                response.Dispose();
+                // Capped exponential back-off: 200ms, 400ms.
+                await Task.Delay(TimeSpan.FromMilliseconds(RetryBackoffBaseMs * Math.Pow(RetryBackoffExponent, attempt)), ct);
+                continue;
+            }
+
+            if (transient)
+            {
+                // Exhausted retries on a transient status — parse Retry-After (delta-seconds
+                // form) and throw so the middleware maps it to 503/502 instead of 404.
+                var retryAfter = ParseRetryAfter(response);
+                int exhaustedStatus = (int)response.StatusCode;
+                response.Dispose();
+                throw new UpstreamFetchFailedException { Url = url, StatusCode = exhaustedStatus, RetryAfter = retryAfter, Transient = true };
+            }
+
+            // Non-transient (e.g. 404, 410): surface as HttpRequestException so the
+            // controller's multi-base loop can try the next upstream registry.
+            response.EnsureSuccessStatusCode();
+        }
+
+        // Unreachable: the loop always returns, continues, or throws.
+        throw new InvalidOperationException("Retry loop exited without returning a response.");
+    }
+
+    // Extracts the diagnostic response headers used in the non-success boundary log.
+    private static (string? RetryAfter, string? CfRay, string? XServedBy, string? Via, string UserAgent)
+        GetResponseDiagHeaders(HttpResponseMessage response, HttpRequestMessage fetchRequest)
+    {
+        string? retryAfter = response.Headers.TryGetValues("Retry-After", out var raVals)
+            ? string.Join(",", raVals) : null;
+        string? cfRay = response.Headers.TryGetValues("CF-Ray", out var cfVals)
+            ? string.Join(",", cfVals) : null;
+        string? xServedBy = response.Headers.TryGetValues("X-Served-By", out var xsVals)
+            ? string.Join(",", xsVals) : null;
+        string? via = response.Headers.TryGetValues("Via", out var viaVals)
+            ? string.Join(",", viaVals) : null;
+        return (retryAfter, cfRay, xServedBy, via, fetchRequest.Headers.UserAgent.ToString());
+    }
+
+    // Parses the Retry-After header (delta-seconds form) from an exhausted-retry response.
+    // Returns null when the header is absent or non-numeric.
+    private static TimeSpan? ParseRetryAfter(HttpResponseMessage response) =>
+        response.Headers.TryGetValues("Retry-After", out var raHeaders)
+            && int.TryParse(raHeaders.FirstOrDefault(), out int raSecs) && raSecs >= 0
+            ? TimeSpan.FromSeconds(raSecs)
+            : null;
+
+    // Resolved upstream fetch context passed to the staging/verify tail, bundled to keep
+    // StreamVerifyAndStoreAsync within the parameter-count threshold (S107).
+    private sealed record UpstreamStagingContext(
+        HttpResponseMessage Response, string BlobKey,
+        ChecksumSpec? Spec, string Url, string Ecosystem, string? OrgId, string? Purl);
+
+    // Streams the upstream response body to a temp file while computing SHA-256 inline,
+    // verifies the checksum, uploads to the blob store, and cleans up the temp file.
+    // Separated from FetchAndStageAsync to keep each method under the S138 line ceiling.
+    private async Task<UpstreamFetchResult> StreamVerifyAndStoreAsync(
+        UpstreamStagingContext ctx, CancellationToken fetchCt)
+    {
         string tempPath = Path.Combine(_stagingPath, $"dependably-stage-{Guid.NewGuid():N}.tmp");
         string sha256Hex = string.Empty;
         long sizeBytes = 0;
@@ -323,7 +446,7 @@ public sealed class UpstreamClient
             // Stream upstream → temp file, hashing inline. HashingFileStream wraps the
             // FileStream and forwards writes to disk AND to IncrementalHash, throwing on
             // the 600 MB cap.
-            await using (var responseStream = await response.Content.ReadAsStreamAsync(fetchCt))
+            await using (var responseStream = await ctx.Response.Content.ReadAsStreamAsync(fetchCt))
             {
                 var fileStream = new FileStream(
                     tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
@@ -336,9 +459,9 @@ public sealed class UpstreamClient
                 catch (UpstreamResponseTooLargeException)
                 {
                     await _audit.LogAsync(
-                        "upstream_response_too_large", orgId: orgId, ecosystem: ecosystem, purl: purl,
-                        detail: $"{{\"url\":\"{url}\",\"bytes_read\":{staging.BytesWritten}}}", ct: fetchCt);
-                    throw new UpstreamResponseTooLargeException(url, MaxUpstreamResponseBytes);
+                        "upstream_response_too_large", orgId: ctx.OrgId, ecosystem: ctx.Ecosystem, purl: ctx.Purl,
+                        detail: $"{{\"url\":\"{ctx.Url}\",\"bytes_read\":{staging.BytesWritten}}}", ct: fetchCt);
+                    throw new UpstreamResponseTooLargeException(ctx.Url, MaxUpstreamResponseBytes);
                 }
                 sha256Hex = staging.GetSha256Hex();
                 sizeBytes = staging.BytesWritten;
@@ -347,10 +470,10 @@ public sealed class UpstreamClient
             // For SHA-256 specs we already computed the hash inline; for SHA-1/SHA-512
             // (npm shasum, NuGet packageHash) we re-read the staged file. Same temp file,
             // single disk write.
-            if (spec is not null && !await VerifyChecksumAsync(
-                    new VerifyChecksumRequest(tempPath, sha256Hex, spec, url, ecosystem, orgId, purl), fetchCt))
+            if (ctx.Spec is not null && !await VerifyChecksumAsync(
+                    new VerifyChecksumRequest(tempPath, sha256Hex, ctx.Spec, ctx.Url, ctx.Ecosystem, ctx.OrgId, ctx.Purl), fetchCt))
             {
-                throw new ChecksumException($"Upstream checksum mismatch for {url}");
+                throw new ChecksumException($"Upstream checksum mismatch for {ctx.Url}");
             }
 
             // Upload the verified bytes to the blob store.
@@ -363,10 +486,10 @@ public sealed class UpstreamClient
                 // is served as a cache HIT on subsequent requests (no integrity re-check
                 // at serve time). Use CancellationToken.None so the commit is atomic with
                 // respect to host shutdown; only the preceding fetch/stage steps use fetchCt.
-                await _blobs.PutAsync(blobKey, verified, CancellationToken.None);
+                await _blobs.PutAsync(ctx.BlobKey, verified, CancellationToken.None);
             }
 
-            return new UpstreamFetchResult(sha256Hex, sizeBytes, blobKey);
+            return new UpstreamFetchResult(sha256Hex, sizeBytes, ctx.BlobKey);
         }
         finally
         {
@@ -397,6 +520,13 @@ public sealed class UpstreamClient
     /// </summary>
     private void EnsureStagingDiskFloorForContentLength(long? declaredContentLength)
     {
+        // STAGING_DISK_FLOOR_BYTES=0 is the operator opt-out: skip the dynamic floor too, so
+        // disk-full protection is fully off rather than only the absolute floor.
+        if (_stagingDiskFloorBytes <= 0)
+        {
+            return;
+        }
+
         if (declaredContentLength is not { } contentLength || contentLength <= 0)
         {
             return;
@@ -428,9 +558,9 @@ public sealed class UpstreamClient
     /// so the caller throws.
     /// </summary>
     // SocketsHttpHandler surfaces a SsrfBlockedException thrown by the connect-time guard
-    // (SsrfConnectCallback) wrapped inside an HttpRequestException. Unwrap it so a rebinding
-    // or redirect blocked at connect time — past the URL-level pre-check — reports with the
-    // same exception type and SSRF metric as a pre-check block.
+    // (SsrfConnectCallback) wrapped inside an HttpRequestException. Unwrap it so a block
+    // at the TCP level (DNS-rebinding caught at socket-open time) reports with the same
+    // exception type and SSRF metric as a URL-level pre-check block or redirect-hop block.
     private static async Task<T> UnwrapSsrfAsync<T>(Func<Task<T>> send)
     {
         try
@@ -552,6 +682,12 @@ public sealed class UpstreamClient
             activity?.SetStatus(ActivityStatusCode.Error, "air-gapped");
             throw;
         }
+        catch (UpstreamFetchFailedException)
+        {
+            outcome = "upstream_error";
+            activity?.SetStatus(ActivityStatusCode.Error, "upstream fetch failed");
+            throw;
+        }
         catch (Exception ex)
         {
             outcome = "server_error";
@@ -597,9 +733,10 @@ public sealed class UpstreamClient
         }
 
         var client = _httpClientFactory.CreateClient("upstream");
-        using var response = await UnwrapSsrfAsync(
-            () => client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct));
-        response.EnsureSuccessStatusCode();
+        // Retry loop for transient upstream failures; same contract as FetchAndStageAsync.
+        // Non-transient failures (e.g. 404) propagate as HttpRequestException so the
+        // controller's multi-base loop can try the next upstream registry.
+        using var response = await FetchWithRetryAsync(client, url, orgId, ct);
 
         if (response.Content.Headers.ContentLength > MaxUpstreamResponseBytes)
         {
@@ -608,6 +745,17 @@ public sealed class UpstreamClient
             throw new UpstreamResponseTooLargeException(url, MaxUpstreamResponseBytes);
         }
 
+        return await StreamHashAndStoreByContentKeyAsync(response, spec, url, ecosystem, orgId, ct);
+    }
+
+    // Streams the upstream response body to a temp file, computes SHA-256 inline, verifies
+    // any supplied checksum, stores under the content-addressed BlobKeys.Proxy key, and
+    // returns the result. Cleans up the temp file unconditionally. Separated from
+    // FetchAndStageToContentKeyAsync to keep each method under the S138 line ceiling.
+    private async Task<UpstreamFetchResult> StreamHashAndStoreByContentKeyAsync(
+        HttpResponseMessage response, ChecksumSpec? spec,
+        string url, string ecosystem, string? orgId, CancellationToken ct)
+    {
         string tempPath = Path.Combine(_stagingPath, $"dependably-stage-{Guid.NewGuid():N}.tmp");
         string sha256Hex = string.Empty;
         long sizeBytes = 0;
@@ -928,6 +1076,24 @@ public sealed record UpstreamMetadataResponse(
 // adding (SerializationInfo, StreamingContext) would trade a Sonar warning for a
 // build-time obsolete warning. These exceptions never cross an AppDomain or binary
 // serialization boundary.
+
+/// <summary>
+/// Thrown when an upstream blob fetch fails with a transient/retryable status after retries
+/// are exhausted; mapped by <c>UpstreamFetchFailedExceptionMiddleware</c> to 503/502 so
+/// clients retry rather than treat it as fatal policy (403) or absence (404).
+/// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
+    Justification = "Binary serialization ctor on Exception is obsolete in .NET 10 (SYSLIB0051); this exception is never serialized across an AppDomain or binary boundary.")]
+public sealed class UpstreamFetchFailedException : Exception
+{
+    public string Url { get; init; } = string.Empty;
+    public int StatusCode { get; init; }
+    public TimeSpan? RetryAfter { get; init; }
+    public bool Transient { get; init; }
+
+    public UpstreamFetchFailedException()
+        : base("Upstream blob fetch failed after retries were exhausted.") { }
+}
 
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
     Justification = "Binary serialization ctor on Exception is obsolete in .NET 10 (SYSLIB0051); this exception is never serialized across an AppDomain or binary boundary.")]

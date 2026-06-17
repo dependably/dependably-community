@@ -11,6 +11,8 @@ namespace Dependably.Storage;
 /// </summary>
 public sealed class AzureBlobContainerAdapter : IAzureBlobContainer
 {
+    private const int HttpStatusNotFound = StatusCodes.Status404NotFound;
+
     private readonly BlobContainerClient _container;
 
     public AzureBlobContainerAdapter(BlobContainerClient container) => _container = container;
@@ -49,7 +51,7 @@ public sealed class AzureBlobContainerAdapter : IAzureBlobContainer
         {
             propsResponse = await blob.GetPropertiesAsync(cancellationToken: ct);
         }
-        catch (RequestFailedException ex) when (ex.Status == 404)
+        catch (RequestFailedException ex) when (ex.Status == HttpStatusNotFound)
         {
             return (null, 0);
         }
@@ -74,7 +76,7 @@ public sealed class AzureBlobContainerAdapter : IAzureBlobContainer
                 cancellationToken: ct);
             return (response.Value.Content, totalLength);
         }
-        catch (RequestFailedException ex) when (ex.Status == 404)
+        catch (RequestFailedException ex) when (ex.Status == HttpStatusNotFound)
         {
             return (null, 0);
         }

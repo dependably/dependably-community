@@ -41,6 +41,7 @@ public sealed class OrgSettingsRepository
                    max_upload_bytes_maven as MaxUploadBytesMaven,
                    max_upload_bytes_rpm as MaxUploadBytesRpm,
                    max_upload_bytes_oci as MaxUploadBytesOci,
+                   max_upload_bytes_cargo as MaxUploadBytesCargo,
                    keep_versions as KeepVersions, keep_days as KeepDays,
                    activity_retention_days as ActivityRetentionDays,
                    COALESCE(license_enforcement_mode, 'off') as LicenseEnforcementMode,
@@ -73,10 +74,10 @@ public sealed class OrgSettingsRepository
             """
             INSERT INTO org_settings (org_id, anonymous_pull, allowlist_mode,
                 max_upload_bytes, max_upload_bytes_pypi, max_upload_bytes_npm, max_upload_bytes_nuget,
-                max_upload_bytes_maven, max_upload_bytes_rpm, max_upload_bytes_oci,
+                max_upload_bytes_maven, max_upload_bytes_rpm, max_upload_bytes_oci, max_upload_bytes_cargo,
                 default_language, allow_version_overwrite, air_gapped)
             VALUES (@orgId, @anonPull, @allowlist, @maxBytes, @maxBytesPyPi, @maxBytesNpm, @maxBytesNuGet,
-                @maxBytesMaven, @maxBytesRpm, @maxBytesOci,
+                @maxBytesMaven, @maxBytesRpm, @maxBytesOci, @maxBytesCargo,
                 COALESCE(@lang, 'en'), COALESCE(@overwrite, 0), COALESCE(@airGapped, 0))
             ON CONFLICT(org_id) DO UPDATE SET
                 anonymous_pull      = @anonPull,
@@ -88,6 +89,7 @@ public sealed class OrgSettingsRepository
                 max_upload_bytes_maven = @maxBytesMaven,
                 max_upload_bytes_rpm   = @maxBytesRpm,
                 max_upload_bytes_oci   = @maxBytesOci,
+                max_upload_bytes_cargo = @maxBytesCargo,
                 default_language    = COALESCE(@lang, default_language),
                 allow_version_overwrite = COALESCE(@overwrite, allow_version_overwrite),
                 air_gapped          = COALESCE(@airGapped, air_gapped)
@@ -104,6 +106,7 @@ public sealed class OrgSettingsRepository
                 maxBytesMaven = Clamp(update.MaxUploadBytesMaven, update.InstanceMaxUploadBytes),
                 maxBytesRpm = Clamp(update.MaxUploadBytesRpm, update.InstanceMaxUploadBytes),
                 maxBytesOci = Clamp(update.MaxUploadBytesOci, update.InstanceMaxUploadBytes),
+                maxBytesCargo = Clamp(update.MaxUploadBytesCargo, update.InstanceMaxUploadBytes),
                 lang,
                 overwrite = ToBoolFlag(update.AllowVersionOverwrite),
                 airGapped = ToBoolFlag(update.AirGapped),

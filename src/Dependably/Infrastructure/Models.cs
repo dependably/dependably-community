@@ -82,6 +82,7 @@ public class OrgSettings
     public long? MaxUploadBytesMaven { get; set; }
     public long? MaxUploadBytesRpm { get; set; }
     public long? MaxUploadBytesOci { get; set; }
+    public long? MaxUploadBytesCargo { get; set; }
     public int? KeepVersions { get; set; }
     public int? KeepDays { get; set; }
     public int? ActivityRetentionDays { get; set; }
@@ -90,10 +91,11 @@ public class OrgSettings
     public bool ProxyPassthroughEnabled { get; set; } = true;
     public double MaxOsvScoreTolerance { get; set; } = 10.0;
     /// <summary>
-    /// Supply-chain hold: a proxy-fetched version is blocked at first-fetch when
+    /// Supply-chain hold: a proxy-fetched version is blocked when
     /// (now − upstream published_at) is below this many hours. NULL = policy off.
-    /// Evaluated in <see cref="Protocol.BlockGateService"/>; fail-open when the upstream
-    /// publish timestamp is missing.
+    /// Evaluated on every serve and index render by <see cref="Protocol.BlockGateService"/>,
+    /// so a held version serves again automatically once it ages past the threshold;
+    /// fail-open when the upstream publish timestamp is missing.
     /// </summary>
     public int? MinReleaseAgeHours { get; set; }
     /// <summary>BCP-47 short code (e.g. "en", "fr"). New users in this tenant inherit this value.</summary>
@@ -175,6 +177,9 @@ public class Package
     // Packages-list "Latest" indicator, computed in SQL: "current" (upstream latest is cached),
     // "stale" (a newer upstream version exists but is not cached), or "unknown" (no baseline).
     public string LatestState { get; set; } = "unknown";
+    // True when any version of this package is linked to an OSV MAL- advisory (OpenSSF
+    // malicious-packages feed). Drives the packages-list malicious indicator. Computed in SQL.
+    public bool HasMaliciousVersion { get; set; }
 }
 
 public class PackageVersion
@@ -229,6 +234,20 @@ public class PackageVersion
     public string? UpstreamIntegrityAlgorithm { get; set; }
     /// <summary>ISO 8601 UTC; set by <c>DeprecationRefreshService</c> after each upstream metadata check. NULL = never checked.</summary>
     public DateTimeOffset? DeprecationCheckedAt { get; set; }
+    /// <summary>
+    /// True when this version is linked to an OSV <c>MAL-</c> advisory (OpenSSF
+    /// malicious-packages feed) — i.e. known-malicious. MAL advisories usually carry no CVSS
+    /// score, so this is a distinct signal from the vulnerability-severity counts. Derived in
+    /// SQL by <see cref="PackageRepository.GetVersionsAsync"/>; not a stored column.
+    /// </summary>
+    public bool IsMalicious { get; set; }
+    /// <summary>
+    /// True when this version is linked to at least one OSV advisory of any kind (scored,
+    /// unscored, or MAL-). Lets the status projection distinguish "scanned, no advisories"
+    /// from "scanned, has advisories below the block tolerance" so a vulnerable-but-servable
+    /// version is never labelled clean. Derived in SQL; not a stored column.
+    /// </summary>
+    public bool HasAdvisory { get; set; }
 }
 
 public class User

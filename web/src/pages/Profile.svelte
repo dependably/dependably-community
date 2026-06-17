@@ -1,6 +1,7 @@
 <script>
   import { t, locale } from 'svelte-i18n'
-  import { user, theme, navigate, takePendingRoute } from '../lib/store.js'
+  import { user, navigate, takePendingRoute } from '../lib/store.js'
+  import ThemeToggle from '../lib/ThemeToggle.svelte'
   import { api } from '../lib/api.js'
   import { submitForm } from '../lib/form.js'
   import { locales, switchLocale } from '../lib/locale.js'
@@ -93,12 +94,7 @@
         <div class="settings-row-help">{$t('profile.rows.themeHelp')}</div>
       </div>
       <div class="settings-row-control">
-        <div class="segmented" role="radiogroup" aria-label={$t('profile.rows.themeTitle')}>
-          <button class:active={$theme === 'light'} role="radio" aria-checked={$theme === 'light'}
-                  on:click={() => theme.set('light')}>{$t('profile.theme.light')}</button>
-          <button class:active={$theme === 'dark'} role="radio" aria-checked={$theme === 'dark'}
-                  on:click={() => theme.set('dark')}>{$t('profile.theme.dark')}</button>
-        </div>
+        <ThemeToggle />
       </div>
     </div>
 
@@ -194,18 +190,4 @@
   .settings-row-success { font-size: 12px; color: var(--success); margin-top: 4px; }
   .settings-row-control { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
   .settings-row-control select { width: auto; font-size: 13px; }
-
-  /* Compact segmented control for the theme picker. */
-  .segmented { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-  .segmented button {
-    background: var(--bg);
-    color: var(--text2);
-    border: none;
-    padding: 4px 12px;
-    font-size: 13px;
-    border-radius: 0;
-    cursor: pointer;
-  }
-  .segmented button + button { border-left: 1px solid var(--border); }
-  .segmented button.active { background: var(--accent); color: var(--on-accent); }
 </style>

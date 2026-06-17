@@ -103,6 +103,102 @@ public sealed class InstanceControllerTests : IClassFixture<DependablyFactory>, 
         string detail = await resp.Content.ReadAsStringAsync();
         Assert.Contains("totally_unknown", detail);
     }
+
+    [Fact]
+    public async Task Admin_UpdateSettings_AcceptsReconciledKeys()
+    {
+        // default_storage_quota_bytes + max_active_tokens_per_tenant were previously rejected
+        // in single mode (the InstanceController key set had drifted behind the system surface).
+        // After the canonical-key-set reconcile both are accepted here too.
+        using var c = await AdminClient();
+        var body = JsonContent.Create(new Dictionary<string, string>
+        {
+            ["default_storage_quota_bytes"] = "1073741824",
+            ["max_active_tokens_per_tenant"] = "250",
+            ["max_upload_bytes_oci"] = "2147483648",
+        });
+
+        var resp = await c.PutAsync("/api/v1/instance/settings", body);
+        Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
+    }
+
+    // ── /metrics access ──────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Member_GetMetricsAccess_Returns403()
+    {
+        string memberId = await _factory.CreateUser($"member-{Guid.NewGuid():N}@example.com", "Password12345");
+        string jwt = await _factory.CreateUserJwt(memberId, "member");
+        using var c = _factory.CreateClientWithBearer(jwt);
+
+        var resp = await c.GetAsync("/api/v1/instance/metrics-access");
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Admin_GetMetricsAccess_ReturnsValidShape()
+    {
+        using var c = await AdminClient();
+        var resp = await c.GetAsync("/api/v1/instance/metrics-access");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var json = JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+        Assert.True(json.GetProperty("enabled").ValueKind is JsonValueKind.True or JsonValueKind.False);
+        Assert.Contains(json.GetProperty("allowlistSource").GetString(), new[] { "env", "db", "default" });
+        Assert.True(json.GetProperty("allowedIps").GetArrayLength() > 0);
+    }
+
+    [Fact]
+    public async Task Admin_PutMetricsAccess_PersistsReflectsInGetAndAudits()
+    {
+        using var c = await AdminClient();
+
+        var put = await c.PutAsJsonAsync("/api/v1/instance/metrics-access", new
+        {
+            enabled = true,
+            allowedIps = new[] { "10.0.0.0/8", "::1" },
+        });
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        var get = await c.GetAsync("/api/v1/instance/metrics-access");
+        var json = JsonDocument.Parse(await get.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("db", json.GetProperty("allowlistSource").GetString());
+        var ips = json.GetProperty("allowedIps").EnumerateArray().Select(e => e.GetString()).ToList();
+        Assert.Contains("10.0.0.0/8", ips);
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        long audited = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'instance_metrics_access_updated'");
+        Assert.True(audited >= 1);
+    }
+
+    [Fact]
+    public async Task Admin_PutMetricsAccess_MalformedCidr_RejectedWith4xx()
+    {
+        using var c = await AdminClient();
+        var put = await c.PutAsJsonAsync("/api/v1/instance/metrics-access", new
+        {
+            allowedIps = new[] { "not-an-ip" },
+        });
+        Assert.True((int)put.StatusCode is >= 400 and < 500, $"Expected client error, got {put.StatusCode}");
+    }
+
+    [Fact]
+    public async Task Admin_PutMetricsAccess_BroadCidr_ReturnsWarning()
+    {
+        using var c = await AdminClient();
+        var put = await c.PutAsJsonAsync("/api/v1/instance/metrics-access", new
+        {
+            allowedIps = new[] { "0.0.0.0/0" },
+        });
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        var warnings = JsonDocument.Parse(await put.Content.ReadAsStringAsync())
+            .RootElement.GetProperty("warnings").EnumerateArray().Select(e => e.GetString()).ToList();
+        Assert.Single(warnings);
+        Assert.Contains("0.0.0.0/0", warnings[0]!);
+    }
 }
 
 /// <summary>
@@ -199,6 +295,30 @@ public sealed class InstanceControllerMultiModeTests
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
 
         var resp = await client.GetAsync("/api/v1/instance/background-jobs");
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task MultiMode_TenantOwner_GetMetricsAccess_Returns404()
+    {
+        var (jwt, host) = await CreateTenantOwnerAsync();
+        using var client = _factory.CreateClientForHost(host);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+
+        var resp = await client.GetAsync("/api/v1/instance/metrics-access");
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task MultiMode_TenantOwner_PutMetricsAccess_Returns404()
+    {
+        var (jwt, host) = await CreateTenantOwnerAsync();
+        using var client = _factory.CreateClientForHost(host);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+
+        var resp = await client.PutAsJsonAsync("/api/v1/instance/metrics-access", new { enabled = true });
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }

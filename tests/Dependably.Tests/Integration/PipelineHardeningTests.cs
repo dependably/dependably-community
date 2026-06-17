@@ -124,8 +124,9 @@ public sealed class PipelineHardeningTests
     [Fact]
     public async Task LoginRateLimit_IsPartitionedPerClientIp()
     {
-        // No TRUSTED_PROXIES: forwarded headers are accepted from any source
-        // (back-compat mode), so X-Forwarded-For stands in for distinct client IPs.
+        // X-Test-Remote-Ip drives Connection.RemoteIpAddress directly via HeaderRemoteIpFilter
+        // (runs before all production middleware). TRUSTED_PROXIES is not set, so X-Forwarded-For
+        // is ignored (fail-closed) — rate-limit partitioning relies on the real socket peer.
         await using var factory = new PipelineFactory(new Dictionary<string, string>
         {
             ["LOGIN_RATE_LIMIT_PERMITS"] = "2",
@@ -161,13 +162,13 @@ public sealed class PipelineHardeningTests
 
         for (int i = 0; i < 3; i++)
         {
-            var resp = await GetWithForwardedForAsync(client, "/health", "198.51.100.20");
+            var resp = await GetWithSocketIpAsync(client, "/health", "198.51.100.20");
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
         }
-        var blocked = await GetWithForwardedForAsync(client, "/health", "198.51.100.20");
+        var blocked = await GetWithSocketIpAsync(client, "/health", "198.51.100.20");
         Assert.Equal(HttpStatusCode.TooManyRequests, blocked.StatusCode);
 
-        var other = await GetWithForwardedForAsync(client, "/health", "198.51.100.21");
+        var other = await GetWithSocketIpAsync(client, "/health", "198.51.100.21");
         Assert.Equal(HttpStatusCode.OK, other.StatusCode);
     }
 
@@ -188,18 +189,18 @@ public sealed class PipelineHardeningTests
         // Three requests from the same IP exhaust the configured budget.
         for (int i = 0; i < 3; i++)
         {
-            var resp = await GetWithForwardedForAsync(client, "/api/v1/bootstrap", "198.51.100.30");
+            var resp = await GetWithSocketIpAsync(client, "/api/v1/bootstrap", "198.51.100.30");
             Assert.NotEqual(HttpStatusCode.TooManyRequests, resp.StatusCode);
         }
 
         // The fourth request must be rejected by the management GlobalLimiter.
-        var blocked = await GetWithForwardedForAsync(client, "/api/v1/bootstrap", "198.51.100.30");
+        var blocked = await GetWithSocketIpAsync(client, "/api/v1/bootstrap", "198.51.100.30");
         Assert.Equal(HttpStatusCode.TooManyRequests, blocked.StatusCode);
         Assert.True(blocked.Headers.Contains("Retry-After"),
             "429 responses from the management limiter must carry a Retry-After header");
 
         // A different source IP still has a full window (limiter partitions per principal).
-        var other = await GetWithForwardedForAsync(client, "/api/v1/bootstrap", "198.51.100.31");
+        var other = await GetWithSocketIpAsync(client, "/api/v1/bootstrap", "198.51.100.31");
         Assert.NotEqual(HttpStatusCode.TooManyRequests, other.StatusCode);
     }
 
@@ -211,14 +212,18 @@ public sealed class PipelineHardeningTests
             // this test exercises only the per-IP limiter window.
             Content = JsonContent.Create(new { email = $"nobody{attempt}@example.test", password = "wrong-password" }),
         };
-        req.Headers.Add("X-Forwarded-For", sourceIp);
+        // Use the test socket-peer header so HeaderRemoteIpFilter sets RemoteIpAddress
+        // directly. X-Forwarded-For is ignored without TRUSTED_PROXIES (fail-closed).
+        req.Headers.Add(HeaderRemoteIpFilter.HeaderName, sourceIp);
         return await client.SendAsync(req);
     }
 
-    private static async Task<HttpResponseMessage> GetWithForwardedForAsync(HttpClient client, string path, string sourceIp)
+    private static async Task<HttpResponseMessage> GetWithSocketIpAsync(HttpClient client, string path, string sourceIp)
     {
         var req = new HttpRequestMessage(HttpMethod.Get, path);
-        req.Headers.Add("X-Forwarded-For", sourceIp);
+        // Drive RemoteIpAddress through the test socket-peer header, not X-Forwarded-For,
+        // since forwarded-header processing is disabled when TRUSTED_PROXIES is unset.
+        req.Headers.Add(HeaderRemoteIpFilter.HeaderName, sourceIp);
         return await client.SendAsync(req);
     }
 

@@ -19,7 +19,7 @@ public sealed class RedisFixedWindowRateLimiterTests
 
     private RedisFixedWindowRateLimiter NewSut(int permitLimit = 5, int windowSeconds = 60)
         => new(_db, keyPrefix: "p:", scope: "login", bucket: "ip-1.2.3.4",
-               permitLimit: permitLimit, windowSeconds: windowSeconds);
+               permitLimit: permitLimit, windowSeconds: windowSeconds, time: TimeProvider.System);
 
     private static RedisResult Pair(long count, long ttl) =>
         RedisResult.Create(new[] { RedisResult.Create(count), RedisResult.Create(ttl) });

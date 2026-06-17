@@ -28,7 +28,7 @@ public class ClaimRepositoryTests : IAsyncLifetime
         PriorState = null,
         NewState = state,
         Reason = reason,
-        OccurredAt = DateTimeOffset.UtcNow
+        OccurredAt = TestTime.KnownNow
     };
 
     [Fact]
@@ -66,7 +66,7 @@ public class ClaimRepositoryTests : IAsyncLifetime
             PriorState = ClaimStateMachine.LocalOnly,
             NewState = ClaimStateMachine.Mixed,
             Reason = "want proxy fallback",
-            OccurredAt = DateTimeOffset.UtcNow
+            OccurredAt = TestTime.KnownNow
         });
 
         var c = await repo.GetAsync("o1", "npm", "lodash");
@@ -96,7 +96,7 @@ public class ClaimRepositoryTests : IAsyncLifetime
             PriorState = ClaimStateMachine.LocalOnly,
             NewState = null,
             Reason = "release",
-            OccurredAt = DateTimeOffset.UtcNow
+            OccurredAt = TestTime.KnownNow
         });
 
         Assert.Null(await repo.GetAsync("o1", "npm", "lodash"));

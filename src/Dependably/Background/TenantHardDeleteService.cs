@@ -22,19 +22,22 @@ public sealed class TenantHardDeleteService : BackgroundService
     private readonly IMetadataStore _db;
     private readonly IConfiguration _config;
     private readonly ILogger<TenantHardDeleteService> _logger;
+    private readonly TimeProvider _time;
 
     public TenantHardDeleteService(
         OrgRepository orgs,
         AuditRepository audit,
         IMetadataStore db,
         IConfiguration config,
-        ILogger<TenantHardDeleteService> logger)
+        ILogger<TenantHardDeleteService> logger,
+        TimeProvider time)
     {
         _orgs = orgs;
         _audit = audit;
         _db = db;
         _config = config;
         _logger = logger;
+        _time = time;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -45,13 +48,13 @@ public sealed class TenantHardDeleteService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var next = schedule.GetNextOccurrence(DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
+            var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
             if (next is null)
             {
                 break;
             }
 
-            var delay = next.Value - DateTimeOffset.UtcNow;
+            var delay = next.Value - _time.GetUtcNow();
             if (delay > TimeSpan.Zero)
             {
                 try { await Task.Delay(delay, stoppingToken); }

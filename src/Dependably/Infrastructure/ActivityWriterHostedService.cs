@@ -19,6 +19,9 @@ public sealed class ActivityWriterHostedService : BackgroundService
     public const int MaxBatch = 200;
     public static readonly TimeSpan MaxFlushInterval = TimeSpan.FromMilliseconds(100);
 
+    // Polling interval used by WaitForIdleAsync when waiting for the writer to drain.
+    private const int IdleCheckIntervalMs = 5;
+
     private readonly ActivityWriter _writer;
     private readonly IMetadataStore _db;
     private readonly ILogger<ActivityWriterHostedService> _logger;
@@ -239,7 +242,7 @@ public sealed class ActivityWriterHostedService : BackgroundService
                 return;
             }
 
-            await Task.Delay(5, ct);
+            await Task.Delay(IdleCheckIntervalMs, ct);
         }
         throw new TimeoutException(
             $"ActivityWriter did not become idle within {timeout.TotalMilliseconds} ms " +

@@ -6,12 +6,19 @@ namespace Dependably.Storage;
 public sealed class InMemoryBlobStore : IBlobStore
 {
     private readonly ConcurrentDictionary<string, Entry> _blobs = new();
+    private readonly TimeProvider _time;
+
+    /// <summary>
+    /// Constructed with <c>new</c> by test fixtures, not the container, so the clock is an
+    /// optional parameter rather than a required DI dependency.
+    /// </summary>
+    public InMemoryBlobStore(TimeProvider? time = null) => _time = time ?? TimeProvider.System;
 
     /// <summary>
     /// Test seam: callers (notably the orphan-reconciler tests) need to plant a blob with
     /// a backdated <c>LastModified</c> so the grace-window gate evaluates the way the test
     /// intends. Production code always goes through <see cref="PutAsync"/>, which stamps
-    /// <c>DateTimeOffset.UtcNow</c>.
+    /// the clock's current instant.
     /// </summary>
     public void SeedWithLastModified(string key, byte[] bytes, DateTimeOffset lastModified)
         => _blobs[key] = new Entry(bytes, lastModified);
@@ -20,7 +27,7 @@ public sealed class InMemoryBlobStore : IBlobStore
     {
         using var ms = new MemoryStream();
         data.CopyTo(ms);
-        _blobs[key] = new Entry(ms.ToArray(), DateTimeOffset.UtcNow);
+        _blobs[key] = new Entry(ms.ToArray(), _time.GetUtcNow());
         return Task.CompletedTask;
     }
 

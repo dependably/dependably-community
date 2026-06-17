@@ -21,13 +21,18 @@ public sealed class OrgAuditController : OrgScopedControllerBase
     /// </summary>
     private const int CsvExportRowCap = 50_000;
 
+    // Maximum page size for paged audit/activity list responses.
+    private const int MaxAuditPageSize = 200;
+
     private readonly AuditRepository _audit;
     private readonly OrgAccessGuard _guard;
+    private readonly TimeProvider _time;
 
-    public OrgAuditController(AuditRepository audit, OrgAccessGuard guard)
+    public OrgAuditController(AuditRepository audit, OrgAccessGuard guard, TimeProvider time)
     {
         _audit = audit;
         _guard = guard;
+        _time = time;
     }
 
     /// <summary>GET /api/v1/orgs/{org}/activity</summary>
@@ -36,6 +41,7 @@ public sealed class OrgAuditController : OrgScopedControllerBase
         [FromQuery] int limit = 50,
         [FromQuery] int page = 1,
         [FromQuery(Name = "event_type")] string? eventType = null,
+        [FromQuery] string? search = null,
         [FromQuery] string? format = null,
         CancellationToken ct = default)
     {
@@ -53,7 +59,7 @@ public sealed class OrgAuditController : OrgScopedControllerBase
 
         if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
         {
-            var (csvItems, _) = await _audit.ListActivityAsync(orgId, CsvExportRowCap, 0, eventType, ct);
+            var (csvItems, _) = await _audit.ListActivityAsync(orgId, CsvExportRowCap, 0, eventType, search, ct);
             var sb = new System.Text.StringBuilder();
             CsvWriter.WriteRow(sb, "created_at", "event_type", "ecosystem", "purl", "actor_email", "source_ip", "detail");
             foreach (var item in csvItems)
@@ -64,14 +70,14 @@ public sealed class OrgAuditController : OrgScopedControllerBase
                     item.ActorEmail, item.SourceIp, item.Detail);
             }
             byte[] bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
-            string filename = $"activity-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}.csv";
+            string filename = $"activity-{_time.GetUtcNow():yyyyMMddTHHmmssZ}.csv";
             return File(bytes, "text/csv", filename);
         }
 
-        limit = Math.Clamp(limit, 1, 200);
+        limit = Math.Clamp(limit, 1, MaxAuditPageSize);
         page = Math.Max(page, 1);
         int offset = (page - 1) * limit;
-        var (items, total) = await _audit.ListActivityAsync(orgId, limit, offset, eventType, ct);
+        var (items, total) = await _audit.ListActivityAsync(orgId, limit, offset, eventType, search, ct);
         return Ok(new { items, total, limit, offset });
     }
 
@@ -80,6 +86,7 @@ public sealed class OrgAuditController : OrgScopedControllerBase
     public async Task<IActionResult> GetAudit(
         [FromQuery] int limit = 50, [FromQuery] int page = 1,
         [FromQuery] string? action = null,
+        [FromQuery] string? search = null,
         [FromQuery] string? format = null,
         CancellationToken ct = default)
     {
@@ -97,7 +104,7 @@ public sealed class OrgAuditController : OrgScopedControllerBase
 
         if (string.Equals(format, "csv", StringComparison.OrdinalIgnoreCase))
         {
-            var (csvItems, _) = await _audit.ListAuditAsync(orgId, CsvExportRowCap, 0, action, ct);
+            var (csvItems, _) = await _audit.ListAuditAsync(orgId, CsvExportRowCap, 0, action, search, ct);
             var sb = new System.Text.StringBuilder();
             CsvWriter.WriteRow(sb, "created_at", "action", "actor_email", "ecosystem", "purl", "detail");
             foreach (var item in csvItems)
@@ -107,14 +114,14 @@ public sealed class OrgAuditController : OrgScopedControllerBase
                     item.Action, item.ActorEmail, item.Ecosystem, item.Purl, item.Detail);
             }
             byte[] bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
-            string filename = $"audit-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssZ}.csv";
+            string filename = $"audit-{_time.GetUtcNow():yyyyMMddTHHmmssZ}.csv";
             return File(bytes, "text/csv", filename);
         }
 
-        limit = Math.Clamp(limit, 1, 200);
+        limit = Math.Clamp(limit, 1, MaxAuditPageSize);
         page = Math.Max(page, 1);
         int offset = (page - 1) * limit;
-        var (items, total) = await _audit.ListAuditAsync(orgId, limit, offset, action, ct);
+        var (items, total) = await _audit.ListAuditAsync(orgId, limit, offset, action, search, ct);
         return Ok(new { items, total, limit, offset });
     }
 }

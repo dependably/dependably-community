@@ -18,6 +18,10 @@ namespace Dependably.Infrastructure.Observability;
 /// </summary>
 public sealed class MetricsSnapshotProvider
 {
+    private readonly TimeProvider _time;
+
+    public MetricsSnapshotProvider(TimeProvider time) => _time = time;
+
     public Snapshot Capture()
     {
         var blobSizes = DependablyMeter.ReadBlobStoreSizes();
@@ -31,7 +35,7 @@ public sealed class MetricsSnapshotProvider
             ProxyFetchCountSinceStartup: SnapshotCounters.ProxyFetchCount,
             CacheHitsSinceStartup: SnapshotCounters.CacheHits,
             CacheMissesSinceStartup: SnapshotCounters.CacheMisses,
-            CapturedAt: DateTimeOffset.UtcNow);
+            CapturedAt: _time.GetUtcNow());
     }
 
     public sealed record Snapshot(

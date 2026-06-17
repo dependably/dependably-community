@@ -14,21 +14,39 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed class RetentionService : BackgroundService
 {
+    /// <summary>
+    /// Injected dependencies for <see cref="RetentionService"/>. Bundles the eight DI services
+    /// so the constructor stays within the parameter-count gate (S107).
+    /// </summary>
+    public sealed record Dependencies(
+        IMetadataStore Db,
+        IBlobStore Blobs,
+        JwtRevocationRepository JwtRevocations,
+        InviteRepository Invites,
+        SamlConfigRepository SamlConfig,
+        IConfiguration Config,
+        ILogger<RetentionService> Logger,
+        TimeProvider Time);
+
     private readonly IMetadataStore _db;
     private readonly IBlobStore _blobs;
     private readonly JwtRevocationRepository _jwtRevocations;
+    private readonly InviteRepository _invites;
     private readonly SamlConfigRepository _samlConfig;
     private readonly IConfiguration _config;
     private readonly ILogger<RetentionService> _logger;
+    private readonly TimeProvider _time;
 
-    public RetentionService(IMetadataStore db, IBlobStore blobs, JwtRevocationRepository jwtRevocations, SamlConfigRepository samlConfig, IConfiguration config, ILogger<RetentionService> logger)
+    public RetentionService(Dependencies deps)
     {
-        _db = db;
-        _blobs = blobs;
-        _jwtRevocations = jwtRevocations;
-        _samlConfig = samlConfig;
-        _config = config;
-        _logger = logger;
+        _db = deps.Db;
+        _blobs = deps.Blobs;
+        _jwtRevocations = deps.JwtRevocations;
+        _invites = deps.Invites;
+        _samlConfig = deps.SamlConfig;
+        _config = deps.Config;
+        _logger = deps.Logger;
+        _time = deps.Time;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -39,13 +57,13 @@ public sealed class RetentionService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var next = schedule.GetNextOccurrence(DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
+            var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
             if (next is null)
             {
                 break;
             }
 
-            var delay = next.Value - DateTimeOffset.UtcNow;
+            var delay = next.Value - _time.GetUtcNow();
             if (delay > TimeSpan.Zero)
             {
                 try { await Task.Delay(delay, stoppingToken); }
@@ -58,7 +76,7 @@ public sealed class RetentionService : BackgroundService
             }
 
             using var scope = Dependably.Infrastructure.Observability.BackgroundJobScope.Begin(
-                "retention", "retention.gc");
+                "retention", "retention.gc", _time);
             try
             {
                 await RunGcPassAsync(stoppingToken);
@@ -108,12 +126,19 @@ public sealed class RetentionService : BackgroundService
 
             if (ActivityRetentionDays.HasValue)
             {
-                await PruneActivityAsync(conn, OrgId, ActivityRetentionDays.Value, ct);
+                await PruneActivityAsync(conn, OrgId, ActivityRetentionDays.Value, _time.GetUtcNow(), ct);
             }
         }
 
         // Prune expired JWT revocations (global — not org-scoped)
         await _jwtRevocations.PruneExpiredAsync(ct);
+
+        // Prune expired, unconsumed invite rows (global sweep — see PruneExpiredAsync xtenant comment).
+        int prunedInvites = await _invites.PruneExpiredAsync(ct);
+        if (prunedInvites > 0)
+        {
+            _logger.LogInformation("Retention GC: pruned {Count} expired invite rows.", prunedInvites);
+        }
 
         // Prune typed audit_event rows past the retention window. Default window is 365
         // days, set in cross-cutting-decisions.md section 4 (audit_event is append-only and
@@ -132,7 +157,7 @@ public sealed class RetentionService : BackgroundService
     {
         int retentionDays = int.TryParse(_config["AUDIT_EVENT_RETENTION_DAYS"], out int d) && d > 0
             ? d : 365;
-        string cutoff = DateTimeOffset.UtcNow.AddDays(-retentionDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = _time.GetUtcNow().AddDays(-retentionDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         // Hard-delete is the right shape today: there's no archive destination yet (decision
         // deferred per cross-cutting-decisions.md). When archive lands, this becomes a copy
@@ -184,7 +209,7 @@ public sealed class RetentionService : BackgroundService
     private async Task EvictStaleBlobsAsync(
         System.Data.Common.DbConnection conn, string orgId, int keepDays, CancellationToken ct)
     {
-        string cutoff = DateTimeOffset.UtcNow.AddDays(-keepDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = _time.GetUtcNow().AddDays(-keepDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         var stale = await conn.QueryAsync<(string VersionId, string BlobKey)>(
             """
@@ -209,9 +234,9 @@ public sealed class RetentionService : BackgroundService
     }
 
     private static async Task PruneActivityAsync(
-        System.Data.Common.DbConnection conn, string orgId, int retentionDays, CancellationToken ct)
+        System.Data.Common.DbConnection conn, string orgId, int retentionDays, DateTimeOffset now, CancellationToken ct)
     {
-        string cutoff = DateTimeOffset.UtcNow.AddDays(-retentionDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string cutoff = now.AddDays(-retentionDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
         await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM activity WHERE org_id = @orgId AND created_at < @cutoff",
             new { orgId, cutoff },

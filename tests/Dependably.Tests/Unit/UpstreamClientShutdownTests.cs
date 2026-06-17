@@ -117,7 +117,7 @@ public sealed class UpstreamClientShutdownTests
             .Build();
         var client = new UpstreamClient(
             factory, tiered, audit, new PermitAll(), new NotAirGapped(),
-            new UnlimitedDisk(), config,
+            new UnlimitedDisk(), Dependably.Infrastructure.StagingOptions.Resolve(config),
             NullLogger<UpstreamClient>.Instance,
             lifetime);
         return (client, store);

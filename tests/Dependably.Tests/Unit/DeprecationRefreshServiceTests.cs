@@ -9,6 +9,7 @@ using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 
 namespace Dependably.Tests.Unit;
 
@@ -22,6 +23,7 @@ namespace Dependably.Tests.Unit;
 public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
+    private readonly FakeTimeProvider _clock = TestTime.Frozen();
 
     public async Task InitializeAsync()
     {
@@ -310,7 +312,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await SeedVersionAsync(ecosystem: "npm", name: "stale-pkg", version: "1.0.0",
             origin: "proxy", deprecated: null, deprecationCheckedAt: null);
 
-        var repo = new PackageRepository(_db);
+        var repo = new PackageRepository(_db, time: _clock);
         var results = await repo.ListPackagesNeedingDeprecationRefreshAsync(ageHours: 24, limit: 10);
 
         Assert.Single(results, r => r.PurlName == "stale-pkg");
@@ -319,11 +321,11 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task ListPackagesNeedingDeprecationRefresh_FreshRow_NotReturned()
     {
-        string freshAt = DateTimeOffset.UtcNow.AddMinutes(-30).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string freshAt = _clock.GetUtcNow().AddMinutes(-30).ToString("yyyy-MM-ddTHH:mm:ssZ");
         await SeedVersionAsync(ecosystem: "npm", name: "fresh-pkg", version: "1.0.0",
             origin: "proxy", deprecated: null, deprecationCheckedAt: freshAt);
 
-        var repo = new PackageRepository(_db);
+        var repo = new PackageRepository(_db, time: _clock);
         var results = await repo.ListPackagesNeedingDeprecationRefreshAsync(ageHours: 24, limit: 10);
 
         Assert.DoesNotContain(results, r => r.PurlName == "fresh-pkg");
@@ -332,11 +334,11 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task ListPackagesNeedingDeprecationRefresh_StaleRow_Returned()
     {
-        string staleAt = DateTimeOffset.UtcNow.AddHours(-48).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string staleAt = _clock.GetUtcNow().AddHours(-48).ToString("yyyy-MM-ddTHH:mm:ssZ");
         await SeedVersionAsync(ecosystem: "npm", name: "stale-pkg2", version: "1.0.0",
             origin: "proxy", deprecated: null, deprecationCheckedAt: staleAt);
 
-        var repo = new PackageRepository(_db);
+        var repo = new PackageRepository(_db, time: _clock);
         var results = await repo.ListPackagesNeedingDeprecationRefreshAsync(ageHours: 24, limit: 10);
 
         Assert.Single(results, r => r.PurlName == "stale-pkg2");
@@ -348,7 +350,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await SeedVersionAsync(ecosystem: "npm", name: "uploaded-pkg", version: "1.0.0",
             origin: "uploaded", deprecated: null, deprecationCheckedAt: null);
 
-        var repo = new PackageRepository(_db);
+        var repo = new PackageRepository(_db, time: _clock);
         var results = await repo.ListPackagesNeedingDeprecationRefreshAsync(ageHours: 24, limit: 10);
 
         Assert.DoesNotContain(results, r => r.PurlName == "uploaded-pkg");
@@ -360,13 +362,13 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var (_, _, versionId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "x", version: "1.0.0", origin: "proxy", deprecated: null);
 
-        var repo = new PackageRepository(_db);
+        var repo = new PackageRepository(_db, time: _clock);
         await repo.UpdateDeprecationCheckedAtAsync(versionId);
 
         await using var conn = await _db.OpenAsync();
         string? checkedAt = await conn.QuerySingleAsync<string?>(
             "SELECT deprecation_checked_at FROM package_versions WHERE id = @id", new { id = versionId });
-        Assert.NotNull(checkedAt);
+        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), checkedAt);
     }
 
     [Fact]
@@ -375,7 +377,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var (_, _, versionId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "y", version: "1.0.0", origin: "proxy", deprecated: null);
 
-        var repo = new PackageRepository(_db);
+        var repo = new PackageRepository(_db, time: _clock);
         await repo.UpdateDeprecatedAndCheckedAsync(versionId, "some reason");
 
         await using var conn = await _db.OpenAsync();
@@ -383,7 +385,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             "SELECT deprecated, deprecation_checked_at FROM package_versions WHERE id = @id",
             new { id = versionId });
         Assert.Equal("some reason", dep);
-        Assert.NotNull(checkedAt);
+        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), checkedAt);
     }
 
     [Fact]
@@ -392,7 +394,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var (_, _, versionId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "z", version: "1.0.0", origin: "proxy", deprecated: "old reason");
 
-        var repo = new PackageRepository(_db);
+        var repo = new PackageRepository(_db, time: _clock);
         await repo.UpdateDeprecatedAndCheckedAsync(versionId, null);
 
         await using var conn = await _db.OpenAsync();
@@ -429,12 +431,13 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var upstream = new UpstreamClient(
             factory, tiered, new AuditRepository(_db), validator, airGap,
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(Path.GetTempPath()),
-            config,
+            Dependably.Infrastructure.StagingOptions.Resolve(config),
             NullLogger<UpstreamClient>.Instance);
-        var packages = new PackageRepository(_db);
+        var packages = new PackageRepository(_db, time: _clock);
         return new DeprecationRefreshService(
             packages, audit, upstream, airGap, config,
-            NullLogger<DeprecationRefreshService>.Instance);
+            NullLogger<DeprecationRefreshService>.Instance,
+            _clock);
     }
 
     private async Task<(string OrgId, string PackageId, string VersionId, string Purl)> SeedVersionAsync(

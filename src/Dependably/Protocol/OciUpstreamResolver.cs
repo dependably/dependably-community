@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Dapper;
@@ -29,6 +31,16 @@ namespace Dependably.Protocol;
 /// </summary>
 public sealed class OciUpstreamResolver
 {
+    // Split limit for OCI digest strings: algorithm and hex are exactly two parts ({algo}:{hex}).
+    private const int DigestSplitParts = 2;
+
+    // Auth retry pattern: one initial attempt and one retry after token invalidation.
+    private const int UpstreamMaxAttempts = 2;
+    private const int UpstreamFirstAttempt = 0;
+
+    // SQLite SQLITE_CONSTRAINT error code (unique constraint violation on insert).
+    private const int SqliteConstraintErrorCode = 19;
+
     // All four manifest media types accepted by current Docker and OCI clients.
     private static readonly string[] ManifestAcceptTypes =
     [
@@ -46,7 +58,23 @@ public sealed class OciUpstreamResolver
     private readonly PackageRepository _packages;
     private readonly IAirGapMode _airGap;
     private readonly ILogger<OciUpstreamResolver> _logger;
+    private readonly TimeProvider _time;
 
+    // Single-flight dedup for concurrent OCI blob fetches: keyed by the content-addressed
+    // blob key (BlobKeys.OciBlob(algo, hex)) so concurrent cache-misses for the same
+    // digest collapse to one upstream pull. The shared work item writes the verified blob
+    // to the cache store and returns only metadata (key + media type) — NOT an open stream.
+    // Each waiter independently calls _blobs.Cache.GetAsync after the Lazy resolves to open
+    // its OWN stream, avoiding use-after-dispose when N callers race on the same digest.
+    // CancellationToken.None prevents a single caller disconnect from faulting the shared
+    // Lazy and cancelling all other waiters — the blob write is idempotent.
+    private readonly ConcurrentDictionary<string, Lazy<Task<OciBlobFetchMetadata?>>> _blobInflight = new();
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification =
+            "Resolver aggregates 8 independent DI-resolved services (HTTP client factory, auth service, " +
+            "options, tiered blob storage, metadata store, air-gap mode, logger, clock). " +
+            "Bundling into a wrapper record would obscure the DI graph.")]
     public OciUpstreamResolver(
         IHttpClientFactory http,
         OciUpstreamAuthService auth,
@@ -54,7 +82,8 @@ public sealed class OciUpstreamResolver
         TieredBlobStorage blobs,
         IMetadataStore db,
         IAirGapMode airGap,
-        ILogger<OciUpstreamResolver> logger)
+        ILogger<OciUpstreamResolver> logger,
+        TimeProvider time)
     {
         _http = http;
         _auth = auth;
@@ -62,11 +91,12 @@ public sealed class OciUpstreamResolver
         _blobs = blobs;
         _db = db;
         // PackageRepository is a stateless Dapper wrapper over the same IMetadataStore, so it is
-        // built here rather than injected — this keeps the constructor within S107's 7-parameter
-        // limit and avoids a Scoped-style repository being captured by this Singleton resolver.
-        _packages = new PackageRepository(db);
+        // built here rather than injected — this avoids a Scoped-style repository being captured
+        // by this Singleton resolver.
+        _packages = new PackageRepository(db, time: time);
         _airGap = airGap;
         _logger = logger;
+        _time = time;
     }
 
     /// <summary>
@@ -88,6 +118,163 @@ public sealed class OciUpstreamResolver
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// Fetches only the header metadata (digest, size, media type) for a manifest from the
+    /// upstream registry using a HEAD request — no body is downloaded. Used by the manifest
+    /// HEAD handler on a cache-miss to avoid downloading the full manifest body only to
+    /// discard it.
+    ///
+    /// Checks the local cache first (same TTL logic as <see cref="FetchManifestAsync"/>).
+    /// Falls back to an upstream HEAD on a cache-miss. Returns <c>null</c> when no upstream
+    /// matches, the upstream returns 404, or the upstream does not supply the required headers.
+    /// Throws <see cref="AirGappedException"/> in air-gap mode.
+    /// </summary>
+    public async Task<OciManifestMetadata?> FetchManifestMetadataAsync(
+        string orgId,
+        string repository,
+        string reference,
+        bool isDigest,
+        CancellationToken ct)
+    {
+        if (_airGap.IsEnabled)
+        {
+            throw new AirGappedException($"oci-manifest::{repository}/{reference}");
+        }
+
+        // Check the local cache before hitting upstream — a cached manifest already has
+        // all the metadata we need without any network round-trip.
+        var fromCache = isDigest
+            ? await TryGetCachedManifestMetadataByDigestAsync(orgId, reference, ct)
+            : await TryGetCachedTagManifestMetadataAsync(orgId, repository, reference, ct);
+
+        if (fromCache is not null)
+        {
+            return fromCache;
+        }
+
+        var upstream = MatchUpstream(repository);
+        return upstream is null ? null : await FetchManifestMetadataFromUpstreamAsync(upstream, repository, reference, ct);
+    }
+
+    private async Task<OciManifestMetadata?> TryGetCachedManifestMetadataByDigestAsync(
+        string orgId, string digest, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: (digest, org_id) PK is tenant-scoped.
+        var (MediaType, SizeBytes, BlobKey) = await conn.QuerySingleOrDefaultAsync<(string? MediaType, long SizeBytes, string? BlobKey)>(
+            "SELECT media_type AS MediaType, size_bytes AS SizeBytes, blob_key AS BlobKey " +
+            "FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId });
+
+        if (BlobKey is null)
+        {
+            return null;
+        }
+
+        // Confirm the blob is still present in the store without opening a stream.
+        bool exists = await _blobs.Cache.ExistsAsync(BlobKey, ct)
+            || await _blobs.Registry.ExistsAsync(BlobKey, ct);
+        return exists ? new OciManifestMetadata(digest, MediaType ?? "application/octet-stream", SizeBytes) : null;
+    }
+
+    private async Task<OciManifestMetadata?> TryGetCachedTagManifestMetadataAsync(
+        string orgId, string repository, string tag, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: (org_id, repository, tag) PK.
+        var (Digest, LastRevalidated) = await conn.QuerySingleOrDefaultAsync<(string? Digest, string? LastRevalidated)>(
+            "SELECT digest AS Digest, last_revalidated AS LastRevalidated " +
+            "FROM oci_tags WHERE org_id = @orgId AND repository = @repo AND tag = @tag",
+            new { orgId, repo = repository, tag });
+
+        if (Digest is null)
+        {
+            return null;
+        }
+
+        var ttl = _options.Value.ManifestTagTtl;
+        return LastRevalidated is not null &&
+            DateTimeOffset.TryParse(LastRevalidated, null, System.Globalization.DateTimeStyles.RoundtripKind, out var revalidated) &&
+            _time.GetUtcNow() - revalidated < ttl
+            ? await TryGetCachedManifestMetadataByDigestAsync(orgId, Digest, ct)
+            : null;
+    }
+
+    private async Task<OciManifestMetadata?> FetchManifestMetadataFromUpstreamAsync(
+        OciUpstreamRegistryOptions upstream, string repository, string reference, CancellationToken ct)
+    {
+        string url = $"https://{upstream.Host}/v2/{repository}/manifests/{reference}";
+        const string scope = "pull";
+        var client = _http.CreateClient("OciUpstream");
+
+        for (int attempt = 0; attempt < UpstreamMaxAttempts; attempt++)
+        {
+            string? authHeader = await _auth.GetAuthorizationAsync(upstream, repository, scope, ct);
+            using var req = new HttpRequestMessage(HttpMethod.Head, url);
+            foreach (string mt in ManifestAcceptTypes)
+            {
+                req.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue(mt));
+            }
+
+            if (authHeader is not null)
+            {
+                req.Headers.TryAddWithoutValidation("Authorization", authHeader);
+            }
+
+            using var resp = await client.SendAsync(req, ct);
+
+            if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized && attempt == UpstreamFirstAttempt)
+            {
+                _auth.InvalidateToken(upstream, repository, scope);
+                continue;
+            }
+
+            if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return null;
+            }
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("OCI manifest HEAD {Repository}:{Reference} upstream {Host} returned {Status}",
+                    repository, reference, upstream.Host, resp.StatusCode);
+                return null;
+            }
+
+            return ExtractManifestMetadataFromHeadResponse(resp, repository, reference, upstream.Host);
+        }
+
+        return null;
+    }
+
+    // Extracts OciManifestMetadata from a successful HEAD response.
+    // Returns null when no usable digest can be determined from the response headers.
+    private OciManifestMetadata? ExtractManifestMetadataFromHeadResponse(
+        HttpResponseMessage resp, string repository, string reference, string upstreamHost)
+    {
+        // Prefer the upstream's Docker-Content-Digest header as the digest; fall back
+        // to the reference itself when the reference is already a digest.
+        string? upstreamDigest = resp.Headers.TryGetValues("Docker-Content-Digest", out var dcdVals)
+            ? dcdVals.FirstOrDefault()
+            : null;
+
+        string digest = !string.IsNullOrEmpty(upstreamDigest)
+            ? upstreamDigest
+            : OciCoordinatesParser.IsValidDigest(reference) ? reference : string.Empty;
+
+        if (string.IsNullOrEmpty(digest))
+        {
+            _logger.LogWarning(
+                "OCI manifest HEAD {Repository}:{Reference} from {Host}: no Docker-Content-Digest header and reference is not a digest; cannot satisfy HEAD without body download.",
+                repository, reference, upstreamHost);
+            return null;
+        }
+
+        string mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+        long sizeBytes = resp.Content.Headers.ContentLength ?? 0;
+        return new OciManifestMetadata(digest, mediaType, sizeBytes);
     }
 
     /// <summary>
@@ -138,9 +325,96 @@ public sealed class OciUpstreamResolver
     }
 
     /// <summary>
+    /// Fetches only the header metadata for an OCI blob from upstream using a HEAD request —
+    /// no body is downloaded. Returns a <see cref="OciBlobMetadata"/> record with the media
+    /// type from the upstream response headers when the blob exists, or <c>null</c> when
+    /// no upstream matches or the upstream returns 404.
+    /// Used by the blob HEAD handler on a cache-miss to avoid downloading the full layer blob.
+    /// Throws <see cref="AirGappedException"/> in air-gap mode.
+    /// </summary>
+    public async Task<OciBlobMetadata?> FetchBlobMetadataAsync(
+        string orgId,
+        string repository,
+        string digest,
+        CancellationToken ct)
+    {
+        if (_airGap.IsEnabled)
+        {
+            throw new AirGappedException($"oci-blob::{repository}/{digest}");
+        }
+
+        string[] parts = digest.Split(':', DigestSplitParts);
+        if (parts.Length != 2)
+        {
+            return null;
+        }
+
+        string algo = parts[0];
+        string hex = parts[1];
+        string blobKey = BlobKeys.OciBlob(algo, hex);
+
+        // Blob may already be in cache from a prior request — just confirm existence.
+        if (await _blobs.Cache.ExistsAsync(blobKey, ct))
+        {
+            return new OciBlobMetadata("application/octet-stream");
+        }
+
+        var upstream = MatchUpstream(repository);
+        if (upstream is null)
+        {
+            return null;
+        }
+
+        var client = _http.CreateClient("OciUpstream");
+        string url = $"https://{upstream.Host}/v2/{repository}/blobs/{digest}";
+        const string scope = "pull";
+
+        for (int attempt = 0; attempt < UpstreamMaxAttempts; attempt++)
+        {
+            string? authHeader = await _auth.GetAuthorizationAsync(upstream, repository, scope, ct);
+            using var req = new HttpRequestMessage(HttpMethod.Head, url);
+            req.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/octet-stream"));
+            if (authHeader is not null)
+            {
+                req.Headers.TryAddWithoutValidation("Authorization", authHeader);
+            }
+
+            using var resp = await client.SendAsync(req, ct);
+
+            if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized && attempt == UpstreamFirstAttempt)
+            {
+                _auth.InvalidateToken(upstream, repository, scope);
+                continue;
+            }
+
+            if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return null;
+            }
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("OCI blob HEAD {Digest} upstream {Host} returned {Status}",
+                    digest, upstream.Host, resp.StatusCode);
+                return null;
+            }
+
+            string mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+            return new OciBlobMetadata(mediaType);
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Returns the OCI blob for <paramref name="digest"/> from cache or from upstream.
     /// The digest is verified against the downloaded bytes; a mismatch evicts the
     /// partially-written cache entry and returns null.
+    ///
+    /// Concurrent cache-misses for the same digest are collapsed by a single-flight
+    /// coordinator (keyed by the content-addressed blob key) so only one upstream pull
+    /// runs per digest per process. Each waiter re-opens the cached blob independently
+    /// after the shared fetch completes.
     ///
     /// Returns null when no upstream matches or the upstream returns 404.
     /// Throws <see cref="AirGappedException"/> in air-gap mode.
@@ -156,7 +430,7 @@ public sealed class OciUpstreamResolver
             throw new AirGappedException($"oci-blob::{repository}/{digest}");
         }
 
-        string[] parts = digest.Split(':', 2);
+        string[] parts = digest.Split(':', DigestSplitParts);
         if (parts.Length != 2)
         {
             return null;
@@ -176,7 +450,39 @@ public sealed class OciUpstreamResolver
         }
 
         var upstream = MatchUpstream(repository);
-        return upstream is null ? null : await FetchAndCacheBlobAsync(upstream, orgId, repository, digest, blobKey, ct);
+        if (upstream is null)
+        {
+            return null;
+        }
+
+        // Single-flight: collapse concurrent misses for the same blob key into one fetch.
+        // The shared work item (FetchAndCacheBlobAsync) writes the verified blob to the cache
+        // store and returns only metadata (blobKey + mediaType). Each waiter below opens its
+        // OWN stream via _blobs.Cache.GetAsync so no stream is shared across callers.
+        // CancellationToken.None: a caller disconnect must not fault the shared Lazy and
+        // cancel all other waiters. Blob writes are idempotent (content-addressed key).
+        var lazy = _blobInflight.GetOrAdd(blobKey, _ => new Lazy<Task<OciBlobFetchMetadata?>>(
+            () => FetchAndCacheBlobAsync(upstream, orgId, repository, digest, blobKey, CancellationToken.None),
+            LazyThreadSafetyMode.ExecutionAndPublication));
+
+        try
+        {
+            // WaitAsync(ct) lets the caller's request token abort the wait without
+            // cancelling the shared upstream fetch that other waiters depend on.
+            var meta = await lazy.Value.WaitAsync(ct);
+            if (meta is null)
+            {
+                return null;
+            }
+
+            // Each waiter opens an INDEPENDENT stream from the cache store — never shared.
+            var stream = await _blobs.Cache.GetAsync(meta.BlobKey, ct);
+            return stream is null ? null : new OciBlobResult(stream, meta.MediaType);
+        }
+        finally
+        {
+            _blobInflight.TryRemove(blobKey, out _);
+        }
     }
 
     /// <summary>
@@ -202,11 +508,11 @@ public sealed class OciUpstreamResolver
         string url = $"https://{upstream.Host}/v2/{repository}/tags/list";
         const string scope = "pull";
 
-        for (int attempt = 0; attempt < 2; attempt++)
+        for (int attempt = 0; attempt < UpstreamMaxAttempts; attempt++)
         {
             using var resp = await SendAuthenticatedTagRequestAsync(client, upstream, repository, url, scope, ct);
 
-            if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized && attempt == 0)
+            if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized && attempt == UpstreamFirstAttempt)
             {
                 _auth.InvalidateToken(upstream, repository, scope);
                 continue;
@@ -315,7 +621,7 @@ public sealed class OciUpstreamResolver
         var ttl = _options.Value.ManifestTagTtl;
         if (LastRevalidated is not null &&
             DateTimeOffset.TryParse(LastRevalidated, null, System.Globalization.DateTimeStyles.RoundtripKind, out var revalidated) &&
-            DateTimeOffset.UtcNow - revalidated < ttl)
+            _time.GetUtcNow() - revalidated < ttl)
         {
             return await TryGetCachedManifestByDigestAsync(orgId, Digest, ct);
         }
@@ -336,7 +642,7 @@ public sealed class OciUpstreamResolver
         string url = $"https://{upstream.Host}/v2/{repository}/manifests/{reference}";
         const string scope = "pull";
 
-        for (int attempt = 0; attempt < 2; attempt++)
+        for (int attempt = 0; attempt < UpstreamMaxAttempts; attempt++)
         {
             var (Retry, Result) = await TryFetchManifestAsync(upstream, repository, reference, scope, url, attempt, ct);
             if (Retry)
@@ -369,7 +675,7 @@ public sealed class OciUpstreamResolver
 
         using var resp = await client.SendAsync(req, ct);
 
-        if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized && attempt == 0)
+        if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized && attempt == UpstreamFirstAttempt)
         {
             _auth.InvalidateToken(upstream, repository, scope);
             return (Retry: true, Result: null);
@@ -406,6 +712,19 @@ public sealed class OciUpstreamResolver
             return (false, null);
         }
         string digest = ResolveDigest(resp, repository, reference, bytes, out string? sha256Hex);
+
+        // For by-digest references the caller already knows which digest to expect.
+        // Verify the computed digest matches before caching — if upstream returns bytes
+        // that hash to a different digest the fetch fails closed (no cache write, no DB
+        // row) rather than serving attacker-controlled content under the requested key.
+        if (OciCoordinatesParser.IsValidDigest(reference) &&
+            !string.Equals(digest, reference, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "OCI manifest digest mismatch for {Repository}/{Reference}: computed {Computed} does not match requested digest",
+                repository, reference, digest);
+            return (false, null);
+        }
 
         return (false, new FetchedManifest(bytes, mediaType, digest, sha256Hex));
     }
@@ -522,7 +841,7 @@ public sealed class OciUpstreamResolver
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            if (ex is not Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 19 })
+            if (ex is not Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: SqliteConstraintErrorCode })
             {
                 _logger.LogWarning(
                     "{ExceptionType} cataloguing OCI version {Repository}@{Digest}; pull unaffected. BlobKey={BlobKey} TraceId={TraceId}",
@@ -532,7 +851,8 @@ public sealed class OciUpstreamResolver
         }
     }
 
-    private async Task<OciBlobResult?> FetchAndCacheBlobAsync(
+    [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Descriptive documentation comment, not commented-out code.")]
+    private async Task<OciBlobFetchMetadata?> FetchAndCacheBlobAsync(
         OciUpstreamRegistryOptions upstream,
         string orgId,
         string repository,
@@ -545,10 +865,10 @@ public sealed class OciUpstreamResolver
         const string scope = "pull";
 
         // Expected hex for post-download verification.
-        string[] digestParts = digest.Split(':', 2);
-        string expectedHex = digestParts.Length == 2 ? digestParts[1].ToLowerInvariant() : "";
+        string[] digestParts = digest.Split(':', DigestSplitParts);
+        string expectedHex = digestParts.Length == DigestSplitParts ? digestParts[1].ToLowerInvariant() : "";
 
-        for (int attempt = 0; attempt < 2; attempt++)
+        for (int attempt = 0; attempt < UpstreamMaxAttempts; attempt++)
         {
             string? authHeader = await _auth.GetAuthorizationAsync(upstream, repository, scope, ct);
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
@@ -561,7 +881,7 @@ public sealed class OciUpstreamResolver
             // ResponseHeadersRead → don't buffer response in memory.
             var resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
 
-            if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized && attempt == 0)
+            if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized && attempt == UpstreamFirstAttempt)
             {
                 resp.Dispose();
                 _auth.InvalidateToken(upstream, repository, scope);
@@ -583,11 +903,17 @@ public sealed class OciUpstreamResolver
             string mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
             long bytesWritten;
 
-            // Stream upstream → OciDigestVerifyStream → blob cache (zero-copy buffering).
+            // Verify-then-commit: stream upstream bytes into an ephemeral staging key so
+            // the content-addressed blobKey is never written until the digest is confirmed.
+            // A concurrent cache-first reader (FetchBlobAsync) checks blobKey directly;
+            // because blobKey is only populated after a successful verification here, a
+            // cache-first branch can only ever serve verified bytes.
+            string stagingKey = BlobKeys.OciStaging(Guid.NewGuid().ToString("N"));
+
             await using (var contentStream = await resp.Content.ReadAsStreamAsync(ct))
             await using (var verifyStream = new OciDigestVerifyStream(contentStream))
             {
-                await _blobs.Cache.PutAsync(blobKey, verifyStream, ct);
+                await _blobs.Cache.PutAsync(stagingKey, verifyStream, ct);
                 bytesWritten = verifyStream.BytesWritten;
 
                 string computedDigest = verifyStream.ComputedDigest;
@@ -596,29 +922,34 @@ public sealed class OciUpstreamResolver
                     _logger.LogWarning(
                         "OCI blob digest mismatch for {Repository}/{Digest}: expected sha256:{Expected}, computed {Computed}",
                         repository, digest, expectedHex, computedDigest);
-                    await _blobs.Cache.DeleteAsync(blobKey, ct);
+                    await _blobs.Cache.DeleteAsync(stagingKey, ct);
                     resp.Dispose();
                     return null;
                 }
             }
+
+            // Digest verified — promote staging entry to the content-addressed key, then
+            // clean up the staging slot so it never persists beyond this request.
+            var stagedStream = await _blobs.Cache.GetAsync(stagingKey, ct);
+            if (stagedStream is not null)
+            {
+                await _blobs.Cache.PutAsync(blobKey, stagedStream, ct);
+            }
+
+            await _blobs.Cache.DeleteAsync(stagingKey, ct);
 
             resp.Dispose();
 
             // Persist DB row for this org.
             await EnsureBlobDbRowAsync(orgId, digest, mediaType, bytesWritten, blobKey, ct);
 
-            // Read back from cache for streaming to the controller.
-            var cacheStream = await _blobs.Cache.GetAsync(blobKey, ct);
-            if (cacheStream is null)
-            {
-                return null;
-            }
-
             _logger.LogInformation(
                 "OCI blob proxy {Repository}/{Digest} ({Bytes} B) from {Host}",
                 repository, digest, bytesWritten, upstream.Host);
 
-            return new OciBlobResult(cacheStream, mediaType);
+            // Return only metadata — each waiter opens its own stream independently in
+            // FetchBlobAsync, so the single shared result never carries a shared stream.
+            return new OciBlobFetchMetadata(blobKey, mediaType);
         }
 
         return null;
@@ -640,13 +971,36 @@ public sealed class OciUpstreamResolver
     }
 }
 
-// ── Result types ──────────────────────────────────────────────────────────────
+// ── Result types ────────────────────────────────────────────────
 
 /// <summary>Resolved manifest with its content stream, media type, digest, and byte count.</summary>
 public sealed record OciManifestResult(Stream Content, string MediaType, string Digest, long SizeBytes);
 
+/// <summary>
+/// Manifest header metadata returned by a HEAD-only upstream fetch: digest, media type, and
+/// byte count. No content stream is opened — used by the manifest HEAD handler on a cache-miss
+/// to populate response headers without downloading the manifest body.
+/// </summary>
+public sealed record OciManifestMetadata(string Digest, string MediaType, long SizeBytes);
+
 /// <summary>Resolved blob with its content stream and media type.</summary>
 public sealed record OciBlobResult(Stream Content, string MediaType);
+
+/// <summary>
+/// Blob header metadata returned by a HEAD-only upstream fetch: media type only.
+/// The digest and size are already known from the request (digest is the request parameter;
+/// size is not needed for OCI blob HEAD — <c>Content-Length</c> is set from the DB row or
+/// omitted on a cache-miss HEAD where the blob has not yet been fetched).
+/// </summary>
+public sealed record OciBlobMetadata(string MediaType);
+
+/// <summary>
+/// Metadata returned by the single-flight blob fetch work item (<c>_blobInflight</c>).
+/// Carries only the content-addressed cache key and media type — NOT an open stream.
+/// Each concurrent waiter opens its own stream from the cache store after the Lazy resolves,
+/// preventing use-after-dispose when multiple callers race on the same digest.
+/// </summary>
+internal sealed record OciBlobFetchMetadata(string BlobKey, string MediaType);
 
 // ── Digest-verifying pass-through stream ─────────────────────────────────────
 

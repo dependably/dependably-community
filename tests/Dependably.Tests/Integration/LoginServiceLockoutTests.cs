@@ -1,7 +1,5 @@
 using System.Net;
 using System.Net.Http.Json;
-using System.Security.Cryptography;
-using System.Text;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
@@ -102,12 +100,15 @@ public sealed class LoginServiceLockoutTests : IClassFixture<DependablyFactory>,
         }
 
         // Lockout row stamped with locked_until.
-        string emailHash = HashEmail(email);
+        // The key stored in login_attempts is the realm+tenant scoped lockout key, not the
+        // bare email hash. Resolve the tenant the same way CreateUser does (default org).
+        string tenantId = await ResolveDefaultTenantIdAsync();
+        string lockoutKey = LoginService.HashLockoutKey("tenant", tenantId, email);
         await using (var conn = await Db.OpenAsync())
         {
             string? lockedUntil = await conn.ExecuteScalarAsync<string?>(
-                "SELECT locked_until FROM login_attempts WHERE email_hash = @hash LIMIT 1",
-                new { hash = emailHash });
+                "SELECT locked_until FROM login_attempts WHERE email_hash = @key LIMIT 1",
+                new { key = lockoutKey });
             Assert.False(string.IsNullOrEmpty(lockedUntil));
         }
 
@@ -124,9 +125,11 @@ public sealed class LoginServiceLockoutTests : IClassFixture<DependablyFactory>,
         Assert.True(lockoutAudit >= 1);
     }
 
-    private static string HashEmail(string email)
+    private async Task<string> ResolveDefaultTenantIdAsync()
     {
-        byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(email.ToLowerInvariant()));
-        return Convert.ToHexString(bytes).ToLowerInvariant();
+        await using var conn = await Db.OpenAsync();
+        return await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
+            ?? throw new InvalidOperationException("Default org not found.");
     }
 }

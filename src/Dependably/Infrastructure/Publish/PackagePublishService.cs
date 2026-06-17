@@ -13,6 +13,9 @@ namespace Dependably.Infrastructure.Publish;
 /// </summary>
 public sealed class PackagePublishService : IPackagePublishService
 {
+    // Minimum slash position for a valid npm scoped package: '@' + at least one scope char.
+    private const int NpmScopeMinSlashPosition = 2;
+
     private readonly PackageRepository _packages;
     private readonly OrgRepository _orgs;
     private readonly ITenantStorageResolver _storage;
@@ -54,7 +57,7 @@ public sealed class PackagePublishService : IPackagePublishService
         activity?.SetTag("dependably.tenant_id", request.OrgId);
         activity?.SetTag("dependably.org_id", request.OrgId);
         activity?.SetTag("dependably.purl", request.Purl);
-        activity?.SetTag("dependably.size_bytes", request.ArtifactBytes.Length);
+        activity?.SetTag("dependably.size_bytes", ArtifactLength(request));
 
         var stopwatch = Stopwatch.StartNew();
         string outcome = "success";
@@ -85,7 +88,7 @@ public sealed class PackagePublishService : IPackagePublishService
             if (outcome == "success")
             {
                 DependablyMeter.PublishSizeBytes.Record(
-                    request.ArtifactBytes.Length,
+                    ArtifactLength(request),
                     new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
             }
 
@@ -134,7 +137,8 @@ public sealed class PackagePublishService : IPackagePublishService
         // two publishes that each individually fit cannot both pass when their combined size
         // would exceed the cap. The reservation is released on any failure after this point.
         // When quota is null (unlimited), skip the reservation — no counter to maintain.
-        long delta = request.ArtifactBytes.LongLength - (existing?.SizeBytes ?? 0);
+        long artifactLength = ArtifactLength(request);
+        long delta = artifactLength - (existing?.SizeBytes ?? 0);
         long? quota = await _orgs.GetEffectiveStorageQuotaAsync(request.OrgId, ct);
         bool reserved = false;
         if (quota is not null)
@@ -147,30 +151,63 @@ public sealed class PackagePublishService : IPackagePublishService
             reserved = true;
         }
 
-        // Hash + blob put. SHA-256 is recomputed inside the trust boundary even when
-        // callers passed the bytes pre-hashed — cheap, and it removes "did the caller
-        // hash it correctly?" from the trust surface.
-        //
-        // Resolver call gates the write on tenant lifecycle status + provisioning state
-        // before any bytes leave this process. A TenantNotReadyException from here means
-        // the orgs row is not active or an enterprise provisioning job hasn't completed —
-        // not a transient fault.
-        string sha256 = Convert.ToHexString(SHA256.HashData(request.ArtifactBytes)).ToLowerInvariant();
-        // npm's packument carries dist.shasum as hex SHA-1 — compute it here so
-        // BuildNpmMetadata can emit the correct hash. NULL for non-npm rows; the column
-        // is read by NpmController.{Build,Merge}*. Cheap (~500 MB/s); always compute.
-        string? sha1 = request.Ecosystem == "npm"
-            ? Convert.ToHexString(SHA1.HashData(request.ArtifactBytes)).ToLowerInvariant()
-            : null;
+        return await HashAndStoreBlobAsync(
+            request,
+            new PublishStorageContext(pkg, existing, blobKey, artifactLength, delta, reserved),
+            ct);
+    }
+
+    // Resolved storage context for the write tail, bundled to keep HashAndStoreBlobAsync
+    // within the parameter-count threshold (S107).
+    private sealed record PublishStorageContext(
+        Package Pkg, PackageVersion? Existing, string BlobKey,
+        long ArtifactSizeBytes, long Delta, bool Reserved);
+
+    // Resolves the artifact's SHA-256 (and npm SHA-1), opens the artifact stream, puts the blob,
+    // commits the metadata and OSV scan, emits the audit record, and releases the quota
+    // reservation on any failure to keep the storage counter accurate.
+    private async Task<PublishResult> HashAndStoreBlobAsync(
+        PublishRequest request, PublishStorageContext ctx, CancellationToken ct)
+    {
+        string sha256;
+        string? sha1;
+        Stream artifactStream;
+        bool ownsStream = false;
+        if (request.ArtifactStagingPath is { } stagingPath)
+        {
+            // Staged path: SHA-256 and SHA-1 computed by streaming the temp file once,
+            // then the same file is re-opened for the blob put. Never materialises the
+            // artifact as a byte[].
+            (sha256, sha1) = await ComputeHashesFromFileAsync(stagingPath, request.Ecosystem, ct);
+            // deepcode ignore PT: stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+            artifactStream = new FileStream(
+                stagingPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 81920, useAsync: true);
+            ownsStream = true;
+        }
+        else
+        {
+            // In-memory path for Cargo and Import callers that already hold bytes.
+            byte[] bytes = request.ArtifactBytes!;
+            sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+            // npm's packument carries dist.shasum as hex SHA-1 — compute it here so
+            // BuildNpmMetadata can emit the correct hash. NULL for non-npm rows; the column
+            // is read by NpmController.{Build,Merge}*. Cheap (~500 MB/s); always compute.
+            sha1 = request.Ecosystem == "npm"
+                ? Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant()
+                : null;
+            artifactStream = new MemoryStream(bytes);
+        }
+
         var registry = await _storage.GetRegistryAsync(request.OrgId, ct);
         try
         {
-            await registry.PutAsync(blobKey, new MemoryStream(request.ArtifactBytes), ct);
+            await registry.PutAsync(ctx.BlobKey, artifactStream, ct);
 
-            var newVersion = await CommitMetadataAsync(request, pkg, existing,
-                new PersistedArtifact(blobKey, sha256, sha1), registry, ct);
+            var newVersion = await CommitMetadataAsync(request, ctx.Pkg, ctx.Existing,
+                new PersistedArtifact(ctx.BlobKey, sha256, sha1, ctx.ArtifactSizeBytes), registry, ct);
             await ScanQuietlyAsync(request, newVersion, ct);
-            await _auditor.RecordAsync(request, sha256, existing, ct);
+            await _auditor.RecordAsync(request, sha256, ctx.Existing, ctx.ArtifactSizeBytes, ct);
 
             return new PublishResult.Accepted(newVersion.Id, request.Purl, sha256);
         }
@@ -180,9 +217,9 @@ public sealed class PackagePublishService : IPackagePublishService
             // blob put or metadata commit fails. Fire-and-forget: a release failure
             // leaves the counter high (conservative — subsequent publishes are more
             // likely to 413), which is safer than leaving it low.
-            if (reserved)
+            if (ctx.Reserved)
             {
-                try { await _orgs.ReleaseStorageAsync(request.OrgId, delta, CancellationToken.None); }
+                try { await _orgs.ReleaseStorageAsync(request.OrgId, ctx.Delta, CancellationToken.None); }
                 catch (Exception releaseEx)
                 {
                     _logger.LogError(releaseEx,
@@ -193,6 +230,13 @@ public sealed class PackagePublishService : IPackagePublishService
                 }
             }
             throw;
+        }
+        finally
+        {
+            if (ownsStream)
+            {
+                await artifactStream.DisposeAsync();
+            }
         }
     }
 
@@ -238,7 +282,9 @@ public sealed class PackagePublishService : IPackagePublishService
             }
         }
 
-        string sha256 = Convert.ToHexString(SHA256.HashData(request.ArtifactBytes)).ToLowerInvariant();
+        string sha256 = request.ArtifactStagingPath is { } stagePath
+            ? (await ComputeHashesFromFileAsync(stagePath, request.Ecosystem, ct)).Sha256
+            : Convert.ToHexString(SHA256.HashData(request.ArtifactBytes!)).ToLowerInvariant();
         return new PublishResult.Accepted(VersionId: "", request.Purl, sha256);
     }
 
@@ -285,18 +331,58 @@ public sealed class PackagePublishService : IPackagePublishService
                 && (ecosystem != "npm"
                     || !value.StartsWith('@')
                     || slash != value.LastIndexOf('/')
-                    || slash < 2
+                    || slash < NpmScopeMinSlashPosition
                     || slash == value.Length - 1));
     }
+
+    // Artifact byte count regardless of which path (in-memory or staged) is active.
+    private static long ArtifactLength(PublishRequest request)
+        => request.ArtifactStagingPath is not null
+            ? request.ArtifactSizeBytes
+            : request.ArtifactBytes!.LongLength;
 
     // Size cap. Callers know per-tenant + per-ecosystem cap; we enforce as a final
     // safety net so no single path can write a too-large blob even if a caller forgets.
     private static PublishResult.Rejected? CheckSizeCap(PublishRequest request)
     {
-        return request.ArtifactBytes.LongLength > request.SizeCap
+        return ArtifactLength(request) > request.SizeCap
             ? new PublishResult.Rejected(413, "size_limit_exceeded",
                 $"File exceeds the {request.Ecosystem} upload size limit ({request.SizeCap} bytes).")
             : null;
+    }
+
+    // Computes SHA-256 and (for npm) SHA-1 by streaming a staged temp file once.
+    // Never materialises the artifact in managed memory.
+    private static async Task<(string Sha256, string? Sha1)> ComputeHashesFromFileAsync(
+        string path, string ecosystem, CancellationToken ct)
+    {
+        // deepcode ignore PT: path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        await using var fs = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 81920, useAsync: true);
+        using var sha256Alg = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var sha1Alg = ecosystem == "npm"
+            ? IncrementalHash.CreateHash(HashAlgorithmName.SHA1)
+            : null;
+        try
+        {
+            byte[] buffer = new byte[81920];
+            int read;
+            while ((read = await fs.ReadAsync(buffer, ct)) > 0)
+            {
+                sha256Alg.AppendData(buffer, 0, read);
+                sha1Alg?.AppendData(buffer, 0, read);
+            }
+            string sha256 = Convert.ToHexString(sha256Alg.GetHashAndReset()).ToLowerInvariant();
+            string? sha1 = sha1Alg is not null
+                ? Convert.ToHexString(sha1Alg.GetHashAndReset()).ToLowerInvariant()
+                : null;
+            return (sha256, sha1);
+        }
+        finally
+        {
+            sha1Alg?.Dispose();
+        }
     }
 
     // Metadata commit, with compensating blob delete on failure.
@@ -322,12 +408,12 @@ public sealed class PackagePublishService : IPackagePublishService
                 // checksum_sha1 follows the new bytes (npm) — otherwise the packument would
                 // emit a stale SHA-1 next request.
                 await _packages.UpdateVersionForOverwriteAsync(existing.Id, artifact.BlobKey,
-                    request.ArtifactBytes.LongLength, artifact.Sha256, request.Origin, artifact.Sha1, ct);
+                    artifact.SizeBytes, artifact.Sha256, request.Origin, artifact.Sha1, ct);
                 return (await _packages.GetVersionAsync(pkg.Id, request.Version, ct))!;
             }
             return await _packages.CreateVersionAsync(
                 new NewPackageVersion(pkg.Id, request.Version, request.Purl, artifact.BlobKey,
-                    request.ArtifactBytes.LongLength, artifact.Sha256, Origin: request.Origin,
+                    artifact.SizeBytes, artifact.Sha256, Origin: request.Origin,
                     ChecksumSha1: artifact.Sha1), ct);
         }
         catch (Exception ex) when (existing is null)
@@ -356,7 +442,7 @@ public sealed class PackagePublishService : IPackagePublishService
         }
     }
 
-    private sealed record PersistedArtifact(string BlobKey, string Sha256, string? Sha1);
+    private sealed record PersistedArtifact(string BlobKey, string Sha256, string? Sha1, long SizeBytes);
 
     // Parity with proxy first-fetch (see NpmController/PyPiController/NuGetController
     // post-RecordOrLookupProxyVersionAsync): scan the new bytes synchronously so the

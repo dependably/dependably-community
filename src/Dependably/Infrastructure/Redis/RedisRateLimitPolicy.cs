@@ -11,6 +11,10 @@ namespace Dependably.Infrastructure.Redis;
 /// </summary>
 public sealed class RedisRateLimitPolicy : IRateLimiterPolicy<string>
 {
+    // Fallback rate limit applied when the endpoint's policy name is not in PolicyConfig.
+    private const int DefaultRateLimitPermits = 100;
+    private const int DefaultRateLimitWindowSeconds = 60;
+
     private static readonly Dictionary<string, (int Limit, int WindowSeconds)> PolicyConfig = new()
     {
         ["login"] = (10, 60),       // 10 requests / min
@@ -19,8 +23,13 @@ public sealed class RedisRateLimitPolicy : IRateLimiterPolicy<string>
     };
 
     private readonly IRedisClient _redis;
+    private readonly TimeProvider _time;
 
-    public RedisRateLimitPolicy(IRedisClient redis) => _redis = redis;
+    public RedisRateLimitPolicy(IRedisClient redis, TimeProvider time)
+    {
+        _redis = redis;
+        _time = time;
+    }
 
     public Func<OnRejectedContext, CancellationToken, ValueTask>? OnRejected => null;
 
@@ -36,13 +45,13 @@ public sealed class RedisRateLimitPolicy : IRateLimiterPolicy<string>
 
         if (!PolicyConfig.TryGetValue(policyName, out var cfg))
         {
-            cfg = (100, 60); // safe default
+            cfg = (DefaultRateLimitPermits, DefaultRateLimitWindowSeconds); // safe default
         }
 
         var db = _redis.GetDatabase();
         string prefix = _redis.ApplyPrefix("");
 
         return RateLimitPartition.Get(bucket, key =>
-            new RedisFixedWindowRateLimiter(db, prefix, policyName, key, cfg.Limit, cfg.WindowSeconds));
+            new RedisFixedWindowRateLimiter(db, prefix, policyName, key, cfg.Limit, cfg.WindowSeconds, _time));
     }
 }

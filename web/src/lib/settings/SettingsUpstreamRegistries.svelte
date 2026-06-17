@@ -9,16 +9,18 @@
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { api } from '../api.js'
+  import { ECOSYSTEMS as ECO_VOCAB, ECO_LABEL } from '../ecosystems.js'
   import ErrorBanner from '../ErrorBanner.svelte'
   import InfoTip from '../InfoTip.svelte'
 
-  const ECOSYSTEMS = [
-    { key: 'pypi', label: 'PyPI' },
-    { key: 'npm', label: 'npm' },
-    { key: 'nuget', label: 'NuGet' },
-    { key: 'maven', label: 'Maven' },
-    { key: 'rpm', label: 'RPM' },
-  ]
+  // The subset of the shared ecosystem vocabulary whose upstreams are configurable through the
+  // per-org `upstream_registry` table — mirrors UpstreamRegistryRepository.SupportedEcosystems so
+  // the two can't silently drift. OCI is excluded on purpose: its upstreams are config-file-driven
+  // (`Oci:Upstreams` via OciUpstreamRegistryOptions), not this DB table.
+  const DB_UPSTREAM_ECOSYSTEMS = new Set(['pypi', 'npm', 'nuget', 'maven', 'rpm', 'cargo', 'golang'])
+  const ECOSYSTEMS = ECO_VOCAB
+    .filter(key => DB_UPSTREAM_ECOSYSTEMS.has(key))
+    .map(key => ({ key, label: ECO_LABEL[key] }))
 
   /** @type {Record<string, any[]>} */
   let byEco = Object.fromEntries(ECOSYSTEMS.map(e => [e.key, []]))

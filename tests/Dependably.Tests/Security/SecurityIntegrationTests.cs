@@ -97,6 +97,25 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
         Assert.Contains("form-action 'none'", csp);
     }
 
+    [Theory]
+    [InlineData("/package/npm/%40adobe/css-tools")]
+    [InlineData("/package/nuget/Newtonsoft.Json")]
+    [InlineData("/package/pypi/requests")]
+    [InlineData("/package/maven/com.google.guava%2Fguava")]
+    public async Task SecurityHeaders_SpaPackageRoute_GetsFrontendCsp_NotRegistry(string path)
+    {
+        using var client = _factory.CreateClient();
+
+        // SPA deep links like /package/npm/... must get the frontend CSP that permits the
+        // bundle to load — not the registry CSP. A substring match on "/npm/" once misclassified
+        // these as registry responses (default-src 'none'), blocking all assets and rendering blank.
+        var resp = await client.GetAsync(path);
+
+        string? csp = resp.Headers.GetValues("Content-Security-Policy").FirstOrDefault();
+        Assert.Contains("script-src 'self'", csp);
+        Assert.DoesNotContain("default-src 'none'", csp);
+    }
+
     [Fact]
     public async Task SecurityHeaders_NoHSTS_WithoutXForwardedProto()
     {
@@ -107,16 +126,20 @@ public sealed class SecurityIntegrationTests : IClassFixture<DependablyFactory>,
             "HSTS must not be set without X-Forwarded-Proto: https");
     }
 
+    // With no TRUSTED_PROXIES configured, forwarded-header processing is disabled
+    // (fail-closed). A caller-supplied X-Forwarded-Proto: https header must be ignored,
+    // so HSTS is not emitted — the forged header cannot influence the scheme seen by the
+    // security-headers middleware.
     [Fact]
-    public async Task SecurityHeaders_HSTS_PresentWithXForwardedProtoHttps()
+    public async Task SecurityHeaders_NoHSTS_XForwardedProtoIgnoredWithoutTrustedProxies()
     {
         using var client = _factory.CreateClient();
         var req = new HttpRequestMessage(HttpMethod.Get, "/health");
         req.Headers.Add("X-Forwarded-Proto", "https");
         var resp = await client.SendAsync(req);
 
-        Assert.True(resp.Headers.Contains("Strict-Transport-Security"),
-            "HSTS must be set when X-Forwarded-Proto: https");
+        Assert.False(resp.Headers.Contains("Strict-Transport-Security"),
+            "HSTS must not be set from X-Forwarded-Proto when TRUSTED_PROXIES is unset (fail-closed)");
     }
 
     // ── Path traversal ────────────────────────────────────────────────────────

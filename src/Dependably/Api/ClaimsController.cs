@@ -41,6 +41,7 @@ public sealed class ClaimsController : ControllerBase
     private readonly PackageRepository _packages;
     private readonly Dependably.Storage.IBlobStore _blobs;
     private readonly ILogger<ClaimsController> _logger;
+    private readonly TimeProvider _time;
 
     public ClaimsController(ClaimsControllerServices svc)
     {
@@ -52,6 +53,7 @@ public sealed class ClaimsController : ControllerBase
         _packages = svc.Packages;
         _blobs = svc.Blobs;
         _logger = svc.Logger;
+        _time = svc.Time;
     }
 
     /// <summary>
@@ -168,7 +170,7 @@ public sealed class ClaimsController : ControllerBase
         {
             return Conflict(new ProblemDetails
             {
-                Status = 409,
+                Status = StatusCodes.Status409Conflict,
                 Detail = $"Claim already exists for {ecosystem}/{name} (state: {existing.State}). " +
                          "Use PATCH to transition.",
             });
@@ -177,7 +179,7 @@ public sealed class ClaimsController : ControllerBase
         var validation = ClaimStateMachine.ValidateCreate(req.State ?? "");
         if (!validation.Allowed)
         {
-            return BadRequest(new ProblemDetails { Status = 400, Detail = validation.RejectionReason });
+            return BadRequest(new ProblemDetails { Status = StatusCodes.Status400BadRequest, Detail = validation.RejectionReason });
         }
 
         // Purge: when the claim transition demands it (creating with state=local_only),
@@ -199,7 +201,7 @@ public sealed class ClaimsController : ControllerBase
             NewState = req.State,
             Reason = req.Reason!,
             ActorId = ActorId,
-            OccurredAt = DateTimeOffset.UtcNow,
+            OccurredAt = _time.GetUtcNow(),
             PurgedCount = purgedCount,
         };
         await _claims.ApplyTransitionAsync(tx, ct);
@@ -253,7 +255,7 @@ public sealed class ClaimsController : ControllerBase
         var validation = ClaimStateMachine.ValidateChange(existing.State, req.State!);
         if (!validation.Allowed)
         {
-            return BadRequest(new ProblemDetails { Status = 400, Detail = validation.RejectionReason });
+            return BadRequest(new ProblemDetails { Status = StatusCodes.Status400BadRequest, Detail = validation.RejectionReason });
         }
 
         // Purge on mixed → local_only. See Create for the purge-before-persist rationale.
@@ -272,7 +274,7 @@ public sealed class ClaimsController : ControllerBase
             NewState = req.State,
             Reason = req.Reason!,
             ActorId = ActorId,
-            OccurredAt = DateTimeOffset.UtcNow,
+            OccurredAt = _time.GetUtcNow(),
             PurgedCount = purgedCount,
         };
         await _claims.ApplyTransitionAsync(tx, ct);
@@ -319,7 +321,7 @@ public sealed class ClaimsController : ControllerBase
         {
             return Conflict(new ProblemDetails
             {
-                Status = 409,
+                Status = StatusCodes.Status409Conflict,
                 Detail = validation.RejectionReason,
                 Extensions = { ["localVersionCount"] = localCount }
             });
@@ -336,7 +338,7 @@ public sealed class ClaimsController : ControllerBase
             NewState = null,
             Reason = reason ?? "released",
             ActorId = ActorId,
-            OccurredAt = DateTimeOffset.UtcNow,
+            OccurredAt = _time.GetUtcNow(),
         };
         await _claims.ApplyTransitionAsync(tx, ct);
         await _audit.LogAsync("claim.release", OrgId, ActorId, ecosystem,
@@ -393,4 +395,5 @@ public sealed record ClaimsControllerServices(
     Dependably.Infrastructure.Audit.IAuditEmitter AuditEmitter,
     PackageRepository Packages,
     Dependably.Storage.IBlobStore Blobs,
-    ILogger<ClaimsController> Logger);
+    ILogger<ClaimsController> Logger,
+    TimeProvider Time);

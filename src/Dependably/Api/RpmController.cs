@@ -2,13 +2,13 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Caching;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
-using Microsoft.Extensions.Caching.Memory;
 
 namespace Dependably.Api;
 
@@ -33,6 +33,9 @@ public sealed class RpmController : OrgScopedControllerBase
 
     public RpmController(RpmControllerServices svc) => _svc = svc;
 
+    // Route-level hard ceiling for RPM uploads (500 MiB).
+    private const long RpmUploadSizeLimitBytes = 500L * 1024 * 1024;
+
     // ── Upload ────────────────────────────────────────────────────────────────
 
     /// <summary>PUT /rpm/upload — RPM upload (body = .rpm bytes).</summary>
@@ -41,7 +44,7 @@ public sealed class RpmController : OrgScopedControllerBase
     [Authorize(AuthenticationSchemes = "Bearer," + Dependably.Security.TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.PublishRpm)]
     [EnableRateLimiting("push")]
-    [RequestSizeLimit(500 * 1024 * 1024)]
+    [RequestSizeLimit(RpmUploadSizeLimitBytes)]
     public async Task<IActionResult> Upload(CancellationToken ct)
     {
         string orgId = CurrentTenantId();
@@ -58,7 +61,7 @@ public sealed class RpmController : OrgScopedControllerBase
                 Detail = "This org has a configured rpm upstream registry and Rpm:UpstreamMode=passthrough. " +
                          "Publishing would silently shadow upstream content. Switch Rpm:UpstreamMode " +
                          "to 'merged' or remove the org's rpm upstream registry to enable hosted publishing.",
-                Status = 409,
+                Status = StatusCodes.Status409Conflict,
             });
         }
 
@@ -91,7 +94,7 @@ public sealed class RpmController : OrgScopedControllerBase
         long? sizeCap = await ResolveSizeCapAsync(orgId, ct);
         if (sizeCap is { } cap && bytes.LongLength > cap)
         {
-            return StatusCode(413, $"RPM upload exceeds size limit ({cap} bytes).");
+            return StatusCode(StatusCodes.Status413PayloadTooLarge, $"RPM upload exceeds size limit ({cap} bytes).");
         }
 
         // NEVRA filename convention; dnf clients expect this exact shape.
@@ -105,18 +108,36 @@ public sealed class RpmController : OrgScopedControllerBase
         await _svc.BlobStore.Registry.PutAsync(blobKey, new MemoryStream(bytes), ct);
 
         var pkg = await _svc.Packages.GetOrCreateAsync(orgId, "rpm", header.Name, purlName, isProxy: false, ct);
+        await PersistRpmVersionAsync(new RpmVersionArgs(orgId, pkg, version, purl, blobKey, filename, bytes.Length, sha256, header), ct);
 
-        // xtenant: pkg.Id came from GetOrCreateAsync(orgId, ...); inserts against it
+        await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "push",
+            actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        Response.Headers["X-Dependably-PURL"] = purl;
+        return StatusCode(StatusCodes.Status201Created);
+    }
+
+    // Cohesive set of values for a newly published RPM version, bundled to keep
+    // PersistRpmVersionAsync within the parameter-count threshold (S107).
+    private sealed record RpmVersionArgs(
+        string OrgId, Package Pkg, string Version, string Purl,
+        string BlobKey, string Filename, int SizeBytes, string Sha256, RpmHeaderInfo Header);
+
+    // Upserts the package_versions and rpm_metadata rows for a newly published RPM, marks
+    // the per-arch repodata dirty, and evicts both the merged and local repodata caches.
+    private async Task PersistRpmVersionAsync(RpmVersionArgs a, CancellationToken ct)
+    {
+        // xtenant: a.Pkg.Id came from GetOrCreateAsync(a.OrgId, ...); inserts against it
         // inherit tenant scope via the packages.org_id FK chain.
         await using var conn = await _svc.Db.OpenAsync(ct);
         string? existing = await conn.ExecuteScalarAsync<string?>(
             "SELECT id FROM package_versions WHERE package_id = @pkgId AND version = @version",
-            new { pkgId = pkg.Id, version });
+            new { pkgId = a.Pkg.Id, version = a.Version });
 
         string versionId = existing ?? Guid.NewGuid().ToString("N");
         if (existing is null)
         {
-            // xtenant: pkg.Id came from GetOrCreateAsync(orgId, ...); inherits tenant scope.
+            // xtenant: a.Pkg.Id came from GetOrCreateAsync(a.OrgId, ...); inherits tenant scope.
             await conn.ExecuteAsync(
                 """
                 INSERT INTO package_versions
@@ -126,17 +147,26 @@ public sealed class RpmController : OrgScopedControllerBase
                 new
                 {
                     id = versionId,
-                    pkgId = pkg.Id,
-                    version,
-                    purl,
-                    blobKey,
-                    filename,
-                    sizeBytes = (long)bytes.Length,
-                    sha256,
+                    pkgId = a.Pkg.Id,
+                    version = a.Version,
+                    purl = a.Purl,
+                    blobKey = a.BlobKey,
+                    filename = a.Filename,
+                    sizeBytes = (long)a.SizeBytes,
+                    sha256 = a.Sha256,
                 });
         }
 
-        // Upsert rpm_metadata. xtenant: PK on package_version_id which we just bound to the tenant.
+        await UpsertRpmMetadataAsync(conn, versionId, a.Header);
+        await MarkRepodataDirtyAsync(conn, a.OrgId, a.Header.Arch);
+        EvictRepodataCaches(a.OrgId);
+    }
+
+    // Upserts the rpm_metadata row for a package version.
+    // xtenant: PK on package_version_id which is already bound to the tenant.
+    private static async Task UpsertRpmMetadataAsync(
+        System.Data.IDbConnection conn, string versionId, RpmHeaderInfo header)
+    {
         await conn.ExecuteAsync(
             """
             INSERT INTO rpm_metadata
@@ -191,26 +221,30 @@ public sealed class RpmController : OrgScopedControllerBase
                 changelogs = JsonSerializer.Serialize(header.Changelogs),
                 license = header.License,
             });
+    }
 
-        // Mark the per-arch repodata as dirty so the rebuild service picks it up.
-        // xtenant: composite PK (org_id, arch); explicit org_id parameter.
+    // Marks the per-arch repodata row dirty so the background rebuild service picks it up.
+    // xtenant: composite PK (org_id, arch); explicit org_id parameter.
+    private static async Task MarkRepodataDirtyAsync(
+        System.Data.IDbConnection conn, string orgId, string arch)
+    {
         await conn.ExecuteAsync(
             """
             INSERT INTO rpm_repodata_state (org_id, arch, dirty)
             VALUES (@orgId, @arch, 1)
             ON CONFLICT(org_id, arch) DO UPDATE SET dirty = 1
             """,
-            new { orgId, arch = header.Arch });
+            new { orgId, arch });
+    }
 
-        // Drop the cached merged repodata so the just-published version shows up in the next
-        // repomd/primary/filelists fetch instead of waiting out the TTL (no-op outside merged mode).
-        _svc.MemoryCache.Remove(MergedRepodataCacheKey(orgId));
-
-        await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "push",
-            actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-
-        Response.Headers["X-Dependably-PURL"] = purl;
-        return StatusCode(201);
+    // Evicts the merged and local-mode repodata caches so a newly published RPM appears
+    // immediately without waiting out the TTL.
+    private void EvictRepodataCaches(string orgId)
+    {
+        _svc.MergedRepodataCache.Evict(new RpmMergedRepodataKey(orgId));
+        _svc.LocalRepodataCache.Evict(new RpmLocalRepodataKey(orgId, "primary"));
+        _svc.LocalRepodataCache.Evict(new RpmLocalRepodataKey(orgId, "filelists"));
+        _svc.LocalRepodataCache.Evict(new RpmLocalRepodataKey(orgId, "other"));
     }
 
     // ── Download ──────────────────────────────────────────────────────────────
@@ -332,7 +366,7 @@ public sealed class RpmController : OrgScopedControllerBase
         }
         catch (ChecksumException)
         {
-            return StatusCode(502, "Upstream checksum mismatch; package not served.");
+            return StatusCode(StatusCodes.Status502BadGateway, "Upstream checksum mismatch; package not served.");
         }
 
         // 5. Persist DB row (package_versions + rpm_metadata) on first fetch
@@ -461,6 +495,18 @@ public sealed class RpmController : OrgScopedControllerBase
     /// <see cref="TryServeRepodataFromUpstreamAsync"/> (the same caching + checksum path
     /// passthrough mode uses) — so every href the merged repomd advertises resolves here.
     ///
+    /// Group (comps) and module (modulemd) metadata: Dependably does not generate comps or
+    /// modulemd documents for locally published RPMs. Group definitions and module streams are
+    /// authored independently of RPM packages and require operator-supplied metadata outside
+    /// the scope of the artifact registry. Upstream group/module entries with hash-prefixed
+    /// hrefs are forwarded verbatim (including locally published packages that happen to match
+    /// a group defined upstream), but locally published packages absent from the upstream
+    /// repo's group/module documents do not appear in any comps or modulemd. Plain-named group
+    /// entries (e.g. <c>comps.xml.gz</c>) are dropped from the merged repomd so no unreachable
+    /// href is advertised — dnf treats absent supplemental metadata as non-fatal.
+    /// <c>dnf install</c> and direct package installs work for all published RPMs; <c>dnf group
+    /// install</c> and modular stream installs work only for packages with upstream definitions.
+    ///
     /// Returns null when the upstream primary can't be fetched (caller then falls back to local-only),
     /// or when a hash-prefixed upstream fetch also returns null (caller 404s).
     /// </summary>
@@ -497,15 +543,16 @@ public sealed class RpmController : OrgScopedControllerBase
         }
 
         // repomd.xml: local primary + filelists entries sealed by their checksums, plus upstream's
-        // hash-prefixed non-primary entries (other, group, modules, updateinfo) passed through
-        // verbatim — plain-named upstream entries were dropped at build time as unservable.
-        // Locally published RPMs do not appear in upstream's other/group/modules documents — dnf
-        // handles these as supplemental metadata and degrades gracefully when a package is absent.
+        // hash-prefixed non-primary entries (other, group, modules, updateinfo) forwarded verbatim.
+        // Plain-named upstream entries (e.g. comps.xml.gz from classic createrepo) were dropped at
+        // build time because they are not content-addressed and cannot be proxied here.
+        // No locally-generated comps/modulemd is produced — group and module metadata is upstream-only.
         string repomd = RpmRepodataService.BuildRepomd(
             merged.PrimaryGz,
+            _svc.Time.GetUtcNow(),
             merged.FilelistsGz,
             otherGz: null,
-            merged.UpstreamNonPrimaryEntries);
+            extraEntries: merged.UpstreamNonPrimaryEntries);
         return File(System.Text.Encoding.UTF8.GetBytes(repomd), "application/xml", "repomd.xml");
     }
 
@@ -515,8 +562,8 @@ public sealed class RpmController : OrgScopedControllerBase
     /// </summary>
     private async Task<MergedRepodataCache?> BuildMergedRepodataAsync(string orgId, string upstreamBase, CancellationToken ct)
     {
-        string cacheKey = MergedRepodataCacheKey(orgId);
-        if (_svc.MemoryCache.TryGetValue<MergedRepodataCache>(cacheKey, out var cached) && cached is not null)
+        var cacheKey = new RpmMergedRepodataKey(orgId);
+        if (_svc.MergedRepodataCache.TryGet(cacheKey, out var cached) && cached is not null)
         {
             return cached;
         }
@@ -597,11 +644,7 @@ public sealed class RpmController : OrgScopedControllerBase
             .ToArray();
 
         var result = new MergedRepodataCache(primaryGz, filelistsGz, filteredExtras);
-        _svc.MemoryCache.Set(cacheKey, result, new MemoryCacheEntryOptions
-        {
-            AbsoluteExpirationRelativeToNow = MergedRepodataTtl,
-            Size = primaryGz.Length + filelistsGz.Length,
-        });
+        _svc.MergedRepodataCache.Set(cacheKey, result, MergedRepodataTtl, primaryGz.Length + filelistsGz.Length);
         return result;
     }
 
@@ -626,13 +669,6 @@ public sealed class RpmController : OrgScopedControllerBase
         string filename = href.Contains('/') ? href[(href.LastIndexOf('/') + 1)..] : href;
         return RpmUpstreamProxy.IsHashPrefixedFilename(filename);
     }
-
-    private sealed record MergedRepodataCache(
-        byte[] PrimaryGz,
-        byte[] FilelistsGz,
-        IReadOnlyList<System.Xml.Linq.XElement> UpstreamNonPrimaryEntries);
-
-    private static string MergedRepodataCacheKey(string orgId) => $"rpm:merged-repodata:{orgId}";
 
     // Keep the repomd/primary/filelists tuple consistent across a single dnf sync while
     // still picking up new upstream content within a minute — matches the repomd passthrough TTL.
@@ -664,7 +700,7 @@ public sealed class RpmController : OrgScopedControllerBase
 
         if (upstreamResult.NotModified)
         {
-            return StatusCode(304);
+            return StatusCode(StatusCodes.Status304NotModified);
         }
 
         if (upstreamResult.ETag is not null)
@@ -686,39 +722,103 @@ public sealed class RpmController : OrgScopedControllerBase
         return File(upstreamResult.Body, upstreamResult.ContentType);
     }
 
+    // Short TTL keeps the local repodata fresh while amortising per-request builds over
+    // a dnf metadata refresh burst. Eviction on upload provides immediate consistency.
+    private static readonly TimeSpan LocalRepodataTtl = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// Serves locally generated repodata when no upstream proxy is active (no configured rpm
+    /// registry, or proxy passthrough disabled). Generates and serves <c>repomd.xml</c>,
+    /// <c>primary.xml.gz</c>, <c>filelists.xml.gz</c>, and <c>other.xml.gz</c> from the
+    /// locally published RPMs stored in the database.
+    ///
+    /// Group (comps) and module (modulemd) documents are not generated in local or hosted mode.
+    /// Group definitions and module streams are authored independently of RPM packages; the
+    /// registry stores only the package artifact and its header metadata. Any request for
+    /// <c>comps.xml.gz</c>, <c>modules.yaml</c>, or similar supplemental metadata returns
+    /// 404 — no empty or malformed document is served. <c>dnf install</c> works for all
+    /// published packages; <c>dnf group install</c> and modular workflows require upstream
+    /// group/module definitions that Dependably does not produce.
+    /// </summary>
     private async Task<IActionResult> ServeRepodataLocallyAsync(string orgId, string file, CancellationToken ct)
     {
         if (file.Equals("repomd.xml", StringComparison.OrdinalIgnoreCase))
         {
-            string primary = await _svc.Repodata.BuildPrimaryAsync(orgId, ct);
-            byte[] primaryGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(primary));
-            string filelists = await _svc.Repodata.BuildFilelistsAsync(orgId, ct);
-            byte[] filelistsGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(filelists));
-            string other = await _svc.Repodata.BuildOtherAsync(orgId, ct);
-            byte[] otherGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(other));
-            string repomd = RpmRepodataService.BuildRepomd(primaryGz, filelistsGz, otherGz);
+            // repomd.xml seals the SHA-256 checksums of primary/filelists/other — the three
+            // compressed documents must be byte-identical to what was used to compute those
+            // checksums. Fetch or rebuild each from the same per-document cache entries so
+            // concurrent repomd.xml and primary.xml.gz requests always agree.
+            byte[] primaryGz = await GetOrRebuildLocalDocAsync(orgId, "primary",
+                async rebuildCt =>
+                {
+                    string xml = await _svc.Repodata.BuildPrimaryAsync(orgId, rebuildCt);
+                    return RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(xml));
+                }, ct);
+            byte[] filelistsGz = await GetOrRebuildLocalDocAsync(orgId, "filelists",
+                async rebuildCt =>
+                {
+                    string xml = await _svc.Repodata.BuildFilelistsAsync(orgId, rebuildCt);
+                    return RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(xml));
+                }, ct);
+            byte[] otherGz = await GetOrRebuildLocalDocAsync(orgId, "other",
+                async rebuildCt =>
+                {
+                    string xml = await _svc.Repodata.BuildOtherAsync(orgId, rebuildCt);
+                    return RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(xml));
+                }, ct);
+            string repomd = RpmRepodataService.BuildRepomd(primaryGz, _svc.Time.GetUtcNow(), filelistsGz, otherGz);
             return File(System.Text.Encoding.UTF8.GetBytes(repomd), "application/xml", "repomd.xml");
         }
         if (file.Equals("primary.xml.gz", StringComparison.OrdinalIgnoreCase))
         {
-            string primary = await _svc.Repodata.BuildPrimaryAsync(orgId, ct);
-            return File(RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(primary)),
-                "application/x-gzip", "primary.xml.gz");
+            byte[] gz = await GetOrRebuildLocalDocAsync(orgId, "primary",
+                async rebuildCt =>
+                {
+                    string xml = await _svc.Repodata.BuildPrimaryAsync(orgId, rebuildCt);
+                    return RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(xml));
+                }, ct);
+            return File(gz, "application/x-gzip", "primary.xml.gz");
         }
         if (file.Equals("filelists.xml.gz", StringComparison.OrdinalIgnoreCase))
         {
-            string filelists = await _svc.Repodata.BuildFilelistsAsync(orgId, ct);
-            return File(RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(filelists)),
-                "application/x-gzip", "filelists.xml.gz");
+            byte[] gz = await GetOrRebuildLocalDocAsync(orgId, "filelists",
+                async rebuildCt =>
+                {
+                    string xml = await _svc.Repodata.BuildFilelistsAsync(orgId, rebuildCt);
+                    return RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(xml));
+                }, ct);
+            return File(gz, "application/x-gzip", "filelists.xml.gz");
         }
         if (file.Equals("other.xml.gz", StringComparison.OrdinalIgnoreCase))
         {
-            string other = await _svc.Repodata.BuildOtherAsync(orgId, ct);
-            return File(RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(other)),
-                "application/x-gzip", "other.xml.gz");
+            byte[] gz = await GetOrRebuildLocalDocAsync(orgId, "other",
+                async rebuildCt =>
+                {
+                    string xml = await _svc.Repodata.BuildOtherAsync(orgId, rebuildCt);
+                    return RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(xml));
+                }, ct);
+            return File(gz, "application/x-gzip", "other.xml.gz");
         }
 
         return NotFound();
+    }
+
+    // Retrieves the gzip-compressed document bytes from the per-document cache, or rebuilds
+    // them under single-flight (concurrent callers for the same key share one rebuild). The
+    // rebuild lambda always produces bytes (RPM documents are unconditionally generated from
+    // stored rows), so the nullable result is converted to non-null by the call site.
+    private async Task<byte[]> GetOrRebuildLocalDocAsync(
+        string orgId, string docType,
+        Func<CancellationToken, Task<byte[]>> build,
+        CancellationToken ct)
+    {
+        var key = new RpmLocalRepodataKey(orgId, docType);
+        // The lambda always returns non-null bytes; null-forgiving is safe here because
+        // the RPM build methods always produce a complete XML document even for an empty repo.
+        return (await _svc.LocalRepodataCache.GetOrRebuildAsync(
+            key, LocalRepodataTtl,
+            async rebuildCt => await build(rebuildCt),
+            ct))!;
     }
 
     // ── GPG key ───────────────────────────────────────────────────────────────
@@ -919,6 +1019,8 @@ public sealed record RpmControllerServices(
     IMetadataStore Db,
     RpmRepodataService Repodata,
     UpstreamRegistryResolver Registries,
-    IMemoryCache MemoryCache,
+    MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> MergedRepodataCache,
+    RenderedResponseCache<RpmLocalRepodataKey> LocalRepodataCache,
+    TimeProvider Time,
     UpstreamClient? UpstreamClient = null,
     IRpmUpstreamProxy? Proxy = null);

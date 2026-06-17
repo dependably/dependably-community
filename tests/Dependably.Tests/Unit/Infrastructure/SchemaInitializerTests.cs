@@ -355,6 +355,87 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
         Assert.NotNull(realError);  // no-such-table now surfaces rather than being swallowed
     }
 
+    [Fact]
+    public async Task SeedGoCargoUpstreamRegistries_SeedsBothDefaultsForOrgWithNoRows()
+    {
+        // A pre-existing org that has no golang/cargo upstream rows (because the original
+        // seed_default_upstream_registries backfill predated those ecosystems) receives both
+        // defaults when the targeted backfill re-runs.
+        await NewInitializer(_db).InitializeAsync();
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");
+        }
+        await ResetMigrationAsync("seed_go_cargo_upstream_registries");
+
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+        string? golang = await verify.ExecuteScalarAsync<string>(
+            "SELECT url FROM upstream_registry WHERE org_id = 'o1' AND ecosystem = 'golang'");
+        string? cargo = await verify.ExecuteScalarAsync<string>(
+            "SELECT url FROM upstream_registry WHERE org_id = 'o1' AND ecosystem = 'cargo'");
+        Assert.Equal("https://proxy.golang.org", golang);
+        Assert.Equal("https://index.crates.io", cargo);
+    }
+
+    [Fact]
+    public async Task SeedGoCargoUpstreamRegistries_DoesNotDuplicateExistingRows()
+    {
+        // An org that already has a golang/cargo row (e.g. an operator-customised mirror) is not
+        // touched: the per-(org, ecosystem) existence check skips it, so no second row appears.
+        await NewInitializer(_db).InitializeAsync();
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");
+            await setup.ExecuteAsync("""
+                INSERT INTO upstream_registry (id, org_id, ecosystem, url, position)
+                VALUES ('g-custom','o1','golang','https://mirror.internal/go',0)
+                """);
+            await setup.ExecuteAsync("""
+                INSERT INTO upstream_registry (id, org_id, ecosystem, url, position)
+                VALUES ('c-custom','o1','cargo','https://mirror.internal/cargo',0)
+                """);
+        }
+        await ResetMigrationAsync("seed_go_cargo_upstream_registries");
+
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+        var golangIds = (await verify.QueryAsync<string>(
+            "SELECT id FROM upstream_registry WHERE org_id = 'o1' AND ecosystem = 'golang'")).ToList();
+        var cargoIds = (await verify.QueryAsync<string>(
+            "SELECT id FROM upstream_registry WHERE org_id = 'o1' AND ecosystem = 'cargo'")).ToList();
+        Assert.Equal(new[] { "g-custom" }, golangIds);
+        Assert.Equal(new[] { "c-custom" }, cargoIds);
+    }
+
+    [Fact]
+    public async Task SeedGoCargoUpstreamRegistries_DoesNotResurrectDeliberatelyRemovedOtherEcosystem()
+    {
+        // The targeted-backfill safety property: an org that has deliberately zero rows for an
+        // OTHER ecosystem (e.g. npm proxying disabled by deleting its upstream) must NOT have that
+        // ecosystem re-seeded by this migration — it touches only golang and cargo. Re-running the
+        // full backfill would resurrect the removed npm row; the restricted scope prevents that.
+        await NewInitializer(_db).InitializeAsync();
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");
+            // o1 has rows for everything EXCEPT npm and golang/cargo: npm was deliberately removed.
+        }
+        await ResetMigrationAsync("seed_go_cargo_upstream_registries");
+
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+        long npmRows = await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM upstream_registry WHERE org_id = 'o1' AND ecosystem = 'npm'");
+        long golangRows = await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM upstream_registry WHERE org_id = 'o1' AND ecosystem = 'golang'");
+        Assert.Equal(0, npmRows);   // deliberately-removed npm stays removed
+        Assert.Equal(1, golangRows); // golang/cargo are the only ecosystems seeded
+    }
+
     /// <summary>
     /// Captures log records so we can assert on the applied/skipped branches in
     /// <c>RunOnceAsync</c>. Per project memory: "migrations log applied AND skipped".

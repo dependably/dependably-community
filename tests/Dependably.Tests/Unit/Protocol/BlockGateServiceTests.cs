@@ -3,6 +3,7 @@ using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
+using Microsoft.Extensions.Time.Testing;
 
 namespace Dependably.Tests.Unit.Protocol;
 
@@ -17,6 +18,7 @@ namespace Dependably.Tests.Unit.Protocol;
 public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
 {
     private readonly InMemoryDbFixture _fixture;
+    private readonly FakeTimeProvider _clock = TestTime.Frozen();
     private readonly BlockGateService _sut;
     private readonly AuditRepository _audit;
 
@@ -24,7 +26,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     {
         _fixture = fixture;
         _audit = new AuditRepository(_fixture.Store);
-        _sut = new BlockGateService(new VulnerabilityRepository(_fixture.Store), _audit, new QuarantineRepository(_fixture.Store), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance);
+        _sut = new BlockGateService(new VulnerabilityRepository(_fixture.Store, _clock), _audit, new QuarantineRepository(_fixture.Store, _clock), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, _clock);
     }
 
     // ── manual-block / manual-allow ───────────────────────────────────────────
@@ -38,7 +40,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         {
             ManualState = "blocked",
             MinReleaseAgeHours = 24,
-            PublishedAt = DateTimeOffset.UtcNow.AddDays(-30),
+            PublishedAt = _clock.GetUtcNow().AddDays(-30),
         };
 
         Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
@@ -55,8 +57,8 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         {
             ManualState = "allowed",
             MinReleaseAgeHours = 48,
-            PublishedAt = DateTimeOffset.UtcNow.AddHours(-1), // would be blocked by release-age
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            PublishedAt = _clock.GetUtcNow().AddHours(-1), // would be blocked by release-age
+            VulnCheckedAt = _clock.GetUtcNow(),
         };
 
         Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
@@ -247,7 +249,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             MinReleaseAgeHours = 24,
-            PublishedAt = DateTimeOffset.UtcNow.AddHours(-6), // 18 hours short of the hold
+            PublishedAt = _clock.GetUtcNow().AddHours(-6), // 18 hours short of the hold
         };
 
         Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
@@ -272,7 +274,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             MinReleaseAgeHours = 24,
-            PublishedAt = DateTimeOffset.UtcNow.AddDays(-7),
+            PublishedAt = _clock.GetUtcNow().AddDays(-7),
         };
 
         Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
@@ -304,7 +306,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             MinReleaseAgeHours = null,
-            PublishedAt = DateTimeOffset.UtcNow,
+            PublishedAt = _clock.GetUtcNow(),
         };
 
         Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
@@ -320,7 +322,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             MinReleaseAgeHours = 0,
-            PublishedAt = DateTimeOffset.UtcNow,
+            PublishedAt = _clock.GetUtcNow(),
         };
 
         Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
@@ -340,7 +342,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             VersionId = verId,
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            VulnCheckedAt = _clock.GetUtcNow(),
             BlockMaliciousMode = "block",
         };
         string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
@@ -370,7 +372,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             VersionId = verId,
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            VulnCheckedAt = _clock.GetUtcNow(),
             BlockMaliciousMode = mode,
         };
         string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
@@ -392,7 +394,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         {
             VersionId = verId,
             ManualState = "allowed",
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            VulnCheckedAt = _clock.GetUtcNow(),
             BlockMaliciousMode = "block",
         };
         string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
@@ -414,7 +416,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             VersionId = verId,
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            VulnCheckedAt = _clock.GetUtcNow(),
             BlockMaliciousMode = "block",
             MaxOsvScoreTolerance = 0.0,
         };
@@ -437,7 +439,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             VersionId = verId,
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            VulnCheckedAt = _clock.GetUtcNow(),
             BlockMaliciousMode = "block",
             MaxOsvScoreTolerance = 5.0,
         };
@@ -483,7 +485,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             VersionId = verId,
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            VulnCheckedAt = _clock.GetUtcNow(),
             BlockKevMode = "block",
         };
         string kevOsvId = $"GHSA-kev-{Guid.NewGuid():N}";
@@ -513,7 +515,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             VersionId = verId,
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            VulnCheckedAt = _clock.GetUtcNow(),
             BlockKevMode = mode,
         };
         string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
@@ -533,7 +535,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             VersionId = verId,
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            VulnCheckedAt = _clock.GetUtcNow(),
             MaxEpssTolerance = 0.5,
         };
         string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
@@ -562,7 +564,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             VersionId = verId,
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            VulnCheckedAt = _clock.GetUtcNow(),
             MaxEpssTolerance = tolerance,
         };
         string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
@@ -583,7 +585,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             VersionId = verId,
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            VulnCheckedAt = _clock.GetUtcNow(),
             MaxEpssTolerance = null,
         };
         string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
@@ -604,7 +606,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         var req = BaseRequest(orgId) with
         {
             VersionId = verId,
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            VulnCheckedAt = _clock.GetUtcNow(),
             BlockMaliciousMode = "block",
             BlockKevMode = "block",
             MaxEpssTolerance = 0.1,
@@ -632,7 +634,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         {
             VersionId = verId,
             ManualState = "allowed",
-            VulnCheckedAt = DateTimeOffset.UtcNow,
+            VulnCheckedAt = _clock.GetUtcNow(),
             BlockKevMode = "block",
             MaxEpssTolerance = 0.1,
         };
@@ -657,12 +659,12 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         {
             VersionId = string.Empty,
             MinReleaseAgeHours = 24,
-            PublishedAt = DateTimeOffset.UtcNow.AddHours(-1),
+            PublishedAt = _clock.GetUtcNow().AddHours(-1),
         };
 
         Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
 
-        var quarantine = new QuarantineRepository(_fixture.Store);
+        var quarantine = new QuarantineRepository(_fixture.Store, _clock);
         var (items, total) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
         Assert.Equal(1, total);
         Assert.Equal("release_age", items[0].Gate);
@@ -679,7 +681,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
 
         Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
 
-        var quarantine = new QuarantineRepository(_fixture.Store);
+        var quarantine = new QuarantineRepository(_fixture.Store, _clock);
         var (_, total) = await quarantine.ListAsync(orgId, null, null, 10, 0);
         Assert.Equal(0, total);
     }
@@ -699,7 +701,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
 
         // First fetch blocks and queues the pending row.
         Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateFirstFetchDeprecationAsync(req));
-        var quarantine = new QuarantineRepository(_fixture.Store);
+        var quarantine = new QuarantineRepository(_fixture.Store, _clock);
         var (items, _) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
         string id = items.Single(i => i.Purl == req.Purl).Id;
 
@@ -720,7 +722,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         };
 
         Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateFirstFetchDeprecationAsync(req));
-        var quarantine = new QuarantineRepository(_fixture.Store);
+        var quarantine = new QuarantineRepository(_fixture.Store, _clock);
         var (items, _) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
         await quarantine.DecideAsync(orgId, items.Single(i => i.Purl == req.Purl).Id, "denied", null, null);
 

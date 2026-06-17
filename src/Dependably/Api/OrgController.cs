@@ -1,4 +1,5 @@
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Caching;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -21,6 +22,9 @@ namespace Dependably.Api;
 [Authorize]
 public sealed class OrgController : OrgScopedControllerBase
 {
+    // Maximum page size for package list responses.
+    private const int MaxPackagePageSize = 200;
+
     private readonly OrgRepository _orgs;
     private readonly PackageRepository _packages;
     private readonly PackageAnalyticsRepository _packageAnalytics;
@@ -34,6 +38,8 @@ public sealed class OrgController : OrgScopedControllerBase
     private readonly IPublicUrlBuilder _urls;
     private readonly ILogger<OrgController> _logger;
     private readonly IMemoryCache _cache;
+    private readonly MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> _rpmMergedCache;
+    private readonly RenderedResponseCache<RpmLocalRepodataKey> _rpmLocalCache;
 
     public OrgController(OrgControllerServices svc)
     {
@@ -50,6 +56,8 @@ public sealed class OrgController : OrgScopedControllerBase
         _urls = svc.Urls;
         _logger = svc.Logger;
         _cache = svc.Cache;
+        _rpmMergedCache = svc.RpmMergedCache;
+        _rpmLocalCache = svc.RpmLocalCache;
     }
 
     // Org CRUD lives on SystemController (/api/v1/system/tenants). Tenant users have no
@@ -75,7 +83,7 @@ public sealed class OrgController : OrgScopedControllerBase
         }
 
         string orgId = CurrentTenantId();
-        limit = Math.Clamp(limit, 1, 200);
+        limit = Math.Clamp(limit, 1, MaxPackagePageSize);
         page = Math.Max(page, 1);
         int offset = (page - 1) * limit;
 
@@ -135,6 +143,7 @@ public sealed class OrgController : OrgScopedControllerBase
                 v.Origin,
                 v.UpstreamIntegrityValue,
                 v.UpstreamIntegrityAlgorithm,
+                v.IsMalicious,
                 MaxOsvScore = hasMax ? maxScore : (double?)null,
                 Status = status,
                 Licenses = licenseMap[v.Id].ToArray()
@@ -159,16 +168,26 @@ public sealed class OrgController : OrgScopedControllerBase
         bool autoBlocked = v.VulnCheckedAt is not null && maxScore.HasValue && maxScore.Value > tolerance;
         return (v.ManualBlockState, autoBlocked) switch
         {
+            // Manual allow over an advisory the gate would otherwise auto-block.
             ("allowed", true) => "allowed",
-            ("allowed", false) => "clean",
+            // Any non-allowed version above tolerance is auto-blocked.
             (_, true) => "blocked",
             _ when v.Deprecated is not null => "deprecated",
             _ when v.VulnCheckedAt is null => "unscanned",
+            // Scanned and servable, but carries at least one advisory below the block
+            // tolerance (or an unscored/MAL advisory the score aggregate never saw). Reported
+            // distinctly so it is never labelled "clean" — only an advisory-free scanned
+            // version earns that label.
+            _ when v.HasAdvisory => "vulnerable",
             _ => "clean",
         };
     }
 
     /// <summary>DELETE /api/v1/orgs/{org}/packages/{ecosystem}/{name}/{version}</summary>
+    // Delete accepts both JWT sessions (UI) and API tokens (automation/scripted yank).
+    // The class-level [Authorize] covers JWT; this method-level override unions in the
+    // ApiToken scheme so a PAT carrying the per-ecosystem yank cap can reach the endpoint.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpDelete("api/v1/packages/{ecosystem}/{name}/{version}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> DeleteVersion(string ecosystem, string name, string version, CancellationToken ct)
@@ -231,6 +250,14 @@ public sealed class OrgController : OrgScopedControllerBase
                 string nugetId = pkg.Name.ToLowerInvariant();
                 _cache.Remove($"metadata:{orgId}:nuget:{nugetId}:sv1");
                 _cache.Remove($"metadata:{orgId}:nuget:{nugetId}:sv2");
+                break;
+            case "rpm":
+                // Evict the local per-document cache (primary, filelists, other) and the
+                // merged-repodata tuple so a yanked package no longer appears in repodata.
+                _rpmLocalCache.Evict(new RpmLocalRepodataKey(orgId, "primary"));
+                _rpmLocalCache.Evict(new RpmLocalRepodataKey(orgId, "filelists"));
+                _rpmLocalCache.Evict(new RpmLocalRepodataKey(orgId, "other"));
+                _rpmMergedCache.Evict(new RpmMergedRepodataKey(orgId));
                 break;
         }
 
@@ -301,7 +328,7 @@ public sealed class OrgController : OrgScopedControllerBase
         string orgId = CurrentTenantId();
 
         // Serve the pre-computed snapshot kept warm by StatsRefreshService rather than running
-        // the eight live aggregate queries per request. Deserialize and return through Ok() so
+        // the live aggregate queries per request. Deserialize and return through Ok() so
         // the MVC pipeline is the single serialization authority — the cached and live paths
         // produce byte-identical shape/casing, and the read tolerates any stored casing. Cache
         // miss (new org, or before the first refresh pass) falls back to a live compute so the
@@ -364,6 +391,8 @@ public sealed class OrgController : OrgScopedControllerBase
             "maven" => GenerateMavenSnippet(baseUrl, slug, settings),
             "rpm" => GenerateRpmSnippet(baseUrl, slug, settings),
             "oci" => GenerateOciSnippet(baseUrl, slug, settings),
+            "golang" => GenerateGoSnippet(baseUrl, slug, settings),
+            "cargo" => GenerateCargoSnippet(baseUrl, slug, settings),
             _ => null
         };
 
@@ -484,6 +513,50 @@ public sealed class OrgController : OrgScopedControllerBase
             docker pull  {host}/<image>:<tag>
             docker push  {host}/<image>:<tag>
             # Max upload (per blob): {s?.MaxUploadBytesOci ?? s?.MaxUploadBytes ?? 0} bytes
+            """;
+    }
+
+    // Go is proxy-only (no hosted publish) — GOPROXY points the toolchain at the registry, and a
+    // .netrc entry carries credentials for authenticated proxies. GOPRIVATE/GONOSUMDB exempt a
+    // private module path from the public checksum database.
+    private static string GenerateGoSnippet(string baseUrl, string slug, OrgSettings? s)
+    {
+        _ = slug;
+        _ = s;
+        string host = new Uri(baseUrl).Host;
+        return $"""
+            # Point the Go toolchain at the registry proxy:
+            export GOPROXY={baseUrl}/go
+
+            # ~/.netrc — credentials for an authenticated proxy:
+            machine {host} login <user> password <token>
+
+            # For a private module path, skip the public checksum DB:
+            export GONOSUMDB=example.com/private/*
+            export GOPRIVATE=example.com/private/*
+            """;
+    }
+
+    // Cargo snippet covers both consume (sparse index in config.toml) and publish (`cargo publish
+    // --registry dependably`). Cargo publish honours the per-ecosystem cap, falling back to the
+    // org global cap when unset.
+    private static string GenerateCargoSnippet(string baseUrl, string slug, OrgSettings? s)
+    {
+        _ = slug;
+        return $"""
+            # ~/.cargo/config.toml — consume + publish
+            [registries.dependably]
+            index = "sparse+{baseUrl}/cargo/"
+
+            # Authenticate (writes the token into Cargo's credentials store):
+            cargo login --registry dependably
+            # ...or set it directly in config.toml / credentials.toml:
+            [registries.dependably]
+            token = "<token>"
+
+            # Publish a crate:
+            cargo publish --registry dependably
+            # Max upload: {s?.MaxUploadBytesCargo ?? s?.MaxUploadBytes ?? 0} bytes
             """;
     }
 

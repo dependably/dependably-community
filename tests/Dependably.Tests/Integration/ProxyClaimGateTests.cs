@@ -35,6 +35,7 @@ public sealed class ProxyClaimGateTests : IClassFixture<DependablyFactory>, IAsy
             PriorState = null,
             NewState = state,
             Reason = "test",
+            // now-ok: claim-event provenance stamp; no test asserts on this instant.
             OccurredAt = DateTimeOffset.UtcNow,
         });
     }

@@ -22,6 +22,7 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
     private const string DefaultBaseUrl = "http://localhost:8080";
 
     private readonly InviteRepository _invites;
+    private readonly OrgRepository _orgs;
     private readonly OrgAccessGuard _guard;
     private readonly AuditRepository _audit;
     private readonly IConfiguration _config;
@@ -36,6 +37,7 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
 #pragma warning disable S107
     public OrgInvitesController(
         InviteRepository invites,
+        OrgRepository orgs,
         OrgAccessGuard guard,
         AuditRepository audit,
         IConfiguration config,
@@ -46,6 +48,7 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
 #pragma warning restore S107
     {
         _invites = invites;
+        _orgs = orgs;
         _guard = guard;
         _audit = audit;
         _config = config;
@@ -106,6 +109,18 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
             }
         }
 
+        // Pending-invite cap. Count+insert is intentionally non-transactional: a small
+        // race overshoot (two concurrent creates both reading the same count just below the
+        // cap) is acceptable and bounded — the DB grows by at most one row past the cap in
+        // a concurrent burst.
+        int pendingCount = await _invites.CountPendingAsync(orgId, ct);
+        int cap = await _orgs.GetMaxPendingInvitesPerTenantAsync(ct);
+        if (pendingCount >= cap)
+        {
+            return _problems.ValidationErrorAction("invites",
+                $"Pending invite limit ({cap}) reached for this tenant. Cancel unused invites before creating new ones.");
+        }
+
         var (raw, record) = await _invites.CreateAsync(orgId, req.Email, userId!, role, ct);
 
         await _audit.LogAsync("invite_created", orgId, userId,
@@ -129,6 +144,8 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
             // (intentional, per audit_log vs activity policy); the link — which embeds the
             // raw invite token — is never logged at any level. The API response is the
             // sanctioned channel for the link.
+            // deepcode ignore PrivateInformationExposure: logs only record.Id (invite GUID) and tenant id —
+            // Snyk taints the whole record for its Email field, but no email/token/link reaches the log sink.
             _logger.LogInformation("Invite {InviteId} created for tenant {TenantId}; SMTP not configured — retrieve link from API response.", record.Id, orgId);
             return Ok(new { record, invite_link = inviteLink, delivered_via = "link" });
         }
@@ -144,6 +161,7 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
         }
         catch (Exception ex)
         {
+            // deepcode ignore PrivateInformationExposure: logs only ExceptionType, record.Id (invite GUID) and tenant id — the tainted record's email/token never reaches the sink.
             _logger.LogWarning(
                 ex,
                 "ExceptionType={ExceptionType} invite email delivery failed for invite {InviteId} on tenant {TenantId}; returning link as fallback.",

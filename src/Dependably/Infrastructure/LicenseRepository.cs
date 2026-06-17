@@ -7,9 +7,17 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed class LicenseRepository
 {
-    private readonly IMetadataStore _db;
+    // SQLite SQLITE_CONSTRAINT error code (unique constraint violation on insert).
+    private const int SqliteConstraintErrorCode = 19;
 
-    public LicenseRepository(IMetadataStore db) => _db = db;
+    private readonly IMetadataStore _db;
+    private readonly TimeProvider _time;
+
+    public LicenseRepository(IMetadataStore db, TimeProvider time)
+    {
+        _db = db;
+        _time = time;
+    }
 
     // ── Package version licenses ──────────────────────────────────────────────
 
@@ -102,7 +110,7 @@ public sealed class LicenseRepository
                 "INSERT INTO license_allowlist (id, org_id, license_spdx) VALUES (@id, @orgId, @licenseSpdx)",
                 new { id, orgId, licenseSpdx });
         }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 19)
+        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == SqliteConstraintErrorCode)
         {
             // UNIQUE constraint — already exists
             return null;
@@ -112,7 +120,7 @@ public sealed class LicenseRepository
             Id = id,
             OrgId = orgId,
             LicenseSpdx = licenseSpdx,
-            CreatedAt = DateTimeOffset.UtcNow
+            CreatedAt = _time.GetUtcNow()
         };
     }
 
@@ -152,7 +160,7 @@ public sealed class LicenseRepository
                 "INSERT INTO license_blocklist (id, org_id, license_spdx) VALUES (@id, @orgId, @licenseSpdx)",
                 new { id, orgId, licenseSpdx });
         }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 19)
+        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == SqliteConstraintErrorCode)
         {
             return null;
         }
@@ -161,7 +169,7 @@ public sealed class LicenseRepository
             Id = id,
             OrgId = orgId,
             LicenseSpdx = licenseSpdx,
-            CreatedAt = DateTimeOffset.UtcNow
+            CreatedAt = _time.GetUtcNow()
         };
     }
 

@@ -23,6 +23,12 @@ namespace Dependably.Protocol;
 /// <item>maven — dot-boundary groupId prefix: <c>com.acme</c> reserves <c>com.acme</c> and
 /// every <c>com.acme.*</c> groupId but not <c>com.acmecorp</c>. A trailing <c>*</c> /
 /// <c>.*</c> on the stored pattern is tolerated and folds into the same semantics.</item>
+/// <item>cargo — exact or trailing-<c>*</c> glob, ordinal on lowercased names (crates.io is a
+/// flat, case-folded namespace), same shape as npm.</item>
+/// <item>golang — slash-boundary module-path prefix, the <c>/</c> analog of maven's dot
+/// boundary: <c>github.com/acme</c> reserves <c>github.com/acme</c> and every
+/// <c>github.com/acme/*</c> path but not <c>github.com/acmecorp</c>. Case-sensitive (Ordinal) —
+/// Go module paths are case-significant (the proxy's bang-encoding exists for exactly this).</item>
 /// </list>
 ///
 /// Reads are served from a short-TTL per-org cache (same shape as
@@ -31,16 +37,18 @@ namespace Dependably.Protocol;
 /// </summary>
 public sealed partial class ReservedNamespaceService
 {
-    public static readonly IReadOnlyList<string> SupportedEcosystems = ["npm", "pypi", "nuget", "maven"];
+    public static readonly IReadOnlyList<string> SupportedEcosystems = ["npm", "pypi", "nuget", "maven", "cargo", "golang"];
 
     private readonly IMetadataStore _db;
     private readonly IMemoryCache _cache;
+    private readonly TimeProvider _time;
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(60);
 
-    public ReservedNamespaceService(IMetadataStore db, IMemoryCache cache)
+    public ReservedNamespaceService(IMetadataStore db, IMemoryCache cache, TimeProvider time)
     {
         _db = db;
         _cache = cache;
+        _time = time;
     }
 
     private static string CacheKey(string orgId) => $"reserved-namespace:{orgId}";
@@ -91,7 +99,7 @@ public sealed partial class ReservedNamespaceService
             Ecosystem = ecosystem,
             Pattern = pattern,
             CreatedBy = createdBy,
-            CreatedAt = DateTimeOffset.UtcNow,
+            CreatedAt = _time.GetUtcNow(),
         };
     }
 
@@ -142,12 +150,13 @@ public sealed partial class ReservedNamespaceService
         && ecosystem.ToLowerInvariant() switch
         {
             "maven" => MatchesMavenGroupId(pattern, name),
+            "golang" => MatchesGoModulePath(pattern, name),
             "nuget" => MatchesGlob(pattern, name, StringComparison.OrdinalIgnoreCase),
             "pypi" => MatchesGlob(
                 NormalizePyPiStem(TrimTrailingStar(pattern, out bool pypiGlob)) + (pypiGlob ? "*" : ""),
                 NormalizePyPiStem(name),
                 StringComparison.Ordinal),
-            // npm (and any future lowercase-canonical ecosystem): ordinal on lowercase.
+            // npm and cargo (lowercase-canonical, flat namespaces): ordinal on lowercase.
             _ => MatchesGlob(pattern.ToLowerInvariant(), name.ToLowerInvariant(), StringComparison.Ordinal),
         };
 
@@ -173,6 +182,18 @@ public sealed partial class ReservedNamespaceService
         return prefix.Length != 0
             && (groupId == prefix
                 || groupId.StartsWith(prefix + ".", StringComparison.Ordinal));
+    }
+
+    // Slash-boundary module-path prefix — the '/' analog of MatchesMavenGroupId: 'github.com/acme'
+    // covers 'github.com/acme' and 'github.com/acme/<anything>' but never 'github.com/acmecorp'.
+    // Trailing '*' / '/*' / '/' spellings collapse to the same boundary-safe prefix. Ordinal
+    // (case-sensitive) because Go module paths are case-significant.
+    private static bool MatchesGoModulePath(string pattern, string module)
+    {
+        string prefix = pattern.TrimEnd('*').TrimEnd('/');
+        return prefix.Length != 0
+            && (module == prefix
+                || module.StartsWith(prefix + "/", StringComparison.Ordinal));
     }
 
     // PEP 503 name normalization — runs of '-', '_', '.' collapse to '-', lowercased.

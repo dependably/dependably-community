@@ -3,6 +3,7 @@ using System.Text;
 using Dapper;
 using Dependably.Api;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Caching;
 using Dependably.Protocol;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
@@ -25,6 +26,7 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
     private readonly InMemoryBlobStore _blobs = new();
+    private readonly Microsoft.Extensions.Time.Testing.FakeTimeProvider _clock = TestTime.Frozen();
     private RpmController _controller = null!;
     private string _orgId = null!;
     private TokenRepository _tokens = null!;
@@ -43,14 +45,18 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
                 new { id = _orgId });
         }
 
-        _tokens = new TokenRepository(_db);
+        _tokens = new TokenRepository(_db, _clock);
         var packages = new PackageRepository(_db);
         var audit = new AuditRepository(_db);
         var orgs = new OrgRepository(_db);
-        var repodata = new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance);
+        var repodata = new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance, _clock);
         var svc = new RpmControllerServices(packages, _tokens, audit, orgs, new TieredBlobStorage(_blobs, _blobs), _db, repodata,
-            new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db)),
-            new MemoryCache(new MemoryCacheOptions()));
+            new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock)),
+            new MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache>(
+                new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmMergedRepodata),
+            new RenderedResponseCache<RpmLocalRepodataKey>(
+                new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmLocalRepodata),
+            _clock);
         _controller = new RpmController(svc)
         {
             ControllerContext = BuildContext(_orgId),
@@ -371,7 +377,7 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
                 u = userId,
                 h = hash,
                 c = """["publish:rpm"]""",
-                ts = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                ts = _clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
         return raw;
     }
@@ -398,6 +404,9 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
     }
 
     // ── Synthetic RPM bytes ────────────────────────────────────────────────────
+
+    internal static byte[] BuildSyntheticRpm(string name, string version, string release, string arch)
+        => BuildRpm(name, version, release, arch);
 
     private static byte[] BuildRpm(string name, string version, string release, string arch)
     {

@@ -28,6 +28,20 @@ public sealed class LoginService
         return BCrypt.Net.BCrypt.HashPassword(preimage, workFactor: 12);
     }
 
+    /// <summary>
+    /// Injected dependencies for <see cref="LoginService"/>. Bundles the eight DI services
+    /// so the constructor stays within the parameter-count gate (S107).
+    /// </summary>
+    public sealed record Dependencies(
+        IMetadataStore Db,
+        OrgRepository Orgs,
+        SystemAdminRepository SystemAdmins,
+        ILockoutStore Lockout,
+        AuditRepository Audit,
+        ExternalIdentityRepository ExternalIdentities,
+        Audit.IAuditEmitter AuditEmitter,
+        TimeProvider Time);
+
     private readonly IMetadataStore _db;
     private readonly OrgRepository _orgs;
     private readonly SystemAdminRepository _systemAdmins;
@@ -35,23 +49,18 @@ public sealed class LoginService
     private readonly AuditRepository _audit;
     private readonly ExternalIdentityRepository _externalIdentities;
     private readonly Dependably.Infrastructure.Audit.IAuditEmitter _auditEmitter;
+    private readonly TimeProvider _time;
 
-    public LoginService(
-        IMetadataStore db,
-        OrgRepository orgs,
-        SystemAdminRepository systemAdmins,
-        ILockoutStore lockout,
-        AuditRepository audit,
-        ExternalIdentityRepository externalIdentities,
-        Dependably.Infrastructure.Audit.IAuditEmitter auditEmitter)
+    public LoginService(Dependencies deps)
     {
-        _db = db;
-        _orgs = orgs;
-        _systemAdmins = systemAdmins;
-        _lockout = lockout;
-        _audit = audit;
-        _externalIdentities = externalIdentities;
-        _auditEmitter = auditEmitter;
+        _db = deps.Db;
+        _orgs = deps.Orgs;
+        _systemAdmins = deps.SystemAdmins;
+        _lockout = deps.Lockout;
+        _audit = deps.Audit;
+        _externalIdentities = deps.ExternalIdentities;
+        _auditEmitter = deps.AuditEmitter;
+        _time = deps.Time;
     }
 
     /// <summary>
@@ -62,12 +71,18 @@ public sealed class LoginService
     public async Task<(string? Token, string? Error, int? RetryAfterSeconds)> LoginTenantAsync(
         string email, string password, string tenantId, string? sourceIp = null, CancellationToken ct = default)
     {
+        // Lockout key is realm+tenant scoped so each (realm, tenant, email) identity gets an
+        // independent counter. Tenant isolation lives in the key derivation — login_attempts
+        // has no org_id column, so the OrgIdFilteringComplianceTests gate does not apply here.
+        string lockoutKey = HashLockoutKey("tenant", tenantId, email);
+        // Audit pseudonym remains the unsalted email hash so audit rows stay joinable across
+        // realms without coupling them to the lockout key structure.
         string emailHash = HashEmail(email);
 
-        var (failedCount, lockedUntil) = await _lockout.GetAsync(emailHash, ct);
-        if (lockedUntil.HasValue && DateTimeOffset.UtcNow < lockedUntil.Value)
+        var (failedCount, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
+        if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
         {
-            int retryAfter = (int)(lockedUntil.Value - DateTimeOffset.UtcNow).TotalSeconds + 1;
+            int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
             await _audit.LogAsync("lockout.triggered",
                 detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "tenant" }),
                 sourceIp: sourceIp, ct: ct);
@@ -81,7 +96,9 @@ public sealed class LoginService
         }
 
         await using var conn = await _db.OpenAsync(ct);
-        var (Id, _, PasswordHash, TenantId, Role, AccountLocked, TokenVersion) = await conn.QuerySingleOrDefaultAsync<(string Id, string Email, string PasswordHash, string TenantId, string Role, int AccountLocked, long TokenVersion)>(
+        var (Id, _, PasswordHash, TenantId, Role, AccountLocked, TokenVersion) =
+            await conn.QuerySingleOrDefaultAsync<(string Id, string Email, string PasswordHash,
+                string TenantId, string Role, int AccountLocked, long TokenVersion)>(
             """
             SELECT id, email, password_hash, tenant_id AS TenantId, role,
                    CASE WHEN account_status IN ('locked','disabled') THEN 1 ELSE 0 END AS AccountLocked,
@@ -99,11 +116,11 @@ public sealed class LoginService
 
         if (!valid)
         {
-            await RecordFailureAsync(emailHash, failedCount, "tenant", tenantId, sourceIp, ct);
+            await RecordFailureAsync(lockoutKey, emailHash, failedCount, "tenant", tenantId, sourceIp, ct);
             return (null, "Invalid credentials.", null);
         }
 
-        await _lockout.ClearAsync(emailHash, ct);
+        await _lockout.ClearAsync(lockoutKey, ct);
         await _audit.LogAsync("login.success", actorId: Id, sourceIp: sourceIp, ct: ct);
         await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: Id,
             detail: System.Text.Json.JsonSerializer.Serialize(new { method = "forms" }),
@@ -117,12 +134,12 @@ public sealed class LoginService
         // it without a separate auth audit query.
         await conn.ExecuteAsync(
             "UPDATE users SET last_login_at = @now WHERE id = @id",
-            new { id = Id, now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { id = Id, now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") });
 
         string jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", ct)
             ?? throw new InvalidOperationException("JWT secret not found in instance_settings.");
 
-        string token = IssueTenantJwt(Id!, TenantId, Role, jwtSecret, TokenVersion);
+        string token = IssueTenantJwt(Id!, TenantId, Role, jwtSecret, TokenVersion, _time);
         return (token, null, null);
     }
 
@@ -148,12 +165,16 @@ public sealed class LoginService
     public async Task<(string? Token, string? Error, int? RetryAfterSeconds)> LoginSystemAsync(
         string email, string password, string? sourceIp = null, CancellationToken ct = default)
     {
+        // System-realm lockout key is scoped to the system realm so it cannot collide with a
+        // same-email tenant identity. Tenant isolation lives in the key derivation — see comment
+        // in LoginTenantAsync.
+        string lockoutKey = HashLockoutKey("system", null, email);
         string emailHash = HashEmail(email);
 
-        var (failedCount, lockedUntil) = await _lockout.GetAsync(emailHash, ct);
-        if (lockedUntil.HasValue && DateTimeOffset.UtcNow < lockedUntil.Value)
+        var (failedCount, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
+        if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
         {
-            int retryAfter = (int)(lockedUntil.Value - DateTimeOffset.UtcNow).TotalSeconds + 1;
+            int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
             await _audit.LogAsync("lockout.triggered",
                 detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "system" }),
                 sourceIp: sourceIp, ct: ct);
@@ -172,11 +193,11 @@ public sealed class LoginService
 
         if (!valid)
         {
-            await RecordFailureAsync(emailHash, failedCount, "system", orgIdForActivity: null, sourceIp, ct);
+            await RecordFailureAsync(lockoutKey, emailHash, failedCount, "system", orgIdForActivity: null, sourceIp, ct);
             return (null, "Invalid credentials.", null);
         }
 
-        await _lockout.ClearAsync(emailHash, ct);
+        await _lockout.ClearAsync(lockoutKey, ct);
         await _audit.LogAsync("login.success", actorId: creds!.Value.Id,
             detail: System.Text.Json.JsonSerializer.Serialize(new { realm = "system" }),
             sourceIp: sourceIp, ct: ct);
@@ -187,12 +208,12 @@ public sealed class LoginService
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginSuccess,
             null, "user", creds.Value.Id, "accepted",
             new Dependably.Infrastructure.Audit.Events.AuthEvents.LoginSuccess("system", "forms").ToJson(), ct);
-        await _systemAdmins.UpdateLastLoginAsync(creds.Value.Id, DateTimeOffset.UtcNow, ct);
+        await _systemAdmins.UpdateLastLoginAsync(creds.Value.Id, _time.GetUtcNow(), ct);
 
         string jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", ct)
             ?? throw new InvalidOperationException("JWT secret not found in instance_settings.");
 
-        string token = IssueSystemJwt(creds.Value.Id, jwtSecret);
+        string token = IssueSystemJwt(creds.Value.Id, jwtSecret, _time);
         return (token, null, null);
     }
 
@@ -262,11 +283,15 @@ public sealed class LoginService
     // The IdP may never auto-assign 'owner'; 'admin' requires the per-tenant
     // idp_can_assign_admin opt-in. member/auditor are always assignable.
 
+    private const int RoleRankOwner = 3;
+    private const int RoleRankAdmin = 2;
+    private const int RoleRankMember = 1;
+
     private static int RoleRank(string role) => role switch
     {
-        "owner" => 3,
-        "admin" => 2,
-        _ => 1,
+        "owner" => RoleRankOwner,
+        "admin" => RoleRankAdmin,
+        _ => RoleRankMember,
     };
 
     private static string IdpRoleCeiling(in SamlLoginContext ctx) =>
@@ -324,6 +349,9 @@ public sealed class LoginService
 
     // Branch 2: no external identity, but a local user shares the asserted email — link them.
     // Returns null when no user matches the email, so the caller falls through to JIT provisioning.
+    // Privileged accounts (owner, or admin without idp_can_assign_admin) are never silently linked:
+    // the IdP ceiling that guards JIT provisioning must also guard the email-link path. Refusal is
+    // audited and returns null-token so the ACS issues a 401; no external_identities row is created.
     private async Task<SamlLoginResult?> TryLoginViaEmailLinkAsync(
         System.Data.Common.DbConnection conn, SamlLoginContext ctx, CancellationToken ct)
     {
@@ -349,6 +377,30 @@ public sealed class LoginService
             await EmitSamlFailureAsync(ctx.TenantId, Id,
                 "account_status_" + AccountStatus, ctx.IdpEntityId, ctx.NameId, ct);
             return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
+        }
+
+        // Guard: refuse to auto-link when the matched account is privileged beyond the IdP ceiling.
+        // This mirrors the JIT ceiling in ProvisionJitUserAsync: owner is never linkable, admin only
+        // when idp_can_assign_admin is set. On refusal, no external_identities row is created and a
+        // login failure is audited so the caller returns 401. The block does not fall through to JIT
+        // (that would create a duplicate user for the same email).
+        if (ExceedsIdpRoleCeiling(ctx, Role))
+        {
+            await _audit.LogAsync("auth.saml.login.failure",
+                orgId: ctx.TenantId, actorId: Id,
+                detail: System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    reason = "email_link_privileged_account_blocked",
+                    existing_role = Role,
+                    ceiling = IdpRoleCeiling(ctx),
+                    idp_can_assign_admin = ctx.IdpCanAssignAdmin,
+                    idp_entity_id = ctx.IdpEntityId,
+                    nameid = ctx.NameId,
+                }),
+                sourceIp: ctx.SourceIp, ct: ct);
+            await EmitSamlFailureAsync(ctx.TenantId, Id,
+                "email_link_privileged_account_blocked", ctx.IdpEntityId, ctx.NameId, ct);
+            return new SamlLoginResult(null, "SSO auto-link is not permitted for this account.", null, null, false, false);
         }
 
         await _externalIdentities.LinkAsync(ctx.TenantId, Id, ctx.IdpEntityId, ctx.NameId, ctx.AssertionEmail, ct);
@@ -469,10 +521,10 @@ public sealed class LoginService
     /// rotated it (we keep the local email in sync with the latest assertion so listings,
     /// audit, and invites surface the current address).
     /// </summary>
-    private static async Task StampUserLoginAsync(
+    private async Task StampUserLoginAsync(
         System.Data.Common.DbConnection conn, string userId, string? assertionEmail, string? currentEmail)
     {
-        string nowStr = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string nowStr = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         bool emailChanged = !string.IsNullOrWhiteSpace(assertionEmail)
             && !string.Equals(assertionEmail, currentEmail, StringComparison.OrdinalIgnoreCase);
         if (emailChanged)
@@ -533,22 +585,36 @@ public sealed class LoginService
     /// </summary>
     public async Task<string> IssueTenantSessionAsync(
         string userId, string tenantId, string role, long tokenVersion, CancellationToken ct = default) =>
-        IssueTenantJwt(userId, tenantId, role, await JwtSecretAsync(ct), tokenVersion);
+        IssueTenantJwt(userId, tenantId, role, await JwtSecretAsync(ct), tokenVersion, _time);
 
-    private static string IssueJwt(string userId, string tenantId, string role, string secret, long tokenVersion) =>
-        IssueTenantJwt(userId, tenantId, role, secret, tokenVersion);
+    private string IssueJwt(string userId, string tenantId, string role, string secret, long tokenVersion) =>
+        IssueTenantJwt(userId, tenantId, role, secret, tokenVersion, _time);
 
     private async Task RecordFailureAsync(
-        string emailHash, int currentFailedCount, string realm, string? orgIdForActivity, string? sourceIp, CancellationToken ct)
+        string lockoutKey, string emailHash, int currentFailedCount, string realm, string? orgIdForActivity, string? sourceIp, CancellationToken ct)
     {
         int newCount = currentFailedCount + 1;
         DateTimeOffset? lockExpiry = newCount >= MaxFailedAttempts
-            ? DateTimeOffset.UtcNow.AddMinutes(LockoutMinutes)
+            ? _time.GetUtcNow().AddMinutes(LockoutMinutes)
             : null;
-        await _lockout.RecordFailureAsync(emailHash, newCount, lockExpiry, ct);
-        await _audit.LogAsync("login.failure",
-            detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "invalid_credentials", realm }),
-            sourceIp: sourceIp, ct: ct);
+        // lockoutKey is realm+tenant scoped; emailHash is the unsalted audit pseudonym.
+        await _lockout.RecordFailureAsync(lockoutKey, newCount, lockExpiry, ct);
+        string failureDetail = System.Text.Json.JsonSerializer.Serialize(new { reason = "invalid_credentials", realm });
+        // Scope the audit row to the realm that rejected the login: a system/master failure is
+        // visible only on the operator audit list (scope='system'); a tenant failure is pinned to
+        // that one tenant's audit list (scope='tenant', org_id=<tenant>) so no other tenant — nor
+        // the system realm — can see it.
+        if (realm == "system" || orgIdForActivity is null)
+        {
+            await _audit.LogSystemAsync("login.failure",
+                detail: failureDetail, sourceIp: sourceIp, ct: ct);
+        }
+        else
+        {
+            await _audit.LogAsync("login.failure",
+                orgId: orgIdForActivity,
+                detail: failureDetail, sourceIp: sourceIp, ct: ct);
+        }
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginFailure,
             orgIdForActivity, "system", null, "rejected",
@@ -561,11 +627,11 @@ public sealed class LoginService
         }
     }
 
-    internal static string IssueTenantJwt(string userId, string tenantId, string role, string secret, long tokenVersion = 1)
+    internal static string IssueTenantJwt(string userId, string tenantId, string role, string secret, long tokenVersion = 1, TimeProvider? time = null)
     {
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-        var now = DateTime.UtcNow;
+        var now = (time ?? TimeProvider.System).GetUtcNow().UtcDateTime;
 
         // Tenant-scoped JWT. `org_id` carries the same value as `tid` for compatibility with
         // controllers that read the legacy claim name directly. `tver` snapshots
@@ -591,11 +657,11 @@ public sealed class LoginService
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
-    internal static string IssueSystemJwt(string systemAdminId, string secret)
+    internal static string IssueSystemJwt(string systemAdminId, string secret, TimeProvider? time = null)
     {
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-        var now = DateTime.UtcNow;
+        var now = (time ?? TimeProvider.System).GetUtcNow().UtcDateTime;
 
         var claims = new List<Claim>
         {
@@ -617,6 +683,28 @@ public sealed class LoginService
     private static string HashEmail(string email)
     {
         byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(email.ToLowerInvariant()));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Derives a lockout-store key that is unique per (realm, tenantId, email) identity.
+    /// The canonical form uses a length-prefixed tenantId segment so that the construction
+    /// is unambiguous regardless of what characters the tenantId contains:
+    /// <c>"tenant|{len}|{tenantId}|{email}"</c> for tenant logins and
+    /// <c>"system|0||{email}"</c> for system-admin logins. The tenantId length prefix makes
+    /// different (tenantId, email) pairs that share the same bytes after naive concatenation
+    /// hash to distinct values.
+    /// This value is stored as the opaque PK in login_attempts; it is never used in audit
+    /// payloads (use <see cref="HashEmail"/> for that so audit rows stay realm-joinable).
+    /// </summary>
+    internal static string HashLockoutKey(string realm, string? tenantId, string email)
+    {
+        string tid = tenantId ?? "";
+        // Length-prefix the tenantId so the boundary between tenantId and email is always
+        // unambiguous: "tenant|1|a|b|c@x" (tenantId="a") differs from "tenant|3|a|b|c@x"
+        // (tenantId="a|b") even though the suffixes share bytes.
+        string canonical = $"{realm}|{tid.Length}|{tid}|{email.ToLowerInvariant()}";
+        byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 }

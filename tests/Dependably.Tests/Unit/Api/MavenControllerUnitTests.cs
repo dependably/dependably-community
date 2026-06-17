@@ -44,6 +44,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
     private readonly InMemoryBlobStore _blobs = new();
+    private readonly Microsoft.Extensions.Time.Testing.FakeTimeProvider _clock = TestTime.Frozen();
 
     private string _orgId = null!;
     private string _otherOrgId = null!;
@@ -59,7 +60,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         await new SchemaInitializer(_db).InitializeAsync();
 
         _orgs = new OrgRepository(_db);
-        _tokens = new TokenRepository(_db);
+        _tokens = new TokenRepository(_db, _clock);
         _audit = new AuditRepository(_db);
         _packages = new PackageRepository(_db);
 
@@ -112,13 +113,18 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             // ProxyFetch is only reached on the proxy-miss path, which short-circuits to 404
             // here because Upstream is null. BlockGate runs on every cache hit, so it's real.
             ProxyFetch: null!,
-            BlockGate: new BlockGateService(new VulnerabilityRepository(_db), _audit, new QuarantineRepository(_db), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance),
+            BlockGate: new BlockGateService(new VulnerabilityRepository(_db, _clock), _audit, new QuarantineRepository(_db, _clock), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, _clock),
             ReservedNamespaces: new ReservedNamespaceService(
                 _db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
-                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions())),
+                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock),
             // Real resolver over an empty registry list — these tests exercise publish/auth
             // paths, not proxy fetches.
-            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db)));
+            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock)),
+            MetadataCache: new Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.MavenMetadataKey>(
+                new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions { SizeLimit = 8 * 1024 * 1024 }),
+                Dependably.Infrastructure.Caching.MetadataCacheKeys.MavenMetadata),
+            Log: Microsoft.Extensions.Logging.Abstractions.NullLogger<MavenController>.Instance);
 
         return new MavenController(svc)
         {
@@ -133,6 +139,15 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         // directly. We still set a JSON array for realism.
         var (raw, _) = await _tokens.CreateUserTokenAsync(
             orgId, userId, """["publish:maven","read:metadata"]""", expiresAt: null);
+        return raw;
+    }
+
+    private async Task<string> IssueReadArtifactTokenAsync(string orgId, string userId)
+    {
+        // Issues a token carrying read:artifact so the origin-based download gate allows
+        // access to uploaded artifacts (origin='uploaded' requires this capability).
+        var (raw, _) = await _tokens.CreateUserTokenAsync(
+            orgId, userId, """["read:artifact","read:metadata"]""", expiresAt: null);
         return raw;
     }
 
@@ -204,6 +219,75 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         return (pkgId, verId, blobKey);
     }
 
+    // Seeds a proxy-cached Maven artifact (origin='proxy'). Use this for tests that exercise
+    // behavior other than origin-based auth (checksums, block gate, metadata, HEAD) so they
+    // remain servable under AnonymousPull without a token — uploaded artifacts require a token
+    // even when AnonymousPull is enabled.
+    private async Task<(string pkgId, string verId, string blobKey)> SeedMavenProxyArtifactAsync(
+        string groupId, string artifactId, string version, byte[] bytes)
+    {
+        string purlName = $"{groupId}:{artifactId}";
+        string filename = $"{artifactId}-{version}.jar";
+        string blobKey = BlobKeys.Hosted(_orgId, "maven", groupId.Replace('.', '/') + "/" + artifactId, version, filename);
+
+        await _blobs.PutAsync(blobKey, new MemoryStream(bytes), CancellationToken.None);
+
+        string sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string sha1 = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
+        string md5 = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
+
+        string verId = Guid.NewGuid().ToString("N");
+        string fileId = Guid.NewGuid().ToString("N");
+
+        await using var conn = await _db.OpenAsync();
+        string? existingPkgId = await conn.ExecuteScalarAsync<string?>(
+            "SELECT id FROM packages WHERE org_id = @org AND ecosystem = 'maven' AND purl_name = @purl",
+            new { org = _orgId, purl = purlName });
+        string pkgId = existingPkgId ?? Guid.NewGuid().ToString("N");
+        if (existingPkgId is null)
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES (@id, @org, 'maven', @name, @purl, 1)",
+                new { id = pkgId, org = _orgId, name = purlName, purl = purlName });
+        }
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO package_versions (id, package_id, version, purl, blob_key, filename, size_bytes, checksum_sha256, origin)
+            VALUES (@id, @pkg, @ver, @purl, @blobKey, @filename, @size, @sha256, 'proxy')
+            """,
+            new
+            {
+                id = verId,
+                pkg = pkgId,
+                ver = version,
+                purl = $"pkg:maven/{groupId}/{artifactId}@{version}",
+                blobKey,
+                filename,
+                size = (long)bytes.Length,
+                sha256,
+            });
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO maven_version_files
+                (id, package_version_id, filename, classifier, extension, blob_key, size_bytes,
+                 checksum_sha256, checksum_sha1, checksum_md5, origin)
+            VALUES (@id, @pv, @filename, NULL, 'jar', @blobKey, @size, @sha256, @sha1, @md5, 'proxy')
+            """,
+            new
+            {
+                id = fileId,
+                pv = verId,
+                filename,
+                blobKey,
+                size = (long)bytes.Length,
+                sha256,
+                sha1,
+                md5,
+            });
+
+        return (pkgId, verId, blobKey);
+    }
+
     private async Task SetMaxUploadMavenAsync(long bytes)
     {
         await using var conn = await _db.OpenAsync();
@@ -225,9 +309,12 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     [Fact]
     public async Task Download_HappyPath_ReturnsFile()
     {
+        // Uploaded artifacts require a token carrying read:artifact regardless of AnonymousPull.
+        // Use a proxy-cached artifact here so the test remains focused on the file-serving path,
+        // not the origin-auth gate (which has its own dedicated tests below).
         await SetAnonymousPullAsync(true);
         byte[] bytes = Encoding.UTF8.GetBytes("jar-content");
-        await SeedMavenArtifactAsync("com.example", "mylib", "1.0", bytes);
+        await SeedMavenProxyArtifactAsync("com.example", "mylib", "1.0", bytes);
 
         var ctl = BuildController();
         var result = await ctl.Download("com/example/mylib/1.0/mylib-1.0.jar", CancellationToken.None);
@@ -270,6 +357,71 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         Assert.Contains("Basic", ctl.Response.Headers.WWWAuthenticate.ToString());
     }
 
+    // ── Origin-based download auth (uploaded artifacts require token) ───────
+
+    [Fact]
+    public async Task Download_UploadedArtifact_AnonymousPullOn_AnonRequest_Returns401()
+    {
+        // Uploaded artifacts require a token carrying read:artifact even when AnonymousPull
+        // is enabled — anonymous callers must not receive privately-published artifacts.
+        await SetAnonymousPullAsync(true);
+        byte[] bytes = Encoding.UTF8.GetBytes("private-jar");
+        await SeedMavenArtifactAsync("com.example", "private", "1.0", bytes);
+
+        var ctl = BuildController(authenticated: false);
+        var result = await ctl.Download("com/example/private/1.0/private-1.0.jar", CancellationToken.None);
+
+        Assert.IsType<UnauthorizedResult>(result);
+        Assert.Contains("Basic", ctl.Response.Headers.WWWAuthenticate.ToString());
+    }
+
+    [Fact]
+    public async Task Download_UploadedArtifact_WithReadArtifactToken_Returns200()
+    {
+        // A token carrying read:artifact satisfies the origin gate and the file is served.
+        await SetAnonymousPullAsync(true);
+        byte[] bytes = Encoding.UTF8.GetBytes("private-jar-content");
+        await SeedMavenArtifactAsync("com.example", "private", "1.0", bytes);
+
+        string raw = await IssueReadArtifactTokenAsync(_orgId, _userId);
+        var ctl = BuildController(authHeader: $"Bearer {raw}");
+        var result = await ctl.Download("com/example/private/1.0/private-1.0.jar", CancellationToken.None);
+
+        Assert.IsType<FileStreamResult>(result).FileStream.Dispose();
+    }
+
+    [Fact]
+    public async Task Download_UploadedArtifact_TokenWithoutReadArtifact_Returns403()
+    {
+        // A token missing read:artifact hits the Forbid branch of the origin gate.
+        await SetAnonymousPullAsync(true);
+        byte[] bytes = Encoding.UTF8.GetBytes("private-jar-no-cap");
+        await SeedMavenArtifactAsync("com.example", "private2", "1.0", bytes);
+
+        // This token has read:metadata but not read:artifact.
+        string raw = await IssueTokenAsync(_orgId, _userId);
+        var ctl = BuildController(authHeader: $"Bearer {raw}");
+        var result = await ctl.Download("com/example/private2/1.0/private2-1.0.jar", CancellationToken.None);
+
+        // ForbidResult from token.HasCapability(ReadArtifact) == false.
+        Assert.IsType<ForbidResult>(result);
+    }
+
+    [Fact]
+    public async Task Download_ProxyArtifact_AnonymousPullOn_AnonRequest_Returns200()
+    {
+        // Proxy-cached artifacts remain freely accessible under AnonymousPull — the origin
+        // gate applies only to uploaded artifacts.
+        await SetAnonymousPullAsync(true);
+        byte[] bytes = Encoding.UTF8.GetBytes("proxy-jar");
+        await SeedMavenProxyArtifactAsync("com.example", "proxied", "1.0", bytes);
+
+        var ctl = BuildController(authenticated: false);
+        var result = await ctl.Download("com/example/proxied/1.0/proxied-1.0.jar", CancellationToken.None);
+
+        Assert.IsType<FileStreamResult>(result).FileStream.Dispose();
+    }
+
     [Fact]
     public async Task Download_UnknownArtifact_Returns404()
     {
@@ -284,7 +436,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     {
         await SetAnonymousPullAsync(true);
         byte[] bytes = Encoding.UTF8.GetBytes("primary-bytes");
-        await SeedMavenArtifactAsync("com.example", "lib", "1.2.3", bytes);
+        await SeedMavenProxyArtifactAsync("com.example", "lib", "1.2.3", bytes);
 
         var ctl = BuildController();
         var result = await ctl.Download("com/example/lib/1.2.3/lib-1.2.3.jar.sha1", CancellationToken.None);
@@ -304,7 +456,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         // demand. This exercises the BlobKeys.StoreKey + ComputeChecksumAsync branch.
         await SetAnonymousPullAsync(true);
         byte[] bytes = Encoding.UTF8.GetBytes("primary-bytes-for-sha512");
-        await SeedMavenArtifactAsync("com.example", "lib", "2.0", bytes);
+        await SeedMavenProxyArtifactAsync("com.example", "lib", "2.0", bytes);
 
         var ctl = BuildController();
         var result = await ctl.Download("com/example/lib/2.0/lib-2.0.jar.sha512", CancellationToken.None);
@@ -322,8 +474,8 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         await SetAnonymousPullAsync(true);
         byte[] b1 = Encoding.UTF8.GetBytes("v1");
         byte[] b2 = Encoding.UTF8.GetBytes("v2");
-        await SeedMavenArtifactAsync("com.example", "lib", "1.0", b1);
-        await SeedMavenArtifactAsync("com.example", "lib", "2.0", b2);
+        await SeedMavenProxyArtifactAsync("com.example", "lib", "1.0", b1);
+        await SeedMavenProxyArtifactAsync("com.example", "lib", "2.0", b2);
 
         var ctl = BuildController();
         var result = await ctl.Download("com/example/lib/maven-metadata.xml", CancellationToken.None);
@@ -348,7 +500,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     {
         // metadata sidecar (.md5/.sha1 on maven-metadata.xml) hashes the generated body.
         await SetAnonymousPullAsync(true);
-        await SeedMavenArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("x"));
+        await SeedMavenProxyArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("x"));
 
         var ctl = BuildController();
         var result = await ctl.Download("com/example/lib/maven-metadata.xml.md5", CancellationToken.None);
@@ -356,6 +508,27 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         var content = Assert.IsType<ContentResult>(result);
         Assert.Equal("text/plain", content.ContentType);
         Assert.False(string.IsNullOrWhiteSpace(content.Content));
+    }
+
+    [Fact]
+    public async Task Download_MetadataChecksumSidecar_MatchesServedMetadataBody()
+    {
+        // mvn fetches maven-metadata.xml, then its sidecar, as separate requests. Both are
+        // generated on the fly, so the body must be byte-stable across requests or the
+        // client's checksum validation fails.
+        await SetAnonymousPullAsync(true);
+        await SeedMavenProxyArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("x"));
+
+        var ctl = BuildController();
+        var body = Assert.IsType<ContentResult>(
+            await ctl.Download("com/example/lib/maven-metadata.xml", CancellationToken.None));
+        var sidecar = Assert.IsType<ContentResult>(
+            await ctl.Download("com/example/lib/maven-metadata.xml.sha1", CancellationToken.None));
+
+        // deepcode ignore InsecureHash: mirrors the Maven-spec .sha1 sidecar, not a security check.
+        string expected = Convert.ToHexString(
+            SHA1.HashData(Encoding.UTF8.GetBytes(body.Content!))).ToLowerInvariant();
+        Assert.Equal(expected, sidecar.Content);
     }
 
     // ── Block gate (vuln/manual gate on download) ───────────────────────
@@ -393,14 +566,14 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             new { pv = versionId, vuln = vulnId });
         await conn.ExecuteAsync(
             "UPDATE package_versions SET vuln_checked_at = @ts WHERE id = @id",
-            new { ts = DateTimeOffset.UtcNow.ToString("o"), id = versionId });
+            new { ts = _clock.GetUtcNow().ToString("o"), id = versionId });
     }
 
     [Fact]
     public async Task Download_ManualBlockedVersion_Returns403()
     {
         await SetAnonymousPullAsync(true);
-        var (_, verId, _) = await SeedMavenArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("blocked-jar"));
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("blocked-jar"));
         await SetManualBlockStateAsync(verId, "blocked");
 
         var ctl = BuildController();
@@ -414,7 +587,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     {
         await SetAnonymousPullAsync(true);
         await SetMaxOsvToleranceAsync(4.0);
-        var (_, verId, _) = await SeedMavenArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("vuln-jar"));
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("vuln-jar"));
         await SeedScannedVulnAsync(verId, 9.8);
 
         var ctl = BuildController();
@@ -428,7 +601,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     {
         // The gate runs before the sidecar branch, so a blocked artifact's checksums don't leak.
         await SetAnonymousPullAsync(true);
-        var (_, verId, _) = await SeedMavenArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("blocked-sidecar-jar"));
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("blocked-sidecar-jar"));
         await SetManualBlockStateAsync(verId, "blocked");
 
         var ctl = BuildController();
@@ -443,7 +616,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         // Scanned and carries an advisory, but the score is within tolerance → served, not blocked.
         await SetAnonymousPullAsync(true);
         await SetMaxOsvToleranceAsync(10.0);
-        var (_, verId, _) = await SeedMavenArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("tolerable-jar"));
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("tolerable-jar"));
         await SeedScannedVulnAsync(verId, 5.0);
 
         var ctl = BuildController();
@@ -458,7 +631,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         // Operator override: manual_block_state='allowed' short-circuits the OSV gate.
         await SetAnonymousPullAsync(true);
         await SetMaxOsvToleranceAsync(4.0);
-        var (_, verId, _) = await SeedMavenArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("allowed-despite-vuln"));
+        var (_, verId, _) = await SeedMavenProxyArtifactAsync("com.example", "lib", "1.0", Encoding.UTF8.GetBytes("allowed-despite-vuln"));
         await SeedScannedVulnAsync(verId, 9.8);
         await SetManualBlockStateAsync(verId, "allowed");
 
@@ -475,7 +648,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     {
         await SetAnonymousPullAsync(true);
         byte[] bytes = Encoding.UTF8.GetBytes("jar-content");
-        await SeedMavenArtifactAsync("com.example", "headtest", "1.0", bytes);
+        await SeedMavenProxyArtifactAsync("com.example", "headtest", "1.0", bytes);
 
         var ctl = BuildController();
         var result = await ctl.Head("com/example/headtest/1.0/headtest-1.0.jar", CancellationToken.None);

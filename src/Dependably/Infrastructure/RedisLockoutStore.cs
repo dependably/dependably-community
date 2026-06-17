@@ -14,8 +14,13 @@ public sealed class RedisLockoutStore : ILockoutStore
     private const int LockoutSeconds = 15 * 60;
 
     private readonly IRedisClient _redis;
+    private readonly TimeProvider _time;
 
-    public RedisLockoutStore(IRedisClient redis) => _redis = redis;
+    public RedisLockoutStore(IRedisClient redis, TimeProvider time)
+    {
+        _redis = redis;
+        _time = time;
+    }
 
     public async Task<(int FailedCount, DateTimeOffset? LockedUntil)> GetAsync(
         string emailHash, CancellationToken ct)
@@ -28,7 +33,7 @@ public sealed class RedisLockoutStore : ILockoutStore
         if (locked.Value.HasValue)
         {
             var remaining = locked.Expiry ?? TimeSpan.FromSeconds(LockoutSeconds);
-            return (0, DateTimeOffset.UtcNow + remaining);
+            return (0, _time.GetUtcNow() + remaining);
         }
 
         var count = await db.StringGetAsync(attemptsKey);
@@ -48,7 +53,7 @@ public sealed class RedisLockoutStore : ILockoutStore
 
         if (lockedUntil.HasValue)
         {
-            var ttl = lockedUntil.Value - DateTimeOffset.UtcNow;
+            var ttl = lockedUntil.Value - _time.GetUtcNow();
             if (ttl > TimeSpan.Zero)
             {
                 _ = batch.StringSetAsync(lockedKey, "1", ttl);

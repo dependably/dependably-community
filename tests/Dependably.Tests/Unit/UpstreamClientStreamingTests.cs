@@ -166,7 +166,7 @@ public sealed class UpstreamClientStreamingTests
         var airGappedClient = new UpstreamClient(
             factory, tiered, audit, new AllowAll(), new AirGap(true),
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir),
-            config,
+            Dependably.Infrastructure.StagingOptions.Resolve(config),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<UpstreamClient>.Instance);
 
         await Assert.ThrowsAsync<AirGappedException>(
@@ -192,7 +192,7 @@ public sealed class UpstreamClientStreamingTests
         var client = new UpstreamClient(
             factory, tiered, audit, new AllowAll(), new AirGap(false),
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir),
-            config,
+            Dependably.Infrastructure.StagingOptions.Resolve(config),
             NullLogger<UpstreamClient>.Instance);
         return (client, blobs);
     }

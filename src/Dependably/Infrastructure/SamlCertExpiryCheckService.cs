@@ -1,5 +1,6 @@
 using Cronos;
 using Dapper;
+using Dependably.Infrastructure.Redis;
 
 namespace Dependably.Infrastructure;
 
@@ -20,24 +21,37 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed class SamlCertExpiryCheckService : BackgroundService
 {
+    // A sweep is short (one query plus per-org cert parsing), so a generous fixed TTL with no
+    // renewal is sufficient — matching the no-renewal style of the in-process lock used in
+    // standalone mode. The TTL only needs to exceed a realistic sweep duration; if a leader
+    // crashes mid-sweep the lock lapses and the next scheduled tick on any instance retries.
+    private static readonly TimeSpan SweepLockTtl = TimeSpan.FromMinutes(5);
+    private const string SweepLockName = "saml-cert-expiry:sweep";
+
     private readonly SamlConfigRepository _samlConfig;
     private readonly AuditRepository _audit;
     private readonly IConfiguration _config;
     private readonly IAirGapMode _airGap;
+    private readonly IDistributedLock _locks;
     private readonly ILogger<SamlCertExpiryCheckService> _logger;
+    private readonly TimeProvider _time;
 
     public SamlCertExpiryCheckService(
         SamlConfigRepository samlConfig,
         AuditRepository audit,
         IConfiguration config,
         IAirGapMode airGap,
-        ILogger<SamlCertExpiryCheckService> logger)
+        IDistributedLock locks,
+        ILogger<SamlCertExpiryCheckService> logger,
+        TimeProvider time)
     {
         _samlConfig = samlConfig;
         _audit = audit;
         _config = config;
         _airGap = airGap;
+        _locks = locks;
         _logger = logger;
+        _time = time;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -47,6 +61,11 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
         try
         {
             await RunCheckPassAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Expected graceful shutdown — exit quietly, not at LogError.
+            return;
         }
         catch (Exception ex)
         {
@@ -73,6 +92,11 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
             {
                 await RunCheckPassAsync(stoppingToken);
             }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // Expected graceful shutdown — exit the loop quietly, not at LogError.
+                break;
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "SAML cert-expiry check pass failed.");
@@ -80,14 +104,19 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
         }
     }
 
+    // Task.Delay throws ArgumentOutOfRangeException when the interval exceeds uint.MaxValue
+    // milliseconds (~49.7 days). Chunking at 1 hour keeps every individual delay well within
+    // that limit while also providing a natural re-check cadence.
+    private static readonly TimeSpan WaitChunkMax = TimeSpan.FromHours(1);
+
     /// <summary>
     /// Sleeps until the next cron occurrence plus a random load-spreading jitter.
     /// Returns false when the schedule has no further occurrence or the host is stopping,
     /// which ends the scheduling loop.
     /// </summary>
-    private async Task<bool> WaitForNextOccurrenceAsync(CronExpression schedule, CancellationToken stoppingToken)
+    internal async Task<bool> WaitForNextOccurrenceAsync(CronExpression schedule, CancellationToken stoppingToken)
     {
-        var next = schedule.GetNextOccurrence(DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
+        var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
         if (next is null)
         {
             return false;
@@ -104,11 +133,28 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
             : TimeSpan.Zero;
 #pragma warning restore SCS0005
 
-        var delay = (next.Value - DateTimeOffset.UtcNow) + jitter;
-        if (delay > TimeSpan.Zero)
+        // Sleep in bounded chunks so that arbitrarily-long horizons (e.g. a yearly cron whose
+        // first tick is >49.7 days out) never exceed the Task.Delay uint.MaxValue-millisecond
+        // ceiling. Remaining time is recomputed from the clock on each iteration so accumulated
+        // drift does not cause an early or late wake.
+        var target = next.Value + jitter;
+        while (true)
         {
-            try { await Task.Delay(delay, stoppingToken); }
-            catch (OperationCanceledException) { return false; }
+            var remaining = target - _time.GetUtcNow();
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            var chunk = remaining < WaitChunkMax ? remaining : WaitChunkMax;
+            try
+            {
+                await Task.Delay(chunk, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
         }
 
         return true;
@@ -116,7 +162,7 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
 
     internal async Task RunCheckPassAsync(CancellationToken ct)
     {
-        using var scope = Observability.BackgroundJobScope.Begin("saml-cert-expiry", "saml.cert_expiry_check");
+        using var scope = Observability.BackgroundJobScope.Begin("saml-cert-expiry", "saml.cert_expiry_check", _time);
         try
         {
             await RunCheckPassInnerAsync(ct);
@@ -134,6 +180,18 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
         if (_airGap.IsJobDisabled("saml-cert-expiry"))
         {
             _logger.LogInformation("SAML cert-expiry check pass skipped (disabled by AIR_GAPPED or DISABLE_BACKGROUND_JOBS).");
+            return;
+        }
+
+        // In a multi-replica deployment every instance runs this BackgroundService, so without
+        // coordination each one would sweep and emit duplicate operator notifications. Hold a
+        // distributed lock for the duration of the pass: only the instance that wins the lock
+        // does the work; the rest skip without touching the database. In standalone mode the
+        // in-process lock always grants on first acquire, so the single instance sweeps normally.
+        await using var sweepLock = await _locks.TryAcquireAsync(SweepLockName, SweepLockTtl, ct);
+        if (sweepLock is null)
+        {
+            _logger.LogDebug("SAML cert-expiry sweep skipped — another instance holds the sweep lock.");
             return;
         }
 
@@ -214,7 +272,7 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
             return false;
         }
 
-        double daysRemaining = (notAfter - DateTimeOffset.UtcNow).TotalDays;
+        double daysRemaining = (notAfter - _time.GetUtcNow()).TotalDays;
         string targetStage = ComputeTargetStage(daysRemaining, warnDays);
 
         // No alert warranted yet (beyond the longest warn window and not expired).
@@ -294,13 +352,19 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
         return targetPriority > currentPriority;
     }
 
+    private const int StagePriority30 = 1;
+    private const int StagePriority14 = 2;
+    private const int StagePriority7 = 3;
+    private const int StagePriority1 = 4;
+    private const int StagePriorityExpired = 5;
+
     private static int StagePriority(string? stage) => stage switch
     {
-        "30" => 1,
-        "14" => 2,
-        "7" => 3,
-        "1" => 4,
-        "expired" => 5,
+        "30" => StagePriority30,
+        "14" => StagePriority14,
+        "7" => StagePriority7,
+        "1" => StagePriority1,
+        "expired" => StagePriorityExpired,
         _ => 0,
     };
 

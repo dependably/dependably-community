@@ -1,5 +1,6 @@
 using Dependably.Infrastructure;
 using Dependably.Security;
+using Dependably.Tests.Infrastructure;
 
 namespace Dependably.Tests.Unit;
 
@@ -17,7 +18,7 @@ public sealed class HasCapabilityTests
         OrgId = "o1",
         UserId = "u1",
         Capabilities = capabilities,
-        CreatedAt = DateTimeOffset.UtcNow,
+        CreatedAt = TestTime.KnownNow,
     };
 
     [Fact]

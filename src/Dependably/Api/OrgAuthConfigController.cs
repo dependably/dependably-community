@@ -23,19 +23,22 @@ public sealed class OrgAuthConfigController : ControllerBase
     private readonly AuditRepository _audit;
     private readonly IPublicUrlBuilder _urls;
     private readonly ProblemResults _problems;
+    private readonly TimeProvider _time;
 
     public OrgAuthConfigController(
         OrgAccessGuard guard,
         SamlConfigRepository samlConfig,
         AuditRepository audit,
         IPublicUrlBuilder urls,
-        ProblemResults problems)
+        ProblemResults problems,
+        TimeProvider time)
     {
         _guard = guard;
         _samlConfig = samlConfig;
         _audit = audit;
         _urls = urls;
         _problems = problems;
+        _time = time;
     }
 
     /// <summary>GET /api/v1/auth-config — current SAML config + SP info for the IdP admin.</summary>
@@ -64,7 +67,7 @@ public sealed class OrgAuthConfigController : ControllerBase
             idpSsoUrl = cfg?.IdpSsoUrl,
             idpSigningCertThumbprint = ThumbprintOrNull(cfg?.IdpSigningCert),
             idpSigningCertOverrideThumbprint = ThumbprintOrNull(cfg?.IdpSigningCertOverride),
-            samlIdpCert = BuildCertStatus(cfg),
+            samlIdpCert = BuildCertStatus(cfg, _time.GetUtcNow()),
             spEntityId = cfg?.SpEntityId ?? defaultSpEntityId,
             nameIdFormat = cfg?.NameIdFormat ?? "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
             emailAttribute = cfg?.EmailAttribute,
@@ -292,7 +295,7 @@ public sealed class OrgAuthConfigController : ControllerBase
         }
 
         var lastTest = existing!.LastTestAt;
-        return lastTest is null || DateTimeOffset.UtcNow - lastTest.Value > TimeSpan.FromMinutes(10)
+        return lastTest is null || _time.GetUtcNow() - lastTest.Value > TimeSpan.FromMinutes(10)
             ? _problems.ValidationErrorAction("formsLoginEnabled",
                 "Run a successful SAML test within the last 10 minutes before disabling forms login.")
             : null;
@@ -362,7 +365,7 @@ public sealed class OrgAuthConfigController : ControllerBase
     // Builds the samlIdpCert status block for the GET /api/v1/auth-config response.
     // Returns null when no cert is configured. The effective cert is the override when set,
     // otherwise the metadata cert. Status is computed on read — not stored.
-    private static object? BuildCertStatus(TenantSamlConfig? cfg)
+    private static object? BuildCertStatus(TenantSamlConfig? cfg, DateTimeOffset now)
     {
         if (cfg is null)
         {
@@ -388,7 +391,6 @@ public sealed class OrgAuthConfigController : ControllerBase
         catch { return null; }
 
         var notAfter = new DateTimeOffset(cert.NotAfter.ToUniversalTime(), TimeSpan.Zero);
-        var now = DateTimeOffset.UtcNow;
         double daysRemaining = (notAfter - now).TotalDays;
 
         string status = daysRemaining < 0

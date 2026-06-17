@@ -22,7 +22,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await new SchemaInitializer(_db).InitializeAsync();
-        _tokens = new TokenRepository(_db);
+        _tokens = new TokenRepository(_db, TestTime.Frozen());
     }
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
@@ -146,7 +146,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
                     user = "user-unit",
                     hash,
                     caps = """["read:metadata"]""",
-                    createdAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    createdAt = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 });
         }
 
@@ -182,7 +182,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
                     name = "ci",
                     hash,
                     caps = """["publish:npm"]""",
-                    createdAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    createdAt = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 });
         }
 
@@ -231,7 +231,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
                     user = "user-touch",
                     hash,
                     caps = """["read:metadata"]""",
-                    createdAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    createdAt = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 });
         }
 
@@ -241,7 +241,8 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
         Assert.NotNull(resolved);
         var after = await _tokens.GetTokenByIdAsync(tokenId, "org-touch");
         Assert.NotNull(after!.LastUsedAt);
-        Assert.True((DateTimeOffset.UtcNow - after.LastUsedAt!.Value).Duration() < TimeSpan.FromSeconds(10));
+        // Repository stamps from its injected frozen clock at second granularity — exact match.
+        Assert.Equal(TestTime.KnownNow, after.LastUsedAt!.Value);
     }
 
     [Fact]
@@ -279,7 +280,7 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
                     name = "ci",
                     hash,
                     caps = """["publish:npm"]""",
-                    createdAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    createdAt = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 });
         }
 

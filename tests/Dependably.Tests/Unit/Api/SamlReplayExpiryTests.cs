@@ -10,15 +10,16 @@ namespace Dependably.Tests.Unit.Api;
 /// </summary>
 public sealed class SamlReplayExpiryTests
 {
+    // Fixed clock instant: the resolver takes `now` as a parameter, so the fallback
+    // branch asserts exactly instead of tolerating wall-clock movement mid-test.
+    private static readonly DateTimeOffset Now = new(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
+
     [Fact]
     public void ResolveAssertionExpiry_Default_FallsBackToGenerousTtl()
     {
-        var before = DateTimeOffset.UtcNow;
-        var result = SamlController.ResolveAssertionExpiry(default);
-        var after = DateTimeOffset.UtcNow;
+        var result = SamlController.ResolveAssertionExpiry(default, Now);
 
-        // Fallback is now + 24h; allow a small window for clock movement during the call.
-        Assert.InRange(result, before.AddHours(24).AddSeconds(-5), after.AddHours(24).AddSeconds(5));
+        Assert.Equal(Now.AddHours(24), result);
     }
 
     [Fact]
@@ -26,7 +27,7 @@ public sealed class SamlReplayExpiryTests
     {
         var notOnOrAfter = new DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.Zero);
 
-        var result = SamlController.ResolveAssertionExpiry(notOnOrAfter);
+        var result = SamlController.ResolveAssertionExpiry(notOnOrAfter, Now);
 
         Assert.Equal(notOnOrAfter, result);
         Assert.Equal(TimeSpan.Zero, result.Offset);
@@ -38,7 +39,7 @@ public sealed class SamlReplayExpiryTests
         // An IdP that emits a non-Z offset must still land on the same absolute instant in UTC.
         var withOffset = new DateTimeOffset(2030, 1, 2, 8, 4, 5, TimeSpan.FromHours(5));
 
-        var result = SamlController.ResolveAssertionExpiry(withOffset);
+        var result = SamlController.ResolveAssertionExpiry(withOffset, Now);
 
         Assert.Equal(TimeSpan.Zero, result.Offset);
         Assert.Equal(withOffset.UtcDateTime, result.UtcDateTime);

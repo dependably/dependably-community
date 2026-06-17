@@ -35,6 +35,7 @@ public sealed class ProxyFetchService
     private readonly BlockGateService _blockGate;
     private readonly PackageRepository _packages;
     private readonly AuditRepository _audit;
+    private readonly TimeProvider _time;
 
     public ProxyFetchService(
         CacheAccessRecorder cacheRecorder,
@@ -42,7 +43,8 @@ public sealed class ProxyFetchService
         VulnerabilityScanService scanner,
         BlockGateService blockGate,
         PackageRepository packages,
-        AuditRepository audit)
+        AuditRepository audit,
+        TimeProvider time)
     {
         _cacheRecorder = cacheRecorder;
         _proxyVersions = proxyVersions;
@@ -50,6 +52,7 @@ public sealed class ProxyFetchService
         _blockGate = blockGate;
         _packages = packages;
         _audit = audit;
+        _time = time;
     }
 
     /// <summary>
@@ -147,7 +150,7 @@ public sealed class ProxyFetchService
         var existing = await _packages.GetVersionByIdAsync(request.OrgId, scanVersionId, ct);
         var decision = await _blockGate.EvaluateAsync(
             new BlockGateRequest(request.OrgId, request.Ecosystem, request.Purl, scanVersionId,
-                existing?.ManualBlockState, DateTimeOffset.UtcNow,
+                existing?.ManualBlockState, _time.GetUtcNow(),
                 request.UserId, request.MaxOsvScoreTolerance, request.SourceIp,
                 MinReleaseAgeHours: request.MinReleaseAgeHours,
                 PublishedAt: request.PublishedAt,

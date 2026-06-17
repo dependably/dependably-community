@@ -6,10 +6,13 @@ namespace Dependably.Tests.Unit;
 [Trait("Category", "Unit")]
 public sealed class MavenMetadataBuilderTests
 {
+    private static readonly DateTimeOffset Stamp =
+        new(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
+
     [Fact]
     public void Build_SingleVersion_EmitsLatestReleaseAndVersions()
     {
-        string xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0" });
+        string xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0" }, Stamp);
         var doc = XDocument.Parse(xml);
 
         Assert.Equal("com.example", doc.Root!.Element("groupId")!.Value);
@@ -24,7 +27,7 @@ public sealed class MavenMetadataBuilderTests
     [Fact]
     public void Build_MultipleVersions_LatestIsTheLast()
     {
-        string xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0", "2.0", "3.0" });
+        string xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0", "2.0", "3.0" }, Stamp);
         var doc = XDocument.Parse(xml);
         var versioning = doc.Root!.Element("versioning")!;
 
@@ -40,7 +43,7 @@ public sealed class MavenMetadataBuilderTests
         // skip SNAPSHOTs so dependency resolvers asking for the latest stable build don't
         // accidentally land on an in-flight prerelease.
         string xml = MavenMetadataBuilder.Build("com.example", "mylib",
-            new[] { "1.0", "2.0", "2.1-SNAPSHOT" });
+            new[] { "1.0", "2.0", "2.1-SNAPSHOT" }, Stamp);
         var doc = XDocument.Parse(xml);
         var versioning = doc.Root!.Element("versioning")!;
 
@@ -52,7 +55,7 @@ public sealed class MavenMetadataBuilderTests
     public void Build_AllSnapshots_NoReleaseElement()
     {
         string xml = MavenMetadataBuilder.Build("com.example", "mylib",
-            new[] { "1.0-SNAPSHOT", "1.1-SNAPSHOT" });
+            new[] { "1.0-SNAPSHOT", "1.1-SNAPSHOT" }, Stamp);
         var doc = XDocument.Parse(xml);
         var versioning = doc.Root!.Element("versioning")!;
 
@@ -61,13 +64,29 @@ public sealed class MavenMetadataBuilderTests
     }
 
     [Fact]
-    public void Build_EmitsLastUpdatedAsTimestamp()
+    public void Build_EmitsLastUpdatedFromProvidedTimestamp()
     {
-        string xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0" });
+        string xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0" }, Stamp);
         var doc = XDocument.Parse(xml);
         string lu = doc.Root!.Element("versioning")!.Element("lastUpdated")!.Value;
-        // yyyyMMddHHmmss → 14 digits.
-        Assert.Equal(14, lu.Length);
-        Assert.True(lu.All(char.IsDigit));
+        Assert.Equal("20260102030405", lu);
+    }
+
+    [Fact]
+    public void Build_IsDeterministic_ForSameInputs()
+    {
+        // The body feeds a content-derived ETag and generated checksum sidecars; two builds
+        // of the same version set must be byte-identical.
+        string a = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0", "2.0" }, Stamp);
+        string b = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0", "2.0" }, Stamp);
+        Assert.Equal(a, b);
+    }
+
+    [Fact]
+    public void Build_NullLastUpdated_OmitsElement()
+    {
+        string xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0" }, lastUpdated: null);
+        var doc = XDocument.Parse(xml);
+        Assert.Null(doc.Root!.Element("versioning")!.Element("lastUpdated"));
     }
 }

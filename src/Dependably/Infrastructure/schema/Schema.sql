@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS org_settings (
     max_upload_bytes_maven  INTEGER,           -- per-ecosystem Maven cap; falls back to max_upload_bytes
     max_upload_bytes_rpm    INTEGER,           -- per-ecosystem RPM cap; falls back to max_upload_bytes
     max_upload_bytes_oci    INTEGER,           -- per-ecosystem OCI (Docker) cap; falls back to max_upload_bytes
+    max_upload_bytes_cargo  INTEGER,           -- per-ecosystem Cargo cap; falls back to max_upload_bytes
     keep_versions       INTEGER,            -- GC: max versions to retain per package per ecosystem
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
     activity_retention_days INTEGER,        -- GC: delete activity rows older than this
@@ -55,8 +56,9 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- Minimum upstream-release age (hours) before a proxy-fetched version is allowed past the
     -- block gate. NULL = policy off. Supply-chain hold: lets community detection (npm/PyPI/NuGet
     -- removals, advisories) catch up before a fresh upstream version reaches tenant builds.
-    -- First-fetch only; already-cached versions are unaffected, and unblock requires an operator
-    -- action once the threshold passes (no automatic rescan).
+    -- The gate is re-evaluated on every serve and index render against the current clock, so a
+    -- held version serves again automatically once it ages past the threshold. The pending review
+    -- row created when the hold first fired is cleared from the queue at that point.
     min_release_age_hours     INTEGER,
     default_language          TEXT    NOT NULL DEFAULT 'en',  -- new tenant users start with this locale
     allow_version_overwrite   INTEGER NOT NULL DEFAULT 0,   -- replacement policy; off by default
@@ -271,7 +273,7 @@ CREATE TABLE IF NOT EXISTS blocklist (
 CREATE TABLE IF NOT EXISTS reserved_namespace (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,  -- 'npm' | 'pypi' | 'nuget' | 'maven'
+    ecosystem   TEXT NOT NULL,  -- 'npm' | 'pypi' | 'nuget' | 'maven' | 'cargo' | 'golang'
     pattern     TEXT NOT NULL,
     created_by  TEXT REFERENCES users(id),
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),

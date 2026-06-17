@@ -15,6 +15,9 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed class ProxyVersionRecorder
 {
+    // SQLite SQLITE_CONSTRAINT error code (unique constraint violation on insert).
+    private const int SqliteConstraintErrorCode = 19;
+
     private readonly PackageRepository _packages;
     private readonly AuditRepository _audit;
     private readonly LicenseRepository _licenses;
@@ -89,7 +92,7 @@ public sealed class ProxyVersionRecorder
 
             return newVer.Id;
         }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 19)
+        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == SqliteConstraintErrorCode)
         {
             // Concurrent first-fetch already recorded this version — look it up so the
             // caller can still gate / scan against the existing row.

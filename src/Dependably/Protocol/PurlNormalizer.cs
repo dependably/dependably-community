@@ -8,9 +8,17 @@ public static partial class PurlNormalizer
     [GeneratedRegex(@"[-_.]+")]
     private static partial Regex PyPiSeparatorRegex();
 
+    /// <summary>
+    /// Normalizes a PyPI package name per PEP 503: runs of <c>-</c>, <c>_</c>, or <c>.</c>
+    /// collapse to a single <c>-</c>, and the result is lowercased. Use this as the canonical
+    /// key wherever a PyPI name is stored or compared (cache keys, purl_name column, etc.).
+    /// </summary>
+    public static string PyPiName(string name)
+        => PyPiSeparatorRegex().Replace(name, "-").ToLowerInvariant();
+
     public static string PyPi(string name, string version)
     {
-        string normalized = PyPiSeparatorRegex().Replace(name, "-").ToLowerInvariant();
+        string normalized = PyPiName(name);
         return $"pkg:pypi/{normalized}@{version}";
     }
 

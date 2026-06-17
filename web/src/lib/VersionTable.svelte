@@ -13,10 +13,11 @@
   import { createEventDispatcher } from 'svelte'
   import { t } from 'svelte-i18n'
   import VulnerabilityRow from './VulnerabilityRow.svelte'
+  import InfoTip from './InfoTip.svelte'
   import { formatDate, formatBytes, formatNumber } from './format.js'
   import { sortIndicator } from './sortIndicator.js'
 
-  /** @type {{ ecosystem: string, isProxy: boolean, name: string } | null} */
+  /** @type {{ ecosystem: string, isProxy: boolean, name: string, upstreamLatestVersion?: string | null, latestState?: string } | null} */
   export let pkg = null
   export let versions = []
   /** @type {Map<string, Array<{osvId: string, severity?: string, summary?: string, cvssScore?: number}>>} */
@@ -99,9 +100,26 @@
 
 <svelte:window on:click={handleWindowClick} />
 
+<!-- Package-level upstream-currency banner. The per-row "Latest" column can only mark which
+     cached version IS the upstream latest; when the package is stale that version isn't cached
+     at all, so every row falls to "—" and the staleness signal (the red x in the packages list)
+     would otherwise vanish here. This banner restores it so the two views agree. -->
+{#if pkg?.latestState === 'stale'}
+  <div class="latest-banner latest-banner-stale" role="status">
+    <svg class="latest-no" width="14" height="14" aria-hidden="true"><use href="/icons.svg#icon-x"/></svg>
+    <span>{$t('versionDetail.latestBanner.stale', { values: { version: pkg.upstreamLatestVersion } })}</span>
+  </div>
+{:else if pkg?.latestState === 'current'}
+  <div class="latest-banner latest-banner-current" role="status">
+    <svg class="latest-yes" width="14" height="14" aria-hidden="true"><use href="/icons.svg#icon-check"/></svg>
+    <span>{$t('versionDetail.latestBanner.current', { values: { version: pkg.upstreamLatestVersion } })}</span>
+  </div>
+{/if}
+
 <table class="table-auto versions-table">
   <colgroup>
     <col class="col-version">
+    <col class="col-latest">
     <col class="col-origin">
     <col class="col-checksum">
     <col class="col-size">
@@ -114,20 +132,21 @@
   <thead>
     <tr>
       <th class="sortable" on:click={() => toggleSort('version')}>{$t('versionDetail.columns.version')}{sortIndicator('version', sortCol, sortDir)}</th>
+      <th class="text-center">{$t('versionDetail.columns.latest')}</th>
       <th>{$t('versionDetail.columns.origin')}</th>
       <th class="sortable" on:click={() => toggleSort('checksum')}>{$t('versionDetail.columns.checksum')}{sortIndicator('checksum', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('size')}>{$t('versionDetail.columns.size')}{sortIndicator('size', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('pushed')}>{$t('versionDetail.columns.pushed')}{sortIndicator('pushed', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('license')}>{$t('versionDetail.columns.license')}{sortIndicator('license', sortCol, sortDir)}</th>
       <th class="sortable num-col" on:click={() => toggleSort('downloads')}>{$t('versionDetail.columns.downloads')}{sortIndicator('downloads', sortCol, sortDir)}</th>
-      <th class="sortable" on:click={() => toggleSort('status')}>{$t('versionDetail.columns.status')}{sortIndicator('status', sortCol, sortDir)}</th>
+      <th class="sortable status-th" on:click={() => toggleSort('status')}>{$t('versionDetail.columns.status')}{sortIndicator('status', sortCol, sortDir)}<InfoTip text={$t('versionDetail.statusHelp')} /></th>
       <th>{$t('versionDetail.columns.actions')}</th>
     </tr>
   </thead>
   {#if loading}
     <tbody>
       {#each [0,1,2,3,4] as i (i)}
-        <tr><td colspan="9"><span class="skeleton"></span></td></tr>
+        <tr><td colspan="10"><span class="skeleton"></span></td></tr>
       {/each}
     </tbody>
   {:else}
@@ -158,6 +177,13 @@
             </span>
           {/if}
         </td>
+        <td class="text-center latest-cell">
+          {#if pkg?.upstreamLatestVersion && ver.version === pkg.upstreamLatestVersion}
+            <svg class="latest-yes" width="14" height="14" role="img" aria-label={$t('versionDetail.columns.latest')}><use href="/icons.svg#icon-check"/></svg>
+          {:else}
+            <span class="text-muted">—</span>
+          {/if}
+        </td>
         <td class="nowrap">
           {#if pkg}
             <span class="badge {pkg.isProxy ? 'proxy' : 'hosted'}">
@@ -177,6 +203,12 @@
         </td>
         <td class="nowrap num-col">{$formatNumber(ver.downloadCount)}</td>
         <td>
+          {#if ver.isMalicious}
+            <span class="status-badge status-malicious" title={$t('versionDetail.status.maliciousHelp')}>
+              <svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>
+              {$t('versionDetail.status.malicious')}
+            </span>
+          {/if}
           {#if ver.status}
             <span class="status-badge status-{ver.status}">{$t(`versionDetail.status.${ver.status}`)}</span>
           {/if}
@@ -194,7 +226,7 @@
 
       {#if isExpanded}
         <tr class="detail-row">
-          <td colspan="9">
+          <td colspan="10">
             <div class="detail-panel">
               <div class="detail-section">
                 <span class="detail-label">{$t('versionDetail.detail.purl')}</span>
@@ -312,6 +344,7 @@
   .checksum-cell { font-size: 11px; color: var(--text2); }
   .license-cell { font-size: 12px; overflow-wrap: anywhere; }
   .versions-table .col-version   { width: 180px; }
+  .versions-table .col-latest    { width: 70px; }
   .versions-table .col-origin    { width: 90px; }
   .versions-table .col-checksum  { width: 100px; }
   .versions-table .col-size      { width: 80px; }
@@ -321,13 +354,32 @@
   .versions-table .col-status    { width: 100px; }
   .versions-table .col-actions   { width: 60px; }
   .num-col { text-align: right; font-variant-numeric: tabular-nums; }
+  .latest-cell { font-weight: 600; }
+  .latest-yes { color: var(--success); }
+  .latest-no { color: var(--danger); }
+
+  .latest-banner {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 10px;
+    padding: 7px 11px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .latest-banner svg { flex-shrink: 0; }
+  .latest-banner-stale   { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
+  .latest-banner-current { background: var(--badge-hosted-bg);  color: var(--badge-hosted-text); }
 
   .detail-row td { padding: 0; border-top: none; }
   .copy-btn { padding: 1px 6px; font-size: 11px; flex-shrink: 0; }
   .vuln-list { display: flex; flex-direction: column; gap: 4px; flex: 1; }
 
   .status-badge {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     padding: 2px 8px;
     border-radius: 999px;
     font-size: 11px;
@@ -335,10 +387,20 @@
     text-transform: uppercase;
     letter-spacing: 0.02em;
   }
-  .status-blocked   { background: var(--badge-red-bg);    color: var(--badge-red-text); }
-  .status-allowed   { background: var(--badge-sky-bg);    color: var(--badge-sky-text); }
-  .status-clean     { background: var(--badge-hosted-bg); color: var(--badge-hosted-text); }
-  .status-unscanned { background: var(--badge-warning-bg);  color: var(--badge-warning-text); }
+  .status-blocked    { background: var(--badge-red-bg);    color: var(--badge-red-text); }
+  .status-allowed    { background: var(--badge-sky-bg);    color: var(--badge-sky-text); }
+  .status-vulnerable { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
+  .status-deprecated { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
+  .status-clean      { background: var(--badge-hosted-bg); color: var(--badge-hosted-text); }
+  .status-unscanned  { background: var(--badge-warning-bg);  color: var(--badge-warning-text); }
+  /* Known-malicious: the strongest danger signal in the table. A filled red pill (not the
+     muted --badge-red-bg tint) so it dominates whatever gate status sits beside it. */
+  .status-malicious {
+    background: var(--danger);
+    color: var(--on-accent);
+    margin-right: 4px;
+  }
+  .status-th { white-space: nowrap; }
 
   .kebab-btn {
     background: transparent;

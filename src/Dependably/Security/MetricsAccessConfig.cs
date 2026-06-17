@@ -19,10 +19,14 @@ namespace Dependably.Security;
 /// </summary>
 public sealed class MetricsAccessConfig
 {
+    // Resolved-config cache TTL. Short enough that DB/env changes take effect quickly.
+    private const int CacheTtlSeconds = 5;
+
     private static readonly string[] DefaultAllowlist = { "127.0.0.1", "::1" };
 
     private readonly Func<string, CancellationToken, Task<string?>> _instanceSettingReader;
     private readonly IConfiguration _config;
+    private readonly TimeProvider _time;
 
     private readonly SemaphoreSlim _lock = new(1, 1);
     private ResolvedConfig? _cached;
@@ -35,10 +39,12 @@ public sealed class MetricsAccessConfig
     /// </summary>
     public MetricsAccessConfig(
         Func<string, CancellationToken, Task<string?>> instanceSettingReader,
-        IConfiguration config)
+        IConfiguration config,
+        TimeProvider time)
     {
         _instanceSettingReader = instanceSettingReader;
         _config = config;
+        _time = time;
     }
 
     public enum Source { Env, Db, Default }
@@ -54,7 +60,7 @@ public sealed class MetricsAccessConfig
 
     public async Task<ResolvedConfig> ResolveAsync(CancellationToken ct = default)
     {
-        if (_cached is not null && DateTimeOffset.UtcNow < _expiry)
+        if (_cached is not null && _time.GetUtcNow() < _expiry)
         {
             return _cached;
         }
@@ -62,14 +68,14 @@ public sealed class MetricsAccessConfig
         await _lock.WaitAsync(ct);
         try
         {
-            if (_cached is not null && DateTimeOffset.UtcNow < _expiry)
+            if (_cached is not null && _time.GetUtcNow() < _expiry)
             {
                 return _cached;
             }
 
             var resolved = await ResolveFromSourcesAsync(ct);
             _cached = resolved;
-            _expiry = DateTimeOffset.UtcNow.AddSeconds(5);
+            _expiry = _time.GetUtcNow().AddSeconds(CacheTtlSeconds);
             return resolved;
         }
         finally

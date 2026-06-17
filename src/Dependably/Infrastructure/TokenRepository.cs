@@ -7,8 +7,13 @@ namespace Dependably.Infrastructure;
 public sealed class TokenRepository
 {
     private readonly IMetadataStore _db;
+    private readonly TimeProvider _time;
 
-    public TokenRepository(IMetadataStore db) => _db = db;
+    public TokenRepository(IMetadataStore db, TimeProvider time)
+    {
+        _db = db;
+        _time = time;
+    }
 
     /// <summary>
     /// Resolves a raw token string to a TokenRecord via indexed lookup on the stored SHA-256 hash.
@@ -21,7 +26,7 @@ public sealed class TokenRepository
 
         await using var conn = await _db.OpenAsync(ct);
 
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         // Single UNION ALL query collapses the previous two-round-trip lookup
         // (user_tokens THEN service_tokens) into one. token_hash is SHA-256 of a
@@ -103,7 +108,7 @@ public sealed class TokenRepository
             UserId = userId,
             Capabilities = capabilities,
             Description = description,
-            CreatedAt = DateTimeOffset.UtcNow,
+            CreatedAt = _time.GetUtcNow(),
             ExpiresAt = expiresAt,
             Source = TokenSource.User
         });
@@ -112,7 +117,10 @@ public sealed class TokenRepository
     public async Task<TokenRecord?> GetTokenByIdAsync(string tokenId, string orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var (Id, OrgId, UserId, Capabilities, Description, CreatedAt, ExpiresAt, LastUsedAt) = await conn.QuerySingleOrDefaultAsync<(string Id, string OrgId, string UserId, string? Capabilities, string? Description, string CreatedAt, string? ExpiresAt, string? LastUsedAt)>(
+        var (Id, OrgId, UserId, Capabilities, Description, CreatedAt, ExpiresAt, LastUsedAt) =
+            await conn.QuerySingleOrDefaultAsync<(string Id, string OrgId, string UserId,
+                string? Capabilities, string? Description, string CreatedAt,
+                string? ExpiresAt, string? LastUsedAt)>(
             "SELECT id, org_id, user_id, capabilities, description, created_at, expires_at, last_used_at FROM user_tokens WHERE id = @id AND org_id = @orgId",
             new { id = tokenId, orgId });
         return Id is null
@@ -188,7 +196,7 @@ public sealed class TokenRepository
             Name = name,
             Capabilities = capabilities,
             Description = description,
-            CreatedAt = DateTimeOffset.UtcNow,
+            CreatedAt = _time.GetUtcNow(),
             ExpiresAt = expiresAt
         });
     }
@@ -279,7 +287,7 @@ public sealed class TokenRepository
             _ => throw new ArgumentOutOfRangeException(nameof(source), source, "Unknown token source"),
         };
 
-        var nowDto = DateTimeOffset.UtcNow;
+        var nowDto = _time.GetUtcNow();
         string now = nowDto.ToString("yyyy-MM-ddTHH:mm:ssZ");
         string threshold = nowDto.AddSeconds(-minIntervalSeconds).ToString("yyyy-MM-ddTHH:mm:ssZ");
 

@@ -137,10 +137,16 @@ export const api = {
   uploadSamlMetadata: (metadataXml) => req('POST', '/auth-config/metadata', { metadataXml }),
   deleteAuthConfig: () => req('DELETE', '/auth-config'),
 
-  // Instance settings — read-only from tenant SPA (used by OrgSettings to surface the
-  // instance ceiling on the per-org upload-limits tab). Writes happen via the system_admin
-  // SPA (systemApi.updateSettings) in multi-mode.
+  // Instance settings. Read from any tenant SPA (used by OrgSettings to surface the instance
+  // ceiling on the per-org upload-limits tab). In single mode the owner is also the operator,
+  // so the write + the /metrics access knobs are exposed here too; in multi mode the backend
+  // 404s these and operators use the system_admin SPA (systemApi.*) instead.
   getInstanceSettings: () => req('GET', '/instance/settings'),
+  updateInstanceSettings: (settings) => req('PUT', '/instance/settings', settings),
+  // /metrics access config. 409 from PUT means the env var locks the knob; 200 may carry a
+  // `warnings` array (e.g. allowlist contains 0.0.0.0/0).
+  getMetricsAccess: () => req('GET', '/instance/metrics-access'),
+  updateMetricsAccess: (body) => req('PUT', '/instance/metrics-access', body),
 
   // Tenant settings (per-org config)
   getOrgSettings: () => req('GET', '/settings'),

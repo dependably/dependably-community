@@ -5,8 +5,13 @@ namespace Dependably.Infrastructure;
 public sealed class SamlConfigRepository
 {
     private readonly IMetadataStore _db;
+    private readonly TimeProvider _time;
 
-    public SamlConfigRepository(IMetadataStore db) => _db = db;
+    public SamlConfigRepository(IMetadataStore db, TimeProvider time)
+    {
+        _db = db;
+        _time = time;
+    }
 
     public async Task<TenantSamlConfig?> GetAsync(string orgId, CancellationToken ct = default)
     {
@@ -137,7 +142,7 @@ public sealed class SamlConfigRepository
                 roleMapping = update.RoleMapping,
                 defaultRole = update.DefaultRole,
                 idpCanAssignAdmin = update.IdpCanAssignAdmin ? 1 : 0,
-                now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
     }
 
@@ -174,7 +179,7 @@ public sealed class SamlConfigRepository
                 ssoUrl = idpSsoUrl,
                 cert = idpSigningCertBase64,
                 xml = metadataXml,
-                now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
     }
 
@@ -193,7 +198,7 @@ public sealed class SamlConfigRepository
                 orgId,
                 email,
                 claimsJson,
-                now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
     }
 
@@ -213,7 +218,7 @@ public sealed class SamlConfigRepository
             {
                 orgId,
                 cert = certBase64,
-                now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
     }
 
@@ -230,7 +235,7 @@ public sealed class SamlConfigRepository
             new
             {
                 orgId,
-                now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
     }
 
@@ -261,7 +266,7 @@ public sealed class SamlConfigRepository
                 cid,
                 tenantId,
                 actorId,
-                issuedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                issuedAt = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 expiresAt = expiresAt.ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
     }
@@ -288,7 +293,7 @@ public sealed class SamlConfigRepository
             {
                 cid,
                 tenantId,
-                now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
         return rows == 1;
     }
@@ -302,8 +307,8 @@ public sealed class SamlConfigRepository
     /// </summary>
     public async Task PurgeExpiredSamlAsync(CancellationToken ct = default)
     {
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-        string testCutoff = DateTimeOffset.UtcNow.AddHours(-1).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string testCutoff = _time.GetUtcNow().AddHours(-1).ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: global retention sweep of expired one-shot rows; deletes by expiry across all tenants
         await conn.ExecuteAsync("DELETE FROM saml_pending_requests WHERE expires_at < @now", new { now });
@@ -323,7 +328,7 @@ public sealed class SamlConfigRepository
     public async Task IssuePendingRequestAsync(
         string requestId, string tenantId, DateTimeOffset expiresAt, CancellationToken ct = default)
     {
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: prune-on-write of expired one-shot rows; deletes by expiry across all tenants
         await conn.ExecuteAsync("DELETE FROM saml_pending_requests WHERE expires_at < @now", new { now });
@@ -363,7 +368,7 @@ public sealed class SamlConfigRepository
             {
                 requestId,
                 tenantId,
-                now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
         return rows == 1;
     }
@@ -381,7 +386,7 @@ public sealed class SamlConfigRepository
         string tenantId, string? idpEntityId, string assertionId, DateTimeOffset expiresAt,
         CancellationToken ct = default)
     {
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: prune-on-write of expired one-shot rows; deletes by expiry across all tenants
         await conn.ExecuteAsync("DELETE FROM saml_consumed_assertions WHERE expires_at < @now", new { now });

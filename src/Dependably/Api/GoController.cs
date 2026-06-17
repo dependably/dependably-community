@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using System.Text.Json;
 using Dependably.Infrastructure;
@@ -25,7 +26,7 @@ namespace Dependably.Api;
 ///
 /// Proxy-only surface: all requests go through the upstream cache-miss path
 /// (<see cref="UpstreamClient.GetOrFetchStreamAsync"/>). There is no hosted-push path for Go
-/// modules in MR1 — only proxy reading is supported.
+/// modules — only proxy reading is supported.
 /// </summary>
 [ApiController]
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S1075",
@@ -108,12 +109,6 @@ public sealed class GoController : OrgScopedControllerBase
             return NotFound();
         }
 
-        // sumdb passthrough is not implemented in this version.
-        if (path.StartsWith("sumdb/", StringComparison.OrdinalIgnoreCase))
-        {
-            return NotFound("sumdb passthrough not yet implemented");
-        }
-
         string orgId = CurrentTenantId();
         var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
         var token = await Request.ResolveTokenAsync(_svc.Tokens, orgId, ct);
@@ -122,6 +117,14 @@ public sealed class GoController : OrgScopedControllerBase
         {
             Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
             return Unauthorized();
+        }
+
+        // sumdb passthrough: the go client discovers the proxy proxies the checksum database
+        // via /go/sumdb/{name}/supported, then fetches lookup/tile/latest paths verbatim. The
+        // client verifies the transparency-log signatures itself, so bytes pass through untouched.
+        if (path.StartsWith("sumdb/", StringComparison.OrdinalIgnoreCase))
+        {
+            return await ServeSumDbAsync(orgId, path["sumdb/".Length..], settings, ct);
         }
 
         // Classify the request by examining the last two path segments.
@@ -180,6 +183,118 @@ public sealed class GoController : OrgScopedControllerBase
             : await ServeArtifactAsync(orgId, modulePath, version, ext, settings, token, ct);
     }
 
+    // ── sumdb passthrough ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Serves the Go checksum-database passthrough surface (GOPROXY spec, "Serving modules
+    /// privately"). <paramref name="rest"/> is the path after <c>sumdb/</c>:
+    /// <c>{sumdb-name}/supported</c> or <c>{sumdb-name}/{lookup|tile|latest...}</c>.
+    ///
+    /// Only the single operator-configured sumdb (<c>Go:SumDb</c>, default
+    /// <c>sum.golang.org</c>) is proxied — a request naming any other sumdb returns 404 so the
+    /// go client falls back to verifying directly. The upstream host is config-derived, never
+    /// taken from the client path, so an attacker cannot steer the fetch at an arbitrary host.
+    /// </summary>
+    private async Task<IActionResult> ServeSumDbAsync(
+        string orgId, string rest, OrgSettings? settings, CancellationToken ct)
+    {
+        int slashIdx = rest.IndexOf('/');
+        if (slashIdx <= 0)
+        {
+            return NotFound();
+        }
+
+        string requestedName = rest[..slashIdx];
+        string sumDbPath = rest[(slashIdx + 1)..];
+
+        var (configuredName, upstreamBase) = ResolveSumDb();
+        if (!string.Equals(requestedName, configuredName, StringComparison.OrdinalIgnoreCase))
+        {
+            // Per spec, an unsupported sumdb name returns 404 from /supported (the client then
+            // falls back to verifying the checksum database directly) and 404 for any other path.
+            return NotFound();
+        }
+
+        // /supported is the capability probe: a 200 with an empty body tells the client the
+        // proxy serves this sumdb. No upstream call — the answer is purely "do we proxy it".
+        if (string.Equals(sumDbPath, "supported", StringComparison.Ordinal))
+        {
+            return Ok();
+        }
+
+        // Air-gap / proxy-passthrough gate, identical to the module proxy paths: gated off → 404.
+        if (settings is not null && !settings.ProxyPassthroughEffective)
+        {
+            return NotFound();
+        }
+
+        // The residual sumdb path is composed into the upstream URL. Validate each segment the
+        // same way module paths are validated (reject traversal, control chars, percent-encoding)
+        // before it reaches the upstream request.
+        foreach (string seg in sumDbPath.Split('/'))
+        {
+            var r = PathSafeValidator.ValidateUpstreamSegment(seg, "sumdb");
+            if (!r.IsValid)
+            {
+                return BadRequest($"Invalid sumdb path: {r.Message}");
+            }
+        }
+
+        string upstreamUrl = $"{upstreamBase}/{sumDbPath}";
+        try
+        {
+            // Verbatim proxy via the shared metadata path: it caches (tiles are immutable),
+            // dedups concurrent fetches, and size-caps. Status, bytes, and Content-Type pass
+            // through untouched so the client verifies the transparency-log signatures itself.
+            var resp = await _svc.Upstream.GetOrFetchMetadataAsync(upstreamUrl, ct);
+            string contentType = resp.ContentType ?? "text/plain; charset=utf-8";
+            // Verbatim passthrough: the upstream status and bytes are returned untouched so the
+            // client verifies the transparency-log signatures itself. Writing the body directly
+            // (rather than File(...)) lets a non-200 upstream status — e.g. a 404 lookup for an
+            // unknown module — survive instead of being coerced to 200 by an IActionResult.
+            Response.StatusCode = resp.StatusCode;
+            Response.ContentType = contentType;
+            await Response.Body.WriteAsync(resp.Body, ct);
+            return new EmptyResult();
+        }
+        catch (UpstreamResponseTooLargeException)
+        {
+            _svc.Logger.LogWarning(
+                "Upstream sumdb response too large fetching {SumDbPath} for org {OrgId}",
+                sumDbPath, orgId);
+            return StatusCode(StatusCodes.Status502BadGateway, "Upstream sumdb response exceeded size limit.");
+        }
+        catch (Exception ex) when (ex is HttpRequestException or SsrfBlockedException)
+        {
+            _svc.Logger.LogWarning(
+                ex,
+                "Upstream sumdb fetch failed for {SumDbPath} (org {OrgId}): {ExceptionType}",
+                sumDbPath, orgId, ex.GetType().Name);
+            return StatusCode(StatusCodes.Status502BadGateway, "Upstream sumdb fetch failed.");
+        }
+    }
+
+    /// <summary>
+    /// Resolves the operator-configured checksum database into (name, upstream-base-URL).
+    /// <c>Go:SumDb</c> accepts a bare host (<c>sum.golang.org</c> → <c>https://sum.golang.org</c>)
+    /// or a full URL (used as its own origin, host taken as the name) so deployments can point at
+    /// a mirror. The default is the public <c>sum.golang.org</c>.
+    /// </summary>
+    private (string Name, string UpstreamBase) ResolveSumDb()
+    {
+        string? raw = _svc.Configuration["Go:SumDb"];
+        string configured = string.IsNullOrWhiteSpace(raw) ? "sum.golang.org" : raw.Trim();
+
+        if (configured.Contains("://", StringComparison.Ordinal)
+            && Uri.TryCreate(configured, UriKind.Absolute, out var uri))
+        {
+            string baseUrl = uri.GetLeftPart(UriPartial.Authority);
+            return (uri.Host, baseUrl);
+        }
+
+        return (configured, $"https://{configured}");
+    }
+
     // ── Artifact serving ─────────────────────────────────────────────────────
 
     private async Task<IActionResult> ServeArtifactAsync(
@@ -205,12 +320,20 @@ public sealed class GoController : OrgScopedControllerBase
         if (cached is not null)
         {
             Response.Headers["X-Cache"] = "HIT";
+            if (ext == "zip")
+            {
+                // The .zip is the primary cached artefact; record the hit so the eviction
+                // pipeline and vulnerability-response query see this tenant's access.
+                await RecordZipCacheAccessAsync(orgId, module, version, blobKey, upstreamUrl: null, ct);
+            }
             return File(cached, ContentTypeFor(ext));
         }
 
-        // Cache MISS — check proxy settings (ProxyPassthroughEffective combines
-        // ProxyPassthroughEnabled and AirGapped into a single gate).
-        return settings is not null && !settings.ProxyPassthroughEffective
+        // Cache MISS — refuse the upstream fetch when proxying is off (ProxyPassthroughEffective
+        // combines ProxyPassthroughEnabled and AirGapped) or the module path is reserved. A
+        // reserved namespace follows local_only semantics: it never pulls from upstream.
+        bool proxyOff = settings is not null && !settings.ProxyPassthroughEffective;
+        return proxyOff || await _svc.Reserved.IsReservedAsync(orgId, "golang", module, ct)
             ? NotFound()
             : await ServeArtifactFromUpstreamsAsync(orgId, module, version, ext, token, ct);
     }
@@ -257,6 +380,9 @@ public sealed class GoController : OrgScopedControllerBase
                 {
                     // Record the version in the catalogue for the .zip (primary artifact).
                     await RecordVersionAsync(orgId, module, version, blobKey, token, ct);
+                    // Record the proxy fetch into the shared cache index so the eviction
+                    // pipeline and vulnerability-response query can see it.
+                    await RecordZipCacheAccessAsync(orgId, module, version, blobKey, upstreamUrl, ct);
                 }
 
                 await _svc.Audit.LogActivityAsync(
@@ -274,14 +400,14 @@ public sealed class GoController : OrgScopedControllerBase
                 _svc.Logger.LogWarning(
                     "Checksum mismatch fetching golang {Module}@{Version}.{Ext} from {UpstreamBase}",
                     module, version, ext, upstreamBase);
-                return StatusCode(502, "Upstream checksum verification failed.");
+                return StatusCode(StatusCodes.Status502BadGateway, "Upstream checksum verification failed.");
             }
             catch (UpstreamResponseTooLargeException)
             {
                 _svc.Logger.LogWarning(
                     "Upstream response too large fetching golang {Module}@{Version}.{Ext} from {UpstreamBase}",
                     module, version, ext, upstreamBase);
-                return StatusCode(502, "Upstream response exceeded size limit.");
+                return StatusCode(StatusCodes.Status502BadGateway, "Upstream response exceeded size limit.");
             }
             catch (HttpRequestException ex)
             {
@@ -295,7 +421,7 @@ public sealed class GoController : OrgScopedControllerBase
                     ex,
                     "HTTP error fetching golang {Module}@{Version}.{Ext} from {UpstreamBase}: {ExceptionType}",
                     module, version, ext, upstreamBase, ex.GetType().Name);
-                return StatusCode(502, "Upstream fetch failed.");
+                return StatusCode(StatusCodes.Status502BadGateway, "Upstream fetch failed.");
             }
         }
 
@@ -365,8 +491,10 @@ public sealed class GoController : OrgScopedControllerBase
                 "application/json");
         }
 
-        // Proxy upstream @latest.
-        if (settings is not null && !settings.ProxyPassthroughEffective)
+        // Proxy upstream @latest — refused when proxying is off or the module path is reserved
+        // (local_only semantics). A locally-cached latest was already returned above.
+        if ((settings is not null && !settings.ProxyPassthroughEffective)
+            || await _svc.Reserved.IsReservedAsync(orgId, "golang", module, ct))
         {
             return NotFound();
         }
@@ -380,47 +508,56 @@ public sealed class GoController : OrgScopedControllerBase
         string encodedModule = EncodeBangEncoding(module);
         foreach (string upstreamBase in upstreamBases)
         {
-            string upstreamUrl = $"{upstreamBase}/{encodedModule}/@latest";
-            string inflightKey = $"{orgId}:{module}:{upstreamBase}";
-            try
+            string? json = await FetchLatestFromUpstreamAsync(orgId, module, encodedModule, upstreamBase, ct);
+            if (json is not null)
             {
-                // Single-flight: collapse concurrent @latest fetches for the same coordinate
-                // onto one upstream call. CancellationToken.None ensures a disconnecting caller
-                // does not cancel the shared Lazy and fault every other waiter.
-                var lazy = _svc.LatestCoordinator.InFlight.GetOrAdd(
-                    inflightKey,
-                    _ => new Lazy<Task<string?>>(
-                        () => FetchLatestJsonAsync(upstreamUrl, _svc.HttpClientFactory, _svc.Logger, module, upstreamBase, CancellationToken.None)));
-                try
-                {
-                    string? json = await lazy.Value.WaitAsync(ct);
-                    if (json is null)
-                    {
-                        continue;
-                    }
-                    return Content(json, "application/json");
-                }
-                finally
-                {
-                    _svc.LatestCoordinator.InFlight.TryRemove(inflightKey, out _);
-                }
-            }
-            catch (HttpRequestException ex)
-            {
-                _svc.Logger.LogWarning(
-                    ex,
-                    "HTTP error fetching golang {Module} @latest from {UpstreamBase}: {ExceptionType}",
-                    module, upstreamBase, ex.GetType().Name);
-                continue;
+                return Content(json, "application/json");
             }
         }
 
         return NotFound();
     }
 
+    // Single-flight @latest fetch for one upstream base. Returns the JSON string on success,
+    // null when the upstream returns 404 or a too-large body, and logs + returns null on
+    // HttpRequestException so the caller continues to the next upstream.
+    private async Task<string?> FetchLatestFromUpstreamAsync(
+        string orgId, string module, string encodedModule, string upstreamBase, CancellationToken ct)
+    {
+        string upstreamUrl = $"{upstreamBase}/{encodedModule}/@latest";
+        string inflightKey = $"{orgId}:{module}:{upstreamBase}";
+        try
+        {
+            // Single-flight: collapse concurrent @latest fetches for the same coordinate
+            // onto one upstream call. CancellationToken.None ensures a disconnecting caller
+            // does not cancel the shared Lazy and fault every other waiter.
+            var lazy = _svc.LatestCoordinator.InFlight.GetOrAdd(
+                inflightKey,
+                _ => new Lazy<Task<string?>>(
+                    () => FetchLatestJsonAsync(upstreamUrl, _svc.HttpClientFactory, _svc.Logger, module, upstreamBase, CancellationToken.None)));
+            try
+            {
+                return await lazy.Value.WaitAsync(ct);
+            }
+            finally
+            {
+                _svc.LatestCoordinator.InFlight.TryRemove(inflightKey, out _);
+            }
+        }
+        catch (HttpRequestException ex)
+        {
+            _svc.Logger.LogWarning(
+                ex,
+                "HTTP error fetching golang {Module} @latest from {UpstreamBase}: {ExceptionType}",
+                module, upstreamBase, ex.GetType().Name);
+            return null;
+        }
+    }
+
     // Performs the bounded upstream @latest fetch. Returns the JSON string on success,
     // null on 404, or throws HttpRequestException on other HTTP errors.
     // Called exclusively from the Lazy<Task> body — always with CancellationToken.None.
+    [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Functional Snyk // deepcode ignore suppression marker, not commented-out code.")]
     private static async Task<string?> FetchLatestJsonAsync(
         string upstreamUrl,
         IHttpClientFactory httpClientFactory,
@@ -452,6 +589,8 @@ public sealed class GoController : OrgScopedControllerBase
             sb.Append(buffer, 0, read);
             if (sb.Length > MaxLatestResponseBytes)
             {
+                // deepcode ignore LogForging: module is validated by ValidateModulePath in ServeLatestAsync before this helper is called;
+                // upstreamBase is operator-configured; Serilog renders structured parameters, not concatenated strings.
                 logger.LogWarning(
                     "Upstream @latest response too large for golang {Module} from {UpstreamBase}",
                     module, upstreamBase);
@@ -470,6 +609,57 @@ public sealed class GoController : OrgScopedControllerBase
         string purl = PurlNormalizer.Golang(module, version);
         await _svc.Packages.GetOrCreateGoVersionAsync(orgId, module, version, purl, blobKey, token?.UserId, ct);
     }
+
+    /// <summary>
+    /// Records a .zip access into the shared cache index (<c>cache_artifact</c> +
+    /// <c>tenant_artifact_access</c>). Go modules are proxy-only, so every cached .zip is a
+    /// proxy artefact and is always recorded. The checksum and size come from the
+    /// <c>package_versions</c> row (org-scoped via the join on <c>packages</c>), matching the
+    /// Cargo lookup shape. A missing row records empty/zero bytes-metadata — the coordinate
+    /// and blob key are what the eviction pipeline keys on. Best-effort: the recorder swallows
+    /// its own failures and the lookup failure is caught so serving is never broken.
+    /// </summary>
+    private async Task RecordZipCacheAccessAsync(
+        string orgId, string module, string version, string blobKey, string? upstreamUrl, CancellationToken ct)
+    {
+        string contentHash = "";
+        long sizeBytes = 0;
+        try
+        {
+            await using var conn = await _svc.Db.OpenAsync(ct);
+            var row = await Dapper.SqlMapper.QuerySingleOrDefaultAsync<GoVersionBytesRow>(conn,
+                """
+                SELECT pv.checksum_sha256 AS ChecksumSha256,
+                       pv.size_bytes AS SizeBytes
+                FROM package_versions pv
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.org_id = @orgId
+                  AND p.ecosystem = 'golang'
+                  AND p.purl_name = @module
+                  AND pv.version = @version
+                """,
+                new { orgId, module, version });
+            if (row is not null)
+            {
+                contentHash = row.ChecksumSha256 ?? "";
+                sizeBytes = row.SizeBytes;
+            }
+        }
+        catch (Exception ex)
+        {
+            // The bytes already streamed to the client; this index lookup is best-effort.
+            _svc.Logger.LogWarning(
+                "Go cache-access recording lookup failed for {Module}@{Version} (org {OrgId}): {ExceptionType}",
+                module, version, orgId, ex.GetType().Name);
+        }
+
+        string filename = $"{version}.zip";
+        await _svc.CacheRecorder.RecordAccessAsync(
+            new CacheAccess(orgId, "golang", module, version, filename,
+                contentHash, sizeBytes, blobKey, upstreamUrl), ct);
+    }
+
+    private sealed record GoVersionBytesRow(string? ChecksumSha256, long SizeBytes);
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -511,5 +701,9 @@ public sealed record GoControllerServices(
     UpstreamClient Upstream,
     UpstreamRegistryResolver Registries,
     IHttpClientFactory HttpClientFactory,
+    IMetadataStore Db,
+    CacheAccessRecorder CacheRecorder,
+    IConfiguration Configuration,
     ILogger<GoController> Logger,
-    GoLatestFetchCoordinator LatestCoordinator);
+    GoLatestFetchCoordinator LatestCoordinator,
+    ReservedNamespaceService Reserved);

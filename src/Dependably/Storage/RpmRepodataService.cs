@@ -29,11 +29,13 @@ public sealed class RpmRepodataService
 
     private readonly IMetadataStore _db;
     private readonly ILogger<RpmRepodataService> _logger;
+    private readonly TimeProvider _time;
 
-    public RpmRepodataService(IMetadataStore db, ILogger<RpmRepodataService> logger)
+    public RpmRepodataService(IMetadataStore db, ILogger<RpmRepodataService> logger, TimeProvider time)
     {
         _db = db;
         _logger = logger;
+        _time = time;
     }
 
     /// <summary>
@@ -53,7 +55,7 @@ public sealed class RpmRepodataService
             new XElement(common + "metadata",
                 new XAttribute(XNamespace.Xmlns + "rpm", rpm.NamespaceName),
                 new XAttribute("packages", rows.Count),
-                rows.Select(r => RenderPackage(r, common, rpm))));
+                rows.Select(r => RenderPackage(r, common, rpm, _time.GetUtcNow()))));
 
         using var sw = new Utf8StringWriter();
         doc.Save(sw, SaveOptions.None);
@@ -136,7 +138,7 @@ public sealed class RpmRepodataService
             localRows.Select(r => r.Filename ?? "").Where(f => f.Length > 0),
             StringComparer.OrdinalIgnoreCase);
 
-        var localElements = localRows.Select(r => RenderPackage(r, common, rpm));
+        var localElements = localRows.Select(r => RenderPackage(r, common, rpm, _time.GetUtcNow()));
         var upstreamElements = ExtractUpstreamPackages(upstreamPrimaryGz, common, localFilenames);
 
         var all = localElements.Concat(upstreamElements).ToList();
@@ -335,26 +337,27 @@ public sealed class RpmRepodataService
     /// </summary>
     public static string BuildRepomd(
         byte[] primaryGz,
+        DateTimeOffset now,
         byte[]? filelistsGz = null,
         byte[]? otherGz = null,
         IReadOnlyList<XElement>? extraEntries = null)
     {
         var repo = RepoNs;
-        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        long revision = now.ToUnixTimeSeconds();
 
         var dataElements = new List<XElement>
         {
-            BuildRepomdDataEntry(repo, "primary", "repodata/primary.xml.gz", primaryGz, now),
+            BuildRepomdDataEntry(repo, "primary", "repodata/primary.xml.gz", primaryGz, revision),
         };
 
         if (filelistsGz is not null)
         {
-            dataElements.Add(BuildRepomdDataEntry(repo, "filelists", "repodata/filelists.xml.gz", filelistsGz, now));
+            dataElements.Add(BuildRepomdDataEntry(repo, "filelists", "repodata/filelists.xml.gz", filelistsGz, revision));
         }
 
         if (otherGz is not null)
         {
-            dataElements.Add(BuildRepomdDataEntry(repo, "other", "repodata/other.xml.gz", otherGz, now));
+            dataElements.Add(BuildRepomdDataEntry(repo, "other", "repodata/other.xml.gz", otherGz, revision));
         }
 
         if (extraEntries is not null)
@@ -365,7 +368,7 @@ public sealed class RpmRepodataService
         var doc = new XDocument(
             new XDeclaration("1.0", "UTF-8", null),
             new XElement(repo + "repomd",
-                new XAttribute("revision", now),
+                new XAttribute("revision", revision),
                 dataElements));
 
         using var sw = new Utf8StringWriter();
@@ -399,7 +402,7 @@ public sealed class RpmRepodataService
         return ms.ToArray();
     }
 
-    private static XElement RenderPackage(RpmPrimaryRow r, XNamespace common, XNamespace rpm)
+    private static XElement RenderPackage(RpmPrimaryRow r, XNamespace common, XNamespace rpm, DateTimeOffset now)
     {
         return new XElement(common + "package",
             new XAttribute("type", "rpm"),
@@ -418,7 +421,7 @@ public sealed class RpmRepodataService
             new XElement(common + "packager", r.Packager ?? ""),
             new XElement(common + "url", r.Url ?? ""),
             new XElement(common + "time",
-                new XAttribute("file", DateTimeOffset.UtcNow.ToUnixTimeSeconds()),
+                new XAttribute("file", now.ToUnixTimeSeconds()),
                 new XAttribute("build", r.BuildTime ?? 0)),
             new XElement(common + "size",
                 new XAttribute("package", r.SizeBytes),

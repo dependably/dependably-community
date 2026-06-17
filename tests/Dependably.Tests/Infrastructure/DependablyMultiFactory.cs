@@ -112,6 +112,7 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        // now-ok: mints a JWT the host validates against its real clock.
         var now = DateTime.UtcNow;
         var token = new JwtSecurityToken(
             claims: new[]
@@ -138,6 +139,7 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
             ?? throw new InvalidOperationException("jwt_secret missing");
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        // now-ok: mints a JWT the host validates against its real clock.
         var now = DateTime.UtcNow;
         var token = new JwtSecurityToken(
             claims: new[]

@@ -122,11 +122,14 @@ public sealed class PostgresSchemaApplyTests
     [Fact]
     public async Task AssertionReplayGuard_OnLivePostgres_FirstAccepts_ReplayRejected()
     {
+        // Frozen clock + fixed expiry: the repository prunes/compares expiry against its
+        // injected TimeProvider, so KnownNow-relative instants stay on the right side of
+        // the window regardless of when the CI job runs.
         var store = await InitializedPostgresAsync();
-        var repo = new SamlConfigRepository(store);
+        var repo = new SamlConfigRepository(store, TestTime.Frozen());
         string org = await SeedOrgAsync(store);
         string assertionId = "_" + Guid.NewGuid().ToString("N");
-        var expiry = DateTimeOffset.UtcNow.AddMinutes(5);
+        var expiry = TestTime.KnownNow.AddMinutes(5);
 
         // ON CONFLICT DO NOTHING must report rows==1 on first insert, rows==0 on the replay.
         Assert.True(await repo.TryConsumeAssertionAsync(org, "https://idp/x", assertionId, expiry));
@@ -137,11 +140,12 @@ public sealed class PostgresSchemaApplyTests
     public async Task AssertionReplayGuard_OnLivePostgres_SameIdDistinctTenants_Independent()
     {
         var store = await InitializedPostgresAsync();
-        var repo = new SamlConfigRepository(store);
+        // Frozen clock + fixed expiry — same determinism rationale as the replay test above.
+        var repo = new SamlConfigRepository(store, TestTime.Frozen());
         string orgA = await SeedOrgAsync(store);
         string orgB = await SeedOrgAsync(store);
         string assertionId = "_" + Guid.NewGuid().ToString("N");
-        var expiry = DateTimeOffset.UtcNow.AddMinutes(5);
+        var expiry = TestTime.KnownNow.AddMinutes(5);
 
         Assert.True(await repo.TryConsumeAssertionAsync(orgA, "idp", assertionId, expiry));
         Assert.True(await repo.TryConsumeAssertionAsync(orgB, "idp", assertionId, expiry)); // different PK
@@ -152,10 +156,11 @@ public sealed class PostgresSchemaApplyTests
     public async Task PendingRequest_OnLivePostgres_ConsumedExactlyOnce()
     {
         var store = await InitializedPostgresAsync();
-        var repo = new SamlConfigRepository(store);
+        // Frozen clock + fixed expiry — same determinism rationale as the replay test above.
+        var repo = new SamlConfigRepository(store, TestTime.Frozen());
         string org = await SeedOrgAsync(store);
         string reqId = "_" + Guid.NewGuid().ToString("N");
-        await repo.IssuePendingRequestAsync(reqId, org, DateTimeOffset.UtcNow.AddMinutes(10));
+        await repo.IssuePendingRequestAsync(reqId, org, TestTime.KnownNow.AddMinutes(10));
 
         // Atomic UPDATE...WHERE consumed_at IS NULL must return rows==1 once, then rows==0.
         Assert.True(await repo.TryConsumePendingRequestAsync(reqId, org));

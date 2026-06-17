@@ -1,5 +1,6 @@
 using System.Net;
 using Dependably.Infrastructure.Siem;
+using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 
 namespace Dependably.Tests.Unit;
@@ -22,7 +23,7 @@ public sealed class WebhookSiemForwarderTests
             Ecosystem: null,
             Purl: null,
             Detail: null,
-            CreatedAt: DateTimeOffset.UtcNow);
+            CreatedAt: TestTime.KnownNow);
 
     [Fact]
     public void Constructor_MissingUrl_Throws()

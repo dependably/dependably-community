@@ -7,12 +7,14 @@ public sealed class BlocklistRepository
 {
     private readonly IMetadataStore _db;
     private readonly IMemoryCache _cache;
+    private readonly TimeProvider _time;
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(60);
 
-    public BlocklistRepository(IMetadataStore db, IMemoryCache cache)
+    public BlocklistRepository(IMetadataStore db, IMemoryCache cache, TimeProvider time)
     {
         _db = db;
         _cache = cache;
+        _time = time;
     }
 
     private static string CacheKey(string orgId) => $"blocklist:{orgId}";
@@ -54,7 +56,7 @@ public sealed class BlocklistRepository
             """,
             new { id, orgId, pattern });
         _cache.Remove(CacheKey(orgId));
-        return new BlocklistEntry { Id = id, OrgId = orgId, Pattern = pattern, CreatedAt = DateTimeOffset.UtcNow };
+        return new BlocklistEntry { Id = id, OrgId = orgId, Pattern = pattern, CreatedAt = _time.GetUtcNow() };
     }
 
     public async Task<bool> IsBlockedAsync(string orgId, string purl, CancellationToken ct = default)

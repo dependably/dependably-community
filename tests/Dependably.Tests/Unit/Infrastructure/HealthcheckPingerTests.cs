@@ -45,11 +45,12 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
     private HealthcheckPinger BuildPinger(IConfiguration config, IHttpClientFactory factory)
         => new(
             factory,
-            new InProcessDistributedLock(),
+            new InProcessDistributedLock(TimeProvider.System),
             _readiness,
             new AirGapMode(config),
             config,
-            NullLogger<HealthcheckPinger>.Instance);
+            NullLogger<HealthcheckPinger>.Instance,
+            TimeProvider.System);
 
     // ── Tests ─────────────────────────────────────────────────────────────────
 

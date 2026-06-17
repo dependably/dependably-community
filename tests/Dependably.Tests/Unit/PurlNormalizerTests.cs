@@ -5,7 +5,33 @@ namespace Dependably.Tests.Unit;
 [Trait("Category", "Unit")]
 public class PurlNormalizerTests
 {
-    // PyPI normalization (PEP 503)
+    // PyPI name normalization (PEP 503) — PyPiName is the shared normalizer used by cache
+    // keys and PURL construction; all equivalent name forms must produce the same output.
+    [Theory]
+    [InlineData("my-package", "my-package")]
+    [InlineData("my_package", "my-package")]
+    [InlineData("my.package", "my-package")]
+    [InlineData("My_Package", "my-package")]
+    [InlineData("MY-PACKAGE", "my-package")]
+    [InlineData("my__package", "my-package")]
+    [InlineData("my-.package", "my-package")]
+    public void PyPiName_EquivalentForms_ProduceSameKey(string input, string expected)
+        => Assert.Equal(expected, PurlNormalizer.PyPiName(input));
+
+    // Cache key equivalence: eviction by one PEP 503-equivalent form invalidates lookups
+    // by any other form (they all resolve to the same normalized cache key).
+    [Fact]
+    public void PyPiName_DashUnderscoreDot_ProduceIdenticalCacheKey()
+    {
+        string dashForm = PurlNormalizer.PyPiName("my-package");
+        string underscoreForm = PurlNormalizer.PyPiName("my_package");
+        string dotForm = PurlNormalizer.PyPiName("my.package");
+
+        Assert.Equal(dashForm, underscoreForm);
+        Assert.Equal(dashForm, dotForm);
+    }
+
+    // PyPI PURL normalization (PEP 503)
     [Theory]
     [InlineData("requests", "2.28.0", "pkg:pypi/requests@2.28.0")]
     [InlineData("My_Package", "1.0.0", "pkg:pypi/my-package@1.0.0")]

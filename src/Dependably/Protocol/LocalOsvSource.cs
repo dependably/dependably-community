@@ -274,7 +274,7 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
             s.Type?.StartsWith("CVSS", StringComparison.OrdinalIgnoreCase) == true);
         if (cvss?.Score is not null)
         {
-            cvssScore = OsvScoring.ParseCvssBaseScore(cvss.Score, out severity);
+            (cvssScore, severity) = OsvScoring.ParseCvssBaseScore(cvss.Score);
         }
 
         if (severity is null && raw.DatabaseSpecific is not null

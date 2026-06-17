@@ -27,7 +27,7 @@ public class LicenseRepositoryTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
 
-    private LicenseRepository Repo() => new(_db);
+    private LicenseRepository Repo() => new(_db, TimeProvider.System);
 
     // ── CheckPolicyAsync ──────────────────────────────────────────────────────
 

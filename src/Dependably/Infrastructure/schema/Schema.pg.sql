@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS org_settings (
     max_upload_bytes_maven  INTEGER,        -- per-ecosystem Maven cap; falls back to max_upload_bytes
     max_upload_bytes_rpm    INTEGER,        -- per-ecosystem RPM cap; falls back to max_upload_bytes
     max_upload_bytes_oci    INTEGER,        -- per-ecosystem OCI (Docker) cap; falls back to max_upload_bytes
+    max_upload_bytes_cargo  INTEGER,        -- per-ecosystem Cargo cap; falls back to max_upload_bytes
     keep_versions       INTEGER,            -- GC: max versions to retain per package per ecosystem
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
     activity_retention_days INTEGER,        -- GC: delete activity rows older than this
@@ -39,7 +40,9 @@ CREATE TABLE IF NOT EXISTS org_settings (
     proxy_passthrough_enabled INTEGER NOT NULL DEFAULT 1,
     max_osv_score_tolerance   REAL    NOT NULL DEFAULT 10.0,
     -- Supply-chain hold: minimum upstream-release age (hours) before a proxy-fetched version
-    -- clears the block gate. NULL = policy off. See Schema.sql for the full rationale.
+    -- clears the block gate. NULL = policy off. The gate is re-evaluated on every serve and
+    -- index render; held versions serve again automatically once they age past the threshold.
+    -- See Schema.sql for the full rationale.
     min_release_age_hours     INTEGER,
     default_language          TEXT    NOT NULL DEFAULT 'en',
     allow_version_overwrite   INTEGER NOT NULL DEFAULT 0,
@@ -284,7 +287,7 @@ CREATE TABLE IF NOT EXISTS blocklist (
 CREATE TABLE IF NOT EXISTS reserved_namespace (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,  -- 'npm' | 'pypi' | 'nuget' | 'maven'
+    ecosystem   TEXT NOT NULL,  -- 'npm' | 'pypi' | 'nuget' | 'maven' | 'cargo' | 'golang'
     pattern     TEXT NOT NULL,
     created_by  TEXT REFERENCES users(id),
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),

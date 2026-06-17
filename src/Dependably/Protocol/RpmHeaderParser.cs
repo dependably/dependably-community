@@ -103,6 +103,28 @@ public static class RpmHeaderParser
     private const int TypeStringArray = 8;
     private const int TypeI18nString = 9;
 
+    // Byte indices of the lead magic bytes (positions 0-3 in the RPM file).
+    private const int LeadMagicIndex2 = 2;
+    private const int LeadMagicIndex3 = 3;
+
+    // Valid RPM lead major version numbers (version byte is at offset 4 in the lead).
+    private const int RpmMajorVersion3 = 3;
+    private const int RpmMajorVersion4 = 4;
+    private const byte HeaderVersionByte = 0x01;
+
+    // Byte offsets within the 16-byte header intro (past the magic + version byte).
+    private const int HeaderIntroNindexOffset = 8;
+    private const int HeaderIntroHsizeOffset = 12;
+
+    // Byte offsets within each 16-byte index entry.
+    private const int IndexTagOffset = 0;
+    private const int IndexTypeOffset = 4;
+    private const int IndexOffsetOffset = 8;
+    private const int IndexCountOffset = 12;
+
+    // Size of a single big-endian int32 field in RPM index entries.
+    private const int Int32Size = sizeof(int);
+
     // RPMSENSE_* dependency flag bits.
     private const int SenseLess = 0x02;
     private const int SenseGreater = 0x04;
@@ -126,13 +148,13 @@ public static class RpmHeaderParser
 
         // ── Lead ────────────────────────────────────────────────────────────────
         if (!(data[0] == LeadMagic0 && data[1] == LeadMagic1 &&
-              data[2] == LeadMagic2 && data[3] == LeadMagic3))
+              data[LeadMagicIndex2] == LeadMagic2 && data[LeadMagicIndex3] == LeadMagic3))
         {
             throw new RpmParseException("Invalid RPM lead magic.");
         }
 
         byte major = data[4];
-        if (major is not 3 and not 4)
+        if (major is not RpmMajorVersion3 and not RpmMajorVersion4)
         {
             throw new RpmParseException($"Unsupported RPM major version: {major}.");
         }
@@ -219,28 +241,28 @@ public static class RpmHeaderParser
 
     private static (int Nindex, int Hsize) ReadHeaderIntro(byte[] data, int offset)
     {
-        if (data[offset] != HeaderMagic0 || data[offset + 1] != HeaderMagic1 || data[offset + 2] != HeaderMagic2)
+        if (data[offset] != HeaderMagic0 || data[offset + 1] != HeaderMagic1 || data[offset + LeadMagicIndex2] != HeaderMagic2)
         {
             throw new RpmParseException("Invalid RPM header magic.");
         }
 
-        if (data[offset + 3] != 0x01)
+        if (data[offset + LeadMagicIndex3] != HeaderVersionByte)
         {
             throw new RpmParseException("Unsupported RPM header version.");
         }
         // 4 bytes reserved at offset+4..7, then nindex + hsize as big-endian int32.
-        int nindex = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 8, 4));
-        int hsize = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 12, 4));
+        int nindex = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + HeaderIntroNindexOffset, Int32Size));
+        int hsize = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + HeaderIntroHsizeOffset, Int32Size));
         return nindex < 0 || hsize < 0 ? throw new RpmParseException("Negative nindex / hsize in RPM header intro.") : ((int Nindex, int Hsize))(nindex, hsize);
     }
 
     private static IndexEntry ReadIndex(byte[] data, int offset)
     {
         return new IndexEntry(
-            Tag: BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset, 4)),
-            Type: BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 4, 4)),
-            Offset: BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 8, 4)),
-            Count: BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + 12, 4)));
+            Tag: BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + IndexTagOffset, Int32Size)),
+            Type: BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + IndexTypeOffset, Int32Size)),
+            Offset: BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + IndexOffsetOffset, Int32Size)),
+            Count: BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(offset + IndexCountOffset, Int32Size)));
     }
 
     private readonly record struct IndexEntry(int Tag, int Type, int Offset, int Count);
@@ -268,7 +290,7 @@ public static class RpmHeaderParser
     {
         return !raw.TryGetValue(tag, out var entry)
             ? null
-            : entry.Type != TypeInt32 ? null : BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(storeStart + entry.Offset, 4));
+            : entry.Type != TypeInt32 ? null : BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(storeStart + entry.Offset, Int32Size));
     }
 
     private static int[] ReadInt32Array(byte[] data, int storeStart, IndexEntry entry)
@@ -281,7 +303,7 @@ public static class RpmHeaderParser
         int[] arr = new int[entry.Count];
         for (int i = 0; i < entry.Count; i++)
         {
-            arr[i] = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(storeStart + entry.Offset + i * 4, 4));
+            arr[i] = BinaryPrimitives.ReadInt32BigEndian(data.AsSpan(storeStart + entry.Offset + i * Int32Size, Int32Size));
         }
 
         return arr;

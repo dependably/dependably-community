@@ -10,12 +10,18 @@ namespace Dependably.Protocol;
 /// </summary>
 public sealed record OciCoordinates(string Repository, string Reference, bool IsDigest)
 {
-    public string? DigestAlgorithm => IsDigest ? Reference.Split(':', 2)[0] : null;
-    public string? DigestHex => IsDigest ? Reference.Split(':', 2)[1] : null;
+    // Split limit: algorithm and hex are the two parts of a digest reference ({algo}:{hex}).
+    private const int DigestSplitParts = 2;
+
+    public string? DigestAlgorithm => IsDigest ? Reference.Split(':', DigestSplitParts)[0] : null;
+    public string? DigestHex => IsDigest ? Reference.Split(':', DigestSplitParts)[1] : null;
 }
 
 public static partial class OciCoordinatesParser
 {
+    // Maximum OCI repository name length per the Distribution Spec (matches DNS name limit).
+    private const int MaxRepositoryNameLength = 255;
+
     [GeneratedRegex(@"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$")]
     private static partial Regex RepoNameRegex();
 
@@ -27,7 +33,7 @@ public static partial class OciCoordinatesParser
 
     /// <summary>Validates that <paramref name="name"/> is a legal OCI repo name.</summary>
     public static bool IsValidRepositoryName(string name)
-        => !string.IsNullOrWhiteSpace(name) && name.Length <= 255 && RepoNameRegex().IsMatch(name);
+        => !string.IsNullOrWhiteSpace(name) && name.Length <= MaxRepositoryNameLength && RepoNameRegex().IsMatch(name);
 
     /// <summary>Validates that <paramref name="reference"/> is a legal tag.</summary>
     public static bool IsValidTag(string reference) =>

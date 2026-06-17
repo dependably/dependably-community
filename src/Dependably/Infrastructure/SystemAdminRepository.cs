@@ -73,7 +73,9 @@ public sealed class SystemAdminRepository
         string email, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var (Id, Email, PasswordHash, MustChangePassword, AccountStatus) = await conn.QuerySingleOrDefaultAsync<(string? Id, string? Email, string? PasswordHash, int MustChangePassword, string? AccountStatus)>(
+        var (Id, Email, PasswordHash, MustChangePassword, AccountStatus) =
+            await conn.QuerySingleOrDefaultAsync<(string? Id, string? Email, string? PasswordHash,
+                int MustChangePassword, string? AccountStatus)>(
             """
             SELECT id, email, password_hash, must_change_password, account_status
             FROM system_admins

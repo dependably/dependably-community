@@ -37,7 +37,7 @@ public sealed class RpmRepodataServiceMergeTests : IClassFixture<InMemoryDbFixtu
             ("hello", "2.10", "1.el9", "x86_64", "Packages/h/hello-2.10-1.el9.x86_64.rpm", 1),
             ("tree", "2.1.1", "1.el9", "x86_64", "Packages/t/tree-2.1.1-1.el9.x86_64.rpm", 4242));
 
-        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance);
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
         string xml = await svc.BuildMergedPrimaryAsync(orgId, upstreamGz, CancellationToken.None);
         var doc = XDocument.Parse(xml);
 
@@ -64,7 +64,7 @@ public sealed class RpmRepodataServiceMergeTests : IClassFixture<InMemoryDbFixtu
         byte[] upstreamGz = BuildUpstreamPrimaryGz(
             ("tree", "2.1.1", "1.el9", "x86_64", "Packages/t/tree-2.1.1-1.el9.x86_64.rpm", 7));
 
-        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance);
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
         string xml = await svc.BuildMergedPrimaryAsync(orgId, upstreamGz, CancellationToken.None);
         var doc = XDocument.Parse(xml);
 

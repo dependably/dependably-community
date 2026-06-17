@@ -263,6 +263,7 @@ public sealed class PasswordChangeTests : IClassFixture<DependablyFactory>, IAsy
         var key = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
         var creds = new Microsoft.IdentityModel.Tokens.SigningCredentials(
             key, Microsoft.IdentityModel.Tokens.SecurityAlgorithms.HmacSha256);
+        // now-ok: mints a JWT the host validates against its (default: real) clock.
         var now = DateTime.UtcNow;
         var token = new System.IdentityModel.Tokens.Jwt.JwtSecurityToken(
             claims: new[]

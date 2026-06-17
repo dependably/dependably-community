@@ -9,6 +9,9 @@ namespace Dependably.Protocol;
 /// </summary>
 public static class Sha256SumsParser
 {
+    // SHA-256 hex digest length (256 bits = 32 bytes = 64 hex chars).
+    private const int Sha256HexLength = 64;
+
     public sealed record Entry(string Sha256Hex, string Filename);
 
     /// <summary>
@@ -83,7 +86,7 @@ public static class Sha256SumsParser
 
     private static void ValidateDigest(string digest, int lineNo)
     {
-        if (digest.Length != 64)
+        if (digest.Length != Sha256HexLength)
         {
             throw new InvalidDataException(
                 $"sha256sums line {lineNo}: digest must be 64 hex characters (got {digest.Length}).");

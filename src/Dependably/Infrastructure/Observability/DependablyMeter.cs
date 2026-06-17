@@ -197,6 +197,16 @@ public static class DependablyMeter
             description: "Downloads blocked by the block_kev proxy policy. Attributes: ecosystem.");
 
     /// <summary>
+    /// Upstream requests shed because the connection-pool wait-queue depth exceeded the
+    /// process limit. The request is rejected immediately with 503 rather than queued
+    /// indefinitely. No attributes — cardinality stays at 1.
+    /// </summary>
+    public static readonly Counter<long> UpstreamQueueSheds =
+        Meter.CreateCounter<long>(
+            "dependably.upstream.queue_sheds",
+            description: "Upstream requests shed by the queue-depth throttle (503 returned immediately).");
+
+    /// <summary>
     /// Downloads blocked because the version's maximum EPSS exploitation probability exceeds
     /// the tenant's <c>max_epss_tolerance</c> ceiling. Attributes: <c>ecosystem</c>.
     /// </summary>
@@ -263,10 +273,11 @@ public static class DependablyMeter
     /// <summary>
     /// Records the most recent successful run of a background job for the
     /// observable gauge <c>dependably.background_job.last_success_timestamp</c>.
-    /// Called by <see cref="BackgroundJobScope.Complete"/>.
+    /// Called by <see cref="BackgroundJobScope.Complete"/>, which supplies the
+    /// timestamp from its clock — static meter helpers never read the wall clock.
     /// </summary>
-    public static void RecordBackgroundJobSuccess(string jobName)
-        => BackgroundJobLastSuccess[jobName] = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    public static void RecordBackgroundJobSuccess(string jobName, long unixSeconds)
+        => BackgroundJobLastSuccess[jobName] = unixSeconds;
 
     /// <summary>
     /// Records the current size of a blob-store tier for the observable gauge

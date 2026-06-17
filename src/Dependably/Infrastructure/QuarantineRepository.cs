@@ -13,13 +13,15 @@ namespace Dependably.Infrastructure;
 public sealed class QuarantineRepository
 {
     private readonly IMetadataStore _db;
+    private readonly TimeProvider _time;
 
-    public QuarantineRepository(IMetadataStore db)
+    public QuarantineRepository(IMetadataStore db, TimeProvider time)
     {
         _db = db;
+        _time = time;
     }
 
-    private static string NowIso() => DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+    private string NowIso() => _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
     /// <summary>
     /// Records (or refreshes) the pending review row for a blocked purl. A decided row is
@@ -110,6 +112,37 @@ public sealed class QuarantineRepository
     }
 
     /// <summary>
+    /// Re-decides an already-decided row, or resets it to pending — the admin "change my mind"
+    /// path. Unlike <see cref="DecideAsync"/> this is not pending-guarded; the controller calls
+    /// it only for rows that are already decided. Resetting to pending clears the decision
+    /// metadata so the row re-enters the queue clean. Returns false when no row matched (unknown
+    /// or cross-tenant id).
+    /// </summary>
+    public async Task<bool> ChangeStateAsync(
+        string orgId, string id, string newState, string? decidedBy, string? note,
+        CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        string now = NowIso();
+        int rows = newState == "pending"
+            ? await conn.ExecuteAsync(
+                """
+                UPDATE quarantine
+                SET state = 'pending', decided_by = NULL, decided_at = NULL, note = NULL, updated_at = @now
+                WHERE id = @id AND org_id = @orgId
+                """,
+                new { orgId, id, now })
+            : await conn.ExecuteAsync(
+                """
+                UPDATE quarantine
+                SET state = @newState, decided_by = @decidedBy, decided_at = @now, note = @note, updated_at = @now
+                WHERE id = @id AND org_id = @orgId
+                """,
+                new { orgId, id, newState, decidedBy, note, now });
+        return rows > 0;
+    }
+
+    /// <summary>
     /// Resolves any pending row for a version when an operator uses the manual block/unblock
     /// endpoints directly, so the review queue can't disagree with the version's
     /// manual_block_state. Manual allow ⇒ approved; manual block ⇒ denied.
@@ -129,6 +162,52 @@ public sealed class QuarantineRepository
             """,
             new { orgId, packageVersionId, state, manualState, decidedBy, now = NowIso() });
     }
+
+    /// <summary>
+    /// Deletes pending <c>release_age</c> quarantine rows whose version has now aged past the
+    /// hold threshold, making them phantom entries in the review queue. The release-age gate is
+    /// re-evaluated on every serve and index render against the current clock, so a held version
+    /// serves again automatically once it ages past the threshold. This clears the now-stale
+    /// pending review row so the queue stays accurate. Rows are deleted (not moved to a terminal
+    /// state) so the UNIQUE(org_id, purl) slot remains free for a future re-block of the same
+    /// purl. Only <c>release_age</c>+<c>pending</c> rows are touched — human decisions
+    /// (<c>approved</c>/<c>denied</c>) and other gate types are never affected.
+    /// </summary>
+    public async Task<int> PurgeAgedReleaseHoldsAsync(
+        string orgId, int? minReleaseAgeHours, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+
+        // xtenant: package_versions joined by FK id already bound to the org-scoped quarantine row
+        var candidates = await conn.QueryAsync<ReleaseHoldRow>(
+            """
+            SELECT q.id AS Id, pv.published_at AS PublishedAt
+            FROM quarantine q
+            LEFT JOIN package_versions pv ON pv.id = q.package_version_id
+            WHERE q.org_id = @orgId
+              AND q.gate = 'release_age'
+              AND q.state = 'pending'
+            """,
+            new { orgId });
+
+        var now = _time.GetUtcNow();
+        bool policyOff = minReleaseAgeHours is not { } m || m <= 0;
+
+        var ids = candidates
+            .Where(row => policyOff
+                || row.PublishedAt is not { } p
+                || (now - p).TotalHours >= minReleaseAgeHours!.Value)
+            .Select(row => row.Id)
+            .ToList();
+
+        return ids.Count == 0
+            ? 0
+            : await conn.ExecuteAsync(
+                "DELETE FROM quarantine WHERE org_id = @orgId AND id IN @ids",
+                new { orgId, ids });
+    }
+
+    private sealed record ReleaseHoldRow(string Id, DateTimeOffset? PublishedAt);
 
     /// <summary>
     /// True when the purl has an approved review — the first-fetch analog of the manual allow

@@ -5,7 +5,7 @@ namespace Dependably.Infrastructure;
 /// <summary>
 /// Reads and writes the pre-computed dashboard snapshot in <c>org_stats_snapshot</c>
 /// (one row per org). The /api/v1/stats endpoint reads the snapshot instead of running
-/// <see cref="PackageAnalyticsRepository.GetOrgStatsAsync"/>'s eight live aggregate
+/// <see cref="PackageAnalyticsRepository.GetOrgStatsAsync"/>'s live aggregate
 /// queries on every page load; <see cref="StatsRefreshService"/> recomputes the row per
 /// org on a fixed interval. <c>stats_json</c> holds a serialized <see cref="OrgStats"/>.
 /// </summary>

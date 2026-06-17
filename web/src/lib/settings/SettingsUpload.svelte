@@ -18,6 +18,7 @@
     ['maxUploadBytesMaven','Maven'],
     ['maxUploadBytesRpm',  'RPM'],
     ['maxUploadBytesOci',  'Docker'],
+    ['maxUploadBytesCargo','Cargo'],
   ]
 
   function exceedsInstance(val) {

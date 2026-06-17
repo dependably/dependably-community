@@ -6,8 +6,13 @@ namespace Dependably.Infrastructure;
 public sealed class SqliteLockoutStore : ILockoutStore
 {
     private readonly IMetadataStore _db;
+    private readonly TimeProvider _time;
 
-    public SqliteLockoutStore(IMetadataStore db) => _db = db;
+    public SqliteLockoutStore(IMetadataStore db, TimeProvider time)
+    {
+        _db = db;
+        _time = time;
+    }
 
     public async Task<(int FailedCount, DateTimeOffset? LockedUntil)> GetAsync(
         string emailHash, CancellationToken ct)
@@ -30,7 +35,7 @@ public sealed class SqliteLockoutStore : ILockoutStore
         await using var conn = await _db.OpenAsync(ct);
         string? locked = lockedUntil?.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await conn.ExecuteAsync(
             """
             INSERT INTO login_attempts (email_hash, failed_count, locked_until)
@@ -46,7 +51,7 @@ public sealed class SqliteLockoutStore : ILockoutStore
     public async Task ClearAsync(string emailHash, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await conn.ExecuteAsync(
             """
             INSERT INTO login_attempts (email_hash, failed_count, locked_until) VALUES (@hash, 0, NULL)

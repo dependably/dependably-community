@@ -32,7 +32,7 @@ public sealed class RedisDistributedLockTests
         _db.StringSetAsync(Arg.Any<RedisKey>(), Arg.Any<RedisValue>(), Arg.Any<TimeSpan?>(), Arg.Any<When>())
             .Returns(true, false);
 
-        var sut = new RedisDistributedLock(_redis);
+        var sut = new RedisDistributedLock(_redis, TimeProvider.System);
 
         var first = await sut.TryAcquireAsync("a-lock", TimeSpan.FromSeconds(5));
         var second = await sut.TryAcquireAsync("a-lock", TimeSpan.FromSeconds(5));
@@ -48,7 +48,7 @@ public sealed class RedisDistributedLockTests
         _db.StringSetAsync(Arg.Any<RedisKey>(), Arg.Any<RedisValue>(), Arg.Any<TimeSpan?>(), Arg.Any<When>())
             .Returns(true);
 
-        var sut = new RedisDistributedLock(_redis);
+        var sut = new RedisDistributedLock(_redis, TimeProvider.System);
         await sut.TryAcquireAsync("my-name", TimeSpan.FromSeconds(5));
 
         // The actual key passed to Redis must be prefix:lock:my-name.
@@ -67,7 +67,7 @@ public sealed class RedisDistributedLockTests
         _db.ScriptEvaluateAsync(Arg.Any<string>(), Arg.Any<RedisKey[]>(), Arg.Any<RedisValue[]>())
             .Returns(RedisResult.Create(1));
 
-        var handle = await new RedisDistributedLock(_redis).TryAcquireAsync("k", TimeSpan.FromSeconds(5));
+        var handle = await new RedisDistributedLock(_redis, TimeProvider.System).TryAcquireAsync("k", TimeSpan.FromSeconds(5));
 
         Assert.True(await handle!.ExtendAsync(TimeSpan.FromSeconds(10)));
     }
@@ -80,7 +80,7 @@ public sealed class RedisDistributedLockTests
         _db.ScriptEvaluateAsync(Arg.Any<string>(), Arg.Any<RedisKey[]>(), Arg.Any<RedisValue[]>())
             .Returns(RedisResult.Create(1));
 
-        var handle = await new RedisDistributedLock(_redis).TryAcquireAsync("k", TimeSpan.FromSeconds(5));
+        var handle = await new RedisDistributedLock(_redis, TimeProvider.System).TryAcquireAsync("k", TimeSpan.FromSeconds(5));
         await handle!.DisposeAsync();
 
         // ExtendAsync returns false post-release without touching Redis again.
@@ -95,7 +95,7 @@ public sealed class RedisDistributedLockTests
         _db.ScriptEvaluateAsync(Arg.Any<string>(), Arg.Any<RedisKey[]>(), Arg.Any<RedisValue[]>())
             .Returns(RedisResult.Create(1));
 
-        var handle = await new RedisDistributedLock(_redis).TryAcquireAsync("k", TimeSpan.FromSeconds(5));
+        var handle = await new RedisDistributedLock(_redis, TimeProvider.System).TryAcquireAsync("k", TimeSpan.FromSeconds(5));
         await handle!.DisposeAsync();
 
         await _db.Received(1).ScriptEvaluateAsync(
@@ -112,7 +112,7 @@ public sealed class RedisDistributedLockTests
         _db.ScriptEvaluateAsync(Arg.Any<string>(), Arg.Any<RedisKey[]>(), Arg.Any<RedisValue[]>())
             .Returns<Task<RedisResult>>(_ => throw new RedisConnectionException(ConnectionFailureType.SocketFailure, "boom"));
 
-        var handle = await new RedisDistributedLock(_redis).TryAcquireAsync("k", TimeSpan.FromSeconds(5));
+        var handle = await new RedisDistributedLock(_redis, TimeProvider.System).TryAcquireAsync("k", TimeSpan.FromSeconds(5));
         Assert.NotNull(handle);
         // Must not propagate — TTL cleans up on its own.
         Assert.Null(await Record.ExceptionAsync(() => handle.DisposeAsync().AsTask()));
@@ -126,7 +126,7 @@ public sealed class RedisDistributedLockTests
             .Returns<Task<bool>>(_ => throw new RedisConnectionException(ConnectionFailureType.SocketFailure, "down"));
 
         await Assert.ThrowsAsync<RedisConnectionException>(() =>
-            new RedisDistributedLock(_redis).TryAcquireAsync("k", TimeSpan.FromSeconds(5)));
+            new RedisDistributedLock(_redis, TimeProvider.System).TryAcquireAsync("k", TimeSpan.FromSeconds(5)));
     }
 
     [Fact]
@@ -136,7 +136,7 @@ public sealed class RedisDistributedLockTests
         _db.StringSetAsync(Arg.Any<RedisKey>(), Arg.Any<RedisValue>(), Arg.Any<TimeSpan?>(), Arg.Any<When>())
             .Returns(false, false, true);
 
-        var handle = await new RedisDistributedLock(_redis).AcquireAsync(
+        var handle = await new RedisDistributedLock(_redis, TimeProvider.System).AcquireAsync(
             "k", ttl: TimeSpan.FromSeconds(5),
             wait: TimeSpan.FromSeconds(2),
             retryInterval: TimeSpan.FromMilliseconds(10));
@@ -150,7 +150,7 @@ public sealed class RedisDistributedLockTests
             .Returns(false);
 
         await Assert.ThrowsAsync<TimeoutException>(() =>
-            new RedisDistributedLock(_redis).AcquireAsync(
+            new RedisDistributedLock(_redis, TimeProvider.System).AcquireAsync(
                 "k", ttl: TimeSpan.FromSeconds(5),
                 wait: TimeSpan.FromMilliseconds(50),
                 retryInterval: TimeSpan.FromMilliseconds(10)));

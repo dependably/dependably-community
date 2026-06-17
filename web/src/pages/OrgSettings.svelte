@@ -3,7 +3,7 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import { submitForm, extractErrorMessage } from '../lib/form.js'
-  import { user } from '../lib/store.js'
+  import { user, bootstrapInfo } from '../lib/store.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { formatDateShort } from '../lib/format.js'
   import Claims from './Claims.svelte'
@@ -14,6 +14,8 @@
   import SettingsRetention from '../lib/settings/SettingsRetention.svelte'
   import SettingsProxy from '../lib/settings/SettingsProxy.svelte'
   import SettingsServiceTokens from '../lib/settings/SettingsServiceTokens.svelte'
+  import SettingsInstance from '../lib/settings/SettingsInstance.svelte'
+  import SettingsMetrics from '../lib/settings/SettingsMetrics.svelte'
 
   let tab = 'general'
   let settings = null, retention = null, instanceMax = null, proxySettings = null
@@ -315,6 +317,12 @@
   // is cosmetic; the backend is the authority.
   $: viewerRole = $user?.role ?? ''
   $: viewerIsAdmin = viewerRole === 'admin' || viewerRole === 'owner'
+  // Instance + /metrics tabs surface only for a single-mode owner. The backend gates
+  // /api/v1/instance/* on tenant:admin (owner-only) and 404s those routes in multi-tenant
+  // deployments, where instance config is a control-plane concern handled by the system_admin
+  // SPA. Bootstrap reports mode as 'single' or 'multi' (header collapses to multi, bound to
+  // single), so gating on 'single' keeps the tenant from seeing tabs whose forms would error.
+  $: showInstanceTabs = viewerRole === 'owner' && ($bootstrapInfo?.mode ?? 'single') === 'single'
 
   $: tabKeys = [
     { key: 'general',        label: 'settings.tabs.general' },
@@ -325,6 +333,10 @@
     { key: 'licenses',       label: 'settings.tabs.licenses' },
     { key: 'claims',         label: 'settings.tabs.claims' },
     ...(viewerIsAdmin ? [{ key: 'service-tokens', label: 'settings.tabs.serviceTokens' }] : []),
+    ...(showInstanceTabs ? [
+      { key: 'instance', label: 'settings.tabs.instance' },
+      { key: 'metrics',  label: 'settings.tabs.metrics' },
+    ] : []),
   ]
 
 </script>
@@ -515,6 +527,14 @@
 
     {:else if tab === 'service-tokens' && viewerIsAdmin}
       <SettingsServiceTokens />
+
+    {:else if tab === 'instance' && showInstanceTabs}
+      <p class="tab-intro">{$t('settings.instance.intro')}</p>
+      <SettingsInstance getSettings={api.getInstanceSettings} updateSettings={api.updateInstanceSettings} />
+
+    {:else if tab === 'metrics' && showInstanceTabs}
+      <p class="tab-intro">{$t('settings.metrics.intro')}</p>
+      <SettingsMetrics getAccess={api.getMetricsAccess} updateAccess={api.updateMetricsAccess} />
     {/if}
   {/if}
 </div>
@@ -602,6 +622,8 @@
           <option value="pypi">PyPI</option>
           <option value="nuget">NuGet</option>
           <option value="maven">Maven</option>
+          <option value="cargo">Cargo</option>
+          <option value="golang">Go</option>
         </select>
       </div>
       <div class="form-row">

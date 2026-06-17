@@ -31,6 +31,7 @@ public sealed class OciUpstreamAuthService : IDisposable
     private readonly IOptions<OciOptions> _options;
     private readonly IAirGapMode _airGap;
     private readonly ILogger<OciUpstreamAuthService> _logger;
+    private readonly TimeProvider _time;
 
     // Token cache: (host, repository, scope) → CachedToken
     private readonly ConcurrentDictionary<(string, string, string), CachedToken> _tokens = new();
@@ -44,12 +45,14 @@ public sealed class OciUpstreamAuthService : IDisposable
         IHttpClientFactory http,
         IOptions<OciOptions> options,
         IAirGapMode airGap,
-        ILogger<OciUpstreamAuthService> logger)
+        ILogger<OciUpstreamAuthService> logger,
+        TimeProvider time)
     {
         _http = http;
         _options = options;
         _airGap = airGap;
         _logger = logger;
+        _time = time;
     }
 
     /// <summary>
@@ -96,7 +99,7 @@ public sealed class OciUpstreamAuthService : IDisposable
 
         // Check cache before acquiring semaphore.
         if (_tokens.TryGetValue(key, out var cached) &&
-            cached.ExpiresAt > DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30))
+            cached.ExpiresAt > _time.GetUtcNow() + TimeSpan.FromSeconds(30))
         {
             return "Bearer " + cached.Value;
         }
@@ -106,7 +109,7 @@ public sealed class OciUpstreamAuthService : IDisposable
         {
             // Double-check after acquiring.
             if (_tokens.TryGetValue(key, out cached) &&
-                cached.ExpiresAt > DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30))
+                cached.ExpiresAt > _time.GetUtcNow() + TimeSpan.FromSeconds(30))
             {
                 return "Bearer " + cached.Value;
             }
@@ -133,15 +136,15 @@ public sealed class OciUpstreamAuthService : IDisposable
             }
 
             // The realm comes verbatim from the upstream's challenge. Refuse the exchange
-            // unless it is HTTPS and on the upstream's own host / registrable domain (or the
-            // operator-pinned TokenEndpoint) — otherwise a MITM'd or hostile upstream could
-            // point the realm at an attacker host and harvest the configured credentials.
+            // unless it is HTTPS and exactly on the upstream's own host, or exactly matches
+            // the operator-pinned TokenEndpoint — otherwise a MITM'd or hostile upstream
+            // could redirect credentials to an attacker host by returning a forged realm.
             if (!IsTrustedRealm(realm, upstream))
             {
                 _logger.LogWarning(
                     "OCI token exchange refused for upstream {Host}: challenge realm {Realm} is not HTTPS " +
-                    "on the upstream's own host or registrable domain. Set Oci:Upstreams TokenEndpoint to " +
-                    "pin an auth realm hosted on a different domain.",
+                    "on the upstream's own host. Set Oci:Upstreams[*].TokenEndpoint to pin an auth realm " +
+                    "hosted on a different domain (e.g. https://auth.docker.io/token for Docker Hub).",
                     upstream.Host, realm);
                 throw new OciUnauthorizedException(
                     $"Token exchange realm '{realm}' is not trusted for upstream {upstream.Host}");
@@ -180,7 +183,7 @@ public sealed class OciUpstreamAuthService : IDisposable
             }
 
             int expiresIn = doc.RootElement.TryGetProperty("expires_in", out var ep) ? ep.GetInt32() : 300;
-            var expiresAt = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(
+            var expiresAt = _time.GetUtcNow() + TimeSpan.FromSeconds(
                 Math.Min(expiresIn, (int)_options.Value.TokenCacheDuration.TotalSeconds));
 
             _tokens[key] = new CachedToken(token, expiresAt);
@@ -204,7 +207,7 @@ public sealed class OciUpstreamAuthService : IDisposable
         var sem = _sems.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
 
         if (_tokens.TryGetValue(key, out var cached) &&
-            cached.ExpiresAt > DateTimeOffset.UtcNow + TimeSpan.FromMinutes(1))
+            cached.ExpiresAt > _time.GetUtcNow() + TimeSpan.FromMinutes(1))
         {
             return "Basic " + cached.Value;
         }
@@ -213,7 +216,7 @@ public sealed class OciUpstreamAuthService : IDisposable
         try
         {
             if (_tokens.TryGetValue(key, out cached) &&
-                cached.ExpiresAt > DateTimeOffset.UtcNow + TimeSpan.FromMinutes(1))
+                cached.ExpiresAt > _time.GetUtcNow() + TimeSpan.FromMinutes(1))
             {
                 return "Basic " + cached.Value;
             }
@@ -242,14 +245,15 @@ public sealed class OciUpstreamAuthService : IDisposable
     /// True when a <c>Www-Authenticate</c> realm may receive this upstream's credentials.
     /// The realm must be an absolute HTTPS URL and either:
     /// <list type="bullet">
-    ///   <item>exactly match the operator-pinned <see cref="OciUpstreamRegistryOptions.TokenEndpoint"/>;</item>
-    ///   <item>be on the upstream's own host; or</item>
-    ///   <item>be on the upstream host's registrable domain (e.g. realm <c>auth.docker.io</c>
-    ///         for registry host <c>registry-1.docker.io</c> — both under <c>docker.io</c>).
-    ///         The parent domain is the upstream host minus its first label and must itself
-    ///         contain a dot, so a two-label host like <c>ghcr.io</c> never degrades to a
-    ///         bare-TLD match.</item>
+    ///   <item>exactly match the operator-pinned <see cref="OciUpstreamRegistryOptions.TokenEndpoint"/>; or</item>
+    ///   <item>be on exactly the upstream's own host (no registrable-domain fallback).</item>
     /// </list>
+    /// Registrable-domain matching is intentionally absent. A Www-Authenticate challenge
+    /// redirecting to a sibling domain (e.g. <c>auth.docker.io</c> for
+    /// <c>registry-1.docker.io</c>) is treated as an untrusted realm unless the operator
+    /// explicitly pins that endpoint via <see cref="OciUpstreamRegistryOptions.TokenEndpoint"/>.
+    /// This prevents a hostile or MITM'd upstream from redirecting credentials to an
+    /// attacker-controlled host sharing only a parent domain with the configured registry.
     /// </summary>
     internal static bool IsTrustedRealm(string realm, OciUpstreamRegistryOptions upstream)
     {
@@ -259,30 +263,17 @@ public sealed class OciUpstreamAuthService : IDisposable
             return false;
         }
 
+        // Operator-pinned endpoint: exact URL match only.
         if (!string.IsNullOrWhiteSpace(upstream.TokenEndpoint) &&
             string.Equals(realm, upstream.TokenEndpoint, StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
 
-        string realmHost = realmUri.Host;
         // Upstream Host config may carry a port (e.g. "registry.internal:5000") — compare hosts only.
+        string realmHost = realmUri.Host;
         string upstreamHost = upstream.Host.Split(':')[0];
-        if (string.Equals(realmHost, upstreamHost, StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        int firstDot = upstreamHost.IndexOf('.');
-        if (firstDot <= 0)
-        {
-            return false;
-        }
-
-        string parentDomain = upstreamHost[(firstDot + 1)..];
-        return parentDomain.Contains('.') &&
-            (string.Equals(realmHost, parentDomain, StringComparison.OrdinalIgnoreCase) ||
-             realmHost.EndsWith("." + parentDomain, StringComparison.OrdinalIgnoreCase));
+        return string.Equals(realmHost, upstreamHost, StringComparison.OrdinalIgnoreCase);
     }
 
     private static (string? Realm, string? Service, string? Scope) ParseWwwAuthenticate(

@@ -4,6 +4,7 @@ using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 
 namespace Dependably.Tests.Unit;
 
@@ -12,6 +13,7 @@ public class CacheEvictionServiceTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
     private readonly InMemoryBlobStore _blobs = new();
+    private readonly FakeTimeProvider _clock = TestTime.Frozen();
 
     public async Task InitializeAsync()
     {
@@ -61,13 +63,13 @@ public class CacheEvictionServiceTests : IAsyncLifetime
         // Tier-shared bootstrap: in unit tests the cache and registry tiers point to the
         // same in-memory store. The eviction service only ever calls Cache.DeleteAsync.
         var tiered = new TieredBlobStorage(_blobs, _blobs);
-        return new CacheEvictionService(repo, tiered, Config(cfg), NullLogger<CacheEvictionService>.Instance);
+        return new CacheEvictionService(repo, tiered, Config(cfg), NullLogger<CacheEvictionService>.Instance, _clock);
     }
 
     [Fact]
     public async Task NoCapsConfigured_DoesNothing()
     {
-        await SeedAsync("1.0.0", DateTimeOffset.UtcNow.AddDays(-100));
+        await SeedAsync("1.0.0", _clock.GetUtcNow().AddDays(-100));
         var svc = Build(new Dictionary<string, string?>());
         var result = await svc.RunOnceAsync();
         Assert.Equal(0, result.ArtifactsEvicted);
@@ -79,7 +81,7 @@ public class CacheEvictionServiceTests : IAsyncLifetime
     [Fact]
     public async Task AgeCap_EvictsArtifactsOlderThanLimit()
     {
-        var t = DateTimeOffset.UtcNow;
+        var t = _clock.GetUtcNow();
         await SeedAsync("old", t.AddDays(-30));
         await SeedAsync("recent", t.AddDays(-1));
 
@@ -95,7 +97,7 @@ public class CacheEvictionServiceTests : IAsyncLifetime
     [Fact]
     public async Task SizeCap_EvictsOldestFirstUntilUnderCap()
     {
-        var t = DateTimeOffset.UtcNow;
+        var t = _clock.GetUtcNow();
         await SeedAsync("v1", t.AddDays(-3), size: 100);
         await SeedAsync("v2", t.AddDays(-2), size: 100);
         await SeedAsync("v3", t.AddDays(-1), size: 100);
@@ -116,7 +118,7 @@ public class CacheEvictionServiceTests : IAsyncLifetime
     [Fact]
     public async Task Eviction_CascadesTenantArtifactAccess()
     {
-        var t = DateTimeOffset.UtcNow;
+        var t = _clock.GetUtcNow();
         await SeedAsync("v1", t.AddDays(-30));
         var repo = new CacheArtifactRepository(_db);
         var a = await repo.GetByCoordinateAsync("npm", "lodash", "v1", "lodash-v1.tgz");

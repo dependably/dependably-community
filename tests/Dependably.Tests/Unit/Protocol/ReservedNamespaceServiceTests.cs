@@ -4,8 +4,9 @@ namespace Dependably.Tests.Unit.Protocol;
 
 /// <summary>
 /// Table tests for <see cref="ReservedNamespaceService.Matches"/> — the pure per-ecosystem
-/// pattern semantics: trailing-glob and case rules for npm/pypi/nuget, PEP 503 normalization
-/// for pypi, and the dot-boundary groupId prefix for maven.
+/// pattern semantics: trailing-glob and case rules for npm/pypi/nuget/cargo, PEP 503
+/// normalization for pypi, the dot-boundary groupId prefix for maven, and the slash-boundary
+/// case-sensitive module-path prefix for golang.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class ReservedNamespaceServiceTests
@@ -34,6 +35,19 @@ public sealed class ReservedNamespaceServiceTests
     [InlineData("maven", "com.acme", "com.acmecorp", false)]
     [InlineData("maven", "com.acme.*", "com.acme.internal", true)] // tolerated spelling, same semantics
     [InlineData("maven", "com.acme*", "com.acmecorp", false)]      // '*' folds to the dot boundary
+    // cargo — flat, case-folded namespace; same glob shape as npm
+    [InlineData("cargo", "serde-*", "serde-json", true)]
+    [InlineData("cargo", "serde-*", "serdejson", false)]           // boundary is the literal stem
+    [InlineData("cargo", "acme-utils", "acme-utils", true)]
+    [InlineData("cargo", "acme-utils", "acme-utils-extra", false)] // exact pattern ≠ prefix
+    [InlineData("cargo", "Acme-Tools", "acme-tools", true)]        // crates.io case-folds names
+    // golang — slash-boundary module-path prefix; case-sensitive (Ordinal)
+    [InlineData("golang", "github.com/acme", "github.com/acme", true)]
+    [InlineData("golang", "github.com/acme", "github.com/acme/internal/svc", true)]
+    [InlineData("golang", "github.com/acme", "github.com/acmecorp", false)] // never mid-segment
+    [InlineData("golang", "github.com/acme/*", "github.com/acme/lib", true)] // tolerated spelling
+    [InlineData("golang", "github.com/acme", "github.com/Acme", false)]      // module paths are case-significant
+    [InlineData("golang", "github.com/Acme", "github.com/Acme/sdk", true)]
     // degenerate inputs
     [InlineData("npm", "", "anything", false)]
     [InlineData("npm", "*", "", false)]

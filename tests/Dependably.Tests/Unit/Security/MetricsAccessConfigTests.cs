@@ -24,7 +24,7 @@ public sealed class MetricsAccessConfigTests
         Task<string?> Reader(string key, CancellationToken _) =>
             Task.FromResult(db.TryGetValue(key, out string? v) ? v : null);
 
-        return new MetricsAccessConfig(Reader, config);
+        return new MetricsAccessConfig(Reader, config, TimeProvider.System);
     }
 
     [Fact]
@@ -207,7 +207,8 @@ public sealed class MetricsAccessConfigTests
 
         var sut = new MetricsAccessConfig(
             Reader,
-            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>()).Build());
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>()).Build(),
+            TimeProvider.System);
 
         var first = await sut.ResolveAsync();
         Assert.True(first.Enabled);

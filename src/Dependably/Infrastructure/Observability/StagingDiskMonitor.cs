@@ -17,6 +17,13 @@ namespace Dependably.Infrastructure.Observability;
 /// </summary>
 public sealed class StagingDiskMonitor : BackgroundService
 {
+    // Default poll interval and warn threshold when env-vars are not configured.
+    private const int DefaultPollIntervalSeconds = 60;
+    private const int DefaultWarnThresholdPercent = 10;
+
+    // Percent-fraction conversion factor (percent / PercentScale = fraction).
+    private const double PercentScale = 100.0;
+
     private readonly IStagingDiskInfo _diskInfo;
     private readonly double _warnThresholdFraction;
     private readonly TimeSpan _interval;
@@ -31,14 +38,14 @@ public sealed class StagingDiskMonitor : BackgroundService
         _logger = logger;
 
         int intervalSeconds = int.TryParse(
-            config["STAGING_DISK_POLL_INTERVAL_SECONDS"], out int s) && s > 0 ? s : 60;
+            config["STAGING_DISK_POLL_INTERVAL_SECONDS"], out int s) && s > 0 ? s : DefaultPollIntervalSeconds;
         _interval = TimeSpan.FromSeconds(intervalSeconds);
 
         int warnPercent = int.TryParse(
-            config["STAGING_DISK_WARN_THRESHOLD_PERCENT"], out int p) && p is >= 0 and <= 100
+            config["STAGING_DISK_WARN_THRESHOLD_PERCENT"], out int p) && p is >= 0 and <= (int)PercentScale
             ? p
-            : 10;
-        _warnThresholdFraction = warnPercent / 100.0;
+            : DefaultWarnThresholdPercent;
+        _warnThresholdFraction = warnPercent / PercentScale;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -78,8 +85,8 @@ public sealed class StagingDiskMonitor : BackgroundService
                         "Point PROXY_STAGING_PATH at a disk-backed volume with more capacity.",
                         available,
                         total,
-                        availableFraction * 100,
-                        _warnThresholdFraction * 100);
+                        availableFraction * PercentScale,
+                        _warnThresholdFraction * PercentScale);
                 }
             }
         }

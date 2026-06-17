@@ -25,7 +25,7 @@ public sealed class RpmRepodataServicePrimaryTests : IClassFixture<InMemoryDbFix
     public async Task BuildPrimaryAsync_NoRows_ReturnsEmptyMetadataDocument()
     {
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
-        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance);
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
 
         string xml = await svc.BuildPrimaryAsync(orgId, CancellationToken.None);
 
@@ -54,7 +54,7 @@ public sealed class RpmRepodataServicePrimaryTests : IClassFixture<InMemoryDbFix
 
         await InsertRpmMetadataAsync(pvId);
 
-        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance);
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
 
         string xml = await svc.BuildPrimaryAsync(orgId, CancellationToken.None);
 
@@ -100,7 +100,7 @@ public sealed class RpmRepodataServicePrimaryTests : IClassFixture<InMemoryDbFix
             blobKey: "rpm/registry/from-b-1.0-1.el9.noarch.rpm");
         await InsertRpmMetadataAsync(pvB, name: "from-b", arch: "noarch");
 
-        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance);
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
 
         string xmlA = await svc.BuildPrimaryAsync(orgA, CancellationToken.None);
         var docA = XDocument.Parse(xmlA);

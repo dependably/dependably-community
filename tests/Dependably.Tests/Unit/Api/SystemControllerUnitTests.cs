@@ -141,9 +141,11 @@ public sealed class SystemControllerUnitTests
         string orgId = await OrgSeeder.InsertAsync(s.Store, slug);
         await using (var conn = await s.Store.OpenAsync())
         {
+            // Stamp from the scenario clock, not DB-side now: the controller's grace-window
+            // math runs on the frozen clock, and the two must never diverge.
             await conn.ExecuteAsync(
-                "UPDATE orgs SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = @id",
-                new { id = orgId });
+                "UPDATE orgs SET deleted_at = @now WHERE id = @id",
+                new { id = orgId, now = s.Clock.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") });
         }
         var b = await s.BuildAsync();
 
@@ -956,7 +958,7 @@ public sealed class SystemControllerUnitTests
             .AddInMemoryCollection(new Dictionary<string, string?> { ["METRICS_ENABLED"] = "1" })
             .Build();
         static Task<string?> Reader(string _, CancellationToken __) => Task.FromResult<string?>(null);
-        var access = new Dependably.Security.MetricsAccessConfig(Reader, config);
+        var access = new Dependably.Security.MetricsAccessConfig(Reader, config, TimeProvider.System);
 
         var result = await b.SystemController.UpdateMetricsAccess(
             new UpdateMetricsAccessRequest(Enabled: false, AllowedIps: null),
@@ -978,7 +980,7 @@ public sealed class SystemControllerUnitTests
             .AddInMemoryCollection(new Dictionary<string, string?> { ["METRICS_ALLOWED_IPS"] = "10.0.0.0/8" })
             .Build();
         static Task<string?> Reader(string _, CancellationToken __) => Task.FromResult<string?>(null);
-        var access = new Dependably.Security.MetricsAccessConfig(Reader, config);
+        var access = new Dependably.Security.MetricsAccessConfig(Reader, config, TimeProvider.System);
 
         var result = await b.SystemController.UpdateMetricsAccess(
             new UpdateMetricsAccessRequest(Enabled: null, AllowedIps: new[] { "192.168.0.0/16" }),

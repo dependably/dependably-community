@@ -19,23 +19,41 @@ namespace Dependably.Infrastructure;
 /// understated — acceptable under extreme load; a blocked download is not.
 /// The <see cref="DependablyMeter.DownloadCountWriterDropped"/> counter surfaces drop volume
 /// so operators see when the writer falls behind.
+///
+/// Channel capacity is configurable via <c>DOWNLOAD_COUNT_WRITER_QUEUE_CAPACITY</c>. The
+/// default of 50k gives the drainer ~250 s of runway at 200 RPS before the channel saturates;
+/// raise it for sustained burst environments where memory permits. Watch
+/// <c>dependably.download_count_writer.dropped</c> to detect persistent writer backpressure.
 /// </summary>
 public sealed class DownloadCountWriter
 {
-    // Capacity chosen to match ActivityWriter. At one record per download, this gives
-    // the drainer ~50 s of runway at 200 RPS before the channel saturates.
-    public const int ChannelCapacity = 10_000;
+    /// <summary>Default channel capacity used when no configuration override is supplied.</summary>
+    public const int DefaultChannelCapacity = 50_000;
+
+    /// <summary>Actual channel capacity this instance was constructed with.</summary>
+    public int ChannelCapacity { get; }
 
     // FullMode.Wait makes TryWrite return false synchronously when the channel is full,
     // which is exactly what we want: enqueue is lock-free and never blocks the request
     // thread, and we can detect drops + increment the metric.
-    private readonly Channel<DownloadCountRecord> _channel = Channel.CreateBounded<DownloadCountRecord>(
-        new BoundedChannelOptions(ChannelCapacity)
-        {
-            SingleReader = true,
-            SingleWriter = false,
-            FullMode = BoundedChannelFullMode.Wait,
-        });
+    private readonly Channel<DownloadCountRecord> _channel;
+
+    /// <summary>
+    /// Creates a <see cref="DownloadCountWriter"/> with the specified channel capacity.
+    /// Omit <paramref name="capacity"/> (or pass <c>null</c>) to use
+    /// <see cref="DefaultChannelCapacity"/>.
+    /// </summary>
+    public DownloadCountWriter(int? capacity = null)
+    {
+        ChannelCapacity = capacity is > 0 ? capacity.Value : DefaultChannelCapacity;
+        _channel = Channel.CreateBounded<DownloadCountRecord>(
+            new BoundedChannelOptions(ChannelCapacity)
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                FullMode = BoundedChannelFullMode.Wait,
+            });
+    }
 
     /// <summary>Drainer-side reader. Used by <see cref="DownloadCountWriterHostedService"/>.</summary>
     public ChannelReader<DownloadCountRecord> Reader => _channel.Reader;

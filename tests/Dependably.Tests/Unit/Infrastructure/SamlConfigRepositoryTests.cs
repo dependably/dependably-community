@@ -13,7 +13,7 @@ public sealed class SamlConfigRepositoryTests : IClassFixture<InMemoryDbFixture>
     public SamlConfigRepositoryTests(InMemoryDbFixture fixture)
     {
         _fixture = fixture;
-        _repo = new SamlConfigRepository(_fixture.Store);
+        _repo = new SamlConfigRepository(_fixture.Store, TestTime.Frozen());
     }
 
     [Fact]
@@ -86,7 +86,7 @@ public sealed class SamlConfigRepositoryTests : IClassFixture<InMemoryDbFixture>
         string cid = Guid.NewGuid().ToString("N");
 
         await _repo.IssueTestRunAsync(cid, orgId, actorId: "actor-1",
-            expiresAt: DateTimeOffset.UtcNow.AddMinutes(10));
+            expiresAt: TestTime.KnownNow.AddMinutes(10));
 
         Assert.True(await _repo.TryConsumeTestRunAsync(cid, orgId));   // first consume succeeds
         Assert.False(await _repo.TryConsumeTestRunAsync(cid, orgId));  // replay rejected
@@ -99,7 +99,7 @@ public sealed class SamlConfigRepositoryTests : IClassFixture<InMemoryDbFixture>
         string otherOrgId = await OrgSeeder.InsertAsync(_fixture.Store, $"other-{Guid.NewGuid():N}");
         string cid = Guid.NewGuid().ToString("N");
 
-        await _repo.IssueTestRunAsync(cid, orgId, null, expiresAt: DateTimeOffset.UtcNow.AddMinutes(-1));
+        await _repo.IssueTestRunAsync(cid, orgId, null, expiresAt: TestTime.KnownNow.AddMinutes(-1));
         Assert.False(await _repo.TryConsumeTestRunAsync(cid, orgId));      // expired
         Assert.False(await _repo.TryConsumeTestRunAsync(cid, otherOrgId)); // wrong tenant
     }

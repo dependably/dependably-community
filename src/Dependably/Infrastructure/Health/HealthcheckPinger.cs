@@ -23,6 +23,10 @@ namespace Dependably.Infrastructure.Health;
 /// </summary>
 public sealed class HealthcheckPinger : BackgroundService
 {
+    // Default interval and timeout values (seconds) when env-vars are not configured.
+    private const int DefaultPingIntervalSeconds = 60;
+    private const int DefaultPingTimeoutSeconds = 10;
+
     private readonly IHttpClientFactory _http;
     private readonly IDistributedLock _locks;
     private readonly ReadinessAggregator _readiness;
@@ -37,7 +41,8 @@ public sealed class HealthcheckPinger : BackgroundService
     private readonly bool _leaderScope;
     private readonly string _instanceId;
     private readonly string _deploymentMode;
-    private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
+    private readonly TimeProvider _time;
+    private readonly DateTimeOffset _startedAt;
 
     public HealthcheckPinger(
         IHttpClientFactory http,
@@ -45,20 +50,23 @@ public sealed class HealthcheckPinger : BackgroundService
         ReadinessAggregator readiness,
         IAirGapMode airGap,
         IConfiguration config,
-        ILogger<HealthcheckPinger> logger)
+        ILogger<HealthcheckPinger> logger,
+        TimeProvider time)
     {
         _http = http;
         _locks = locks;
         _readiness = readiness;
         _airGap = airGap;
         _logger = logger;
+        _time = time;
+        _startedAt = time.GetUtcNow();
 
         _pingUrl = config["HEALTHCHECK_PING_URL"];
         _failUrl = config["HEALTHCHECK_PING_FAIL_URL"];
         _interval = TimeSpan.FromSeconds(
-            int.TryParse(config["HEALTHCHECK_PING_INTERVAL_SECONDS"], out int i) ? i : 60);
+            int.TryParse(config["HEALTHCHECK_PING_INTERVAL_SECONDS"], out int i) ? i : DefaultPingIntervalSeconds);
         _timeout = TimeSpan.FromSeconds(
-            int.TryParse(config["HEALTHCHECK_PING_TIMEOUT_SECONDS"], out int t) ? t : 10);
+            int.TryParse(config["HEALTHCHECK_PING_TIMEOUT_SECONDS"], out int t) ? t : DefaultPingTimeoutSeconds);
         _usePost = string.Equals(config["HEALTHCHECK_PING_METHOD"], "POST", StringComparison.OrdinalIgnoreCase);
         _sendPayload = string.Equals(config["HEALTHCHECK_PING_PAYLOAD"], "status", StringComparison.OrdinalIgnoreCase);
         _leaderScope = string.Equals(config["HEALTHCHECK_PING_SCOPE"], "leader", StringComparison.OrdinalIgnoreCase);
@@ -135,7 +143,7 @@ public sealed class HealthcheckPinger : BackgroundService
     {
         if (_usePost || _sendPayload)
         {
-            long uptime = (long)(DateTimeOffset.UtcNow - _startedAt).TotalSeconds;
+            long uptime = (long)(_time.GetUtcNow() - _startedAt).TotalSeconds;
             var body = new
             {
                 instance_id = _instanceId,

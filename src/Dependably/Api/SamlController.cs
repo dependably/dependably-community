@@ -47,6 +47,7 @@ public sealed class SamlController : ControllerBase
     private readonly IDataProtectionProvider _dataProtection;
     private readonly ILogger<SamlController> _logger;
     private readonly IPublicUrlBuilder _urls;
+    private readonly TimeProvider _time;
 
     public SamlController(
         SamlConfigRepository samlConfig,
@@ -54,7 +55,8 @@ public sealed class SamlController : ControllerBase
         OrgAccessGuard guard,
         IDataProtectionProvider dataProtection,
         ILogger<SamlController> logger,
-        IPublicUrlBuilder urls)
+        IPublicUrlBuilder urls,
+        TimeProvider time)
     {
         _samlConfig = samlConfig;
         _login = login;
@@ -62,6 +64,7 @@ public sealed class SamlController : ControllerBase
         _dataProtection = dataProtection;
         _logger = logger;
         _urls = urls;
+        _time = time;
     }
 
     // ── SP metadata ───────────────────────────────────────────────────────────
@@ -196,7 +199,7 @@ public sealed class SamlController : ControllerBase
         {
             await _samlConfig.IssuePendingRequestAsync(
                 authnRequest.Id.Value, tenant.TenantId!,
-                DateTimeOffset.UtcNow.Add(AuthnRequestLifetime), ct);
+                _time.GetUtcNow().Add(AuthnRequestLifetime), ct);
         }
 
         var binding = new Saml2RedirectBinding();
@@ -273,7 +276,7 @@ public sealed class SamlController : ControllerBase
         string? nameId = authnResponse!.NameId?.Value;
         if (string.IsNullOrWhiteSpace(nameId))
         {
-            return SamlFailure(isTest, "missing_nameid", "Assertion did not include a NameID.", 400);
+            return SamlFailure(isTest, "missing_nameid", "Assertion did not include a NameID.", StatusCodes.Status400BadRequest);
         }
 
         string? email = Dependably.Infrastructure.Saml.EmailAttributeResolver.Resolve(authnResponse, cfg!);
@@ -340,7 +343,7 @@ public sealed class SamlController : ControllerBase
             return Problem(statusCode: 401, detail: "SAML response does not match a pending sign-in request (expired or already used).");
         }
 
-        var (assertionId, assertionExpiry) = ExtractAssertionReplayKey(authnResponse);
+        var (assertionId, assertionExpiry) = ExtractAssertionReplayKey(authnResponse, _time.GetUtcNow());
         if (string.IsNullOrEmpty(assertionId))
         {
             return Problem(statusCode: 401, detail: "SAML assertion is missing an ID.");
@@ -439,7 +442,7 @@ public sealed class SamlController : ControllerBase
             {
                 _logger.LogWarning("SAML response from IdP {IdpEntityId} returned non-success status {Status}",
                     cfg.IdpEntityId, authnResponse.Status);
-                return (null, SamlFailure(isTest, "idp_rejected", authnResponse.Status.ToString(), 401,
+                return (null, SamlFailure(isTest, "idp_rejected", authnResponse.Status.ToString(), StatusCodes.Status401Unauthorized,
                     realProblemDetail: $"IdP rejected the request: {authnResponse.Status}"));
             }
             binding.Unbind(Request.ToGenericHttpRequest(), authnResponse);
@@ -448,7 +451,7 @@ public sealed class SamlController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "SAML response validation failed for tenant {TenantId}", tenantId);
-            return (null, SamlFailure(isTest, "validation_failed", ex.Message, 401,
+            return (null, SamlFailure(isTest, "validation_failed", ex.Message, StatusCodes.Status401Unauthorized,
                 realProblemDetail: "SAML response validation failed."));
         }
     }
@@ -459,7 +462,8 @@ public sealed class SamlController : ControllerBase
     // of the raw response XML — the token is the single assertion whose signature was verified and
     // whose claims drive login, so keying the replay guard on it is correct by construction and
     // immune to XML-signature-wrapping (a second injected assertion never reaches this point).
-    private static (string? AssertionId, DateTimeOffset Expiry) ExtractAssertionReplayKey(Saml2AuthnResponse response)
+    private static (string? AssertionId, DateTimeOffset Expiry) ExtractAssertionReplayKey(
+        Saml2AuthnResponse response, DateTimeOffset now)
     {
         string? assertionId = response.Saml2SecurityToken?.Assertion?.Id?.Value;
 
@@ -468,16 +472,16 @@ public sealed class SamlController : ControllerBase
         var notOnOrAfter = response.Saml2SecurityToken?.Assertion?.Conditions?.NotOnOrAfter
             ?? response.SecurityTokenValidTo;
 
-        return (assertionId, ResolveAssertionExpiry(notOnOrAfter));
+        return (assertionId, ResolveAssertionExpiry(notOnOrAfter, now));
     }
 
     // Maps a validated NotOnOrAfter to the replay-cache expiry. An absent value (default — no token
-    // or no Conditions) falls back to a generous TTL so the guard never forgets an assertion while
-    // it could still be replayed; a longer-than-necessary TTL is always safe (it only lengthens
-    // retention, never opens a window).
-    internal static DateTimeOffset ResolveAssertionExpiry(DateTimeOffset notOnOrAfter)
+    // or no Conditions) falls back to a generous TTL anchored on the caller-supplied clock instant,
+    // so the guard never forgets an assertion while it could still be replayed; a
+    // longer-than-necessary TTL is always safe (it only lengthens retention, never opens a window).
+    internal static DateTimeOffset ResolveAssertionExpiry(DateTimeOffset notOnOrAfter, DateTimeOffset now)
         => notOnOrAfter == default
-            ? DateTimeOffset.UtcNow.Add(AssertionReplayFallbackTtl)
+            ? now.Add(AssertionReplayFallbackTtl)
             : notOnOrAfter.ToUniversalTime();
 
     private IActionResult SamlFailure(bool isTest, string testError, string testDetail, int realStatus, string? realProblemDetail = null)
@@ -580,7 +584,7 @@ public sealed class SamlController : ControllerBase
             // expired so operators are alerted even if the daily sweep missed the window.
             // Does NOT fail validation; a logins-ok outcome means the cert is still in place
             // and the IdP still signs with it, so refusing would lock users out unnecessarily.
-            if (idpCert.NotAfter.ToUniversalTime() < DateTime.UtcNow)
+            if (idpCert.NotAfter.ToUniversalTime() < _time.GetUtcNow().UtcDateTime)
             {
                 _logger.LogWarning(
                     "SAML IdP signing cert for org {OrgId} expired: thumbprint={Thumbprint}, notAfter={NotAfter}. " +
@@ -603,7 +607,7 @@ public sealed class SamlController : ControllerBase
         string? actorId = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         string cid = Guid.NewGuid().ToString("N");
-        var expiresAt = DateTimeOffset.UtcNow.Add(TestCookieLifetime);
+        var expiresAt = _time.GetUtcNow().Add(TestCookieLifetime);
 
         // Server-side correlation row makes the cid one-shot: TryConsumeTestRunAsync stamps
         // consumed_at on the first ACS hit, so a replayed relay state or cookie can't drive a
@@ -652,7 +656,7 @@ public sealed class SamlController : ControllerBase
                 return false;
             }
 
-            if (DateTimeOffset.FromUnixTimeSeconds(expEl.GetInt64()) < DateTimeOffset.UtcNow)
+            if (DateTimeOffset.FromUnixTimeSeconds(expEl.GetInt64()) < _time.GetUtcNow())
             {
                 return false;
             }
@@ -679,9 +683,11 @@ public sealed class SamlController : ControllerBase
 
     private void SetSessionCookie(string token)
     {
-        // Lax (not Strict) so the redirect from IdP delivers the cookie on the first request
-        // back to the SP. Forms login uses Strict because it's same-site to begin with.
-        Response.Cookies.Append(SessionCookieName, token, _urls.SessionCookieOptions(HttpContext, SameSiteMode.Lax));
+        // SameSite=Strict matches forms-login behaviour. The cookie is set on the ACS response
+        // itself (not on a redirect target), so it is delivered to the browser with that response.
+        // The 302 → top-level GET that follows is same-site to the SP, so Strict cookies are
+        // sent on that subsequent navigation. Lax is not required here.
+        Response.Cookies.Append(SessionCookieName, token, _urls.SessionCookieOptions(HttpContext, SameSiteMode.Strict));
     }
 }
 

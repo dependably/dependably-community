@@ -18,26 +18,43 @@ namespace Dependably.Infrastructure;
 /// stays synchronous via <see cref="AuditRepository.LogAsync"/>). The
 /// <see cref="DependablyMeter.ActivityWriterDropped"/> counter surfaces drop volume so
 /// operators see when the writer falls behind.
+///
+/// Channel capacity is configurable via <c>ACTIVITY_WRITER_QUEUE_CAPACITY</c>. The default
+/// of 50k gives the drainer ~250 s of runway at 200 RPS before the channel saturates; raise
+/// it for sustained burst environments where memory permits. Watch
+/// <c>dependably.activity_writer.dropped</c> to detect persistent writer backpressure.
 /// </summary>
 public sealed class ActivityWriter
 {
-    // 10k capacity matches the issue spec. At a typical p99 row size (~600 bytes), that's
-    // ~6 MB of buffered records — well within process headroom — and gives the drainer
-    // ~50s of runway at 200 RPS before the channel saturates.
-    public const int ChannelCapacity = 10_000;
+    /// <summary>Default channel capacity used when no configuration override is supplied.</summary>
+    public const int DefaultChannelCapacity = 50_000;
+
+    /// <summary>Actual channel capacity this instance was constructed with.</summary>
+    public int ChannelCapacity { get; }
 
     // FullMode.Wait makes TryWrite return false synchronously when the channel is full,
     // which is exactly what we want: enqueue is lock-free and never blocks the request
     // thread, and we can detect drops + increment the metric. The .DropWrite mode would
     // silently make TryWrite always return true and drop the row anyway, so we'd lose
     // observability of the drops.
-    private readonly Channel<ActivityRecord> _channel = Channel.CreateBounded<ActivityRecord>(
-        new BoundedChannelOptions(ChannelCapacity)
-        {
-            SingleReader = true,
-            SingleWriter = false,
-            FullMode = BoundedChannelFullMode.Wait,
-        });
+    private readonly Channel<ActivityRecord> _channel;
+
+    /// <summary>
+    /// Creates an <see cref="ActivityWriter"/> with the specified channel capacity.
+    /// Omit <paramref name="capacity"/> (or pass <c>null</c>) to use
+    /// <see cref="DefaultChannelCapacity"/>.
+    /// </summary>
+    public ActivityWriter(int? capacity = null)
+    {
+        ChannelCapacity = capacity is > 0 ? capacity.Value : DefaultChannelCapacity;
+        _channel = Channel.CreateBounded<ActivityRecord>(
+            new BoundedChannelOptions(ChannelCapacity)
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                FullMode = BoundedChannelFullMode.Wait,
+            });
+    }
 
     /// <summary>Drainer-side reader. Used by <see cref="ActivityWriterHostedService"/>.</summary>
     public ChannelReader<ActivityRecord> Reader => _channel.Reader;

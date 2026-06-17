@@ -11,8 +11,13 @@ namespace Dependably.Infrastructure;
 public sealed class ExternalIdentityRepository
 {
     private readonly IMetadataStore _db;
+    private readonly TimeProvider _time;
 
-    public ExternalIdentityRepository(IMetadataStore db) => _db = db;
+    public ExternalIdentityRepository(IMetadataStore db, TimeProvider time)
+    {
+        _db = db;
+        _time = time;
+    }
 
     public async Task<ExternalIdentity?> FindAsync(
         string orgId, string idpEntityId, string nameId, CancellationToken ct = default)
@@ -39,7 +44,8 @@ public sealed class ExternalIdentityRepository
         CancellationToken ct = default)
     {
         string id = Guid.NewGuid().ToString("N");
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        var nowDto = _time.GetUtcNow();
+        string now = nowDto.ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
@@ -56,8 +62,8 @@ public sealed class ExternalIdentityRepository
             IdpEntityId = idpEntityId,
             NameId = nameId,
             EmailSnapshot = emailSnapshot,
-            CreatedAt = DateTimeOffset.UtcNow,
-            LastLoginAt = DateTimeOffset.UtcNow,
+            CreatedAt = nowDto,
+            LastLoginAt = nowDto,
         };
     }
 
@@ -78,7 +84,7 @@ public sealed class ExternalIdentityRepository
             {
                 id,
                 emailSnapshot,
-                now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ"),
             });
     }
 

@@ -194,6 +194,7 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
         var (raw, record) = await tokens.CreateServiceTokenAsync(
             orgId, $"expired-{Guid.NewGuid():N}",
             """["read:artifact","read:metadata"]""",
+            // now-ok: token must be valid at creation relative to the host's real clock; backdated below.
             expiresAt: DateTimeOffset.UtcNow.AddHours(1));
 
         // Backdate expires_at to the past so the resolver's WHERE clause filters it out.
@@ -202,6 +203,8 @@ public sealed class NpmPingWhoamiTests : IClassFixture<DependablyFactory>, IAsyn
         {
             await conn.ExecuteAsync(
                 "UPDATE service_tokens SET expires_at = @past WHERE id = @id",
+                // now-ok: seeds relative to the host's real clock so the resolver's
+                // expires_at > now filter rejects it; 1h clears the cutoff by a wide margin.
                 new { past = DateTimeOffset.UtcNow.AddHours(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"), id = record.Id });
         }
 

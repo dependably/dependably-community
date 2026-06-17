@@ -31,6 +31,9 @@ public sealed class SmtpInviteMailer : IInviteMailer
     // async cancel propagation.
     private const int SmtpTimeoutMs = 15_000;
 
+    // Default SMTP submission port (RFC 6409 / RFC 8314 — STARTTLS on 587).
+    private const int DefaultSmtpPort = 587;
+
     public SmtpInviteMailer(IConfiguration config, ILogger<SmtpInviteMailer> logger)
     {
         _logger = logger;
@@ -38,7 +41,7 @@ public sealed class SmtpInviteMailer : IInviteMailer
         _host = config["SMTP_HOST"]
             ?? throw new InvalidOperationException("SMTP_HOST is required for SmtpInviteMailer.");
 
-        _port = int.TryParse(config["SMTP_PORT"], out int p) ? p : 587;
+        _port = int.TryParse(config["SMTP_PORT"], out int p) ? p : DefaultSmtpPort;
 
         _username = config["SMTP_USERNAME"];
         _password = config["SMTP_PASSWORD"];

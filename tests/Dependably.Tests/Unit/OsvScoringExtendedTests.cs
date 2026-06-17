@@ -100,7 +100,7 @@ public sealed class OsvScoringExtendedTests
     [Fact]
     public void ParseCvssBaseScore_AppendedScore_MapsToSeverityBand()
     {
-        double? s = OsvScoring.ParseCvssBaseScore("CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:L 3.5", out string? sev);
+        var (s, sev) = OsvScoring.ParseCvssBaseScore("CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:L 3.5");
         Assert.Equal(3.5, s);
         Assert.Equal("LOW", sev);
     }
@@ -109,7 +109,7 @@ public sealed class OsvScoringExtendedTests
     public void ParseCvssBaseScore_VectorOnly_Medium_BandIsMedium()
     {
         // Pick a vector that lands in the MEDIUM 4.0..6.9 band.
-        double? s = OsvScoring.ParseCvssBaseScore("CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N", out string? sev);
+        var (s, sev) = OsvScoring.ParseCvssBaseScore("CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N");
         Assert.NotNull(s);
         Assert.Equal("MEDIUM", sev);
     }

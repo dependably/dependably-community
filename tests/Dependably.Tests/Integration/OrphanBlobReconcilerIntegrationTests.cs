@@ -43,22 +43,27 @@ public sealed class OrphanBlobReconcilerIntegrationTests : IClassFixture<Dependa
 
         // Step 2: plant a SIGKILL-style orphan — a hosted blob with no package_versions row.
         // Backdate the LastModified so it sits outside the grace window the reconciler uses.
+        // Timestamps are fixed instants relative to TestTime.KnownNow; the reconciler below
+        // runs on the same frozen clock, so the grace-window math is deterministic.
         string oldOrphanKey = BlobKeys.Hosted(defaultOrg.Id, "npm",
             "sigkill-orphan", "1.0.0", "sigkill-orphan-1.0.0.tgz");
         _factory.BlobStore.SeedWithLastModified(oldOrphanKey, new byte[] { 9, 9, 9 },
-            DateTimeOffset.UtcNow.AddHours(-2));
+            TestTime.KnownNow.AddHours(-2));
 
         // Step 3: plant a fresh orphan that's INSIDE the grace window — must survive the
         // sweep because it could be from a publish that's still committing.
         string freshOrphanKey = BlobKeys.Hosted(defaultOrg.Id, "npm",
             "inflight", "1.0.0", "inflight-1.0.0.tgz");
         _factory.BlobStore.SeedWithLastModified(freshOrphanKey, new byte[] { 1, 1, 1 },
-            DateTimeOffset.UtcNow);
+            TestTime.KnownNow);
 
         // Step 4: build the reconciler with the same wiring Program.cs uses, but with a
         // tight grace window so the test doesn't have to wait minutes. We instantiate
         // directly rather than resolving the hosted service because AddHostedService<T>
-        // doesn't make T itself resolvable from the DI container.
+        // doesn't make T itself resolvable from the DI container. The clock is frozen at
+        // TestTime.KnownNow so the seeded orphans land on fixed sides of the cutoff; the
+        // legit blob's real-time LastModified doesn't matter — the reference check runs
+        // before the grace check, so referenced blobs survive at any age.
         var tiered = _factory.Services.GetRequiredService<TieredBlobStorage>();
         var packages = _factory.Services.GetRequiredService<PackageRepository>();
         var cfg = new ConfigurationBuilder()
@@ -68,7 +73,8 @@ public sealed class OrphanBlobReconcilerIntegrationTests : IClassFixture<Dependa
             })
             .Build();
         var sut = new OrphanBlobReconcilerService(tiered, packages, cfg,
-            NullLogger<OrphanBlobReconcilerService>.Instance);
+            NullLogger<OrphanBlobReconcilerService>.Instance,
+            TestTime.Frozen());
 
         var summary = await sut.RunOnceAsync();
 

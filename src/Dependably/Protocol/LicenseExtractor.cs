@@ -25,6 +25,9 @@ namespace Dependably.Protocol;
 /// </summary>
 public static class LicenseExtractor
 {
+    // Maximum plausible SPDX identifier length (longest known SPDX expression fits well under 100).
+    private const int MaxSpdxLength = 100;
+
     // RecyclableMemoryStream pool for the non-seekable-backend zip path. Default
     // configuration is appropriate for the proxy-fetch artefact range — buffers are
     // capped at the upstream 600 MB ceiling enforced in UpstreamClient.FetchAndStageAsync,
@@ -73,7 +76,8 @@ public static class LicenseExtractor
             return null;
         }
 
-        using var entryStream = entry.Open();
+        using var entryStream = new LimitedReadStream(
+            entry.Open(), ZipEntryLimits.MaxMetadataEntryBytes, "Wheel METADATA");
         using var reader = new StreamReader(entryStream, Encoding.UTF8);
         return reader.ReadToEnd();
     }
@@ -176,7 +180,8 @@ public static class LicenseExtractor
                 return null;
             }
 
-            using var entryStream = entry.Open();
+            using var entryStream = new LimitedReadStream(
+                entry.Open(), ZipEntryLimits.MaxMetadataEntryBytes, "sdist PKG-INFO");
             using var reader = new StreamReader(entryStream, Encoding.UTF8);
             return reader.ReadToEnd();
         }
@@ -440,7 +445,8 @@ public static class LicenseExtractor
                 return ExtractedMetadata.Empty;
             }
 
-            using var entryStream = entry.Open();
+            using var entryStream = new LimitedReadStream(
+                entry.Open(), ZipEntryLimits.MaxMetadataEntryBytes, "nuspec");
             var doc = XDocument.Load(entryStream);
             string ns = doc.Root?.Name.NamespaceName ?? "";
             XNamespace xns = ns;
@@ -522,7 +528,7 @@ public static class LicenseExtractor
         }
 
         string trimmed = value.Trim();
-        if (trimmed.Length is 0 or > 100)
+        if (trimmed.Length is 0 or > MaxSpdxLength)
         {
             return false;
         }

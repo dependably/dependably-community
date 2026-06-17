@@ -10,8 +10,13 @@ namespace Dependably.Infrastructure;
 public sealed class NpmDistTagRepository
 {
     private readonly IMetadataStore _db;
+    private readonly TimeProvider _time;
 
-    public NpmDistTagRepository(IMetadataStore db) => _db = db;
+    public NpmDistTagRepository(IMetadataStore db, TimeProvider time)
+    {
+        _db = db;
+        _time = time;
+    }
 
     /// <summary>
     /// Returns all dist-tags for <paramref name="packageId"/> as a tag → version dictionary.
@@ -36,7 +41,7 @@ public sealed class NpmDistTagRepository
     public async Task SetTagAsync(
         string orgId, string packageId, string tag, string version, CancellationToken ct = default)
     {
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """

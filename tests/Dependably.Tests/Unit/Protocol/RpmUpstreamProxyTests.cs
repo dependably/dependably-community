@@ -598,9 +598,13 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         var gen = new RsaKeyPairGenerator();
         gen.Init(new RsaKeyGenerationParameters(BigInteger.ValueOf(0x10001), new SecureRandom(), 1024, 25));
         var kp = gen.GenerateKeyPair();
+        // Fixed past instant: the key-creation timestamp is embedded in the key material, and
+        // BouncyCastle never compares it to the wall clock (the key has no expiry), so a
+        // deterministic past value keeps the fixture stable.
+        var keyCreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         var secretKey = new PgpSecretKey(
             PgpSignature.DefaultCertification, PublicKeyAlgorithmTag.RsaGeneral,
-            kp.Public, kp.Private, DateTime.UtcNow, "test@example.com",
+            kp.Public, kp.Private, keyCreatedAt, "test@example.com",
             SymmetricKeyAlgorithmTag.Aes256, System.Array.Empty<char>(), null, null, new SecureRandom());
 
         using var ms = new MemoryStream();
@@ -670,7 +674,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
             config,
             airGapMode,
             urlValidator,
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<RpmUpstreamProxy>.Instance));
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<RpmUpstreamProxy>.Instance, TimeProvider.System));
     }
 
     // ── XML builders ─────────────────────────────────────────────────────────

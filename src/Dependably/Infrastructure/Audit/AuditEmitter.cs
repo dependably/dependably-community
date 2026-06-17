@@ -24,19 +24,22 @@ public sealed class AuditEmitter : IAuditEmitter
     // SIEM forwarder is opt-in. Resolved at construction so the call path stays a
     // single null check; null when no forwarder is configured.
     private readonly SiemForwarderQueue? _siemQueue;
+    private readonly TimeProvider _time;
 
     public AuditEmitter(
         AuditEventRepository repo,
         IHttpContextAccessor http,
         ILogger<AuditEmitter> logger,
         IConfiguration config,
-        IServiceProvider sp)
+        IServiceProvider sp,
+        TimeProvider time)
     {
         _repo = repo;
         _http = http;
         _logger = logger;
         _resolverMode = (config["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
         _siemQueue = sp.GetService<SiemForwarderQueue>();
+        _time = time;
     }
 
     public async Task EmitAsync(
@@ -63,7 +66,7 @@ public sealed class AuditEmitter : IAuditEmitter
             UserAgent = Truncate(ctx?.Request?.Headers.UserAgent.FirstOrDefault(), 512),
             Outcome = outcome,
             Payload = payloadJson,
-            OccurredAt = DateTimeOffset.UtcNow
+            OccurredAt = _time.GetUtcNow()
         };
 
         try

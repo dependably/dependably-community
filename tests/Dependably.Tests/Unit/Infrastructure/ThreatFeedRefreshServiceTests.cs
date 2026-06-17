@@ -23,7 +23,7 @@ public sealed class ThreatFeedRefreshServiceTests : IClassFixture<InMemoryDbFixt
     public ThreatFeedRefreshServiceTests(InMemoryDbFixture fixture)
     {
         _fixture = fixture;
-        _repo = new VulnerabilityRepository(_fixture.Store);
+        _repo = new VulnerabilityRepository(_fixture.Store, TimeProvider.System);
     }
 
     private ThreatFeedRefreshService BuildService(IThreatFeedSource source, bool jobDisabled = false)
@@ -33,7 +33,8 @@ public sealed class ThreatFeedRefreshServiceTests : IClassFixture<InMemoryDbFixt
             source,
             new ConfigurationBuilder().Build(),
             new FakeAirGap(jobDisabled),
-            NullLogger<ThreatFeedRefreshService>.Instance);
+            NullLogger<ThreatFeedRefreshService>.Instance,
+            TimeProvider.System);
     }
 
     [Fact]

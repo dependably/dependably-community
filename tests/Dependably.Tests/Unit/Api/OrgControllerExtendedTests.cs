@@ -170,10 +170,10 @@ public sealed class OrgControllerExtendedTests
     [Theory]
     [InlineData("blocked", null, "blocked")]   // manual block dominates
     [InlineData(null, null, "unscanned")]  // never scanned, no manual state
-    [InlineData(null, 1.0, "clean")]      // scanned, score below tolerance
+    [InlineData(null, 1.0, "vulnerable")] // scanned, advisory below tolerance → not clean
     [InlineData(null, 9.5, "blocked")]    // scanned, score above tolerance → auto-block
     [InlineData("allowed", 9.5, "allowed")]    // manual allow overrides an auto-block
-    [InlineData("allowed", 1.0, "clean")]      // manual allow with no auto-block reports clean
+    [InlineData("allowed", 1.0, "vulnerable")] // manual allow but the advisory still shows
     public async Task GetPackage_VersionStatus_CoversAllBranches(
         string? manualState, double? maxScore, string expectedStatus)
     {
@@ -287,6 +287,95 @@ public sealed class OrgControllerExtendedTests
         Assert.NotNull(first);
         string status = (string)first!.GetType().GetProperty("Status")!.GetValue(first)!;
         Assert.Equal("unscanned", status);
+    }
+
+    [Fact]
+    public async Task GetPackage_ScannedNoAdvisories_ReportsClean()
+    {
+        // The post-fix "clean" means exactly "scanned, zero linked advisories" — the only
+        // state that earns the no-advisories label.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
+        await s.WithPackageAsync("clean-pkg");
+        await s.WithPackageVersionAsync("clean-pkg", "1.0.0");
+        var b = await s.BuildAsync();
+
+        await using (var conn = await b.Db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE package_versions SET vuln_checked_at = '2025-01-01T00:00:00Z' WHERE version = '1.0.0'");
+        }
+
+        Assert.Equal("clean", await FirstVersionStatusAsync(b, "clean-pkg"));
+    }
+
+    [Fact]
+    public async Task GetPackage_ScannedWithAdvisoryBelowTolerance_NotClean()
+    {
+        // The Issue #2 fix: a version with a real advisory must never read as "clean", even
+        // when the advisory's CVSS is below the auto-block tolerance.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
+        await s.WithPackageAsync("vuln-pkg");
+        await s.WithPackageVersionAsync("vuln-pkg", "1.0.0");
+        var b = await s.BuildAsync();
+
+        await using (var conn = await b.Db.OpenAsync())
+        {
+            string verId = (await conn.ExecuteScalarAsync<string>(
+                "SELECT id FROM package_versions WHERE version = '1.0.0' LIMIT 1"))!;
+            string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+                b.Db, osvId: "GHSA-" + Guid.NewGuid().ToString("N")[..8], cvssScore: 2.0);
+            await VulnerabilitySeeder.LinkAsync(b.Db, verId, vulnId);
+            await conn.ExecuteAsync(
+                "UPDATE package_versions SET vuln_checked_at = '2025-01-01T00:00:00Z' WHERE version = '1.0.0'");
+        }
+
+        string status = await FirstVersionStatusAsync(b, "vuln-pkg");
+        Assert.NotEqual("clean", status);
+        Assert.Equal("vulnerable", status);
+    }
+
+    [Fact]
+    public async Task GetPackage_MaliciousVersion_FlagsIsMalicious_AndStatusNotClean()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
+        await s.WithPackageAsync("mal-pkg");
+        await s.WithPackageVersionAsync("mal-pkg", "1.0.0");
+        var b = await s.BuildAsync();
+
+        await using (var conn = await b.Db.OpenAsync())
+        {
+            string verId = (await conn.ExecuteScalarAsync<string>(
+                "SELECT id FROM package_versions WHERE version = '1.0.0' LIMIT 1"))!;
+            string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+                b.Db, osvId: "MAL-2024-" + Guid.NewGuid().ToString("N")[..8], severity: null, cvssScore: null);
+            await VulnerabilitySeeder.LinkAsync(b.Db, verId, vulnId);
+            await conn.ExecuteAsync(
+                "UPDATE package_versions SET vuln_checked_at = '2025-01-01T00:00:00Z' WHERE version = '1.0.0'");
+        }
+
+        object first = await FirstVersionAsync(b, "mal-pkg");
+        bool isMalicious = (bool)first.GetType().GetProperty("IsMalicious")!.GetValue(first)!;
+        string status = (string)first.GetType().GetProperty("Status")!.GetValue(first)!;
+        Assert.True(isMalicious);
+        Assert.NotEqual("clean", status);
+    }
+
+    private static async Task<object> FirstVersionAsync(ControllerScenarioResult b, string name)
+    {
+        var result = await b.OrgController.GetPackage("npm", name, CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var versions = (System.Collections.IEnumerable)ok.Value!.GetType().GetProperty("versions")!.GetValue(ok.Value)!;
+        foreach (object? v in versions) { return v!; }
+        throw new Xunit.Sdk.XunitException("expected at least one version");
+    }
+
+    private static async Task<string> FirstVersionStatusAsync(ControllerScenarioResult b, string name)
+    {
+        object first = await FirstVersionAsync(b, name);
+        return (string)first.GetType().GetProperty("Status")!.GetValue(first)!;
     }
 
     // ── DeleteVersion: pypi / nuget happy paths + audit + GC ────────────────

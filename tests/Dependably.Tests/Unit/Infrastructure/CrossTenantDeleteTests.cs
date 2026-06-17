@@ -30,7 +30,7 @@ public sealed class CrossTenantDeleteTests : IClassFixture<InMemoryDbFixture>
     public async Task Allowlist_DeleteWithForeignOrg_RemovesNothing_OwnOrgRemoves()
     {
         var (orgA, orgB) = await TwoOrgsAsync();
-        var repo = new AllowlistRepository(_fixture.Store);
+        var repo = new AllowlistRepository(_fixture.Store, TimeProvider.System);
         var entry = await repo.AddAsync(orgA, "pkg:npm/owned-by-a");
 
         // Tenant B cannot delete tenant A's entry by id.
@@ -46,7 +46,7 @@ public sealed class CrossTenantDeleteTests : IClassFixture<InMemoryDbFixture>
     public async Task Blocklist_DeleteWithForeignOrg_RemovesNothing_OwnOrgRemoves()
     {
         var (orgA, orgB) = await TwoOrgsAsync();
-        var repo = new BlocklistRepository(_fixture.Store, new MemoryCache(new MemoryCacheOptions()));
+        var repo = new BlocklistRepository(_fixture.Store, new MemoryCache(new MemoryCacheOptions()), TimeProvider.System);
         var entry = await repo.AddAsync(orgA, "pkg:npm/blocked-by-a");
 
         Assert.Equal(0, await repo.DeleteAsync(orgB, entry.Id));
@@ -62,7 +62,7 @@ public sealed class CrossTenantDeleteTests : IClassFixture<InMemoryDbFixture>
         var (orgA, orgB) = await TwoOrgsAsync();
         // invites.created_by is a NOT NULL FK to users(id), so seed a real inviter in org A.
         string inviter = await UserSeeder.InsertAsync(_fixture.Store, orgA, $"inviter-{Guid.NewGuid():N}@x.test", "admin");
-        var repo = new InviteRepository(_fixture.Store);
+        var repo = new InviteRepository(_fixture.Store, TimeProvider.System);
         var (_, invite) = await repo.CreateAsync(orgA, $"invitee-{Guid.NewGuid():N}@x.test", inviter);
 
         Assert.Equal(0, await repo.DeleteAsync(orgB, invite.Id));

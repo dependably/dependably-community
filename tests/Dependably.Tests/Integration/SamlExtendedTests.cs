@@ -161,6 +161,8 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
 
         string cid = Guid.NewGuid().ToString("N");
         var samlRepo = _factory.Services.GetRequiredService<SamlConfigRepository>();
+        // now-ok: the host consumes the test run against its real clock during the ACS hit,
+        // so the expiry must be future relative to real now.
         await samlRepo.IssueTestRunAsync(cid, orgId, actorId: "post-actor",
             expiresAt: DateTimeOffset.UtcNow.AddMinutes(10));
 
@@ -261,6 +263,8 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
             tid = "WRONG-TENANT",
             actor = "actor",
             cid = Guid.NewGuid().ToString("N"),
+            // now-ok: the controller checks exp against the host's real clock; this cookie
+            // must be unexpired so the failure is attributable to the tid mismatch alone.
             exp = DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeSeconds(),
         });
         string cookie = protector.Protect(payload);
@@ -288,7 +292,9 @@ public sealed class SamlExtendedTests : IClassFixture<DependablyFactory>, IAsync
             tid = orgId,
             actor = "actor",
             cid = Guid.NewGuid().ToString("N"),
-            exp = DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeSeconds(),
+            // now-ok: backdated relative to the host's real clock (which checks exp);
+            // 10 minutes keeps the seed decisively past any clock-granularity boundary.
+            exp = DateTimeOffset.UtcNow.AddMinutes(-10).ToUnixTimeSeconds(),
         });
         string cookie = protector.Protect(payload);
 

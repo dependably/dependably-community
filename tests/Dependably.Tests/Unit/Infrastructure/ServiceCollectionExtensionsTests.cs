@@ -45,7 +45,7 @@ public sealed class ServiceCollectionExtensionsTests
     {
         var services = new ServiceCollection();
 
-        var result = services.AddDependablyRepositories();
+        var result = services.AddDependablyRepositories(BuildConfig());
 
         Assert.Same(services, result);
         // Spot-check across the registration list — these cover the conditional

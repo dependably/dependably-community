@@ -42,7 +42,7 @@ public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
     [Fact]
     public async Task IsRevokedAsync_CachesNegativeResult()
     {
-        var repo = new JwtRevocationRepository(_db, _cache);
+        var repo = new JwtRevocationRepository(_db, _cache, TestTime.Frozen());
 
         // First call: cache miss, DB returns false, populates negative cache.
         Assert.False(await repo.IsRevokedAsync("jti-1"));
@@ -52,7 +52,7 @@ public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
         {
             await conn.ExecuteAsync(
                 "INSERT INTO jwt_revocations (jti, expires_at) VALUES (@jti, @exp)",
-                new { jti = "jti-1", exp = DateTimeOffset.UtcNow.AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                new { jti = "jti-1", exp = TestTime.KnownNow.AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ") });
         }
 
         // Second call: cache hit, still returns false (proves we actually cached).
@@ -62,13 +62,13 @@ public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
     [Fact]
     public async Task RevokeAsync_EvictsNegativeCacheEntry()
     {
-        var repo = new JwtRevocationRepository(_db, _cache);
+        var repo = new JwtRevocationRepository(_db, _cache, TestTime.Frozen());
 
         // Warm the negative cache.
         Assert.False(await repo.IsRevokedAsync("jti-2"));
 
         // Revoke through the repository — must invalidate the cache entry.
-        await repo.RevokeAsync("jti-2", DateTimeOffset.UtcNow.AddHours(1));
+        await repo.RevokeAsync("jti-2", TestTime.KnownNow.AddHours(1));
 
         // Next check goes to the DB and reflects the revocation.
         Assert.True(await repo.IsRevokedAsync("jti-2"));
@@ -77,8 +77,8 @@ public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
     [Fact]
     public async Task IsRevokedAsync_DoesNotCachePositiveResult()
     {
-        var repo = new JwtRevocationRepository(_db, _cache);
-        await repo.RevokeAsync("jti-3", DateTimeOffset.UtcNow.AddHours(1));
+        var repo = new JwtRevocationRepository(_db, _cache, TestTime.Frozen());
+        await repo.RevokeAsync("jti-3", TestTime.KnownNow.AddHours(1));
 
         Assert.True(await repo.IsRevokedAsync("jti-3"));
 
@@ -88,7 +88,7 @@ public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
         {
             await conn.ExecuteAsync(
                 "UPDATE jwt_revocations SET expires_at = @past WHERE jti = @jti",
-                new { jti = "jti-3", past = DateTimeOffset.UtcNow.AddHours(-1).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                new { jti = "jti-3", past = TestTime.KnownNow.AddHours(-1).ToString("yyyy-MM-ddTHH:mm:ssZ") });
         }
 
         Assert.False(await repo.IsRevokedAsync("jti-3"));
@@ -97,10 +97,10 @@ public sealed class JwtRevocationRepositoryTests : IAsyncLifetime
     [Fact]
     public async Task IsRevokedAsync_WorksWithoutCache()
     {
-        var repo = new JwtRevocationRepository(_db);
+        var repo = new JwtRevocationRepository(_db, time: TestTime.Frozen());
 
         Assert.False(await repo.IsRevokedAsync("jti-4"));
-        await repo.RevokeAsync("jti-4", DateTimeOffset.UtcNow.AddHours(1));
+        await repo.RevokeAsync("jti-4", TestTime.KnownNow.AddHours(1));
         Assert.True(await repo.IsRevokedAsync("jti-4"));
     }
 }

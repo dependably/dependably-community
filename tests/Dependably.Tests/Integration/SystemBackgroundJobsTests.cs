@@ -31,7 +31,7 @@ public sealed class SystemBackgroundJobsTests : IClassFixture<DependablyMultiFac
         BackgroundJobScope.Services = _factory.Services;
 
         string uniqueJob = "test-job-" + Guid.NewGuid().ToString("N")[..8];
-        using (var scope = BackgroundJobScope.Begin(uniqueJob, "smoke-tick"))
+        using (var scope = BackgroundJobScope.Begin(uniqueJob, "smoke-tick", TimeProvider.System))
         {
             scope.Complete();
         }
@@ -74,8 +74,8 @@ public sealed class SystemBackgroundJobsTests : IClassFixture<DependablyMultiFac
         BackgroundJobScope.Services = _factory.Services;
         string name = "test-outcome-" + Guid.NewGuid().ToString("N")[..8];
 
-        using (var ok = BackgroundJobScope.Begin(name, "ok")) { ok.Complete(); }
-        using (var bad = BackgroundJobScope.Begin(name, "bad")) { bad.Fail(new InvalidOperationException("boom")); }
+        using (var ok = BackgroundJobScope.Begin(name, "ok", TimeProvider.System)) { ok.Complete(); }
+        using (var bad = BackgroundJobScope.Begin(name, "bad", TimeProvider.System)) { bad.Fail(new InvalidOperationException("boom")); }
 
         // Wait for both rows to land. We loop on the unfiltered count so we don't race the
         // outcome filter on a partially-flushed pair.

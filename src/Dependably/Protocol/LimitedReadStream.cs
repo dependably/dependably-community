@@ -41,6 +41,18 @@ public static class ArchiveDecompressLimits
 }
 
 /// <summary>
+/// Caps applied when reading individual ZIP entries that contain only text metadata
+/// (wheel METADATA, EGG-INFO/PKG-INFO, nuspec XML). These entries are structurally
+/// tiny; the tight ceiling prevents a crafted ZIP with a highly-compressed entry
+/// from expanding to an unbounded in-memory string or DOM.
+/// </summary>
+public static class ZipEntryLimits
+{
+    /// <summary>Maximum decompressed bytes for a single metadata ZIP entry (32 MiB).</summary>
+    public const long MaxMetadataEntryBytes = 32L * 1024 * 1024;
+}
+
+/// <summary>
 /// Read-only pass-through stream that throws <see cref="InvalidDataException"/> once more than
 /// <c>maxBytes</c> have been read from the inner stream. Wrapped around decompression streams
 /// (and individual tar entry streams) so a small compressed upload cannot expand into an

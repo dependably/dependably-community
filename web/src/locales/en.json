@@ -110,7 +110,12 @@
     "latest": {
       "current": "Latest upstream version is cached",
       "stale": "A newer upstream version is not cached",
-      "unknown": "No upstream version to compare"
+      "unknown": "No upstream version to compare",
+      "versionLabel": "Latest: {version}"
+    },
+    "malicious": {
+      "label": "Malicious",
+      "help": "This package has a version flagged as known-malicious (OSV MAL- advisory)."
     },
     "empty": "No packages found"
   },
@@ -186,6 +191,7 @@
   "versionDetail": {
     "columns": {
       "version": "Version",
+      "latest": "Latest",
       "checksum": "Checksum",
       "size": "Size",
       "pushed": "Pushed",
@@ -210,9 +216,18 @@
     },
     "status": {
       "blocked": "Blocked",
-      "allowed": "Allowed",
-      "clean": "Clean",
-      "unscanned": "Unscanned"
+      "allowed": "Allowed (vulnerable)",
+      "vulnerable": "Vulnerable",
+      "deprecated": "Deprecated",
+      "clean": "No advisories",
+      "unscanned": "Unscanned",
+      "malicious": "Malicious",
+      "maliciousHelp": "Linked to a known-malicious package advisory (OSV MAL-)."
+    },
+    "statusHelp": "Status is the serving gate (whether this version is blocked or servable), not a verdict on vulnerabilities. A servable version can still carry advisories — see the Vulnerable badge and the severity counts.",
+    "latestBanner": {
+      "stale": "Behind upstream — latest version {version} is not cached here.",
+      "current": "Up to date with upstream — latest version {version} is cached."
     },
     "vulnNever": "Never",
     "rescan": "Rescan",
@@ -250,6 +265,7 @@
   "activity": {
     "title": "Activity",
     "allEvents": "All events",
+    "searchPlaceholder": "Search PURL, event, actor, detail…",
     "export": "Export CSV",
     "events": {
       "firstFetch": "First fetch",
@@ -262,9 +278,14 @@
       "delete": "Delete",
       "manualBlock": "Manual block",
       "manualUnblock": "Manual unblock",
-      "blocked": "Blocked",
+      "blocked": "Blocked (all)",
       "blockedManual": "Blocked (manual)",
+      "blockedReleaseAge": "Blocked (release age)",
+      "blockedMalicious": "Blocked (malicious)",
+      "blockedKev": "Blocked (KEV)",
+      "blockedEpss": "Blocked (EPSS)",
       "blockedVulnScore": "Blocked (vuln score)",
+      "blockedDeprecated": "Blocked (deprecated)",
       "loginSuccess": "Login (success)",
       "loginFailure": "Login (failure)",
       "loginLocked": "Login (locked)"
@@ -296,6 +317,7 @@
       "detail": "Detail"
     },
     "allActions": "All actions",
+    "searchPlaceholder": "Search action, actor, PURL, detail…",
     "export": "Export CSV",
     "groups": {
       "tenantConfig": "Tenant configuration",
@@ -426,7 +448,15 @@
       "licenses": "Licenses",
       "proxy": "Proxy",
       "claims": "Claims",
-      "serviceTokens": "Service tokens"
+      "serviceTokens": "Service tokens",
+      "instance": "Instance settings",
+      "metrics": "Metrics access"
+    },
+    "instance": {
+      "intro": "Instance-wide limits and schedules for this deployment. In single-tenant mode the owner is also the operator, so these are managed here."
+    },
+    "metrics": {
+      "intro": "Control access to the Prometheus /metrics endpoint for this deployment."
     },
     "auth": {
       "methodsTitle": "Sign-in methods",
@@ -624,9 +654,18 @@
       "blockEmptyWarn": "Enforcement is set to Block but no licenses are allowed. Every publish and proxy fetch will be rejected until you approve at least one license below.",
       "mode": {
         "title": "Enforcement mode",
-        "off":   { "label": "Off",   "hint": "License metadata is recorded but no policy is enforced." },
-        "warn":  { "label": "Warn",  "hint": "Violations are logged and surfaced in audit, but downloads still succeed." },
-        "block": { "label": "Block", "hint": "Versions whose license violates this policy are blocked at download." }
+        "off": {
+          "label": "Off",
+          "hint": "License metadata is recorded but no policy is enforced."
+        },
+        "warn": {
+          "label": "Warn",
+          "hint": "Violations are logged and surfaced in audit, but downloads still succeed."
+        },
+        "block": {
+          "label": "Block",
+          "hint": "Versions whose license violates this policy are blocked at download."
+        }
       },
       "review": {
         "title": "Review",
@@ -805,12 +844,26 @@
     "total": "Total",
     "newVulnsTitle": "New vulnerabilities detected",
     "noNewVulns": "No new vulnerabilities",
+    "newVulnsViewAll": "View all vulnerabilities, newest first",
     "window24h": "24h",
     "window7d": "7d",
     "window30d": "30d",
     "activeUsers": "Active users (7d)",
-    "totalDownloads": "Total (30d)",
-    "blockedPulls": "Blocked (30d)",
+    "totalDownloads": "Downloads (30d)",
+    "blockedPulls": "Blocked pulls (30d)",
+    "blockedMalicious": "Malicious blocked (30d)",
+    "quarantinePending": "Quarantine pending",
+    "hostedProxied": "{hosted} hosted · {proxied} proxied",
+    "quotaUsage": "of {total} quota",
+    "gates": {
+      "deprecated": "deprecated",
+      "release_age": "release age",
+      "malicious": "malicious",
+      "kev": "KEV",
+      "epss": "EPSS",
+      "vuln_score": "vuln score",
+      "manual": "manual"
+    },
     "packages": "Packages",
     "diskUsed": "Disk used",
     "vulns": "Vulnerabilities",
@@ -835,6 +888,7 @@
       "all": "All"
     },
     "states": {
+      "pending": "Pending",
       "approved": "Approved",
       "denied": "Denied"
     },
@@ -851,6 +905,17 @@
       "gate": "Gate",
       "detail": "Detail",
       "updated": "Updated"
+    },
+    "actions": {
+      "menuLabel": "Change decision",
+      "resetToPending": "Reset to pending"
+    },
+    "detail": {
+      "policyDetail": "Policy detail",
+      "created": "Created",
+      "decidedBy": "Decided by",
+      "decidedAt": "Decided at",
+      "note": "Note"
     }
   },
   "vulnerabilities": {
@@ -887,13 +952,13 @@
     "title": "License policy",
     "mode": "Enforcement",
     "modes": {
-      "off":   "Off",
-      "warn":  "Warn",
+      "off": "Off",
+      "warn": "Warn",
       "block": "Block"
     },
     "intro": {
-      "off":   "Your tenant records the SPDX license of every package but does not enforce policy. The lists below show what would be allowed or blocked if enforcement were enabled.",
-      "warn":  "Your tenant logs license-policy violations to audit but still serves packages. Use the lists below to understand which licenses an admin has allowed or blocked.",
+      "off": "Your tenant records the SPDX license of every package but does not enforce policy. The lists below show what would be allowed or blocked if enforcement were enabled.",
+      "warn": "Your tenant logs license-policy violations to audit but still serves packages. Use the lists below to understand which licenses an admin has allowed or blocked.",
       "block": "Your tenant blocks publish and proxy fetch for packages whose license isn't allowed below or appears on the block list."
     },
     "allow": {
@@ -1238,8 +1303,11 @@
         "maxUploadBytesMaven": "Max upload size — Maven",
         "maxUploadBytesRpm": "Max upload size — RPM",
         "maxUploadBytesOci": "Max upload size — Docker",
+        "maxUploadBytesCargo": "Max upload size — Cargo",
         "gcSchedule": "GC schedule (cron)",
-        "siemMaxLookbackDays": "SIEM max lookback (days)"
+        "siemMaxLookbackDays": "SIEM max lookback (days)",
+        "defaultStorageQuotaBytes": "Default storage quota — new tenants",
+        "maxActiveTokensPerTenant": "Max active tokens per tenant"
       },
       "placeholders": {
         "string": "unset",
@@ -1254,8 +1322,11 @@
         "maxUploadBytesMaven": "100 MB",
         "maxUploadBytesRpm": "250 MB",
         "maxUploadBytesOci": "2048 MB — fits multi-layer container images",
+        "maxUploadBytesCargo": "100 MB",
         "gcSchedule": "0 3 * * * (03:00 UTC daily)",
-        "siemMaxLookbackDays": "90 days"
+        "siemMaxLookbackDays": "90 days",
+        "defaultStorageQuotaBytes": "unlimited (unset — no quota applied to new tenants)",
+        "maxActiveTokensPerTenant": "1000 tokens"
       },
       "save": "Save",
       "saving": "Saving…",
@@ -1265,11 +1336,21 @@
         "subtitle": "Toggle /metrics availability and configure the IP allowlist. Env vars override these values when set.",
         "envLocked": "One or more knobs are locked by env vars (METRICS_ENABLED / METRICS_ALLOWED_IPS). Unset the env var to manage via UI.",
         "enabled": "Endpoint enabled",
-        "enabledHint": "When off, /metrics returns 404 (endpoint vanishes). When on, the IP allowlist still applies.",
+        "enabledHint": "When off, /metrics returns 404 — the endpoint vanishes entirely (not a 403). When on, the IP allowlist controls access: source IPs on the allowlist receive 200 (anonymous), all others receive 403.",
         "allowedIps": "Allowed IPs / CIDRs",
-        "allowedIpsHint": "One entry per line. Examples: 127.0.0.1, ::1, 10.0.0.0/8.",
+        "allowedIpsHint": "One entry per line. Default when unset: loopback only (127.0.0.1, ::1). Examples: 10.0.0.0/8, 2001:db8::/32.",
         "broadCidrWarn": "⚠ 0.0.0.0/0 or ::/0 disables the IP gate entirely. Use only if /metrics is otherwise protected (e.g. private network, reverse-proxy auth).",
-        "save": "Save metrics access"
+        "save": "Save metrics access",
+        "recentDenied": {
+          "title": "Recently denied scrapes",
+          "hint": "Source IPs blocked by the allowlist in this session. Click + Add to append to the allowlist above.",
+          "add": "+ Add",
+          "addTitle": "Append this IP to the allowlist",
+          "justNow": "just now",
+          "minutesAgo": "{n}m ago",
+          "hoursAgo": "{n}h ago",
+          "daysAgo": "{n}d ago"
+        }
       }
     },
     "profile": {

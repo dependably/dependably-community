@@ -22,7 +22,7 @@
     "sbom:prod": "cyclonedx-npm --omit dev --output-format json --output-file sbom-frontend-prod.json"
   },
   "overrides": {
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.28.1",
     "fast-uri": "^3.1.2"
   },
   "devDependencies": {

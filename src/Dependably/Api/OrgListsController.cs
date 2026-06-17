@@ -17,6 +17,10 @@ namespace Dependably.Api;
 [Authorize]
 public sealed class OrgListsController : OrgScopedControllerBase
 {
+    // Maximum allowed pattern lengths for allowlist/blocklist entries.
+    private const int AllowlistPatternMaxLength = 512;
+    private const int BlocklistPatternMaxLength = 256;
+
     private readonly AllowlistRepository _allowlist;
     private readonly BlocklistRepository _blocklist;
     private readonly Protocol.ReservedNamespaceService _reserved;
@@ -144,7 +148,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
 
         // Length-cap: bounds worst-case compile + match cost. 512 chars is generous for
         // package-name / version globs and far below pathological-regex territory.
-        if (req.Pattern.Length > 512)
+        if (req.Pattern.Length > AllowlistPatternMaxLength)
         {
             return _problems.ValidationErrorAction("pattern", "Pattern must be 512 characters or fewer.");
         }
@@ -227,7 +231,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
         if (!Protocol.ReservedNamespaceService.SupportedEcosystems.Contains(ecosystem))
         {
             return _problems.ValidationErrorAction("ecosystem",
-                "ecosystem must be one of: npm, pypi, nuget, maven.");
+                "ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang.");
         }
 
         string pattern = (req.Pattern ?? "").Trim();
@@ -238,7 +242,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
 
         // Length-cap keeps patterns in package-name territory; matching is a plain prefix
         // compare so this is a sanity bound, not a ReDoS guard.
-        if (pattern.Length > 256)
+        if (pattern.Length > BlocklistPatternMaxLength)
         {
             return _problems.ValidationErrorAction("pattern", "Pattern must be 256 characters or fewer.");
         }

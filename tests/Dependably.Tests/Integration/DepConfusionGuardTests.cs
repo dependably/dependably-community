@@ -155,6 +155,16 @@ public sealed class DepConfusionGuardTests : IClassFixture<DependablyFactory>, I
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
     }
 
+    [Theory]
+    [InlineData("cargo", "serde-*")]              // flat crate-name prefix
+    [InlineData("golang", "github.com/acme/*")]   // module-path prefix
+    public async Task ReservedNamespaces_AcceptsCargoAndGo(string ecosystem, string pattern)
+    {
+        using var c = await AdminClient();
+        var resp = await c.PostAsJsonAsync("/api/v1/reserved-namespaces", new { ecosystem, pattern });
+        Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
+    }
+
     [Fact]
     public async Task ReservedNamespaces_AddByMember_Forbidden()
     {

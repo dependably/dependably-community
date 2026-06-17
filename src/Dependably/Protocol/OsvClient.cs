@@ -19,6 +19,12 @@ public sealed class OsvClient : IOsvSource
     private const int MaxHydrationsPerBatch = 500;
     private const int HydrationConcurrency = 8;
 
+    // Retry parameters for OSV rate-limit responses (429 Too Many Requests).
+    private const int OsvRetryMaxAttempts = 3;
+    private const int OsvRetryInitialDelayMs = 1000;
+    private const int OsvRetryMaxDelayMs = 4000;
+    private const int OsvRetryBackoffMultiplier = 2;
+
     private readonly IHttpClientFactory _httpFactory;
     private readonly ILogger<OsvClient> _logger;
 
@@ -215,9 +221,9 @@ public sealed class OsvClient : IOsvSource
     {
         // Create the client once — BaseAddress is configured at registration in Program.cs.
         var http = _httpFactory.CreateClient("osv");
-        int delay = 1000;
+        int delay = OsvRetryInitialDelayMs;
 
-        for (int attempt = 0; attempt < 3; attempt++)
+        for (int attempt = 0; attempt < OsvRetryMaxAttempts; attempt++)
         {
             // HttpRequestMessage is not reusable; build a fresh one each attempt.
             var response = await http.SendAsync(requestFactory(), ct);
@@ -234,12 +240,12 @@ public sealed class OsvClient : IOsvSource
 
             if (retryAfterHeader is not null && int.TryParse(retryAfterHeader, out int retrySeconds))
             {
-                delay = retrySeconds * 1000;
+                delay = retrySeconds * OsvRetryInitialDelayMs;
             }
 
             _logger.LogWarning("OSV rate-limited; retrying in {Delay}ms (attempt {Attempt}/3)", delay, attempt + 1);
             try { await Task.Delay(delay, ct); } catch (OperationCanceledException) { break; }
-            delay = Math.Min(delay * 2, 4000);
+            delay = Math.Min(delay * OsvRetryBackoffMultiplier, OsvRetryMaxDelayMs);
         }
 
         // Return a synthetic 429 after exhausting retries.
@@ -265,7 +271,7 @@ public sealed class OsvClient : IOsvSource
             s.Type?.StartsWith("CVSS", StringComparison.OrdinalIgnoreCase) == true);
         if (cvssEntry?.Score is not null)
         {
-            cvssScore = OsvScoring.ParseCvssBaseScore(cvssEntry.Score, out severity);
+            (cvssScore, severity) = OsvScoring.ParseCvssBaseScore(cvssEntry.Score);
         }
 
         // Fall back to database_specific.severity for severity text

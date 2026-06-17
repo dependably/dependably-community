@@ -11,12 +11,21 @@ namespace Dependably.Infrastructure;
 public sealed class UpstreamRegistryRepository
 {
     private readonly IMetadataStore _db;
+    private readonly TimeProvider _time;
 
-    public UpstreamRegistryRepository(IMetadataStore db) => _db = db;
+    public UpstreamRegistryRepository(IMetadataStore db, TimeProvider time)
+    {
+        _db = db;
+        _time = time;
+    }
 
-    /// <summary>The ecosystems whose upstream lists are user-configurable through this table.</summary>
+    /// <summary>
+    /// The ecosystems whose upstream lists are user-configurable through this table. OCI is
+    /// deliberately absent: its upstreams are config-file-driven (<c>Oci:Upstreams</c> via
+    /// <c>OciUpstreamRegistryOptions</c>), not the per-org <c>upstream_registry</c> table.
+    /// </summary>
     public static readonly IReadOnlyList<string> SupportedEcosystems =
-        ["pypi", "npm", "nuget", "maven", "rpm", "cargo"];
+        ["pypi", "npm", "nuget", "maven", "rpm", "cargo", "golang"];
 
     public static bool IsSupportedEcosystem(string? ecosystem) =>
         ecosystem is not null && SupportedEcosystems.Contains(ecosystem);
@@ -86,7 +95,7 @@ public sealed class UpstreamRegistryRepository
             Name = name,
             Url = url,
             Position = nextPosition,
-            CreatedAt = DateTimeOffset.UtcNow,
+            CreatedAt = _time.GetUtcNow(),
         };
     }
 

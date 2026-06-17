@@ -176,6 +176,61 @@ public sealed class GoControllerTests : IClassFixture<DependablyFactory>, IAsync
         Assert.Contains(version, body);
     }
 
+    // ── Cache-access recording ────────────────────────────────────────────────
+
+    /// <summary>
+    /// A .zip proxy fetch records the artefact in the shared cache index
+    /// (<c>cache_artifact</c>) and the per-tenant access row (<c>tenant_artifact_access</c>),
+    /// so the eviction pipeline and vulnerability-response query can see proxied Go modules.
+    /// </summary>
+    [Fact]
+    public async Task GetZip_RecordsCacheArtifactAndTenantAccess()
+    {
+        const string module = "example.com/cachezipmod";
+        const string version = "v4.5.6";
+
+        byte[] fakeZip = [0x50, 0x4B, 0x05, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        _factory.MockUpstream.Given(
+                Request.Create()
+                    .WithPath($"/{module}/@v/{version}.zip")
+                    .UsingGet())
+            .RespondWith(Response.Create()
+                .WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/zip")
+                .WithBody(fakeZip));
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var zipResp = await client.GetAsync($"/go/{module}/@v/{version}.zip");
+        Assert.Equal(HttpStatusCode.OK, zipResp.StatusCode);
+
+        string orgId = await GetDefaultOrgIdAsync();
+        await using var conn = await _factory.Services
+            .GetRequiredService<Dependably.Infrastructure.IMetadataStore>()
+            .OpenAsync();
+
+        long artifactCount = await Dapper.SqlMapper.ExecuteScalarAsync<long>(conn,
+            """
+            SELECT COUNT(*) FROM cache_artifact
+            WHERE ecosystem = 'golang' AND name = @module AND version = @version
+            """,
+            new { module, version });
+        Assert.True(artifactCount > 0, "cache_artifact row should exist after a Go .zip proxy fetch.");
+
+        long accessCount = await Dapper.SqlMapper.ExecuteScalarAsync<long>(conn,
+            """
+            SELECT taa.access_count
+            FROM tenant_artifact_access taa
+            JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
+            WHERE ca.ecosystem = 'golang' AND ca.name = @module AND ca.version = @version
+              AND taa.org_id = @orgId
+            """,
+            new { module, version, orgId });
+        Assert.True(accessCount >= 1, "tenant_artifact_access row should exist for the org.");
+    }
+
     // ── @latest proxy ─────────────────────────────────────────────────────────
 
     /// <summary>
@@ -266,17 +321,99 @@ public sealed class GoControllerTests : IClassFixture<DependablyFactory>, IAsync
 
     // ── sumdb passthrough ─────────────────────────────────────────────────────
 
+    // The configured sumdb name (Go:SumDb) is the WireMock host; the go client requests
+    // /go/sumdb/{name}/... so tests address the mock by its host.
+    private string SumDbName => new Uri(_factory.MockUpstream.Urls[0]).Host;
+
     /// <summary>
-    /// sumdb paths return 404 (not implemented in MR1).
+    /// GET /go/sumdb/{configured-name}/supported returns 200 with an empty body — the capability
+    /// probe that tells the go client the proxy proxies this checksum database. No upstream call.
     /// </summary>
     [Fact]
-    public async Task GetSumdb_Returns404()
+    public async Task GetSumdbSupported_ConfiguredName_Returns200EmptyBody()
     {
         string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
-        var resp = await client.GetAsync("/go/sumdb/sum.golang.org/lookup/golang.org/x/net@v0.10.0");
+        var resp = await client.GetAsync($"/go/sumdb/{SumDbName}/supported");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        string body = await resp.Content.ReadAsStringAsync();
+        Assert.Empty(body);
+    }
+
+    /// <summary>
+    /// GET /go/sumdb/{unknown-name}/supported returns 404 so the go client falls back to
+    /// verifying the checksum database directly. No upstream call is made.
+    /// </summary>
+    [Fact]
+    public async Task GetSumdbSupported_UnknownName_Returns404()
+    {
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var resp = await client.GetAsync("/go/sumdb/other-sumdb.example.com/supported");
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    /// <summary>
+    /// A sumdb lookup path is proxied verbatim: the upstream status and body pass through
+    /// untouched (the client verifies the transparency-log signatures itself).
+    /// </summary>
+    [Fact]
+    public async Task GetSumdbLookup_ConfiguredName_ProxiesVerbatim()
+    {
+        const string lookupPath = "lookup/golang.org/x/text@v0.3.0";
+        const string lookupBody =
+            "golang.org/x/text v0.3.0 h1:abcdef\ngolang.org/x/text v0.3.0/go.mod h1:123456\n";
+
+        _factory.MockUpstream.Given(
+                Request.Create()
+                    .WithPath($"/{lookupPath}")
+                    .UsingGet())
+            .RespondWith(Response.Create()
+                .WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "text/plain; charset=utf-8")
+                .WithBody(lookupBody));
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var resp = await client.GetAsync($"/go/sumdb/{SumDbName}/{lookupPath}");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        string body = await resp.Content.ReadAsStringAsync();
+        Assert.Equal(lookupBody, body);
+    }
+
+    /// <summary>
+    /// A fetch for an unknown sumdb name returns 404 without reaching upstream — the proxy never
+    /// fetches a client-chosen host (SSRF guard).
+    /// </summary>
+    [Fact]
+    public async Task GetSumdbLookup_UnknownName_Returns404WithoutUpstreamCall()
+    {
+        const string unknownName = "evil-sumdb.example.com";
+        const string lookupPath = "lookup/example.com/mod@v1.0.0";
+
+        // Stub the path on the mock; the unknown-name guard must short-circuit before any call,
+        // so this stub must NOT be hit.
+        _factory.MockUpstream.Given(
+                Request.Create()
+                    .WithPath($"/{lookupPath}")
+                    .UsingGet())
+            .RespondWith(Response.Create()
+                .WithStatusCode(HttpStatusCode.OK)
+                .WithBody("should-not-be-served"));
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var resp = await client.GetAsync($"/go/sumdb/{unknownName}/{lookupPath}");
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        string body = await resp.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("should-not-be-served", body);
     }
 
     // ── Helper ────────────────────────────────────────────────────────────────

@@ -1,4 +1,5 @@
 using Dependably.Infrastructure.Siem;
+using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -28,7 +29,7 @@ public class SiemForwarderQueueTests
     private static SiemEvent Sample(string id = "e1") => new(
         Id: id, Action: "login.success", Scope: "tenant", OrgId: "o1",
         ActorId: "u1", Ecosystem: null, Purl: null, Detail: null,
-        CreatedAt: DateTimeOffset.UtcNow);
+        CreatedAt: TestTime.KnownNow);
 
     [Fact]
     public async Task EnqueueAndDeliver_HappyPath()
@@ -96,6 +97,7 @@ public class SiemForwarderQueueTests
 
     private static async Task WaitAsync(Func<bool> condition, TimeSpan? timeout = null)
     {
+        // now-ok: polling deadline awaiting real async completion of the queue's consumer loop
         var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(2));
         while (!condition() && DateTimeOffset.UtcNow < deadline)
         {

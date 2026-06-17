@@ -155,7 +155,7 @@ public sealed class TenantSettingsTokenCacheTests : IAsyncLifetime
     [Fact]
     public async Task ResolveAsync_FindsUserTokenViaUnifiedQuery()
     {
-        var tokens = new TokenRepository(_db);
+        var tokens = new TokenRepository(_db, TimeProvider.System);
 
         await using (var conn = await _db.OpenAsync())
         {
@@ -176,7 +176,7 @@ public sealed class TenantSettingsTokenCacheTests : IAsyncLifetime
     [Fact]
     public async Task ResolveAsync_FindsServiceTokenViaUnifiedQuery()
     {
-        var tokens = new TokenRepository(_db);
+        var tokens = new TokenRepository(_db, TimeProvider.System);
 
         await using (var conn = await _db.OpenAsync())
         {
@@ -195,14 +195,14 @@ public sealed class TenantSettingsTokenCacheTests : IAsyncLifetime
     [Fact]
     public async Task ResolveAsync_UnknownToken_ReturnsNull()
     {
-        var tokens = new TokenRepository(_db);
+        var tokens = new TokenRepository(_db, TimeProvider.System);
         Assert.Null(await tokens.ResolveAsync("never-issued"));
     }
 
     [Fact]
     public async Task ResolveAsync_ExpiredToken_ReturnsNull()
     {
-        var tokens = new TokenRepository(_db);
+        var tokens = new TokenRepository(_db, TimeProvider.System);
 
         await using (var conn = await _db.OpenAsync())
         {

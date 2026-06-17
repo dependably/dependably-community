@@ -6,39 +6,42 @@ namespace Dependably.Protocol;
 /// </summary>
 public static class OsvScoring
 {
+    // CVSS v3 severity band thresholds (CVSS 3.1 specification §8).
+    private const double CvssThresholdCritical = 9.0;
+    private const double CvssThresholdHigh = 7.0;
+    private const double CvssThresholdMedium = 4.0;
+
+    // CVSS v3 rounding algorithm: multiply by 1e5, snap to 1e4 grid, divide back by 1e5.
+    // Uses integer arithmetic to avoid floating-point drift (per CVSS spec §7.4).
+    private const long CvssRoundingScale = 100000;
+    private const long CvssRoundingGrid = 10000;
+    private const double CvssRoundingDivisor = 10.0;
+
     /// <summary>
     /// Parses an OSV severity entry's score field. Some advisories append the numeric score
     /// after the vector ("CVSS:3.1/... 9.8"); fall back to computing from the vector when
-    /// only the vector is present. Sets <paramref name="severity"/> to the corresponding
-    /// CRITICAL/HIGH/MEDIUM/LOW band when a score is produced.
+    /// only the vector is present. Returns the numeric score and the corresponding
+    /// CRITICAL/HIGH/MEDIUM/LOW severity band when a score is produced.
     /// </summary>
-    public static double? ParseCvssBaseScore(string vector, out string? severity)
+    public static (double? Score, string? Severity) ParseCvssBaseScore(string vector)
     {
-        severity = null;
-
         string[] parts = vector.Trim().Split(' ');
         if (parts.Length > 1 && double.TryParse(parts[^1],
             System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out double appended))
         {
-            severity = CvssScoreToSeverity(appended);
-            return appended;
+            return (appended, CvssScoreToSeverity(appended));
         }
 
         double? computed = ComputeCvss3Score(parts[0]);
-        if (computed is not null)
-        {
-            severity = CvssScoreToSeverity(computed.Value);
-        }
-
-        return computed;
+        return (computed, computed is not null ? CvssScoreToSeverity(computed.Value) : null);
     }
 
     public static string CvssScoreToSeverity(double score) => score switch
     {
-        >= 9.0 => "CRITICAL",
-        >= 7.0 => "HIGH",
-        >= 4.0 => "MEDIUM",
+        >= CvssThresholdCritical => "CRITICAL",
+        >= CvssThresholdHigh => "HIGH",
+        >= CvssThresholdMedium => "MEDIUM",
         > 0.0 => "LOW",
         _ => "NONE",
     };
@@ -138,7 +141,9 @@ public static class OsvScoring
 
     private static double CvssRoundup(double value)
     {
-        long intVal = (long)Math.Round(value * 100000);
-        return intVal % 10000 == 0 ? intVal / 100000.0 : (Math.Floor(intVal / 10000.0) + 1) / 10.0;
+        long intVal = (long)Math.Round(value * CvssRoundingScale);
+        return intVal % CvssRoundingGrid == 0
+            ? intVal / (double)CvssRoundingScale
+            : (Math.Floor(intVal / (double)CvssRoundingGrid) + 1) / CvssRoundingDivisor;
     }
 }

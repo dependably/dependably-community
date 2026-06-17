@@ -91,6 +91,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     [Fact]
     public async Task AuthConfig_DisableFormsWithoutRecentTest_Returns422()
     {
+        // now-ok: seeds relative to the host's real clock so the server-side 10-minute
+        // staleness window lands as intended; 1h is decisively past the cutoff.
         await SeedFakeSamlConfigAsync(enabled: true, formsLoginEnabled: true, withMetadata: true,
             lastTestAt: DateTimeOffset.UtcNow.AddHours(-1)); // stale: > 10 minutes ago
 
@@ -112,6 +114,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     [Fact]
     public async Task AuthConfig_DisableFormsWithRecentTest_Succeeds()
     {
+        // now-ok: seeds relative to the host's real clock so the server-side 10-minute
+        // recency window lands as intended; -2min leaves 8 minutes of margin for the request.
         await SeedFakeSamlConfigAsync(enabled: true, formsLoginEnabled: true, withMetadata: true,
             lastTestAt: DateTimeOffset.UtcNow.AddMinutes(-2));
 
@@ -231,23 +235,40 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         Assert.Equal(1, linked);
     }
 
+    /// <summary>
+    /// An existing admin account is blocked from silent email-link without the
+    /// idp_can_assign_admin opt-in (privilege-escalation gate). With the opt-in set, the
+    /// link is permitted and the existing admin role is preserved.
+    /// </summary>
     [Fact]
-    public async Task LoginSaml_ExistingFormsUser_LinksAndPreservesAdminRole()
+    public async Task LoginSaml_ExistingAdminFormsUser_BlockedWithoutOptIn_AllowedWithOptIn()
     {
         var login = _factory.Services.GetRequiredService<LoginService>();
         string orgId = await GetDefaultOrgIdAsync();
         string email = $"admin-{Guid.NewGuid():N}@example.com";
         await _factory.CreateUser(email, "doesntmatter12", role: "admin");
 
-        var result = await login.LoginSamlAsync(
+        // Without opt-in: blocked — the email-link ceiling matches the JIT ceiling.
+        var blockedResult = await login.LoginSamlAsync(
             tenantId: orgId,
             idpEntityId: "https://idp.example.com/entity",
-            nameId: "saml-existing-1",
+            nameId: "saml-existing-blocked",
             assertionEmail: email);
 
-        Assert.NotNull(result.Token);
-        Assert.True(result.Linked);
-        Assert.Equal("admin", result.Role);
+        Assert.Null(blockedResult.Token);
+        Assert.False(blockedResult.Linked);
+
+        // With opt-in: link is permitted and the existing admin role is preserved.
+        var allowedResult = await login.LoginSamlAsync(
+            tenantId: orgId,
+            idpEntityId: "https://idp.example.com/entity",
+            nameId: "saml-existing-allowed",
+            assertionEmail: email,
+            new SamlLoginOptions(IdpCanAssignAdmin: true));
+
+        Assert.NotNull(allowedResult.Token);
+        Assert.True(allowedResult.Linked);
+        Assert.Equal("admin", allowedResult.Role);
     }
 
     [Fact]
@@ -414,6 +435,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         // Create a test run row directly (no cookie set — simulates the cross-site POST path)
         string cid = Guid.NewGuid().ToString("N");
         var samlRepo = _factory.Services.GetRequiredService<SamlConfigRepository>();
+        // now-ok: the host consumes the test run against its real clock during the ACS hit,
+        // so the expiry must be future relative to real now.
         await samlRepo.IssueTestRunAsync(cid, orgId, actorId: "test-actor",
             expiresAt: DateTimeOffset.UtcNow.AddMinutes(10));
 
@@ -459,6 +482,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
 
         string cid = Guid.NewGuid().ToString("N");
         var samlRepo = _factory.Services.GetRequiredService<SamlConfigRepository>();
+        // now-ok: the host consumes the test run against its real clock during the ACS hit,
+        // so the expiry must be future relative to real now.
         await samlRepo.IssueTestRunAsync(cid, orgId, actorId: "test-actor",
             expiresAt: DateTimeOffset.UtcNow.AddMinutes(10));
 
@@ -520,6 +545,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     {
         string cid = Guid.NewGuid().ToString("N");
         var samlRepo = _factory.Services.GetRequiredService<SamlConfigRepository>();
+        // now-ok: the host consumes the test run against its real clock during the ACS hit,
+        // so the expiry must be future relative to real now.
         await samlRepo.IssueTestRunAsync(cid, tenantId, actorId: "test-actor",
             expiresAt: DateTimeOffset.UtcNow.AddMinutes(10));
 
@@ -530,6 +557,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
             tid = tenantId,
             actor = "test-actor",
             cid,
+            // now-ok: the controller checks exp against the host's real clock; the cookie
+            // must be unexpired for the ACS test path to run.
             exp = DateTimeOffset.UtcNow.AddMinutes(10).ToUnixTimeSeconds(),
         });
         return (protector.Protect(payload), cid);
@@ -591,6 +620,7 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         var key = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(System.Text.Encoding.UTF8.GetBytes(jwtSecret!));
         var creds = new Microsoft.IdentityModel.Tokens.SigningCredentials(
             key, Microsoft.IdentityModel.Tokens.SecurityAlgorithms.HmacSha256);
+        // now-ok: mints a JWT the host validates against its (default: real) clock.
         var now = DateTime.UtcNow;
         var token = new System.IdentityModel.Tokens.Jwt.JwtSecurityToken(
             claims: new[]

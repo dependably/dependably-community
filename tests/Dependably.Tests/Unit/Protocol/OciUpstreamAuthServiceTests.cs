@@ -39,14 +39,15 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
             _factory,
             options,
             new StubAirGap(airGapped),
-            NullLogger<OciUpstreamAuthService>.Instance);
+            NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
     }
 
     private static OciUpstreamRegistryOptions MakeUpstream(
         OciAuthType authType,
         string host = "registry.docker.io",
         string? username = null,
-        string? password = null)
+        string? password = null,
+        string? tokenEndpoint = null)
         => new()
         {
             Name = "test",
@@ -54,6 +55,7 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
             AuthType = authType,
             Username = username,
             Password = password,
+            TokenEndpoint = tokenEndpoint,
             Prefixes = [""],
         };
 
@@ -113,7 +115,10 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         _factory.Enqueue(probeResp, tokenResp);
 
         using var svc = Build();
-        var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io");
+        // Docker Hub's auth realm (auth.docker.io) differs from the registry host
+        // (registry-1.docker.io) — the operator must pin TokenEndpoint to allow it.
+        var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io",
+            tokenEndpoint: "https://auth.docker.io/token");
 
         string? result = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
 
@@ -132,7 +137,8 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         // Only two responses queued; a third HTTP call would throw.
 
         using var svc = Build();
-        var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io");
+        var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io",
+            tokenEndpoint: "https://auth.docker.io/token");
 
         string? first = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
         string? second = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
@@ -160,7 +166,8 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         _factory.Enqueue(probe1, tokenResp1, probe2, tokenResp2);
 
         using var svc = Build();
-        var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io");
+        var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io",
+            tokenEndpoint: "https://auth.docker.io/token");
 
         string? first = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
         Assert.Equal("Bearer token-v1", first);
@@ -184,6 +191,76 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         string? result = await svc.GetAuthorizationAsync(upstream, "team/app", "pull", default);
 
         Assert.Null(result);
+    }
+
+    // ── Realm-redirect credential leak protection ──────────────────────────────
+
+    /// <summary>
+    /// Regression: a hostile upstream presenting a sibling-domain realm (sharing only the
+    /// registrable domain, not the exact host) must not receive credentials. Without the fix,
+    /// the registrable-domain fallback in IsTrustedRealm allowed harvest.attacker.com to
+    /// receive credentials when registry.attacker.com was configured as the upstream.
+    /// </summary>
+    [Fact]
+    public async Task GetAuthorizationAsync_DockerHub_SiblingDomainRealm_ThrowsWithoutPinnedEndpoint()
+    {
+        // Attacker-controlled registry.attacker.com returns a realm on a sibling domain
+        // (harvest.attacker.com) — both under attacker.com's registrable domain.
+        var probeResp = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+        probeResp.Headers.WwwAuthenticate.ParseAdd(
+            "Bearer realm=\"https://harvest.attacker.com/token\",service=\"registry.attacker.com\",scope=\"\"");
+
+        _factory.Enqueue(probeResp);
+        // If vulnerable: a second HTTP call to harvest.attacker.com would be issued here
+        // carrying upstream credentials. The fix ensures we throw before issuing that call.
+
+        using var svc = Build();
+        var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry.attacker.com");
+
+        await Assert.ThrowsAsync<OciUnauthorizedException>(() =>
+            svc.GetAuthorizationAsync(upstream, "victim/image", "pull", default));
+
+        // Verify no token-exchange HTTP call was made (queue still has no extra dequeues).
+        Assert.Equal(0, _factory.RemainingCount);
+    }
+
+    /// <summary>
+    /// Mixed partial-failure scenario: the first upstream has a pinned endpoint and succeeds;
+    /// the second uses an untrusted sibling-domain realm and fails. Both paths are verified
+    /// in the same call sequence to confirm the gate is per-upstream.
+    /// </summary>
+    [Fact]
+    public async Task GetAuthorizationAsync_MixedUpstreams_PinnedSucceedsSiblingDomainFails()
+    {
+        // Upstream A: registry-1.docker.io with TokenEndpoint pinned — succeeds.
+        var probeA = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+        probeA.Headers.WwwAuthenticate.ParseAdd(
+            "Bearer realm=\"https://auth.docker.io/token\",service=\"registry.docker.io\",scope=\"\"");
+        var tokenA = JsonResponse(new { token = "legit-token", expires_in = 3600 });
+
+        // Upstream B: registry.evil.io with a sibling-domain realm — fails.
+        var probeB = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+        probeB.Headers.WwwAuthenticate.ParseAdd(
+            "Bearer realm=\"https://harvest.evil.io/token\",service=\"registry.evil.io\",scope=\"\"");
+
+        _factory.Enqueue(probeA, tokenA, probeB);
+
+        using var svc = Build();
+
+        var upstreamA = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io",
+            tokenEndpoint: "https://auth.docker.io/token");
+        var upstreamB = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry.evil.io");
+
+        // Upstream A succeeds.
+        string? resultA = await svc.GetAuthorizationAsync(upstreamA, "library/ubuntu", "pull", default);
+        Assert.Equal("Bearer legit-token", resultA);
+
+        // Upstream B's sibling-domain realm is refused.
+        await Assert.ThrowsAsync<OciUnauthorizedException>(() =>
+            svc.GetAuthorizationAsync(upstreamB, "victim/image", "pull", default));
+
+        // All queued responses consumed — no extra HTTP calls were made.
+        Assert.Equal(0, _factory.RemainingCount);
     }
 
     // ── Air-gap ────────────────────────────────────────────────────────────────

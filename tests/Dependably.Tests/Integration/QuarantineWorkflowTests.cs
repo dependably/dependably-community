@@ -6,14 +6,16 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Time.Testing;
 
 namespace Dependably.Tests.Integration;
 
 /// <summary>
 /// End-to-end coverage of the quarantine review workflow: a policy-blocked download lands a
 /// pending entry, approval flips the version's manual allow override so the next download
-/// succeeds, denial records the manual block, and the decision endpoint enforces tenant
-/// scoping, single-decision semantics, and the TenantConfigure capability.
+/// succeeds, denial records the manual block, a decided entry can be re-decided or reset to
+/// pending (the change-my-mind path), and the decision endpoint enforces tenant scoping and
+/// the TenantConfigure capability.
 /// Reuses the malicious gate (unscored MAL- advisory) as the blocking policy because its
 /// data path is fully local — no upstream stubs needed.
 /// </summary>
@@ -97,12 +99,11 @@ public sealed class QuarantineWorkflowTests : IClassFixture<DependablyFactory>, 
     {
         string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
-        string json = await client.GetStringAsync($"/npm/{pkgName}");
-        using var doc = JsonDocument.Parse(json);
-        string tarballUrl = doc.RootElement
-            .GetProperty("versions").GetProperty("1.0.0")
-            .GetProperty("dist").GetProperty("tarball").GetString()!;
-        return await client.GetAsync(new Uri(tarballUrl).PathAndQuery);
+
+        // Construct the tarball URL directly — blocked versions are absent from the packument
+        // after block-gate filtering, so reading tarball from the packument would fail.
+        string tarballPath = $"/npm/tarballs/{pkgName}/{pkgName}-1.0.0.tgz";
+        return await client.GetAsync(tarballPath);
     }
 
     [Fact]
@@ -153,16 +154,80 @@ public sealed class QuarantineWorkflowTests : IClassFixture<DependablyFactory>, 
     }
 
     [Fact]
-    public async Task Decide_Twice_Returns409()
+    public async Task Redecide_ApprovedToDenied_FlipsManualBlock_AndReblocks()
     {
-        string pkg = $"qtwice{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        // The change-my-mind path: an approved entry can be re-decided as denied, which flips
+        // the version's manual override from allow to block and re-blocks the next download.
+        string pkg = $"qflip{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         string id = await SeedBlockedEntryAsync(pkg);
 
         using var admin = await AdminClient();
         (await admin.PostAsJsonAsync($"/api/v1/quarantine/{id}/decide", new { decision = "approved" }))
             .EnsureSuccessStatusCode();
-        var second = await admin.PostAsJsonAsync($"/api/v1/quarantine/{id}/decide", new { decision = "denied" });
-        Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await DownloadTarballAsync(pkg)).StatusCode);
+
+        var flip = await admin.PostAsJsonAsync($"/api/v1/quarantine/{id}/decide", new { decision = "denied" });
+        Assert.Equal(HttpStatusCode.OK, flip.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await DownloadTarballAsync(pkg)).StatusCode);
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string? state = await conn.ExecuteScalarAsync<string>(
+            """
+            SELECT pv.manual_block_state FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id WHERE p.name = @pkg LIMIT 1
+            """, new { pkg });
+        Assert.Equal("blocked", state);
+    }
+
+    [Fact]
+    public async Task Reset_ToPending_ClearsOverride_AndDecisionMetadata()
+    {
+        // Resetting a decided entry to pending clears the version override and wipes the row's
+        // decision metadata so it re-enters the queue clean — and the gate blocks again.
+        string pkg = $"qreset{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = await SeedBlockedEntryAsync(pkg);
+
+        using var admin = await AdminClient();
+        (await admin.PostAsJsonAsync($"/api/v1/quarantine/{id}/decide",
+            new { decision = "approved", note = "vetted internally" })).EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.OK, (await DownloadTarballAsync(pkg)).StatusCode);
+
+        var reset = await admin.PostAsJsonAsync($"/api/v1/quarantine/{id}/decide", new { decision = "pending" });
+        Assert.Equal(HttpStatusCode.OK, reset.StatusCode);
+
+        // The override is cleared, so the malicious gate blocks the next download again.
+        Assert.Equal(HttpStatusCode.Forbidden, (await DownloadTarballAsync(pkg)).StatusCode);
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string? manual = await conn.ExecuteScalarAsync<string>(
+            """
+            SELECT pv.manual_block_state FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id WHERE p.name = @pkg LIMIT 1
+            """, new { pkg });
+        Assert.Null(manual);
+
+        var row = await conn.QuerySingleAsync(
+            "SELECT state, decided_by AS DecidedBy, decided_at AS DecidedAt, note FROM quarantine WHERE id = @id",
+            new { id });
+        Assert.Equal("pending", (string)row.state);
+        Assert.Null(row.DecidedBy);
+        Assert.Null(row.DecidedAt);
+        Assert.Null(row.note);
+    }
+
+    [Fact]
+    public async Task Redecide_SameState_IsNoOp_Returns200()
+    {
+        string pkg = $"qnoop{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string id = await SeedBlockedEntryAsync(pkg);
+
+        using var admin = await AdminClient();
+        (await admin.PostAsJsonAsync($"/api/v1/quarantine/{id}/decide", new { decision = "denied" }))
+            .EnsureSuccessStatusCode();
+        var again = await admin.PostAsJsonAsync($"/api/v1/quarantine/{id}/decide", new { decision = "denied" });
+        Assert.Equal(HttpStatusCode.OK, again.StatusCode);
     }
 
     [Fact]
@@ -216,5 +281,122 @@ public sealed class QuarantineWorkflowTests : IClassFixture<DependablyFactory>, 
         var doc = await JsonDocument.ParseAsync(await list.Content.ReadAsStreamAsync());
         Assert.Contains(doc.RootElement.GetProperty("items").EnumerateArray(),
             e => e.GetProperty("id").GetString() == id);
+    }
+}
+
+/// <summary>
+/// Integration tests for the release-age auto-purge at list time. A separate fixture class
+/// with a frozen host clock so the age arithmetic is deterministic.
+/// </summary>
+[Trait("Category", "Integration")]
+public sealed class QuarantineReleaseAgePurgeTests : IAsyncLifetime
+{
+    private static readonly FakeTimeProvider Clock = TestTime.Frozen();
+    private readonly DependablyFactory _factory = new() { FrozenClock = Clock };
+
+    public async Task InitializeAsync() => await _factory.InitializeAsync();
+    public async Task DisposeAsync() => await _factory.DisposeAsync();
+
+    private async Task<HttpClient> AdminClient()
+    {
+        string jwt = await _factory.CreateAdminJwt();
+        var c = _factory.CreateClient();
+        c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+        return c;
+    }
+
+    /// <summary>
+    /// End-to-end proof that the LIST endpoint omits an aged-out release_age entry while
+    /// keeping a still-young one. This is the mixed partial-failure scenario for the lazy
+    /// purge: the GET /api/v1/quarantine call must delete the aged row before returning, so
+    /// the response total and items count reflect the post-purge state.
+    /// </summary>
+    [Fact]
+    public async Task List_AgedOutReleaseAge_IsOmitted_YoungEntryIsRetained()
+    {
+        using var admin = await AdminClient();
+
+        // Enable release-age hold of 24 hours.
+        (await admin.PutAsJsonAsync("/api/v1/proxy-settings", new
+        {
+            proxyPassthroughEnabled = true,
+            maxOsvScoreTolerance = 10.0,
+            minReleaseAgeHours = 24,
+        })).EnsureSuccessStatusCode();
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        var orgs = _factory.Services.GetRequiredService<OrgRepository>();
+        string orgId = (await orgs.GetBySlugAsync("default"))!.Id;
+
+        // Seed two npm packages and stamp their published_at values.
+        // agedpkg: published 50 hours before frozen-now — aged out (past the 24h hold).
+        // youngpkg: published 1 hour before frozen-now — still held.
+        string agedPkg = $"qpurge-aged-{Guid.NewGuid():N}"[..28].ToLowerInvariant();
+        string youngPkg = $"qpurge-young-{Guid.NewGuid():N}"[..28].ToLowerInvariant();
+
+        await _factory.PushNpmPackage(agedPkg, "1.0.0");
+        await _factory.PushNpmPackage(youngPkg, "1.0.0");
+
+        string agedTs = TestTime.KnownNow.AddHours(-50).ToString("o");
+        string youngTs = TestTime.KnownNow.AddHours(-1).ToString("o");
+
+        await using (var conn = await store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                UPDATE package_versions SET published_at = @ts
+                WHERE id = (
+                    SELECT pv.id FROM package_versions pv
+                    JOIN packages p ON p.id = pv.package_id
+                    WHERE p.name = @name LIMIT 1)
+                """,
+                new { ts = agedTs, name = agedPkg });
+            await conn.ExecuteAsync(
+                """
+                UPDATE package_versions SET published_at = @ts
+                WHERE id = (
+                    SELECT pv.id FROM package_versions pv
+                    JOIN packages p ON p.id = pv.package_id
+                    WHERE p.name = @name LIMIT 1)
+                """,
+                new { ts = youngTs, name = youngPkg });
+        }
+
+        // Directly seed pending release_age quarantine rows so we don't need to trigger an
+        // actual blocked download (the release-age gate only fires on proxy-fetched versions).
+        var quarantine = _factory.Services.GetRequiredService<QuarantineRepository>();
+        string agedPurl = $"pkg:npm/{agedPkg}@1.0.0";
+        string youngPurl = $"pkg:npm/{youngPkg}@1.0.0";
+
+        string? agedVerId;
+        string? youngVerId;
+        await using (var conn = await store.OpenAsync())
+        {
+            agedVerId = await conn.ExecuteScalarAsync<string>(
+                """
+                SELECT pv.id FROM package_versions pv
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.name = @name LIMIT 1
+                """, new { name = agedPkg });
+            youngVerId = await conn.ExecuteScalarAsync<string>(
+                """
+                SELECT pv.id FROM package_versions pv
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.name = @name LIMIT 1
+                """, new { name = youngPkg });
+        }
+
+        await quarantine.UpsertPendingAsync(orgId, "npm", agedPurl, "release_age", null, agedVerId);
+        await quarantine.UpsertPendingAsync(orgId, "npm", youngPurl, "release_age", null, youngVerId);
+
+        // GET /api/v1/quarantine?state=pending — the aged-out entry must be purged before the
+        // response is built; the young entry must still be present.
+        var resp = await admin.GetAsync("/api/v1/quarantine?state=pending");
+        resp.EnsureSuccessStatusCode();
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        var items = doc.RootElement.GetProperty("items").EnumerateArray().ToList();
+
+        Assert.DoesNotContain(items, e => e.GetProperty("purl").GetString() == agedPurl);
+        Assert.Contains(items, e => e.GetProperty("purl").GetString() == youngPurl);
     }
 }

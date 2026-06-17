@@ -32,7 +32,7 @@ public sealed class AuditEmitterTests : IClassFixture<InMemoryDbFixture>
             .AddInMemoryCollection(new Dictionary<string, string?> { ["DEPLOYMENT_MODE"] = deploymentMode })
             .Build();
         var sp = new ServiceCollection().BuildServiceProvider();   // no SiemForwarderQueue registered
-        return new AuditEmitter(repo, accessor, NullLogger<AuditEmitter>.Instance, config, sp);
+        return new AuditEmitter(repo, accessor, NullLogger<AuditEmitter>.Instance, config, sp, TimeProvider.System);
     }
 
     [Fact]
@@ -112,7 +112,7 @@ public sealed class AuditEmitterTests : IClassFixture<InMemoryDbFixture>
         var accessor = Substitute.For<IHttpContextAccessor>();
         var config = new ConfigurationBuilder().Build();
         var sp = new ServiceCollection().BuildServiceProvider();
-        var sut = new AuditEmitter(repo, accessor, NullLogger<AuditEmitter>.Instance, config, sp);
+        var sut = new AuditEmitter(repo, accessor, NullLogger<AuditEmitter>.Instance, config, sp, TimeProvider.System);
 
         // Must not throw — the catch in EmitAsync swallows + increments the metric.
         Assert.Null(await Record.ExceptionAsync(() =>

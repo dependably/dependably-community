@@ -14,6 +14,9 @@ namespace Dependably.Protocol;
 /// </summary>
 public static partial class NuGetNupkgValidator
 {
+    // Maximum NuGet package ID length per the NuGet gallery specification.
+    private const int MaxNuGetPackageIdLength = 100;
+
     private static readonly HashSet<string> KnownNuspecNamespaces = [
         "http://schemas.microsoft.com/packaging/2010/07/nuspec.xsd",
         "http://schemas.microsoft.com/packaging/2011/08/nuspec.xsd",
@@ -52,7 +55,8 @@ public static partial class NuGetNupkgValidator
                 return (ValidationResult.Fail("content", "No .nuspec found at ZIP root"), null, null);
             }
 
-            using var nuspecStream = nuspecEntry.Open();
+            using var nuspecStream = new LimitedReadStream(
+                nuspecEntry.Open(), ZipEntryLimits.MaxMetadataEntryBytes, "nuspec");
             var doc = XDocument.Load(nuspecStream);
             string ns = doc.Root?.Name.NamespaceName ?? "";
 
@@ -68,7 +72,7 @@ public static partial class NuGetNupkgValidator
             string? description = metadata?.Element(xns + "description")?.Value?.Trim();
             string? authors = metadata?.Element(xns + "authors")?.Value?.Trim();
 
-            if (string.IsNullOrEmpty(id) || id.Length > 100)
+            if (string.IsNullOrEmpty(id) || id.Length > MaxNuGetPackageIdLength)
             {
                 return (ValidationResult.Fail("id", "id must be 1-100 characters"), null, null);
             }

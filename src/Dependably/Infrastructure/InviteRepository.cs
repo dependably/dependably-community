@@ -8,8 +8,13 @@ namespace Dependably.Infrastructure;
 public sealed class InviteRepository
 {
     private readonly IMetadataStore _db;
+    private readonly TimeProvider _time;
 
-    public InviteRepository(IMetadataStore db) => _db = db;
+    public InviteRepository(IMetadataStore db, TimeProvider time)
+    {
+        _db = db;
+        _time = time;
+    }
 
     /// <summary>
     /// Creates a new 24-hour invite. Returns (rawToken, record).
@@ -22,7 +27,7 @@ public sealed class InviteRepository
         byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
         string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
         string id = Guid.NewGuid().ToString("N");
-        var expiresAt = DateTimeOffset.UtcNow.AddHours(24);
+        var expiresAt = _time.GetUtcNow().AddHours(24);
         string expiresStr = expiresAt.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         await using var conn = await _db.OpenAsync(ct);
@@ -40,7 +45,7 @@ public sealed class InviteRepository
             Email = email,
             Role = role,
             CreatedBy = createdByUserId,
-            CreatedAt = DateTimeOffset.UtcNow,
+            CreatedAt = _time.GetUtcNow(),
             ExpiresAt = expiresAt,
             AcceptedAt = null
         });
@@ -84,39 +89,42 @@ public sealed class InviteRepository
     }
 
     /// <summary>
-    /// Resolves an invite token and marks it as accepted.
+    /// Atomically consumes an invite token. The UPDATE predicate guards both the
+    /// not-yet-accepted and not-yet-expired conditions in one statement, so concurrent
+    /// requests carrying the same token race on the DB write — exactly one wins
+    /// (rowsAffected == 1); all others see rowsAffected == 0 and receive null.
     /// Returns the invite record on success, null if expired/not found/already accepted.
     /// </summary>
     public async Task<InviteRecord?> AcceptAsync(string rawToken, CancellationToken ct = default)
     {
         byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
         string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         await using var conn = await _db.OpenAsync(ct);
-        var (Id, OrgId, Email, Role, CreatedBy, CreatedAt, ExpiresAt, AcceptedAt) = await conn.QuerySingleOrDefaultAsync<(string Id, string OrgId, string Email, string Role, string CreatedBy, string CreatedAt, string ExpiresAt, string? AcceptedAt)>(
+
+        // Single conditional UPDATE: wins the race only when the row is still pending
+        // and unexpired. Concurrent requests with the same token both reach this statement
+        // but at most one will match (SQLite serializes writes); the loser gets 0 rows.
+        int rowsAffected = await conn.ExecuteAsync(
+            "UPDATE invites SET accepted_at = @now WHERE token_hash = @hash AND accepted_at IS NULL AND expires_at > @now",
+            new { now, hash });
+
+        if (rowsAffected == 0)
+        {
+            return null;
+        }
+
+        // Read the now-immutably-accepted row. The row is race-free at this point because
+        // the winning UPDATE has set accepted_at; no further state change is possible.
+        // token_hash is globally unique so no org_id predicate is required; the returned
+        // org_id is what the caller uses for tenant context.
+        // xtenant: token_hash is a globally-unique PK surrogate; the returned org_id enforces
+        // tenant scope downstream (same rationale as DeleteAsync).
+        var (Id, OrgId, Email, Role, CreatedBy, CreatedAt, ExpiresAt, AcceptedAt) =
+            await conn.QuerySingleAsync<(string Id, string OrgId, string Email, string Role, string CreatedBy, string CreatedAt, string ExpiresAt, string AcceptedAt)>(
             "SELECT id, org_id, email, role, created_by, created_at, expires_at, accepted_at FROM invites WHERE token_hash = @hash",
             new { hash });
-
-        if (Id is null)
-        {
-            return null;
-        }
-
-        var expiresAt = DateTimeOffset.Parse(ExpiresAt);
-        if (expiresAt < DateTimeOffset.UtcNow)
-        {
-            return null;
-        }
-
-        if (AcceptedAt is not null)
-        {
-            return null;
-        }
-
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-        await conn.ExecuteAsync(
-            "UPDATE invites SET accepted_at = @now WHERE id = @id",
-            new { now, id = Id });
 
         return new InviteRecord
         {
@@ -126,8 +134,35 @@ public sealed class InviteRepository
             Role = Role,
             CreatedBy = CreatedBy,
             CreatedAt = DateTimeOffset.Parse(CreatedAt),
-            ExpiresAt = expiresAt,
-            AcceptedAt = DateTimeOffset.UtcNow
+            ExpiresAt = DateTimeOffset.Parse(ExpiresAt),
+            AcceptedAt = DateTimeOffset.Parse(AcceptedAt)
         };
+    }
+
+    /// <summary>
+    /// Counts pending (unexpired, unconsumed) invites for the given org.
+    /// Used to enforce the per-tenant pending-invite cap before creating a new invite.
+    /// </summary>
+    public async Task<int> CountPendingAsync(string orgId, CancellationToken ct = default)
+    {
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM invites WHERE org_id = @orgId AND accepted_at IS NULL AND expires_at > @now",
+            new { orgId, now });
+    }
+
+    /// <summary>
+    /// Deletes expired, unconsumed invite rows. Runs as part of the background GC pass
+    /// to prevent unbounded table growth when invites are never accepted or manually cancelled.
+    /// </summary>
+    public async Task<int> PruneExpiredAsync(CancellationToken ct = default)
+    {
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: instance-wide expired-invite prune; no org_id predicate is correct here
+        return await conn.ExecuteAsync(
+            "DELETE FROM invites WHERE accepted_at IS NULL AND expires_at <= @now",
+            new { now });
     }
 }

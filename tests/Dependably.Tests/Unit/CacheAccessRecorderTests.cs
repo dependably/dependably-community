@@ -32,7 +32,8 @@ public sealed class CacheAccessRecorderTests : IAsyncLifetime
         return new CacheAccessRecorder(
             cache,
             access,
-            logger ?? NullLoggerFactory.Instance.CreateLogger<CacheAccessRecorder>());
+            logger ?? NullLoggerFactory.Instance.CreateLogger<CacheAccessRecorder>(),
+            TimeProvider.System);
     }
 
     private CacheAccess SampleAccess(string? orgId = null) => new(

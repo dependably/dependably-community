@@ -51,7 +51,7 @@ public class DeploymentBoundTenantResolverTests : IAsyncLifetime
         {
             await conn.ExecuteAsync(
                 "UPDATE orgs SET deleted_at = @ts WHERE slug = 'acme'",
-                new { ts = DateTimeOffset.UtcNow });
+                new { ts = TestTime.KnownNow });
         }
         var r = new DeploymentBoundTenantResolver(_db, Config("acme"));
         var t = await r.ResolveAsync(new DefaultHttpContext());

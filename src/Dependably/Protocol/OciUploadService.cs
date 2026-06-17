@@ -24,29 +24,59 @@ namespace Dependably.Protocol;
 /// for S3/Azure backends, so chunked sessions assume a single serving node — acceptable for
 /// the single-instance deployment; a multi-replica deployment would need sticky sessions or
 /// shared staging.
+///
+/// Resource-safety on the push path:
+///   - Disk floor: <see cref="StartUploadAsync"/> and <see cref="AppendChunkAsync"/> both
+///     call <see cref="IStagingDiskInfo.GetAvailableBytes"/> before touching the staging file.
+///     Below the operator-configured floor they throw <see cref="StagingDiskFullException"/>,
+///     which <c>StagingDiskFullExceptionMiddleware</c> maps to HTTP 507.
+///   - Per-tenant cap: <see cref="StartUploadAsync"/> counts open sessions for the org and
+///     rejects the request with <see cref="OciSessionCapExceededException"/> when at or over
+///     the limit (instance setting <c>max_concurrent_oci_uploads_per_tenant</c>).
+///   - TTL janitor: <see cref="OciStagingJanitorService"/> sweeps abandoned sessions and
+///     orphaned staging temp files on a configurable cron schedule.
 /// </summary>
 public sealed class OciUploadService
 {
+    // SQLite SQLITE_CONSTRAINT error code (unique constraint violation on insert).
+    private const int SqliteConstraintErrorCode = 19;
+
     private readonly IMetadataStore _db;
     private readonly TieredBlobStorage _blobs;
     private readonly PackageRepository _packages;
+    private readonly OrgRepository _orgs;
+    private readonly IStagingDiskInfo _stagingDiskInfo;
+    private readonly long _stagingDiskFloorBytes;
     private readonly string _stagingPath;
     private readonly ILogger<OciUploadService> _logger;
 
-    public OciUploadService(
-        IMetadataStore db,
-        TieredBlobStorage blobs,
-        IConfiguration configuration,
-        ILogger<OciUploadService> logger)
+    /// <summary>
+    /// Injected dependencies for <see cref="OciUploadService"/>. Bundles the eight DI services
+    /// so the constructor stays within the parameter-count gate (S107).
+    /// </summary>
+    public sealed record Dependencies(
+        IMetadataStore Db,
+        TieredBlobStorage Blobs,
+        OrgRepository Orgs,
+        IStagingDiskInfo StagingDiskInfo,
+        StagingOptions StagingOptions,
+        IConfiguration Configuration,
+        ILogger<OciUploadService> Logger,
+        TimeProvider Time);
+
+    public OciUploadService(Dependencies deps)
     {
-        _db = db;
-        _blobs = blobs;
+        _db = deps.Db;
+        _blobs = deps.Blobs;
+        _orgs = deps.Orgs;
+        _stagingDiskInfo = deps.StagingDiskInfo;
+        _stagingDiskFloorBytes = deps.StagingOptions.FloorBytes;
         // PackageRepository is a stateless Dapper wrapper over the same IMetadataStore, built
         // here (not injected) so this Singleton doesn't capture a Scoped repository.
-        _packages = new PackageRepository(db);
-        _logger = logger;
+        _packages = new PackageRepository(deps.Db, time: deps.Time);
+        _logger = deps.Logger;
 
-        string? configured = configuration["PROXY_STAGING_PATH"];
+        string? configured = deps.Configuration["PROXY_STAGING_PATH"];
         _stagingPath = string.IsNullOrWhiteSpace(configured) ? Path.GetTempPath() : configured;
         // deepcode ignore PT: PROXY_STAGING_PATH is set by the operator deploying the container.
         try
@@ -63,9 +93,27 @@ public sealed class OciUploadService
 
     // ── Upload sessions ─────────────────────────────────────────────────────────
 
-    /// <summary>Opens a new upload session and returns it (received bytes = 0).</summary>
+    /// <summary>
+    /// Opens a new upload session and returns it (received bytes = 0).
+    /// Enforces:
+    ///   1. Disk floor — throws <see cref="StagingDiskFullException"/> when free space is
+    ///      below the operator-configured floor.
+    ///   2. Per-tenant session cap — throws <see cref="OciSessionCapExceededException"/>
+    ///      when the tenant already has <c>max_concurrent_oci_uploads_per_tenant</c> open
+    ///      sessions. The count and insert happen in separate statements so a small window
+    ///      exists for concurrent races; a tight cap (default 32) bounds the blast radius.
+    /// </summary>
     public async Task<OciUploadSession> StartUploadAsync(string orgId, string repository, CancellationToken ct)
     {
+        EnsureStagingDiskFloor();
+
+        int cap = await _orgs.GetMaxConcurrentOciUploadsPerTenantAsync(ct);
+        long active = await _orgs.GetActiveOciUploadCountAsync(orgId, ct);
+        if (active >= cap)
+        {
+            throw new OciSessionCapExceededException(orgId, (int)active, cap);
+        }
+
         string uploadId = Guid.NewGuid().ToString("N");
         string stagingFile = StagingFileFor(uploadId);
         // Create-and-close the (empty) staging file so PATCH-less monolithic PUTs and chunked
@@ -97,11 +145,14 @@ public sealed class OciUploadService
 
     /// <summary>
     /// Appends a chunk to an open session and returns the new running byte total. The staging
-    /// file's length is the source of truth for the total.
+    /// file's length is the source of truth for the total. Enforces the disk floor before each
+    /// write — throws <see cref="StagingDiskFullException"/> when free space is critically low.
     /// </summary>
     public async Task<long> AppendChunkAsync(
         string orgId, OciUploadSession session, Stream chunk, CancellationToken ct)
     {
+        EnsureStagingDiskFloor();
+
         // deepcode ignore PT: StagingPath is the server-generated "oci-upload-{GUID}" path round-tripped through the DB; not user-controlled.
         await using (var fs = new FileStream(session.StagingPath, FileMode.Append, FileAccess.Write))
         {
@@ -119,9 +170,44 @@ public sealed class OciUploadService
     }
 
     /// <summary>
+    /// Checks the staging disk floor. Throws <see cref="StagingDiskFullException"/> when free
+    /// space is below the floor; also throws (failing closed) when the disk-read itself fails.
+    /// A configured floor of 0 disables the check entirely (operator opt-out).
+    /// </summary>
+    private void EnsureStagingDiskFloor()
+    {
+        if (_stagingDiskFloorBytes <= 0)
+        {
+            return;
+        }
+
+        try
+        {
+            long available = _stagingDiskInfo.GetAvailableBytes();
+            if (available < _stagingDiskFloorBytes)
+            {
+                throw new StagingDiskFullException(available, _stagingDiskFloorBytes);
+            }
+        }
+        catch (StagingDiskFullException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not read staging disk space before OCI upload operation: {ExceptionType}",
+                ex.GetType().Name);
+            throw new StagingDiskFullException(0, _stagingDiskFloorBytes); // fail closed
+        }
+    }
+
+    /// <summary>
     /// Finalizes a blob upload: verifies the staged bytes hash to <paramref name="digest"/>,
-    /// copies them into the Registry tier, and records the <c>oci_blobs</c> row. Deletes the
-    /// session (and staging file) on every terminal outcome.
+    /// checks the tenant's aggregate storage quota, copies bytes into the Registry tier, and
+    /// records the <c>oci_blobs</c> row. Deletes the session (and staging file) on every
+    /// terminal outcome. Returns <see cref="OciFinalizeStatus.QuotaExceeded"/> when the blob
+    /// would push the tenant over its storage ceiling; the caller returns 413.
     /// </summary>
     public async Task<OciBlobFinalizeResult> FinalizeBlobAsync(
         string orgId, OciUploadSession session, string digest, CancellationToken ct)
@@ -146,23 +232,63 @@ public sealed class OciUploadService
             return OciBlobFinalizeResult.DigestMismatch;
         }
 
-        string blobKey = BlobKeys.OciBlob("sha256", computedHex);
-        long sizeBytes;
-        if (!await _blobs.Registry.ExistsAsync(blobKey, ct))
-        {
-            // deepcode ignore PT: StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
-            await using var src = new FileStream(session.StagingPath, FileMode.Open, FileAccess.Read);
-            await _blobs.Registry.PutAsync(blobKey, src, ct);
-        }
         // deepcode ignore PT: StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
-        sizeBytes = new FileInfo(session.StagingPath).Length;
+        long sizeBytes = new FileInfo(session.StagingPath).Length;
+        string blobKey = BlobKeys.OciBlob("sha256", computedHex);
 
-        await UpsertBlobRowAsync(orgId, $"sha256:{computedHex}", "application/octet-stream", sizeBytes, blobKey, ct);
-        await CleanupSessionAsync(orgId, session, ct);
+        // Quota reservation: blobs that already exist in the Registry tier do not consume
+        // additional tenant quota (content-addressed storage — same bytes already counted).
+        // Only reserve for new blobs to avoid double-counting when two tenants push identical
+        // layers. Reserve before any write so the counter stays accurate on failure.
+        bool newBlob = !await _blobs.Registry.ExistsAsync(blobKey, ct);
+        long? quota = newBlob ? await _orgs.GetEffectiveStorageQuotaAsync(orgId, ct) : null;
+        bool reserved = false;
+        if (newBlob && quota is not null)
+        {
+            if (!await _orgs.TryReserveStorageAsync(orgId, sizeBytes, quota, ct))
+            {
+                await CleanupSessionAsync(orgId, session, ct);
+                return OciBlobFinalizeResult.QuotaExceeded;
+            }
+            reserved = true;
+        }
 
-        _logger.LogInformation(
-            "OCI blob push {Repository}/sha256:{Digest} ({Bytes} B)", session.Repository, computedHex, sizeBytes);
-        return OciBlobFinalizeResult.Ok($"sha256:{computedHex}", sizeBytes);
+        try
+        {
+            if (newBlob)
+            {
+                // deepcode ignore PT: StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
+                await using var src = new FileStream(session.StagingPath, FileMode.Open, FileAccess.Read);
+                await _blobs.Registry.PutAsync(blobKey, src, ct);
+            }
+
+            await UpsertBlobRowAsync(orgId, $"sha256:{computedHex}", "application/octet-stream", sizeBytes, blobKey, ct);
+            await CleanupSessionAsync(orgId, session, ct);
+
+            _logger.LogInformation(
+                "OCI blob push {Repository}/sha256:{Digest} ({Bytes} B)", session.Repository, computedHex, sizeBytes);
+            return OciBlobFinalizeResult.Ok($"sha256:{computedHex}", sizeBytes);
+        }
+        catch
+        {
+            // Release the reservation so the quota counter stays accurate when the blob put
+            // or metadata upsert fails. Fire-and-forget: a release failure leaves the counter
+            // high (conservative — more likely to 413 on retry), which is safer than low.
+            if (reserved)
+            {
+                try { await _orgs.ReleaseStorageAsync(orgId, sizeBytes, CancellationToken.None); }
+                catch (Exception releaseEx)
+                {
+                    _logger.LogError(releaseEx,
+                        "Quota counter release failed for org {OrgId} after OCI blob finalize failure; " +
+                        "counter may be high until next publish. BlobKey={BlobKey} TraceId={TraceId}",
+                        orgId, blobKey,
+                        System.Diagnostics.Activity.Current?.TraceId.ToString());
+                }
+            }
+            await CleanupSessionAsync(orgId, session, CancellationToken.None);
+            throw;
+        }
     }
 
     /// <summary>Deletes a session's DB row and staging file. Safe to call more than once.</summary>
@@ -182,10 +308,13 @@ public sealed class OciUploadService
     }
 
     /// <summary>
-    /// Stores a pushed manifest: validates JSON + referenced-blob existence, persists the
-    /// manifest as its own blob, and (when <paramref name="reference"/> is a tag) repoints the
-    /// tag and catalogues the image. OCI tags are mutable by spec, so a tag re-push always
-    /// succeeds and repoints — there is no immutable-version conflict as with npm/NuGet.
+    /// Stores a pushed manifest: validates JSON + referenced-blob existence, checks the
+    /// tenant's aggregate storage quota, persists the manifest as its own blob, and (when
+    /// <paramref name="reference"/> is a tag) repoints the tag and catalogues the image. OCI
+    /// tags are mutable by spec, so a tag re-push always succeeds and repoints — there is no
+    /// immutable-version conflict as with npm/NuGet. Returns
+    /// <see cref="OciManifestStatus.QuotaExceeded"/> when the manifest would push the tenant
+    /// over its storage ceiling; the caller returns 413.
     /// </summary>
     public async Task<OciManifestStoreResult> StoreManifestAsync(
         string orgId, string repository, string reference, byte[] bytes, string mediaType, CancellationToken ct)
@@ -208,28 +337,79 @@ public sealed class OciUploadService
         string digest = $"sha256:{hex}";
         string blobKey = BlobKeys.OciBlob("sha256", hex);
 
-        if (!await _blobs.Registry.ExistsAsync(blobKey, ct))
+        return await ReserveAndPutManifestAsync(
+            new OciManifestPutArgs(orgId, repository, reference, bytes, mediaType, hex, digest, blobKey), ct);
+    }
+
+    // Resolved manifest coordinates passed to the write tail, bundled to keep the method
+    // signature within the parameter-count threshold (S107).
+    private sealed record OciManifestPutArgs(
+        string OrgId, string Repository, string Reference, byte[] Bytes,
+        string MediaType, string Hex, string Digest, string BlobKey);
+
+    // Handles quota reservation, blob put, metadata upsert, tag upsert, and catalog version
+    // for a manifest push. Returns QuotaExceeded when the org is over its storage ceiling.
+    private async Task<OciManifestStoreResult> ReserveAndPutManifestAsync(
+        OciManifestPutArgs a, CancellationToken ct)
+    {
+        // Quota reservation: manifest blobs that already exist in the Registry tier do not
+        // consume additional tenant quota (same content-addressed logic as layer blobs).
+        bool newBlob = !await _blobs.Registry.ExistsAsync(a.BlobKey, ct);
+        long? quota = newBlob ? await _orgs.GetEffectiveStorageQuotaAsync(a.OrgId, ct) : null;
+        bool reserved = false;
+        if (newBlob && quota is not null)
         {
-            await _blobs.Registry.PutAsync(blobKey, new MemoryStream(bytes), ct);
+            if (!await _orgs.TryReserveStorageAsync(a.OrgId, a.Bytes.LongLength, quota, ct))
+            {
+                return OciManifestStoreResult.QuotaExceeded;
+            }
+            reserved = true;
         }
 
-        await UpsertBlobRowAsync(orgId, digest, mediaType, bytes.Length, blobKey, ct, updateMediaType: true);
-
-        // Repoint the tag and surface the image in the shared catalogue (only tag pushes are
-        // catalogued — by-digest manifest pushes, e.g. an index's children, are not the
-        // user-facing unit). Mirrors the proxy path's cataloguing with origin='uploaded'.
-        bool isTag = !OciCoordinatesParser.IsValidDigest(reference) && OciCoordinatesParser.IsValidTag(reference);
-        if (isTag)
+        try
         {
-            await UpsertTagAsync(orgId, repository, reference, digest, ct);
-            await RecordCatalogVersionAsync(
-                new OciCatalogEntry(orgId, repository, reference, digest, hex, bytes.Length, blobKey), ct);
-        }
+            if (newBlob)
+            {
+                await _blobs.Registry.PutAsync(a.BlobKey, new MemoryStream(a.Bytes), ct);
+            }
 
-        _logger.LogInformation(
-            "OCI manifest push {Repository}/{Reference} → {Digest} ({Bytes} B)",
-            repository, reference, digest, bytes.Length);
-        return OciManifestStoreResult.Ok(digest);
+            await UpsertBlobRowAsync(a.OrgId, a.Digest, a.MediaType, a.Bytes.Length, a.BlobKey, ct, updateMediaType: true);
+
+            // Repoint the tag and surface the image in the shared catalogue (only tag pushes are
+            // catalogued — by-digest manifest pushes, e.g. an index's children, are not the
+            // user-facing unit). Mirrors the proxy path's cataloguing with origin='uploaded'.
+            bool isTag = !OciCoordinatesParser.IsValidDigest(a.Reference) && OciCoordinatesParser.IsValidTag(a.Reference);
+            if (isTag)
+            {
+                await UpsertTagAsync(a.OrgId, a.Repository, a.Reference, a.Digest, ct);
+                await RecordCatalogVersionAsync(
+                    new OciCatalogEntry(a.OrgId, a.Repository, a.Reference, a.Digest, a.Hex, a.Bytes.Length, a.BlobKey), ct);
+            }
+
+            _logger.LogInformation(
+                "OCI manifest push {Repository}/{Reference} → {Digest} ({Bytes} B)",
+                a.Repository, a.Reference, a.Digest, a.Bytes.Length);
+            return OciManifestStoreResult.Ok(a.Digest);
+        }
+        catch
+        {
+            // Release the reservation so the quota counter stays accurate when the blob put
+            // or metadata upsert fails. Fire-and-forget: a release failure leaves the counter
+            // high (conservative), which is safer than low.
+            if (reserved)
+            {
+                try { await _orgs.ReleaseStorageAsync(a.OrgId, a.Bytes.LongLength, CancellationToken.None); }
+                catch (Exception releaseEx)
+                {
+                    _logger.LogError(releaseEx,
+                        "Quota counter release failed for org {OrgId} after OCI manifest store failure; " +
+                        "counter may be high until next publish. BlobKey={BlobKey} TraceId={TraceId}",
+                        a.OrgId, a.BlobKey,
+                        System.Diagnostics.Activity.Current?.TraceId.ToString());
+                }
+            }
+            throw;
+        }
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -301,7 +481,7 @@ public sealed class OciUploadService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            if (ex is not Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: 19 })
+            if (ex is not Microsoft.Data.Sqlite.SqliteException { SqliteErrorCode: SqliteConstraintErrorCode })
             {
                 _logger.LogWarning(
                     "{ExceptionType} cataloguing pushed OCI version {Repository}@{Digest}; push unaffected. BlobKey={BlobKey} TraceId={TraceId}",
@@ -343,17 +523,41 @@ public sealed record OciBlobFinalizeResult(OciFinalizeStatus Status, string? Dig
 {
     public static readonly OciBlobFinalizeResult BadDigest = new(OciFinalizeStatus.BadDigest);
     public static readonly OciBlobFinalizeResult DigestMismatch = new(OciFinalizeStatus.DigestMismatch);
+    public static readonly OciBlobFinalizeResult QuotaExceeded = new(OciFinalizeStatus.QuotaExceeded);
     public static OciBlobFinalizeResult Ok(string digest, long size) => new(OciFinalizeStatus.Ok, digest, size);
 }
 
-public enum OciFinalizeStatus { Ok, BadDigest, DigestMismatch }
+public enum OciFinalizeStatus { Ok, BadDigest, DigestMismatch, QuotaExceeded }
 
 /// <summary>Outcome of a manifest push.</summary>
 public sealed record OciManifestStoreResult(OciManifestStatus Status, string? Digest = null, string? MissingDigest = null)
 {
     public static readonly OciManifestStoreResult Invalid = new(OciManifestStatus.Invalid);
+    public static readonly OciManifestStoreResult QuotaExceeded = new(OciManifestStatus.QuotaExceeded);
     public static OciManifestStoreResult MissingBlob(string digest) => new(OciManifestStatus.MissingBlob, MissingDigest: digest);
     public static OciManifestStoreResult Ok(string digest) => new(OciManifestStatus.Ok, Digest: digest);
 }
 
-public enum OciManifestStatus { Ok, Invalid, MissingBlob }
+public enum OciManifestStatus { Ok, Invalid, MissingBlob, QuotaExceeded }
+
+/// <summary>
+/// Thrown by <see cref="OciUploadService.StartUploadAsync"/> when a tenant already has
+/// the maximum number of concurrent upload sessions open. Caught by the OCI controller
+/// and translated to HTTP 429 with an OCI <c>DENIED</c> error body.
+/// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
+    Justification = "Binary serialization ctor on Exception is obsolete in .NET 10 (SYSLIB0051); this exception is never serialized across an AppDomain or binary boundary.")]
+public sealed class OciSessionCapExceededException : Exception
+{
+    public string OrgId { get; }
+    public int ActiveCount { get; }
+    public int Cap { get; }
+
+    public OciSessionCapExceededException(string orgId, int active, int cap)
+        : base($"Tenant {orgId} has {active} open OCI upload sessions; cap is {cap}.")
+    {
+        OrgId = orgId;
+        ActiveCount = active;
+        Cap = cap;
+    }
+}

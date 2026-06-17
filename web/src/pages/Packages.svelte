@@ -121,19 +121,34 @@
     let:row={pkg}
   >
     <tr class="cursor-pointer" on:click={() => openPackage(pkg)}>
-      <td class="name-cell" title={pkg.name}><strong>{pkg.name}</strong></td>
+      <td class="name-cell" title={pkg.name}>
+        <strong>{pkg.name}</strong>
+        {#if pkg.hasMaliciousVersion}
+          <span class="badge malicious ml-1" title={$t('packages.malicious.help')}>
+            <svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>
+            {$t('packages.malicious.label')}
+          </span>
+        {/if}
+      </td>
       <td class="nowrap"><span class="badge {pkg.ecosystem}">{ECO_LABEL[pkg.ecosystem] ?? pkg.ecosystem}</span></td>
       <td class="mono purl-cell" title={fullPurl(pkg)}>{fullPurl(pkg)}</td>
       <td class="nowrap text-right text-muted">{pkg.versionCount ?? 0}</td>
       <td class="nowrap text-right text-muted">{(pkg.totalDownloads ?? 0).toLocaleString()}</td>
-      <td class="nowrap text-center latest-cell" title={pkg.upstreamLatestVersion ?? ''}>
-        {#if pkg.latestState === 'current'}
-          <svg class="latest-yes" width="14" height="14" role="img" aria-label={$t('packages.latest.current')}><use href="/icons.svg#icon-check"/></svg>
-        {:else if pkg.latestState === 'stale'}
-          <svg class="latest-no" width="14" height="14" role="img" aria-label={$t('packages.latest.stale')}><use href="/icons.svg#icon-x"/></svg>
-        {:else}
-          <span class="text-muted" aria-label={$t('packages.latest.unknown')}>—</span>
-        {/if}
+      <td class="nowrap text-center latest-cell">
+        <!-- Instant hover bubble (no native `title` delay) reveals the upstream latest
+             version number; mirrors InfoTip.svelte's bubble. -->
+        <span class="latest-tip-wrap">
+          {#if pkg.latestState === 'current'}
+            <svg class="latest-yes" width="14" height="14" role="img" aria-label={$t('packages.latest.current')}><use href="/icons.svg#icon-check"/></svg>
+          {:else if pkg.latestState === 'stale'}
+            <svg class="latest-no" width="14" height="14" role="img" aria-label={$t('packages.latest.stale')}><use href="/icons.svg#icon-x"/></svg>
+          {:else}
+            <span class="text-muted" aria-label={$t('packages.latest.unknown')}>—</span>
+          {/if}
+          {#if pkg.upstreamLatestVersion}
+            <span class="latest-tip-bubble" role="tooltip">{$t('packages.latest.versionLabel', { values: { version: pkg.upstreamLatestVersion } })}</span>
+          {/if}
+        </span>
       </td>
       <td class="vuln-cell">
         {#if (pkg.criticalCount ?? 0) > 0}<span class="sev sev-critical" aria-label="{pkg.criticalCount} critical">{pkg.criticalCount}</span>{/if}
@@ -163,9 +178,47 @@
   }
   .nowrap { white-space: nowrap; }
   .vuln-cell { white-space: nowrap; }
-  .latest-cell { font-weight: 600; }
+  /* The global `td { overflow: hidden }` (cell ellipsis) would clip the absolutely
+     positioned hover bubble, which pops up out of the cell, down to a thin sliver.
+     This cell holds only a small icon, so it never needs ellipsis clipping. */
+  .latest-cell { font-weight: 600; overflow: visible; }
   .latest-yes { color: var(--success); }
   .latest-no { color: var(--danger); }
+
+  /* Instant hover tooltip for the upstream latest version — mirrors InfoTip.svelte's
+     bubble so there's no native `title` reveal delay. */
+  .latest-tip-wrap {
+    position: relative;
+    display: inline-flex;
+    vertical-align: middle;
+  }
+  .latest-tip-bubble {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    width: max-content;
+    max-width: 240px;
+    padding: 6px 9px;
+    border-radius: var(--radius);
+    background: var(--bg2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.4;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .latest-tip-wrap:hover .latest-tip-bubble,
+  .latest-tip-wrap:focus-within .latest-tip-bubble {
+    opacity: 1;
+    visibility: visible;
+  }
   .name-cell { overflow-wrap: anywhere; }
   .purl-cell { font-size: 12px; color: var(--text2); overflow-wrap: anywhere; }
   .eco-select { width: auto; }

@@ -12,7 +12,7 @@ public sealed class BlocklistRepositoryTests : IClassFixture<InMemoryDbFixture>
 
     public BlocklistRepositoryTests(InMemoryDbFixture fixture) => _fixture = fixture;
 
-    private BlocklistRepository NewRepo() => new(_fixture.Store, new MemoryCache(new MemoryCacheOptions()));
+    private BlocklistRepository NewRepo() => new(_fixture.Store, new MemoryCache(new MemoryCacheOptions()), TimeProvider.System);
 
     [Fact]
     public async Task ListAsync_FiltersByOrg_OrderedByPattern()

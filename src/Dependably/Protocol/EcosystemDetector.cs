@@ -74,28 +74,31 @@ public static class EcosystemDetector
             e.FullName.EndsWith(".dist-info/METADATA", StringComparison.OrdinalIgnoreCase));
         if (hasDistInfo)
         {
-            var wheel = PyPiArtifactValidator.ValidateWheel(bytes, out string? name, out string? version);
-            if (!wheel.IsValid)
+            var wheel = PyPiArtifactValidator.ValidateWheel(bytes);
+            if (!wheel.Validation.IsValid)
             {
-                return Fail("artifact_invalid", wheel.Message ?? "Invalid PyPI wheel.");
+                return Fail("artifact_invalid", wheel.Validation.Message ?? "Invalid PyPI wheel.");
             }
             // Outer-label override: PEP 427 wheel filenames carry the version in segment 2
             // of `{dist}-{version}-{python}-{abi}-{platform}.whl`. Use it when present so
             // a renamed/relabelled wheel can land under its outer label.
+            string? version = wheel.Version;
             if (OuterVersionLabel.TryFromWheelFilename(filename, out string? labelled))
             {
                 version = labelled;
             }
 
-            return Ok("pypi", name!, name!, version!);
+            return Ok("pypi", wheel.Name!, wheel.Name!, version!);
         }
 
         bool hasEggInfo = zip.Entries.Any(e =>
             e.FullName.EndsWith("EGG-INFO/PKG-INFO", StringComparison.OrdinalIgnoreCase));
         if (hasEggInfo)
         {
-            var egg = PyPiArtifactValidator.ValidateEgg(bytes, out string? name, out string? version);
-            return !egg.IsValid ? Fail("artifact_invalid", egg.Message ?? "Invalid PyPI egg.") : Ok("pypi", name!, name!, version!);
+            var egg = PyPiArtifactValidator.ValidateEgg(bytes);
+            return !egg.Validation.IsValid
+                ? Fail("artifact_invalid", egg.Validation.Message ?? "Invalid PyPI egg.")
+                : Ok("pypi", egg.Name!, egg.Name!, egg.Version!);
         }
 
         return Fail("unrecognised_format",
@@ -109,13 +112,17 @@ public static class EcosystemDetector
         {
             case TarMarker.NpmPackageJson:
                 {
-                    var npm = NpmTarballValidator.Validate(bytes, out string? name, out string? version);
-                    return !npm.IsValid ? Fail("tarball_invalid", npm.Message ?? "Invalid npm tarball.") : Ok("npm", name!, name!, version!);
+                    var npm = NpmTarballValidator.Validate(bytes);
+                    return !npm.Validation.IsValid
+                        ? Fail("tarball_invalid", npm.Validation.Message ?? "Invalid npm tarball.")
+                        : Ok("npm", npm.Name!, npm.Name!, npm.Version!);
                 }
             case TarMarker.PyPiSdist:
                 {
-                    var sdist = PyPiArtifactValidator.ValidateSdist(bytes, out string? name, out string? version);
-                    return !sdist.IsValid ? Fail("artifact_invalid", sdist.Message ?? "Invalid PyPI sdist.") : Ok("pypi", name!, name!, version!);
+                    var sdist = PyPiArtifactValidator.ValidateSdist(bytes);
+                    return !sdist.Validation.IsValid
+                        ? Fail("artifact_invalid", sdist.Validation.Message ?? "Invalid PyPI sdist.")
+                        : Ok("pypi", sdist.Name!, sdist.Name!, sdist.Version!);
                 }
             default:
                 return Fail("unrecognised_format",

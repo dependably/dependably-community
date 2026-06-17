@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Xml.Linq;
 using Dependably.Storage;
+using Dependably.Tests.Infrastructure;
 
 namespace Dependably.Tests.Unit;
 
@@ -33,7 +34,7 @@ public sealed class RpmRepodataServiceTests
         byte[] payload = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
         string expectedSha = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
 
-        string xml = RpmRepodataService.BuildRepomd(payload);
+        string xml = RpmRepodataService.BuildRepomd(payload, TestTime.KnownNow);
         var doc = XDocument.Parse(xml);
 
         Assert.Equal(Repo + "repomd", doc.Root!.Name);
@@ -53,25 +54,24 @@ public sealed class RpmRepodataServiceTests
     }
 
     [Fact]
-    public void BuildRepomd_RevisionAndTimestampArePopulatedFromUtcNow()
+    public void BuildRepomd_RevisionAndTimestampArePopulatedFromProvidedInstant()
     {
-        long before = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        string xml = RpmRepodataService.BuildRepomd(new byte[] { 0xAA });
-        long after = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        long expected = TestTime.KnownNow.ToUnixTimeSeconds();
+        string xml = RpmRepodataService.BuildRepomd(new byte[] { 0xAA }, TestTime.KnownNow);
         var doc = XDocument.Parse(xml);
 
         long revision = long.Parse(doc.Root!.Attribute("revision")!.Value);
-        Assert.InRange(revision, before, after);
+        Assert.Equal(expected, revision);
 
         long ts = long.Parse(doc.Root.Element(Repo + "data")!
             .Element(Repo + "timestamp")!.Value);
-        Assert.InRange(ts, before, after);
+        Assert.Equal(expected, ts);
     }
 
     [Fact]
     public void BuildRepomd_EmptyInput_StillProducesValidIndex()
     {
-        string xml = RpmRepodataService.BuildRepomd(Array.Empty<byte>());
+        string xml = RpmRepodataService.BuildRepomd(Array.Empty<byte>(), TestTime.KnownNow);
         var doc = XDocument.Parse(xml);
 
         // sha256 of empty is e3b0c442... — verify it lands in the document.
@@ -86,7 +86,7 @@ public sealed class RpmRepodataServiceTests
     [Fact]
     public void BuildRepomd_DeclaresXmlDeclarationAndRepoNamespace()
     {
-        string xml = RpmRepodataService.BuildRepomd(new byte[] { 0x01 });
+        string xml = RpmRepodataService.BuildRepomd(new byte[] { 0x01 }, TestTime.KnownNow);
         // Document starts with an XML declaration. (StringWriter forces utf-16 in the
         // declaration regardless of the XDeclaration set in code — that's a .NET-runtime
         // quirk of XDocument.Save(TextWriter); the controller serves UTF-8 bytes via
@@ -104,7 +104,7 @@ public sealed class RpmRepodataServiceTests
         // some other count (e.g. string length, chars).
         byte[] payload = new byte[10_000];
         new Random(42).NextBytes(payload);
-        string xml = RpmRepodataService.BuildRepomd(payload);
+        string xml = RpmRepodataService.BuildRepomd(payload, TestTime.KnownNow);
         var doc = XDocument.Parse(xml);
         Assert.Equal("10000", doc.Root!.Element(Repo + "data")!
             .Element(Repo + "size")!.Value);
@@ -180,7 +180,7 @@ public sealed class RpmRepodataServiceTests
         byte[] primary = System.Text.Encoding.UTF8.GetBytes(
             "<metadata xmlns=\"http://linux.duke.edu/metadata/common\" packages=\"0\"/>");
         byte[] gz = RpmRepodataService.Gzip(primary);
-        string xml = RpmRepodataService.BuildRepomd(gz);
+        string xml = RpmRepodataService.BuildRepomd(gz, TestTime.KnownNow);
         var doc = XDocument.Parse(xml);
 
         var data = doc.Root!.Element(Repo + "data")!;

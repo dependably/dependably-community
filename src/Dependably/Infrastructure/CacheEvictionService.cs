@@ -24,12 +24,14 @@ public sealed class CacheEvictionService : BackgroundService
     private readonly IBlobStore _blobs;   // TieredBlobStorage.Cache — only ever deletes from the cache tier
     private readonly IConfiguration _config;
     private readonly ILogger<CacheEvictionService> _logger;
+    private readonly TimeProvider _time;
 
     public CacheEvictionService(
         CacheArtifactRepository cache,
         TieredBlobStorage blobs,
         IConfiguration config,
-        ILogger<CacheEvictionService> logger)
+        ILogger<CacheEvictionService> logger,
+        TimeProvider time)
     {
         _cache = cache;
         // Eviction is cache-only. In split-tier deployments the registry tier is durable
@@ -38,6 +40,7 @@ public sealed class CacheEvictionService : BackgroundService
         _blobs = blobs.Cache;
         _config = config;
         _logger = logger;
+        _time = time;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -48,13 +51,13 @@ public sealed class CacheEvictionService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var next = schedule.GetNextOccurrence(DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
+            var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
             if (next is null)
             {
                 break;
             }
 
-            var delay = next.Value - DateTimeOffset.UtcNow;
+            var delay = next.Value - _time.GetUtcNow();
             if (delay > TimeSpan.Zero)
             {
                 try { await Task.Delay(delay, stoppingToken); }
@@ -67,7 +70,7 @@ public sealed class CacheEvictionService : BackgroundService
             }
 
             using var scope = Dependably.Infrastructure.Observability.BackgroundJobScope.Begin(
-                "cache-eviction", "cache.evict");
+                "cache-eviction", "cache.evict", _time);
             try
             {
                 await RunOnceAsync(stoppingToken);
@@ -128,7 +131,7 @@ public sealed class CacheEvictionService : BackgroundService
     private async Task<(long evicted, long bytesFreed)> EvictByAgeAsync(
         int days, long evicted, long bytesFreed, CancellationToken ct)
     {
-        var threshold = DateTimeOffset.UtcNow.AddDays(-days);
+        var threshold = _time.GetUtcNow().AddDays(-days);
         while (!ct.IsCancellationRequested)
         {
             var rows = await _cache.ListLruCandidatesAsync(threshold, Batch, ct);
@@ -164,7 +167,7 @@ public sealed class CacheEvictionService : BackgroundService
                 break;
             }
 
-            var rows = await _cache.ListLruCandidatesAsync(DateTimeOffset.UtcNow, Batch, ct);
+            var rows = await _cache.ListLruCandidatesAsync(_time.GetUtcNow(), Batch, ct);
             if (rows.Count == 0)
             {
                 break;

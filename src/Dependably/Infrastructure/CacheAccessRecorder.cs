@@ -18,15 +18,18 @@ public sealed class CacheAccessRecorder
     private readonly CacheArtifactRepository _cache;
     private readonly TenantArtifactAccessRepository _access;
     private readonly ILogger<CacheAccessRecorder> _logger;
+    private readonly TimeProvider _time;
 
     public CacheAccessRecorder(
         CacheArtifactRepository cache,
         TenantArtifactAccessRepository access,
-        ILogger<CacheAccessRecorder> logger)
+        ILogger<CacheAccessRecorder> logger,
+        TimeProvider time)
     {
         _cache = cache;
         _access = access;
         _logger = logger;
+        _time = time;
     }
 
     /// <summary>
@@ -45,7 +48,7 @@ public sealed class CacheAccessRecorder
         {
             var existing = await _cache.GetByCoordinateAsync(ecosystem, name, version, filename, ct);
             string artifactId;
-            var now = DateTimeOffset.UtcNow;
+            var now = _time.GetUtcNow();
             if (existing is null)
             {
                 var inserted = await _cache.InsertAsync(new CacheArtifact

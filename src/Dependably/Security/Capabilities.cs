@@ -38,6 +38,7 @@ public static class Capabilities
     public const string PublishMaven = "publish:maven";
     public const string PublishRpm = "publish:rpm";
     public const string PublishOci = "publish:oci";
+    public const string PublishCargo = "publish:cargo";
     public const string PublishAll = "publish:*";
 
     // ── Import (per-ecosystem and wildcard) ─────────────────────────────────────
@@ -60,6 +61,7 @@ public static class Capabilities
     public const string YankMaven = "yank:maven";
     public const string YankRpm = "yank:rpm";
     public const string YankOci = "yank:oci";
+    public const string YankCargo = "yank:cargo";
     public const string YankAll = "yank:*";
 
     // ── Manage ─────────────────────────────────────────────────────────────────
@@ -174,9 +176,9 @@ public static class Capabilities
     public static readonly IReadOnlySet<string> Requestable = new HashSet<string>(StringComparer.Ordinal)
     {
         ReadMetadata, ReadArtifact, ReadPackages, ReadClaims, ReadAudit, ReadTenant,
-        PublishNpm, PublishPypi, PublishNuget, PublishMaven, PublishRpm, PublishOci, PublishAll,
+        PublishNpm, PublishPypi, PublishNuget, PublishMaven, PublishRpm, PublishOci, PublishCargo, PublishAll,
         ImportNpm, ImportPypi, ImportNuget, ImportMaven, ImportRpm, ImportOci, ImportAll,
-        YankNpm, YankPypi, YankNuget, YankMaven, YankRpm, YankOci, YankAll,
+        YankNpm, YankPypi, YankNuget, YankMaven, YankRpm, YankOci, YankCargo, YankAll,
         PullOci,
         ClaimManage, TenantConfigure, TenantAdmin, ManageOwnTokens,
     };

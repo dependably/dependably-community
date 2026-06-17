@@ -50,14 +50,16 @@ public sealed class QuotaReservationTests : IAsyncLifetime
             new Dependably.Infrastructure.Audit.AuditEventRepository(_db),
             new Microsoft.AspNetCore.Http.HttpContextAccessor(),
             NullLogger<Dependably.Infrastructure.Audit.AuditEmitter>.Instance, cfg,
-            new ServiceCollection().BuildServiceProvider());
+            new ServiceCollection().BuildServiceProvider(), TimeProvider.System);
         var tiered = new TieredBlobStorage(_blobs, _blobs);
         var storage = new GlobalTenantStorageResolver(_db, tiered);
         var osv = new NullOsvSource();
-        var scanner = new VulnerabilityScanService(_db, osv,
-            new VulnerabilityRepository(_db), audit, cfg,
+        var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
+            _db, osv,
+            new VulnerabilityRepository(_db, TimeProvider.System), audit, cfg,
             new NoAirGap(),
-            NullLogger<VulnerabilityScanService>.Instance);
+            NullLogger<VulnerabilityScanService>.Instance,
+            TimeProvider.System));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
             auditor, scanner, NullLogger<PackagePublishService>.Instance);
@@ -264,14 +266,16 @@ public sealed class QuotaReservationTests : IAsyncLifetime
             new Dependably.Infrastructure.Audit.AuditEventRepository(_db),
             new Microsoft.AspNetCore.Http.HttpContextAccessor(),
             NullLogger<Dependably.Infrastructure.Audit.AuditEmitter>.Instance, cfg,
-            new ServiceCollection().BuildServiceProvider());
+            new ServiceCollection().BuildServiceProvider(), TimeProvider.System);
         var tiered = new TieredBlobStorage(_blobs, registry);
         var storage = new GlobalTenantStorageResolver(_db, tiered);
         var osv = new NullOsvSource();
-        var scanner = new VulnerabilityScanService(_db, osv,
-            new VulnerabilityRepository(_db), audit, cfg,
+        var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
+            _db, osv,
+            new VulnerabilityRepository(_db, TimeProvider.System), audit, cfg,
             new NoAirGap(),
-            NullLogger<VulnerabilityScanService>.Instance);
+            NullLogger<VulnerabilityScanService>.Instance,
+            TimeProvider.System));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
             auditor, scanner, NullLogger<PackagePublishService>.Instance);

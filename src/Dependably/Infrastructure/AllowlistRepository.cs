@@ -5,8 +5,13 @@ namespace Dependably.Infrastructure;
 public sealed class AllowlistRepository
 {
     private readonly IMetadataStore _db;
+    private readonly TimeProvider _time;
 
-    public AllowlistRepository(IMetadataStore db) => _db = db;
+    public AllowlistRepository(IMetadataStore db, TimeProvider time)
+    {
+        _db = db;
+        _time = time;
+    }
 
     public async Task<IReadOnlyList<AllowlistEntry>> ListAsync(string orgId, CancellationToken ct = default)
     {
@@ -33,7 +38,7 @@ public sealed class AllowlistRepository
             ON CONFLICT DO NOTHING
             """,
             new { id, orgId, purlPattern });
-        return new AllowlistEntry { Id = id, OrgId = orgId, PurlPattern = purlPattern, CreatedAt = DateTimeOffset.UtcNow };
+        return new AllowlistEntry { Id = id, OrgId = orgId, PurlPattern = purlPattern, CreatedAt = _time.GetUtcNow() };
     }
 
     /// <summary>

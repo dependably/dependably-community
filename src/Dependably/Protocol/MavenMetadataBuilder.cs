@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Xml.Linq;
 
 namespace Dependably.Protocol;
@@ -29,8 +30,16 @@ public static class MavenMetadataBuilder
     /// Builds the artifact-level metadata XML for <paramref name="versions"/> (in publish
     /// order — last is the latest). Returns a UTF-8 XML string that <c>mvn</c>/<c>gradle</c>
     /// parse directly.
+    ///
+    /// <paramref name="lastUpdated"/> must be derived from the stored data (newest local
+    /// publish time), never from the wall clock: the output must be byte-identical for the
+    /// same version set so the content-derived ETag is stable across requests and the
+    /// generated <c>.sha1</c>/<c>.md5</c> sidecars match the document a client just
+    /// downloaded. <c>null</c> (no local provenance, e.g. upstream-only merges) omits the
+    /// element — Maven clients treat it as optional.
     /// </summary>
-    public static string Build(string groupId, string artifactId, IReadOnlyList<string> versions)
+    public static string Build(
+        string groupId, string artifactId, IReadOnlyList<string> versions, DateTimeOffset? lastUpdated)
     {
         var doc = new XDocument(
             new XDeclaration("1.0", "UTF-8", null),
@@ -42,7 +51,10 @@ public static class MavenMetadataBuilder
                     LatestElement(versions, releaseOnly: true),
                     new XElement("versions",
                         versions.Select(v => new XElement("version", v))),
-                    new XElement("lastUpdated", DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmss")))));
+                    lastUpdated is null
+                        ? null
+                        : new XElement("lastUpdated",
+                            lastUpdated.Value.UtcDateTime.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)))));
 
         using var sw = new StringWriter();
         doc.Save(sw, SaveOptions.None);

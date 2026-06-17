@@ -266,24 +266,24 @@ public sealed class GzipDecompressionBoundTests
             ArchiveDecompressLimits.MaxDecompressedBytes + 1,
             "mybomb-1.0.0/PKG-INFO");
 
-        var result = PyPiArtifactValidator.ValidateSdist(bomb, out string? name, out string? version);
+        var parsed = PyPiArtifactValidator.ValidateSdist(bomb);
 
-        Assert.False(result.IsValid);
-        Assert.Equal("content", result.FieldName);
-        Assert.Null(name);
-        Assert.Null(version);
-        Assert.NotNull(result.Message);
+        Assert.False(parsed.Validation.IsValid);
+        Assert.Equal("content", parsed.Validation.FieldName);
+        Assert.Null(parsed.Name);
+        Assert.Null(parsed.Version);
+        Assert.NotNull(parsed.Validation.Message);
     }
 
     [Fact]
     public void ValidateSdist_LegitimateInput_Succeeds()
     {
         var (bytes, _) = PyPiFixtures.BuildSdist("my-package", "1.0.0");
-        var result = PyPiArtifactValidator.ValidateSdist(bytes, out string? name, out string? version);
+        var parsed = PyPiArtifactValidator.ValidateSdist(bytes);
 
-        Assert.True(result.IsValid);
-        Assert.Equal("my-package", name);
-        Assert.Equal("1.0.0", version);
+        Assert.True(parsed.Validation.IsValid);
+        Assert.Equal("my-package", parsed.Name);
+        Assert.Equal("1.0.0", parsed.Version);
     }
 
     // ── PyPI / npm: LicenseExtractor ──────────────────────────────────────────

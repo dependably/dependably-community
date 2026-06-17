@@ -29,6 +29,12 @@ namespace Dependably.Protocol;
 /// </summary>
 public static class ManifestParser
 {
+    // Minimum npm package-lock.json lockfileVersion that uses the "packages" map format.
+    private const int NpmLockfileV2MinVersion = 2;
+
+    // Character length of the "==" pip version pin prefix.
+    private const int PipPinPrefixLength = 2;
+
     public enum ManifestType { Unknown, NpmPackageLock, PipRequirements, NuGetPackagesLock, PipfileLock, PoetryLock }
 
     /// <summary>
@@ -125,7 +131,7 @@ public static class ManifestParser
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        if (LockfileVersion(root) >= 2
+        if (LockfileVersion(root) >= NpmLockfileV2MinVersion
             && root.TryGetProperty("packages", out var packages)
             && packages.ValueKind == JsonValueKind.Object)
         {
@@ -365,7 +371,7 @@ public static class ManifestParser
             return null;
         }
 
-        version = version[2..].Trim();
+        version = version[PipPinPrefixLength..].Trim();
         if (version.Length == 0)
         {
             return null;

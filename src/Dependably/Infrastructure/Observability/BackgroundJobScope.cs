@@ -47,8 +47,14 @@ public sealed class BackgroundJobScope : IDisposable
     public string JobRunId { get; }
     public string Operation { get; }
 
-    private BackgroundJobScope(string jobName, string operation)
+    private readonly TimeProvider _time;
+
+    private BackgroundJobScope(string jobName, string operation, TimeProvider time)
     {
+        // The clock is a Begin parameter, not a Services-hook lookup: the static hook can
+        // point at a host that a concurrent test already disposed, and resolving from it
+        // here would throw. Every owning service already injects its own TimeProvider.
+        _time = time;
         JobName = jobName;
         JobRunId = Guid.NewGuid().ToString("N");
         Operation = operation;
@@ -64,12 +70,12 @@ public sealed class BackgroundJobScope : IDisposable
         _activity?.SetTag("dependably.operation", operation);
         _activity?.SetTag("dependably.job_run_id", JobRunId);
 
-        _startedAt = DateTimeOffset.UtcNow;
+        _startedAt = _time.GetUtcNow();
         _stopwatch = Stopwatch.StartNew();
     }
 
-    public static BackgroundJobScope Begin(string jobName, string operation)
-        => new(jobName, operation);
+    public static BackgroundJobScope Begin(string jobName, string operation, TimeProvider time)
+        => new(jobName, operation, time);
 
     public void Complete(string outcome = "success")
     {
@@ -78,7 +84,7 @@ public sealed class BackgroundJobScope : IDisposable
         _activity?.SetStatus(ActivityStatusCode.Ok);
         if (outcome == "success")
         {
-            DependablyMeter.RecordBackgroundJobSuccess(JobName);
+            DependablyMeter.RecordBackgroundJobSuccess(JobName, _time.GetUtcNow().ToUnixTimeSeconds());
         }
     }
 
@@ -97,7 +103,7 @@ public sealed class BackgroundJobScope : IDisposable
     public void Dispose()
     {
         _stopwatch.Stop();
-        var finishedAt = DateTimeOffset.UtcNow;
+        var finishedAt = _time.GetUtcNow();
         long durationMs = _stopwatch.ElapsedMilliseconds;
 
         DependablyMeter.BackgroundJobDuration.Record(

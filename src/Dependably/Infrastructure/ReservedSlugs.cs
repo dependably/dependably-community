@@ -9,6 +9,9 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public static class ReservedSlugs
 {
+    // Maximum DNS label length per RFC 1035 §2.3.4.
+    private const int MaxDnsLabelLength = 63;
+
     /// <summary>
     /// Built-in reserved slugs. Operators may extend via <c>RESERVED_SUBDOMAINS</c> env var
     /// (comma-separated) — the env list is appended to this set, never replacing it.
@@ -53,7 +56,7 @@ public static class ReservedSlugs
 
     private static bool IsValidSlugShape(string s)
     {
-        if (s.Length is 0 or > 63)
+        if (s.Length is 0 or > MaxDnsLabelLength)
         {
             return false;
         }

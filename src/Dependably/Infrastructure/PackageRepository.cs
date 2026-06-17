@@ -6,11 +6,13 @@ public sealed class PackageRepository
 {
     private readonly IMetadataStore _db;
     private readonly DownloadCountWriter? _downloadCountWriter;
+    private readonly TimeProvider _time;
 
-    public PackageRepository(IMetadataStore db, DownloadCountWriter? downloadCountWriter = null)
+    public PackageRepository(IMetadataStore db, DownloadCountWriter? downloadCountWriter = null, TimeProvider? time = null)
     {
         _db = db;
         _downloadCountWriter = downloadCountWriter;
+        _time = time ?? TimeProvider.System;
     }
 
     /// <summary>
@@ -45,10 +47,19 @@ public sealed class PackageRepository
         await using var conn = await _db.OpenAsync(ct);
         return await conn.QuerySingleOrDefaultAsync<Package>(
             """
-            SELECT id, org_id as OrgId, ecosystem, name, purl_name as PurlName,
-                   is_proxy as IsProxy, created_at as CreatedAt
-            FROM packages
-            WHERE org_id = @orgId AND ecosystem = @ecosystem AND purl_name = @purlName
+            SELECT p.id, p.org_id as OrgId, p.ecosystem, p.name, p.purl_name as PurlName,
+                   p.is_proxy as IsProxy, p.created_at as CreatedAt,
+                   p.upstream_latest_version as UpstreamLatestVersion,
+                   CASE
+                     WHEN p.upstream_latest_version IS NULL THEN 'unknown'
+                     WHEN EXISTS (SELECT 1 FROM package_versions pvl
+                                  WHERE pvl.package_id = p.id
+                                    AND pvl.version = p.upstream_latest_version
+                                    AND pvl.origin = 'proxy') THEN 'current'
+                     ELSE 'stale'
+                   END as LatestState
+            FROM packages p
+            WHERE p.org_id = @orgId AND p.ecosystem = @ecosystem AND p.purl_name = @purlName
             """,
             new { orgId, ecosystem, purlName });
     }
@@ -93,7 +104,12 @@ public sealed class PackageRepository
         string orgId, string ecosystem, string filename, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var (PkgId, PkgOrgId, PkgEcosystem, PkgName, PkgPurlName, PkgIsProxy, PkgCreatedAt, VerId, VerPackageId, VerVersion, VerPurl, VerBlobKey, VerSizeBytes, VerChecksumSha256, VerYanked, VerYankReason, VerFirstFetch, VerCreatedAt, VerVulnCheckedAt, VerManualBlockState, VerDeprecated, VerOrigin, VerPublishedAt, VerChecksumSha1, VerUpstreamIntegrityValue, VerUpstreamIntegrityAlgorithm) = await conn.QuerySingleOrDefaultAsync<(
+        var (PkgId, PkgOrgId, PkgEcosystem, PkgName, PkgPurlName, PkgIsProxy, PkgCreatedAt,
+            VerId, VerPackageId, VerVersion, VerPurl, VerBlobKey, VerSizeBytes, VerChecksumSha256,
+            VerYanked, VerYankReason, VerFirstFetch, VerCreatedAt, VerVulnCheckedAt,
+            VerManualBlockState, VerDeprecated, VerOrigin, VerPublishedAt, VerChecksumSha1,
+            VerUpstreamIntegrityValue, VerUpstreamIntegrityAlgorithm) =
+            await conn.QuerySingleOrDefaultAsync<(
             string PkgId, string PkgOrgId, string PkgEcosystem, string PkgName, string PkgPurlName, bool PkgIsProxy, string PkgCreatedAt,
             string VerId, string VerPackageId, string VerVersion, string VerPurl, string VerBlobKey,
             long VerSizeBytes, string? VerChecksumSha256, bool VerYanked, string? VerYankReason,
@@ -159,16 +175,27 @@ public sealed class PackageRepository
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: keyed by package_id which the caller obtained via an org-scoped lookup.
         // package_versions FKs into packages(id), so org isolation rides on the parent.
+        // is_malicious / has_advisory are derived from the version's advisory links: a MAL-
+        // osv_id marks a known-malicious version; any link marks it as carrying advisories.
         var rows = await conn.QueryAsync<PackageVersion>(
             """
-            SELECT id, package_id as PackageId, version, purl, blob_key as BlobKey,
-                   size_bytes as SizeBytes, checksum_sha256 as ChecksumSha256,
-                   yanked, yank_reason as YankReason, first_fetch as FirstFetch, download_count as DownloadCount, created_at as CreatedAt,
-                   vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState,
-                   deprecated as Deprecated, origin as Origin, published_at as PublishedAt, checksum_sha1 as ChecksumSha1, upstream_integrity_value as UpstreamIntegrityValue, upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
-            FROM package_versions
-            WHERE package_id = @packageId
-            ORDER BY created_at DESC
+            SELECT pv.id, pv.package_id as PackageId, pv.version, pv.purl, pv.blob_key as BlobKey,
+                   pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
+                   pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.download_count as DownloadCount, pv.created_at as CreatedAt,
+                   pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
+                   pv.deprecated as Deprecated, pv.origin as Origin, pv.published_at as PublishedAt,
+                   pv.checksum_sha1 as ChecksumSha1,
+                   pv.upstream_integrity_value as UpstreamIntegrityValue,
+                   pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm,
+                   EXISTS (SELECT 1 FROM package_version_vulns pvv
+                           JOIN vulnerabilities v ON v.id = pvv.vuln_id
+                           WHERE pvv.package_version_id = pv.id
+                             AND v.osv_id LIKE 'MAL-%') as IsMalicious,
+                   EXISTS (SELECT 1 FROM package_version_vulns pvv
+                           WHERE pvv.package_version_id = pv.id) as HasAdvisory
+            FROM package_versions pv
+            WHERE pv.package_id = @packageId
+            ORDER BY pv.created_at DESC
             """,
             new { packageId });
         return rows.ToList();
@@ -184,7 +211,10 @@ public sealed class PackageRepository
                    size_bytes as SizeBytes, checksum_sha256 as ChecksumSha256,
                    yanked, yank_reason as YankReason, first_fetch as FirstFetch, download_count as DownloadCount, created_at as CreatedAt,
                    vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState,
-                   deprecated as Deprecated, origin as Origin, published_at as PublishedAt, checksum_sha1 as ChecksumSha1, upstream_integrity_value as UpstreamIntegrityValue, upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
+                   deprecated as Deprecated, origin as Origin, published_at as PublishedAt,
+                   checksum_sha1 as ChecksumSha1,
+                   upstream_integrity_value as UpstreamIntegrityValue,
+                   upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
             FROM package_versions
             WHERE package_id = @packageId AND version = @version
             """,
@@ -206,7 +236,10 @@ public sealed class PackageRepository
                    pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
                    pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.download_count as DownloadCount, pv.created_at as CreatedAt,
                    pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
-                   pv.deprecated as Deprecated, pv.origin as Origin, pv.published_at as PublishedAt, pv.checksum_sha1 as ChecksumSha1, pv.upstream_integrity_value as UpstreamIntegrityValue, pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
+                   pv.deprecated as Deprecated, pv.origin as Origin, pv.published_at as PublishedAt,
+                   pv.checksum_sha1 as ChecksumSha1,
+                   pv.upstream_integrity_value as UpstreamIntegrityValue,
+                   pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE pv.blob_key = @blobKey AND p.org_id = @orgId
@@ -225,8 +258,14 @@ public sealed class PackageRepository
         // xtenant: INSERT pinned to a caller-supplied package_id (org-scoped via FK).
         await conn.ExecuteAsync(
             """
-            INSERT INTO package_versions (id, package_id, version, purl, blob_key, filename, size_bytes, checksum_sha256, first_fetch, origin, published_at, checksum_sha1, upstream_integrity_value, upstream_integrity_algorithm)
-            VALUES (@id, @packageId, @version, @purl, @blobKey, @filename, @sizeBytes, @checksumSha256, @firstFetch, @origin, @publishedAt, @checksumSha1, @upstreamIntegrityValue, @upstreamIntegrityAlgorithm)
+            INSERT INTO package_versions
+                (id, package_id, version, purl, blob_key, filename, size_bytes,
+                 checksum_sha256, first_fetch, origin, published_at,
+                 checksum_sha1, upstream_integrity_value, upstream_integrity_algorithm)
+            VALUES
+                (@id, @packageId, @version, @purl, @blobKey, @filename, @sizeBytes,
+                 @checksumSha256, @firstFetch, @origin, @publishedAt,
+                 @checksumSha1, @upstreamIntegrityValue, @upstreamIntegrityAlgorithm)
             """,
             new
             {
@@ -246,14 +285,26 @@ public sealed class PackageRepository
                 upstreamIntegrityAlgorithm = data.UpstreamIntegrityAlgorithm,
             });
 
+        // xtenant: keyed by version id (globally unique UUID, already org-scoped via FK)
         return (await conn.QuerySingleOrDefaultAsync<PackageVersion>(
-            "SELECT id, package_id as PackageId, version, purl, blob_key as BlobKey, size_bytes as SizeBytes, checksum_sha256 as ChecksumSha256, yanked, yank_reason as YankReason, first_fetch as FirstFetch, download_count as DownloadCount, created_at as CreatedAt, vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState, deprecated as Deprecated, origin as Origin, published_at as PublishedAt, checksum_sha1 as ChecksumSha1, upstream_integrity_value as UpstreamIntegrityValue, upstream_integrity_algorithm as UpstreamIntegrityAlgorithm FROM package_versions WHERE id = @id",
+            """
+            SELECT id, package_id as PackageId, version, purl, blob_key as BlobKey,
+                   size_bytes as SizeBytes, checksum_sha256 as ChecksumSha256,
+                   yanked, yank_reason as YankReason, first_fetch as FirstFetch,
+                   download_count as DownloadCount, created_at as CreatedAt,
+                   vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState,
+                   deprecated as Deprecated, origin as Origin, published_at as PublishedAt,
+                   checksum_sha1 as ChecksumSha1,
+                   upstream_integrity_value as UpstreamIntegrityValue,
+                   upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
+            FROM package_versions WHERE id = @id
+            """,
             new { id }))!;
     }
 
     public async Task TouchLastUsedAsync(string versionId, CancellationToken ct = default)
     {
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE package_versions SET last_used = @now WHERE id = @id",
@@ -281,7 +332,7 @@ public sealed class PackageRepository
             return;
         }
 
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE package_versions SET download_count = download_count + 1, last_used = @now WHERE id = @id",
@@ -304,7 +355,7 @@ public sealed class PackageRepository
             return;
         }
 
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE package_versions SET download_count = download_count + 1, last_used = @now WHERE purl = @purl",
@@ -388,6 +439,11 @@ public sealed class PackageRepository
                    (SELECT COALESCE(SUM(download_count), 0) FROM package_versions
                     WHERE package_id = p.id) as TotalDownloads,
                    p.upstream_latest_version as UpstreamLatestVersion,
+                   EXISTS (SELECT 1 FROM package_versions pvm
+                           JOIN package_version_vulns pvv ON pvv.package_version_id = pvm.id
+                           JOIN vulnerabilities v ON v.id = pvv.vuln_id
+                           WHERE pvm.package_id = p.id
+                             AND v.osv_id LIKE 'MAL-%') as HasMaliciousVersion,
                    CASE
                      WHEN p.upstream_latest_version IS NULL THEN 'unknown'
                      WHEN EXISTS (SELECT 1 FROM package_versions pvl
@@ -437,7 +493,10 @@ public sealed class PackageRepository
                    pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
                    pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.download_count as DownloadCount, pv.created_at as CreatedAt,
                    pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
-                   pv.deprecated as Deprecated, pv.origin as Origin, pv.published_at as PublishedAt, pv.checksum_sha1 as ChecksumSha1, pv.upstream_integrity_value as UpstreamIntegrityValue, pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
+                   pv.deprecated as Deprecated, pv.origin as Origin, pv.published_at as PublishedAt,
+                   pv.checksum_sha1 as ChecksumSha1,
+                   pv.upstream_integrity_value as UpstreamIntegrityValue,
+                   pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE pv.id = @versionId AND p.org_id = @orgId
@@ -595,12 +654,26 @@ public sealed class PackageRepository
     }
 
     /// <summary>
+    /// Flips the <c>yanked</c> flag on a version, clearing <c>yank_reason</c> when unyanking.
+    /// Yank hides a version from dependency resolution (Cargo, npm) without deleting the
+    /// artefact — a yanked crate is still downloadable by exact coordinate. The caller resolves
+    /// the version id from an already org-scoped lookup, so no org filter is needed here.
+    /// </summary>
+    public async Task SetYankedAsync(string versionId, bool yanked, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE package_versions SET yanked = @yanked, yank_reason = NULL WHERE id = @id",
+            new { id = versionId, yanked = yanked ? 1 : 0 });
+    }
+
+    /// <summary>
     /// Stamps <c>deprecation_checked_at</c> to now without changing the <c>deprecated</c> value.
     /// Called when an upstream metadata fetch confirms the deprecation status is unchanged.
     /// </summary>
     public async Task UpdateDeprecationCheckedAtAsync(string versionId, CancellationToken ct = default)
     {
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE package_versions SET deprecation_checked_at = @now WHERE id = @id",
@@ -613,7 +686,7 @@ public sealed class PackageRepository
     /// </summary>
     public async Task UpdateDeprecatedAndCheckedAsync(string versionId, string? deprecated, CancellationToken ct = default)
     {
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE package_versions SET deprecated = @deprecated, deprecation_checked_at = @now WHERE id = @id",
@@ -629,7 +702,7 @@ public sealed class PackageRepository
     // package within a single org's refresh pass.
     public async Task UpdateUpstreamLatestAsync(string packageId, string? latestVersion, CancellationToken ct = default)
     {
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE packages SET upstream_latest_version = @latestVersion, upstream_latest_checked_at = @now WHERE id = @id",
@@ -647,7 +720,7 @@ public sealed class PackageRepository
     public async Task<IReadOnlyList<(string PackageId, string Ecosystem, string PurlName, string OrgId)>>
         ListPackagesNeedingDeprecationRefreshAsync(int ageHours, int limit, CancellationToken ct = default)
     {
-        string threshold = DateTimeOffset.UtcNow.AddHours(-ageHours).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string threshold = _time.GetUtcNow().AddHours(-ageHours).ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<(string PackageId, string Ecosystem, string PurlName, string OrgId)>(
             """
@@ -730,7 +803,7 @@ public sealed class PackageRepository
         var pkg = await GetOrCreateAsync(
             orgId, "golang", module, module, isProxy: true, ct);
 
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         string filename = DeriveFilename(blobKey);
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: INSERT pinned to package_id resolved by GetOrCreateAsync under the caller's org.

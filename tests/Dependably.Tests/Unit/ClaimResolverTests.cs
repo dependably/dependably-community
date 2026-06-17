@@ -37,7 +37,7 @@ public class ClaimResolverTests : IAsyncLifetime
             PriorState = null,
             NewState = state,
             Reason = "test",
-            OccurredAt = DateTimeOffset.UtcNow
+            OccurredAt = TestTime.KnownNow
         });
     }
 

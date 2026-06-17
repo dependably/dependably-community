@@ -159,6 +159,7 @@ public sealed class FirstBootService
             ["gc_schedule"] = _config["GC_SCHEDULE"] ?? InstanceSettingDefaults.GcSchedule,
             ["siem_max_lookback_days"] = _config["SIEM_MAX_LOOKBACK_DAYS"] ?? InstanceSettingDefaults.SiemMaxLookbackDays,
             ["max_active_tokens_per_tenant"] = _config["MAX_ACTIVE_TOKENS_PER_TENANT"] ?? InstanceSettingDefaults.MaxActiveTokensPerTenant,
+            ["max_concurrent_oci_uploads_per_tenant"] = _config["MAX_CONCURRENT_OCI_UPLOADS_PER_TENANT"] ?? InstanceSettingDefaults.MaxConcurrentOciUploadsPerTenant,
         };
 
         // Storage quota default is optional: only seed when the env var is set so

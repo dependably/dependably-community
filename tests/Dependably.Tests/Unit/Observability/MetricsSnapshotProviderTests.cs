@@ -1,4 +1,5 @@
 using Dependably.Infrastructure.Observability;
+using Dependably.Tests.Infrastructure;
 
 namespace Dependably.Tests.Unit.Observability;
 
@@ -18,13 +19,12 @@ namespace Dependably.Tests.Unit.Observability;
 public sealed class MetricsSnapshotProviderTests
 {
     [Fact]
-    public void Capture_ReturnsSnapshotWithDictionariesAndRecentTimestamp()
+    public void Capture_ReturnsSnapshotWithDictionariesAndClockTimestamp()
     {
-        var provider = new MetricsSnapshotProvider();
+        var clock = TestTime.Frozen();
+        var provider = new MetricsSnapshotProvider(clock);
 
-        var before = DateTimeOffset.UtcNow;
         var snapshot = provider.Capture();
-        var after = DateTimeOffset.UtcNow;
 
         // Shape — dictionaries are always materialized, never null. Other suites may
         // have populated them with their own keys, so we only assert the contract:
@@ -32,8 +32,8 @@ public sealed class MetricsSnapshotProviderTests
         Assert.NotNull(snapshot.BlobStoreSizesByTier);
         Assert.NotNull(snapshot.BackgroundJobLastSuccessUnixSeconds);
 
-        // CapturedAt is sampled inside Capture(); allow a tiny clock-skew window.
-        Assert.InRange(snapshot.CapturedAt, before.AddSeconds(-1), after.AddSeconds(1));
+        // CapturedAt is sampled inside Capture() from the injected clock.
+        Assert.Equal(TestTime.KnownNow, snapshot.CapturedAt);
     }
 
     [Fact]
@@ -43,7 +43,7 @@ public sealed class MetricsSnapshotProviderTests
         // wins. Snapshotting after the write must observe the new value.
         DependablyMeter.RecordTenantCount(4242);
 
-        var snapshot = new MetricsSnapshotProvider().Capture();
+        var snapshot = new MetricsSnapshotProvider(TestTime.Frozen()).Capture();
 
         Assert.Equal(4242L, snapshot.ActiveTenants);
     }
@@ -57,7 +57,7 @@ public sealed class MetricsSnapshotProviderTests
         string tier = $"unit-tier-{Guid.NewGuid():N}";
         DependablyMeter.RecordBlobStoreSize(tier, 9_876_543L);
 
-        var snapshot = new MetricsSnapshotProvider().Capture();
+        var snapshot = new MetricsSnapshotProvider(TestTime.Frozen()).Capture();
 
         Assert.True(snapshot.BlobStoreSizesByTier.TryGetValue(tier, out long bytes));
         Assert.Equal(9_876_543L, bytes);
@@ -67,14 +67,13 @@ public sealed class MetricsSnapshotProviderTests
     public void Capture_ReflectsBackgroundJobLastSuccessKeyedByJobName()
     {
         string jobName = $"unit-job-{Guid.NewGuid():N}";
-        DependablyMeter.RecordBackgroundJobSuccess(jobName);
+        // The caller supplies the epoch second, so the gauge value asserts exactly.
+        DependablyMeter.RecordBackgroundJobSuccess(jobName, 1_767_225_600L);
 
-        var snapshot = new MetricsSnapshotProvider().Capture();
+        var snapshot = new MetricsSnapshotProvider(TestTime.Frozen()).Capture();
 
         Assert.True(snapshot.BackgroundJobLastSuccessUnixSeconds.TryGetValue(jobName, out long ts));
-        // Recorded as DateTimeOffset.UtcNow.ToUnixTimeSeconds() — must be a sane
-        // recent epoch second (sometime after 2026-01-01).
-        Assert.True(ts >= 1_767_225_600L, $"Unexpected timestamp {ts}");
+        Assert.Equal(1_767_225_600L, ts);
     }
 
     [Fact]
@@ -82,14 +81,14 @@ public sealed class MetricsSnapshotProviderTests
     {
         // SnapshotCounters are process-lifetime — assert delta, not absolute,
         // so the test doesn't race other suites incrementing the same counters.
-        var baseline = new MetricsSnapshotProvider().Capture();
+        var baseline = new MetricsSnapshotProvider(TestTime.Frozen()).Capture();
 
         SnapshotCounters.IncrementPublish();
         SnapshotCounters.IncrementProxyFetch();
         SnapshotCounters.IncrementCacheHit();
         SnapshotCounters.IncrementCacheMiss();
 
-        var after = new MetricsSnapshotProvider().Capture();
+        var after = new MetricsSnapshotProvider(TestTime.Frozen()).Capture();
 
         Assert.True(after.PublishCountSinceStartup >= baseline.PublishCountSinceStartup + 1);
         Assert.True(after.ProxyFetchCountSinceStartup >= baseline.ProxyFetchCountSinceStartup + 1);
@@ -108,9 +107,9 @@ public sealed class MetricsSnapshotProviderTests
         string jobName = $"unit-stable-job-{Guid.NewGuid():N}";
 
         DependablyMeter.RecordBlobStoreSize(tier, 1L);
-        DependablyMeter.RecordBackgroundJobSuccess(jobName);
+        DependablyMeter.RecordBackgroundJobSuccess(jobName, 1_767_225_600L);
 
-        var snapshot = new MetricsSnapshotProvider().Capture();
+        var snapshot = new MetricsSnapshotProvider(TestTime.Frozen()).Capture();
 
         // Mutate the underlying state after capturing.
         DependablyMeter.RecordBlobStoreSize(tier, 2L);
@@ -126,7 +125,7 @@ public sealed class MetricsSnapshotProviderTests
         // The provider is registered as a singleton; the underlying read accessors
         // use ConcurrentDictionary / Interlocked.Read. Fan out captures across many
         // threads to prove no read throws under contention.
-        var provider = new MetricsSnapshotProvider();
+        var provider = new MetricsSnapshotProvider(TestTime.Frozen());
 
         var tasks = Enumerable.Range(0, 32).Select(_ => Task.Run(() =>
         {

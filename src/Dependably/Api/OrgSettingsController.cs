@@ -18,6 +18,9 @@ namespace Dependably.Api;
 [Authorize]
 public sealed class OrgSettingsController : OrgScopedControllerBase
 {
+    // Maximum OSV score on the 0.0–10.0 CVSS scale.
+    private const double MaxOsvScore = 10.0;
+
     private readonly OrgSettingsRepository _settings;
     private readonly OrgAccessGuard _guard;
     private readonly AuditRepository _audit;
@@ -110,6 +113,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             MaxUploadBytesMaven: req.MaxUploadBytesMaven,
             MaxUploadBytesRpm: req.MaxUploadBytesRpm,
             MaxUploadBytesOci: req.MaxUploadBytesOci,
+            MaxUploadBytesCargo: req.MaxUploadBytesCargo,
             AirGapped: req.AirGapped), ct);
 
         await _audit.LogAsync("org_settings_updated", orgId, GetUserId(),
@@ -124,6 +128,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 max_upload_bytes_maven = req.MaxUploadBytesMaven,
                 max_upload_bytes_rpm = req.MaxUploadBytesRpm,
                 max_upload_bytes_oci = req.MaxUploadBytesOci,
+                max_upload_bytes_cargo = req.MaxUploadBytesCargo,
                 default_language = req.DefaultLanguage,
                 allow_version_overwrite = req.AllowVersionOverwrite,
                 air_gapped = req.AirGapped,
@@ -224,7 +229,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         return Ok(new
         {
             proxy_passthrough_enabled = settings?.ProxyPassthroughEnabled ?? true,
-            max_osv_score_tolerance = settings?.MaxOsvScoreTolerance ?? 10.0,
+            max_osv_score_tolerance = settings?.MaxOsvScoreTolerance ?? MaxOsvScore,
             min_release_age_hours = settings?.MinReleaseAgeHours,
             block_deprecated = settings?.BlockDeprecated ?? "off",
             block_malicious = settings?.BlockMalicious ?? "block",
@@ -248,7 +253,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             return result;
         }
 
-        if (req.MaxOsvScoreTolerance is < 0.0 or > 10.0)
+        if (req.MaxOsvScoreTolerance is < 0.0 or > MaxOsvScore)
         {
             return _problems.ValidationErrorAction("max_osv_score_tolerance", "Must be between 0.0 and 10.0.");
         }

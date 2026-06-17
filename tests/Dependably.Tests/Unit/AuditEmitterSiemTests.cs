@@ -69,7 +69,8 @@ public sealed class AuditEmitterSiemTests : IAsyncLifetime
                 new HttpContextAccessor(),
                 NullLogger<AuditEmitter>.Instance,
                 EmptyConfig(),
-                services);
+                services,
+                TestTime.Frozen());
 
             await emitter.EmitAsync(
                 eventType: "package.publish",
@@ -81,6 +82,7 @@ public sealed class AuditEmitterSiemTests : IAsyncLifetime
                 ct: default);
 
             // BackgroundService delivery is async via the channel reader; poll briefly.
+            // now-ok: real-clock deadline bounding an actual async channel delivery
             var deadline = DateTime.UtcNow.AddSeconds(2);
             while (DateTime.UtcNow < deadline && forwarder.Sent.Count == 0)
             {
@@ -110,7 +112,8 @@ public sealed class AuditEmitterSiemTests : IAsyncLifetime
             new HttpContextAccessor(),
             NullLogger<AuditEmitter>.Instance,
             EmptyConfig(),
-            sp);
+            sp,
+            TestTime.Frozen());
 
         await emitter.EmitAsync(
             eventType: "package.publish",
@@ -150,7 +153,8 @@ public sealed class AuditEmitterSiemTests : IAsyncLifetime
                 new HttpContextAccessor(),
                 NullLogger<AuditEmitter>.Instance,
                 EmptyConfig(),
-                services);
+                services,
+                TestTime.Frozen());
 
             await emitter.EmitAsync(
                 eventType: "system.config_change",
@@ -161,6 +165,7 @@ public sealed class AuditEmitterSiemTests : IAsyncLifetime
                 payloadJson: "{}",
                 ct: default);
 
+            // now-ok: real-clock deadline bounding an actual async channel delivery
             var deadline = DateTime.UtcNow.AddSeconds(2);
             while (DateTime.UtcNow < deadline && forwarder.Sent.Count == 0)
             {

@@ -7,10 +7,10 @@ using Microsoft.Extensions.Configuration;
 namespace Dependably.Tests.Unit.Infrastructure;
 
 /// <summary>
-/// Exercises the per-ecosystem resolution arms for the three ecosystems
-/// (maven, rpm, oci). The existing pypi/npm/nuget arms are covered indirectly through
-/// the controllers; this file is intentionally narrow — one assertion per fallback
-/// step, run against each new ecosystem.
+/// Exercises the per-ecosystem resolution arms for the publish ecosystems added after the
+/// original pypi/npm/nuget set (maven, rpm, oci, cargo). The original three arms are covered
+/// indirectly through the controllers; this file is intentionally narrow — one assertion per
+/// fallback step, run against each ecosystem.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class UploadLimitResolverEcosystemTests : IClassFixture<InMemoryDbFixture>
@@ -42,6 +42,7 @@ public sealed class UploadLimitResolverEcosystemTests : IClassFixture<InMemoryDb
         "maven",
         "rpm",
         "oci",
+        "cargo",
     };
 
     [Theory]
@@ -56,7 +57,8 @@ public sealed class UploadLimitResolverEcosystemTests : IClassFixture<InMemoryDb
             InstanceMaxUploadBytes: null, DefaultLanguage: null,
             MaxUploadBytesMaven: ecosystem == "maven" ? 111L : null,
             MaxUploadBytesRpm: ecosystem == "rpm" ? 111L : null,
-            MaxUploadBytesOci: ecosystem == "oci" ? 111L : null));
+            MaxUploadBytesOci: ecosystem == "oci" ? 111L : null,
+            MaxUploadBytesCargo: ecosystem == "cargo" ? 111L : null));
 
         long? limit = await Resolver(instanceDefault: 9_999_999L).ResolveAsync(orgId, ecosystem);
         Assert.Equal(111L, limit);

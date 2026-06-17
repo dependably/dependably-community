@@ -29,8 +29,8 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         var blobs = blobOverride ?? _blobs;
         var packages = new PackageRepository(_db);
         var audit = new AuditRepository(_db);
-        var licenses = new LicenseRepository(_db);
-        var vulns = new VulnerabilityRepository(_db);
+        var licenses = new LicenseRepository(_db, TimeProvider.System);
+        var vulns = new VulnerabilityRepository(_db, TimeProvider.System);
         var cfg = new ConfigurationBuilder().Build();
         // Default OSV stub: returns no advisories so the block gate has nothing to act on.
         // Tests that need a vulnerable version pass their own stub via osvOverride.
@@ -52,16 +52,18 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         airGap.IsEnabled.Returns(false);
         airGap.DisabledJobs.Returns(new System.Collections.Generic.HashSet<string>());
         airGap.IsJobDisabled(Arg.Any<string>()).Returns(false);
-        var scanner = new VulnerabilityScanService(_db, osv, vulns, audit, cfg,
+        var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
+            _db, osv, vulns, audit, cfg,
             airGap,
-            NullLogger<VulnerabilityScanService>.Instance);
+            NullLogger<VulnerabilityScanService>.Instance,
+            TimeProvider.System));
         var proxyVersions = new ProxyVersionRecorder(packages, audit, licenses);
-        var blockGate = new BlockGateService(vulns, audit, new QuarantineRepository(_db), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance);
+        var blockGate = new BlockGateService(vulns, audit, new QuarantineRepository(_db, TimeProvider.System), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, TimeProvider.System);
         var cacheArtifact = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var cacheRecorder = new CacheAccessRecorder(cacheArtifact, tenantAccess,
-            NullLogger<CacheAccessRecorder>.Instance);
-        return new ProxyFetchService(cacheRecorder, proxyVersions, scanner, blockGate, packages, audit);
+            NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
+        return new ProxyFetchService(cacheRecorder, proxyVersions, scanner, blockGate, packages, audit, TimeProvider.System);
     }
 
     private static async Task<BlobHandle> SeedBlobAsync(InMemoryBlobStore blobs, byte[] bytes)

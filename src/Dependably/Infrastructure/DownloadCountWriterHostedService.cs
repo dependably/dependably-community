@@ -23,9 +23,13 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
     public const int MaxBatch = 200;
     public static readonly TimeSpan MaxFlushInterval = TimeSpan.FromMilliseconds(100);
 
+    // Polling interval used by WaitForIdleAsync when waiting for the writer to drain.
+    private const int IdleCheckIntervalMs = 5;
+
     private readonly DownloadCountWriter _writer;
     private readonly IMetadataStore _db;
     private readonly ILogger<DownloadCountWriterHostedService> _logger;
+    private readonly TimeProvider _time;
     private long _flushed;
 
     /// <summary>
@@ -37,11 +41,13 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
     public DownloadCountWriterHostedService(
         DownloadCountWriter writer,
         IMetadataStore db,
-        ILogger<DownloadCountWriterHostedService> logger)
+        ILogger<DownloadCountWriterHostedService> logger,
+        TimeProvider time)
     {
         _writer = writer;
         _db = db;
         _logger = logger;
+        _time = time;
     }
 
     /// <summary>
@@ -234,7 +240,7 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
             }
         }
 
-        string now = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
 
         await using var conn = await _db.OpenAsync(ct);
         // Wrap all UPDATEs in a single transaction so the writer holds the WAL writer
@@ -287,7 +293,7 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
                 return;
             }
 
-            await Task.Delay(5, ct);
+            await Task.Delay(IdleCheckIntervalMs, ct);
         }
         throw new TimeoutException(
             $"DownloadCountWriter did not become idle within {timeout.TotalMilliseconds} ms " +

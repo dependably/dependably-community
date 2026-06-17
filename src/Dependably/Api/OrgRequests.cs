@@ -1,5 +1,6 @@
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit;
+using Dependably.Infrastructure.Caching;
 using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.Extensions.Caching.Memory;
@@ -22,6 +23,7 @@ public sealed record UpdateOrgSettingsRequest(
     long? MaxUploadBytesMaven = null,
     long? MaxUploadBytesRpm = null,
     long? MaxUploadBytesOci = null,
+    long? MaxUploadBytesCargo = null,
     string? DefaultLanguage = null,
     bool? AllowVersionOverwrite = null,
     bool? AirGapped = null);
@@ -91,4 +93,6 @@ public sealed record OrgControllerServices(
     VulnerabilityRepository Vulns,
     IPublicUrlBuilder Urls,
     IAuditEmitter AuditEmitter,
-    IMemoryCache Cache);
+    IMemoryCache Cache,
+    MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> RpmMergedCache,
+    RenderedResponseCache<RpmLocalRepodataKey> RpmLocalCache);

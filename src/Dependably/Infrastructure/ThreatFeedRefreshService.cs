@@ -20,19 +20,22 @@ public sealed class ThreatFeedRefreshService : BackgroundService
     private readonly IConfiguration _config;
     private readonly IAirGapMode _airGap;
     private readonly ILogger<ThreatFeedRefreshService> _logger;
+    private readonly TimeProvider _time;
 
     public ThreatFeedRefreshService(
         VulnerabilityRepository vulns,
         IThreatFeedSource source,
         IConfiguration config,
         IAirGapMode airGap,
-        ILogger<ThreatFeedRefreshService> logger)
+        ILogger<ThreatFeedRefreshService> logger,
+        TimeProvider time)
     {
         _vulns = vulns;
         _source = source;
         _config = config;
         _airGap = airGap;
         _logger = logger;
+        _time = time;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -47,7 +50,7 @@ public sealed class ThreatFeedRefreshService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var next = schedule.GetNextOccurrence(DateTimeOffset.UtcNow, TimeZoneInfo.Utc);
+            var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
             if (next is null)
             {
                 break;
@@ -60,7 +63,7 @@ public sealed class ThreatFeedRefreshService : BackgroundService
                 ? TimeSpan.FromSeconds(Random.Shared.Next(0, jitterMaxSeconds + 1))
                 : TimeSpan.Zero;
 #pragma warning restore SCS0005
-            var delay = (next.Value - DateTimeOffset.UtcNow) + jitter;
+            var delay = (next.Value - _time.GetUtcNow()) + jitter;
             if (delay > TimeSpan.Zero)
             {
                 try { await Task.Delay(delay, stoppingToken); }
@@ -78,7 +81,7 @@ public sealed class ThreatFeedRefreshService : BackgroundService
 
     internal async Task RunRefreshPassAsync(CancellationToken ct)
     {
-        using var scope = Observability.BackgroundJobScope.Begin("threat-feed", "threatfeed.refresh");
+        using var scope = Observability.BackgroundJobScope.Begin("threat-feed", "threatfeed.refresh", _time);
         try
         {
             await RunRefreshPassInnerAsync(ct);

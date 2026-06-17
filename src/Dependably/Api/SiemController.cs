@@ -20,24 +20,38 @@ namespace Dependably.Api;
 [AllowAnonymous] // Auth is checked manually to support both JWT and siem:read tokens
 public sealed class SiemController : ControllerBase
 {
+    // CEF (Common Event Format) severity values per the ArcSight specification (0=Unknown, 1-3=Low,
+    // 4-6=Medium, 7-8=High, 9-10=Very-High). Each auth event maps to the most appropriate level.
+    private const int CefSeverityHigh = 7;
+    private const int CefSeverityMediumHigh = 6;
+    private const int CefSeverityMedium = 5;
+    private const int CefSeverityMediumLow = 4;
+    private const int CefSeverityLow = 3;
+
+    // Maximum page size for SIEM event stream responses.
+    private const int MaxSiemPageSize = 500;
+
     private readonly AuditRepository _audit;
     private readonly VulnerabilityRepository _vulns;
     private readonly OrgRepository _orgs;
     private readonly TokenRepository _tokens;
     private readonly IConfiguration _config;
+    private readonly TimeProvider _time;
 
     public SiemController(
         AuditRepository audit,
         VulnerabilityRepository vulns,
         OrgRepository orgs,
         TokenRepository tokens,
-        IConfiguration config)
+        IConfiguration config,
+        TimeProvider time)
     {
         _audit = audit;
         _vulns = vulns;
         _orgs = orgs;
         _tokens = tokens;
         _config = config;
+        _time = time;
     }
 
     /// <summary>
@@ -86,14 +100,14 @@ public sealed class SiemController : ControllerBase
         }
 
         var (items, nextCursor) = await _audit.ListAuthEventsAsync(
-            Since, Until, orgId, action, Math.Clamp(limit, 1, 500), cursor, ct);
+            Since, Until, orgId, action, Math.Clamp(limit, 1, MaxSiemPageSize), cursor, ct);
 
         return RenderAuthEventsResponse(items, nextCursor);
     }
 
     private (DateTimeOffset Since, DateTimeOffset Until, IActionResult? Error) ParseAuthEventDateRange(string? since, string? until)
     {
-        var now = DateTimeOffset.UtcNow;
+        var now = _time.GetUtcNow();
         int maxLookbackDays = _config.GetValue<int>("SIEM_MAX_LOOKBACK_DAYS", 90);
 
         if (!TryParseIso(since, now.AddDays(-1), out var sinceDto))
@@ -372,11 +386,11 @@ public sealed class SiemController : ControllerBase
 
     private static int CefSeverity(string action) => action switch
     {
-        "lockout.triggered" => 7,
-        "login.failure" => 5,
-        "login.success" => 3,
-        "token.revoked" => 4,
-        "rbac.role_changed" => 6,
-        _ => 3,
+        "lockout.triggered" => CefSeverityHigh,
+        "login.failure" => CefSeverityMedium,
+        "login.success" => CefSeverityLow,
+        "token.revoked" => CefSeverityMediumLow,
+        "rbac.role_changed" => CefSeverityMediumHigh,
+        _ => CefSeverityLow,
     };
 }

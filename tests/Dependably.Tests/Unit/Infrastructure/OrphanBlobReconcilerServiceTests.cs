@@ -4,6 +4,7 @@ using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -13,6 +14,7 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
     private readonly TestMetadataStore _db = new();
     private readonly InMemoryBlobStore _registry = new();
     private readonly InMemoryBlobStore _cache = new();
+    private readonly FakeTimeProvider _clock = TestTime.Frozen();
     private OrphanBlobReconcilerService _sut = null!;
 
     public async Task InitializeAsync()
@@ -33,7 +35,8 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
             .Build();
         var tiered = new TieredBlobStorage(_cache, _registry);
         _sut = new OrphanBlobReconcilerService(tiered, new PackageRepository(_db), cfg,
-            NullLogger<OrphanBlobReconcilerService>.Instance);
+            NullLogger<OrphanBlobReconcilerService>.Instance,
+            _clock);
     }
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
@@ -54,7 +57,7 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
     {
         // The whole point: a hosted blob with a matching package_versions row must survive
         // the sweep regardless of how old it is.
-        var ancient = DateTimeOffset.UtcNow.AddDays(-365);
+        var ancient = _clock.GetUtcNow().AddDays(-365);
         await SeedReferencedAsync("1.0.0",
             BlobKeys.Hosted("o1", "npm", "acme", "1.0.0", "acme-1.0.0.tgz"),
             new byte[] { 1, 2, 3 }, ancient);
@@ -72,7 +75,7 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
         // must be reaped on the next pass.
         string orphanKey = BlobKeys.Hosted("o1", "npm", "ghost", "1.0.0", "ghost-1.0.0.tgz");
         _registry.SeedWithLastModified(orphanKey, new byte[] { 9, 9, 9 },
-            DateTimeOffset.UtcNow.AddMinutes(-10));
+            _clock.GetUtcNow().AddMinutes(-10));
 
         var summary = await _sut.RunOnceAsync();
 
@@ -89,7 +92,7 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
         // unreferenced.
         string freshOrphanKey = BlobKeys.Hosted("o1", "npm", "wip", "1.0.0", "wip-1.0.0.tgz");
         _registry.SeedWithLastModified(freshOrphanKey, new byte[] { 7, 7, 7 },
-            DateTimeOffset.UtcNow);  // brand new — well inside the 1-minute grace
+            _clock.GetUtcNow());  // brand new — well inside the 1-minute grace
 
         var summary = await _sut.RunOnceAsync();
 
@@ -103,7 +106,7 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
         // Cache eviction is a separate service; this reconciler must never touch
         // proxy/ keys even when they're unreferenced. The "hosted/" prefix gate enforces it.
         _cache.SeedWithLastModified("proxy/deadbeef", new byte[] { 1 },
-            DateTimeOffset.UtcNow.AddDays(-365));
+            _clock.GetUtcNow().AddDays(-365));
 
         var summary = await _sut.RunOnceAsync();
 
@@ -117,15 +120,15 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
         // End-to-end: one of each kind in the same pass.
         string refKey = BlobKeys.Hosted("o1", "npm", "keep", "1.0.0", "keep-1.0.0.tgz");
         await SeedReferencedAsync("1.0.0", refKey, new byte[] { 1, 2 },
-            DateTimeOffset.UtcNow.AddDays(-1));
+            _clock.GetUtcNow().AddDays(-1));
 
         string oldOrphan = BlobKeys.Hosted("o1", "npm", "old", "1.0.0", "old-1.0.0.tgz");
         _registry.SeedWithLastModified(oldOrphan, new byte[] { 3, 4, 5 },
-            DateTimeOffset.UtcNow.AddMinutes(-10));
+            _clock.GetUtcNow().AddMinutes(-10));
 
         string freshOrphan = BlobKeys.Hosted("o1", "npm", "fresh", "1.0.0", "fresh-1.0.0.tgz");
         _registry.SeedWithLastModified(freshOrphan, new byte[] { 6 },
-            DateTimeOffset.UtcNow);
+            _clock.GetUtcNow());
 
         var summary = await _sut.RunOnceAsync();
 
@@ -144,7 +147,7 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
         // specific key's DeleteAsync.
         string poisonKey = BlobKeys.Hosted("o1", "npm", "poison", "1.0.0", "poison-1.0.0.tgz");
         string goodKey = BlobKeys.Hosted("o1", "npm", "good", "1.0.0", "good-1.0.0.tgz");
-        var oldTime = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var oldTime = _clock.GetUtcNow().AddMinutes(-10);
         _registry.SeedWithLastModified(poisonKey, new byte[] { 1 }, oldTime);
         _registry.SeedWithLastModified(goodKey, new byte[] { 2 }, oldTime);
 
@@ -155,7 +158,8 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
             { ["ORPHAN_RECONCILE_GRACE_MINUTES"] = "1" })
             .Build();
         var sut = new OrphanBlobReconcilerService(tiered, new PackageRepository(_db), cfg,
-            NullLogger<OrphanBlobReconcilerService>.Instance);
+            NullLogger<OrphanBlobReconcilerService>.Instance,
+            _clock);
 
         var summary = await sut.RunOnceAsync();
 

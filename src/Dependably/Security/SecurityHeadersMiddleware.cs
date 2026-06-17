@@ -74,10 +74,14 @@ public sealed class SecurityHeadersMiddleware
         await _next(ctx);
     }
 
+    // Registry routes are always root-level — tenancy is host/subdomain-resolved, never
+    // path-prefixed — so anchor on the prefix. A substring match would wrongly classify the
+    // SPA route /package/npm/... as registry (it contains "/npm/") and serve it the locked-down
+    // RegistryCsp, which blocks the SPA bundle and renders a blank page.
     private static bool IsRegistryPath(string path) =>
-        path.Contains("/simple/", StringComparison.OrdinalIgnoreCase) ||
-        path.Contains("/packages/", StringComparison.OrdinalIgnoreCase) ||
-        path.Contains("/npm/", StringComparison.OrdinalIgnoreCase) ||
-        path.Contains("/nuget/", StringComparison.OrdinalIgnoreCase) ||
-        path.Contains("/pypi/", StringComparison.OrdinalIgnoreCase);
+        path.StartsWith("/simple/", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/packages/", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/npm/", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/nuget/", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/pypi/", StringComparison.OrdinalIgnoreCase);
 }

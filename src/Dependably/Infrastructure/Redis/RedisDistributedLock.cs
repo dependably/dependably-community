@@ -29,8 +29,13 @@ public sealed class RedisDistributedLock : IDistributedLock
         """);
 
     private readonly IRedisClient _redis;
+    private readonly TimeProvider _time;
 
-    public RedisDistributedLock(IRedisClient redis) => _redis = redis;
+    public RedisDistributedLock(IRedisClient redis, TimeProvider time)
+    {
+        _redis = redis;
+        _time = time;
+    }
 
     public async Task<ILockHandle?> TryAcquireAsync(string name, TimeSpan ttl, CancellationToken ct = default)
     {
@@ -39,13 +44,13 @@ public sealed class RedisDistributedLock : IDistributedLock
         var db = _redis.GetDatabase();
 
         bool acquired = await db.StringSetAsync(key, token, ttl, When.NotExists);
-        return !acquired ? null : (ILockHandle)new LockHandle(db, key, token, name, ReleaseScript, ExtendScript);
+        return !acquired ? null : (ILockHandle)new LockHandle(db, key, token, name, ReleaseScript, ExtendScript, _time.GetUtcNow());
     }
 
     public async Task<ILockHandle> AcquireAsync(
         string name, TimeSpan ttl, TimeSpan wait, TimeSpan retryInterval, CancellationToken ct = default)
     {
-        var deadline = DateTimeOffset.UtcNow + wait;
+        var deadline = _time.GetUtcNow() + wait;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
@@ -55,7 +60,7 @@ public sealed class RedisDistributedLock : IDistributedLock
                 return handle;
             }
 
-            if (DateTimeOffset.UtcNow >= deadline)
+            if (_time.GetUtcNow() >= deadline)
             {
                 throw new TimeoutException($"Could not acquire distributed lock '{name}' within {wait}.");
             }
@@ -74,10 +79,10 @@ public sealed class RedisDistributedLock : IDistributedLock
         private bool _released;
 
         public string Name { get; }
-        public DateTimeOffset AcquiredAt { get; } = DateTimeOffset.UtcNow;
+        public DateTimeOffset AcquiredAt { get; }
 
         public LockHandle(IDatabase db, RedisKey key, string token, string name,
-            RedisScript releaseScript, RedisScript extendScript)
+            RedisScript releaseScript, RedisScript extendScript, DateTimeOffset acquiredAt)
         {
             _db = db;
             _key = key;
@@ -85,6 +90,7 @@ public sealed class RedisDistributedLock : IDistributedLock
             Name = name;
             _releaseScript = releaseScript;
             _extendScript = extendScript;
+            AcquiredAt = acquiredAt;
         }
 
         public async Task<bool> ExtendAsync(TimeSpan additional, CancellationToken ct = default)

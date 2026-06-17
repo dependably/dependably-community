@@ -111,8 +111,13 @@ public sealed class InstanceControllerUnitTests
     [InlineData("max_upload_bytes_pypi", "1024")]
     [InlineData("max_upload_bytes_npm", "2048")]
     [InlineData("max_upload_bytes_nuget", "4096")]
+    [InlineData("max_upload_bytes_maven", "8192")]
+    [InlineData("max_upload_bytes_rpm", "16384")]
+    [InlineData("max_upload_bytes_oci", "32768")]
     [InlineData("gc_schedule", "0 4 * * *")]
     [InlineData("siem_max_lookback_days", "60")]
+    [InlineData("default_storage_quota_bytes", "1073741824")]
+    [InlineData("max_active_tokens_per_tenant", "250")]
     public async Task UpdateSettings_AcceptsEachAllowedKey(string key, string value)
     {
         await using var s = await ControllerScenario.CreateAsync();

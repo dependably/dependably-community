@@ -13,20 +13,20 @@ public sealed class NpmTarballValidatorTests
     public void Validate_RealFixture_Succeeds()
     {
         var (bytes, _) = NpmFixtures.RealTarball();
-        var result = NpmTarballValidator.Validate(bytes, out string? name, out string? version);
-        Assert.True(result.IsValid);
-        Assert.Equal("is-odd", name);
-        Assert.Equal("3.0.1", version);
+        var parsed = NpmTarballValidator.Validate(bytes);
+        Assert.True(parsed.Validation.IsValid);
+        Assert.Equal("is-odd", parsed.Name);
+        Assert.Equal("3.0.1", parsed.Version);
     }
 
     [Fact]
     public void Validate_SyntheticPackageDirWrapper_Succeeds()
     {
         var (bytes, _, _) = NpmFixtures.BuildTarball("acme", "1.0.0");
-        var result = NpmTarballValidator.Validate(bytes, out string? name, out string? version);
-        Assert.True(result.IsValid);
-        Assert.Equal("acme", name);
-        Assert.Equal("1.0.0", version);
+        var parsed = NpmTarballValidator.Validate(bytes);
+        Assert.True(parsed.Validation.IsValid);
+        Assert.Equal("acme", parsed.Name);
+        Assert.Equal("1.0.0", parsed.Version);
     }
 
     [Fact]
@@ -34,10 +34,10 @@ public sealed class NpmTarballValidatorTests
     {
         byte[] bytes = BuildTarballWithEntries(
             ("package.json", """{"name":"rooted","version":"2.0.0"}"""));
-        var result = NpmTarballValidator.Validate(bytes, out string? name, out string? version);
-        Assert.True(result.IsValid);
-        Assert.Equal("rooted", name);
-        Assert.Equal("2.0.0", version);
+        var parsed = NpmTarballValidator.Validate(bytes);
+        Assert.True(parsed.Validation.IsValid);
+        Assert.Equal("rooted", parsed.Name);
+        Assert.Equal("2.0.0", parsed.Version);
     }
 
     [Fact]
@@ -47,21 +47,21 @@ public sealed class NpmTarballValidatorTests
         // Wrapper version 2.5.0 wins over the package.json's 1.0.0.
         byte[] bytes = BuildTarballWithEntries(
             ("foo-2.5.0/package.json", """{"name":"foo","version":"1.0.0"}"""));
-        var result = NpmTarballValidator.Validate(bytes, out string? name, out string? version);
-        Assert.True(result.IsValid);
-        Assert.Equal("foo", name);
-        Assert.Equal("2.5.0", version);
+        var parsed = NpmTarballValidator.Validate(bytes);
+        Assert.True(parsed.Validation.IsValid);
+        Assert.Equal("foo", parsed.Name);
+        Assert.Equal("2.5.0", parsed.Version);
     }
 
     [Fact]
     public void Validate_NoPackageJson_Fails()
     {
         byte[] bytes = BuildTarballWithEntries(("package/README.md", "just a readme"));
-        var result = NpmTarballValidator.Validate(bytes, out string? name, out string? version);
-        Assert.False(result.IsValid);
-        Assert.Equal("content", result.FieldName);
-        Assert.Null(name);
-        Assert.Null(version);
+        var parsed = NpmTarballValidator.Validate(bytes);
+        Assert.False(parsed.Validation.IsValid);
+        Assert.Equal("content", parsed.Validation.FieldName);
+        Assert.Null(parsed.Name);
+        Assert.Null(parsed.Version);
     }
 
     [Fact]
@@ -71,17 +71,17 @@ public sealed class NpmTarballValidatorTests
         // only considers root or single-wrapper entries.
         byte[] bytes = BuildTarballWithEntries(
             ("a/b/package.json", """{"name":"nested","version":"1.0.0"}"""));
-        var result = NpmTarballValidator.Validate(bytes, out _, out _);
-        Assert.False(result.IsValid);
+        var parsed = NpmTarballValidator.Validate(bytes);
+        Assert.False(parsed.Validation.IsValid);
     }
 
     [Fact]
     public void Validate_MissingNameOrVersionInPackageJson_Fails()
     {
         byte[] bytes = BuildTarballWithEntries(("package/package.json", """{"name":"only"}"""));
-        var result = NpmTarballValidator.Validate(bytes, out _, out _);
-        Assert.False(result.IsValid);
-        Assert.Equal("content", result.FieldName);
+        var parsed = NpmTarballValidator.Validate(bytes);
+        Assert.False(parsed.Validation.IsValid);
+        Assert.Equal("content", parsed.Validation.FieldName);
     }
 
     [Fact]
@@ -90,11 +90,11 @@ public sealed class NpmTarballValidatorTests
         // Exercises the left-hand side of the `IsNullOrEmpty(name) || IsNullOrEmpty(version)`
         // short-circuit: name absent, version present.
         byte[] bytes = BuildTarballWithEntries(("package/package.json", """{"version":"1.2.3"}"""));
-        var result = NpmTarballValidator.Validate(bytes, out string? name, out string? version);
-        Assert.False(result.IsValid);
-        Assert.Equal("content", result.FieldName);
-        Assert.Null(name);
-        Assert.Equal("1.2.3", version);
+        var parsed = NpmTarballValidator.Validate(bytes);
+        Assert.False(parsed.Validation.IsValid);
+        Assert.Equal("content", parsed.Validation.FieldName);
+        Assert.Null(parsed.Name);
+        Assert.Equal("1.2.3", parsed.Version);
     }
 
     [Fact]
@@ -104,11 +104,11 @@ public sealed class NpmTarballValidatorTests
         // to a JSON null literal. Both name and version end up null, triggering the
         // missing-name-or-version failure path.
         byte[] bytes = BuildTarballWithEntries(("package/package.json", "null"));
-        var result = NpmTarballValidator.Validate(bytes, out string? name, out string? version);
-        Assert.False(result.IsValid);
-        Assert.Equal("content", result.FieldName);
-        Assert.Null(name);
-        Assert.Null(version);
+        var parsed = NpmTarballValidator.Validate(bytes);
+        Assert.False(parsed.Validation.IsValid);
+        Assert.Equal("content", parsed.Validation.FieldName);
+        Assert.Null(parsed.Name);
+        Assert.Null(parsed.Version);
     }
 
     [Fact]
@@ -120,18 +120,18 @@ public sealed class NpmTarballValidatorTests
             ("package/README.md", "readme"),
             ("package/lib/index.js", "console.log('hi');"),
             ("package/package.json", """{"name":"late","version":"4.5.6"}"""));
-        var result = NpmTarballValidator.Validate(bytes, out string? name, out string? version);
-        Assert.True(result.IsValid);
-        Assert.Equal("late", name);
-        Assert.Equal("4.5.6", version);
+        var parsed = NpmTarballValidator.Validate(bytes);
+        Assert.True(parsed.Validation.IsValid);
+        Assert.Equal("late", parsed.Name);
+        Assert.Equal("4.5.6", parsed.Version);
     }
 
     [Fact]
     public void Validate_InvalidGzip_FailsGracefully()
     {
-        var result = NpmTarballValidator.Validate("not gzip"u8.ToArray(), out _, out _);
-        Assert.False(result.IsValid);
-        Assert.Equal("content", result.FieldName);
+        var parsed = NpmTarballValidator.Validate("not gzip"u8.ToArray());
+        Assert.False(parsed.Validation.IsValid);
+        Assert.Equal("content", parsed.Validation.FieldName);
     }
 
     // ── Zip-bomb caps ────────────────────────────────────────────────────────
@@ -145,10 +145,10 @@ public sealed class NpmTarballValidatorTests
         string json = $$"""{"name":"big","version":"1.0.0","padding":"{{new string('a', 5 * 1024 * 1024)}}"}""";
         byte[] bytes = BuildTarballWithEntries(("package/package.json", json));
 
-        var result = NpmTarballValidator.Validate(bytes, out _, out _);
+        var parsed = NpmTarballValidator.Validate(bytes);
 
-        Assert.False(result.IsValid);
-        Assert.Contains("decompression limit", result.Message);
+        Assert.False(parsed.Validation.IsValid);
+        Assert.Contains("decompression limit", parsed.Validation.Message);
     }
 
     [Fact]
@@ -159,10 +159,10 @@ public sealed class NpmTarballValidatorTests
         byte[] bytes = NpmFixtures.BuildBombTarball(
             "package/blob.bin", TarScanLimits.MaxTotalDecompressedBytes + 1024 * 1024);
 
-        var result = NpmTarballValidator.Validate(bytes, out _, out _);
+        var parsed = NpmTarballValidator.Validate(bytes);
 
-        Assert.False(result.IsValid);
-        Assert.Contains("decompression limit", result.Message);
+        Assert.False(parsed.Validation.IsValid);
+        Assert.Contains("decompression limit", parsed.Validation.Message);
     }
 
     [Fact]
@@ -170,10 +170,10 @@ public sealed class NpmTarballValidatorTests
     {
         byte[] bytes = NpmFixtures.BuildManyEntryTarball(TarScanLimits.MaxEntries + 1);
 
-        var result = NpmTarballValidator.Validate(bytes, out _, out _);
+        var parsed = NpmTarballValidator.Validate(bytes);
 
-        Assert.False(result.IsValid);
-        Assert.Contains("entry limit", result.Message);
+        Assert.False(parsed.Validation.IsValid);
+        Assert.Contains("entry limit", parsed.Validation.Message);
     }
 
     [Fact]
@@ -184,11 +184,11 @@ public sealed class NpmTarballValidatorTests
         string json = $$"""{"name":"big-legal","version":"1.0.0","padding":"{{new string('a', 1024 * 1024)}}"}""";
         byte[] bytes = BuildTarballWithEntries(("package/package.json", json));
 
-        var result = NpmTarballValidator.Validate(bytes, out string? name, out string? version);
+        var parsed = NpmTarballValidator.Validate(bytes);
 
-        Assert.True(result.IsValid);
-        Assert.Equal("big-legal", name);
-        Assert.Equal("1.0.0", version);
+        Assert.True(parsed.Validation.IsValid);
+        Assert.Equal("big-legal", parsed.Name);
+        Assert.Equal("1.0.0", parsed.Version);
     }
 
     // ── Name shape (shared with the npm publish controller) ──────────────────
@@ -205,10 +205,10 @@ public sealed class NpmTarballValidatorTests
         byte[] bytes = BuildTarballWithEntries(
             ("package/package.json", $$"""{"name":"{{badName}}","version":"1.0.0"}"""));
 
-        var result = NpmTarballValidator.Validate(bytes, out _, out _);
+        var parsed = NpmTarballValidator.Validate(bytes);
 
-        Assert.False(result.IsValid);
-        Assert.Contains("Invalid npm package name", result.Message);
+        Assert.False(parsed.Validation.IsValid);
+        Assert.Contains("Invalid npm package name", parsed.Validation.Message);
     }
 
     [Fact]
@@ -217,10 +217,10 @@ public sealed class NpmTarballValidatorTests
         byte[] bytes = BuildTarballWithEntries(
             ("package/package.json", """{"name":"@scope/name","version":"1.0.0"}"""));
 
-        var result = NpmTarballValidator.Validate(bytes, out string? name, out _);
+        var parsed = NpmTarballValidator.Validate(bytes);
 
-        Assert.True(result.IsValid);
-        Assert.Equal("@scope/name", name);
+        Assert.True(parsed.Validation.IsValid);
+        Assert.Equal("@scope/name", parsed.Name);
     }
 
     // ── IsTopLevelPackageJson (internal helper) ──────────────────────────────

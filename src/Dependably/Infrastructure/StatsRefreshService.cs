@@ -23,19 +23,22 @@ public sealed class StatsRefreshService : BackgroundService
     private readonly IConfiguration _config;
     private readonly IAirGapMode _airGap;
     private readonly ILogger<StatsRefreshService> _logger;
+    private readonly TimeProvider _time;
 
     public StatsRefreshService(
         StatsSnapshotRepository snapshots,
         PackageAnalyticsRepository analytics,
         IConfiguration config,
         IAirGapMode airGap,
-        ILogger<StatsRefreshService> logger)
+        ILogger<StatsRefreshService> logger,
+        TimeProvider time)
     {
         _snapshots = snapshots;
         _analytics = analytics;
         _config = config;
         _airGap = airGap;
         _logger = logger;
+        _time = time;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -60,7 +63,7 @@ public sealed class StatsRefreshService : BackgroundService
 
     internal async Task RunRefreshPassAsync(CancellationToken ct)
     {
-        using var scope = Observability.BackgroundJobScope.Begin("stats-refresh", "stats.refresh");
+        using var scope = Observability.BackgroundJobScope.Begin("stats-refresh", "stats.refresh", _time);
         try
         {
             await RunRefreshPassInnerAsync(ct);
@@ -99,7 +102,7 @@ public sealed class StatsRefreshService : BackgroundService
                 orgSw.Stop();
 
                 string json = JsonSerializer.Serialize(stats, SnapshotJson);
-                string computedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                string computedAt = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
                 await _snapshots.UpsertSnapshotAsync(orgId, json, computedAt, orgSw.ElapsedMilliseconds, ct);
                 refreshed++;
             }

@@ -1,6 +1,7 @@
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
+using Microsoft.Extensions.Time.Testing;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -13,12 +14,13 @@ namespace Dependably.Tests.Unit.Infrastructure;
 public sealed class TokenRepositoryDescriptionTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
+    private readonly FakeTimeProvider _clock = TestTime.Frozen();
     private TokenRepository _tokens = null!;
 
     public async Task InitializeAsync()
     {
         await new SchemaInitializer(_db).InitializeAsync();
-        _tokens = new TokenRepository(_db);
+        _tokens = new TokenRepository(_db, _clock);
 
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");
@@ -98,7 +100,8 @@ public sealed class TokenRepositoryDescriptionTests : IAsyncLifetime
 
         var fetched = await _tokens.GetTokenByIdAsync(rec.Id, rec.OrgId);
         Assert.NotNull(fetched!.LastUsedAt);
-        Assert.True((DateTimeOffset.UtcNow - fetched.LastUsedAt!.Value).Duration() < TimeSpan.FromSeconds(10));
+        // Repository stamps from its injected clock at second granularity — exact match.
+        Assert.Equal(TestTime.KnownNow, fetched.LastUsedAt!.Value);
     }
 
     [Fact]
@@ -109,9 +112,11 @@ public sealed class TokenRepositoryDescriptionTests : IAsyncLifetime
 
         await _tokens.TouchLastUsedAsync(rec.Id, TokenSource.User);
         var first = (await _tokens.GetTokenByIdAsync(rec.Id, rec.OrgId))!.LastUsedAt;
+        Assert.Equal(TestTime.KnownNow, first!.Value);
 
-        // Second call inside the throttle window must be a no-op — the timestamp stays put.
-        await Task.Delay(50);
+        // Second call inside the throttle window must be a no-op — the timestamp stays put
+        // even though the clock has visibly advanced.
+        _clock.Advance(TimeSpan.FromSeconds(30));
         await _tokens.TouchLastUsedAsync(rec.Id, TokenSource.User, minIntervalSeconds: 60);
         var second = (await _tokens.GetTokenByIdAsync(rec.Id, rec.OrgId))!.LastUsedAt;
 
@@ -130,7 +135,7 @@ public sealed class TokenRepositoryDescriptionTests : IAsyncLifetime
         {
             await conn.ExecuteAsync(
                 "UPDATE user_tokens SET last_used_at = @ts WHERE id = @id",
-                new { id = rec.Id, ts = DateTimeOffset.UtcNow.AddMinutes(-5).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                new { id = rec.Id, ts = TestTime.KnownNow.AddMinutes(-5).ToString("yyyy-MM-ddTHH:mm:ssZ") });
         }
 
         var before = (await _tokens.GetTokenByIdAsync(rec.Id, rec.OrgId))!.LastUsedAt;
@@ -138,6 +143,7 @@ public sealed class TokenRepositoryDescriptionTests : IAsyncLifetime
         var after = (await _tokens.GetTokenByIdAsync(rec.Id, rec.OrgId))!.LastUsedAt;
 
         Assert.True(after > before);
+        Assert.Equal(TestTime.KnownNow, after!.Value);
     }
 
     [Fact]

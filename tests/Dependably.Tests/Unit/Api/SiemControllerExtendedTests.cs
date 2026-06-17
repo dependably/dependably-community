@@ -121,7 +121,7 @@ public sealed class SiemControllerExtendedTests
         {
             await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('foreign-org', 'foreign')");
         }
-        await SeedAuditAsync(b.Db, "foreign-org", "login.success", DateTimeOffset.UtcNow.AddHours(-1), actorId: "foreign-user");
+        await SeedAuditAsync(b.Db, "foreign-org", "login.success", s.Clock.GetUtcNow().AddHours(-1), actorId: "foreign-user");
 
         var result = await b.SiemController.GetAuthEvents(null, null, null, null, 100, null);
         var ok = Assert.IsType<OkObjectResult>(result);
@@ -223,8 +223,8 @@ public sealed class SiemControllerExtendedTests
         await s.WithOrgAsync("acme"); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        await SeedAuditAsync(b.Db, b.PrimaryOrgId, "login.success", DateTimeOffset.UtcNow.AddMinutes(-10), actorId: "login-actor");
-        await SeedAuditAsync(b.Db, b.PrimaryOrgId, "lockout.triggered", DateTimeOffset.UtcNow.AddMinutes(-5), actorId: "lockout-actor");
+        await SeedAuditAsync(b.Db, b.PrimaryOrgId, "login.success", s.Clock.GetUtcNow().AddMinutes(-10), actorId: "login-actor");
+        await SeedAuditAsync(b.Db, b.PrimaryOrgId, "lockout.triggered", s.Clock.GetUtcNow().AddMinutes(-5), actorId: "lockout-actor");
 
         var result = await b.SiemController.GetAuthEvents(
             since: null, until: null, org: null,
@@ -264,7 +264,7 @@ public sealed class SiemControllerExtendedTests
         var b = await s.BuildAsync();
         // 5y ago → clamped to default 90-day window. Doesn't 400.
         var result = await b.SiemController.GetAuthEvents(
-            since: DateTimeOffset.UtcNow.AddYears(-5).ToString("o"),
+            since: s.Clock.GetUtcNow().AddYears(-5).ToString("o"),
             until: null, org: null, action: null, limit: 100, cursor: null);
         Assert.IsType<OkObjectResult>(result);
     }
@@ -277,7 +277,7 @@ public sealed class SiemControllerExtendedTests
         var b = await s.BuildAsync();
         var result = await b.SiemController.GetAuthEvents(
             since: null,
-            until: DateTimeOffset.UtcNow.AddYears(5).ToString("o"),
+            until: s.Clock.GetUtcNow().AddYears(5).ToString("o"),
             org: null, action: null, limit: 100, cursor: null);
         Assert.IsType<OkObjectResult>(result);
     }
@@ -289,7 +289,7 @@ public sealed class SiemControllerExtendedTests
         await s.WithOrgAsync("acme"); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var now = DateTimeOffset.UtcNow;
+        var now = s.Clock.GetUtcNow();
         for (int i = 0; i < 3; i++)
         {
             await SeedAuditAsync(b.Db, b.PrimaryOrgId, "login.success", now.AddMinutes(-i * 5), actorId: $"a{i}");
@@ -330,7 +330,7 @@ public sealed class SiemControllerExtendedTests
         await s.WithOrgAsync("acme"); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var now = DateTimeOffset.UtcNow;
+        var now = s.Clock.GetUtcNow();
         await SeedAuditAsync(b.Db, b.PrimaryOrgId, "login.success", now.AddMinutes(-2), actorId: "actor-a");
         await SeedAuditAsync(b.Db, b.PrimaryOrgId, "login.failure", now.AddMinutes(-1), actorId: "actor-b");
         b.SiemController.Request.Headers.Accept = "application/x-ndjson";
@@ -351,7 +351,7 @@ public sealed class SiemControllerExtendedTests
         await s.WithOrgAsync("acme"); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
 
-        var now = DateTimeOffset.UtcNow;
+        var now = s.Clock.GetUtcNow();
         // Hit every arm of CefFriendlyName + CefSeverity, including the default arm.
         string[] actions =
         {
@@ -425,7 +425,7 @@ public sealed class SiemControllerExtendedTests
                 new
                 {
                     id = Guid.NewGuid().ToString("N"),
-                    createdAt = DateTimeOffset.UtcNow.AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    createdAt = s.Clock.GetUtcNow().AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 });
         }
         b.SiemController.Request.Headers.Accept = "application/x-cef";

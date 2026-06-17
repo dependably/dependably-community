@@ -162,7 +162,7 @@ public sealed class ProxyFetchSoakTests
             new PermissiveUpstreamUrlValidator(),
             new SoakNoAirGap(),
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir),
-            config,
+            Dependably.Infrastructure.StagingOptions.Resolve(config),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<Protocol.UpstreamClient>.Instance);
 
         string blobKey = BlobKeys.Proxy(sha);

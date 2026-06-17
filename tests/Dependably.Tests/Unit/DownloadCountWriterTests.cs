@@ -1,5 +1,7 @@
+using System.Diagnostics.Metrics;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Observability;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -49,6 +51,35 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
 
+    // ── Capacity defaults ────────────────────────────────────────────────────
+
+    [Fact]
+    public void DefaultCapacity_Is_50k()
+    {
+        Assert.Equal(50_000, DownloadCountWriter.DefaultChannelCapacity);
+    }
+
+    [Fact]
+    public void ChannelCapacity_UsesDefault_WhenNullPassed()
+    {
+        var writer = new DownloadCountWriter();
+        Assert.Equal(DownloadCountWriter.DefaultChannelCapacity, writer.ChannelCapacity);
+    }
+
+    [Fact]
+    public void ChannelCapacity_Configurable_WithCustomValue()
+    {
+        var writer = new DownloadCountWriter(capacity: 9);
+        Assert.Equal(9, writer.ChannelCapacity);
+    }
+
+    [Fact]
+    public void ChannelCapacity_IgnoresNonPositive_FallsBackToDefault()
+    {
+        var writer = new DownloadCountWriter(capacity: 0);
+        Assert.Equal(DownloadCountWriter.DefaultChannelCapacity, writer.ChannelCapacity);
+    }
+
     // ── TryEnqueue ───────────────────────────────────────────────────────────
 
     [Fact]
@@ -59,14 +90,83 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
     }
 
     [Fact]
-    public void TryEnqueue_AtCapacity_DropsRecord_ReturnsFalse()
+    public void TryEnqueue_AtCustomCapacity_DropsRecord_ReturnsFalse()
     {
-        var writer = new DownloadCountWriter();
-        for (int i = 0; i < DownloadCountWriter.ChannelCapacity; i++)
+        const int cap = 5;
+        var writer = new DownloadCountWriter(capacity: cap);
+        for (int i = 0; i < cap; i++)
         {
             Assert.True(writer.TryEnqueue(new DownloadCountRecord(VersionId: $"v{i}", Purl: null)));
         }
         Assert.False(writer.TryEnqueue(new DownloadCountRecord(VersionId: "overflow", Purl: null)));
+    }
+
+    // ── Drop-meter fires on full channel ────────────────────────────────────
+
+    [Fact]
+    public void TryEnqueue_OverCapacity_IncrementsDropMeter()
+    {
+        const int cap = 3;
+        var writer = new DownloadCountWriter(capacity: cap);
+
+        long drops = 0;
+        using var listener = DropMeterListener(delta => drops += delta);
+
+        for (int i = 0; i < cap; i++)
+        {
+            writer.TryEnqueue(new DownloadCountRecord(VersionId: $"v{i}", Purl: null));
+        }
+
+        bool enqueued = writer.TryEnqueue(new DownloadCountRecord(VersionId: "overflow", Purl: null));
+
+        Assert.False(enqueued);
+        Assert.Equal(1, drops);
+    }
+
+    // ── Mixed partial-failure scenario (house rule) ──────────────────────────
+    // A burst that partially exceeds capacity: under-capacity writes succeed and persist
+    // after drain; only overflow records are dropped and counted.
+
+    [Fact]
+    public async Task MixedBurst_PartiallyExceedsCapacity_OnlyOverflowDropped()
+    {
+        const int cap = 4;
+        const int burst = 7;
+        const int expectedDrops = burst - cap;
+
+        var writer = new DownloadCountWriter(capacity: cap);
+        var service = new DownloadCountWriterHostedService(writer, _db,
+            NullLogger<DownloadCountWriterHostedService>.Instance,
+            TimeProvider.System);
+
+        long drops = 0;
+        using var listener = DropMeterListener(delta => drops += delta);
+
+        int successCount = 0;
+        for (int i = 0; i < burst; i++)
+        {
+            // Alternate between versionId and purl keying strategies.
+            var record = i % 2 == 0
+                ? new DownloadCountRecord(VersionId: _versionId, Purl: null)
+                : new DownloadCountRecord(VersionId: null, Purl: _purl);
+            if (writer.TryEnqueue(record))
+            {
+                successCount++;
+            }
+        }
+
+        Assert.Equal(cap, successCount);
+        Assert.Equal(expectedDrops, drops);
+
+        // Drain and verify the DB accumulated only the persisted increments.
+        await service.DrainPendingAsync();
+
+        await using var conn = await _db.OpenAsync();
+        int dbCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT download_count FROM package_versions WHERE id = @id",
+            new { id = _versionId });
+        // Each queued record increments the count by 1 regardless of key strategy.
+        Assert.Equal(cap, dbCount);
     }
 
     // ── IncrementDownloadCountAsync — off-path enqueue ───────────────────────
@@ -139,7 +239,8 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
         var writer = new DownloadCountWriter();
         var repo = new PackageRepository(_db, writer);
         var service = new DownloadCountWriterHostedService(writer, _db,
-            NullLogger<DownloadCountWriterHostedService>.Instance);
+            NullLogger<DownloadCountWriterHostedService>.Instance,
+            TimeProvider.System);
 
         // Enqueue 5 increments for the same version — all arrive in the same drain batch.
         for (int i = 0; i < 5; i++)
@@ -162,7 +263,8 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
         var writer = new DownloadCountWriter();
         var repo = new PackageRepository(_db, writer);
         var service = new DownloadCountWriterHostedService(writer, _db,
-            NullLogger<DownloadCountWriterHostedService>.Instance);
+            NullLogger<DownloadCountWriterHostedService>.Instance,
+            TimeProvider.System);
 
         for (int i = 0; i < 3; i++)
         {
@@ -185,7 +287,8 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
         var writer = new DownloadCountWriter();
         var repo = new PackageRepository(_db, writer);
         var service = new DownloadCountWriterHostedService(writer, _db,
-            NullLogger<DownloadCountWriterHostedService>.Instance);
+            NullLogger<DownloadCountWriterHostedService>.Instance,
+            TimeProvider.System);
 
         for (int i = 0; i < 250; i++)
         {
@@ -207,7 +310,8 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
         var writer = new DownloadCountWriter();
         var repo = new PackageRepository(_db, writer);
         var service = new DownloadCountWriterHostedService(writer, _db,
-            NullLogger<DownloadCountWriterHostedService>.Instance);
+            NullLogger<DownloadCountWriterHostedService>.Instance,
+            TimeProvider.System);
 
         await repo.IncrementDownloadCountAsync(_versionId);
         await repo.IncrementDownloadCountAsync(_versionId);
@@ -221,5 +325,30 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
             "SELECT download_count FROM package_versions WHERE id = @id",
             new { id = _versionId });
         Assert.Equal(3, count);
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns an active <see cref="MeterListener"/> that invokes <paramref name="onDrop"/>
+    /// with each measurement delta emitted by
+    /// <c>dependably.download_count_writer.dropped</c>. Must be disposed after the assertion.
+    /// </summary>
+    private static MeterListener DropMeterListener(Action<long> onDrop)
+    {
+        var listener = new MeterListener
+        {
+            InstrumentPublished = (instrument, l) =>
+            {
+                if (instrument.Meter.Name == DependablyMeter.MeterName &&
+                    instrument.Name == "dependably.download_count_writer.dropped")
+                {
+                    l.EnableMeasurementEvents(instrument);
+                }
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((_, measurement, _, _) => onDrop(measurement));
+        listener.Start();
+        return listener;
     }
 }

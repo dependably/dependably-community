@@ -11,7 +11,7 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
 
     public UpstreamRegistryRepositoryTests(InMemoryDbFixture fixture) => _fixture = fixture;
 
-    private UpstreamRegistryRepository NewRepo() => new(_fixture.Store);
+    private UpstreamRegistryRepository NewRepo() => new(_fixture.Store, TimeProvider.System);
 
     [Fact]
     public async Task Add_AppendsInPriorityOrder_AndListFiltersByOrg()
