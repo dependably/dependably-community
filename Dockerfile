@@ -4,8 +4,11 @@
 # RUN steps that need them — never as an ARG, which would persist in layer
 # metadata/history and builder cache. The non-secret REGISTRY_URL stays an ARG.
 
-# Frontend build stage
-FROM node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920 AS frontend
+# Frontend build stage. Pinned to the build platform: the emitted wwwroot assets
+# and SBOM are architecture-independent, so this stage runs node/esbuild natively
+# on the builder instead of under QEMU emulation for the non-native target arch
+# (esbuild's native binary aborts with SIGILL under QEMU).
+FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920 AS frontend
 WORKDIR /web
 COPY web/package*.json ./
 ARG REGISTRY_URL=
@@ -86,8 +89,10 @@ RUN --mount=type=secret,id=registry_key \
     -p:Version="${VERSION}" \
     -o /app/publish
 
-# Notices stage — combines both CycloneDX SBOMs into a curated attribution file
-FROM node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920 AS notices
+# Notices stage — combines both CycloneDX SBOMs into a curated attribution file.
+# Pinned to the build platform for the same reason as the frontend stage: it runs
+# node over architecture-independent JSON, so emulation buys nothing and risks SIGILL.
+FROM --platform=$BUILDPLATFORM node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920 AS notices
 WORKDIR /work
 COPY build/extract-notices.mjs ./
 COPY --from=frontend /web/sbom-frontend-prod.json ./
