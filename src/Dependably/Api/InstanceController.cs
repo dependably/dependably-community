@@ -134,18 +134,7 @@ public sealed class InstanceController : ControllerBase
         }
 
         var resolved = await access.ResolveAsync(ct);
-        var denied = diagnostics.RecentDeniedIps(10)
-            .Select(e => new { ip = e.Ip, lastSeen = e.LastSeen });
-        return Ok(new
-        {
-            enabled = resolved.Enabled,
-            enabledSource = resolved.EnabledSource.ToString().ToLowerInvariant(),
-            enabledLockedByEnv = resolved.EnabledLockedByEnv,
-            allowedIps = resolved.AllowedRaw,
-            allowlistSource = resolved.AllowlistSource.ToString().ToLowerInvariant(),
-            allowlistLockedByEnv = resolved.AllowlistLockedByEnv,
-            recentDeniedIps = denied,
-        });
+        return Ok(MetricsAccessView.Build(resolved, diagnostics));
     }
 
     /// <summary>

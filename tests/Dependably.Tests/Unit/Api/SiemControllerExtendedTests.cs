@@ -101,9 +101,10 @@ public sealed class SiemControllerExtendedTests
             VALUES (@id, @osvId, @eco, @name, @severity)
             """,
             new { id = vulnId, osvId, eco = ecosystem, name = packageName, severity });
+        string pvvId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
-            "INSERT INTO package_version_vulns (package_version_id, vuln_id) VALUES (@verId, @vulnId)",
-            new { verId, vulnId });
+            "INSERT INTO package_version_vulns (id, package_version_id, vuln_id, owner_kind) VALUES (@pvvId, @verId, @vulnId, 'package_version')",
+            new { pvvId, verId, vulnId });
     }
 
     // ── GetAuthEvents — JWT platform-admin / tenant-claim branches ───────────

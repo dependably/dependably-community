@@ -71,7 +71,7 @@ public static class PyPiSimpleIndexHelper
                 continue;
             }
 
-            string filename = v.BlobKey.Split('/').Last();
+            string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
             string href = OrgPath($"packages/{filename}");
             if (v.ChecksumSha256 is not null)
             {
@@ -114,7 +114,7 @@ public static class PyPiSimpleIndexHelper
                 continue;
             }
 
-            string filename = v.BlobKey.Split('/').Last();
+            string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
             if (upstreamHtml.Contains($">{filename}<", StringComparison.Ordinal))
             {
                 continue;

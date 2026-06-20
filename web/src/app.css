@@ -214,6 +214,10 @@ tr:hover td { background: var(--bg2); }
 .badge.first-fetch { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
 .badge.yanked  { background: var(--badge-red-bg);     color: var(--badge-red-text); }
 .badge.deprecated { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
+.badge.install-script { background: var(--badge-purple-bg); color: var(--badge-purple-text); }
+.badge.prov-verified { background: var(--success-soft);     color: var(--success); }
+.badge.prov-failed   { background: var(--badge-red-bg);     color: var(--badge-red-text); }
+.badge.prov-unsigned { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
 .badge.unlisted { background: var(--badge-purple-bg); color: var(--badge-purple-text); }
 .badge.unblock { background: var(--badge-sky-bg);     color: var(--badge-sky-text); }
 .badge.warning { background: var(--badge-warning-bg);   color: var(--badge-warning-text); }

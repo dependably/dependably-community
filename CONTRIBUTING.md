@@ -18,6 +18,12 @@ dotnet publish src/Dependably -c Release -r linux-musl-x64 --self-contained true
 dotnet publish src/Dependably -c Release -r linux-musl-arm64 --self-contained true
 ```
 
+`web/.npmrc` sets `ignore-scripts=true`, so `npm ci` does not run lifecycle scripts (including `prepare`). On a fresh clone, run `npm run prepare` once from `web/` after `npm ci` to install the husky pre-commit hooks:
+
+```bash
+cd web && npm ci && npm run prepare
+```
+
 ### Docker
 
 ```bash
@@ -114,7 +120,7 @@ Each lens runs in **two passes**: a review pass produces candidate findings, the
 
 Output that degenerates (a repetition loop, or a runaway that hits the token cap without stopping) is **detected and suppressed** rather than posted as if it were a review — the artifact records that it was suppressed. Sampling is tuned to avoid both degeneration modes (small temperature against greedy loops; `min_p` tail-cutting and a modest `repeat_penalty` against word-salad).
 
-A single weak model cannot reliably filter its own output — the verify pass tends to rubber-stamp its own family's speculation. So a **deterministic guard** runs in code after both passes: it drops findings phrased as speculation (hedge words like *may / might / could / suggests / can lead to*), caps the number of findings, and caps total report length. These are heuristics — they can drop a genuinely tentative finding — but for an advisory check, suppressing confident-sounding noise is the right trade. A lens whose findings are all filtered out posts a single "no material findings" line, same as a clean review.
+A single weak model cannot reliably filter its own output — the verify pass tends to rubber-stamp its own family's speculation. So a **deterministic guard** runs in code after both passes: it drops *ungrounded* speculation (a hedged block — *may / might / could / suggests / can lead to* — that cites no `> ` diff line), caps the number of findings, and caps total report length. A hedged block that **does** quote a diff line is kept: the high-value findings (cross-tenant access, missing session revocation) are reasoning-heavy and naturally cautious in wording but still grounded, and the older "drop anything hedged" rule suppressed them along with the noise. A lens whose findings are all filtered out posts a single "no material findings" line, same as a clean review.
 
 The reviews are **advisory** — `allow_failure: true` and not part of the release gate — so non-deterministic model output never blocks a merge. They run after the `sbom` stage (so the model only reviews an MR that already built and passed tests), are serialized by a shared `resource_group` so a single local model isn't hit concurrently, and run on merge-request pipelines only.
 
@@ -125,7 +131,7 @@ The endpoint and tuning knobs are job variables on the `.ai-review` template in 
 | Variable | Default | Purpose |
 |---|---|---|
 | `OLLAMA_URL` | `http://192.168.2.25:11434` | Ollama base URL (`/api/chat` is appended) |
-| `OLLAMA_MODEL` | `gemma4:12b-it-qat` | Model name — must be pulled on the Ollama host |
+| `OLLAMA_MODEL` | `gemma4:26b-a4b-it-qat` | Model name — must be pulled on the Ollama host |
 | `AI_REVIEW_MAX_DIFF_BYTES` | `120000` | Diff is truncated to this many bytes before review |
 | `AI_REVIEW_DIFF_CONTEXT` | `10` | `git diff -U` context lines — more lets the model verify a hunk instead of speculating, but grows the diff toward the byte/context caps |
 | `AI_REVIEW_NUM_CTX` | `49152` | Model context window — must hold the persona + capped diff (~3.45 bytes/token, so a 120000-byte diff ≈ 35K tokens) **and** leave room to generate; too small and the prompt fills the window, leaving no room for output (empty/near-empty review) |
@@ -136,7 +142,7 @@ The endpoint and tuning knobs are job variables on the `.ai-review` template in 
 | `AI_REVIEW_MIN_P` | `0.05` | Min-p tail cut — drops improbable tokens; the robust guard against word-salad |
 | `AI_REVIEW_SELF_VERIFY` | `1` | Run the second self-verify pass (`0` disables it) |
 | `AI_REVIEW_VERIFY_PERSONA_FILE` | `ci/prompts/verify.md` | System prompt for the verify pass |
-| `AI_REVIEW_MAX_FINDINGS` | `5` | Deterministic cap on findings kept per lens |
+| `AI_REVIEW_MAX_FINDINGS` | `8` | Deterministic cap on findings kept per lens |
 | `AI_REVIEW_MAX_REPORT_CHARS` | `2200` | Hard cap on posted report length |
 | `AI_REVIEW_CURL_MAX_TIME` | `1000` | Per-request timeout, seconds |
 | `AI_REVIEW_API_URL` | `$CI_API_V4_URL` | GitLab API base for posting comments (override if the API isn't at the default) |
@@ -338,16 +344,25 @@ Storage has two tiers: **cache** (proxy artefacts, eviction-friendly) and **regi
 | `Rpm__UpstreamMode` | `passthrough` | `passthrough` forwards upstream repodata verbatim and refuses hosted publish (a local package would shadow upstream); `merged` serves a combined `repomd.xml`/`primary.xml.gz` (local ∪ upstream, local shadows on NEVRA collision) and allows hosted publish alongside proxying. **Group (comps) and module (modulemd) metadata limitation**: Dependably does not generate comps or modulemd documents for locally published RPMs — group definitions and module streams are authored independently of packages. In merged mode, upstream group/module entries with content-addressed (hash-prefixed) hrefs are forwarded verbatim; plain-named entries (e.g. `comps.xml.gz` from classic createrepo) are dropped from the merged repomd so no unreachable href is advertised. In local/hosted-only mode, `comps.xml.gz`, `modules.yaml`, and similar requests return 404. `dnf install` works for all published RPMs; `dnf group install` and modular stream installs work only for packages that have definitions in the upstream repo. |
 | `Rpm__GpgKey` | — (verification off) | Operator-pinned trust anchor for the RPM proxy: an inline ASCII-armored OpenPGP public key block, or a file path / `file:` URL the operator trusts out of band. When set, the proxy verifies `repomd.xml`'s detached signature (`repomd.xml.asc`) before trusting upstream metadata; on failure it refuses to resolve (fail closed). When unset, verification is skipped and a startup warning is logged. The anchor must be operator-provided — the upstream-fetched GPG key is not used as the trust root (circular against a MITM). |
 | `Rpm__VerifyRepomdSignature` | derived | Force RPM signature verification on/off. When unset, verification is enabled iff `Rpm__GpgKey` is set. Setting `true` with no parseable key fails every resolution closed. |
-| `Oci__Upstreams` | Docker Hub (`registry-1.docker.io`) | Array of upstream OCI registries (prefix-routed, per-registry auth). Set via `appsettings.json` `Oci:Upstreams`, not a flat env var. |
+| `Oci__ManifestTagTtl` / `Oci__TokenCacheDuration` / `Oci__UpstreamHttpTimeout` / `Oci__CatalogEnabled` | 5m / 55m / 30m / off | Instance-level OCI proxy tunings. **Upstream OCI registries are no longer configured here** — they are per-org and managed in Settings → Proxy → Upstream registries (host + repository-prefix routing + auth type), like every other ecosystem. Every org is seeded with Docker Hub and `mcr.microsoft.com` defaults. |
 
 ### Observability
 
 | Variable | Default | Description |
 |---|---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP collector endpoint for metrics and traces push (e.g. `http://otel-collector:4317`). When unset, only the Prometheus scrape endpoint is active; no traces are exported. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP collector endpoint for logs, traces, and metrics push (e.g. `http://otel-collector:4317`). Logs ship via the Serilog OTLP sink (in addition to the always-on stdout JSON sink); traces and metrics ship via the OpenTelemetry SDK. When unset, logs go to stdout only and only the Prometheus scrape endpoint is active — no OTLP is exported. |
 | `OTEL_SERVICE_NAME` | `dependably` | OTel `service.name` resource attribute. Override when running multiple Dependably instances in the same trace backend. |
 | `OTEL_TRACES_SAMPLER_ARG` | `0.1` | Head-sampling ratio passed to `TraceIdRatioBasedSampler` (0.0–1.0). `1.0` records every trace; `0.0` disables tracing. |
 | `TENANT_COUNT_POLL_INTERVAL_SECONDS` | `60` | How often the tenant-count metric is refreshed. Set `0` to disable the background poller. |
+
+**Local collector quickstart.** The base `docker-compose.yml` ships no telemetry plumbing. To bring up a local OpenTelemetry Collector and route the app's logs/traces/metrics to it, add the opt-in overlay:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.observability.yml logs -f otel-collector
+```
+
+The overlay sets `OTEL_EXPORTER_OTLP_ENDPOINT` for you and runs a collector whose `debug` exporter prints every received signal to its own stdout. Swap that exporter (in `otel-collector-config.yaml`) for a real backend to retain or query the telemetry.
 
 ### Vulnerability scanning and stats
 
@@ -365,7 +380,7 @@ Storage has two tiers: **cache** (proxy artefacts, eviction-friendly) and **regi
 | `THREAT_FEED_JITTER_SECONDS` | `3600` | Random offset (0..N seconds) added to each scheduled threat-feed pass. Set `0` to disable. |
 | `KEV_FEED_URL` | CISA catalog URL | Override the KEV catalog JSON endpoint (mirrors, tests) |
 | `EPSS_API_URL` | `https://api.first.org/data/v1/epss` | Override the EPSS API endpoint (mirrors, tests) |
-| `STATS_REFRESH_INTERVAL_SECONDS` | `300` | How often `StatsRefreshService` recomputes the per-org dashboard snapshot (`org_stats_snapshot`). The `/api/v1/stats` endpoint reads this snapshot instead of running live aggregate queries on every page load. |
+| `STATS_REFRESH_INTERVAL_SECONDS` | `60` | How often `StatsRefreshService` recomputes the per-org dashboard snapshot (`org_stats_snapshot`). The `/api/v1/stats` endpoint reads this snapshot instead of running live aggregate queries on every page load. Raise it on large multi-tenant instances where the aggregate pass is expensive. |
 
 ### Retention and GC
 

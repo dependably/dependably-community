@@ -179,15 +179,28 @@ public sealed class FirstBootServiceTests
         await NewSut(fx, Cfg()).RunAsync();
 
         await using var conn = await fx.Store.OpenAsync();
-        var rows = (await conn.QueryAsync<(string Ecosystem, string Url)>(
-            "SELECT ecosystem AS Ecosystem, url AS Url FROM upstream_registry ORDER BY ecosystem")).ToList();
 
-        var map = rows.ToDictionary(r => r.Ecosystem, r => r.Url);
-        Assert.Equal("https://pypi.org", map["pypi"]);
-        Assert.Equal("https://registry.npmjs.org", map["npm"]);
-        Assert.Equal("https://api.nuget.org/v3", map["nuget"]);
-        Assert.Equal("https://repo1.maven.org/maven2", map["maven"]);
-        Assert.False(map.ContainsKey("rpm"));   // RPM has no default — not seeded
+        // Query one row per non-OCI ecosystem (unique by design) and verify the defaults.
+        // OCI upstreams have two rows (mcr + dockerhub) — look them up separately.
+        string? pypiUrl = await conn.ExecuteScalarAsync<string>(
+            "SELECT url FROM upstream_registry WHERE ecosystem = 'pypi' LIMIT 1");
+        string? npmUrl = await conn.ExecuteScalarAsync<string>(
+            "SELECT url FROM upstream_registry WHERE ecosystem = 'npm' LIMIT 1");
+        string? nugetUrl = await conn.ExecuteScalarAsync<string>(
+            "SELECT url FROM upstream_registry WHERE ecosystem = 'nuget' LIMIT 1");
+        string? mavenUrl = await conn.ExecuteScalarAsync<string>(
+            "SELECT url FROM upstream_registry WHERE ecosystem = 'maven' LIMIT 1");
+        int rpmCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM upstream_registry WHERE ecosystem = 'rpm'");
+        int ociCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM upstream_registry WHERE ecosystem = 'oci'");
+
+        Assert.Equal("https://pypi.org", pypiUrl);
+        Assert.Equal("https://registry.npmjs.org", npmUrl);
+        Assert.Equal("https://api.nuget.org/v3", nugetUrl);
+        Assert.Equal("https://repo1.maven.org/maven2", mavenUrl);
+        Assert.Equal(0, rpmCount);   // RPM has no default — not seeded
+        Assert.Equal(2, ociCount);   // OCI seeds two default registries (MCR + Docker Hub)
     }
 
     [Fact]

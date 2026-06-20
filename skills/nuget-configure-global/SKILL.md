@@ -5,7 +5,6 @@ ecosystem: nuget
 scope: global
 inputs:
   - DEPENDABLY_BASE_URL
-  - ORG_SLUG
   - DEPENDABLY_TOKEN
 ---
 
@@ -18,9 +17,11 @@ default, without a per-solution `NuGet.config`.
 
 Ask the user for:
 
-1. **DEPENDABLY_BASE_URL** — e.g. `https://repo.example.com`.
-2. **ORG_SLUG** — e.g. `default`.
-3. **DEPENDABLY_TOKEN** — from dependably **Tokens**.
+1. **DEPENDABLY_BASE_URL** — the base URL of your dependably org, e.g.
+   `https://repo.example.com`. Multi-tenant deployments put the org in the
+   subdomain (`https://my-org.repo.example.com`); single-tenant deployments use
+   the bare host.
+2. **DEPENDABLY_TOKEN** — from dependably **Tokens**.
 
 ## File to write
 
@@ -32,7 +33,7 @@ The user-level NuGet config path depends on the OS:
 The `dotnet nuget` CLI can edit this file safely:
 
 ```bash
-dotnet nuget add source https://repo.example.com/o/default/nuget/v3/index.json \
+dotnet nuget add source https://repo.example.com/nuget/v3/index.json \
   --name dependably \
   --username user \
   --password $DEPENDABLY_TOKEN \

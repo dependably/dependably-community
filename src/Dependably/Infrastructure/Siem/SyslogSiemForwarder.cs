@@ -23,13 +23,6 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
     // Default syslog port (UDP/TCP plaintext per RFC 5426/6587).
     private const int DefaultSyslogPort = 514;
 
-    // CEF severity levels for specific event types (0-10 scale per CEF specification).
-    private const int CefSeverityHigh = 7;
-    private const int CefSeverityMedium = 5;
-    private const int CefSeverityLow = 3;
-    private const int CefSeverityMediumLow = 4;
-    private const int CefSeverityMediumHigh = 6;
-
     private readonly string _host;
     private readonly int _port;
     private readonly Transport _transport;
@@ -108,40 +101,39 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
     }
 
     /// <summary>
-    /// CEF body. Mirrors <c>SiemController.CefResult</c> — same field mapping and same escape rules.
-    /// Both formatters should converge into a shared helper in a follow-up; for now they are
-    /// kept as parallel small implementations to avoid churn in the controller.
+    /// CEF body. Shared formatting logic lives in <see cref="CefFormat"/>; this method
+    /// assembles the per-event field map using that shared layer.
     /// </summary>
     internal static string FormatCef(SiemEvent ev)
     {
-        string sig = CefEscape(ev.Action);
-        string name = CefFriendlyName(ev.Action);
-        int sev = CefSeverity(ev.Action);
+        string sig = CefFormat.Escape(ev.Action);
+        string name = CefFormat.FriendlyName(ev.Action);
+        int sev = CefFormat.Severity(ev.Action);
         var ext = new StringBuilder();
         ext.Append($"rt={ev.CreatedAt:yyyyMMddHHmmss.fffZ}");
         if (ev.ActorId is not null)
         {
-            ext.Append($" suid={CefEscape(ev.ActorId)}");
+            ext.Append($" suid={CefFormat.Escape(ev.ActorId)}");
         }
 
         if (ev.OrgId is not null)
         {
-            ext.Append($" cs1={CefEscape(ev.OrgId)} cs1Label=OrgId");
+            ext.Append($" cs1={CefFormat.Escape(ev.OrgId)} cs1Label=OrgId");
         }
 
         if (ev.Ecosystem is not null)
         {
-            ext.Append($" cs2={CefEscape(ev.Ecosystem)} cs2Label=Ecosystem");
+            ext.Append($" cs2={CefFormat.Escape(ev.Ecosystem)} cs2Label=Ecosystem");
         }
 
         if (ev.Purl is not null)
         {
-            ext.Append($" cs3={CefEscape(ev.Purl)} cs3Label=Purl");
+            ext.Append($" cs3={CefFormat.Escape(ev.Purl)} cs3Label=Purl");
         }
 
         if (ev.Detail is not null)
         {
-            ext.Append($" msg={CefEscape(ev.Detail)}");
+            ext.Append($" msg={CefFormat.Escape(ev.Detail)}");
         }
 
         return $"CEF:0|Dependably|dependably|1.0|{sig}|{name}|{sev}|{ext}";
@@ -187,34 +179,8 @@ public sealed class SyslogSiemForwarder : ISiemForwarder
         return $"<{prival}>1 {ts} {hostname} dependably - {ev.Action} {sd} {msg}";
     }
 
-    private static string CefEscape(string s) =>
-        s.Replace("\\", "\\\\").Replace("|", "\\|").Replace("=", "\\=").Replace("\n", "\\n").Replace("\r", "\\r");
-
     private static string Rfc5424Escape(string s) =>
         s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("]", "\\]");
-
-    private static string CefFriendlyName(string action) => action switch
-    {
-        "login.success" => "Login Success",
-        "login.failure" => "Login Failure",
-        "lockout.triggered" => "Account Lockout",
-        "token.created" => "Token Created",
-        "token.revoked" => "Token Revoked",
-        "rbac.role_changed" => "Role Changed",
-        "rbac.member_added" => "Member Added",
-        "rbac.member_removed" => "Member Removed",
-        _ => action,
-    };
-
-    private static int CefSeverity(string action) => action switch
-    {
-        "lockout.triggered" => CefSeverityHigh,
-        "login.failure" => CefSeverityMedium,
-        "login.success" => CefSeverityLow,
-        "token.revoked" => CefSeverityMediumLow,
-        "rbac.role_changed" => CefSeverityMediumHigh,
-        _ => CefSeverityLow,
-    };
 
     private enum Transport { Udp, Tcp, Tls }
     private enum Format { Cef, Rfc5424 }

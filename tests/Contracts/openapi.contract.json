@@ -242,6 +242,34 @@
         }
       }
     },
+    "/api/v1/install-script-allowlist": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "201"
+          ]
+        }
+      }
+    },
+    "/api/v1/install-script-allowlist/{id}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "204"
+          ]
+        }
+      }
+    },
     "/api/v1/instance/background-jobs": {
       "operations": {
         "get": {

@@ -57,13 +57,14 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             airGap,
             NullLogger<VulnerabilityScanService>.Instance,
             TimeProvider.System));
-        var proxyVersions = new ProxyVersionRecorder(packages, audit, licenses);
-        var blockGate = new BlockGateService(vulns, audit, new QuarantineRepository(_db, TimeProvider.System), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, TimeProvider.System);
         var cacheArtifact = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
+        var proxyVersions = new ProxyVersionRecorder(packages, audit, licenses, cacheArtifact,
+            Substitute.For<IUpstreamLatestVersionResolver>(), NullLogger<ProxyVersionRecorder>.Instance);
+        var blockGate = new BlockGateService(vulns, audit, new QuarantineRepository(_db, TimeProvider.System), new InstallScriptAllowlistService(_db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, TimeProvider.System);
         var cacheRecorder = new CacheAccessRecorder(cacheArtifact, tenantAccess,
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
-        return new ProxyFetchService(cacheRecorder, proxyVersions, scanner, blockGate, packages, audit, TimeProvider.System);
+        return new ProxyFetchService(cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, packages, audit, TimeProvider.System);
     }
 
     private static async Task<BlobHandle> SeedBlobAsync(InMemoryBlobStore blobs, byte[] bytes)
@@ -313,6 +314,221 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
 
         // Extractor invoked only for the successful coordinates.
         Assert.Equal(failFrom, calls.Count);
+    }
+
+    // ── provenance fail-closed ingest ────────────────────────────────────────
+
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("unsigned")]
+    public async Task RecordAndScanAsync_provenance_block_failed_does_not_cache(string status)
+    {
+        // Under verify=block a version that fails signature verification (or is unsigned) is
+        // refused before recording, exactly like the deprecated first-fetch gate: no version row,
+        // so subsequent requests re-enter this path and re-block. The staged blob is an orphan.
+        var svc = Build();
+
+        byte[] bytes = "unverified-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        var result = await svc.RecordAndScanAsync(new ProxyFetchRequest(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "spoofed", PurlName: "spoofed",
+            Version: "1.0.0", Purl: "pkg:npm/spoofed@1.0.0",
+            File: "spoofed-1.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: null,
+            ProvenanceStatus: status,
+            VerifyProvenanceMode: "block"));
+
+        Assert.Equal(BlockDecision.Blocked, result.Decision);
+        Assert.Null(result.VersionId);
+
+        await using var conn = await _db.OpenAsync();
+        long rowCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions");
+        Assert.Equal(0, rowCount);
+        long blockCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM activity WHERE event_type = 'blocked_provenance'");
+        Assert.Equal(1, blockCount);
+        // The tenant-level security event is recorded (and SIEM-forwarded via audit_log).
+        long auditCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'provenance_verification_failed'");
+        Assert.Equal(1, auditCount);
+    }
+
+    [Fact]
+    public async Task RecordAndScanAsync_provenance_verified_records_and_persists_status()
+    {
+        var svc = Build();
+
+        byte[] bytes = "signed-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        var result = await svc.RecordAndScanAsync(new ProxyFetchRequest(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "trusted", PurlName: "trusted",
+            Version: "1.0.0", Purl: "pkg:npm/trusted@1.0.0",
+            File: "trusted-1.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: null,
+            ProvenanceStatus: "verified",
+            ProvenanceSigner: "SHA256:anchor",
+            VerifyProvenanceMode: "block"));
+
+        Assert.Equal(BlockDecision.Allowed, result.Decision);
+        Assert.NotNull(result.VersionId);
+
+        var packages = new PackageRepository(_db);
+        var version = await packages.GetVersionByIdAsync("o1", result.VersionId!);
+        Assert.Equal("verified", version!.ProvenanceStatus);
+        Assert.Equal("SHA256:anchor", version.ProvenanceSigner);
+    }
+
+    [Fact]
+    public async Task RecordAndScanAsync_provenance_warn_mode_records_failed_status_without_blocking()
+    {
+        // warn never blocks: a version that failed verification is still cached, but the failure
+        // is persisted so the UI/audit surface it.
+        var svc = Build();
+
+        byte[] bytes = "warn-prov-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        var result = await svc.RecordAndScanAsync(new ProxyFetchRequest(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "warned-prov", PurlName: "warned-prov",
+            Version: "1.0.0", Purl: "pkg:npm/warned-prov@1.0.0",
+            File: "warned-prov-1.0.0.tgz", Blob: blob,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: null,
+            ProvenanceStatus: "failed",
+            VerifyProvenanceMode: "warn"));
+
+        Assert.Equal(BlockDecision.Allowed, result.Decision);
+        Assert.NotNull(result.VersionId);
+
+        var packages = new PackageRepository(_db);
+        var version = await packages.GetVersionByIdAsync("o1", result.VersionId!);
+        Assert.Equal("failed", version!.ProvenanceStatus);
+    }
+
+    /// <summary>
+    /// Mixed partial-failure fan-out (house rule): a burst of first-fetches where some versions
+    /// verify, some fail, and some are unsigned, all under verify=block in the same call set. The
+    /// verified versions must record with status 'verified'; the failed/unsigned ones must be
+    /// refused and never recorded — so the catalogue ends up holding exactly the verified subset.
+    /// </summary>
+    [Fact]
+    public async Task RecordAndScanAsync_mixed_provenance_outcomes_blocks_only_unverified()
+    {
+        var svc = Build();
+
+        var coords = new[]
+        {
+            (Name: "good-a", Status: "verified", Signer: (string?)"SHA256:anchor"),
+            (Name: "bad-b", Status: "failed", Signer: (string?)null),
+            (Name: "good-c", Status: "verified", Signer: (string?)"SHA256:anchor"),
+            (Name: "old-d", Status: "unsigned", Signer: (string?)null),
+        };
+
+        var results = new System.Collections.Concurrent.ConcurrentDictionary<string, ProxyFetchResult>();
+        await Parallel.ForEachAsync(coords, async (c, ct) =>
+        {
+            byte[] bytes = System.Text.Encoding.UTF8.GetBytes($"tar-{c.Name}");
+            var blob = await SeedBlobAsync(_blobs, bytes);
+            var result = await svc.RecordAndScanAsync(new ProxyFetchRequest(
+                OrgId: "o1", Ecosystem: "npm",
+                PackageName: c.Name, PurlName: c.Name,
+                Version: "1.0.0", Purl: $"pkg:npm/{c.Name}@1.0.0",
+                File: $"{c.Name}-1.0.0.tgz", Blob: blob,
+                ExtractLicenses: null,
+                UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+                MaxOsvScoreTolerance: 10.0,
+                CacheAccess: null,
+                ProvenanceStatus: c.Status,
+                ProvenanceSigner: c.Signer,
+                VerifyProvenanceMode: "block"), ct);
+            results[c.Name] = result;
+        });
+
+        // Verified versions allowed + recorded; failed/unsigned blocked + not recorded.
+        Assert.Equal(BlockDecision.Allowed, results["good-a"].Decision);
+        Assert.NotNull(results["good-a"].VersionId);
+        Assert.Equal(BlockDecision.Allowed, results["good-c"].Decision);
+        Assert.Equal(BlockDecision.Blocked, results["bad-b"].Decision);
+        Assert.Null(results["bad-b"].VersionId);
+        Assert.Equal(BlockDecision.Blocked, results["old-d"].Decision);
+        Assert.Null(results["old-d"].VersionId);
+
+        await using var conn = await _db.OpenAsync();
+        // Exactly the two verified versions made it into the catalogue.
+        long rowCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions");
+        Assert.Equal(2, rowCount);
+        long verifiedCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_versions WHERE provenance_status = 'verified'");
+        Assert.Equal(2, verifiedCount);
+        // Two block events (one per refused version).
+        long blockCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM activity WHERE event_type = 'blocked_provenance'");
+        Assert.Equal(2, blockCount);
+    }
+
+    /// <summary>
+    /// The cache_artifact.name written by the shared proxy choke point must equal
+    /// request.PurlName (the canonical, normalized form), not whatever raw name the caller
+    /// placed in CacheAccess.Name. The cross-plane version-count and vuln-count joins use
+    /// ca.name = p.purl_name; a divergent case breaks them silently.
+    ///
+    /// Regression test for the shared-path structural guard in
+    /// ProxyFetchService.RecordCacheAccessAsync: even when CacheAccess.Name carries a
+    /// mixed-case raw name (simulating the pre-fix RPM path), the persisted row must carry
+    /// the PurlName value.
+    /// </summary>
+    [Fact]
+    public async Task RecordAndScanAsync_cache_artifact_name_uses_purlname_not_raw_cache_access_name()
+    {
+        // CacheAccess.Name is the mixed-case raw name; PurlName is the canonical form.
+        // Before the structural guard, the raw name was persisted verbatim, breaking the
+        // ca.name = p.purl_name join for packages whose names are not fully lowercased.
+        const string rawName = "perl-AutoLoader";
+        const string purlName = "perl-autoloader";
+
+        var svc = Build();
+
+        byte[] bytes = "rpm-tarball"u8.ToArray();
+        var blob = await SeedBlobAsync(_blobs, bytes);
+        await svc.RecordAndScanAsync(new ProxyFetchRequest(
+            OrgId: "o1", Ecosystem: "rpm",
+            PackageName: rawName, PurlName: purlName,
+            Version: "5.74-502.fc41", Purl: $"pkg:rpm/fedora/perl-autoloader@5.74-502.fc41",
+            File: "perl-AutoLoader-5.74-502.fc41.noarch.rpm", Blob: blob,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: null,
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: new CacheAccess(
+                OrgId: "o1", Ecosystem: "rpm",
+                Name: rawName,  // raw mixed-case, as the pre-fix RPM path passed it
+                Version: "5.74-502.fc41",
+                Filename: "perl-AutoLoader-5.74-502.fc41.noarch.rpm",
+                Sha256: "", SizeBytes: 0, BlobKey: "",
+                UpstreamUrl: "https://dl.fedoraproject.org/perl-AutoLoader-5.74-502.fc41.noarch.rpm")));
+
+        await using var conn = await _db.OpenAsync();
+
+        // The persisted name must be the canonical PurlName, not the raw CacheAccess.Name.
+        // If the structural guard is absent (Change 1 reverted), this returns rawName and the
+        // assertion fails.
+        string? persistedName = await conn.ExecuteScalarAsync<string?>(
+            "SELECT name FROM cache_artifact WHERE ecosystem = 'rpm'");
+        Assert.Equal(purlName, persistedName);
+
+        // Confirm exactly one row was written.
+        long count = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'rpm'");
+        Assert.Equal(1, count);
     }
 
     /// <summary>

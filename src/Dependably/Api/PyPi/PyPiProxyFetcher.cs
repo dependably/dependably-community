@@ -24,6 +24,7 @@ public sealed class PyPiProxyFetcher(
     CacheAccessRecorder cacheRecorder,
     ProxyFetchService proxyFetch,
     UpstreamRegistryResolver registries,
+    Dependably.Protocol.Provenance.PyPiProvenanceVerifier provenance,
     ILogger<PyPiProxyFetcher> logger)
 {
     public async Task<IActionResult?> CheckProxyAllowlistBlocklistAsync(
@@ -73,16 +74,19 @@ public sealed class PyPiProxyFetcher(
             }
 
             // Record into cache_artifact + tenant_artifact_access on every fetch path
-            // (hit and miss). Best-effort — recorder swallows failures.
+            // (hit and miss). Best-effort — recorder swallows failures. The returned id is
+            // threaded into RecordAndScanFirstFetchAsync so the first-fetch pipeline routes
+            // to the global plane (no package_versions INSERT) matching all other ecosystems.
             string purlName = pkgVersions?.Package.PurlName ?? parsed.PurlName;
             string version = pkgVersions?.Version.Version ?? parsed.Version;
-            await cacheRecorder.RecordAccessAsync(new CacheAccess(
+            string? cacheArtifactId = await cacheRecorder.RecordAccessAsync(new CacheAccess(
                 gate.OrgId, "pypi", purlName, version, file,
                 fetched.Blob.Sha256Hex, fetched.Blob.SizeBytes, fetched.Blob.BlobKey, upstreamUrl), ct);
 
             if (!fetched.IsHit && pkgVersions is null)
             {
-                var firstFetchBlock = await RecordAndScanFirstFetchAsync(file, parsed, fetched.Blob, upstreamSha256, gate, ct);
+                var firstFetchBlock = await RecordAndScanFirstFetchAsync(
+                    file, parsed, fetched.Blob, upstreamSha256, gate, cacheArtifactId, ct);
                 if (firstFetchBlock is not null)
                 {
                     return firstFetchBlock;
@@ -239,7 +243,7 @@ public sealed class PyPiProxyFetcher(
     // 64-char lowercase hex; Serilog uses RenderedCompactJsonFormatter (CRLF-safe).
     private async Task<IActionResult?> RecordAndScanFirstFetchAsync(
         string file, PyPiFilename parsed, BlobHandle blob, string? upstreamSha256,
-        ProxyContext gate, CancellationToken ct)
+        ProxyContext gate, string? cacheArtifactId, CancellationToken ct)
     {
         string purl = PurlNormalizer.PyPi(parsed.PurlName, parsed.Version);
         // Use the highest-priority configured upstream for the supplementary JSON metadata fetch.
@@ -254,6 +258,12 @@ public sealed class PyPiProxyFetcher(
         string? integrityValue = upstreamSha256 ?? jsonMeta.Sha256Hex;
         string? integrityAlgo = integrityValue is not null ? "sha256" : null;
 
+        // PEP 740 attestation verification for proxy-origin files when the tenant enabled it. The
+        // verifier binds the attestation's in-toto subject digest to the SHA-256 dependably just
+        // computed (blob.Sha256Hex), so a mismatched attestation fails closed. Off-policy or an
+        // unconfigured verifier short-circuits to NotApplicable (NULL status, never blocks).
+        var prov = await ResolveProvenanceAsync(file, blob.Sha256Hex, jsonMeta, gate, ct);
+
         // deepcode ignore LogForging: file is a PyPI filename parsed and validated by PyPiFilename.TryParse before this method is called; Serilog structured rendering prevents log injection.
         var result = await proxyFetch.RecordAndScanAsync(new ProxyFetchRequest(
             OrgId: gate.OrgId, Ecosystem: "pypi",
@@ -265,9 +275,11 @@ public sealed class PyPiProxyFetcher(
             SourceIp: gate.SourceIp,
             MaxOsvScoreTolerance: gate.Settings.MaxOsvScoreTolerance,
             MinReleaseAgeHours: gate.Settings.MinReleaseAgeHours,
-            // PyPI records cache_access separately in FetchAndCacheUpstreamAsync (covers
-            // both hit and miss paths); skip here to avoid the double-write.
+            // PyPI records cache-access once in FetchAndCacheUpstreamAsync (covering both hit
+            // and miss paths). Pass the already-obtained id so the pipeline routes to the global
+            // plane without a second cache_artifact write.
             CacheAccess: null,
+            PreRecordedCacheArtifactId: cacheArtifactId,
             PublishedAt: jsonMeta.PublishedAt,
             UpstreamIntegrityValue: integrityValue,
             UpstreamIntegrityAlgorithm: integrityAlgo,
@@ -275,8 +287,57 @@ public sealed class PyPiProxyFetcher(
             BlockDeprecatedMode: gate.Settings.BlockDeprecated,
             BlockMaliciousMode: gate.Settings.BlockMalicious,
             BlockKevMode: gate.Settings.BlockKev,
-            MaxEpssTolerance: gate.Settings.MaxEpssTolerance), ct);
+            MaxEpssTolerance: gate.Settings.MaxEpssTolerance,
+            BlockInstallScriptsMode: gate.Settings.BlockInstallScripts,
+            ProvenanceStatus: Dependably.Protocol.Provenance.ProvenanceStatuses.ToColumn(prov.Status),
+            ProvenanceSigner: prov.Signer,
+            VerifyProvenanceMode: gate.Settings.VerifyPyPiAttestations), ct);
         return result.Decision == BlockDecision.Blocked ? new StatusCodeResult(StatusCodes.Status403Forbidden) : null;
+    }
+
+    // Runs PEP 740 attestation verification for a proxy-origin PyPI file when the tenant enabled it
+    // and the verifier is configured (pinned Sigstore roots + Trusted Publishers). Fetches the file's
+    // provenance document from the URL the JSON API surfaced; an off policy, an unconfigured verifier,
+    // or a missing provenance URL short-circuits to NotApplicable / Unsigned without throwing. The
+    // verifier never throws — a malformed bundle maps to Failed so the gate can fail closed.
+    private async Task<Dependably.Protocol.Provenance.ProvenanceResult> ResolveProvenanceAsync(
+        string file, string fileSha256Hex, PyPiJsonMetadata jsonMeta, ProxyContext gate, CancellationToken ct)
+    {
+        if (gate.Settings.VerifyPyPiAttestations == "off" || !provenance.IsConfigured)
+        {
+            return Dependably.Protocol.Provenance.ProvenanceResult.NotApplicable;
+        }
+
+        string? provenanceJson = await TryFetchProvenanceDocumentAsync(jsonMeta.ProvenanceUrl, ct);
+        return provenance.VerifyAttestation(file, fileSha256Hex, provenanceJson);
+    }
+
+    // Fetches the PEP 740 provenance document from the upstream-supplied URL. Routed through the
+    // single-flighted metadata fetch so a stampede doesn't hammer the provenance endpoint. Returns
+    // null (→ Unsigned) when no URL was published or the fetch fails — fail-soft, like the JSON
+    // metadata fetch; the verifier maps a null document to Unsigned, which the block gate refuses
+    // under a 'block' policy.
+    private async Task<string?> TryFetchProvenanceDocumentAsync(string? provenanceUrl, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(provenanceUrl))
+        {
+            return null;
+        }
+
+        try
+        {
+            var resp = await upstream.GetOrFetchMetadataAsync(provenanceUrl, ct);
+            return resp.IsSuccessStatusCode ? resp.BodyAsString() : null;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
+        {
+            logger.LogWarning(
+                ex,
+                "PyPI provenance-document fetch failed: {ExceptionType} trace={TraceId}",
+                ex.GetType().Name,
+                System.Diagnostics.Activity.Current?.TraceId.ToString());
+            return null;
+        }
     }
 
     /// <summary>

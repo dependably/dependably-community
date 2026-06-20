@@ -772,9 +772,10 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
                          strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                     """,
                     new { vulnId, malId, name });
+                string pvvId = Guid.NewGuid().ToString("N");
                 await conn.ExecuteAsync(
-                    "INSERT INTO package_version_vulns (package_version_id, vuln_id) VALUES (@versionId, @vulnId)",
-                    new { versionId, vulnId });
+                    "INSERT INTO package_version_vulns (id, package_version_id, vuln_id, owner_kind) VALUES (@pvvId, @versionId, @vulnId, 'package_version')",
+                    new { pvvId, versionId, vulnId });
                 await conn.ExecuteAsync(
                     "UPDATE package_versions SET vuln_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = @versionId",
                     new { versionId });

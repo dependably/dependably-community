@@ -2,6 +2,7 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -154,58 +155,37 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal("off", settings!.LicenseEnforcementMode);
     }
 
-    [Fact]
-    public async Task UpsertSettingsAsync_ClampsOrgLimitToInstanceLimit()
-    {
-        var orgId = await _repo.CreateOrgAsync($"o-{Guid.NewGuid():N}");
-        await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
-            OrgId: orgId.Id,
-            AnonymousPull: true, AllowlistMode: false,
-            MaxUploadBytes: 1_000_000_000L,
-            MaxUploadBytesPyPi: null, MaxUploadBytesNpm: null, MaxUploadBytesNuGet: null,
-            InstanceMaxUploadBytes: 500_000_000L,
-            DefaultLanguage: null));
-
-        var settings = (await _repo.GetSettingsAsync(orgId.Id))!;
-        Assert.Equal(500_000_000L, settings.MaxUploadBytes);
-        Assert.True(settings.AnonymousPull);
-    }
+    // ── Shared SELECT projection — both GetSettingsAsync paths agree ──────────
 
     [Fact]
-    public async Task UpsertSettingsAsync_AllowVersionOverwriteNull_PreservesPriorValue()
+    public async Task GetSettingsAsync_CachedAndUncachedPaths_ReturnSameProjection_IncludingAirGapped()
     {
-        // Tristate behaviour: null AllowVersionOverwrite means "don't touch".
-        var org = await _repo.CreateOrgAsync($"o-{Guid.NewGuid():N}");
+        // Regression: OrgRepository and OrgSettingsRepository share OrgRepository.OrgSettingsSelect.
+        // Both must map air_gapped (and all other columns) identically. Verifies the shared const
+        // covers the full column list including fields that were absent from the now-deleted
+        // OrgRepository.UpsertSettingsAsync (which silently dropped air_gapped).
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"parity-{Guid.NewGuid():N}");
 
-        await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
-            org.Id, AnonymousPull: false, AllowlistMode: false,
-            null, null, null, null, null, DefaultLanguage: null,
-            AllowVersionOverwrite: true));
-        Assert.True((await _repo.GetSettingsAsync(org.Id))!.AllowVersionOverwrite);
+        var settingsRepo = new OrgSettingsRepository(_fixture.Store, _repo);
+        await settingsRepo.UpsertSettingsAsync(new OrgSettingsUpdate(
+            orgId, AnonymousPull: true, AllowlistMode: false,
+            MaxUploadBytes: 42L, null, null, null, null, DefaultLanguage: "de",
+            AirGapped: true));
 
-        await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
-            org.Id, AnonymousPull: true, AllowlistMode: false,
-            null, null, null, null, null, DefaultLanguage: null,
-            AllowVersionOverwrite: null));    // explicit null → preserve
-        Assert.True((await _repo.GetSettingsAsync(org.Id))!.AllowVersionOverwrite);
-    }
+        // Uncached path (OrgSettingsRepository) — bypasses OrgRepository's memory cache.
+        var uncached = (await settingsRepo.GetSettingsAsync(orgId))!;
 
-    [Fact]
-    public async Task UpsertSettingsAsync_NonEmptyDefaultLanguage_PersistsValue()
-    {
-        // Covers the false branch of `string.IsNullOrWhiteSpace(update.DefaultLanguage)`
-        // in UpsertSettingsAsync — when a real language code is supplied, it must persist
-        // rather than fall back to the COALESCE default.
-        var org = await _repo.CreateOrgAsync($"o-{Guid.NewGuid():N}");
-        await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
-            org.Id, AnonymousPull: false, AllowlistMode: false,
-            MaxUploadBytes: null, MaxUploadBytesPyPi: null,
-            MaxUploadBytesNpm: null, MaxUploadBytesNuGet: null,
-            InstanceMaxUploadBytes: null,
-            DefaultLanguage: "fr"));
+        // Cached path (OrgRepository) — goes through the IMemoryCache layer.
+        var cached = (await _repo.GetSettingsAsync(orgId))!;
 
-        var settings = (await _repo.GetSettingsAsync(org.Id))!;
-        Assert.Equal("fr", settings.DefaultLanguage);
+        Assert.Equal(uncached.AirGapped, cached.AirGapped);
+        Assert.True(cached.AirGapped);
+        Assert.Equal(uncached.MaxUploadBytes, cached.MaxUploadBytes);
+        Assert.Equal(42L, cached.MaxUploadBytes);
+        Assert.Equal(uncached.DefaultLanguage, cached.DefaultLanguage);
+        Assert.Equal("de", cached.DefaultLanguage);
+        Assert.Equal(uncached.AnonymousPull, cached.AnonymousPull);
+        Assert.True(cached.AnonymousPull);
     }
 
     [Fact]
@@ -242,6 +222,20 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
     }
 
     // ── User management projections ──────────────────────────────────────────
+
+    // Helpers shared by the account-status / session-revocation tests.
+    private OrgRepository RepoWithVersionStore(UserTokenVersionStore store) =>
+        new(_fixture.Store, time: TestTime.Frozen(), tokenVersions: store);
+
+    private static UserTokenVersionStore MakeVersionStore(IMetadataStore db) =>
+        new(db, new MemoryCache(new MemoryCacheOptions()));
+
+    private async Task<long> ReadTokenVersionAsync(string userId)
+    {
+        await using var conn = await _fixture.Store.OpenAsync();
+        return await conn.ExecuteScalarAsync<long>(
+            "SELECT token_version FROM users WHERE id = @id", new { id = userId });
+    }
 
     [Fact]
     public async Task SetUserAccountStatusAsync_CaseInsensitive_AndRejectsUnknownStatus()
@@ -383,5 +377,127 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         // Touch the unused locals so the seeds are kept "live" for the assertion narrative.
         Assert.NotNull(activeId);
         Assert.NotNull(aliceId);
+    }
+
+    // ── Session revocation on account-status change ──────────────────────────────────────
+
+    [Fact]
+    public async Task SetUserAccountStatusAsync_Lock_BumpsTokenVersion()
+    {
+        // Regression: locking an account must bump token_version so outstanding session JWTs
+        // are rejected by OnTokenValidated on the next request.
+        var store = MakeVersionStore(_fixture.Store);
+        var repo = RepoWithVersionStore(store);
+
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"sv-lock-{Guid.NewGuid():N}");
+        string slug = (await repo.GetByIdAsync(orgId))!.Slug;
+        string email = $"u-{Guid.NewGuid():N}@x.test";
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId, email);
+
+        long versionBefore = await ReadTokenVersionAsync(userId);
+        bool ok = await repo.SetUserAccountStatusAsync(email, slug, "locked");
+
+        Assert.True(ok);
+        long versionAfter = await ReadTokenVersionAsync(userId);
+        Assert.Equal(versionBefore + 1, versionAfter);
+    }
+
+    [Fact]
+    public async Task SetUserAccountStatusAsync_Disable_BumpsTokenVersion()
+    {
+        var store = MakeVersionStore(_fixture.Store);
+        var repo = RepoWithVersionStore(store);
+
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"sv-dis-{Guid.NewGuid():N}");
+        string slug = (await repo.GetByIdAsync(orgId))!.Slug;
+        string email = $"u-{Guid.NewGuid():N}@x.test";
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId, email);
+
+        long versionBefore = await ReadTokenVersionAsync(userId);
+        bool ok = await repo.SetUserAccountStatusAsync(email, slug, "disabled");
+
+        Assert.True(ok);
+        long versionAfter = await ReadTokenVersionAsync(userId);
+        Assert.Equal(versionBefore + 1, versionAfter);
+    }
+
+    [Fact]
+    public async Task SetUserAccountStatusAsync_Activate_DoesNotBumpTokenVersion()
+    {
+        // Re-enabling a locked account must not bump token_version — the user has no live
+        // sessions while locked, and bumping on re-activation would stale a session that
+        // was legitimately re-issued after the lock was lifted.
+        var store = MakeVersionStore(_fixture.Store);
+        var repo = RepoWithVersionStore(store);
+
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"sv-act-{Guid.NewGuid():N}");
+        string slug = (await repo.GetByIdAsync(orgId))!.Slug;
+        string email = $"u-{Guid.NewGuid():N}@x.test";
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId, email, accountStatus: "locked");
+
+        long versionBefore = await ReadTokenVersionAsync(userId);
+        bool ok = await repo.SetUserAccountStatusAsync(email, slug, "active");
+
+        Assert.True(ok);
+        long versionAfter = await ReadTokenVersionAsync(userId);
+        Assert.Equal(versionBefore, versionAfter);
+    }
+
+    [Fact]
+    public async Task SetUserAccountStatusAsync_Lock_EvictsTokenVersionCache()
+    {
+        // Regression: bumping token_version without evicting the cache leaves a stale
+        // cached version; OnTokenValidated reads the cached value and passes the now-
+        // invalid session for up to the 60s cache TTL.
+        using var memCache = new MemoryCache(new MemoryCacheOptions());
+        var store = new UserTokenVersionStore(_fixture.Store, memCache);
+        var repo = RepoWithVersionStore(store);
+
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"sv-ev-{Guid.NewGuid():N}");
+        string slug = (await repo.GetByIdAsync(orgId))!.Slug;
+        string email = $"u-{Guid.NewGuid():N}@x.test";
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId, email);
+
+        // Prime the cache with the current (pre-lock) version.
+        long versionBefore = (await store.GetCurrentVersionAsync(userId))!.Value;
+
+        // Lock evicts the cache entry so the next read hits the DB.
+        await repo.SetUserAccountStatusAsync(email, slug, "locked");
+
+        // The cache entry for this user must be gone — GetCurrentVersionAsync re-reads the DB
+        // and returns the bumped version rather than the stale cached one.
+        long versionAfterLock = (await store.GetCurrentVersionAsync(userId))!.Value;
+        Assert.Equal(versionBefore + 1, versionAfterLock);
+    }
+
+    [Fact]
+    public async Task SetUserAccountStatusAsync_MixedOutcomes_BumpsOnlyMatchedUser()
+    {
+        // Partial-failure scenario: two users, one lock request per user. The matched
+        // user's token_version is bumped; the non-existent user's attempt returns false
+        // and the matched user's version is unaffected by the failed call.
+        var store = MakeVersionStore(_fixture.Store);
+        var repo = RepoWithVersionStore(store);
+
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"sv-mix-{Guid.NewGuid():N}");
+        string slug = (await repo.GetByIdAsync(orgId))!.Slug;
+        string emailA = $"u-a-{Guid.NewGuid():N}@x.test";
+        string emailB = $"u-b-{Guid.NewGuid():N}@x.test";
+
+        string userAId = await UserSeeder.InsertAsync(_fixture.Store, orgId, emailA);
+        string userBId = await UserSeeder.InsertAsync(_fixture.Store, orgId, emailB);
+
+        long versionA0 = await ReadTokenVersionAsync(userAId);
+        long versionB0 = await ReadTokenVersionAsync(userBId);
+
+        // Locking user A succeeds; user A's version bumps, user B's does not.
+        bool lockA = await repo.SetUserAccountStatusAsync(emailA, slug, "locked");
+        // Locking a ghost email fails (returns false) without touching any user row.
+        bool lockGhost = await repo.SetUserAccountStatusAsync("ghost@nowhere.test", slug, "locked");
+
+        Assert.True(lockA);
+        Assert.False(lockGhost);
+        Assert.Equal(versionA0 + 1, await ReadTokenVersionAsync(userAId));
+        Assert.Equal(versionB0, await ReadTokenVersionAsync(userBId));
     }
 }

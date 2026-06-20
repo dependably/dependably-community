@@ -17,6 +17,7 @@ namespace Dependably.Api.PyPiProtocol;
 public sealed class PyPiSimpleIndexHandler(
     OrgRepository orgs,
     PackageRepository packages,
+    CacheArtifactRepository cacheArtifacts,
     TokenRepository tokens,
     VulnerabilityRepository vulns,
     UpstreamClient upstream,
@@ -137,9 +138,9 @@ public sealed class PyPiSimpleIndexHandler(
                 ?? (IActionResult)new FileContentResult(localHit, "text/html; charset=utf-8");
         }
 
-        var versions = await packages.GetVersionsAsync(pkg.Id, ct);
-        var signals = await LoadVulnSignalsAsync(versions, ct);
-        string localHtml = PyPiSimpleIndexHelper.RenderLocalSimpleIndex(pkg.PurlName, versions, settings, signals, time.GetUtcNow());
+        var allVersions = await LoadCombinedVersionsAsync(orgId, pkg.Id, "pypi", purlName, ct);
+        var signals = await LoadVulnSignalsAsync(allVersions, ct);
+        string localHtml = PyPiSimpleIndexHelper.RenderLocalSimpleIndex(pkg.PurlName, allVersions, settings, signals, time.GetUtcNow());
         byte[] localBytes = Encoding.UTF8.GetBytes(localHtml);
         cache.Set(localCacheKey, localBytes, PyPiConstants.SimpleIndexLocalTtl);
         return ServeNotModifiedOrSetCacheHeaders(httpContext, localBytes, "private, max-age=300")
@@ -156,10 +157,12 @@ public sealed class PyPiSimpleIndexHandler(
             return new UnauthorizedResult();
         }
 
-        // Collect local versions up-front so a missing upstream still serves what we have.
+        // Collect local versions up-front (uploaded + globally-cached proxy) so a missing
+        // upstream still serves what we have cached, and locally-cached proxy versions
+        // appear in the index with correct block-gate state.
         var localVersions = localPkg is null
             ? Array.Empty<PackageVersion>() as IReadOnlyList<PackageVersion>
-            : await packages.GetVersionsAsync(localPkg.Id, ct);
+            : await LoadCombinedVersionsAsync(orgId, localPkg.Id, "pypi", purlName, ct);
 
         // Walk the org's configured upstreams in priority order; the first that answers wins.
         // No configured upstream ⇒ proxying is disabled for this ecosystem, so fall through to
@@ -230,11 +233,88 @@ public sealed class PyPiSimpleIndexHandler(
         return null;
     }
 
-    // Loads vuln gate signals for a version list in one batch query. Returns an empty dict when
-    // all versions lack advisory links. Callers pass the result into BlockGateService.IsHardBlockedByStoredState.
-    private Task<IReadOnlyDictionary<string, VulnGateSignals>> LoadVulnSignalsAsync(
-        IReadOnlyList<PackageVersion> versions, CancellationToken ct) =>
-        versions.Count == 0
-            ? Task.FromResult<IReadOnlyDictionary<string, VulnGateSignals>>(new Dictionary<string, VulnGateSignals>())
-            : vulns.GetGateSignalsBatchAsync(versions.Select(v => v.Id).ToList(), ct);
+    // Loads vuln gate signals for a combined (uploaded + proxy synthetic) version list.
+    // Uploaded versions key on package_version_id; synthetic proxy versions key on
+    // cache_artifact_id (stored in PackageVersion.Id via ToPackageVersionSynthetic).
+    // The two signal dictionaries are merged so block-gate filtering works uniformly for
+    // both origin types.
+    private async Task<IReadOnlyDictionary<string, VulnGateSignals>> LoadVulnSignalsAsync(
+        IReadOnlyList<PackageVersion> versions, CancellationToken ct)
+    {
+        if (versions.Count == 0)
+        {
+            return new Dictionary<string, VulnGateSignals>();
+        }
+
+        var uploadedIds = versions.Where(v => v.Origin == "uploaded").Select(v => v.Id).ToList();
+        var proxyIds = versions.Where(v => v.Origin == "proxy").Select(v => v.Id).ToList();
+
+        var uploadedSignals = uploadedIds.Count > 0
+            ? await vulns.GetGateSignalsBatchAsync(uploadedIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+        var proxySignals = proxyIds.Count > 0
+            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        if (uploadedSignals.Count == 0)
+        {
+            return proxySignals;
+        }
+
+        if (proxySignals.Count == 0)
+        {
+            return uploadedSignals;
+        }
+
+        var merged = new Dictionary<string, VulnGateSignals>(uploadedSignals);
+        foreach (var (k, v) in proxySignals)
+        {
+            merged[k] = v;
+        }
+
+        return merged;
+    }
+
+    // Returns the combined list of uploaded package_versions and synthetic PackageVersion
+    // objects projected from global-plane proxy cache entries for the given package. Used by
+    // both the local-only and proxy-passthrough renderers so proxy-cached versions appear in
+    // the index even when no package_versions row exists for them.
+    private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
+        string orgId, string packageId, string ecosystem, string purlName, CancellationToken ct)
+    {
+        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
+        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, purlName, ct);
+
+        if (proxyEntries.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        // Deduplicate: skip proxy entries whose version already appears in uploaded versions
+        // so a name that was cached before upload does not double-list that version.
+        var uploadedVersionSet = uploadedVersions
+            .Select(v => v.Version)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Load proxy signals once to populate IsMalicious on the synthetic PackageVersion.
+        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
+        var proxySignals = proxyIds.Count > 0
+            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        var synthetic = proxyEntries
+            .Where(e => !uploadedVersionSet.Contains(e.Version))
+            .Select(e => e.ToPackageVersionSynthetic(proxySignals))
+            .ToList();
+
+        if (synthetic.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
+        combined.AddRange(uploadedVersions);
+        combined.AddRange(synthetic);
+        return combined;
+    }
 }

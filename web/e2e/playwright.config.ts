@@ -85,6 +85,7 @@ export default defineConfig({
       FIRST_BOOT_ADMIN_PASSWORD: 'E2eTestPassword123!',
       LOGIN_RATE_LIMIT_PERMITS: '100',
       TOKEN_CREATE_RATE_LIMIT_PERMITS: '1000',
+      DISABLE_BACKGROUND_JOBS: 'vuln-scan,vuln-rescan,deprecation-refresh,threat-feed',
     },
   } : undefined,
   globalSetup: './global-setup.ts',

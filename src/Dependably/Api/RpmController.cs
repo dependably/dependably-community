@@ -105,10 +105,15 @@ public sealed class RpmController : OrgScopedControllerBase
         string sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         string blobKey = BlobKeys.Hosted(orgId, "rpm", purlName, version, filename);
 
+        // Install/lifecycle-script detection on the in-memory bytes. Best-effort: the artifact
+        // already passed validation, so a parse failure here must not fail the upload.
+        var scriptResult = ScriptDetectionService.Detect("rpm", filename, bytes);
+
         await _svc.BlobStore.Registry.PutAsync(blobKey, new MemoryStream(bytes), ct);
 
         var pkg = await _svc.Packages.GetOrCreateAsync(orgId, "rpm", header.Name, purlName, isProxy: false, ct);
-        await PersistRpmVersionAsync(new RpmVersionArgs(orgId, pkg, version, purl, blobKey, filename, bytes.Length, sha256, header), ct);
+        await PersistRpmVersionAsync(new RpmVersionArgs(orgId, pkg, version, purl, blobKey, filename, bytes.Length, sha256, header,
+            HasInstallScript: scriptResult.HasScript, InstallScriptKind: scriptResult.Kind), ct);
 
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "push",
             actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
@@ -121,7 +126,8 @@ public sealed class RpmController : OrgScopedControllerBase
     // PersistRpmVersionAsync within the parameter-count threshold (S107).
     private sealed record RpmVersionArgs(
         string OrgId, Package Pkg, string Version, string Purl,
-        string BlobKey, string Filename, int SizeBytes, string Sha256, RpmHeaderInfo Header);
+        string BlobKey, string Filename, int SizeBytes, string Sha256, RpmHeaderInfo Header,
+        bool HasInstallScript, string? InstallScriptKind);
 
     // Upserts the package_versions and rpm_metadata rows for a newly published RPM, marks
     // the per-arch repodata dirty, and evicts both the merged and local repodata caches.
@@ -160,30 +166,36 @@ public sealed class RpmController : OrgScopedControllerBase
         await UpsertRpmMetadataAsync(conn, versionId, a.Header);
         await MarkRepodataDirtyAsync(conn, a.OrgId, a.Header.Arch);
         EvictRepodataCaches(a.OrgId);
+
+        // Persist the install-script signal whether or not the version row is new — a
+        // republished, now-script-free artefact must clear any stale flag from a prior upload.
+        await _svc.Packages.UpdateInstallScriptAsync(versionId, a.HasInstallScript, a.InstallScriptKind, ct);
     }
 
-    // Upserts the rpm_metadata row for a package version.
-    // xtenant: PK on package_version_id which is already bound to the tenant.
+    // Upserts the rpm_metadata row for a package version (owner_kind='package_version' arm).
+    // xtenant: package_version_id is already bound to the tenant.
     private static async Task UpsertRpmMetadataAsync(
         System.Data.IDbConnection conn, string versionId, RpmHeaderInfo header)
     {
         await conn.ExecuteAsync(
             """
             INSERT INTO rpm_metadata
-                (package_version_id, rpm_name, epoch, rpm_version, rpm_release, arch,
+                (id, package_version_id, owner_kind,
+                 rpm_name, epoch, rpm_version, rpm_release, arch,
                  summary, description, build_host, build_time, packager, vendor,
                  rpm_group, source_rpm, url, installed_size, archive_size,
                  header_start, header_end,
                  requires_json, provides_json, conflicts_json, obsoletes_json,
                  files_json, changelogs_json, rpm_license)
             VALUES
-                (@pvId, @name, @epoch, @ver, @rel, @arch,
+                (lower(hex(randomblob(16))), @pvId, 'package_version',
+                 @name, @epoch, @ver, @rel, @arch,
                  @summary, @description, @buildHost, @buildTime, @packager, @vendor,
                  @rpmGroup, @sourceRpm, @url, @installedSize, @archiveSize,
                  @headerStart, @headerEnd,
                  @requires, @provides, @conflicts, @obsoletes,
                  @files, @changelogs, @license)
-            ON CONFLICT(package_version_id) DO UPDATE SET
+            ON CONFLICT(package_version_id) WHERE owner_kind = 'package_version' DO UPDATE SET
                 rpm_name = excluded.rpm_name,
                 epoch = excluded.epoch,
                 rpm_version = excluded.rpm_version,
@@ -275,11 +287,26 @@ public sealed class RpmController : OrgScopedControllerBase
             return Unauthorized();
         }
 
-        var versionMatch = await _svc.Packages.FindVersionByBlobKeySuffixAsync(orgId, "rpm", file, ct);
+        // Uploaded RPMs are served from the package_versions path.
+        var versionMatch = await _svc.Packages.FindVersionByBlobKeySuffixAsync(orgId, "rpm", file, ct, uploadedOnly: true);
 
         if (versionMatch is not null)
         {
             return await ServePackageFromCacheAsync(orgId, file, versionMatch.Value, token, ct);
+        }
+
+        // Global-plane lookup for proxy RPMs stored in cache_artifact.
+        // Parse the NEVRA filename to extract the name and version for the coordinate lookup.
+        // Name is lowercased to match the normalized value stored in cache_artifact.name.
+        var nevra = ParseNevra(file);
+        if (nevra is not null)
+        {
+            var globalCa = await _svc.CacheArtifacts.GetServeFactsByCoordinateAsync(
+                orgId, "rpm", nevra.Value.Name.ToLowerInvariant(), $"{nevra.Value.Version}-{nevra.Value.Release}", file, ct);
+            if (globalCa is not null)
+            {
+                return await ServeGlobalPlaneRpmAsync(orgId, file, globalCa, token, ct);
+            }
         }
 
         // Cache MISS — attempt upstream proxy if configured.
@@ -295,7 +322,7 @@ public sealed class RpmController : OrgScopedControllerBase
 
         // Per-org upstream: top-priority configured rpm registry. Empty ⇒ proxying disabled.
         var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
-        return bases.Count == 0 ? NotFound() : await ProxyDownloadAsync(orgId, bases[0], file, token, ct);
+        return bases.Count == 0 ? NotFound() : await ProxyDownloadAsync(orgId, bases[0], file, token, settings, ct);
     }
 
     private async Task<IActionResult> ServePackageFromCacheAsync(
@@ -325,8 +352,40 @@ public sealed class RpmController : OrgScopedControllerBase
         return File(stream, "application/x-rpm", file);
     }
 
+    // Serves a proxy RPM that was recorded in the global plane (cache_artifact) after the P3b flip.
+    // The per-tenant download count is bumped via tenant_artifact_access (UpsertStateAsync).
+    private async Task<IActionResult> ServeGlobalPlaneRpmAsync(
+        string orgId, string file, CacheArtifactServeFacts caFacts, TokenRecord? token, CancellationToken ct)
+    {
+        // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey routes to cache tier.
+        var stream = await _svc.BlobStore.Cache.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
+        if (stream is null)
+        {
+            return NotFound();
+        }
+
+        Response.Headers["X-Cache"] = "HIT";
+        if (!string.IsNullOrEmpty(caFacts.ContentHash))
+        {
+            Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
+            Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+        }
+
+        string purl = caFacts.Purl ?? string.Empty;
+        await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "download",
+            token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        // Increment per-tenant download count on the global plane.
+        await _svc.TenantAccess.UpsertStateAsync(orgId, caFacts.Id, _svc.Time.GetUtcNow(), ct);
+        return File(stream, "application/x-rpm", file);
+    }
+
+    // Size cap for RPM signature verification: generous (the blob is already staged and
+    // bounded by the upstream size limit), but avoids a second unbounded allocation.
+    private const long RpmSignatureVerifyCapBytes = 256L * 1024 * 1024;
+
     private async Task<IActionResult> ProxyDownloadAsync(
-        string orgId, string upstreamBase, string file, TokenRecord? token, CancellationToken ct)
+        string orgId, string upstreamBase, string file, TokenRecord? token,
+        OrgSettings? settings, CancellationToken ct)
     {
         // 1. Negative cache
         if (await _svc.Proxy!.IsNegativelyCachedAsync(file, ct))
@@ -369,18 +428,45 @@ public sealed class RpmController : OrgScopedControllerBase
             return StatusCode(StatusCodes.Status502BadGateway, "Upstream checksum mismatch; package not served.");
         }
 
-        // 5. Persist DB row (package_versions + rpm_metadata) on first fetch
+        // 5. Verify per-package RPM signature against the operator-pinned Rpm:GpgKey when the
+        // tenant has verification enabled. The blob was already staged by GetOrFetchStreamAsync
+        // above, so we open a fresh stream from the cache tier rather than buffering twice.
+        // NotApplicable (off/not-configured) leaves the status NULL (never blocks).
+        Dependably.Protocol.Provenance.ProvenanceResult provResult;
+        if (settings?.VerifyRpmSignatures != "off" && _svc.RpmProvenance.IsConfigured)
+        {
+            var blobStream = await _svc.BlobStore.Cache.GetAsync(blobStoreKey, ct);
+            if (blobStream is not null)
+            {
+                await using (blobStream.ConfigureAwait(false))
+                {
+                    provResult = await _svc.RpmProvenance.VerifyPackageAsync(
+                        blobStream, RpmSignatureVerifyCapBytes, ct);
+                }
+            }
+            else
+            {
+                provResult = Dependably.Protocol.Provenance.ProvenanceResult.Failed;
+            }
+        }
+        else
+        {
+            provResult = Dependably.Protocol.Provenance.ProvenanceResult.NotApplicable;
+        }
+
+        // 6. Persist DB row (cache_artifact + rpm_metadata) on first fetch
         string dbBlobKey = $"proxy/{resolution.Sha256}/{file}"; // StoreKey strips the filename suffix
         // Use Content-Length if the stream knows it; otherwise fall back to 0 (updated async).
         int contentLength = body.CanSeek ? (int)body.Length : 0;
         await CacheProxyPackageAsync(
-            new ProxyCachePackage(orgId, file, resolution, nevra.Value, ver, purl, dbBlobKey, contentLength),
+            new ProxyCachePackage(orgId, file, resolution, nevra.Value, ver, purl, dbBlobKey, contentLength,
+                provResult),
             ct);
 
         Response.Headers["X-Cache"] = isHit ? "HIT" : "MISS";
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "download",
             token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-        await _svc.Packages.IncrementDownloadCountByPurlAsync(purl, ct);
+        await _svc.Packages.IncrementDownloadCountByPurlAsync(orgId, purl, ct);
         return File(body, "application/x-rpm", file);
     }
 
@@ -922,65 +1008,99 @@ public sealed class RpmController : OrgScopedControllerBase
         .GetRequiredService<ILogger<RpmController>>();
 
     /// <summary>
-    /// Inserts <c>package_versions</c> + <c>rpm_metadata</c> rows for a proxied RPM.
-    /// Idempotent — skips silently if the row already exists (concurrent-fetch race).
+    /// Records a proxy RPM first-fetch into the global cache plane. The per-tenant
+    /// <c>packages</c> row is created for discoverability; the per-version data lives in
+    /// <c>cache_artifact</c> + <c>tenant_artifact_access</c>. No <c>package_versions</c> row
+    /// is inserted for proxy artifacts — the global plane is authoritative for proxy versions.
+    /// RPM header metadata (from <c>primary.xml</c>) is written to <c>rpm_metadata</c> keyed
+    /// by <c>cache_artifact_id</c> so repodata builders can include it without a PV row.
     /// </summary>
     private async Task CacheProxyPackageAsync(ProxyCachePackage p, CancellationToken ct)
     {
-        var pkg = await _svc.Packages.GetOrCreateAsync(
+        // Ensure per-tenant packages row so the RPM appears in this org's listings.
+        await _svc.Packages.GetOrCreateAsync(
             p.OrgId, "rpm", p.Resolution.Name, p.Resolution.Name.ToLowerInvariant(), isProxy: true, ct);
 
-        await using var conn = await _svc.Db.OpenAsync(ct);
-        string? existing = await conn.ExecuteScalarAsync<string?>(
-            "SELECT id FROM package_versions WHERE package_id = @pkgId AND version = @ver",
-            new { pkgId = pkg.Id, ver = p.Ver });
+        // Record the fetch into the global cache plane. Best-effort — swallowed by the recorder.
+        // name is lowercased so ca.name = p.purl_name joins hold for mixed-case RPM names
+        // (e.g. 'perl-AutoLoader' normalizes to 'perl-autoloader', matching packages.purl_name).
+        string? cacheArtifactId = await _svc.CacheRecorder.RecordAccessAsync(
+            new CacheAccess(p.OrgId, "rpm", p.Resolution.Name.ToLowerInvariant(), p.Ver, p.Filename,
+                p.Resolution.Sha256, p.SizeBytes, BlobKeys.Proxy(p.Resolution.Sha256),
+                p.Resolution.PackageUrl), ct);
 
-        if (existing is not null)
+        if (cacheArtifactId is not null)
         {
-            return;
+            await _svc.TenantAccess.UpsertStateAsync(p.OrgId, cacheArtifactId, _svc.Time.GetUtcNow(), ct);
+
+            // Install/lifecycle-script detection on the freshly-cached blob. Best-effort:
+            // the artifact already streamed to the client, so any read or parse failure
+            // leaves has_install_script at its 0 default without affecting the response.
+            bool hasScript = false;
+            string? scriptKind = null;
+            try
+            {
+                await using var blobStream = await _svc.BlobStore.Cache.GetAsync(
+                    BlobKeys.Proxy(p.Resolution.Sha256), ct);
+                if (blobStream is not null)
+                {
+                    var scriptResult = await ScriptDetectionService.DetectAsync("rpm", p.Filename, blobStream, ct);
+                    hasScript = scriptResult.HasScript;
+                    scriptKind = scriptResult.Kind;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Swallowed: detection is advisory; the cached version still serves.
+                // deepcode ignore LogForging: Serilog RenderedCompactJsonFormatter JSON-encodes {Filename}, neutralising newline/control-char injection.
+                Logger.LogWarning(ex,
+                    "RPM proxy: install-script detection failed for {Filename}: {ExceptionType}",
+                    p.Filename, ex.GetType().Name);
+            }
+
+            string? provStatus = Dependably.Protocol.Provenance.ProvenanceStatuses.ToColumn(
+                p.ProvenanceResult.Status);
+            await _svc.CacheArtifacts.UpdateGlobalFactsAsync(
+                cacheArtifactId,
+                purl: p.Purl,
+                checksumSha1: null,
+                publishedAt: null,
+                deprecated: null,
+                hasInstallScript: hasScript,
+                installScriptKind: scriptKind,
+                provenanceStatus: provStatus,
+                provenanceSigner: p.ProvenanceResult.Signer,
+                upstreamIntegrityValue: p.Resolution.Sha256,
+                upstreamIntegrityAlgorithm: "sha256",
+                ct);
+
+            // Write rpm_metadata against the global cache_artifact row so repodata renderers
+            // have structured NEVRA/summary/description available without a package_versions row.
+            // xtenant: cache_artifact is global; keyed by id returned from the recorder above.
+            await using var conn = await _svc.Db.OpenAsync(ct);
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO rpm_metadata
+                    (id, cache_artifact_id, owner_kind,
+                     rpm_name, epoch, rpm_version, rpm_release, arch,
+                     summary, description, rpm_license)
+                VALUES (lower(hex(randomblob(16))), @caId, 'cache_artifact',
+                        @name, @epoch, @ver, @rel, @arch, @summary, @desc, @license)
+                ON CONFLICT(cache_artifact_id) WHERE owner_kind = 'cache_artifact' DO NOTHING
+                """,
+                new
+                {
+                    caId = cacheArtifactId,
+                    name = p.Nevra.Name,
+                    epoch = p.Nevra.Epoch,
+                    ver = p.Nevra.Version,
+                    rel = p.Nevra.Release,
+                    arch = p.Nevra.Arch,
+                    summary = p.Resolution.Summary,
+                    desc = p.Resolution.Description,
+                    license = p.Resolution.License,
+                });
         }
-
-        string versionId = Guid.NewGuid().ToString("N");
-        // xtenant: pkg.Id from GetOrCreateAsync(orgId,...); inherits tenant scope.
-        await conn.ExecuteAsync(
-            """
-            INSERT INTO package_versions
-                (id, package_id, version, purl, blob_key, filename, size_bytes, checksum_sha256, origin)
-            VALUES (@id, @pkgId, @ver, @purl, @blobKey, @filename, @sizeBytes, @sha256, 'proxy')
-            """,
-            new
-            {
-                id = versionId,
-                pkgId = pkg.Id,
-                ver = p.Ver,
-                purl = p.Purl,
-                blobKey = p.DbBlobKey,
-                filename = p.Filename,
-                sizeBytes = p.SizeBytes,
-                sha256 = p.Resolution.Sha256,
-            });
-
-        // rpm_metadata from primary.xml — no binary header parse needed for proxied packages.
-        // xtenant: PK on package_version_id bound above.
-        await conn.ExecuteAsync(
-            """
-            INSERT OR IGNORE INTO rpm_metadata
-                (package_version_id, rpm_name, epoch, rpm_version, rpm_release, arch,
-                 summary, description, rpm_license)
-            VALUES (@pvId, @name, @epoch, @ver, @rel, @arch, @summary, @desc, @license)
-            """,
-            new
-            {
-                pvId = versionId,
-                name = p.Nevra.Name,
-                epoch = p.Nevra.Epoch,
-                ver = p.Nevra.Version,
-                rel = p.Nevra.Release,
-                arch = p.Nevra.Arch,
-                summary = p.Resolution.Summary,
-                desc = p.Resolution.Description,
-                license = p.Resolution.License,
-            });
     }
 
     private sealed record ProxyCachePackage(
@@ -991,7 +1111,8 @@ public sealed class RpmController : OrgScopedControllerBase
         string Ver,
         string Purl,
         string DbBlobKey,
-        long SizeBytes);
+        long SizeBytes,
+        Dependably.Protocol.Provenance.ProvenanceResult ProvenanceResult);
 
     private async Task<long?> ResolveSizeCapAsync(string orgId, CancellationToken ct)
     {
@@ -1022,5 +1143,9 @@ public sealed record RpmControllerServices(
     MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> MergedRepodataCache,
     RenderedResponseCache<RpmLocalRepodataKey> LocalRepodataCache,
     TimeProvider Time,
+    CacheAccessRecorder CacheRecorder,
+    CacheArtifactRepository CacheArtifacts,
+    TenantArtifactAccessRepository TenantAccess,
+    Dependably.Protocol.Provenance.RpmProvenanceVerifier RpmProvenance,
     UpstreamClient? UpstreamClient = null,
     IRpmUpstreamProxy? Proxy = null);

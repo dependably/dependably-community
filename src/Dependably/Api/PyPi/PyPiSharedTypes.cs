@@ -58,11 +58,14 @@ public sealed record PyPiFetchOutcome(BlobHandle Blob, bool IsHit);
 /// <summary>
 /// Supplementary metadata fetched from the PyPI JSON API on first fetch. All fields are
 /// optional — the upstream JSON endpoint is consulted as a best-effort source for
-/// published_at and sha256 when the simple-index fragment is absent.
+/// published_at, sha256, and the PEP 740 provenance URL when the simple-index fragment is absent.
+/// <paramref name="ProvenanceUrl"/> is the file's <c>provenance</c> attribute (a URL to the PEP
+/// 740 provenance document carrying the Sigstore attestation bundles); null when the file has none.
 /// </summary>
-public readonly record struct PyPiJsonMetadata(DateTimeOffset? PublishedAt, string? Sha256Hex, string? Deprecated)
+public readonly record struct PyPiJsonMetadata(
+    DateTimeOffset? PublishedAt, string? Sha256Hex, string? Deprecated, string? ProvenanceUrl = null)
 {
-    public static PyPiJsonMetadata Empty => new(null, null, null);
+    public static PyPiJsonMetadata Empty => new(null, null, null, null);
 }
 
 /// <summary>

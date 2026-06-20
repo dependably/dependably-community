@@ -40,7 +40,13 @@ public sealed record UpdateProxySettingsRequest(
     string? BlockDeprecated = null,
     string? BlockMalicious = null,
     string? BlockKev = null,
-    double? MaxEpssTolerance = null);
+    double? MaxEpssTolerance = null,
+    string? BlockInstallScripts = null,
+    string? VerifyNpmSignatures = null,
+    string? VerifyNuGetSignatures = null,
+    string? VerifyPyPiAttestations = null,
+    string? VerifyRpmSignatures = null,
+    string? VerifyMavenSignatures = null);
 
 // Scope is retained as a nullable field purely so the controller can detect callers still
 // sending the retired field and return a clear 400. The repository never sees it.
@@ -65,7 +71,23 @@ public sealed record BlocklistRequest(string Pattern);
 
 public sealed record ReservedNamespaceRequest(string Ecosystem, string Pattern);
 
-public sealed record AddUpstreamRegistryRequest(string Ecosystem, string Url, string? Name = null);
+public sealed record InstallScriptAllowlistRequest(
+    string Ecosystem,
+    string Name,
+    string? VersionPattern = null);
+
+public sealed record AddUpstreamRegistryRequest(
+    string Ecosystem,
+    string? Url = null,
+    string? Name = null,
+    // OCI-only fields — ignored for non-OCI ecosystems.
+    string? AuthType = null,
+    string? Username = null,
+    string? Secret = null,
+    string? TokenEndpoint = null,
+    IReadOnlyList<string>? Prefixes = null,
+    // Non-OCI field — the registry URL for non-OCI ecosystems.
+    string? Host = null);
 
 public sealed record ReorderUpstreamRegistryRequest(IReadOnlyList<string> Ids);
 
@@ -95,4 +117,7 @@ public sealed record OrgControllerServices(
     IAuditEmitter AuditEmitter,
     IMemoryCache Cache,
     MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> RpmMergedCache,
-    RenderedResponseCache<RpmLocalRepodataKey> RpmLocalCache);
+    RenderedResponseCache<RpmLocalRepodataKey> RpmLocalCache,
+    CacheArtifactRepository CacheArtifacts,
+    TenantArtifactAccessRepository TenantAccess,
+    TimeProvider Time);

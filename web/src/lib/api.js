@@ -246,6 +246,12 @@ export const api = {
   addReservedNamespace: (ecosystem, pattern) => req('POST', '/reserved-namespaces', { ecosystem, pattern }),
   deleteReservedNamespace: (id) => req('DELETE', `/reserved-namespaces/${id}`),
 
+  // Install-script allowlist — packages exempt from the install-script block-gate arm
+  getInstallScriptAllowlist: () => req('GET', '/install-script-allowlist'),
+  addInstallScriptAllowlist: (ecosystem, name, versionPattern) =>
+    req('POST', '/install-script-allowlist', { ecosystem, name, versionPattern: versionPattern || null }),
+  deleteInstallScriptAllowlist: (id) => req('DELETE', `/install-script-allowlist/${id}`),
+
   // Quarantine review queue
   getQuarantine: (state) => {
     const suffix = state ? `?state=${encodeURIComponent(state)}` : ''
@@ -255,7 +261,11 @@ export const api = {
 
   // Upstream proxy registries — per ecosystem, priority-ordered (top = tried first).
   getUpstreamRegistries: () => req('GET', '/upstream-registries'),
+  // Non-OCI: supply ecosystem, url, name. OCI: omit this overload and use addOciUpstreamRegistry.
   addUpstreamRegistry: (ecosystem, url, name) => req('POST', '/upstream-registries', { ecosystem, url, name }),
+  // OCI-specific add: carries host (in url), authType, prefixes, optional username/secret/tokenEndpoint.
+  addOciUpstreamRegistry: ({ name, url, authType, username, secret, tokenEndpoint, prefixes }) =>
+    req('POST', '/upstream-registries', { ecosystem: 'oci', url, name: name || null, authType, username: username || null, secret: secret || null, tokenEndpoint: tokenEndpoint || null, prefixes }),
   deleteUpstreamRegistry: (id) => req('DELETE', `/upstream-registries/${id}`),
   reorderUpstreamRegistries: (ecosystem, ids) => req('PUT', `/upstream-registries/${ecosystem}/order`, { ids }),
 

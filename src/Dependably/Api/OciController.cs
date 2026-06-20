@@ -638,7 +638,7 @@ public sealed class OciController : OrgScopedControllerBase
     {
         try
         {
-            return await _svc.Upstream.FetchTagsAsync(name, ct);
+            return await _svc.Upstream.FetchTagsAsync(CurrentTenantId(), name, ct);
         }
         catch (AirGappedException)
         {

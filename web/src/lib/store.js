@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store'
-import { pathFor, routesEqual } from './routes.js'
+import { pathFor, searchFor, routesEqual } from './routes.js'
 
 /**
  * @typedef {{ userId?: string, role?: string, email?: string,
@@ -62,9 +62,12 @@ export function navigate(page, params = {}, { replace = false, preserveSearch = 
   // along — otherwise the URL would say "defaults" while the live component keeps its
   // filters. A fresh navigation to a different page gets a clean URL = default state.
   const keepSearch = preserveSearch || (sameRoute && !replace)
+  // A fresh navigation to a different page gets a clean URL whose query string is built from
+  // the page's params (searchFor) — so a deep link like navigate('vulnerabilities',
+  // { sort: 'published' }) lands the list page on that sort, which it reads from the URL.
   const url = (keepSearch && typeof window !== 'undefined')
     ? basePath + window.location.search
-    : basePath
+    : basePath + searchFor(page, params)
   if (typeof window !== 'undefined' && window.history) {
     const currentIdx = window.history.state?.idx ?? 0
     if (replace || sameRoute) {

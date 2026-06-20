@@ -10,12 +10,15 @@ namespace Dependably.Api.PyPiProtocol;
 
 /// <summary>
 /// Handles GET /pypi/{package}/json and GET /pypi/{package}/{version}/json — the PyPI JSON API
-/// endpoints. Synthesizes a local JSON document for hosted packages or proxies the upstream
-/// document verbatim for proxy-only packages.
+/// endpoints. Synthesizes a local JSON document for packages with any locally-known versions
+/// (uploaded or global-plane proxy cached), or proxies the upstream document verbatim when
+/// no local versions are known.
 /// </summary>
 public sealed class PyPiJsonApiHandler(
     OrgRepository orgs,
     PackageRepository packages,
+    CacheArtifactRepository cacheArtifacts,
+    VulnerabilityRepository vulns,
     TokenRepository tokens,
     UpstreamClient upstream,
     ClaimResolver claimResolver,
@@ -57,29 +60,30 @@ public sealed class PyPiJsonApiHandler(
         bool passthroughAllowed = settings!.ProxyPassthroughEffective
             && await claimResolver.IsProxyFetchAllowedAsync(orgId, "pypi", purlName, ct);
 
-        // Collect local versions scoped to origin=uploaded (hosted packages).
-        IReadOnlyList<PackageVersion>? hostedVersions = null;
+        // Collect all locally-known versions: uploaded (package_versions) + global-plane proxy
+        // (cache_artifact joined to tenant_artifact_access). Proxy entries mirror
+        // PyPiSimpleIndexHandler's LoadCombinedVersionsAsync so all three endpoints are consistent.
+        IReadOnlyList<PackageVersion>? localVersions = null;
         if (pkg is not null)
         {
-            var allVersions = await packages.GetVersionsAsync(pkg.Id, ct);
-            hostedVersions = allVersions.Where(v => v.Origin == "uploaded").ToList();
+            localVersions = await LoadCombinedVersionsAsync(orgId, pkg.Id, purlName, ct);
         }
 
-        bool hasHosted = hostedVersions is { Count: > 0 };
+        bool hasLocal = localVersions is { Count: > 0 };
 
-        // Mixed or hosted-only: synthesize the local JSON document (local shadows upstream,
-        // consistent with SimpleIndex merge behaviour).
-        if (hasHosted)
+        // Any locally-known versions (uploaded or proxy-cached): synthesize the JSON document.
+        // Local shadows upstream, consistent with SimpleIndex merge behaviour.
+        if (hasLocal)
         {
             if (!settings.AnonymousPull && token is null)
             {
                 httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
                 return new UnauthorizedResult();
             }
-            return SynthesizeLocalJsonDocument(pkg!, hostedVersions!, version, purlName);
+            return SynthesizeLocalJsonDocument(pkg!, localVersions!, version, purlName);
         }
 
-        // No hosted versions — proxy the upstream JSON document when passthrough is enabled.
+        // No locally-known versions — proxy the upstream JSON document when passthrough is enabled.
         if (passthroughAllowed)
         {
             if (!settings.AnonymousPull && token is null)
@@ -156,7 +160,7 @@ public sealed class PyPiJsonApiHandler(
 
     private static Dictionary<string, object?> BuildLocalFileEntry(PackageVersion v)
     {
-        string filename = v.BlobKey.Split('/').Last();
+        string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
         string downloadUrl = PyPiSimpleIndexHelper.OrgPath($"packages/{filename}");
 
         var fileEntry = new Dictionary<string, object?>
@@ -194,6 +198,46 @@ public sealed class PyPiJsonApiHandler(
             ? versions.FirstOrDefault(v =>
                 string.Equals(v.Version, requestedVersion, StringComparison.OrdinalIgnoreCase))
             : versions.FirstOrDefault(v => !v.Yanked) ?? (versions.Count > 0 ? versions[0] : null);
+    }
+
+    // Combines uploaded (package_versions) and global-plane proxy (cache_artifact) versions
+    // for a PyPI package. Proxy entries whose version already appears in uploaded versions are
+    // deduplicated. Mirrors PyPiSimpleIndexHandler.LoadCombinedVersionsAsync so the JSON API
+    // and simple index surfaces stay consistent.
+    private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
+        string orgId, string packageId, string purlName, CancellationToken ct)
+    {
+        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
+        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, "pypi", purlName, ct);
+
+        if (proxyEntries.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var uploadedVersionSet = uploadedVersions
+            .Select(v => v.Version)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
+        var proxySignals = proxyIds.Count > 0
+            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        var synthetic = proxyEntries
+            .Where(e => !uploadedVersionSet.Contains(e.Version))
+            .Select(e => e.ToPackageVersionSynthetic(proxySignals))
+            .ToList();
+
+        if (synthetic.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
+        combined.AddRange(uploadedVersions);
+        combined.AddRange(synthetic);
+        return combined;
     }
 
     /// <summary>

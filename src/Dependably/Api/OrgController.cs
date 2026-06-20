@@ -40,6 +40,9 @@ public sealed class OrgController : OrgScopedControllerBase
     private readonly IMemoryCache _cache;
     private readonly MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> _rpmMergedCache;
     private readonly RenderedResponseCache<RpmLocalRepodataKey> _rpmLocalCache;
+    private readonly CacheArtifactRepository _cacheArtifacts;
+    private readonly TenantArtifactAccessRepository _tenantAccess;
+    private readonly TimeProvider _time;
 
     public OrgController(OrgControllerServices svc)
     {
@@ -58,6 +61,9 @@ public sealed class OrgController : OrgScopedControllerBase
         _cache = svc.Cache;
         _rpmMergedCache = svc.RpmMergedCache;
         _rpmLocalCache = svc.RpmLocalCache;
+        _cacheArtifacts = svc.CacheArtifacts;
+        _tenantAccess = svc.TenantAccess;
+        _time = svc.Time;
     }
 
     // Org CRUD lives on SystemController (/api/v1/system/tenants). Tenant users have no
@@ -109,9 +115,32 @@ public sealed class OrgController : OrgScopedControllerBase
             return NotFound();
         }
 
-        var versions = await _packages.GetVersionsAsync(pkg.Id, ct);
-        var licenseMap = await _licenses.GetSpdxForVersionsAsync(versions.Select(v => v.Id), ct);
-        var scoreMap = await _vulns.GetMaxScoresForVersionsAsync(versions.Select(v => v.Id), ct);
+        var versions = await LoadCombinedVersionsForOrgAsync(orgId, pkg.Id, ecosystem, AsPurlName(name), ct);
+        // License map: uploaded versions key by package_version_id; proxy versions key by
+        // cache_artifact_id. Merge both lookups into one dictionary.
+        var uploadedIds = versions.Where(v => v.Origin != "proxy").Select(v => v.Id).ToList();
+        var proxyIds = versions.Where(v => v.Origin == "proxy").Select(v => v.Id).ToList();
+        var uploadedLicenses = uploadedIds.Count > 0
+            ? await _licenses.GetSpdxForVersionsAsync(uploadedIds, ct)
+            : Enumerable.Empty<(string, string)>().ToLookup(r => r.Item1, r => r.Item2);
+        var proxyLicenses = proxyIds.Count > 0
+            ? await _licenses.GetSpdxForCacheArtifactsAsync(proxyIds, ct)
+            : Enumerable.Empty<(string, string)>().ToLookup(r => r.Item1, r => r.Item2);
+        // Score map: merge uploaded (package_version_id) and proxy (cache_artifact_id) signals.
+        var uploadedScores = uploadedIds.Count > 0
+            ? await _vulns.GetMaxScoresForVersionsAsync(uploadedIds, ct)
+            : new Dictionary<string, double>();
+        var proxySignals = proxyIds.Count > 0
+            ? await _vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+        var scoreMap = new Dictionary<string, double>(uploadedScores);
+        foreach (var (id, sig) in proxySignals)
+        {
+            if (sig.MaxCvss.HasValue)
+            {
+                scoreMap[id] = sig.MaxCvss.Value;
+            }
+        }
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         double tolerance = settings?.MaxOsvScoreTolerance ?? 10.0;
         string blockDeprecatedMode = settings?.BlockDeprecated ?? "off";
@@ -144,12 +173,58 @@ public sealed class OrgController : OrgScopedControllerBase
                 v.UpstreamIntegrityValue,
                 v.UpstreamIntegrityAlgorithm,
                 v.IsMalicious,
+                v.HasInstallScript,
+                v.InstallScriptKind,
+                v.ProvenanceStatus,
+                v.ProvenanceSigner,
                 MaxOsvScore = hasMax ? maxScore : (double?)null,
                 Status = status,
-                Licenses = licenseMap[v.Id].ToArray()
+                Licenses = (v.Origin == "proxy" ? proxyLicenses[v.Id] : uploadedLicenses[v.Id]).ToArray()
             };
         });
         return Ok(new { package = pkg, versions = versionsWithLicenses });
+    }
+
+    // Combines uploaded (package_versions) and global-plane proxy (cache_artifact) versions for
+    // a package. Proxy entries whose version already appears in uploaded versions are
+    // deduplicated so a name that was cached before upload does not double-list a version.
+    // The synthesized proxy PackageVersion rows carry per-tenant download_count from
+    // tenant_artifact_access via CacheArtifactIndexFacts.DownloadCount.
+    private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsForOrgAsync(
+        string orgId, string packageId, string ecosystem, string purlName, CancellationToken ct)
+    {
+        var uploadedVersions = await _packages.GetVersionsAsync(packageId, ct);
+        var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, purlName, ct);
+
+        if (proxyEntries.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var uploadedVersionSet = uploadedVersions
+            .Select(v => v.Version)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Load proxy signals once to populate IsMalicious on the synthetic PackageVersion.
+        var proxySignalIds = proxyEntries.Select(e => e.Id).ToList();
+        var proxySignals = proxySignalIds.Count > 0
+            ? await _vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxySignalIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        var synthetic = proxyEntries
+            .Where(e => !uploadedVersionSet.Contains(e.Version))
+            .Select(e => e.ToPackageVersionSynthetic(proxySignals))
+            .ToList();
+
+        if (synthetic.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
+        combined.AddRange(uploadedVersions);
+        combined.AddRange(synthetic);
+        return combined;
     }
 
     private static string ComputeVersionStatus(PackageVersion v, double? maxScore, double tolerance, string blockDeprecatedMode = "off")
@@ -287,30 +362,59 @@ public sealed class OrgController : OrgScopedControllerBase
         }
 
         var ver = await _packages.GetVersionAsync(pkg.Id, version, ct);
-        if (ver is null)
+        if (ver is not null)
+        {
+            // Route by per-version origin: proxy artifacts live on the eviction-friendly cache
+            // tier, uploaded artifacts on the durable registry tier. Under split storage these
+            // are distinct backends, so picking the wrong tier would 404 or serve wrong bytes.
+            var store = ver.Origin == "proxy" ? _blobStorage.Cache : _blobStorage.Registry;
+            var stream = await store.GetAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
+            if (stream is null)
+            {
+                return NotFound();
+            }
+
+            // Count the UI download the same way protocol pulls are counted, and log it as a
+            // 'download' activity so it also appears on the dashboard chart — the UI is just
+            // another download surface.
+            await _audit.LogActivityAsync(orgId, ecosystem, ver.Purl, "download", GetUserId(),
+                actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            await _packages.IncrementDownloadCountAsync(ver.Id, ct);
+
+            string filename = ver.BlobKey.Split('/').Last();
+            return File(stream, "application/octet-stream", filename);
+        }
+
+        // Global-plane fallback: proxy versions no longer have a package_versions row.
+        // Look up the artifact in cache_artifact (joined to tenant_artifact_access for org
+        // scoping) and serve from the cache tier.
+        var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, AsPurlName(name), ct);
+        var facts = proxyEntries.FirstOrDefault(
+            e => string.Equals(e.Version, version, StringComparison.OrdinalIgnoreCase));
+        if (facts is null)
         {
             return NotFound();
         }
 
-        // Route by per-version origin: proxy artifacts live on the eviction-friendly cache tier,
-        // uploaded artifacts on the durable registry tier. Under split storage these are distinct
-        // backends, so picking the wrong tier would 404 or serve the wrong bytes.
-        var store = ver.Origin == "proxy" ? _blobStorage.Cache : _blobStorage.Registry;
-        var stream = await store.GetAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
-        if (stream is null)
+        var proxyStream = await _blobStorage.Cache.GetAsync(BlobKeys.StoreKey(facts.BlobKey), ct);
+        if (proxyStream is null)
         {
             return NotFound();
         }
 
-        // Count the UI download the same way protocol pulls are counted, and log it as a
-        // 'download' activity so it also appears on the dashboard chart — the UI is just
-        // another download surface.
-        await _audit.LogActivityAsync(orgId, ecosystem, ver.Purl, "download", GetUserId(),
-            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-        await _packages.IncrementDownloadCountAsync(ver.Id, ct);
+        if (facts.Purl is not null)
+        {
+            await _audit.LogActivityAsync(orgId, ecosystem, facts.Purl, "download", GetUserId(),
+                actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        }
+        await _tenantAccess.UpsertStateAsync(orgId, facts.Id, _time.GetUtcNow(), ct);
 
-        string filename = ver.BlobKey.Split('/').Last();
-        return File(stream, "application/octet-stream", filename);
+        // Proxy blob keys are content-addressed (last segment is the SHA-256), so the download
+        // filename comes from the recorded artifact filename, not the blob-key suffix.
+        string proxyFilename = string.IsNullOrEmpty(facts.Filename)
+            ? facts.BlobKey.Split('/').Last()
+            : facts.Filename;
+        return File(proxyStream, "application/octet-stream", proxyFilename);
     }
 
     // ── Stats ─────────────────────────────────────────────────────────────────
@@ -375,9 +479,6 @@ public sealed class OrgController : OrgScopedControllerBase
             return result;
         }
 
-        string orgId = CurrentTenantId();
-        var settings = await _orgs.GetSettingsAsync(orgId, ct);
-
         // Tenant-implicit URLs: every request is already on the tenant's host (multi mode) or
         // the single-tenant install. Snippets use the request's host directly.
         string baseUrl = _urls.BaseUrl(HttpContext);
@@ -385,14 +486,14 @@ public sealed class OrgController : OrgScopedControllerBase
 
         string? snippet = ecosystem switch
         {
-            "pypi" => GeneratePyPiSnippet(baseUrl, slug, settings),
-            "npm" => GenerateNpmSnippet(baseUrl, slug, settings),
-            "nuget" => GenerateNuGetSnippet(baseUrl, slug, settings),
-            "maven" => GenerateMavenSnippet(baseUrl, slug, settings),
-            "rpm" => GenerateRpmSnippet(baseUrl, slug, settings),
-            "oci" => GenerateOciSnippet(baseUrl, slug, settings),
-            "golang" => GenerateGoSnippet(baseUrl, slug, settings),
-            "cargo" => GenerateCargoSnippet(baseUrl, slug, settings),
+            "pypi" => GeneratePyPiSnippet(baseUrl, slug),
+            "npm" => GenerateNpmSnippet(baseUrl, slug),
+            "nuget" => GenerateNuGetSnippet(baseUrl, slug),
+            "maven" => GenerateMavenSnippet(baseUrl, slug),
+            "rpm" => GenerateRpmSnippet(baseUrl, slug),
+            "oci" => GenerateOciSnippet(baseUrl, slug),
+            "golang" => GenerateGoSnippet(baseUrl, slug),
+            "cargo" => GenerateCargoSnippet(baseUrl, slug),
             _ => null
         };
 
@@ -402,7 +503,7 @@ public sealed class OrgController : OrgScopedControllerBase
     // Snippet generators emit tenant-implicit URLs (host-relative). The slug parameter is
     // unused at the URL level today but kept so the future-multi-mode form `slug.apex/simple/`
     // could be reconstructed if needed; the request's host already carries the tenant.
-    private static string GeneratePyPiSnippet(string baseUrl, string slug, OrgSettings? s)
+    private static string GeneratePyPiSnippet(string baseUrl, string slug)
     {
         _ = slug;
         var uri = new Uri(baseUrl);
@@ -413,23 +514,28 @@ public sealed class OrgController : OrgScopedControllerBase
             [global]
             index-url = {indexUrl}
 
+            # ~/.netrc — auth (the username is ignored; the token is the password):
+            machine {uri.Host} login <user> password <token>
+
             # One-liner install example:
             pip install <package>==<version> --index-url {indexUrl}{trustedHost} --no-deps
-            # Max upload: {s?.MaxUploadBytesPyPi ?? s?.MaxUploadBytes ?? 0} bytes
             """;
     }
 
-    private static string GenerateNpmSnippet(string baseUrl, string slug, OrgSettings? s)
+    private static string GenerateNpmSnippet(string baseUrl, string slug)
     {
         _ = slug;
+        string registryUrl = $"{baseUrl}/npm/";
+        // npm keys the auth token by the registry URL with the scheme stripped.
+        string authKey = registryUrl[(registryUrl.IndexOf("://", StringComparison.Ordinal) + 3)..];
         return $"""
             # .npmrc
-            registry={baseUrl}/npm/
-            # Max upload: {s?.MaxUploadBytesNpm ?? s?.MaxUploadBytes ?? 0} bytes
+            registry={registryUrl}
+            //{authKey}:_authToken=<token>
             """;
     }
 
-    private static string GenerateNuGetSnippet(string baseUrl, string slug, OrgSettings? s)
+    private static string GenerateNuGetSnippet(string baseUrl, string slug)
     {
         _ = slug;
         return $"""
@@ -438,15 +544,23 @@ public sealed class OrgController : OrgScopedControllerBase
               <packageSources>
                 <add key="dependably" value="{baseUrl}/nuget/v3/index.json" />
               </packageSources>
+              <packageSourceCredentials>
+                <dependably>
+                  <add key="Username" value="your-username" />
+                  <add key="ClearTextPassword" value="your-token" />
+                </dependably>
+              </packageSourceCredentials>
             </configuration>
-            <!-- Max upload: {s?.MaxUploadBytesNuGet ?? s?.MaxUploadBytes ?? 0} bytes -->
+
+            <!-- Publish (push uses an API key, not the credentials above): -->
+            <!-- dotnet nuget push pkg.nupkg --api-key your-token --source dependably -->
             """;
     }
 
     // Maven snippet bundles both publish (distributionManagement, used by `mvn deploy`) and
     // consume (repositories, used at resolution time). A registry is no use if onboarding only
     // covers one half of the workflow.
-    private static string GenerateMavenSnippet(string baseUrl, string slug, OrgSettings? s)
+    private static string GenerateMavenSnippet(string baseUrl, string slug)
     {
         _ = slug;
         return $"""
@@ -480,13 +594,12 @@ public sealed class OrgController : OrgScopedControllerBase
                 <url>{baseUrl}/maven/</url>
               </repository>
             </distributionManagement>
-            <!-- Max upload: {s?.MaxUploadBytesMaven ?? s?.MaxUploadBytes ?? 0} bytes -->
             """;
     }
 
     // RPM .repo file pointing at the yum/dnf-compatible directory layout, plus a curl one-liner
     // for the push side. gpgcheck=0 by default — operators turn it on once signing is wired.
-    private static string GenerateRpmSnippet(string baseUrl, string slug, OrgSettings? s)
+    private static string GenerateRpmSnippet(string baseUrl, string slug)
     {
         _ = slug;
         return $"""
@@ -496,14 +609,15 @@ public sealed class OrgController : OrgScopedControllerBase
             baseurl={baseUrl}/rpm/
             enabled=1
             gpgcheck=0
+            username=<user>
+            password=<token>
 
             # Push an RPM:
-            curl -u user:<token> --upload-file pkg.rpm {baseUrl}/rpm/upload
-            # Max upload: {s?.MaxUploadBytesRpm ?? s?.MaxUploadBytes ?? 0} bytes
+            curl -u <user>:<token> --upload-file pkg.rpm {baseUrl}/rpm/upload
             """;
     }
 
-    private static string GenerateOciSnippet(string baseUrl, string slug, OrgSettings? s)
+    private static string GenerateOciSnippet(string baseUrl, string slug)
     {
         _ = slug;
         string host = new Uri(baseUrl).Host;
@@ -512,17 +626,15 @@ public sealed class OrgController : OrgScopedControllerBase
             docker login {host}
             docker pull  {host}/<image>:<tag>
             docker push  {host}/<image>:<tag>
-            # Max upload (per blob): {s?.MaxUploadBytesOci ?? s?.MaxUploadBytes ?? 0} bytes
             """;
     }
 
     // Go is proxy-only (no hosted publish) — GOPROXY points the toolchain at the registry, and a
     // .netrc entry carries credentials for authenticated proxies. GOPRIVATE/GONOSUMDB exempt a
     // private module path from the public checksum database.
-    private static string GenerateGoSnippet(string baseUrl, string slug, OrgSettings? s)
+    private static string GenerateGoSnippet(string baseUrl, string slug)
     {
         _ = slug;
-        _ = s;
         string host = new Uri(baseUrl).Host;
         return $"""
             # Point the Go toolchain at the registry proxy:
@@ -538,9 +650,8 @@ public sealed class OrgController : OrgScopedControllerBase
     }
 
     // Cargo snippet covers both consume (sparse index in config.toml) and publish (`cargo publish
-    // --registry dependably`). Cargo publish honours the per-ecosystem cap, falling back to the
-    // org global cap when unset.
-    private static string GenerateCargoSnippet(string baseUrl, string slug, OrgSettings? s)
+    // --registry dependably`).
+    private static string GenerateCargoSnippet(string baseUrl, string slug)
     {
         _ = slug;
         return $"""
@@ -556,7 +667,6 @@ public sealed class OrgController : OrgScopedControllerBase
 
             # Publish a crate:
             cargo publish --registry dependably
-            # Max upload: {s?.MaxUploadBytesCargo ?? s?.MaxUploadBytes ?? 0} bytes
             """;
     }
 

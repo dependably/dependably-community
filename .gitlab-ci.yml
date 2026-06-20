@@ -3,6 +3,11 @@
 # the explicit `when: never` for "push when an MR is open" must come before
 # the main-branch and tag rules so it isn't shadowed.
 workflow:
+  # On a re-push to an open MR, cancel the superseded pipeline's still-running
+  # interruptible jobs (the DAST scans below) instead of stacking a second run
+  # behind it on the single serialized runner.
+  auto_cancel:
+    on_new_commit: interruptible
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_OPEN_MERGE_REQUESTS
@@ -255,6 +260,39 @@ release-contract-lint:
       print(f"release-contract-lint: {len(required)} required jobs, gate aligned.")
       PY
 
+# Scans .gitlab-ci.yml for supply-chain and security misconfigurations using glsec
+# (https://github.com/glsec/glsec), the zizmor-equivalent linter for GitLab CI.
+# --strict promotes warn-level findings to errors; skipped rules are accepted trade-offs:
+#   GL022 — container images are already digest-pinned; apk/apt package version pins add
+#           no supply-chain value when the image layer is immutable.
+#   GL024 — scripts use explicit set -eu + exit 1 guards instead of pipefail; the pattern
+#           is intentional throughout this pipeline.
+#   GL032 — the flagged echo/printf writes registry API tokens to npm/NuGet config, not
+#           SSH private keys; the rule description does not apply.
+ci-config-lint:
+  stage: validate
+  extends: .runs-on-ci
+  # amd64-pinned: the job downloads the linux_amd64 glsec binary, which would
+  # fail with an exec-format error on an arm64 runner.
+  tags: [amd64]
+  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  script:
+    - apk add --no-cache curl tar
+    - |
+      set -eu
+      GLSEC_VERSION="1.7.0"
+      GLSEC_SHA256="1d906a5a1ae51f1a2e787f49e2666168821a852559481130b154d21ed6e174a8"
+      curl -sSL "https://github.com/glsec/glsec/releases/download/v${GLSEC_VERSION}/glsec_${GLSEC_VERSION}_linux_amd64.tar.gz" \
+        -o /tmp/glsec.tar.gz
+      echo "${GLSEC_SHA256}  /tmp/glsec.tar.gz" | sha256sum -c
+      tar -xzf /tmp/glsec.tar.gz -C /usr/local/bin glsec
+      chmod +x /usr/local/bin/glsec
+      # GL026 (mutable git-clone ref) is skipped: the integration-external job
+      # intentionally tracks the dependably-integration-tests branch head
+      # (INTEGRATION_TESTS_REF, default main) rather than pinning a commit SHA, so
+      # the suite is verified continuously. It is the only git clone in this file.
+      glsec --strict --skip GL022,GL024,GL026,GL032 .gitlab-ci.yml
+
 # Fails MRs that leak the private dependably registry into web/package-lock.json.
 # Happens when a dev's ~/.npmrc points npm at the private proxy and `npm install`
 # writes those URLs as `resolved`. Catches pre-mirror — GitHub runners have no
@@ -292,7 +330,7 @@ private-registry-guard:
     - *release-tag-rule
   script:
     - apk add --no-cache curl
-    - |
+    - | # glsec:ignore GL020 -- curl uses -o /dev/null (connectivity check only); no file is downloaded for execution
       if [ -z "${REGISTRY_URL:-}" ] || [ -z "${REGISTRY_KEY:-}" ]; then
         echo "ERROR: REGISTRY_URL/REGISTRY_KEY are empty on an internal pipeline." >&2
         echo "Restores would fall back to public registries. Set both project CI/CD variables." >&2
@@ -592,7 +630,6 @@ e2e:
   script:
     - cd web
     - npm ci
-    - npx playwright install chromium
     - npm run e2e -- --project=chromium
   artifacts:
     when: always
@@ -688,6 +725,99 @@ snyk-code:
     - ci/snyk-code-scan.sh
   allow_failure: false
 
+# Boots the real published binary and runs the external dependably-integration-tests suite
+# against it. Background jobs that make outbound internet calls at startup (vuln-scan,
+# vuln-rescan, deprecation-refresh, threat-feed) are disabled via DISABLE_BACKGROUND_JOBS
+# so the runner needs no boot-time egress — but ASPNETCORE_ENVIRONMENT is left at Production
+# and AIR_GAPPED is NOT set, so request-time proxy passthrough to upstream registries
+# remains fully operational. The suite exercises proxy/upstream code paths that need
+# real network.
+#
+# allow_failure: true holds until the external suite is proven green against this job.
+# A follow-up will promote it to .release-required and add it to release-gate.needs.
+integration-external:
+  stage: test
+  extends: [.private-registry-setup]
+  # Opt-in: stays skipped (not failed) until the dependably-integration-tests repo
+  # allowlists this project for CI_JOB_TOKEN (Settings → CI/CD → Job token
+  # permissions) and the suite implements the env contract below. Set
+  # RUN_EXTERNAL_INTEGRATION=true (project CI/CD variable) to enable; drop
+  # allow_failure and promote to .release-required once it is reliably green.
+  rules:
+    - if: '$RUN_EXTERNAL_INTEGRATION != "true"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - *release-tag-rule
+  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  needs: [build]
+  tags: [amd64]
+  allow_failure: true
+  variables:
+    INTEGRATION_TESTS_REF: "main"
+  script:
+    # --- inline app boot (mirrors .zap_app_boot but with background jobs disabled) ---
+    # AIR_GAPPED is intentionally NOT set so proxy passthrough remains live.
+    - mkdir -p /tmp/ext-int/blobs
+    - export DB_PATH=/tmp/ext-int/dependably.db
+    - export LOCAL_STORAGE_PATH=/tmp/ext-int/blobs
+    - export STORAGE_BACKEND=local
+    - export ASPNETCORE_URLS=http://+:8080
+    - export FIRST_BOOT_ADMIN_PASSWORD="$DAST_ADMIN_PASSWORD"
+    - export LOGIN_RATE_LIMIT_PERMITS=100000
+    - export TOKEN_CREATE_RATE_LIMIT_PERMITS=100000
+    # Disable the three RunOnStartup services that make outbound internet calls at boot
+    # (OsvVulnScanService, DeprecationRefreshService, ThreatFeedService). Proxy
+    # request-time passthrough to upstream registries is unaffected.
+    # OSV stays in default remote mode (never invoked — vuln-scan is disabled), so
+    # no OSV_LOCAL_PATH is required; AIR_GAPPED/OSV_MODE=local would crash the boot.
+    - export DISABLE_BACKGROUND_JOBS=vuln-scan,vuln-rescan,deprecation-refresh,threat-feed
+    - cp -r src/Dependably/bin/Release/net10.0/linux-x64/publish /tmp/ext-int/app
+    - chmod +x /tmp/ext-int/app/Dependably
+    - /tmp/ext-int/app/Dependably > /tmp/ext-int/app.log 2>&1 &
+    - APP_PID=$!
+    - |
+      for i in $(seq 1 60); do
+        if curl -fsS http://localhost:8080/ready > /dev/null 2>&1; then
+          echo "App ready after ${i}s"
+          break
+        fi
+        if ! kill -0 "$APP_PID" 2>/dev/null; then
+          echo "App died during startup — log follows:" >&2
+          cat /tmp/ext-int/app.log >&2
+          exit 1
+        fi
+        sleep 1
+      done
+      curl -fsS http://localhost:8080/ready || { echo "App not ready after 60s — log follows:" >&2; cat /tmp/ext-int/app.log >&2; exit 1; }
+    # --- clone and run the external suite ---
+    - export DEPENDABLY_BASE_URL=http://localhost:8080
+    - export DEPENDABLY_ADMIN_EMAIL=admin@dependably.local
+    - export DEPENDABLY_ADMIN_PASSWORD="$DAST_ADMIN_PASSWORD"
+    # Clone the external suite from this project's own self-hosted GitLab. The
+    # CI_JOB_TOKEN is sent as an Authorization header rather than embedded in the
+    # remote URL, so it never lands in .git/config or the process argv.
+    - | # glsec:ignore GL004 -- gitlab.northwardlabs.ca is this project's own self-hosted GitLab; CI_JOB_TOKEN is a first-party credential
+      AUTH_B64=$(printf 'gitlab-ci-token:%s' "$CI_JOB_TOKEN" | base64 | tr -d '\n')
+      git -c http.extraHeader="Authorization: Basic ${AUTH_B64}" clone --depth 1 --branch "$INTEGRATION_TESTS_REF" "https://gitlab.northwardlabs.ca/moonlitlabs/dependably-integration-tests.git" /tmp/integration-tests
+    # .private-registry-setup writes nuget.config to $CI_PROJECT_DIR (not $HOME), so
+    # dotnet restore inside the cloned suite — running from /tmp/integration-tests —
+    # would fall back to public nuget.org. Copy the generated config into the clone
+    # directory so all NuGet restores in the suite target the private feed.
+    - cp "$CI_PROJECT_DIR/nuget.config" /tmp/integration-tests/
+    - mkdir -p "$CI_PROJECT_DIR/test-results"
+    - cd /tmp/integration-tests
+    - dotnet test --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/integration-external.xml"
+  after_script:
+    - echo "=== dependably app log ==="; cat /tmp/ext-int/app.log || true
+  artifacts:
+    when: always
+    expire_in: 7 days
+    reports:
+      junit: test-results/integration-external.xml
+    paths:
+      - test-results/
+
 # === sbom ===
 
 sbom-backend:
@@ -727,7 +857,7 @@ dt-publish:
     DT_VERSION: "latest"
   script:
     - apk add --no-cache curl
-    - |
+    - | # glsec:ignore GL020 -- curl POSTs SBOM files to the DT API; no executable is downloaded
       set -eu
       AUTH="X-Api-Key: $dependencyTrack_token"
       BASE="${dependencyTrack_url%/}"
@@ -786,8 +916,11 @@ dt-publish:
   timeout: 20 minutes
   variables:
     # Defaults; override via project CI/CD variables without editing YAML.
-    OLLAMA_URL: "http://192.168.2.25:11434"
-    OLLAMA_MODEL: "gemma4:12b-it-qat"
+    OLLAMA_URL: "http://192.168.2.25:11434" # glsec:ignore GL016 -- Ollama runs on a private LAN address; TLS is not available there
+    # 26B MoE (a4b => ~4B active params): same per-call latency as the 12B dense
+    # model on this host but stronger review quality. The earlier no-content failure
+    # at this size was the reasoning-budget bug now fixed by AI_REVIEW_THINK=false.
+    OLLAMA_MODEL: "gemma4:26b-a4b-it-qat"
     GIT_DEPTH: "20"
     AI_REVIEW_MAX_DIFF_BYTES: "120000"
     # Must hold the ~35K-token prompt a 120000-byte diff produces plus generation
@@ -837,11 +970,15 @@ ai-review-docs:
 
 # === dast ===
 
-# Shared app-boot for every DAST job: copies the published binary, boots it on
-# :8080 with a throwaway DB/blob store, and waits on /ready (aborting if the
-# process dies). Mirrors the Playwright CI webServer pattern in
+# Shared app-boot for every DAST job and e2e: copies the published binary, boots
+# it on :8080 with a throwaway DB/blob store, and waits on /ready (aborting if
+# the process dies). Mirrors the Playwright CI webServer pattern in
 # web/e2e/playwright.config.ts: same binary path, same env-var shape, same gate.
-.zap_app_boot: &zap_app_boot |
+# DISABLE_BACKGROUND_JOBS turns off the three RunOnStartup refresh services that
+# make outbound calls on every boot (vuln-scan/-rescan, deprecation-refresh →
+# npmjs/pypi, threat-feed → cisa.gov + first.org). OSV stays in default remote
+# mode but is never invoked, so no OSV_LOCAL_PATH is required.
+.app_boot: &app_boot |
   mkdir -p /tmp/dast/blobs
   export DB_PATH=/tmp/dast/dependably.db
   export LOCAL_STORAGE_PATH=/tmp/dast/blobs
@@ -850,6 +987,7 @@ ai-review-docs:
   export FIRST_BOOT_ADMIN_PASSWORD="$DAST_ADMIN_PASSWORD"
   export LOGIN_RATE_LIMIT_PERMITS=100000
   export TOKEN_CREATE_RATE_LIMIT_PERMITS=100000
+  export DISABLE_BACKGROUND_JOBS=vuln-scan,vuln-rescan,deprecation-refresh,threat-feed
   cp -r src/Dependably/bin/Release/net10.0/linux-x64/publish /tmp/dast/app
   chmod +x /tmp/dast/app/Dependably
   /tmp/dast/app/Dependably > app.log 2>&1 &
@@ -885,7 +1023,7 @@ zap-baseline:
   # runners so the published binary executes natively.
   tags: [amd64]
   script:
-    - *zap_app_boot
+    - *app_boot
     # ZAP scripts hardcode base_dir='/zap/wrk/' for report output, but the image
     # ships without that directory (it's the conventional bind-mount target).
     # Symlink it to $PWD so .zap/*.conf is in place and -J/-r land in the build
@@ -917,7 +1055,7 @@ zap-full:
   tags: [amd64]
   interruptible: true
   script:
-    - *zap_app_boot
+    - *app_boot
     - ln -sfn "$PWD" /zap/wrk
     - zap-full-scan.py -t http://localhost:8080 -c .zap/full.conf -J zap-full.json -r zap-full.html
   after_script:
@@ -951,7 +1089,7 @@ zap-api-management:
   tags: [amd64]
   interruptible: true
   script:
-    - *zap_app_boot
+    - *app_boot
     - sh ci/zap-dast-auth.sh
     - . ./zap-creds.env
     - ln -sfn "$PWD" /zap/wrk
@@ -986,7 +1124,7 @@ zap-api-protocol:
   tags: [amd64]
   interruptible: true
   script:
-    - *zap_app_boot
+    - *app_boot
     - sh ci/zap-dast-auth.sh
     - . ./zap-creds.env
     - ln -sfn "$PWD" /zap/wrk
@@ -1033,6 +1171,7 @@ release-to-github:
   image:
     name: alpine/git@sha256:d453f54c83320412aa89c391b076930bd8569bc1012285e8c68ce2d4435826a3
     entrypoint: [""]
+  tags: [amd64]
   resource_group: github-release
   # Cancellation must not race a partial push.
   interruptible: false

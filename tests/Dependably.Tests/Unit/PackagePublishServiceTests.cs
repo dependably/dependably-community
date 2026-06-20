@@ -560,23 +560,13 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
     [Fact]
     public async Task InsertFails_CompensatingDeleteAlsoThrows_OriginalExceptionStillPropagates()
     {
-        // Force the INSERT-path failure exactly the way the existing orphan-delete test
-        // does (purl UNIQUE collision via a decoy row), then route the publish through a
-        // blob store whose DeleteAsync throws — exercising the inner catch on the
+        // Force the INSERT-path failure with a registry that drops the package_versions table
+        // inside PutAsync (so the put commits but the subsequent INSERT throws 'no such table'),
+        // then make the compensating delete throw too — exercising the inner catch on the
         // compensating delete (lines 211-216 in the SUT). The outer exception must still
         // propagate; the operator-visible signal that something needs reconciliation is
         // the logged 'Compensating blob delete failed' error.
-        await using (var seedConn = await _db.OpenAsync())
-        {
-            await seedConn.ExecuteAsync(
-                "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) " +
-                "VALUES ('pkg-decoy2', 'o1', 'npm', 'decoy2', 'decoy2', 0)");
-            await seedConn.ExecuteAsync(
-                "INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes) " +
-                "VALUES ('ver-decoy2', 'pkg-decoy2', '99.0.0', 'pkg:npm/lodash@1.0.0', 'k', 1)");
-        }
-
-        var failingDelete = new DeleteThrowingBlobStore(_blobs);
+        var failingDelete = new DropTableOnPutBlobStore(_blobs, _db, "package_versions", throwOnDelete: true);
         var svc = BuildWithRegistry(failingDelete);
 
         var ex = await Assert.ThrowsAnyAsync<Exception>(() => svc.StoreAndRecordAsync(Sample()));
@@ -620,30 +610,21 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
     [Fact]
     public async Task BlobPutSucceedsButVersionInsertFails_CompensatesByDeletingOrphanBlob()
     {
-        // Force CreateVersionAsync to throw by pre-seeding a row whose `purl` collides with
-        // the one our publish would insert (purl is UNIQUE at the DB level). The dedup check
-        // doesn't see the collision (different package_id), so the flow passes the put and
-        // fails inside CreateVersionAsync — exactly the orphan-blob scenario the catch is
-        // there to handle.
-        await using (var seedConn = await _db.OpenAsync())
-        {
-            // A separate package — different purl_name — but a versions row whose purl matches
-            // the one our test publish will compute.
-            await seedConn.ExecuteAsync(
-                "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) " +
-                "VALUES ('pkg-decoy', 'o1', 'npm', 'decoy', 'decoy', 0)");
-            await seedConn.ExecuteAsync(
-                "INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes) " +
-                "VALUES ('ver-decoy', 'pkg-decoy', '99.0.0', 'pkg:npm/lodash@1.0.0', 'k', 1)");
-        }
-
-        var svc = Build();
+        // Force CreateVersionAsync to throw after the blob put has committed: a registry whose
+        // PutAsync drops the package_versions table, so the put succeeds but the subsequent
+        // INSERT fails with 'no such table'. The dedup check ran earlier (table still present),
+        // so the flow passes the put and fails inside CreateVersionAsync — exactly the
+        // orphan-blob scenario the compensating-delete catch is there to handle.
+        var droppingRegistry = new DropTableOnPutBlobStore(_blobs, _db, "package_versions");
+        var svc = BuildWithRegistry(droppingRegistry);
         string blobKey = BlobKeys.Hosted("o1", "npm", "lodash", "1.0.0", "lodash-1.0.0.tgz");
 
         await Assert.ThrowsAnyAsync<Exception>(() => svc.StoreAndRecordAsync(Sample()));
 
         // The compensating delete must have run; otherwise we'd have an orphan blob with
         // no row pointing at it — the very scenario the catch guards against.
+        Assert.True(droppingRegistry.DeleteAttempted,
+            "INSERT failure must trigger a compensating blob delete; orphan would otherwise persist.");
         Assert.False(await _blobs.ExistsAsync(blobKey),
             "INSERT failure must trigger a compensating blob delete; orphan would otherwise persist.");
     }
@@ -680,48 +661,27 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Blob store that delegates Put/Get/Exists/List/Size to an inner store but throws on
-    /// DeleteAsync — used to exercise the inner catch around the compensating delete in
-    /// PackagePublishService.CommitMetadataAsync (lines 211-216 of the SUT). Records whether
-    /// the delete was attempted so the test can assert the branch was reached.
-    /// </summary>
-    private sealed class DeleteThrowingBlobStore : IBlobStore
-    {
-        private readonly IBlobStore _inner;
-        public bool DeleteAttempted { get; private set; }
-        public DeleteThrowingBlobStore(IBlobStore inner) { _inner = inner; }
-        public Task PutAsync(string key, Stream data, CancellationToken ct = default) => _inner.PutAsync(key, data, ct);
-        public Task<Stream?> GetAsync(string key, CancellationToken ct = default) => _inner.GetAsync(key, ct);
-        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default) => _inner.GetRangeAsync(key, from, to, ct);
-        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => _inner.ExistsAsync(key, ct);
-        public Task DeleteAsync(string key, CancellationToken ct = default)
-        {
-            DeleteAttempted = true;
-            throw new InvalidOperationException("simulated blob delete outage");
-        }
-        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => _inner.GetTotalSizeAsync(ct);
-        public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default) => _inner.ListAsync(prefix, ct);
-    }
-
-    /// <summary>
     /// Blob store that drops a named DB table inside PutAsync, then delegates to the inner
-    /// store. Used to force <c>UpdateVersionForOverwriteAsync</c> to throw after the blob
-    /// put has already committed — the OVERWRITE-failure scenario that the SUT's outer
-    /// catch (lines 219-227) logs and re-throws without compensating. Also tracks whether
-    /// DeleteAsync was attempted so the test can confirm the OVERWRITE branch does NOT
-    /// compensate (in contrast to the INSERT branch).
+    /// store. Used to force a DB write to throw after the blob put has already committed —
+    /// either the INSERT-failure scenario (orphan blob; the SUT's catch at lines 211-216
+    /// compensates) or the OVERWRITE-failure scenario (lines 219-227 log and re-throw without
+    /// compensating). Tracks whether DeleteAsync was attempted so a test can assert whether the
+    /// branch compensated. When <paramref name="throwOnDelete"/> is set, DeleteAsync throws,
+    /// exercising the inner catch around the compensating delete.
     /// </summary>
     private sealed class DropTableOnPutBlobStore : IBlobStore
     {
         private readonly IBlobStore _inner;
         private readonly IMetadataStore _db;
         private readonly string _table;
+        private readonly bool _throwOnDelete;
         public bool DeleteAttempted { get; private set; }
-        public DropTableOnPutBlobStore(IBlobStore inner, IMetadataStore db, string table)
+        public DropTableOnPutBlobStore(IBlobStore inner, IMetadataStore db, string table, bool throwOnDelete = false)
         {
             _inner = inner;
             _db = db;
             _table = table;
+            _throwOnDelete = throwOnDelete;
         }
         public async Task PutAsync(string key, Stream data, CancellationToken ct = default)
         {
@@ -737,7 +697,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         public Task DeleteAsync(string key, CancellationToken ct = default)
         {
             DeleteAttempted = true;
-            return _inner.DeleteAsync(key, ct);
+            return _throwOnDelete ? throw new InvalidOperationException("simulated blob delete outage") : _inner.DeleteAsync(key, ct);
         }
         public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => _inner.GetTotalSizeAsync(ct);
         public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default) => _inner.ListAsync(prefix, ct);

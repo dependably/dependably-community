@@ -10,10 +10,14 @@ namespace Dependably.Api.PyPiProtocol;
 /// <summary>
 /// Handles HEAD /packages/{file} and GET /packages/{file}: auth gate, block-gate evaluation,
 /// cached-blob serving, and delegation to <see cref="PyPiProxyFetcher"/> for cache-miss proxy.
+/// Serve routing: uploaded versions use <c>package_versions</c>; proxy cache-hits use the
+/// global plane (<c>cache_artifact</c> + <c>tenant_artifact_access</c>).
 /// </summary>
 public sealed class PyPiDownloadHandler(
     OrgRepository orgs,
     PackageRepository packages,
+    CacheArtifactRepository cacheArtifacts,
+    TenantArtifactAccessRepository tenantAccess,
     TokenRepository tokens,
     AuditRepository audit,
     IBlobStore blobs,
@@ -21,7 +25,8 @@ public sealed class PyPiDownloadHandler(
     ClaimResolver claimResolver,
     ReservedNamespaceService reserved,
     UpstreamRegistryResolver registries,
-    PyPiProxyFetcher proxyFetcher)
+    PyPiProxyFetcher proxyFetcher,
+    TimeProvider time)
 {
     /// <summary>
     /// HEAD /packages/{file} — returns headers (size, checksum, content-type) without opening
@@ -38,49 +43,47 @@ public sealed class PyPiDownloadHandler(
             return new NotFoundResult();
         }
 
-        if (!PyPiArtifactValidator.TryParseFilename(file).Success)
+        var (filenameSuccess, parsedPurlName, parsedVersion) = PyPiArtifactValidator.TryParseFilename(file);
+        if (!filenameSuccess)
         {
             return new NotFoundResult();
         }
 
         var settings = await orgs.GetSettingsAsync(orgId, ct);
         var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
+
+        // Uploaded-only lookup: proxy versions are served via the global plane below.
         var pkgVersions = await packages.FindVersionByBlobKeySuffixAsync(orgId, "pypi", file, ct);
 
-        var authError = CheckDownloadAuth(httpContext, pkgVersions, token, settings!);
-        if (authError is not null)
+        return pkgVersions is not null
+            ? await HeadUploadedPackageAsync(httpContext, orgId, pkgVersions.Value.Version, token, settings, ct)
+            : await HeadProxyCachedPackageAsync(
+                httpContext, orgId, parsedPurlName!, parsedVersion!, file, token, settings!, ct);
+    }
+
+    // Returns HEAD headers for an uploaded-origin PyPI artifact. Requires a valid token;
+    // runs the block gate; returns 401/403/404 when denied or absent.
+    private async Task<IActionResult> HeadUploadedPackageAsync(
+        HttpContext httpContext, string orgId, PackageVersion v,
+        TokenRecord? token, OrgSettings? settings, CancellationToken ct)
+    {
+        // Uploaded version found — auth required.
+        var authErr = RequireUploadedAuth(httpContext, token);
+        if (authErr is not null)
         {
-            return authError;
+            return authErr;
         }
 
-        if (pkgVersions is null)
-        {
-            return new NotFoundResult();
-        }
-
-        var v = pkgVersions.Value.Version;
-        string? sourceIp = httpContext.GetNormalizedRemoteIp();
+        string? srcIp = httpContext.GetNormalizedRemoteIp();
         if (await blockGate.EvaluateAsync(
-                new BlockGateRequest(orgId, "pypi", v.Purl, v.Id,
-                    v.ManualBlockState, v.VulnCheckedAt,
-                    token?.UserId, settings!.MaxOsvScoreTolerance, sourceIp,
-                    MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                    PublishedAt: v.PublishedAt,
-                    ActorKind: token?.ActorKind,
-                    Deprecated: v.Deprecated,
-                    BlockDeprecatedMode: settings.BlockDeprecated,
-                    BlockMaliciousMode: settings.BlockMalicious,
-                    BlockKevMode: settings.BlockKev,
-                    MaxEpssTolerance: settings.MaxEpssTolerance), ct)
+                BlockGateRequest.For(orgId, "pypi", v, token, settings, srcIp), ct)
             == BlockDecision.Blocked)
         {
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
 
-        // Confirm the blob is present without opening a stream.
-        string blobKey = BlobKeys.StoreKey(v.BlobKey);
-        bool exists = await blobs.ExistsAsync(blobKey, ct);
-        if (!exists)
+        string blobKeyUploaded = BlobKeys.StoreKey(v.BlobKey);
+        if (!await blobs.ExistsAsync(blobKeyUploaded, ct))
         {
             return new NotFoundResult();
         }
@@ -92,6 +95,60 @@ public sealed class PyPiDownloadHandler(
         if (v.ChecksumSha256 is not null)
         {
             httpContext.Response.Headers.ETag = $"\"sha256:{v.ChecksumSha256}\"";
+            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+        }
+        return new OkResult();
+    }
+
+    // Returns HEAD headers for a proxy-cached PyPI artifact from the global plane. Enforces
+    // the AnonymousPull gate, then runs the block gate; returns 401/403/404 when denied or absent.
+    // Cohesive HEAD serve helper; all params are required for auth, block-gate, and blob lookup.
+#pragma warning disable S107
+    private async Task<IActionResult> HeadProxyCachedPackageAsync(
+        HttpContext httpContext, string orgId, string parsedPurlName, string parsedVersion,
+        string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
+#pragma warning restore S107
+    {
+        // Proxy cache-hit path: look up via the global plane.
+        if (!settings.AnonymousPull && token is null)
+        {
+            httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
+            return new UnauthorizedResult();
+        }
+
+        var caFacts = await cacheArtifacts.GetServeFactsByCoordinateAsync(
+            orgId, "pypi", parsedPurlName, parsedVersion, file, ct);
+
+        if (caFacts is null)
+        {
+            return new NotFoundResult();
+        }
+
+        string? sourceIpHead = httpContext.GetNormalizedRemoteIp();
+        if (await blockGate.EvaluateAsync(
+                BuildProxyBlockGateRequest(orgId, caFacts, token, settings, sourceIpHead), ct)
+            == BlockDecision.Blocked)
+        {
+            return new StatusCodeResult(StatusCodes.Status403Forbidden);
+        }
+
+        // blobkey-ok: proxy blob key from cache_artifact; no filename suffix needed for HEAD.
+        string blobKey = BlobKeys.StoreKey(caFacts.BlobKey);
+        if (!await blobs.ExistsAsync(blobKey, ct))
+        {
+            return new NotFoundResult();
+        }
+
+        httpContext.Response.Headers["X-Cache"] = "HIT";
+        if (caFacts.Purl is not null)
+        {
+            httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(caFacts.Purl);
+        }
+        httpContext.Response.ContentType = "application/octet-stream";
+        httpContext.Response.Headers["Content-Length"] = caFacts.SizeBytes.ToString();
+        if (!string.IsNullOrEmpty(caFacts.ContentHash))
+        {
+            httpContext.Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
             httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
         return new OkResult();
@@ -121,44 +178,105 @@ public sealed class PyPiDownloadHandler(
 
         var settings = await orgs.GetSettingsAsync(orgId, ct);
         var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
+        string? sourceIp = httpContext.GetNormalizedRemoteIp();
+
+        // Uploaded-only lookup first: proxy rows are no longer in package_versions.
         var pkgVersions = await packages.FindVersionByBlobKeySuffixAsync(orgId, "pypi", file, ct);
 
-        var authError = CheckDownloadAuth(httpContext, pkgVersions, token, settings!);
-        if (authError is not null)
-        {
-            return authError;
-        }
-
-        string? sourceIp = httpContext.GetNormalizedRemoteIp();
         if (pkgVersions is not null)
         {
-            var v = pkgVersions.Value.Version;
-            if (await blockGate.EvaluateAsync(
-                    new BlockGateRequest(orgId, "pypi", v.Purl, v.Id,
-                        v.ManualBlockState, v.VulnCheckedAt,
-                        token?.UserId, settings!.MaxOsvScoreTolerance, sourceIp,
-                        MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                        PublishedAt: v.PublishedAt,
-                        ActorKind: token?.ActorKind,
-                        Deprecated: v.Deprecated,
-                        BlockDeprecatedMode: settings.BlockDeprecated,
-                        BlockMaliciousMode: settings.BlockMalicious,
-                        BlockKevMode: settings.BlockKev,
-                        MaxEpssTolerance: settings.MaxEpssTolerance), ct)
-                == BlockDecision.Blocked)
+            var uploadedResult = await TryServeUploadedPackageAsync(
+                httpContext, orgId, pkgVersions.Value, file, token, settings, sourceIp, ct);
+            if (uploadedResult is not null)
             {
-                return new StatusCodeResult(StatusCodes.Status403Forbidden);
+                return uploadedResult;
             }
-
-            var cached = await TryServeCachedBlobAsync(httpContext, pkgVersions.Value, file, orgId, token, sourceIp, ct);
-            if (cached is not null)
+        }
+        else
+        {
+            // No uploaded row. Check the global-plane proxy cache before going to upstream.
+            var proxyCacheResult = await TryServeProxyCacheHitAsync(
+                httpContext, orgId, parsedPurlName!, parsedVersion!, file, token, settings!, sourceIp, ct);
+            if (proxyCacheResult is not null)
             {
-                return cached;
+                return proxyCacheResult;
             }
         }
 
-        // Cache miss — proxy from upstream. No configured upstream for pypi ⇒ proxying is
-        // disabled for this ecosystem, so a miss is a 404 (mirrors ProxyPassthroughEnabled=false).
+        return await FetchFromUpstreamAsync(
+            httpContext, orgId, file, parsed, pkgVersions, token, settings!, sourceIp, ct);
+    }
+
+    // Serves an uploaded-origin PyPI artifact if auth and block gates pass. Returns an
+    // IActionResult (including 401/403 gate denials or a file stream) when the uploaded row is
+    // found and the blob is in the store, or null when the blob is missing (falls through to upstream).
+    // Cohesive uploaded-serve helper; pkgVer tuple + sourceIp + ct each carry distinct roles.
+#pragma warning disable S107
+    private async Task<IActionResult?> TryServeUploadedPackageAsync(
+        HttpContext httpContext, string orgId,
+        (Package Package, PackageVersion Version) pkgVer, string file,
+        TokenRecord? token, OrgSettings? settings, string? sourceIp, CancellationToken ct)
+#pragma warning restore S107
+    {
+        // Uploaded version found — auth required.
+        var authErr = RequireUploadedAuth(httpContext, token);
+        if (authErr is not null)
+        {
+            return authErr;
+        }
+
+        var v = pkgVer.Version;
+        return await blockGate.EvaluateAsync(
+                BlockGateRequest.For(orgId, "pypi", v, token, settings, sourceIp), ct)
+            == BlockDecision.Blocked
+            ? new StatusCodeResult(StatusCodes.Status403Forbidden)
+            : await TryServeCachedBlobAsync(httpContext, pkgVer, file, orgId, token, sourceIp, ct);
+    }
+
+    // Checks the global-plane proxy cache for a PyPI artifact. Returns an IActionResult
+    // (including a block-gate denial or a file stream) when a cache_artifact row exists and
+    // the blob is in the store, or null when absent (falls through to upstream).
+    // Cohesive proxy-cache serve helper; sourceIp is separate from HttpContext for testability.
+#pragma warning disable S107
+    private async Task<IActionResult?> TryServeProxyCacheHitAsync(
+        HttpContext httpContext, string orgId, string parsedPurlName, string parsedVersion,
+        string file, TokenRecord? token, OrgSettings settings, string? sourceIp, CancellationToken ct)
+#pragma warning restore S107
+    {
+        // No uploaded row. Check the global-plane proxy cache before going to upstream.
+        if (!settings.AnonymousPull && token is null)
+        {
+            httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
+            return new UnauthorizedResult();
+        }
+
+        var caFacts = await cacheArtifacts.GetServeFactsByCoordinateAsync(
+            orgId, "pypi", parsedPurlName, parsedVersion, file, ct);
+
+        if (caFacts is null)
+        {
+            return null;
+        }
+
+        // Ternary form satisfies IDE0046: last guard before a single return expression.
+        return await (await blockGate.EvaluateAsync(
+                BuildProxyBlockGateRequest(orgId, caFacts, token, settings, sourceIp), ct)
+            == BlockDecision.Blocked
+            ? Task.FromResult<IActionResult?>(new StatusCodeResult(StatusCodes.Status403Forbidden))
+            : TryServeProxyCachedBlobAsync(httpContext, caFacts, file, orgId, token, sourceIp, ct));
+    }
+
+    // Proxies a PyPI artifact from upstream on a cache miss. Evaluates the allowlist/blocklist,
+    // passthrough, and claim gates before triggering the outbound fetch.
+    // Cohesive upstream-fetch helper; pkgVersions + parsed each carry distinct resolution state.
+#pragma warning disable S107
+    private async Task<IActionResult> FetchFromUpstreamAsync(
+        HttpContext httpContext, string orgId, string file, PyPiFilename parsed,
+        (Package Package, PackageVersion Version)? pkgVersions,
+        TokenRecord? token, OrgSettings settings, string? sourceIp, CancellationToken ct)
+#pragma warning restore S107
+    {
+        // Cache miss — proxy from upstream.
         httpContext.Response.Headers["X-Cache"] = "MISS";
         var bases = await registries.ResolveAsync(orgId, "pypi", ct);
         var resolved = await proxyFetcher.ResolveProxyUpstreamUrlAsync(file, parsed, pkgVersions, bases, ct);
@@ -167,13 +285,13 @@ public sealed class PyPiDownloadHandler(
             return new NotFoundResult();
         }
 
-        var gateError = await proxyFetcher.CheckProxyAllowlistBlocklistAsync(orgId, parsed, token, settings!, sourceIp, ct);
+        var gateError = await proxyFetcher.CheckProxyAllowlistBlocklistAsync(orgId, parsed, token, settings, sourceIp, ct);
         if (gateError is not null)
         {
             return gateError;
         }
 
-        if (!settings!.ProxyPassthroughEffective)
+        if (!settings.ProxyPassthroughEffective)
         {
             return new NotFoundResult();
         }
@@ -188,34 +306,42 @@ public sealed class PyPiDownloadHandler(
             : await proxyFetcher.FetchAndCacheUpstreamAsync(
                 httpContext,
                 new PyPiProxyDownload(file, resolved.Value.Url, resolved.Value.Sha256Hex, parsed, pkgVersions),
-                new ProxyContext(orgId, token?.UserId, token?.ActorKind, settings!, sourceIp),
+                new ProxyContext(orgId, token?.UserId, token?.ActorKind, settings, sourceIp),
                 ct);
     }
 
-    private static IActionResult? CheckDownloadAuth(
-        HttpContext httpContext,
-        (Package Package, PackageVersion Version)? pkgVersions,
-        TokenRecord? token, OrgSettings settings)
+    // Auth gate for uploaded-origin versions: token required, ReadMetadata capability required.
+    private static IActionResult? RequireUploadedAuth(HttpContext httpContext, TokenRecord? token)
     {
-        // Route by per-version origin, not the package-level is_proxy flag. A package name
-        // can host mixed-origin versions; an uploaded version requires auth even if other
-        // versions on the same name are proxy-cached.
-        if (pkgVersions is not null && pkgVersions.Value.Version.Origin == "uploaded")
-        {
-            if (token is null)
-            {
-                httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
-                return new UnauthorizedResult();
-            }
-            return !token.HasCapability(Capabilities.ReadMetadata) ? new ForbidResult() : (IActionResult?)null;
-        }
-        if (!settings.AnonymousPull && token is null)
+        if (token is null)
         {
             httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
             return new UnauthorizedResult();
         }
-        return null;
+        return !token.HasCapability(Capabilities.ReadMetadata) ? new ForbidResult() : (IActionResult?)null;
     }
+
+    // Builds a BlockGateRequest for a proxy artifact from global-plane serve facts.
+    private static BlockGateRequest BuildProxyBlockGateRequest(
+        string orgId, CacheArtifactServeFacts caFacts, TokenRecord? token,
+        OrgSettings settings, string? sourceIp) =>
+        new(orgId, "pypi", caFacts.Purl ?? string.Empty, string.Empty,
+            caFacts.ManualBlockState, caFacts.VulnCheckedAt,
+            token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
+            MinReleaseAgeHours: settings.MinReleaseAgeHours,
+            PublishedAt: caFacts.PublishedAt,
+            ActorKind: token?.ActorKind,
+            Deprecated: caFacts.Deprecated,
+            BlockDeprecatedMode: settings.BlockDeprecated,
+            BlockMaliciousMode: settings.BlockMalicious,
+            BlockKevMode: settings.BlockKev,
+            MaxEpssTolerance: settings.MaxEpssTolerance,
+            Origin: "proxy",
+            HasInstallScript: caFacts.HasInstallScript,
+            InstallScriptKind: caFacts.InstallScriptKind,
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            ProvenanceStatus: caFacts.ProvenanceStatus,
+            CacheArtifactId: caFacts.Id);
 
     private async Task<IActionResult?> TryServeCachedBlobAsync(
         HttpContext httpContext,
@@ -238,6 +364,38 @@ public sealed class PyPiDownloadHandler(
         await audit.LogActivityAsync(orgId, "pypi", pkgVer.Version.Purl, "download", token?.UserId,
             actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         await packages.IncrementDownloadCountAsync(pkgVer.Version.Id, ct);
+        return new FileStreamResult(blob, "application/octet-stream") { FileDownloadName = file };
+    }
+
+    private async Task<IActionResult?> TryServeProxyCachedBlobAsync(
+        HttpContext httpContext,
+        CacheArtifactServeFacts caFacts, string file, string orgId,
+        TokenRecord? token, string? sourceIp, CancellationToken ct)
+    {
+        // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to the cache tier.
+        var blob = await blobs.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
+        if (blob is null)
+        {
+            return null;
+        }
+
+        httpContext.Response.Headers["X-Cache"] = "HIT";
+        if (caFacts.Purl is not null)
+        {
+            httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(caFacts.Purl);
+        }
+        if (!string.IsNullOrEmpty(caFacts.ContentHash))
+        {
+            httpContext.Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
+            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+        }
+        if (caFacts.Purl is not null)
+        {
+            await audit.LogActivityAsync(orgId, "pypi", caFacts.Purl, "download", token?.UserId,
+                actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
+        }
+        // Increment per-tenant download count on the global plane.
+        await tenantAccess.UpsertStateAsync(orgId, caFacts.Id, time.GetUtcNow(), ct);
         return new FileStreamResult(blob, "application/octet-stream") { FileDownloadName = file };
     }
 

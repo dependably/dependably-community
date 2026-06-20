@@ -26,7 +26,7 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     {
         _fixture = fixture;
         _audit = new AuditRepository(_fixture.Store);
-        _sut = new BlockGateService(new VulnerabilityRepository(_fixture.Store, _clock), _audit, new QuarantineRepository(_fixture.Store, _clock), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, _clock);
+        _sut = new BlockGateService(new VulnerabilityRepository(_fixture.Store, _clock), _audit, new QuarantineRepository(_fixture.Store, _clock), new InstallScriptAllowlistService(_fixture.Store, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, _clock);
     }
 
     // ── manual-block / manual-allow ───────────────────────────────────────────
@@ -727,6 +727,74 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         await quarantine.DecideAsync(orgId, items.Single(i => i.Purl == req.Purl).Id, "denied", null, null);
 
         Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateFirstFetchDeprecationAsync(req));
+    }
+
+    // ── release-age cooldown origin exemption ─────────────────────────────────
+
+    [Fact]
+    public async Task ReleaseAge_HostedOrigin_ExemptsFromCooldown()
+    {
+        // Hosted packages set PublishedAt to the local push time, not an upstream release date.
+        // A version pushed 1 hour ago must not be self-blocked by a 48-hour cooldown.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ra-hosted-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            MinReleaseAgeHours = 48,
+            PublishedAt = _clock.GetUtcNow().AddHours(-1),
+            Origin = "hosted",
+        };
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_release_age"));
+    }
+
+    [Fact]
+    public async Task ReleaseAge_LocalOnlyOrigin_ExemptsFromCooldown()
+    {
+        // local_only follows the same exemption rationale as hosted: the publish timestamp
+        // reflects a local push, not an upstream release.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ra-local-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            MinReleaseAgeHours = 48,
+            PublishedAt = _clock.GetUtcNow().AddHours(-1),
+            Origin = "local_only",
+        };
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_release_age"));
+    }
+
+    [Fact]
+    public async Task ReleaseAge_ProxyOrigin_StillBlockedWithinCooldown()
+    {
+        // Proxy versions carry an upstream publish timestamp; the cooldown applies as intended.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ra-proxy-young-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            MinReleaseAgeHours = 48,
+            PublishedAt = _clock.GetUtcNow().AddHours(-1),
+            Origin = "proxy",
+        };
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+        Assert.Equal(1, await CountActivityAsync(orgId, "blocked_release_age"));
+    }
+
+    [Fact]
+    public async Task ReleaseAge_ProxyOrigin_AllowedOnceCooldownExpires()
+    {
+        // A proxy version published 72 hours ago clears a 48-hour hold with comfortable margin.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ra-proxy-old-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            MinReleaseAgeHours = 48,
+            PublishedAt = _clock.GetUtcNow().AddHours(-72),
+            Origin = "proxy",
+        };
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_release_age"));
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────

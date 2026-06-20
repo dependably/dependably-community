@@ -191,12 +191,8 @@ public sealed class QuarantineRepository
             new { orgId });
 
         var now = _time.GetUtcNow();
-        bool policyOff = minReleaseAgeHours is not { } m || m <= 0;
-
         var ids = candidates
-            .Where(row => policyOff
-                || row.PublishedAt is not { } p
-                || (now - p).TotalHours >= minReleaseAgeHours!.Value)
+            .Where(row => IsReleaseHoldStale(row.PublishedAt, minReleaseAgeHours, now))
             .Select(row => row.Id)
             .ToList();
 
@@ -205,6 +201,27 @@ public sealed class QuarantineRepository
             : await conn.ExecuteAsync(
                 "DELETE FROM quarantine WHERE org_id = @orgId AND id IN @ids",
                 new { orgId, ids });
+    }
+
+    /// <summary>
+    /// True when a pending <c>release_age</c> hold is now stale and would be deleted by
+    /// <see cref="PurgeAgedReleaseHoldsAsync"/>: the release-age policy is off, the version's
+    /// publish date is unknown, or the version has aged past the hold threshold. This is the single
+    /// source of truth for "the queue no longer shows this hold" — <see cref="PurgeAgedReleaseHoldsAsync"/>
+    /// uses it to choose rows to delete, and the dashboard pending count uses it to exclude the same
+    /// rows, so the count can never disagree with the (purged-on-load) review queue.
+    /// </summary>
+    public static bool IsReleaseHoldStale(DateTimeOffset? publishedAt, int? minReleaseAgeHours, DateTimeOffset now)
+    {
+        if (minReleaseAgeHours is not { } m || m <= 0)
+        {
+            return true; // policy off → the hold no longer applies
+        }
+        if (publishedAt is not { } p)
+        {
+            return true; // unknown publish date → re-evaluated as serveable, so the hold is stale
+        }
+        return (now - p).TotalHours >= m;
     }
 
     private sealed record ReleaseHoldRow(string Id, DateTimeOffset? PublishedAt);

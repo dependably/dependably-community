@@ -1,5 +1,6 @@
 using Dependably.Infrastructure;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace Dependably.Tests.Unit;
 
@@ -16,6 +17,34 @@ public class AirGapModeTests
         };
         var cfg = new ConfigurationBuilder().AddInMemoryCollection(dict).Build();
         return new AirGapMode(cfg);
+    }
+
+    private static (AirGapMode Mode, List<string> Warnings) BuildWithWarningCapture(string? disableJobs)
+    {
+        var dict = new Dictionary<string, string?>
+        {
+            ["AIR_GAPPED"] = null,
+            ["DISABLE_BACKGROUND_JOBS"] = disableJobs,
+            ["OSV_MODE"] = null,
+        };
+        var cfg = new ConfigurationBuilder().AddInMemoryCollection(dict).Build();
+        var warnings = new List<string>();
+        var logger = new CapturingLogger(warnings);
+        return (new AirGapMode(cfg, logger), warnings);
+    }
+
+    // Minimal logger that captures only Warning-level messages.
+    private sealed class CapturingLogger(List<string> sink) : ILogger<AirGapMode>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel level) => level >= LogLevel.Warning;
+        public void Log<TState>(LogLevel level, EventId eventId, TState state, Exception? ex, Func<TState, Exception?, string> formatter)
+        {
+            if (level >= LogLevel.Warning)
+            {
+                sink.Add(formatter(state, ex));
+            }
+        }
     }
 
     // ── IsEnabled ────────────────────────────────────────────────────────────────
@@ -92,6 +121,17 @@ public class AirGapModeTests
         // The set is case-insensitive so the lookup works regardless.
         var mode = Build(null, "not-a-real-job");
         Assert.Contains("not-a-real-job", mode.DisabledJobs);
+    }
+
+    [Fact]
+    public void DisabledJobs_ThreatFeed_IsKnownName_NoWarning()
+    {
+        // "threat-feed" is the job name used by ThreatFeedRefreshService. It must be
+        // in KnownJobNames so that DISABLE_BACKGROUND_JOBS=threat-feed does not emit
+        // a spurious "unknown job name" warning.
+        var (mode, warnings) = BuildWithWarningCapture("threat-feed");
+        Assert.Contains("threat-feed", mode.DisabledJobs);
+        Assert.DoesNotContain(warnings, w => w.Contains("unknown job name", StringComparison.OrdinalIgnoreCase));
     }
 
     // ── IsJobDisabled ─────────────────────────────────────────────────────────────

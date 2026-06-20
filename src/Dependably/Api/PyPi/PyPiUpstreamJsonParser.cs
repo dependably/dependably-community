@@ -59,6 +59,13 @@ internal static class PyPiUpstreamJsonParser
 
         string? deprecated = LicenseExtractor.FromPyPiJsonFile(entry).Deprecated;
 
-        return new PyPiJsonMetadata(publishedAt, sha256, deprecated);
+        // PEP 740: a file that carries attestations exposes a 'provenance' URL pointing at the
+        // provenance document (the Sigstore attestation bundles). Null when the file has none.
+        string? provenanceUrl =
+            entry.TryGetProperty("provenance", out var prov) && prov.ValueKind == JsonValueKind.String
+                ? prov.GetString()
+                : null;
+
+        return new PyPiJsonMetadata(publishedAt, sha256, deprecated, provenanceUrl);
     }
 }

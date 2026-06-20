@@ -1,3 +1,5 @@
+using Dependably.Infrastructure.Observability;
+
 namespace Dependably.Infrastructure;
 
 /// <summary>
@@ -34,13 +36,16 @@ public sealed class CacheAccessRecorder
 
     /// <summary>
     /// Records that the given tenant accessed the cached artefact at the given coordinate.
-    /// Creates the <c>cache_artifact</c> row if absent, otherwise touches its
-    /// <c>last_accessed_at</c>. Always upserts the per-tenant access row.
+    /// Creates the <c>cache_artifact</c> row if absent (using <c>ON CONFLICT DO NOTHING</c> +
+    /// re-read so a concurrent first-fetch race always resolves to the single winner row),
+    /// otherwise touches its <c>last_accessed_at</c>. Always upserts the per-tenant access row.
+    /// Returns the <c>cache_artifact.id</c> on success, or <c>null</c> when recording fails
+    /// (failures are swallowed and logged; the originating fetch already succeeded).
     /// </summary>
-    public Task RecordAccessAsync(CacheAccess access, CancellationToken ct = default)
+    public Task<string?> RecordAccessAsync(CacheAccess access, CancellationToken ct = default)
         => RecordAccessImplAsync(access, ct);
 
-    private async Task RecordAccessImplAsync(CacheAccess access, CancellationToken ct)
+    private async Task<string?> RecordAccessImplAsync(CacheAccess access, CancellationToken ct)
     {
         var (orgId, ecosystem, name, version, filename,
              sha256, sizeBytes, blobKey, upstreamUrl) = access;
@@ -71,9 +76,31 @@ public sealed class CacheAccessRecorder
             {
                 artifactId = existing.Id;
                 await _cache.TouchAccessAsync(existing.Id, now, ct);
+
+                // First-fetch content-divergence detection: a freshly-fetched SHA-256 that
+                // differs from the globally-cached row signals that two organisations resolved
+                // different bytes for the same coordinate. The cache_artifact row is NOT
+                // mutated — detection only; serve-path behaviour is unchanged.
+                if (!string.IsNullOrEmpty(sha256)
+                    && !string.IsNullOrEmpty(existing.ContentHash)
+                    && !string.Equals(sha256, existing.ContentHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    DependablyMeter.CacheContentDivergences.Add(
+                        1,
+                        new KeyValuePair<string, object?>("ecosystem", ecosystem));
+
+                    _logger.LogWarning(
+                        "Cache-plane content divergence detected: {Ecosystem}/{Name}@{Version} " +
+                        "{Filename} — cached hash {CachedHash}, diverging hash {DivertingHash}, " +
+                        "requesting org {OrgId}. The cached row is unchanged; the first-fetch " +
+                        "content is authoritative on the shared cache plane.",
+                        ecosystem, name, version, filename,
+                        existing.ContentHash, sha256, orgId);
+                }
             }
 
             await _access.UpsertAsync(orgId, artifactId, now, ct);
+            return artifactId;
         }
         catch (Exception ex)
         {
@@ -83,6 +110,7 @@ public sealed class CacheAccessRecorder
             _logger.LogWarning(ex,
                 "CacheAccessRecorder failed for {Ecosystem}/{Name}@{Version} {Filename} (org {OrgId}).",
                 ecosystem, name, version, filename, orgId);
+            return null;
         }
     }
 }

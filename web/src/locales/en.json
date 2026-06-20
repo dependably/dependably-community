@@ -212,7 +212,15 @@
       "yanked": "yanked",
       "deprecated": "deprecated",
       "verified": "verified",
-      "signed": "signed"
+      "signed": "signed",
+      "installScript": "runs install scripts",
+      "installScriptHelp": "This version ships an install/lifecycle script that runs automatically on install ({kind}).",
+      "provenanceVerified": "signature verified",
+      "provenanceVerifiedHelp": "The npm registry signature on this version verified against a pinned trust anchor (signer: {signer}).",
+      "provenanceFailed": "signature failed",
+      "provenanceFailedHelp": "This version carried a signature that did not verify against the pinned trust anchors.",
+      "provenanceUnsigned": "unsigned",
+      "provenanceUnsignedHelp": "The upstream registry published no signature for this version."
     },
     "status": {
       "blocked": "Blocked",
@@ -228,6 +236,11 @@
     "latestBanner": {
       "stale": "Behind upstream — latest version {version} is not cached here.",
       "current": "Up to date with upstream — latest version {version} is cached."
+    },
+    "latestCell": {
+      "isLatest": "Latest upstream version",
+      "behind": "Behind upstream latest",
+      "unknown": "No upstream version to compare"
     },
     "vulnNever": "Never",
     "rescan": "Rescan",
@@ -612,6 +625,8 @@
       "blocklistSection": "Blocklist",
       "reservedSection": "Reserved namespaces",
       "reservedHint": "Dependency-confusion guard: names matching these per-ecosystem patterns are never fetched or merged from upstream — only your hosted content serves. Names you have published are protected automatically; reserve patterns here to also cover names you haven't published yet.",
+      "installScriptAllowlistSection": "Install-script allowlist",
+      "installScriptAllowlistHint": "Packages exempt from the install-script block gate. When the policy above is 'Block', versions listed here are served normally regardless of whether they ship an install/lifecycle script. Use this to permit known-good build tools (e.g. esbuild, node-gyp) while keeping the gate active for everything else.",
       "blockDeprecated": "Deprecated package policy",
       "blockDeprecatedHint": "How upstream-deprecated versions are handled. Warn surfaces a 'deprecated' status in the UI and API. Block new refuses a deprecated version on cache miss — it is never fetched, cached, or served — while already-cached versions keep serving. Block all additionally returns 403 for already-cached versions once deprecated. Deprecation data is captured at proxy fetch and refreshed daily by the deprecation-refresh job.",
       "blockDeprecatedOff": "Off — allow deprecated",
@@ -628,6 +643,41 @@
       "blockKevOff": "Off — ignore KEV listings",
       "blockKevWarn": "Warn — flag only",
       "blockKevBlock": "Block — refuse exploited-in-the-wild",
+      "blockInstallScripts": "Install-script policy",
+      "blockInstallScriptsHint": "How versions that ship an install/lifecycle script are handled. Such a script runs automatically on install — an npm preinstall/install/postinstall hook, a PyPI sdist setup.py, or a NuGet tools install.ps1/init.ps1 or build .targets/.props. Block returns 403 on fetch and serve; Warn surfaces the badge in the version detail only. A per-version manual allow override still wins.",
+      "blockInstallScriptsOff": "Off — allow install scripts",
+      "blockInstallScriptsWarn": "Warn — flag only",
+      "blockInstallScriptsBlock": "Block — refuse install scripts",
+      "verifyNpmSignatures": "npm signature verification",
+      "verifyNpmSignaturesHint": "Verify the npm registry's signature on each proxied version against operator-pinned trust anchors (Npm:SignatureKeys), the same check npm audit signatures performs. Block fails closed — a version that fails verification or carries no signature is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Requires pinned keys to enable.",
+      "verifyNpmSignaturesOff": "Off — do not verify",
+      "verifyNpmSignaturesWarn": "Warn — verify, flag only",
+      "verifyNpmSignaturesBlock": "Block — refuse unverified",
+      "verifyNpmSignaturesNoKeys": "No npm trust anchors are configured. Pin the registry's public keys via Npm:SignatureKeys to enable signature verification.",
+      "verifyNuGetSignatures": "NuGet signature verification",
+      "verifyNuGetSignaturesHint": "Verify the signature embedded in each proxied .nupkg against operator-pinned trust anchors (NuGet:SignatureCertificates). Block fails closed — a version whose signature fails verification or that carries no signature is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Requires pinned certificates to enable.",
+      "verifyNuGetSignaturesOff": "Off — do not verify",
+      "verifyNuGetSignaturesWarn": "Warn — verify, flag only",
+      "verifyNuGetSignaturesBlock": "Block — refuse unverified",
+      "verifyNuGetSignaturesNoCerts": "No NuGet trust anchors are configured. Pin the registry's signing certificates via NuGet:SignatureCertificates to enable signature verification.",
+      "verifyPyPiAttestations": "PyPI attestation verification",
+      "verifyPyPiAttestationsHint": "Verify the PEP 740 digital attestation for each proxied PyPI file against operator-pinned Sigstore roots (PyPI:SigstoreRoots) and a Trusted Publisher allowlist (PyPI:TrustedPublishers). The attestation's signed digest is bound to the downloaded bytes, the Fulcio leaf is chained to a pinned root, and the publisher identity is matched. Block fails closed — a version whose attestation fails verification or that carries none is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Requires pinned roots and publishers to enable.",
+      "verifyPyPiAttestationsOff": "Off — do not verify",
+      "verifyPyPiAttestationsWarn": "Warn — verify, flag only",
+      "verifyPyPiAttestationsBlock": "Block — refuse unverified",
+      "verifyPyPiAttestationsNoRoots": "No PyPI Sigstore roots and Trusted Publishers are configured. Pin them via PyPI:SigstoreRoots and PyPI:TrustedPublishers to enable attestation verification.",
+      "verifyRpmSignatures": "RPM signature verification",
+      "verifyRpmSignaturesHint": "Verify the OpenPGP signature embedded in each proxied RPM package header against the operator-pinned GPG key (Rpm:GpgKey). Block fails closed — a package whose signature fails verification or that carries none is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched packages only. Requires a pinned GPG key to enable.",
+      "verifyRpmSignaturesOff": "Off — do not verify",
+      "verifyRpmSignaturesWarn": "Warn — verify, flag only",
+      "verifyRpmSignaturesBlock": "Block — refuse unverified",
+      "verifyRpmSignaturesNoKey": "No RPM GPG key is configured. Pin the repository's signing key via Rpm:GpgKey to enable signature verification.",
+      "verifyMavenSignatures": "Maven signature verification",
+      "verifyMavenSignaturesHint": "Verify the detached OpenPGP signature (.asc sidecar) for each proxied Maven artifact against operator-pinned trust anchors (Maven:SignatureKeys). Block fails closed — a version whose .asc fails verification or that carries none is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Requires pinned keys to enable.",
+      "verifyMavenSignaturesOff": "Off — do not verify",
+      "verifyMavenSignaturesWarn": "Warn — verify, flag only",
+      "verifyMavenSignaturesBlock": "Block — refuse unverified",
+      "verifyMavenSignaturesNoKeys": "No Maven trust anchors are configured. Pin the repository's public keys via Maven:SignatureKeys to enable signature verification.",
       "maxEpssTolerance": "EPSS probability ceiling",
       "maxEpssToleranceHint": "Maximum FIRST.org EPSS exploitation probability (0.0–1.0) tolerated across a version's advisories. EPSS estimates the likelihood a CVE is exploited within 30 days; for example 0.5 blocks versions with an advisory considered more likely than not to be exploited. Scores are refreshed daily by the threat-feed job. Leave empty to disable.",
       "maxEpssTolerancePlaceholder": "Off",
@@ -646,6 +696,27 @@
           "urlHint": "Base URL of the upstream registry (e.g. https://pypi.org, https://registry.npmjs.org).",
           "name": "Label (optional)",
           "namePlaceholder": "e.g. Internal mirror"
+        },
+        "oci": {
+          "host": "Host",
+          "hostHint": "Registry hostname without protocol (e.g. registry-1.docker.io, mcr.microsoft.com).",
+          "prefixes": "Repository prefixes",
+          "prefixesPlaceholder": "library/\ndotnet/",
+          "prefixesHint": "One prefix per line (or comma-separated). First-match-wins against the requested repository path. Use a blank line to add the catch-all prefix that matches everything.",
+          "authTypeLabel": "Authentication",
+          "authType": {
+            "anonymous": "Anonymous",
+            "basic": "Basic (username + password/token)",
+            "dockerhub_token_exchange": "Docker Hub token exchange"
+          },
+          "username": "Username",
+          "secret": "Password / token",
+          "secretHint": "Write-only — not returned by the API after saving.",
+          "tokenEndpoint": "Token endpoint (optional)",
+          "tokenEndpointHint": "Override the default Docker Hub token endpoint. Leave blank to use https://auth.docker.io/token.",
+          "credentialSet": "credential set",
+          "catchAllLabel": "(catch-all)",
+          "catchAllWarn": "Registries listed below this catch-all are never reached."
         }
       }
     },
@@ -753,6 +824,28 @@
       "pattern": "Pattern",
       "patternPlaceholder": "e.g. @acme/* or com.acme",
       "patternHint": "Exact name or trailing-* glob ('@acme/*', 'Acme.*'). Maven patterns are dot-boundary groupId prefixes: 'com.acme' also reserves every 'com.acme.*' groupId, but never 'com.acmecorp'."
+    }
+  },
+  "installScriptAllowlist": {
+    "addEntry": "Add allowlist entry",
+    "removeConfirm": "Remove this allowlist entry? The package will be blocked again when block_install_scripts is 'block'.",
+    "allVersions": "All versions",
+    "columns": {
+      "ecosystem": "Ecosystem",
+      "name": "Package",
+      "versionPattern": "Version",
+      "added": "Added"
+    },
+    "empty": "No install-script allowlist entries",
+    "modal": {
+      "title": "Allow Install Script",
+      "ecosystem": "Ecosystem",
+      "name": "Package name",
+      "namePlaceholder": "e.g. esbuild or node-gyp",
+      "nameHint": "Exact package name, case-sensitive for most ecosystems.",
+      "versionPattern": "Version pattern (optional)",
+      "versionPatternPlaceholder": "e.g. 0.19.* or leave blank for all versions",
+      "versionPatternHint": "Leave blank to exempt all versions. Use a trailing * for a version prefix glob (e.g. 0.19.* matches 0.19.0 and 0.19.1)."
     }
   },
   "users": {
@@ -1339,11 +1432,12 @@
         "enabledHint": "When off, /metrics returns 404 — the endpoint vanishes entirely (not a 403). When on, the IP allowlist controls access: source IPs on the allowlist receive 200 (anonymous), all others receive 403.",
         "allowedIps": "Allowed IPs / CIDRs",
         "allowedIpsHint": "One entry per line. Default when unset: loopback only (127.0.0.1, ::1). Examples: 10.0.0.0/8, 2001:db8::/32.",
+        "sourceIpNote": "Enter IPs as the server sees the connection source. Direct Docker scrapes may appear as the Docker bridge gateway (for example 172.17.0.1) rather than the original client. To allowlist real client IPs, scrape through a trusted reverse proxy and configure TRUSTED_PROXIES.",
         "broadCidrWarn": "⚠ 0.0.0.0/0 or ::/0 disables the IP gate entirely. Use only if /metrics is otherwise protected (e.g. private network, reverse-proxy auth).",
         "save": "Save metrics access",
         "recentDenied": {
           "title": "Recently denied scrapes",
-          "hint": "Source IPs blocked by the allowlist in this session. Click + Add to append to the allowlist above.",
+          "hint": "Connection source addresses as seen by the server, blocked by the allowlist this session. Click + Add to append to the allowlist above.",
           "add": "+ Add",
           "addTitle": "Append this IP to the allowlist",
           "justNow": "just now",

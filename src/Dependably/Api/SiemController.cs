@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Siem;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -20,14 +21,6 @@ namespace Dependably.Api;
 [AllowAnonymous] // Auth is checked manually to support both JWT and siem:read tokens
 public sealed class SiemController : ControllerBase
 {
-    // CEF (Common Event Format) severity values per the ArcSight specification (0=Unknown, 1-3=Low,
-    // 4-6=Medium, 7-8=High, 9-10=Very-High). Each auth event maps to the most appropriate level.
-    private const int CefSeverityHigh = 7;
-    private const int CefSeverityMediumHigh = 6;
-    private const int CefSeverityMedium = 5;
-    private const int CefSeverityMediumLow = 4;
-    private const int CefSeverityLow = 3;
-
     // Maximum page size for SIEM event stream responses.
     private const int MaxSiemPageSize = 500;
 
@@ -328,34 +321,34 @@ public sealed class SiemController : ControllerBase
         var sb = new StringBuilder();
         foreach (var item in items)
         {
-            string sig = CefEscape(item.Action);
-            string name = CefFriendlyName(item.Action);
-            int sev = CefSeverity(item.Action);
+            string sig = CefFormat.Escape(item.Action);
+            string name = CefFormat.FriendlyName(item.Action);
+            int sev = CefFormat.Severity(item.Action);
             var ext = new StringBuilder();
             ext.Append($"rt={item.CreatedAt:yyyyMMddHHmmss.fffZ}");
             if (item.ActorId is not null)
             {
-                ext.Append($" suid={CefEscape(item.ActorId)}");
+                ext.Append($" suid={CefFormat.Escape(item.ActorId)}");
             }
 
             if (item.OrgId is not null)
             {
-                ext.Append($" cs1={CefEscape(item.OrgId)} cs1Label=OrgId");
+                ext.Append($" cs1={CefFormat.Escape(item.OrgId)} cs1Label=OrgId");
             }
 
             if (item.Ecosystem is not null)
             {
-                ext.Append($" cs2={CefEscape(item.Ecosystem)} cs2Label=Ecosystem");
+                ext.Append($" cs2={CefFormat.Escape(item.Ecosystem)} cs2Label=Ecosystem");
             }
 
             if (item.Purl is not null)
             {
-                ext.Append($" cs3={CefEscape(item.Purl)} cs3Label=Purl");
+                ext.Append($" cs3={CefFormat.Escape(item.Purl)} cs3Label=Purl");
             }
 
             if (item.Detail is not null)
             {
-                ext.Append($" msg={CefEscape(item.Detail)}");
+                ext.Append($" msg={CefFormat.Escape(item.Detail)}");
             }
 
             sb.AppendLine($"CEF:0|Dependably|dependably|1.0|{sig}|{name}|{sev}|{ext}");
@@ -367,30 +360,4 @@ public sealed class SiemController : ControllerBase
 
         return Content(sb.ToString(), "application/x-cef", Encoding.UTF8);
     }
-
-    private static string CefEscape(string s) =>
-        s.Replace("\\", "\\\\").Replace("|", "\\|").Replace("=", "\\=").Replace("\n", "\\n").Replace("\r", "\\r");
-
-    private static string CefFriendlyName(string action) => action switch
-    {
-        "login.success" => "Login Success",
-        "login.failure" => "Login Failure",
-        "lockout.triggered" => "Account Lockout",
-        "token.created" => "Token Created",
-        "token.revoked" => "Token Revoked",
-        "rbac.role_changed" => "Role Changed",
-        "rbac.member_added" => "Member Added",
-        "rbac.member_removed" => "Member Removed",
-        _ => action,
-    };
-
-    private static int CefSeverity(string action) => action switch
-    {
-        "lockout.triggered" => CefSeverityHigh,
-        "login.failure" => CefSeverityMedium,
-        "login.success" => CefSeverityLow,
-        "token.revoked" => CefSeverityMediumLow,
-        "rbac.role_changed" => CefSeverityMediumHigh,
-        _ => CefSeverityLow,
-    };
 }

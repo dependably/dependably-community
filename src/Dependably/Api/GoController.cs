@@ -379,7 +379,7 @@ public sealed class GoController : OrgScopedControllerBase
                 if (ext == "zip")
                 {
                     // Record the version in the catalogue for the .zip (primary artifact).
-                    await RecordVersionAsync(orgId, module, version, blobKey, token, ct);
+                    await RecordVersionAsync(orgId, module, ct);
                     // Record the proxy fetch into the shared cache index so the eviction
                     // pipeline and vulnerability-response query can see it.
                     await RecordZipCacheAccessAsync(orgId, module, version, blobKey, upstreamUrl, ct);
@@ -603,11 +603,14 @@ public sealed class GoController : OrgScopedControllerBase
 
     // ── Package catalogue recording ──────────────────────────────────────────
 
+    // Records a Go module .zip first-fetch. Ensures the per-tenant packages row exists so the
+    // module appears in this org's @v/list and @latest responses; the per-version data lives in
+    // the global cache plane (cache_artifact + tenant_artifact_access). No package_versions row
+    // is inserted for proxy .zips — the global plane is authoritative for proxy versions.
     private async Task RecordVersionAsync(
-        string orgId, string module, string version, string blobKey, TokenRecord? token, CancellationToken ct)
+        string orgId, string module, CancellationToken ct)
     {
-        string purl = PurlNormalizer.Golang(module, version);
-        await _svc.Packages.GetOrCreateGoVersionAsync(orgId, module, version, purl, blobKey, token?.UserId, ct);
+        await _svc.Packages.GetOrCreateAsync(orgId, "golang", module, module, isProxy: true, ct);
     }
 
     /// <summary>
@@ -644,6 +647,28 @@ public sealed class GoController : OrgScopedControllerBase
                 contentHash = row.ChecksumSha256 ?? "";
                 sizeBytes = row.SizeBytes;
             }
+            else
+            {
+                // Global-plane lookup for proxy .zips recorded after the P3b flip: resolve
+                // checksum and size from cache_artifact so the recorder gets accurate metadata.
+                // xtenant: cache_artifact is global; org_id filter on tenant_artifact_access.
+                var caRow = await Dapper.SqlMapper.QuerySingleOrDefaultAsync<GoZipCacheRow>(conn,
+                    """
+                    SELECT ca.content_hash AS ContentHash, ca.size_bytes AS SizeBytes
+                    FROM cache_artifact ca
+                    JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id AND taa.org_id = @orgId
+                    WHERE ca.ecosystem = 'golang'
+                      AND ca.name = @module
+                      AND ca.version = @version
+                    LIMIT 1
+                    """,
+                    new { orgId, module, version });
+                if (caRow is not null && caRow.ContentHash is not null)
+                {
+                    contentHash = caRow.ContentHash;
+                    sizeBytes = caRow.SizeBytes;
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -654,12 +679,38 @@ public sealed class GoController : OrgScopedControllerBase
         }
 
         string filename = $"{version}.zip";
-        await _svc.CacheRecorder.RecordAccessAsync(
+        string? cacheArtifactId = await _svc.CacheRecorder.RecordAccessAsync(
             new CacheAccess(orgId, "golang", module, version, filename,
                 contentHash, sizeBytes, blobKey, upstreamUrl), ct);
+        if (cacheArtifactId is not null)
+        {
+            // Increment per-tenant download counter and write global supply-chain facts.
+            await _svc.TenantAccess.UpsertStateAsync(orgId, cacheArtifactId, _svc.Time.GetUtcNow(), ct);
+            if (upstreamUrl is not null)
+            {
+                // Only write global facts on first-fetch (when upstreamUrl is non-null).
+                // Cache-hit calls pass null to signal the artifact row already carries them.
+                await _svc.CacheArtifacts.UpdateGlobalFactsAsync(
+                    cacheArtifactId,
+                    purl: PurlNormalizer.Golang(module, version),
+                    checksumSha1: null,
+                    publishedAt: null,
+                    deprecated: null,
+                    hasInstallScript: false,
+                    installScriptKind: null,
+                    provenanceStatus: null,
+                    provenanceSigner: null,
+                    upstreamIntegrityValue: contentHash.Length > 0 ? contentHash : null,
+                    upstreamIntegrityAlgorithm: contentHash.Length > 0 ? "sha256" : null,
+                    ct);
+            }
+        }
     }
 
     private sealed record GoVersionBytesRow(string? ChecksumSha256, long SizeBytes);
+
+    // Holds content hash and size resolved from the global cache plane for proxy .zip metadata.
+    private sealed record GoZipCacheRow(string? ContentHash, long SizeBytes);
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -703,6 +754,9 @@ public sealed record GoControllerServices(
     IHttpClientFactory HttpClientFactory,
     IMetadataStore Db,
     CacheAccessRecorder CacheRecorder,
+    CacheArtifactRepository CacheArtifacts,
+    TenantArtifactAccessRepository TenantAccess,
+    TimeProvider Time,
     IConfiguration Configuration,
     ILogger<GoController> Logger,
     GoLatestFetchCoordinator LatestCoordinator,

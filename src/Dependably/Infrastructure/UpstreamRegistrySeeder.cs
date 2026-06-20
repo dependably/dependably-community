@@ -62,5 +62,38 @@ public static class UpstreamRegistrySeeder
                 new { id = Guid.NewGuid().ToString("N"), orgId, eco, url },
                 transaction: tx, cancellationToken: ct));
         }
+
+        await SeedOciDefaultsForOrgAsync(conn, orgId, tx, ct);
+    }
+
+    /// <summary>
+    /// Inserts the two default OCI upstream registries for a new or existing org.
+    /// Position 0: MCR (mcr.microsoft.com, anonymous, prefixes dotnet/ and playwright).
+    /// Position 1: Docker Hub (registry-1.docker.io, dockerhub_token_exchange, catch-all).
+    /// Idempotent via the <c>(org_id, ecosystem, url)</c> unique constraint.
+    /// </summary>
+    public static async Task SeedOciDefaultsForOrgAsync(
+        IDbConnection conn, string orgId, IDbTransaction? tx = null, CancellationToken ct = default)
+    {
+        // MCR at position 0: matches dotnet/ and playwright prefixes before the Docker Hub catch-all.
+        await conn.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO upstream_registry (id, org_id, ecosystem, url, position, auth_type, prefixes)
+            VALUES (@id, @orgId, 'oci', 'mcr.microsoft.com', 0, 'anonymous', '["dotnet/","playwright"]')
+            ON CONFLICT (org_id, ecosystem, url) DO NOTHING
+            """,
+            new { id = Guid.NewGuid().ToString("N"), orgId },
+            transaction: tx, cancellationToken: ct));
+
+        // Docker Hub at position 1: includes the catch-all prefix "" so any unmatched repository routes here.
+        await conn.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO upstream_registry (id, org_id, ecosystem, url, position, auth_type, token_endpoint, prefixes)
+            VALUES (@id, @orgId, 'oci', 'registry-1.docker.io', 1, 'dockerhub_token_exchange',
+                    'https://auth.docker.io/token', '["library/",""]')
+            ON CONFLICT (org_id, ecosystem, url) DO NOTHING
+            """,
+            new { id = Guid.NewGuid().ToString("N"), orgId },
+            transaction: tx, cancellationToken: ct));
     }
 }

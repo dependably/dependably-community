@@ -2,6 +2,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Observability;
+using Dependably.Protocol.Provenance;
 
 namespace Dependably.Protocol;
 
@@ -24,15 +25,23 @@ namespace Dependably.Protocol;
 ///      (OpenSSF malicious-packages feed) when the tenant's <c>BlockMaliciousMode</c> is
 ///      'block'. Runs ahead of the score gate because MAL advisories usually carry no CVSS
 ///      score and the score comparison would otherwise never see them.
+///   5b. Provenance/signature gate — blocks versions whose <c>ProvenanceStatus</c> is
+///      <c>Failed</c>/<c>Unsigned</c> when the tenant's <c>VerifyProvenanceMode</c> is 'block'.
+///      Just below malicious (a known-malicious advisory is a stronger reason to deny than a
+///      missing signature); independent of scan state.
 ///   6. KEV gate — blocks versions whose advisories alias a CISA-KEV-listed CVE
 ///      (exploited-in-the-wild) when the tenant's <c>BlockKevMode</c> is 'block'.
 ///   7. EPSS gate — blocks when the maximum EPSS exploitation probability across the
 ///      version's advisories exceeds the tenant's <c>MaxEpssTolerance</c> ceiling.
 ///   8. OSV vulnerability score exceeds the tenant's <c>MaxOsvScoreTolerance</c>.
+///   9. Install-script gate — blocks versions that ship an install/lifecycle script
+///      (<c>HasInstallScript</c>) when the tenant's <c>BlockInstallScriptsMode</c> is 'block'.
+///      Lowest priority: a vuln/KEV/malicious signal is a stronger reason to deny, so this arm
+///      only fires when nothing above it did.
 /// Records the corresponding <c>blocked_manual</c> / <c>blocked_deprecated</c> /
 /// <c>blocked_release_age</c> / <c>blocked_malicious</c> / <c>blocked_kev</c> /
-/// <c>blocked_epss</c> / <c>blocked_vuln_score</c> activity row when a block fires so the
-/// dashboard can surface why a download was denied.
+/// <c>blocked_epss</c> / <c>blocked_vuln_score</c> / <c>blocked_install_script</c> activity row
+/// when a block fires so the dashboard can surface why a download was denied.
 ///
 /// Every automatic policy block (everything except <c>blocked_manual</c>, which is already a
 /// human decision) additionally upserts a pending <c>quarantine</c> review row, best-effort —
@@ -43,6 +52,7 @@ public sealed class BlockGateService
     private readonly VulnerabilityRepository _vulns;
     private readonly AuditRepository _audit;
     private readonly QuarantineRepository _quarantine;
+    private readonly InstallScriptAllowlistService _installScriptAllowlist;
     private readonly ILogger<BlockGateService> _logger;
     private readonly TimeProvider _time;
 
@@ -50,12 +60,14 @@ public sealed class BlockGateService
         VulnerabilityRepository vulns,
         AuditRepository audit,
         QuarantineRepository quarantine,
+        InstallScriptAllowlistService installScriptAllowlist,
         ILogger<BlockGateService> logger,
         TimeProvider time)
     {
         _vulns = vulns;
         _audit = audit;
         _quarantine = quarantine;
+        _installScriptAllowlist = installScriptAllowlist;
         _logger = logger;
         _time = time;
     }
@@ -84,11 +96,28 @@ public sealed class BlockGateService
 
     public async Task<BlockDecision> EvaluateAsync(BlockGateRequest request, CancellationToken ct = default)
     {
-        // Load vuln signals when the version has been scanned — same condition as today.
+        // Load vuln signals when the artifact has been scanned. Route to the global-plane arm
+        // when CacheArtifactId is set (proxy path, P3+), otherwise use the per-version arm.
         VulnGateSignals? signals = null;
         if (request.VulnCheckedAt is not null)
         {
-            signals = await _vulns.GetGateSignalsForVersionAsync(request.VersionId, ct);
+            signals = request.CacheArtifactId is not null
+                ? await _vulns.GetGateSignalsAsync("cache_artifact", request.CacheArtifactId, ct)
+                : await _vulns.GetGateSignalsAsync("package_version", request.VersionId, ct);
+        }
+
+        // Resolve install-script allowlist only when the arm could fire: saves a cache lookup on
+        // the common path (no install script, or policy is off/warn). The PURL name and version
+        // segments are extracted via PurlParser; a parse failure returns false (fail-closed).
+        bool installScriptAllowlisted = false;
+        if (request.HasInstallScript && request.BlockInstallScriptsMode == "block")
+        {
+            var parsed = PurlParser.TryParse(request.Purl);
+            if (parsed is not null)
+            {
+                installScriptAllowlisted = await _installScriptAllowlist.IsAllowlistedAsync(
+                    request.OrgId, parsed.Ecosystem, parsed.Name, parsed.Version, ct);
+            }
         }
 
         var facts = new VersionFacts(
@@ -100,7 +129,11 @@ public sealed class BlockGateService
             HasMalicious: signals?.HasMalicious ?? false,
             HasKev: signals?.HasKev ?? false,
             MaxEpss: signals?.MaxEpss,
-            MaxCvss: signals?.MaxCvss);
+            MaxCvss: signals?.MaxCvss,
+            Origin: request.Origin,
+            HasInstallScript: request.HasInstallScript,
+            ProvenanceStatus: request.ProvenanceStatus,
+            InstallScriptAllowlisted: installScriptAllowlisted);
 
         var policy = new BlockPolicy(
             MinReleaseAgeHours: request.MinReleaseAgeHours,
@@ -108,7 +141,9 @@ public sealed class BlockGateService
             BlockMaliciousMode: request.BlockMaliciousMode,
             BlockKevMode: request.BlockKevMode,
             MaxEpssTolerance: request.MaxEpssTolerance,
-            MaxOsvScoreTolerance: request.MaxOsvScoreTolerance);
+            MaxOsvScoreTolerance: request.MaxOsvScoreTolerance,
+            BlockInstallScriptsMode: request.BlockInstallScriptsMode,
+            VerifyProvenanceMode: request.VerifyProvenanceMode);
 
         var verdict = Evaluate(facts, policy, _time.GetUtcNow());
 
@@ -142,76 +177,142 @@ public sealed class BlockGateService
                 break;
 
             case BlockArm.ReleaseAge:
-                var publishedAt = request.PublishedAt!.Value;
-                double ageHours = (_time.GetUtcNow() - publishedAt).TotalHours;
-                string publishedIso = publishedAt.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
-                double ageRounded = Math.Round(ageHours, 2);
-                string ageDetail = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "{{\"published_at\":\"{0}\",\"min_age_hours\":{1},\"age_at_block_hours\":{2}}}",
-                    publishedIso, request.MinReleaseAgeHours!.Value, ageRounded);
-                await _audit.LogActivityAsync(
-                    request.OrgId, request.Ecosystem, request.Purl,
-                    "blocked_release_age", request.UserId, actorKind: request.ActorKind,
-                    detail: ageDetail,
-                    sourceIp: request.SourceIp, ct: ct);
-                await QueueForReviewAsync(request, "release_age", ageDetail, ct);
+                await RecordReleaseAgeBlockAsync(request, ct);
                 break;
 
             case BlockArm.Malicious:
-                DependablyMeter.MaliciousBlocks.Add(1,
-                    new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
-                // Advisory ids fetched only on the (rare) block path so the hot-path aggregate
-                // stays free of per-row string assembly.
-                var malIds = await _vulns.GetMaliciousOsvIdsForVersionAsync(request.VersionId, ct);
-                string malDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = malIds });
-                await _audit.LogActivityAsync(
-                    request.OrgId, request.Ecosystem, request.Purl,
-                    "blocked_malicious", request.UserId, actorKind: request.ActorKind,
-                    detail: malDetail,
-                    sourceIp: request.SourceIp, ct: ct);
-                await QueueForReviewAsync(request, "malicious", malDetail, ct);
+                await RecordMaliciousBlockAsync(request, ct);
+                break;
+
+            case BlockArm.Provenance:
+                await RecordProvenanceBlockAsync(request, ct);
                 break;
 
             case BlockArm.Kev:
-                DependablyMeter.KevBlocks.Add(1,
-                    new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
-                // KEV ids fetched only on the block path, same pattern as malicious above.
-                var kevIds = await _vulns.GetKevOsvIdsForVersionAsync(request.VersionId, ct);
-                string kevDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = kevIds });
-                await _audit.LogActivityAsync(
-                    request.OrgId, request.Ecosystem, request.Purl,
-                    "blocked_kev", request.UserId, actorKind: request.ActorKind,
-                    detail: kevDetail,
-                    sourceIp: request.SourceIp, ct: ct);
-                await QueueForReviewAsync(request, "kev", kevDetail, ct);
+                await RecordKevBlockAsync(request, ct);
                 break;
 
             case BlockArm.Epss:
-                DependablyMeter.EpssBlocks.Add(1,
-                    new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
-                double maxEpss = signals!.MaxEpss!.Value;
-                double epssTolerance = request.MaxEpssTolerance!.Value;
-                string epssDetail = $"{{\"max_epss\":{maxEpss.ToString(CultureInfo.InvariantCulture)},\"tolerance\":{epssTolerance.ToString(CultureInfo.InvariantCulture)}}}";
-                await _audit.LogActivityAsync(
-                    request.OrgId, request.Ecosystem, request.Purl,
-                    "blocked_epss", request.UserId, actorKind: request.ActorKind,
-                    detail: epssDetail,
-                    sourceIp: request.SourceIp, ct: ct);
-                await QueueForReviewAsync(request, "epss", epssDetail, ct);
+                await RecordEpssBlockAsync(request, signals!, ct);
                 break;
 
             case BlockArm.VulnScore:
-                double maxScore = signals!.MaxCvss!.Value;
-                string scoreDetail = $"{{\"max_score\":{maxScore},\"tolerance\":{request.MaxOsvScoreTolerance}}}";
-                await _audit.LogActivityAsync(
-                    request.OrgId, request.Ecosystem, request.Purl,
-                    "blocked_vuln_score", request.UserId, actorKind: request.ActorKind,
-                    detail: scoreDetail,
-                    sourceIp: request.SourceIp, ct: ct);
-                await QueueForReviewAsync(request, "vuln_score", scoreDetail, ct);
+                await RecordVulnScoreBlockAsync(request, signals!, ct);
+                break;
+
+            case BlockArm.InstallScript:
+                await RecordInstallScriptBlockAsync(request, ct);
                 break;
         }
+    }
+
+    // Side effects for the release-age arm: computes the age gap, formats the detail JSON,
+    // logs the activity row, and queues a review entry.
+    private async Task RecordReleaseAgeBlockAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        var publishedAt = request.PublishedAt!.Value;
+        double ageHours = (_time.GetUtcNow() - publishedAt).TotalHours;
+        string publishedIso = publishedAt.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+        double ageRounded = Math.Round(ageHours, 2);
+        string ageDetail = string.Format(
+            CultureInfo.InvariantCulture,
+            "{{\"published_at\":\"{0}\",\"min_age_hours\":{1},\"age_at_block_hours\":{2}}}",
+            publishedIso, request.MinReleaseAgeHours!.Value, ageRounded);
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_release_age", request.UserId, actorKind: request.ActorKind,
+            detail: ageDetail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "release_age", ageDetail, ct);
+    }
+
+    // Side effects for the malicious arm: fetches the OSV advisory ids (only on the block
+    // path so the hot-path aggregate stays free of per-row string assembly), increments the
+    // meter, logs the activity row, and queues a review entry.
+    private async Task RecordMaliciousBlockAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        DependablyMeter.MaliciousBlocks.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
+        // Route to the cache_artifact arm when CacheArtifactId is set (proxy serve path),
+        // otherwise use the per-version arm.
+        var malIds = request.CacheArtifactId is not null
+            ? await _vulns.GetMaliciousOsvIdsForCacheArtifactAsync(request.CacheArtifactId, ct)
+            : await _vulns.GetMaliciousOsvIdsForVersionAsync(request.VersionId, ct);
+        string malDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = malIds });
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_malicious", request.UserId, actorKind: request.ActorKind,
+            detail: malDetail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "malicious", malDetail, ct);
+    }
+
+    // Side effects for the KEV arm: fetches advisory ids (block path only), increments the
+    // meter, logs the activity row, and queues a review entry.
+    private async Task RecordKevBlockAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        DependablyMeter.KevBlocks.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
+        // Route to the cache_artifact arm when CacheArtifactId is set (proxy serve path).
+        var kevIds = request.CacheArtifactId is not null
+            ? await _vulns.GetKevOsvIdsForCacheArtifactAsync(request.CacheArtifactId, ct)
+            : await _vulns.GetKevOsvIdsForVersionAsync(request.VersionId, ct);
+        string kevDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = kevIds });
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_kev", request.UserId, actorKind: request.ActorKind,
+            detail: kevDetail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "kev", kevDetail, ct);
+    }
+
+    // Side effects for the EPSS arm: formats the probability + tolerance detail JSON,
+    // increments the meter, logs the activity row, and queues a review entry.
+    private async Task RecordEpssBlockAsync(
+        BlockGateRequest request, VulnGateSignals signals, CancellationToken ct)
+    {
+        DependablyMeter.EpssBlocks.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
+        double maxEpss = signals.MaxEpss!.Value;
+        double epssTolerance = request.MaxEpssTolerance!.Value;
+        string epssDetail = $"{{\"max_epss\":{maxEpss.ToString(CultureInfo.InvariantCulture)},\"tolerance\":{epssTolerance.ToString(CultureInfo.InvariantCulture)}}}";
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_epss", request.UserId, actorKind: request.ActorKind,
+            detail: epssDetail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "epss", epssDetail, ct);
+    }
+
+    // Side effects for the CVSS-score arm: formats the max-score + tolerance detail JSON,
+    // logs the activity row, and queues a review entry.
+    private async Task RecordVulnScoreBlockAsync(
+        BlockGateRequest request, VulnGateSignals signals, CancellationToken ct)
+    {
+        double maxScore = signals.MaxCvss!.Value;
+        string scoreDetail = $"{{\"max_score\":{maxScore},\"tolerance\":{request.MaxOsvScoreTolerance}}}";
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_vuln_score", request.UserId, actorKind: request.ActorKind,
+            detail: scoreDetail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "vuln_score", scoreDetail, ct);
+    }
+
+    // Side effects for the install-script arm: formats the script-kind detail JSON,
+    // increments the meter, logs the activity row, and queues a review entry.
+    private async Task RecordInstallScriptBlockAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        DependablyMeter.InstallScriptBlocks.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
+        string scriptDetail = System.Text.Json.JsonSerializer.Serialize(
+            new { install_script_kind = request.InstallScriptKind });
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_install_script", request.UserId, actorKind: request.ActorKind,
+            detail: scriptDetail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "install_script", scriptDetail, ct);
     }
 
     /// <summary>
@@ -238,6 +339,39 @@ public sealed class BlockGateService
             : await RecordDeprecatedBlockAsync(request, ct);
     }
 
+    /// <summary>
+    /// Records the side effects of a provenance/signature block (meter + tenant-level audit event
+    /// forwarded to SIEM + per-version activity row + review-queue row) so the cache-miss
+    /// first-fetch path and the serve path emit one consistent event shape. Called by
+    /// <see cref="Storage.ProxyFetchService"/> before it records the version (fail closed) and by
+    /// <see cref="ApplySideEffectsAsync"/> on the serve path.
+    /// </summary>
+    public async Task RecordProvenanceBlockAsync(BlockGateRequest request, CancellationToken ct = default)
+    {
+        DependablyMeter.ProvenanceBlocks.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
+        string provDetail = System.Text.Json.JsonSerializer.Serialize(
+            new { provenance_status = request.ProvenanceStatus });
+        // Tenant-level security event: forwarded to SIEM via the audit_log path.
+        await _audit.LogAsync(
+            "provenance_verification_failed",
+            orgId: request.OrgId,
+            actorId: request.UserId,
+            actorKind: request.ActorKind,
+            ecosystem: request.Ecosystem,
+            purl: request.Purl,
+            detail: provDetail,
+            sourceIp: request.SourceIp,
+            ct: ct);
+        // Per-version activity row so the dashboard surfaces why the download was denied.
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_provenance", request.UserId, actorKind: request.ActorKind,
+            detail: provDetail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "provenance", provDetail, ct);
+    }
+
     // Single home for the deprecated-block side effects (meter + activity row + review row) so
     // the cache-hit and first-fetch paths emit one consistent event shape.
     private async Task<BlockDecision> RecordDeprecatedBlockAsync(BlockGateRequest request, CancellationToken ct)
@@ -261,6 +395,12 @@ public sealed class BlockGateService
     // Any deprecated-blocking mode — used only on the first-fetch path, where block_new and
     // block_all behave identically (both refuse a brand-new deprecated version).
     private static bool IsAnyDeprecatedBlock(string? mode) => mode is "block_new" or "block_all" or "block";
+
+    // Upstream-derived origins are subject to the release-age cooldown. Hosted and local_only
+    // versions are exempt: their PublishedAt is the local push timestamp, not an upstream
+    // release date, so the cooldown would self-block an org's own fresh publishes.
+    // proxy, mixed, and null (legacy rows predating the origin column) remain eligible.
+    private static bool IsCooldownEligible(string? origin) => origin is not ("hosted" or "local_only");
 
     /// <summary>
     /// Pure, synchronous predicate: returns <see langword="true"/> when a version is hard-blocked
@@ -287,7 +427,8 @@ public sealed class BlockGateService
     /// does not exist for them — first-fetch dynamic blocks remain listed until first-fetch.
     /// </summary>
     public static bool IsHardBlockedByStoredState(
-        PackageVersion v, OrgSettings settings, VulnGateSignals? signals, DateTimeOffset now)
+        PackageVersion v, OrgSettings settings, VulnGateSignals? signals, DateTimeOffset now,
+        bool installScriptAllowlisted = false)
     {
         var facts = new VersionFacts(
             ManualState: v.ManualBlockState,
@@ -298,7 +439,11 @@ public sealed class BlockGateService
             HasMalicious: v.IsMalicious,
             HasKev: signals?.HasKev ?? false,
             MaxEpss: signals?.MaxEpss,
-            MaxCvss: signals?.MaxCvss);
+            MaxCvss: signals?.MaxCvss,
+            Origin: v.Origin,
+            HasInstallScript: v.HasInstallScript,
+            ProvenanceStatus: v.ProvenanceStatus,
+            InstallScriptAllowlisted: installScriptAllowlisted);
 
         var policy = new BlockPolicy(
             MinReleaseAgeHours: settings.MinReleaseAgeHours,
@@ -306,15 +451,75 @@ public sealed class BlockGateService
             BlockMaliciousMode: settings.BlockMalicious,
             BlockKevMode: settings.BlockKev,
             MaxEpssTolerance: settings.MaxEpssTolerance,
-            MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance);
+            MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            // The provenance policy is per-ecosystem (npm vs nuget have independent toggles), so
+            // pick the right one from the version's PURL — the stored provenance_status column is
+            // ecosystem-agnostic but the gate that interprets it is not.
+            VerifyProvenanceMode: settings.VerifyProvenanceMode(EcosystemFromPurl(v.Purl)));
 
         return !Evaluate(facts, policy, now).Servable;
     }
 
     /// <summary>
+    /// Block-gate filter for a proxy artifact entry sourced from the global plane
+    /// (<c>cache_artifact</c> + <c>tenant_artifact_access</c>) rather than
+    /// <c>package_versions</c>. Used by the list/index/metadata renderers when proxy
+    /// versions no longer have <c>package_versions</c> rows. The policy evaluation is
+    /// identical to <see cref="IsHardBlockedByStoredState"/> — both delegate to
+    /// <see cref="Evaluate"/> with the same <see cref="VersionFacts"/> shape.
+    /// </summary>
+    public static bool IsHardBlockedByCacheEntry(
+        Infrastructure.CacheArtifactIndexFacts entry, OrgSettings settings,
+        VulnGateSignals? signals, DateTimeOffset now,
+        bool installScriptAllowlisted = false)
+    {
+        var facts = new VersionFacts(
+            ManualState: entry.ManualBlockState,
+            Deprecated: entry.Deprecated,
+            PublishedAt: entry.PublishedAt,
+            Scanned: entry.VulnCheckedAt is not null,
+            HasMalicious: signals?.HasMalicious ?? false,
+            HasKev: signals?.HasKev ?? false,
+            MaxEpss: signals?.MaxEpss,
+            MaxCvss: signals?.MaxCvss,
+            Origin: "proxy",
+            HasInstallScript: entry.HasInstallScript,
+            ProvenanceStatus: entry.ProvenanceStatus,
+            InstallScriptAllowlisted: installScriptAllowlisted);
+
+        var policy = new BlockPolicy(
+            MinReleaseAgeHours: settings.MinReleaseAgeHours,
+            BlockDeprecatedMode: settings.BlockDeprecated,
+            BlockMaliciousMode: settings.BlockMalicious,
+            BlockKevMode: settings.BlockKev,
+            MaxEpssTolerance: settings.MaxEpssTolerance,
+            MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            VerifyProvenanceMode: settings.VerifyProvenanceMode(EcosystemFromPurl(entry.Purl ?? string.Empty)));
+
+        return !Evaluate(facts, policy, now).Servable;
+    }
+
+    // Extracts the ecosystem segment from a canonical PURL ("pkg:nuget/name@version" → "nuget").
+    // Returns an empty string when the value is not PURL-shaped, which maps to an 'off' provenance
+    // policy (never blocks) — a safe default for a malformed or legacy row.
+    private static string EcosystemFromPurl(string purl)
+    {
+        const string prefix = "pkg:";
+        if (!purl.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return string.Empty;
+        }
+
+        int slash = purl.IndexOf('/', prefix.Length);
+        return slash < 0 ? string.Empty : purl[prefix.Length..slash];
+    }
+
+    /// <summary>
     /// Pure policy core: maps <see cref="VersionFacts"/> + <see cref="BlockPolicy"/> to a
-    /// <see cref="BlockVerdict"/> with no I/O or side effects. Applies the eight arms in
-    /// priority order (Manual > Deprecated > ReleaseAge > Malicious > Kev > Epss > VulnScore).
+    /// <see cref="BlockVerdict"/> with no I/O or side effects. Applies the nine arms in priority
+    /// order (Manual > Deprecated > ReleaseAge > Malicious > Kev > Epss > VulnScore > InstallScript).
     /// Both <see cref="EvaluateAsync"/> and <see cref="IsHardBlockedByStoredState"/> project
     /// their inputs into these types and delegate here so the policy logic has one home.
     /// </summary>
@@ -340,8 +545,11 @@ public sealed class BlockGateService
             return new BlockVerdict(Servable: false, Arm: BlockArm.Deprecated);
         }
 
-        // Arm 3: release-age hold. Fail-open when PublishedAt is absent.
-        if (policy.MinReleaseAgeHours is { } minHours && minHours > 0 && facts.PublishedAt is { } publishedAt)
+        // Arm 3: release-age hold. Applies only to upstream-derived origins so locally-hosted
+        // packages are not self-blocked by a cooldown measured against their own push timestamp.
+        // Fail-open when PublishedAt is absent.
+        if (IsCooldownEligible(facts.Origin) &&
+            policy.MinReleaseAgeHours is { } minHours && minHours > 0 && facts.PublishedAt is { } publishedAt)
         {
             double ageHours = (now - publishedAt).TotalHours;
             if (ageHours < minHours)
@@ -352,7 +560,33 @@ public sealed class BlockGateService
 
         // Arms 4–7 require vuln data. Scanned false means not yet scanned — fail-open.
         // Extracted into a separate helper so this method stays below the S3776 threshold.
-        return EvaluateVulnArms(facts, policy);
+        var vulnVerdict = EvaluateVulnArms(facts, policy);
+        if (!vulnVerdict.Servable)
+        {
+            return vulnVerdict;
+        }
+
+        // Arm 8: provenance/signature gate. Sits just below the malicious arm in priority (a
+        // known-malicious advisory is a stronger reason to deny than a missing signature) and
+        // above the install-script arm. Independent of scan state — provenance is captured at
+        // ingest, not from the OSV scan. Only the require mode ('block') denies; under 'block'
+        // both a Failed and an Unsigned outcome refuse the version (fail closed). 'warn'/'off'/
+        // null and a NULL status (verification not applicable) all pass.
+        if (policy.VerifyProvenanceMode == "block" &&
+            facts.ProvenanceStatus is ProvenanceStatuses.Failed or ProvenanceStatuses.Unsigned)
+        {
+            return new BlockVerdict(Servable: false, Arm: BlockArm.Provenance);
+        }
+
+        // Arm 9 (lowest priority): install-script gate. Independent of scan state — a shipped
+        // install hook is a static artefact property, not a vuln signal — so it runs whether or
+        // not the version has been scanned, but only when no stronger arm above already blocked.
+        // The allowlist exemption takes effect here: a package on the per-org install-script
+        // allowlist is treated as if it has no install script for this arm only.
+        return facts.HasInstallScript && policy.BlockInstallScriptsMode == "block"
+               && !facts.InstallScriptAllowlisted
+            ? new BlockVerdict(Servable: false, Arm: BlockArm.InstallScript)
+            : vulnVerdict;
     }
 
     // Arms 4–7: malicious, KEV, EPSS, and CVSS score gates. All require a scanned version row;
@@ -402,7 +636,7 @@ public sealed class BlockGateService
 /// Identifies which policy arm triggered a block verdict. <see cref="None"/> means the
 /// version is servable (no arm fired).
 /// </summary>
-public enum BlockArm { None, Manual, Deprecated, ReleaseAge, Malicious, Kev, Epss, VulnScore }
+public enum BlockArm { None, Manual, Deprecated, ReleaseAge, Malicious, Provenance, Kev, Epss, VulnScore, InstallScript }
 
 /// <summary>
 /// Outcome of the pure policy core: whether the version is servable and, if not, which arm
@@ -423,7 +657,22 @@ public readonly record struct VersionFacts(
     bool HasMalicious,
     bool HasKev,
     double? MaxEpss,
-    double? MaxCvss);
+    double? MaxCvss,
+    string? Origin = null,
+    bool HasInstallScript = false,
+    /// <summary>
+    /// Provenance/signature-verification outcome from <c>package_versions.provenance_status</c>:
+    /// <c>'verified'</c> / <c>'failed'</c> / <c>'unsigned'</c>, or NULL when verification was not
+    /// applicable. Drives the provenance arm under a require policy.
+    /// </summary>
+    string? ProvenanceStatus = null,
+    /// <summary>
+    /// True when the package is on the per-org install-script allowlist. When true, arm 9
+    /// (install-script gate) is skipped regardless of <see cref="BlockPolicy.BlockInstallScriptsMode"/>.
+    /// Computed at the call site by <see cref="InstallScriptAllowlistService.IsAllowlistedAsync"/>
+    /// on the download path; always false on the listing path (callers pass the default).
+    /// </summary>
+    bool InstallScriptAllowlisted = false);
 
 /// <summary>
 /// Immutable projection of the tenant policy knobs that every arm reads. Built from
@@ -436,7 +685,15 @@ public readonly record struct BlockPolicy(
     string? BlockMaliciousMode,
     string? BlockKevMode,
     double? MaxEpssTolerance,
-    double MaxOsvScoreTolerance);
+    double MaxOsvScoreTolerance,
+    string? BlockInstallScriptsMode = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.verify_npm_signatures</c>: 'off' | 'warn' | 'block'.
+    /// Only 'block' denies a Failed/Unsigned version; 'warn'/'off'/null let it through. The npm
+    /// proxy ingest path is responsible for actually running verification and persisting the
+    /// status; this gate only acts on the persisted result.
+    /// </summary>
+    string? VerifyProvenanceMode = null);
 
 public enum BlockDecision
 {
@@ -486,4 +743,80 @@ public sealed record BlockGateRequest(
     /// Tenant ceiling from <c>org_settings.max_epss_tolerance</c> (0.0–1.0). Blocks when the
     /// version's maximum EPSS exploitation probability exceeds it. Null = policy off.
     /// </summary>
-    double? MaxEpssTolerance = null);
+    double? MaxEpssTolerance = null,
+    /// <summary>
+    /// Version origin from <c>package_versions.origin</c>: 'proxy' (default), 'hosted',
+    /// 'local_only', or 'mixed'. The release-age cooldown applies only to upstream-derived
+    /// origins ('proxy', 'mixed', or null); hosted and local_only versions are exempt because
+    /// their <c>PublishedAt</c> reflects the local push time, not an upstream release date.
+    /// </summary>
+    string? Origin = null,
+    /// <summary>
+    /// True when the version ships an install/lifecycle script
+    /// (<c>package_versions.has_install_script</c>). Drives the lowest-priority install-script arm.
+    /// </summary>
+    bool HasInstallScript = false,
+    /// <summary>
+    /// Detected script kind for the audit detail JSON (e.g. <c>'npm:postinstall'</c>). NULL when
+    /// <see cref="HasInstallScript"/> is false. Read only on the block path.
+    /// </summary>
+    string? InstallScriptKind = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.block_install_scripts</c>: 'off' | 'warn' | 'block'.
+    /// Only 'block' denies; 'warn'/'off'/null let the version through. Null behaves as 'off'.
+    /// </summary>
+    string? BlockInstallScriptsMode = null,
+    /// <summary>
+    /// Provenance/signature-verification outcome from <c>package_versions.provenance_status</c>:
+    /// <c>'verified'</c> / <c>'failed'</c> / <c>'unsigned'</c>, or NULL when not applicable.
+    /// Drives the provenance arm.
+    /// </summary>
+    string? ProvenanceStatus = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.verify_npm_signatures</c>: 'off' | 'warn' | 'block'.
+    /// Only 'block' denies a Failed/Unsigned version. Null behaves as 'off'.
+    /// </summary>
+    string? VerifyProvenanceMode = null,
+    /// <summary>
+    /// Global-plane artifact id from <c>cache_artifact.id</c>. When set, the vuln-signal lookup
+    /// routes through the <c>cache_artifact</c> owner arm
+    /// (<c>GetGateSignalsAsync("cache_artifact", …)</c>) instead of the per-version arm. NULL
+    /// for all current call sites (behaviour-equivalent to the pre-P2 path). P3 will set this
+    /// on the proxy serve path once the global plane is authoritative.
+    /// </summary>
+    string? CacheArtifactId = null)
+{
+    /// <summary>
+    /// Constructs a <see cref="BlockGateRequest"/> from the standard download-path inputs shared
+    /// across all ecosystem controllers. <paramref name="token"/> is nullable so both hosted paths
+    /// (authenticated, non-null token) and proxy paths (anonymous pull, nullable token) use the
+    /// same factory without overload branching. <paramref name="settings"/> is nullable to
+    /// accommodate controllers that retrieve settings with a nullable result (e.g. Maven);
+    /// absent settings fall back to the policy-off defaults on each field.
+    /// </summary>
+    // CVSS scores range 0.0–10.0; when org settings are absent, use the maximum (allow all).
+    private const double DefaultMaxOsvScore = 10.0;
+
+    public static BlockGateRequest For(
+        string orgId,
+        string ecosystem,
+        PackageVersion version,
+        TokenRecord? token,
+        OrgSettings? settings,
+        string? sourceIp) =>
+        new(orgId, ecosystem, version.Purl, version.Id,
+            version.ManualBlockState, version.VulnCheckedAt,
+            token?.UserId, settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScore, sourceIp,
+            MinReleaseAgeHours: settings?.MinReleaseAgeHours,
+            PublishedAt: version.PublishedAt,
+            ActorKind: token?.ActorKind,
+            Deprecated: version.Deprecated,
+            BlockDeprecatedMode: settings?.BlockDeprecated,
+            BlockMaliciousMode: settings?.BlockMalicious,
+            BlockKevMode: settings?.BlockKev,
+            MaxEpssTolerance: settings?.MaxEpssTolerance,
+            Origin: version.Origin,
+            HasInstallScript: version.HasInstallScript,
+            InstallScriptKind: version.InstallScriptKind,
+            BlockInstallScriptsMode: settings?.BlockInstallScripts);
+}

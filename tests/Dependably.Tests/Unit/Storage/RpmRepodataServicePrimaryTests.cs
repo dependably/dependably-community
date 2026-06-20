@@ -119,12 +119,14 @@ public sealed class RpmRepodataServicePrimaryTests : IClassFixture<InMemoryDbFix
         await using var conn = await _fixture.Store.OpenAsync();
         await conn.ExecuteAsync("""
             INSERT INTO rpm_metadata
-                (package_version_id, rpm_name, epoch, rpm_version, rpm_release, arch,
+                (id, package_version_id, owner_kind,
+                 rpm_name, epoch, rpm_version, rpm_release, arch,
                  summary, description, build_host, build_time,
                  installed_size, archive_size, header_start, header_end,
                  rpm_license)
             VALUES
-                (@pvId, @name, 0, '2.10', '1.el9', @arch,
+                (lower(hex(randomblob(16))), @pvId, 'package_version',
+                 @name, 0, '2.10', '1.el9', @arch,
                  'A GNU greeting program', 'The GNU Hello program produces a familiar, friendly greeting.',
                  'builder.example.com', 1716393600,
                  65536, 60000, 440, 2048,

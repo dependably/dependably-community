@@ -24,6 +24,7 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
     public Task InitializeAsync() => ((IAsyncLifetime)_factory).InitializeAsync();
     public Task DisposeAsync() => Task.CompletedTask;
 
+    // Reads deprecated from package_versions for uploaded-origin ecosystems only.
     private async Task<string?> QueryDeprecatedAsync(string ecosystem, string purlName, string version)
     {
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
@@ -37,6 +38,25 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
             ORDER BY pv.created_at DESC LIMIT 1
             """,
             new { ecosystem, purlName, version });
+    }
+
+    // Reads deprecated from cache_artifact for proxy-origin ecosystems whose first-fetch
+    // path writes to the global plane (npm, NuGet). Uses (ecosystem, name, version) as
+    // the coordinate; name for npm is the bare package name, for NuGet the lowercased id.
+    // xtenant: cache_artifact is global (no org_id); scoped by coordinate.
+    private async Task<string?> QueryCacheArtifactDeprecatedAsync(
+        string ecosystem, string name, string version)
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        return await conn.ExecuteScalarAsync<string?>(
+            """
+            SELECT deprecated
+            FROM cache_artifact
+            WHERE ecosystem = @ecosystem AND name = @name AND version = @version
+            ORDER BY first_cached_at DESC LIMIT 1
+            """,
+            new { ecosystem, name, version });
     }
 
     // ── npm ──────────────────────────────────────────────────────────────────
@@ -74,7 +94,8 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryDeprecatedAsync("npm", name, version);
+        // npm proxy first-fetch writes to cache_artifact (global plane); no package_versions row.
+        string? stored = await QueryCacheArtifactDeprecatedAsync("npm", name, version);
         Assert.Equal("use foo@2 instead", stored);
     }
 
@@ -108,7 +129,8 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryDeprecatedAsync("npm", name, version);
+        // Not deprecated: cache_artifact.deprecated stays NULL.
+        string? stored = await QueryCacheArtifactDeprecatedAsync("npm", name, version);
         Assert.Null(stored);
     }
 
@@ -141,7 +163,8 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryDeprecatedAsync("npm", name, version);
+        // Empty-string deprecated is normalised to NULL: cache_artifact.deprecated stays NULL.
+        string? stored = await QueryCacheArtifactDeprecatedAsync("npm", name, version);
         Assert.Null(stored);
     }
 
@@ -185,7 +208,8 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryDeprecatedAsync("pypi", name, version);
+        // PyPI proxy first-fetch writes to cache_artifact (global plane); no package_versions row.
+        string? stored = await QueryCacheArtifactDeprecatedAsync("pypi", name, version);
         Assert.Equal("CVE-2024-9999 critical", stored);
     }
 
@@ -227,7 +251,8 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryDeprecatedAsync("pypi", name, version);
+        // PyPI proxy first-fetch writes to cache_artifact (global plane); no package_versions row.
+        string? stored = await QueryCacheArtifactDeprecatedAsync("pypi", name, version);
         Assert.Equal("Yanked", stored);
     }
 
@@ -269,7 +294,8 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryDeprecatedAsync("pypi", name, version);
+        // Not yanked: cache_artifact.deprecated stays NULL.
+        string? stored = await QueryCacheArtifactDeprecatedAsync("pypi", name, version);
         Assert.Null(stored);
     }
 
@@ -300,7 +326,8 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryDeprecatedAsync("nuget", lowerId, version);
+        // NuGet proxy first-fetch writes to cache_artifact (global plane); no package_versions row.
+        string? stored = await QueryCacheArtifactDeprecatedAsync("nuget", lowerId, version);
         Assert.Equal("Unlisted upstream", stored);
     }
 
@@ -329,7 +356,8 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryDeprecatedAsync("nuget", lowerId, version);
+        // Listed upstream: no deprecated sentinel; cache_artifact.deprecated stays NULL.
+        string? stored = await QueryCacheArtifactDeprecatedAsync("nuget", lowerId, version);
         Assert.Null(stored);
     }
 
@@ -359,7 +387,8 @@ public sealed class UpstreamDeprecationCaptureTests : IClassFixture<DependablyFa
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryDeprecatedAsync("nuget", lowerId, version);
+        // Registration leaf 500 is fail-soft: cache_artifact row created but deprecated stays NULL.
+        string? stored = await QueryCacheArtifactDeprecatedAsync("nuget", lowerId, version);
         Assert.Null(stored);
     }
 }

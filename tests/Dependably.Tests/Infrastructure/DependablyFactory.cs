@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
@@ -52,9 +53,31 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// </summary>
     public string? StagingPath { get; init; }
 
+    /// <summary>
+    /// Deployment mode for the test host. Defaults to <c>single</c> so first-boot seeds the
+    /// <c>default</c> org that the fixtures assume. Pinned explicitly because the host reads
+    /// <c>DEPLOYMENT_MODE</c> from OS environment variables — a value exported for a local debug
+    /// instance must not flip the suite into multi-mode (which seeds no default org). Multi-mode
+    /// tests set this to <c>multi</c> or <c>header</c>.
+    /// </summary>
+    public string DeploymentMode { get; init; } = "single";
+
     protected override IHost CreateHost(IHostBuilder _)
     {
         var builder = WebApplication.CreateBuilder();
+
+        // Pin the deployment mode BEFORE ConfigureBuilder so it overrides any ambient
+        // DEPLOYMENT_MODE OS environment variable (e.g. one exported for a local debug instance).
+        // Appended as a configuration source so it wins over the environment-variable provider and
+        // survives the provider reload during Build(); a plain indexer set does not. It must precede
+        // ConfigureBuilder because the tenant-resolver strategy is selected from DEPLOYMENT_MODE at
+        // service-registration time — setting it afterwards leaves the resolver bound to the wrong
+        // mode even though first-boot reads the corrected value. Keeps the test host hermetic
+        // regardless of the developer's shell.
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["DEPLOYMENT_MODE"] = DeploymentMode,
+        });
 
         Program.ConfigureBuilder(builder);
 
@@ -129,6 +152,14 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         // Tests that explicitly exercise the 429 behaviour create a dedicated factory
         // instance with a tight limit.
         builder.WebHost.UseSetting("METADATA_RATE_LIMIT_PERMITS", "100000");
+        // Download, push, and import limiters partition by validated principal (sub claim)
+        // with IP fallback. TestServer requests from the same authenticated user share one
+        // bucket, and the parallel suite fires many requests from a single principal across
+        // all test classes. Raise the budgets so the shared fixture does not self-throttle;
+        // tests that explicitly exercise 429 behaviour create a dedicated factory instance.
+        builder.WebHost.UseSetting("DOWNLOAD_RATE_LIMIT_PERMITS", "1000000");
+        builder.WebHost.UseSetting("PUSH_RATE_LIMIT_PERMITS", "1000000");
+        builder.WebHost.UseSetting("IMPORT_RATE_LIMIT_PERMITS", "1000000");
 
         var app = builder.Build();
         Program.ConfigureApp(app);

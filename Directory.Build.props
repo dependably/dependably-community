@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <Version>0.1.16</Version>
+    <Version>0.1.17</Version>
     <!-- Reproducible restores: maintain packages.lock.json (pins transitive versions + hashes).
          Locked mode is enforced only in CI so a green pipeline proves the committed lockfile is
          exactly what restores; locally it stays off so developers can update dependencies.

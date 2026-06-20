@@ -16,12 +16,14 @@ public sealed class OrgRepository
     private readonly IMetadataStore _db;
     private readonly IMemoryCache? _cache;
     private readonly TimeProvider _time;
+    private readonly UserTokenVersionStore? _tokenVersions;
 
-    public OrgRepository(IMetadataStore db, IMemoryCache? cache = null, TimeProvider? time = null)
+    public OrgRepository(IMetadataStore db, IMemoryCache? cache = null, TimeProvider? time = null, UserTokenVersionStore? tokenVersions = null)
     {
         _db = db;
         _cache = cache;
         _time = time ?? TimeProvider.System;
+        _tokenVersions = tokenVersions;
     }
 
     private static string SettingsCacheKey(string orgId) => "org-settings:" + orgId;
@@ -48,6 +50,43 @@ public sealed class OrgRepository
         return await conn.QuerySingleOrDefaultAsync<Org>(sql, new { slug });
     }
 
+    // Shared SELECT projection for org_settings, including the tenant filter. Both the
+    // cached read path here and the uncached path in OrgSettingsRepository.GetSettingsAsync
+    // reference this constant so the column list stays in sync across both repositories.
+    internal const string OrgSettingsSelect =
+        """
+        SELECT org_id as OrgId, anonymous_pull as AnonymousPull, allowlist_mode as AllowlistMode,
+               max_upload_bytes as MaxUploadBytes,
+               max_upload_bytes_pypi as MaxUploadBytesPyPi,
+               max_upload_bytes_npm as MaxUploadBytesNpm,
+               max_upload_bytes_nuget as MaxUploadBytesNuGet,
+               max_upload_bytes_maven as MaxUploadBytesMaven,
+               max_upload_bytes_rpm as MaxUploadBytesRpm,
+               max_upload_bytes_oci as MaxUploadBytesOci,
+               max_upload_bytes_cargo as MaxUploadBytesCargo,
+               keep_versions as KeepVersions, keep_days as KeepDays,
+               activity_retention_days as ActivityRetentionDays,
+               COALESCE(license_enforcement_mode, 'off') as LicenseEnforcementMode,
+               COALESCE(proxy_passthrough_enabled, 1) as ProxyPassthroughEnabled,
+               COALESCE(max_osv_score_tolerance, 10.0) as MaxOsvScoreTolerance,
+               min_release_age_hours as MinReleaseAgeHours,
+               COALESCE(default_language, 'en') as DefaultLanguage,
+               COALESCE(allow_version_overwrite, 0) as AllowVersionOverwrite,
+               COALESCE(air_gapped, 0) as AirGapped,
+               COALESCE(block_deprecated, 'off') as BlockDeprecated,
+               COALESCE(block_malicious, 'block') as BlockMalicious,
+               COALESCE(block_kev, 'off') as BlockKev,
+               max_epss_tolerance as MaxEpssTolerance,
+               COALESCE(block_install_scripts, 'off') as BlockInstallScripts,
+               COALESCE(verify_npm_signatures, 'off') as VerifyNpmSignatures,
+               COALESCE(verify_nuget_signatures, 'off') as VerifyNuGetSignatures,
+               COALESCE(verify_pypi_attestations, 'off') as VerifyPyPiAttestations,
+               COALESCE(verify_rpm_signatures, 'off') as VerifyRpmSignatures,
+               COALESCE(verify_maven_signatures, 'off') as VerifyMavenSignatures,
+               COALESCE(storage_used_bytes, 0) as StorageUsedBytes
+        FROM org_settings WHERE org_id = @orgId
+        """;
+
     public async Task<OrgSettings?> GetSettingsAsync(string orgId, CancellationToken ct = default)
     {
         string key = SettingsCacheKey(orgId);
@@ -58,32 +97,7 @@ public sealed class OrgRepository
 
         await using var conn = await _db.OpenAsync(ct);
         var result = await conn.QuerySingleOrDefaultAsync<OrgSettings>(
-            """
-            SELECT org_id as OrgId, anonymous_pull as AnonymousPull, allowlist_mode as AllowlistMode,
-                   max_upload_bytes as MaxUploadBytes,
-                   max_upload_bytes_pypi as MaxUploadBytesPyPi,
-                   max_upload_bytes_npm as MaxUploadBytesNpm,
-                   max_upload_bytes_nuget as MaxUploadBytesNuGet,
-                   max_upload_bytes_maven as MaxUploadBytesMaven,
-                   max_upload_bytes_rpm as MaxUploadBytesRpm,
-                   max_upload_bytes_oci as MaxUploadBytesOci,
-                   max_upload_bytes_cargo as MaxUploadBytesCargo,
-                   keep_versions as KeepVersions, keep_days as KeepDays,
-                   activity_retention_days as ActivityRetentionDays,
-                   COALESCE(license_enforcement_mode, 'off') as LicenseEnforcementMode,
-                   COALESCE(proxy_passthrough_enabled, 1) as ProxyPassthroughEnabled,
-                   COALESCE(max_osv_score_tolerance, 10.0) as MaxOsvScoreTolerance,
-                   min_release_age_hours as MinReleaseAgeHours,
-                   COALESCE(default_language, 'en') as DefaultLanguage,
-                   COALESCE(allow_version_overwrite, 0) as AllowVersionOverwrite,
-                   COALESCE(air_gapped, 0) as AirGapped,
-                   COALESCE(block_deprecated, 'off') as BlockDeprecated,
-                   COALESCE(block_malicious, 'block') as BlockMalicious,
-                   COALESCE(block_kev, 'off') as BlockKev,
-                   max_epss_tolerance as MaxEpssTolerance,
-                   COALESCE(storage_used_bytes, 0) as StorageUsedBytes
-            FROM org_settings WHERE org_id = @orgId
-            """,
+            OrgSettingsSelect,
             new { orgId });
 
         // Cache both hit and miss so a non-existent org_id doesn't repeatedly hit the DB.
@@ -258,111 +272,6 @@ public sealed class OrgRepository
         await conn.ExecuteAsync("DELETE FROM orgs WHERE id = @orgId", new { orgId });
     }
 
-    public async Task UpsertSettingsAsync(OrgSettingsUpdate update, CancellationToken ct = default)
-    {
-        // Enforce org limit <= instance limit at write time
-        static long? Clamp(long? orgVal, long? instanceMax)
-        {
-            return orgVal is null ? null : instanceMax is null ? orgVal : Math.Min(orgVal.Value, instanceMax.Value);
-        }
-
-        await using var conn = await _db.OpenAsync(ct);
-        // Treat null as "leave unchanged" so this method stays usable when callers don't carry
-        // language (e.g. retention/proxy upserts at the controller layer don't touch it either).
-        string? lang = string.IsNullOrWhiteSpace(update.DefaultLanguage) ? null : update.DefaultLanguage;
-        await conn.ExecuteAsync(
-            """
-            INSERT INTO org_settings (org_id, anonymous_pull, allowlist_mode,
-                max_upload_bytes, max_upload_bytes_pypi, max_upload_bytes_npm, max_upload_bytes_nuget,
-                max_upload_bytes_maven, max_upload_bytes_rpm, max_upload_bytes_oci, max_upload_bytes_cargo,
-                default_language, allow_version_overwrite)
-            VALUES (@orgId, @anonPull, @allowlist, @maxBytes, @maxBytesPyPi, @maxBytesNpm, @maxBytesNuGet,
-                @maxBytesMaven, @maxBytesRpm, @maxBytesOci, @maxBytesCargo,
-                COALESCE(@lang, 'en'), COALESCE(@overwrite, 0))
-            ON CONFLICT(org_id) DO UPDATE SET
-                anonymous_pull      = @anonPull,
-                allowlist_mode      = @allowlist,
-                max_upload_bytes    = @maxBytes,
-                max_upload_bytes_pypi  = @maxBytesPyPi,
-                max_upload_bytes_npm   = @maxBytesNpm,
-                max_upload_bytes_nuget = @maxBytesNuGet,
-                max_upload_bytes_maven = @maxBytesMaven,
-                max_upload_bytes_rpm   = @maxBytesRpm,
-                max_upload_bytes_oci   = @maxBytesOci,
-                max_upload_bytes_cargo = @maxBytesCargo,
-                default_language    = COALESCE(@lang, default_language),
-                allow_version_overwrite = COALESCE(@overwrite, allow_version_overwrite)
-            """,
-            new
-            {
-                orgId = update.OrgId,
-                anonPull = update.AnonymousPull ? 1 : 0,
-                allowlist = update.AllowlistMode ? 1 : 0,
-                maxBytes = Clamp(update.MaxUploadBytes, update.InstanceMaxUploadBytes),
-                maxBytesPyPi = Clamp(update.MaxUploadBytesPyPi, update.InstanceMaxUploadBytes),
-                maxBytesNpm = Clamp(update.MaxUploadBytesNpm, update.InstanceMaxUploadBytes),
-                maxBytesNuGet = Clamp(update.MaxUploadBytesNuGet, update.InstanceMaxUploadBytes),
-                maxBytesMaven = Clamp(update.MaxUploadBytesMaven, update.InstanceMaxUploadBytes),
-                maxBytesRpm = Clamp(update.MaxUploadBytesRpm, update.InstanceMaxUploadBytes),
-                maxBytesOci = Clamp(update.MaxUploadBytesOci, update.InstanceMaxUploadBytes),
-                maxBytesCargo = Clamp(update.MaxUploadBytesCargo, update.InstanceMaxUploadBytes),
-                lang,
-                overwrite = ToOverwriteFlag(update.AllowVersionOverwrite),
-            });
-    }
-
-    /// <summary>
-    /// Encodes a tristate <c>bool?</c> as the SQLite/Postgres int representation we store:
-    /// <c>null</c> → null (don't update), <c>true</c> → 1, <c>false</c> → 0. Extracted from
-    /// the inline ternary so the call site reads as a single column assignment.
-    /// </summary>
-    private static int? ToOverwriteFlag(bool? value)
-    {
-        return value is null ? null : value.Value ? 1 : 0;
-    }
-
-    public async Task UpsertRetentionAsync(
-        string orgId, int? keepVersions, int? keepDays, int? activityRetentionDays,
-        CancellationToken ct = default)
-    {
-        await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
-            """
-            INSERT INTO org_settings (org_id, keep_versions, keep_days, activity_retention_days)
-            VALUES (@orgId, @keepVersions, @keepDays, @activityDays)
-            ON CONFLICT(org_id) DO UPDATE SET
-                keep_versions           = @keepVersions,
-                keep_days               = @keepDays,
-                activity_retention_days = @activityDays
-            """,
-            new { orgId, keepVersions, keepDays, activityDays = activityRetentionDays });
-    }
-
-    public async Task UpsertProxySettingsAsync(
-        string orgId, bool proxyPassthroughEnabled, double maxOsvScoreTolerance,
-        int? minReleaseAgeHours, string blockDeprecated = "off", CancellationToken ct = default)
-    {
-        await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
-            """
-            INSERT INTO org_settings (org_id, proxy_passthrough_enabled, max_osv_score_tolerance, min_release_age_hours, block_deprecated)
-            VALUES (@orgId, @proxyEnabled, @maxScore, @minAgeHours, @blockDeprecated)
-            ON CONFLICT(org_id) DO UPDATE SET
-                proxy_passthrough_enabled = @proxyEnabled,
-                max_osv_score_tolerance   = @maxScore,
-                min_release_age_hours     = @minAgeHours,
-                block_deprecated          = @blockDeprecated
-            """,
-            new
-            {
-                orgId,
-                proxyEnabled = proxyPassthroughEnabled ? 1 : 0,
-                maxScore = maxOsvScoreTolerance,
-                minAgeHours = minReleaseAgeHours,
-                blockDeprecated,
-            });
-    }
-
     public async Task UpsertLicensePolicyModeAsync(
         string orgId, string mode, CancellationToken ct = default)
     {
@@ -459,6 +368,10 @@ public sealed class OrgRepository
     /// <summary>
     /// system_admin support flow: locks/unlocks/disables a tenant user account. Returns false
     /// if the (email, tenantSlug) pair doesn't resolve. Idempotent on the same target status.
+    /// When locking or disabling, bumps <c>users.token_version</c> to invalidate every active
+    /// session JWT for the affected user (the same mechanism as a password change). The
+    /// in-memory token-version cache is evicted immediately so the next request re-reads the
+    /// new version rather than serving from a stale cache entry.
     /// </summary>
     public async Task<bool> SetUserAccountStatusAsync(
         string email, string tenantSlug, string accountStatus, CancellationToken ct = default)
@@ -469,16 +382,52 @@ public sealed class OrgRepository
         }
 
         await using var conn = await _db.OpenAsync(ct);
-        int rows = await conn.ExecuteAsync(
-            """
-            UPDATE users SET account_status = @status
-            WHERE id IN (
+
+        // Resolving to locked/disabled kills active sessions by bumping token_version.
+        // Restoring to active does not bump — the user has no live sessions while locked.
+        bool bumpVersion = accountStatus is "locked" or "disabled";
+
+        // xtenant: system_admin flow that resolves a user by email + org slug across tenants.
+        IEnumerable<string>? affectedIds = null;
+        if (bumpVersion && _tokenVersions is not null)
+        {
+            affectedIds = await conn.QueryAsync<string>(
+                """
                 SELECT u.id FROM users u
                 JOIN orgs o ON o.id = u.tenant_id
                 WHERE lower(u.email) = lower(@email) AND o.slug = @tenantSlug
-            )
-            """,
-            new { status = accountStatus, email, tenantSlug });
+                """,
+                new { email, tenantSlug });
+        }
+
+        string sql = bumpVersion
+            ? """
+              UPDATE users SET account_status = @status, token_version = token_version + 1
+              WHERE id IN (
+                  SELECT u.id FROM users u
+                  JOIN orgs o ON o.id = u.tenant_id
+                  WHERE lower(u.email) = lower(@email) AND o.slug = @tenantSlug
+              )
+              """
+            : """
+              UPDATE users SET account_status = @status
+              WHERE id IN (
+                  SELECT u.id FROM users u
+                  JOIN orgs o ON o.id = u.tenant_id
+                  WHERE lower(u.email) = lower(@email) AND o.slug = @tenantSlug
+              )
+              """;
+
+        int rows = await conn.ExecuteAsync(sql, new { status = accountStatus, email, tenantSlug });
+
+        if (rows > 0 && affectedIds is not null)
+        {
+            foreach (string userId in affectedIds)
+            {
+                _tokenVersions!.Invalidate(userId);
+            }
+        }
+
         return rows > 0;
     }
 

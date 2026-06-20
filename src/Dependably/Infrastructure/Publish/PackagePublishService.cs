@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using Dependably.Infrastructure.Observability;
+using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
 
@@ -206,6 +207,7 @@ public sealed class PackagePublishService : IPackagePublishService
 
             var newVersion = await CommitMetadataAsync(request, ctx.Pkg, ctx.Existing,
                 new PersistedArtifact(ctx.BlobKey, sha256, sha1, ctx.ArtifactSizeBytes), registry, ct);
+            await DetectInstallScriptQuietlyAsync(request, newVersion, ctx.BlobKey, registry, ct);
             await ScanQuietlyAsync(request, newVersion, ct);
             await _auditor.RecordAsync(request, sha256, ctx.Existing, ctx.ArtifactSizeBytes, ct);
 
@@ -450,6 +452,33 @@ public sealed class PackagePublishService : IPackagePublishService
     // doesn't know about resolve to zero advisories → status "clean", same path as a
     // public package with no known issues. Failures are swallowed so a transient OSV
     // outage cannot fail an otherwise valid publish; the scheduled pass retries later.
+    // Install/lifecycle-script detection on the just-stored artefact. Re-opens the registry blob
+    // (the artifact stream was already consumed by the put) and persists the signal. Best-effort:
+    // a backend or parse failure leaves has_install_script at its default rather than failing an
+    // otherwise valid publish. Always writes the result (including a negative on overwrite) so a
+    // republished, now-script-free artefact clears a stale flag.
+    private async Task DetectInstallScriptQuietlyAsync(
+        PublishRequest request, PackageVersion newVersion, string blobKey, IBlobStore registry, CancellationToken ct)
+    {
+        try
+        {
+            await using var stream = await registry.GetAsync(blobKey, ct);
+            if (stream is null)
+            {
+                return;
+            }
+
+            var script = await ScriptDetectionService.DetectAsync(
+                request.Ecosystem, request.Filename, stream, ct);
+            await _packages.UpdateInstallScriptAsync(newVersion.Id, script.HasScript, script.Kind, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "Install-script detection failed for {Purl}; signal left at its default.", request.Purl);
+        }
+    }
+
     private async Task ScanQuietlyAsync(PublishRequest request, PackageVersion newVersion, CancellationToken ct)
     {
         try

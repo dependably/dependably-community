@@ -362,6 +362,14 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
         var audit = new AuditRepository(_db);
         var orgs = new OrgRepository(_db);
         var repodata = new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance, _clock);
+        var cacheArtifacts = new CacheArtifactRepository(_db);
+        var tenantAccess = new TenantArtifactAccessRepository(_db);
+        var cacheRecorder = new CacheAccessRecorder(cacheArtifacts, tenantAccess,
+            NullLogger<CacheAccessRecorder>.Instance, _clock);
+        // No Rpm:GpgKey configured — IsConfigured=false, provenance skipped.
+        var rpmProvenance = new Dependably.Protocol.Provenance.RpmProvenanceVerifier(
+            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.RpmProvenanceVerifier>.Instance);
         var svc = new RpmControllerServices(
             packages, _tokens, audit, orgs,
             new TieredBlobStorage(_blobs, _blobs),
@@ -369,7 +377,11 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
             new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock)),
             _mergedRepodataCache,
             _localRepodataCache,
-            _clock);
+            _clock,
+            cacheRecorder,
+            cacheArtifacts,
+            tenantAccess,
+            rpmProvenance);
         return new RpmController(svc) { ControllerContext = BuildRpmContext() };
     }
 
@@ -471,7 +483,10 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
             AuditEmitter: null!,
             Cache: null!,
             RpmMergedCache: _mergedRepodataCache,
-            RpmLocalCache: _localRepodataCache);
+            RpmLocalCache: _localRepodataCache,
+            CacheArtifacts: null!,
+            TenantAccess: null!,
+            Time: null!);
 
         return new OrgController(svc)
         {

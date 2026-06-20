@@ -51,8 +51,16 @@ public sealed class PackageAnalyticsRepository
             """,
             new { orgId })).ToList();
 
+        // The dashboard pending count must agree with the review queue, which purges aged-out
+        // release_age holds on load (QuarantineRepository.PurgeAgedReleaseHoldsAsync). Pass the
+        // org's hold threshold and the current clock down so the count excludes the same stale
+        // holds — otherwise the card shows a number the (empty) queue can't account for.
+        int? minReleaseAgeHours = await conn.ExecuteScalarAsync<int?>(
+            "SELECT min_release_age_hours FROM org_settings WHERE org_id = @orgId",
+            new { orgId });
+
         var (vulnsByEcoSeverity, diskByEco, vulnPeriods, activeUsers, blockedByGate, blockedPulls, quarantinePending) =
-            await QueryVulnAndActivityStatsAsync(conn, orgId);
+            await QueryVulnAndActivityStatsAsync(conn, orgId, minReleaseAgeHours, _time.GetUtcNow());
 
         var (hostedPackages, proxiedPackages, storageQuotaBytes, totalDownloads30d) =
             await QueryPackageCountsAndQuotaAsync(conn, orgId);
@@ -87,52 +95,120 @@ public sealed class PackageAnalyticsRepository
         List<GateCount> BlockedByGate,
         int BlockedPulls,
         int QuarantinePending)>
-        QueryVulnAndActivityStatsAsync(System.Data.Common.DbConnection conn, string orgId)
+        QueryVulnAndActivityStatsAsync(
+            System.Data.Common.DbConnection conn, string orgId,
+            int? minReleaseAgeHours, DateTimeOffset now)
     {
+        var (vulnsByEcoSeverity, diskByEco, vulnPeriods) = await QueryVulnDataAsync(conn, orgId);
+        var (activeUsers, blockedByGate, blockedPulls, quarantinePending) =
+            await QueryActivityDataAsync(conn, orgId, minReleaseAgeHours, now);
+        return (vulnsByEcoSeverity, diskByEco, vulnPeriods, activeUsers, blockedByGate, blockedPulls, quarantinePending);
+    }
+
+    // Queries vuln-by-severity, disk-by-ecosystem, and vuln-period buckets. Uses a two-plane
+    // union (package_versions + cache_artifact) so both uploaded and proxy artifacts are covered.
+    private static async Task<(
+        List<EcoSeverityCount> VulnsByEcoSeverity,
+        List<EcoDiskBytes> DiskByEco,
+        VulnPeriodCounts VulnPeriods)>
+        QueryVulnDataAsync(System.Data.Common.DbConnection conn, string orgId)
+    {
+        // Vulns live on two planes since proxy artifacts moved to the global cache_artifact table:
+        // uploaded artifacts keep package_version_vulns rows with owner_kind='package_version'
+        // (org-scoped via packages.org_id), while proxy artifacts carry owner_kind='cache_artifact'
+        // rows on the global plane, org-scoped via tenant_artifact_access.org_id and labelled by
+        // cache_artifact.ecosystem. Both arms are unioned; COUNT(DISTINCT vuln_id) dedupes a CVE
+        // affecting the same ecosystem on both planes so it is counted once.
         var vulnsByEcoSeverity = (await conn.QueryAsync<EcoSeverityCount>(
             """
-            SELECT p.ecosystem as Ecosystem, COALESCE(v.severity, 'UNKNOWN') as Severity,
-                   COUNT(DISTINCT pvv.vuln_id) as Count
-            FROM package_version_vulns pvv
-            JOIN vulnerabilities v ON v.id = pvv.vuln_id
-            JOIN package_versions pv ON pv.id = pvv.package_version_id
-            JOIN packages p ON p.id = pv.package_id
-            WHERE p.org_id = @orgId
-            GROUP BY p.ecosystem, v.severity
+            SELECT Ecosystem, Severity, COUNT(DISTINCT VulnId) as Count
+            FROM (
+                SELECT p.ecosystem as Ecosystem, COALESCE(v.severity, 'UNKNOWN') as Severity, pvv.vuln_id as VulnId
+                FROM package_version_vulns pvv
+                JOIN vulnerabilities v ON v.id = pvv.vuln_id
+                JOIN package_versions pv ON pv.id = pvv.package_version_id
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.org_id = @orgId AND pvv.owner_kind = 'package_version'
+                UNION ALL
+                SELECT ca.ecosystem as Ecosystem, COALESCE(v.severity, 'UNKNOWN') as Severity, pvv.vuln_id as VulnId
+                FROM package_version_vulns pvv
+                JOIN vulnerabilities v ON v.id = pvv.vuln_id
+                JOIN cache_artifact ca ON ca.id = pvv.cache_artifact_id
+                JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                WHERE taa.org_id = @orgId AND pvv.owner_kind = 'cache_artifact'
+            )
+            GROUP BY Ecosystem, Severity
             """,
             new { orgId })).ToList();
 
-        // OCI disk usage lives in oci_blobs (manifest + layer blobs, content-addressed and
-        // deduped within an org), not in package_versions — an OCI version row carries only the
-        // tiny manifest size. So exclude 'oci' from the package_versions sum and add its real
-        // cached footprint from oci_blobs. Both branches are org-scoped (WHERE org_id = @orgId).
+        // Disk usage spans three sources, each org-scoped. (1) Uploaded artifacts: package_versions
+        // sized rows (origin='uploaded'; proxy rows now live on the cache plane). (2) Proxy artifacts:
+        // the global cache_artifact table, attributed per-org via tenant_artifact_access — the same
+        // per-tenant footprint the package_versions sum showed before proxy rows moved planes.
+        // (3) OCI: blob bytes live in oci_blobs (content-addressed, deduped within an org), not in
+        // either sized table, so 'oci' is excluded from the first two arms and summed from oci_blobs.
+        // Outer GROUP BY collapses the uploaded and proxy arms into one row per ecosystem (npm can
+        // appear in both) so the dashboard's per-ecosystem lookup stays single-valued.
         var diskByEco = (await conn.QueryAsync<EcoDiskBytes>(
             """
-            SELECT p.ecosystem as Ecosystem, COALESCE(SUM(pv.size_bytes), 0) as TotalBytes
-            FROM package_versions pv
-            JOIN packages p ON p.id = pv.package_id
-            WHERE p.org_id = @orgId AND p.ecosystem != 'oci'
-            GROUP BY p.ecosystem
-            UNION ALL
-            SELECT 'oci' as Ecosystem, COALESCE(SUM(size_bytes), 0) as TotalBytes
-            FROM oci_blobs
-            WHERE org_id = @orgId
+            SELECT Ecosystem, SUM(TotalBytes) as TotalBytes
+            FROM (
+                SELECT p.ecosystem as Ecosystem, COALESCE(SUM(pv.size_bytes), 0) as TotalBytes
+                FROM package_versions pv
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.org_id = @orgId AND p.ecosystem != 'oci'
+                  AND pv.origin = 'uploaded'
+                GROUP BY p.ecosystem
+                UNION ALL
+                SELECT ca.ecosystem as Ecosystem, COALESCE(SUM(ca.size_bytes), 0) as TotalBytes
+                FROM cache_artifact ca
+                JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                WHERE taa.org_id = @orgId AND ca.ecosystem != 'oci'
+                GROUP BY ca.ecosystem
+                UNION ALL
+                SELECT 'oci' as Ecosystem, COALESCE(SUM(size_bytes), 0) as TotalBytes
+                FROM oci_blobs
+                WHERE org_id = @orgId
+            )
+            GROUP BY Ecosystem
             """,
             new { orgId })).ToList();
 
+        // Same two-plane union as the severity breakdown: uploaded vulns are org-scoped via
+        // packages.org_id, proxy vulns via tenant_artifact_access.org_id. COUNT(DISTINCT vuln_id)
+        // per window dedupes a CVE seen on both planes.
         var vulnPeriods = await conn.QuerySingleOrDefaultAsync<VulnPeriodCounts>(
             """
             SELECT
-              COUNT(DISTINCT CASE WHEN pvv.checked_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-1 days'))  THEN pvv.vuln_id END) as Day,
-              COUNT(DISTINCT CASE WHEN pvv.checked_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-7 days'))  THEN pvv.vuln_id END) as Week,
-              COUNT(DISTINCT CASE WHEN pvv.checked_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-30 days')) THEN pvv.vuln_id END) as Month
-            FROM package_version_vulns pvv
-            JOIN package_versions pv ON pv.id = pvv.package_version_id
-            JOIN packages p ON p.id = pv.package_id
-            WHERE p.org_id = @orgId
+              COUNT(DISTINCT CASE WHEN CheckedAt >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-1 days'))  THEN VulnId END) as Day,
+              COUNT(DISTINCT CASE WHEN CheckedAt >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-7 days'))  THEN VulnId END) as Week,
+              COUNT(DISTINCT CASE WHEN CheckedAt >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-30 days')) THEN VulnId END) as Month
+            FROM (
+                SELECT pvv.checked_at as CheckedAt, pvv.vuln_id as VulnId
+                FROM package_version_vulns pvv
+                JOIN package_versions pv ON pv.id = pvv.package_version_id
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.org_id = @orgId AND pvv.owner_kind = 'package_version'
+                UNION ALL
+                SELECT pvv.checked_at as CheckedAt, pvv.vuln_id as VulnId
+                FROM package_version_vulns pvv
+                JOIN cache_artifact ca ON ca.id = pvv.cache_artifact_id
+                JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                WHERE taa.org_id = @orgId AND pvv.owner_kind = 'cache_artifact'
+            )
             """,
             new { orgId }) ?? new VulnPeriodCounts();
 
+        return (vulnsByEcoSeverity, diskByEco, vulnPeriods);
+    }
+
+    // Queries active-user count (7d), blocked-pull summary by gate (30d), and quarantine
+    // pending count. All org-scoped via WHERE org_id=@orgId.
+    private static async Task<(int ActiveUsers, List<GateCount> BlockedByGate, int BlockedPulls, int QuarantinePending)>
+        QueryActivityDataAsync(
+            System.Data.Common.DbConnection conn, string orgId,
+            int? minReleaseAgeHours, DateTimeOffset now)
+    {
         int activeUsers = await conn.ExecuteScalarAsync<int>(
             """
             SELECT COUNT(DISTINCT actor_id)
@@ -165,14 +241,35 @@ public sealed class PackageAnalyticsRepository
             .ToList();
         int blockedPulls = blockedByGate.Sum(g => g.Count);
 
-        int quarantinePending = await conn.ExecuteScalarAsync<int>(
+        // Pending review rows that the queue would actually show. Non-release_age holds always
+        // count; a release_age hold counts only while its version is still inside the hold window —
+        // once it ages out it is a phantom the queue purges on load (see
+        // QuarantineRepository.PurgeAgedReleaseHoldsAsync), so it must not inflate the card. The
+        // staleness test is shared with the purge (QuarantineRepository.IsReleaseHoldStale) so the
+        // count and the queue can never disagree.
+        int nonReleaseAgePending = await conn.ExecuteScalarAsync<int>(
             """
             SELECT COUNT(*) FROM quarantine
-            WHERE org_id = @orgId AND state = 'pending'
+            WHERE org_id = @orgId AND state = 'pending' AND gate <> 'release_age'
             """,
             new { orgId });
 
-        return (vulnsByEcoSeverity, diskByEco, vulnPeriods, activeUsers, blockedByGate, blockedPulls, quarantinePending);
+        // xtenant: package_versions joined by FK id already bound to the org-scoped quarantine row
+        var releaseHoldPublishDates = await conn.QueryAsync<DateTimeOffset?>(
+            """
+            SELECT pv.published_at
+            FROM quarantine q
+            LEFT JOIN package_versions pv ON pv.id = q.package_version_id
+            WHERE q.org_id = @orgId AND q.state = 'pending' AND q.gate = 'release_age'
+            """,
+            new { orgId });
+
+        int activeReleaseHolds = releaseHoldPublishDates
+            .Count(p => !QuarantineRepository.IsReleaseHoldStale(p, minReleaseAgeHours, now));
+
+        int quarantinePending = nonReleaseAgePending + activeReleaseHolds;
+
+        return (activeUsers, blockedByGate, blockedPulls, quarantinePending);
     }
 
     // Queries package hosted/proxy counts, the org storage quota, and 30-day download total.

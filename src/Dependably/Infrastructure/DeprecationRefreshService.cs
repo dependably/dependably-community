@@ -1,88 +1,68 @@
 using System.Text.Json;
-using Cronos;
 using Dependably.Infrastructure.Observability;
 using Dependably.Protocol;
 
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Background service that refreshes upstream deprecation metadata for proxy-cached package
-/// versions. Runs on a cron schedule (<c>DEPRECATION_REFRESH_SCHEDULE</c> env var, default
-/// daily at 5am UTC). Supports npm and PyPI; NuGet, Maven, RPM, and OCI are skipped (no
-/// reliable upstream deprecation signal in a single metadata endpoint).
+/// Background service that refreshes upstream metadata for proxy-cached package versions. Runs on
+/// a cron schedule (<c>DEPRECATION_REFRESH_SCHEDULE</c> env var, default daily at 5am UTC).
 ///
-/// For each stale package, fetches the upstream packument (npm) or project JSON (PyPI) and
-/// updates <c>package_versions.deprecated</c> and <c>package_versions.deprecation_checked_at</c>
-/// for every version row under that package. The same fetch also records upstream's declared
-/// latest version (npm <c>dist-tags.latest</c> / PyPI <c>info.version</c>) on
-/// <c>packages.upstream_latest_version</c>, which drives the packages-list "Latest" indicator.
+/// Deprecation is refreshed for npm and PyPI only — they expose a per-version deprecation/yank
+/// signal in a single metadata endpoint; NuGet, Maven, RPM, and OCI do not. For each stale
+/// npm/PyPI package, fetches the upstream packument (npm) or project JSON (PyPI) and updates
+/// <c>deprecated</c>/<c>deprecation_checked_at</c> for every version row under that package.
+///
+/// Upstream-latest is refreshed for npm, PyPI, NuGet, and Maven: the same npm/PyPI fetch yields
+/// <c>dist-tags.latest</c>/<c>info.version</c>, while NuGet/Maven resolve their latest-stable
+/// release via <see cref="Protocol.IUpstreamLatestVersionResolver"/>. The result is written to
+/// <c>packages.upstream_latest_version</c>, which drives the packages-list "Latest" indicator and
+/// the package-detail "behind upstream" banner. Newly-proxied packages get their baseline
+/// immediately from the first-fetch recorder, so this pass keeps the baseline current rather than
+/// establishing it.
 /// </summary>
-public sealed class DeprecationRefreshService : BackgroundService
+public sealed class DeprecationRefreshService : ScheduledBackgroundService
 {
     private readonly PackageRepository _packages;
+    private readonly CacheArtifactRepository _cacheArtifacts;
     private readonly AuditRepository _audit;
     private readonly UpstreamClient _upstream;
+    private readonly IUpstreamLatestVersionResolver _latestResolver;
     private readonly IAirGapMode _airGap;
     private readonly IConfiguration _config;
     private readonly ILogger<DeprecationRefreshService> _logger;
     private readonly TimeProvider _time;
 
+    protected override string CronEnvKey => "DEPRECATION_REFRESH_SCHEDULE";
+    protected override string DefaultCron => "0 5 * * *";
+    protected override string? JitterEnvKey => "DEPRECATION_REFRESH_JITTER_SECONDS";
+    protected override bool RunOnStartup => true;
+    protected override bool ContinueOnTickError => false;
+
     public DeprecationRefreshService(
         PackageRepository packages,
+        CacheArtifactRepository cacheArtifacts,
         AuditRepository audit,
         UpstreamClient upstream,
+        IUpstreamLatestVersionResolver latestResolver,
         IAirGapMode airGap,
         IConfiguration config,
         ILogger<DeprecationRefreshService> logger,
         TimeProvider time)
+        : base(config, logger, time)
     {
         _packages = packages;
+        _cacheArtifacts = cacheArtifacts;
         _audit = audit;
         _upstream = upstream;
+        _latestResolver = latestResolver;
         _airGap = airGap;
         _config = config;
         _logger = logger;
         _time = time;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        await RunRefreshPassAsync(stoppingToken);
-
-        var schedule = CronExpression.Parse(
-            _config["DEPRECATION_REFRESH_SCHEDULE"] ?? "0 5 * * *",
-            CronFormat.Standard);
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
-            if (next is null)
-            {
-                break;
-            }
-
-            int jitterMaxSeconds = int.TryParse(_config["DEPRECATION_REFRESH_JITTER_SECONDS"], out int j) && j >= 0 ? j : 3600;
-            // SCS0005: load-spreading jitter, not a security boundary — weak RNG is intentional.
-#pragma warning disable SCS0005
-            var jitter = jitterMaxSeconds > 0
-                ? TimeSpan.FromSeconds(Random.Shared.Next(0, jitterMaxSeconds + 1))
-                : TimeSpan.Zero;
-#pragma warning restore SCS0005
-            var delay = (next.Value - _time.GetUtcNow()) + jitter;
-            if (delay > TimeSpan.Zero)
-            {
-                try { await Task.Delay(delay, stoppingToken); }
-                catch (OperationCanceledException) { break; }
-            }
-
-            if (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-
-            await RunRefreshPassAsync(stoppingToken);
-        }
-    }
+    protected override Task RunTickAsync(CancellationToken ct) => RunRefreshPassAsync(ct);
 
     internal async Task RunRefreshPassAsync(CancellationToken ct)
     {
@@ -101,9 +81,9 @@ public sealed class DeprecationRefreshService : BackgroundService
 
     private async Task RunRefreshPassInnerAsync(CancellationToken ct)
     {
-        if (_airGap.IsEnabled)
+        if (_airGap.IsJobDisabled("deprecation-refresh"))
         {
-            _logger.LogInformation("Deprecation refresh skipped: air-gap mode is enabled.");
+            _logger.LogInformation("Deprecation refresh pass skipped (disabled by AIR_GAPPED or DISABLE_BACKGROUND_JOBS).");
             return;
         }
 
@@ -116,18 +96,18 @@ public sealed class DeprecationRefreshService : BackgroundService
             ageHours, batchSize);
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        var packages = await _packages.ListPackagesNeedingDeprecationRefreshAsync(ageHours, batchSize, ct);
+        var groups = await _cacheArtifacts.ListGroupsNeedingDeprecationRefreshAsync(ageHours, batchSize, _time, ct);
         int totalChecked = 0;
         int totalUpdated = 0;
 
-        foreach (var pkg in packages)
+        foreach (var group in groups)
         {
             if (ct.IsCancellationRequested)
             {
                 break;
             }
 
-            var (checked_, updated) = await ProcessPackageAsync(pkg, ct);
+            var (checked_, updated) = await ProcessCacheGroupAsync(group, ct);
             totalChecked += checked_;
             totalUpdated += updated;
 
@@ -140,15 +120,20 @@ public sealed class DeprecationRefreshService : BackgroundService
 
         sw.Stop();
         _logger.LogInformation(
-            "Deprecation refresh pass complete. Checked {Checked} versions across {Packages} packages, {Updated} updated, took {ElapsedMs}ms.",
-            totalChecked, packages.Count, totalUpdated, sw.ElapsedMilliseconds);
+            "Deprecation refresh pass complete. Checked {Checked} versions across {Groups} packages, {Updated} updated, took {ElapsedMs}ms.",
+            totalChecked, groups.Count, totalUpdated, sw.ElapsedMilliseconds);
     }
 
-    private async Task<(int Checked, int Updated)> ProcessPackageAsync(
-        (string PackageId, string Ecosystem, string PurlName, string OrgId) pkg,
+    /// <summary>
+    /// Processes one (ecosystem, name, orgId) group: fetches upstream metadata and writes
+    /// <c>deprecated</c>/<c>deprecation_checked_at</c> to each <c>cache_artifact</c> row for
+    /// that package name. One upstream fetch covers all version rows for the name.
+    /// </summary>
+    private async Task<(int Checked, int Updated)> ProcessCacheGroupAsync(
+        (string Ecosystem, string Name, string OrgId) group,
         CancellationToken ct)
     {
-        var (packageId, ecosystem, purlName, orgId) = pkg;
+        var (ecosystem, name, orgId) = group;
 
         if (!IsSupportedEcosystem(ecosystem))
         {
@@ -159,21 +144,26 @@ public sealed class DeprecationRefreshService : BackgroundService
         string? upstreamLatest;
         try
         {
-            (upstreamDeprecated, upstreamLatest) = await FetchUpstreamMetadataAsync(ecosystem, purlName, ct);
+            (upstreamDeprecated, upstreamLatest) = await FetchUpstreamMetadataAsync(ecosystem, orgId, name, ct);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
                 "Failed to fetch upstream deprecation metadata for {Ecosystem}/{Package}: {ExceptionType}",
-                ecosystem, purlName, ex.GetType().Name);
+                ecosystem, name, ex.GetType().Name);
             return (0, 0);
         }
 
-        // Record upstream's declared latest version for the packages-list "Latest" indicator.
-        // Null clears any stale baseline (upstream had no latest claim).
-        await _packages.UpdateUpstreamLatestAsync(packageId, upstreamLatest, ct);
+        // Record upstream's declared latest version on the packages row if one exists for this org.
+        // The packages table may not have a row when the artifact was only ever accessed via the
+        // global plane; skip silently in that case.
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, name, ct);
+        if (pkg is not null)
+        {
+            await _packages.UpdateUpstreamLatestAsync(pkg.Id, upstreamLatest, ct);
+        }
 
-        var versions = await _packages.GetVersionsAsync(packageId, ct);
+        var versions = await _cacheArtifacts.ListVersionsForNameAsync(ecosystem, name, ct);
         int checked_ = 0;
         int updated = 0;
 
@@ -182,11 +172,6 @@ public sealed class DeprecationRefreshService : BackgroundService
             if (ct.IsCancellationRequested)
             {
                 break;
-            }
-
-            if (ver.Origin != "proxy")
-            {
-                continue;
             }
 
             // Look up the upstream deprecated value for this version.
@@ -199,14 +184,14 @@ public sealed class DeprecationRefreshService : BackgroundService
 
             if (upstreamValue != ver.Deprecated)
             {
-                await _packages.UpdateDeprecatedAndCheckedAsync(ver.Id, upstreamValue, ct);
+                await _cacheArtifacts.UpdateDeprecationAsync(ver.Id, upstreamValue, _time, ct);
                 updated++;
                 DependablyMeter.DeprecationRefreshUpdated.Add(1,
                     new KeyValuePair<string, object?>("ecosystem", ecosystem));
             }
             else
             {
-                await _packages.UpdateDeprecationCheckedAtAsync(ver.Id, ct);
+                await _cacheArtifacts.TouchDeprecationCheckedAtAsync(ver.Id, _time, ct);
             }
         }
 
@@ -220,14 +205,14 @@ public sealed class DeprecationRefreshService : BackgroundService
                     purl: null,
                     eventType: "deprecation_refresh",
                     actorId: null,
-                    detail: $"Checked {checked_} version(s) for {purlName}, {updated} updated",
+                    detail: $"Checked {checked_} version(s) for {name}, {updated} updated",
                     ct: ct);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
                     "Failed to log deprecation_refresh activity for {OrgId}/{Package}: {ExceptionType}",
-                    orgId, purlName, ex.GetType().Name);
+                    orgId, name, ex.GetType().Name);
             }
         }
 
@@ -235,16 +220,21 @@ public sealed class DeprecationRefreshService : BackgroundService
     }
 
     private static bool IsSupportedEcosystem(string ecosystem) =>
-        ecosystem is "npm" or "pypi";
+        ecosystem is "npm" or "pypi" or "nuget" or "maven";
 
     // Per-version deprecation map plus upstream's declared latest version (null when absent).
+    // npm/PyPI carry a per-version deprecation signal AND a latest tag in one document. NuGet and
+    // Maven have no deprecation signal, so the deprecation map is empty (their cache_artifact
+    // rows never set deprecated, so the empty map clears nothing) and only the latest is resolved.
     private async Task<(Dictionary<string, string?> Deprecated, string? Latest)> FetchUpstreamMetadataAsync(
-        string ecosystem, string purlName, CancellationToken ct)
+        string ecosystem, string orgId, string purlName, CancellationToken ct)
     {
         return ecosystem switch
         {
             "npm" => await FetchNpmMetadataAsync(purlName, ct),
             "pypi" => await FetchPyPiMetadataAsync(purlName, ct),
+            "nuget" or "maven" =>
+                (new Dictionary<string, string?>(), await _latestResolver.ResolveAsync(ecosystem, orgId, purlName, ct)),
             _ => (new Dictionary<string, string?>(), null)
         };
     }

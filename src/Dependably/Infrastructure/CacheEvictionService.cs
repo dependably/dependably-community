@@ -1,4 +1,3 @@
-using Cronos;
 using Dependably.Storage;
 
 namespace Dependably.Infrastructure;
@@ -18,7 +17,7 @@ namespace Dependably.Infrastructure;
 /// <c>tenant_artifact_access</c> rows automatically (keep/cascade decision: cascade by
 /// default; usage history without a backing artifact is dead weight).
 /// </summary>
-public sealed class CacheEvictionService : BackgroundService
+public sealed class CacheEvictionService : ScheduledBackgroundService
 {
     private readonly CacheArtifactRepository _cache;
     private readonly IBlobStore _blobs;   // TieredBlobStorage.Cache — only ever deletes from the cache tier
@@ -26,12 +25,18 @@ public sealed class CacheEvictionService : BackgroundService
     private readonly ILogger<CacheEvictionService> _logger;
     private readonly TimeProvider _time;
 
+    protected override string CronEnvKey => "CACHE_EVICT_SCHEDULE";
+    protected override string DefaultCron => "0 * * * *";
+    protected override string ScopeJobName => "cache-eviction";
+    protected override string ScopeMetricName => "cache.evict";
+
     public CacheEvictionService(
         CacheArtifactRepository cache,
         TieredBlobStorage blobs,
         IConfiguration config,
         ILogger<CacheEvictionService> logger,
         TimeProvider time)
+        : base(config, logger, time)
     {
         _cache = cache;
         // Eviction is cache-only. In split-tier deployments the registry tier is durable
@@ -43,46 +48,7 @@ public sealed class CacheEvictionService : BackgroundService
         _time = time;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        var schedule = CronExpression.Parse(
-            _config["CACHE_EVICT_SCHEDULE"] ?? "0 * * * *",
-            CronFormat.Standard);
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
-            if (next is null)
-            {
-                break;
-            }
-
-            var delay = next.Value - _time.GetUtcNow();
-            if (delay > TimeSpan.Zero)
-            {
-                try { await Task.Delay(delay, stoppingToken); }
-                catch (OperationCanceledException) { break; }
-            }
-
-            if (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-
-            using var scope = Dependably.Infrastructure.Observability.BackgroundJobScope.Begin(
-                "cache-eviction", "cache.evict", _time);
-            try
-            {
-                await RunOnceAsync(stoppingToken);
-                scope.Complete();
-            }
-            catch (Exception ex)
-            {
-                scope.Fail(ex);
-                _logger.LogError(ex, "Cache eviction pass failed.");
-            }
-        }
-    }
+    protected override Task RunTickAsync(CancellationToken ct) => RunOnceAsync(ct);
 
     /// <summary>
     /// Runs a single eviction pass. Public so it can be invoked directly in tests without

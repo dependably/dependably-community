@@ -315,6 +315,8 @@ public sealed class ControllerScenario : IAsyncDisposable
             new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), Clock);
         var reservedNamespaces = new ReservedNamespaceService(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
             new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), Clock);
+        var installScriptAllowlist = new InstallScriptAllowlistService(db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
+            new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), Clock);
         var samlConfig = new SamlConfigRepository(db, Clock);
         var blobs = new Dependably.Storage.InMemoryBlobStore();
         var publicUrl = new RequestPublicUrlBuilder(new ConfigurationBuilder().Build());
@@ -352,13 +354,31 @@ public sealed class ControllerScenario : IAsyncDisposable
             RpmMergedCache: new Dependably.Infrastructure.Caching.MetadataResponseCache<Dependably.Infrastructure.Caching.RpmMergedRepodataKey, Dependably.Infrastructure.Caching.MergedRepodataCache>(
                 scenarioCache, Dependably.Infrastructure.Caching.MetadataCacheKeys.RpmMergedRepodata),
             RpmLocalCache: new Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.RpmLocalRepodataKey>(
-                scenarioCache, Dependably.Infrastructure.Caching.MetadataCacheKeys.RpmLocalRepodata));
+                scenarioCache, Dependably.Infrastructure.Caching.MetadataCacheKeys.RpmLocalRepodata),
+            CacheArtifacts: new Dependably.Infrastructure.CacheArtifactRepository(db),
+            TenantAccess: new Dependably.Infrastructure.TenantArtifactAccessRepository(db),
+            Time: Clock);
         var org = new OrgController(orgSvc) { ControllerContext = ctx };
         var orgSettingsRepo = new OrgSettingsRepository(db);
         var orgSettings = new OrgSettingsController(
             orgSettingsRepo, guard, audit, orgAuditEmitter,
             new ConfigurationBuilder().Build(), problems,
-            new AirGapMode(new ConfigurationBuilder().Build()))
+            new AirGapMode(new ConfigurationBuilder().Build()),
+            new Dependably.Protocol.Provenance.NpmSignatureKeyStore(
+                new ConfigurationBuilder().Build(),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.NpmSignatureKeyStore>.Instance),
+            new Dependably.Protocol.Provenance.NuGetSignatureTrustStore(
+                new ConfigurationBuilder().Build(),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.NuGetSignatureTrustStore>.Instance),
+            new Dependably.Protocol.Provenance.PyPiSigstoreTrustStore(
+                new ConfigurationBuilder().Build(),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.PyPiSigstoreTrustStore>.Instance),
+            new Dependably.Protocol.Provenance.RpmProvenanceVerifier(
+                new ConfigurationBuilder().Build(),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.RpmProvenanceVerifier>.Instance),
+            new Dependably.Protocol.Provenance.MavenSignatureKeyStore(
+                new ConfigurationBuilder().Build(),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenSignatureKeyStore>.Instance))
         { ControllerContext = ctx };
         var orgTokens = new OrgTokensController(
             tokens, orgs, guard, audit, orgAuditEmitter, problems)
@@ -372,7 +392,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             orgs, guard, audit, problems)
         { ControllerContext = ctx };
         var orgLists = new OrgListsController(
-            allowlist, blocklist, reservedNamespaces, guard, audit, problems)
+            allowlist, blocklist, reservedNamespaces, installScriptAllowlist, guard, audit, problems)
         { ControllerContext = ctx };
         var orgAudit = new OrgAuditController(audit, guard, Clock) { ControllerContext = ctx };
         var orgAuthConfig = new OrgAuthConfigController(

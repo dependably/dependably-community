@@ -60,6 +60,37 @@ public sealed class LicenseRepository
         }
     }
 
+    /// <summary>
+    /// Attaches SPDX license identifiers to a global <c>cache_artifact</c> row using
+    /// <c>owner_kind='cache_artifact'</c>. Idempotent — duplicate inserts are silently
+    /// ignored via the <c>UNIQUE(cache_artifact_id, license_spdx)</c> constraint. Called
+    /// from the dual-write path so global license facts are written in parallel with the
+    /// per-tenant <c>package_version_licenses</c> rows.
+    /// </summary>
+    // xtenant: cache_artifact is a global table; the id comes from the caller's
+    // CacheAccessRecorder result so no cross-tenant row is writable here.
+    public async Task SetLicensesForCacheArtifactAsync(
+        string cacheArtifactId,
+        IEnumerable<string> spdxIds,
+        string source,
+        CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        foreach (string spdx in spdxIds)
+        {
+            // xtenant: cache_artifact is a global table; cacheArtifactId comes from the
+            // caller's CacheAccessRecorder result so no cross-tenant row is reachable here.
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO package_version_licenses
+                    (id, cache_artifact_id, owner_kind, license_spdx, source)
+                VALUES (@id, @caId, 'cache_artifact', @spdx, @source)
+                ON CONFLICT(cache_artifact_id, license_spdx) DO NOTHING
+                """,
+                new { id = Guid.NewGuid().ToString("N"), caId = cacheArtifactId, spdx, source });
+        }
+    }
+
     public async Task<ILookup<string, string>> GetSpdxForVersionsAsync(
         IEnumerable<string> versionIds, CancellationToken ct = default)
     {
@@ -82,7 +113,40 @@ public sealed class LicenseRepository
         return rows.ToLookup(r => r.VersionId, r => r.Spdx);
     }
 
+    /// <summary>
+    /// Bulk-reads SPDX license identifiers attached to a set of <c>cache_artifact</c> rows
+    /// (rows where <c>owner_kind='cache_artifact'</c>). Returns an <see cref="ILookup{TKey,TElement}"/>
+    /// keyed by <c>cache_artifact_id</c> so callers can resolve licenses for a batch of global
+    /// artifacts in one round-trip. Artifacts with no license rows are absent from the lookup.
+    /// </summary>
+    public async Task<ILookup<string, string>> GetSpdxForCacheArtifactsAsync(
+        IEnumerable<string> cacheArtifactIds, CancellationToken ct = default)
+    {
+        var ids = cacheArtifactIds.ToList();
+        if (ids.Count == 0)
+        {
+            return Enumerable.Empty<CacheArtifactLicenseRow>()
+                .ToLookup(r => r.ArtifactId, r => r.Spdx);
+        }
+
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: cache_artifact is a global table; rows are keyed by cache_artifact_id
+        // (content-addressed, no org column). Callers supply IDs from their own tenant's
+        // artifact access records so no arbitrary cross-tenant row is reachable.
+        var rows = await conn.QueryAsync<CacheArtifactLicenseRow>(
+            """
+            SELECT cache_artifact_id as ArtifactId, license_spdx as Spdx
+            FROM package_version_licenses
+            WHERE cache_artifact_id IN @ids
+              AND owner_kind = 'cache_artifact'
+            ORDER BY license_spdx
+            """,
+            new { ids });
+        return rows.ToLookup(r => r.ArtifactId, r => r.Spdx);
+    }
+
     private sealed record VersionLicenseRow(string VersionId, string Spdx);
+    private sealed record CacheArtifactLicenseRow(string ArtifactId, string Spdx);
 
     // ── License allowlist ─────────────────────────────────────────────────────
 

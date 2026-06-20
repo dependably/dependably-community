@@ -28,7 +28,16 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     private readonly IConfiguration _config;
     private readonly ProblemResults _problems;
     private readonly IAirGapMode _airGap;
+    private readonly Dependably.Protocol.Provenance.NpmSignatureKeyStore _npmKeys;
+    private readonly Dependably.Protocol.Provenance.NuGetSignatureTrustStore _nugetCerts;
+    private readonly Dependably.Protocol.Provenance.PyPiSigstoreTrustStore _pypiRoots;
+    private readonly Dependably.Protocol.Provenance.RpmProvenanceVerifier _rpmProvenance;
+    private readonly Dependably.Protocol.Provenance.MavenSignatureKeyStore _mavenKeys;
 
+    // Dependency-injection constructor; the parameter list is the controller's declared
+    // dependency set and grouping it into an aggregate would hide dependencies without
+    // adding cohesion.
+#pragma warning disable S107
     public OrgSettingsController(
         OrgSettingsRepository settings,
         OrgAccessGuard guard,
@@ -36,7 +45,13 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         IAuditEmitter auditEmitter,
         IConfiguration config,
         ProblemResults problems,
-        IAirGapMode airGap)
+        IAirGapMode airGap,
+        Dependably.Protocol.Provenance.NpmSignatureKeyStore npmKeys,
+        Dependably.Protocol.Provenance.NuGetSignatureTrustStore nugetCerts,
+        Dependably.Protocol.Provenance.PyPiSigstoreTrustStore pypiRoots,
+        Dependably.Protocol.Provenance.RpmProvenanceVerifier rpmProvenance,
+        Dependably.Protocol.Provenance.MavenSignatureKeyStore mavenKeys)
+#pragma warning restore S107
     {
         _settings = settings;
         _guard = guard;
@@ -45,6 +60,11 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         _config = config;
         _problems = problems;
         _airGap = airGap;
+        _npmKeys = npmKeys;
+        _nugetCerts = nugetCerts;
+        _pypiRoots = pypiRoots;
+        _rpmProvenance = rpmProvenance;
+        _mavenKeys = mavenKeys;
     }
 
     /// <summary>GET /api/v1/orgs/{org}/settings</summary>
@@ -235,6 +255,27 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             block_malicious = settings?.BlockMalicious ?? "block",
             block_kev = settings?.BlockKev ?? "off",
             max_epss_tolerance = settings?.MaxEpssTolerance,
+            block_install_scripts = settings?.BlockInstallScripts ?? "off",
+            verify_npm_signatures = settings?.VerifyNpmSignatures ?? "off",
+            // Surfaces whether operator-pinned npm trust anchors exist, so the UI can disable the
+            // verify control (and explain why) when enabling it would be a fail-closed error.
+            npm_signature_keys_configured = _npmKeys.IsConfigured,
+            verify_nuget_signatures = settings?.VerifyNuGetSignatures ?? "off",
+            // Same surface for NuGet: whether operator-pinned signing certificates exist, so the UI
+            // can disable the verify control when enabling it would be a fail-closed error.
+            nuget_signature_certs_configured = _nugetCerts.IsConfigured,
+            verify_pypi_attestations = settings?.VerifyPyPiAttestations ?? "off",
+            // Same surface for PyPI: whether operator-pinned Sigstore roots AND a Trusted Publisher
+            // allowlist exist, so the UI can disable the verify control when enabling it would be a
+            // fail-closed error.
+            pypi_sigstore_roots_configured = _pypiRoots.IsConfigured,
+            verify_rpm_signatures = settings?.VerifyRpmSignatures ?? "off",
+            // Surfaces whether the operator-pinned Rpm:GpgKey is loaded so the UI can disable the
+            // verify control and explain why when enabling it would be a fail-closed error.
+            rpm_gpg_key_configured = _rpmProvenance.IsConfigured,
+            verify_maven_signatures = settings?.VerifyMavenSignatures ?? "off",
+            // Same surface for Maven: whether operator-pinned Maven:SignatureKeys are loaded.
+            maven_signature_keys_configured = _mavenKeys.IsConfigured,
         });
     }
 
@@ -253,53 +294,32 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             return result;
         }
 
-        if (req.MaxOsvScoreTolerance is < 0.0 or > MaxOsvScore)
+        var numericError = ValidateProxyNumericFields(req);
+        if (numericError is not null)
         {
-            return _problems.ValidationErrorAction("max_osv_score_tolerance", "Must be between 0.0 and 10.0.");
+            return numericError;
         }
 
-        if (req.MinReleaseAgeHours is { } age && (age < 0 || age > MaxReleaseAgeHours))
+        var blockDeprecatedError = NormalizeAndValidateBlockDeprecated(req.BlockDeprecated, out string blockDeprecated);
+        if (blockDeprecatedError is not null)
         {
-            return _problems.ValidationErrorAction(
-                "min_release_age_hours",
-                $"Must be between 0 and {MaxReleaseAgeHours} hours (1 year), or null to disable.");
+            return blockDeprecatedError;
         }
 
-        // Normalize the retired 'block' value (deny-everything) to its successor 'block_all' so
-        // existing automation keeps working after the new/all split.
-        string blockDeprecated = req.BlockDeprecated ?? "off";
-        if (blockDeprecated == "block")
+        var blockPolicyError = ValidateBlockPolicyFields(req,
+            out string blockMalicious, out string blockKev, out string blockInstallScripts);
+        if (blockPolicyError is not null)
         {
-            blockDeprecated = "block_all";
+            return blockPolicyError;
         }
 
-        if (blockDeprecated is not ("off" or "warn" or "block_new" or "block_all"))
+        var sigVerifyError = ValidateSignatureVerificationFields(req,
+            out string verifyNpmSignatures, out string verifyNuGetSignatures,
+            out string verifyPyPiAttestations, out string verifyRpmSignatures,
+            out string verifyMavenSignatures);
+        if (sigVerifyError is not null)
         {
-            return _problems.ValidationErrorAction(
-                "block_deprecated", "Must be 'off', 'warn', 'block_new', or 'block_all'.");
-        }
-
-        // Absent field keeps the secure default — a client still sending the pre-gate payload
-        // shape must not silently disable malware blocking.
-        string blockMalicious = req.BlockMalicious ?? "block";
-        if (blockMalicious is not ("off" or "warn" or "block"))
-        {
-            return _problems.ValidationErrorAction(
-                "block_malicious", "Must be 'off', 'warn', or 'block'.");
-        }
-
-        // Absent = off, matching the column default — both KEV and EPSS are opt-in policies.
-        string blockKev = req.BlockKev ?? "off";
-        if (blockKev is not ("off" or "warn" or "block"))
-        {
-            return _problems.ValidationErrorAction(
-                "block_kev", "Must be 'off', 'warn', or 'block'.");
-        }
-
-        if (req.MaxEpssTolerance is < 0.0 or > 1.0)
-        {
-            return _problems.ValidationErrorAction(
-                "max_epss_tolerance", "Must be between 0.0 and 1.0 (EPSS probability), or null to disable.");
+            return sigVerifyError;
         }
 
         string orgId = CurrentTenantId();
@@ -307,7 +327,9 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             orgId,
             new ProxyPolicySettings(
                 req.ProxyPassthroughEnabled, req.MaxOsvScoreTolerance, req.MinReleaseAgeHours,
-                blockDeprecated, blockMalicious, blockKev, req.MaxEpssTolerance),
+                blockDeprecated, blockMalicious, blockKev, req.MaxEpssTolerance, blockInstallScripts,
+                verifyNpmSignatures, verifyNuGetSignatures, verifyPyPiAttestations,
+                verifyRpmSignatures, verifyMavenSignatures),
             ct);
 
         await _audit.LogAsync("proxy_settings_updated", orgId, GetUserId(),
@@ -320,8 +342,136 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 block_malicious = blockMalicious,
                 block_kev = blockKev,
                 max_epss_tolerance = req.MaxEpssTolerance,
+                block_install_scripts = blockInstallScripts,
+                verify_npm_signatures = verifyNpmSignatures,
+                verify_nuget_signatures = verifyNuGetSignatures,
+                verify_pypi_attestations = verifyPyPiAttestations,
+                verify_rpm_signatures = verifyRpmSignatures,
+                verify_maven_signatures = verifyMavenSignatures,
             }), ct: ct);
 
         return NoContent();
+    }
+
+    // Validates numeric range fields on the proxy settings request. Returns a validation error
+    // result when any field is out of range, or null when all pass.
+    private IActionResult? ValidateProxyNumericFields(UpdateProxySettingsRequest req)
+        => req.MaxOsvScoreTolerance is < 0.0 or > MaxOsvScore
+            ? _problems.ValidationErrorAction("max_osv_score_tolerance", "Must be between 0.0 and 10.0.")
+            : req.MinReleaseAgeHours is { } age && (age < 0 || age > MaxReleaseAgeHours)
+                ? _problems.ValidationErrorAction(
+                    "min_release_age_hours",
+                    $"Must be between 0 and {MaxReleaseAgeHours} hours (1 year), or null to disable.")
+                : req.MaxEpssTolerance is < 0.0 or > 1.0
+                    ? _problems.ValidationErrorAction(
+                        "max_epss_tolerance", "Must be between 0.0 and 1.0 (EPSS probability), or null to disable.")
+                    : null;
+
+    // Normalizes the block_deprecated field (maps retired 'block' alias to 'block_all') and
+    // validates the final value. Returns a validation error when invalid, or null when the value
+    // is accepted, writing the normalized value into the out parameter.
+    private IActionResult? NormalizeAndValidateBlockDeprecated(string? raw, out string normalized)
+    {
+        // Normalize the retired 'block' value (deny-everything) to its successor 'block_all' so
+        // existing automation keeps working after the new/all split.
+        normalized = raw ?? "off";
+        if (normalized == "block")
+        {
+            normalized = "block_all";
+        }
+
+        return normalized is not ("off" or "warn" or "block_new" or "block_all")
+            ? _problems.ValidationErrorAction(
+                "block_deprecated", "Must be 'off', 'warn', 'block_new', or 'block_all'.")
+            : null;
+    }
+
+    // Validates the block-policy enum fields (malicious, KEV, install-scripts). Returns a
+    // validation error on the first invalid field, or null when all pass. Writes normalized
+    // values into the out parameters.
+    private IActionResult? ValidateBlockPolicyFields(
+        UpdateProxySettingsRequest req,
+        out string blockMalicious, out string blockKev, out string blockInstallScripts)
+    {
+        // Absent field keeps the secure default — a client still sending the pre-gate payload
+        // shape must not silently disable malware blocking.
+        blockMalicious = req.BlockMalicious ?? "block";
+        blockKev = req.BlockKev ?? "off";
+        blockInstallScripts = req.BlockInstallScripts ?? "off";
+
+        if (blockMalicious is not ("off" or "warn" or "block"))
+        {
+            return _problems.ValidationErrorAction(
+                "block_malicious", "Must be 'off', 'warn', or 'block'.");
+        }
+
+        // Absent = off, matching the column default — both KEV and EPSS are opt-in policies.
+        if (blockKev is not ("off" or "warn" or "block"))
+        {
+            return _problems.ValidationErrorAction(
+                "block_kev", "Must be 'off', 'warn', or 'block'.");
+        }
+
+        // Absent = off, matching the column default — install-script blocking is opt-in.
+        return blockInstallScripts is not ("off" or "warn" or "block")
+            ? _problems.ValidationErrorAction(
+                "block_install_scripts", "Must be 'off', 'warn', or 'block'.")
+            : null;
+    }
+
+    // Validates all five per-ecosystem signature verification fields. Returns a validation
+    // error on the first invalid or unconfigured field, or null when all pass. Writes
+    // normalized values into the out parameters.
+    private IActionResult? ValidateSignatureVerificationFields(
+        UpdateProxySettingsRequest req,
+        out string verifyNpmSignatures, out string verifyNuGetSignatures,
+        out string verifyPyPiAttestations, out string verifyRpmSignatures,
+        out string verifyMavenSignatures)
+    {
+        // Absent = off for all verification fields, matching the column defaults — each is opt-in.
+        verifyNpmSignatures = req.VerifyNpmSignatures ?? "off";
+        verifyNuGetSignatures = req.VerifyNuGetSignatures ?? "off";
+        verifyPyPiAttestations = req.VerifyPyPiAttestations ?? "off";
+        verifyRpmSignatures = req.VerifyRpmSignatures ?? "off";
+        verifyMavenSignatures = req.VerifyMavenSignatures ?? "off";
+
+        return ValidateOneSigVerifyField(verifyNpmSignatures, "verify_npm_signatures",
+                   _npmKeys.IsConfigured,
+                   "Cannot enable npm signature verification: no trust anchors are configured. "
+                   + "Pin the registry's public keys via Npm:SignatureKeys first.")
+               ?? ValidateOneSigVerifyField(verifyNuGetSignatures, "verify_nuget_signatures",
+                   _nugetCerts.IsConfigured,
+                   "Cannot enable NuGet signature verification: no trust anchors are configured. "
+                   + "Pin the registry's signing certificates via NuGet:SignatureCertificates first.")
+               ?? ValidateOneSigVerifyField(verifyPyPiAttestations, "verify_pypi_attestations",
+                   _pypiRoots.IsConfigured,
+                   "Cannot enable PyPI attestation verification: no Sigstore roots and Trusted "
+                   + "Publishers are configured. Pin them via PyPI:SigstoreRoots and "
+                   + "PyPI:TrustedPublishers first.")
+               ?? ValidateOneSigVerifyField(verifyRpmSignatures, "verify_rpm_signatures",
+                   _rpmProvenance.IsConfigured,
+                   "Cannot enable RPM signature verification: no trust anchor is configured. "
+                   + "Pin the operator GPG key via Rpm:GpgKey first.")
+               ?? ValidateOneSigVerifyField(verifyMavenSignatures, "verify_maven_signatures",
+                   _mavenKeys.IsConfigured,
+                   "Cannot enable Maven signature verification: no trust anchors are configured. "
+                   + "Pin the publisher keys via Maven:SignatureKeys first.");
+    }
+
+    // Validates one sig-verify field: rejects values outside the allowed enum and, when
+    // the value is non-off, rejects if the operator trust anchor is not configured.
+    private IActionResult? ValidateOneSigVerifyField(
+        string value, string field, bool isConfigured, string trustMsg)
+    {
+        if (value is not ("off" or "warn" or "block"))
+        {
+            return _problems.ValidationErrorAction(field, "Must be 'off', 'warn', or 'block'.");
+        }
+
+        // Fail closed: enabling verification without a configured trust anchor would silently
+        // pass all versions as not-applicable. The trust root must be configured first.
+        return value != "off" && !isConfigured
+            ? _problems.ValidationErrorAction(field, trustMsg)
+            : null;
     }
 }

@@ -21,6 +21,22 @@ public class SsrfConnectCallbackTests
         Assert.Contains("169.254.169.254", ex.Message);
     }
 
+    [Theory]
+    [InlineData("0.0.0.0")]   // "this host" — Linux routes to loopback
+    [InlineData("0.0.0.1")]   // still in 0/8
+    [InlineData("::")]        // IPv6 unspecified — routes to loopback on Linux
+    public async Task ConnectAsync_ZeroOrUnspecifiedIpLiteral_Blocked(string ip)
+    {
+        // IP literals in the 0/8 "this host" range and the IPv6 unspecified address (::)
+        // must be rejected at the connect-time gate, not merely at URL-validation time.
+        var cb = new SsrfConnectCallback(SsrfGuard.IsBlockedIp);
+
+        var ex = await Assert.ThrowsAsync<SsrfBlockedException>(async () =>
+            await cb.ConnectAsync(ip, 80, CancellationToken.None));
+
+        Assert.Contains(ip, ex.Message);
+    }
+
     [Fact]
     public async Task ConnectAsync_PredicateBlocksEverything_ThrowsForPublicIp()
     {

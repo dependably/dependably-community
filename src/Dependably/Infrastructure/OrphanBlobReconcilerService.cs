@@ -1,4 +1,3 @@
-using Cronos;
 using Dependably.Storage;
 
 namespace Dependably.Infrastructure;
@@ -21,7 +20,7 @@ namespace Dependably.Infrastructure;
 /// <see cref="CacheEvictionService"/>; this service is registry-only and never touches
 /// proxy/-prefixed blobs.
 /// </summary>
-public sealed class OrphanBlobReconcilerService : BackgroundService
+public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
 {
     private readonly TieredBlobStorage _blobs;
     private readonly PackageRepository _packages;
@@ -29,12 +28,19 @@ public sealed class OrphanBlobReconcilerService : BackgroundService
     private readonly ILogger<OrphanBlobReconcilerService> _logger;
     private readonly TimeProvider _time;
 
+    protected override string CronEnvKey => "ORPHAN_RECONCILE_SCHEDULE";
+    protected override string DefaultCron => "0 4 * * *";
+    protected override string ScopeJobName => "orphan-reconciler";
+    protected override string ScopeMetricName => "blob_store.reconcile";
+    protected override bool DisableOnInvalidCron => true;
+
     public OrphanBlobReconcilerService(
         TieredBlobStorage blobs,
         PackageRepository packages,
         IConfiguration config,
         ILogger<OrphanBlobReconcilerService> logger,
         TimeProvider time)
+        : base(config, logger, time)
     {
         _blobs = blobs;
         _packages = packages;
@@ -43,52 +49,7 @@ public sealed class OrphanBlobReconcilerService : BackgroundService
         _time = time;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        string scheduleText = _config["ORPHAN_RECONCILE_SCHEDULE"] ?? "0 4 * * *";
-        CronExpression schedule;
-        try { schedule = CronExpression.Parse(scheduleText, CronFormat.Standard); }
-        catch (CronFormatException)
-        {
-            _logger.LogInformation(
-                "OrphanBlobReconcilerService disabled (ORPHAN_RECONCILE_SCHEDULE='{Schedule}' not parseable as cron).",
-                scheduleText);
-            return;
-        }
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
-            if (next is null)
-            {
-                break;
-            }
-
-            var delay = next.Value - _time.GetUtcNow();
-            if (delay > TimeSpan.Zero)
-            {
-                try { await Task.Delay(delay, stoppingToken); }
-                catch (OperationCanceledException) { break; }
-            }
-            if (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-
-            using var scope = Dependably.Infrastructure.Observability.BackgroundJobScope.Begin(
-                "orphan-reconciler", "blob_store.reconcile", _time);
-            try
-            {
-                await RunOnceAsync(stoppingToken);
-                scope.Complete();
-            }
-            catch (Exception ex)
-            {
-                scope.Fail(ex);
-                _logger.LogError(ex, "Orphan-blob reconciliation pass failed.");
-            }
-        }
-    }
+    protected override Task RunTickAsync(CancellationToken ct) => RunOnceAsync(ct);
 
     /// <summary>
     /// Runs one sweep. Public so tests can invoke it directly without waiting on cron.

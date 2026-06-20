@@ -79,7 +79,7 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         using var svc = Build();
         var upstream = MakeUpstream(OciAuthType.Anonymous, host: "ghcr.io");
 
-        string? result = await svc.GetAuthorizationAsync(upstream, "owner/image", "pull", default);
+        string? result = await svc.GetAuthorizationAsync("test-org", upstream, "owner/image", "pull", default);
 
         Assert.Null(result);
     }
@@ -92,7 +92,7 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         using var svc = Build();
         var upstream = MakeUpstream(OciAuthType.Basic, username: "alice", password: "hunter2");
 
-        string? result = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
+        string? result = await svc.GetAuthorizationAsync("test-org", upstream, "library/ubuntu", "pull", default);
 
         string expected = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("alice:hunter2"));
         Assert.Equal(expected, result);
@@ -120,7 +120,7 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io",
             tokenEndpoint: "https://auth.docker.io/token");
 
-        string? result = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
+        string? result = await svc.GetAuthorizationAsync("test-org", upstream, "library/ubuntu", "pull", default);
 
         Assert.Equal("Bearer " + tokenValue, result);
     }
@@ -140,8 +140,8 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io",
             tokenEndpoint: "https://auth.docker.io/token");
 
-        string? first = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
-        string? second = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
+        string? first = await svc.GetAuthorizationAsync("test-org", upstream, "library/ubuntu", "pull", default);
+        string? second = await svc.GetAuthorizationAsync("test-org", upstream, "library/ubuntu", "pull", default);
 
         Assert.Equal("Bearer cached-token", first);
         Assert.Equal("Bearer cached-token", second);
@@ -169,12 +169,12 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io",
             tokenEndpoint: "https://auth.docker.io/token");
 
-        string? first = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
+        string? first = await svc.GetAuthorizationAsync("test-org", upstream, "library/ubuntu", "pull", default);
         Assert.Equal("Bearer token-v1", first);
 
-        svc.InvalidateToken(upstream, "library/ubuntu", "pull");
+        svc.InvalidateToken("test-org", upstream, "library/ubuntu", "pull");
 
-        string? second = await svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default);
+        string? second = await svc.GetAuthorizationAsync("test-org", upstream, "library/ubuntu", "pull", default);
         Assert.Equal("Bearer token-v2", second);
     }
 
@@ -188,7 +188,7 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         using var svc = Build();
         var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "internal.registry.local");
 
-        string? result = await svc.GetAuthorizationAsync(upstream, "team/app", "pull", default);
+        string? result = await svc.GetAuthorizationAsync("test-org", upstream, "team/app", "pull", default);
 
         Assert.Null(result);
     }
@@ -218,7 +218,7 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry.attacker.com");
 
         await Assert.ThrowsAsync<OciUnauthorizedException>(() =>
-            svc.GetAuthorizationAsync(upstream, "victim/image", "pull", default));
+            svc.GetAuthorizationAsync("test-org", upstream, "victim/image", "pull", default));
 
         // Verify no token-exchange HTTP call was made (queue still has no extra dequeues).
         Assert.Equal(0, _factory.RemainingCount);
@@ -252,12 +252,12 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         var upstreamB = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry.evil.io");
 
         // Upstream A succeeds.
-        string? resultA = await svc.GetAuthorizationAsync(upstreamA, "library/ubuntu", "pull", default);
+        string? resultA = await svc.GetAuthorizationAsync("test-org", upstreamA, "library/ubuntu", "pull", default);
         Assert.Equal("Bearer legit-token", resultA);
 
         // Upstream B's sibling-domain realm is refused.
         await Assert.ThrowsAsync<OciUnauthorizedException>(() =>
-            svc.GetAuthorizationAsync(upstreamB, "victim/image", "pull", default));
+            svc.GetAuthorizationAsync("test-org", upstreamB, "victim/image", "pull", default));
 
         // All queued responses consumed — no extra HTTP calls were made.
         Assert.Equal(0, _factory.RemainingCount);
@@ -272,7 +272,7 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange);
 
         await Assert.ThrowsAsync<AirGappedException>(() =>
-            svc.GetAuthorizationAsync(upstream, "library/ubuntu", "pull", default));
+            svc.GetAuthorizationAsync("test-org", upstream, "library/ubuntu", "pull", default));
     }
 
     // ── Test doubles ──────────────────────────────────────────────────────────

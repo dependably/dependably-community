@@ -1,14 +1,18 @@
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Dapper;
 using Dependably.Protocol;
+using Dependably.Storage;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Infrastructure;
 
 /// <summary>Applies the embedded SQL schema on startup (idempotent — uses CREATE IF NOT EXISTS).</summary>
-public sealed class SchemaInitializer
+[SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out",
+    Justification = "Migration-rationale comments contain SQL/DDL keywords that trip S125; they are documentation, not commented-out code.")]
+public sealed partial class SchemaInitializer
 {
     private readonly IMetadataStore _db;
     private readonly ILogger<SchemaInitializer> _logger;
@@ -77,6 +81,12 @@ public sealed class SchemaInitializer
         await RunOnceAsync(conn, "backfill_oci_catalog", BackfillOciCatalogAsync);
         await RunOnceAsync(conn, "seed_default_upstream_registries", SeedDefaultUpstreamRegistriesAsync);
         await RunOnceAsync(conn, "seed_go_cargo_upstream_registries", SeedGoCargoUpstreamRegistriesAsync);
+        // Seed the two default OCI upstream rows (MCR + Docker Hub) for every org that has no
+        // 'oci' upstream_registry rows yet. Hardcoded defaults; does not read Oci:Upstreams config
+        // (that config key is no longer used). Idempotent via the per-(org, ecosystem) existence
+        // check and the UNIQUE(org_id, ecosystem, url) constraint.
+        // xtenant: one-shot backfill across every tenant on the instance.
+        await RunOnceAsync(conn, "seed_oci_upstream_registries", SeedOciUpstreamRegistriesAsync);
         // transactional: false — the SQLite branch drives PRAGMA writable_schema + a schema_version
         // bump that don't compose with an enclosing transaction (same shape as the auditor CHECK
         // rewrite above). Idempotent on both providers, so an un-recorded partial run is repeated
@@ -85,6 +95,112 @@ public sealed class SchemaInitializer
         await RunOnceAsync(conn, "expand_block_deprecated_check", ExpandBlockDeprecatedCheckAsync, transactional: false);
         await RunOnceAsync(conn, "migrate_block_deprecated_to_block_all", MigrateBlockDeprecatedToBlockAllAsync);
         await RunOnceAsync(conn, "migrate_maven_reserved_prefixes_to_table", MigrateMavenReservedPrefixesToTableAsync);
+        await RunOnceAsync(conn, "drop_redundant_pkg_version_vulns_version_index", DropRedundantPkgVersionVulnsVersionIndexAsync);
+        // Drop the global UNIQUE on package_versions.purl. The constraint was added when purl was a
+        // globally-unique coordinate but fails in multi-tenant mode where the same upstream package can
+        // be pulled by multiple tenants — each proxy-fetch creates its own package_versions row with the
+        // same purl under a different packages.org_id. The UNIQUE(package_id, version) constraint is
+        // retained and is the correct per-tenant uniqueness guard.
+        // transactional: false on SQLite — the recreate-table pattern does not compose with an outer
+        // transaction on SQLite (PRAGMA writable_schema is not used here, but the DROP/RENAME sequence
+        // requires implicit DDL autocommit behavior). Idempotent: both providers check for the constraint's
+        // existence before acting.
+        await RunOnceAsync(conn, "drop_package_versions_purl_unique", DropPackageVersionsPurlUniqueAsync, transactional: false);
+
+        // Make package_version_licenses.package_version_id nullable and add the dedup UNIQUE for the
+        // global (cache_artifact) arm. On fresh installs the CREATE TABLE already has the nullable
+        // column, so the check-then-act pattern is a no-op. On upgraded DBs the column is still NOT
+        // NULL (the P0 additive migration added cache_artifact_id/owner_kind but could not alter
+        // package_version_id's nullability); the SQLite branch recreates the table while the Postgres
+        // branch uses ALTER COLUMN ... DROP NOT NULL + CREATE UNIQUE INDEX IF NOT EXISTS.
+        // transactional: false on SQLite — DROP + RENAME does not compose with an outer transaction.
+        await RunOnceAsync(conn, "make_pvl_package_version_id_nullable", MakePvlPackageVersionIdNullableAsync, transactional: false);
+
+        // Restructure package_version_vulns: add surrogate id PK, make package_version_id nullable,
+        // replace the composite PK with two partial unique indexes. Fresh installs already have the
+        // new shape from Schema.sql. Upgraded DBs carry the old composite PK with package_version_id
+        // NOT NULL; the SQLite branch recreates the table while the Postgres branch uses ALTER + DDL.
+        // transactional: false on SQLite — DROP + RENAME does not compose with an outer transaction.
+        await RunOnceAsync(conn, "make_pvv_package_version_id_nullable", MakePvvPackageVersionIdNullableAsync, transactional: false);
+
+        // Restructure rpm_metadata: add surrogate id TEXT PRIMARY KEY, make package_version_id
+        // nullable (removing it from the PK), add per-arm partial unique indexes. Allows
+        // cache_artifact-owned rows to exist without a package_versions FK.
+        // transactional: false on SQLite — DROP + RENAME does not compose with an outer transaction.
+        await RunOnceAsync(conn, "make_rpm_metadata_pv_nullable", MakeRpmMetadataPvNullableAsync, transactional: false);
+
+        // Restructure maven_version_files: make package_version_id nullable, replace the plain
+        // UNIQUE(package_version_id, filename) with two partial unique indexes.
+        // transactional: false on SQLite — DROP + RENAME does not compose with an outer transaction.
+        await RunOnceAsync(conn, "make_mvf_pv_nullable", MakeMvfPvNullableAsync, transactional: false);
+
+        // Restructure cargo_metadata: make version_id nullable, replace the plain UNIQUE(version_id)
+        // with two partial unique indexes. The INTEGER AUTOINCREMENT PK is preserved.
+        // transactional: false on SQLite — DDL does not compose with an outer transaction.
+        await RunOnceAsync(conn, "make_cargo_metadata_vid_nullable", MakeCargoMetadataVidNullableAsync, transactional: false);
+
+        // Repair databases where make_rpm_metadata_pv_nullable mis-detected the old shape. That
+        // migration keyed off package_version_id's notnull flag, but the old rpm_metadata declared
+        // it as a bare "TEXT PRIMARY KEY", which SQLite reports as notnull=0 — so the reshape was
+        // skipped and recorded as applied while the surrogate id column was never added, leaving
+        // migrate_proxy_versions_to_cache_plane (and rpm_metadata inserts generally) unable to
+        // reference rpm_metadata.id. This separately named one-shot re-runs the now pk-aware
+        // reshape: it adds id on affected databases and no-ops on healthy ones. Must run before
+        // migrate_proxy_versions_to_cache_plane.
+        // transactional: false on SQLite — DROP + RENAME does not compose with an outer transaction.
+        await RunOnceAsync(conn, "repair_rpm_metadata_surrogate_id", MakeRpmMetadataPvNullableAsync, transactional: false);
+
+        // Repair rows whose origin was defaulted to 'proxy' by the ALTER TABLE ADD COLUMN but whose
+        // blob_key starts with 'hosted/'. Hosted artifacts published before the origin column existed
+        // received the column default ('proxy') even though their blob_key is 'hosted/…'. This
+        // backfill reclassifies exactly those rows to 'uploaded'; genuine proxy rows with cargo/ or
+        // go/ prefixes are not touched. The cache-plane migrate and purge steps use the complementary
+        // NOT LIKE 'hosted/%' predicate, so both defences are independent and exact complements.
+        // xtenant: one-shot cross-tenant backfill; touches only mis-defaulted rows.
+        await RunOnceAsync(conn, "backfill_hosted_origin_by_blob_key", BackfillHostedOriginByBlobKeyAsync);
+
+        // Backfill proxy package_versions rows onto the global cache_artifact plane. Per proxy
+        // version row: resolve/insert cache_artifact, copy global facts, upsert tenant_artifact_access,
+        // copy additive-twin metadata (vulns, licenses, rpm, maven-files, cargo-index).
+        // xtenant: cross-tenant backfill migration; the cache_artifact table is global.
+        // transactional: false — the batch loop is idempotent via ON CONFLICT DO NOTHING; wrapping
+        // the entire backfill in one transaction would hold a write lock for too long on large DBs.
+        await RunOnceAsync(conn, "migrate_proxy_versions_to_cache_plane", MigrateProxyVersionsToCachePlaneAsync, transactional: false);
+
+        // Add owner-invariant CHECK to the five polymorphic metadata tables. Fresh installs get it
+        // from the CREATE TABLE blocks above; upgraded DBs were recreated by the make_*_nullable
+        // migrations but without the invariant. Each migration detects the current shape and
+        // recreates (SQLite) or adds the named constraint (Postgres) only when absent.
+        // transactional: false — SQLite recreate-table does not compose with an outer transaction.
+        await RunOnceAsync(conn, "add_pvv_owner_invariant_check", AddPvvOwnerInvariantCheckAsync, transactional: false);
+        await RunOnceAsync(conn, "add_pvl_owner_invariant_check", AddPvlOwnerInvariantCheckAsync, transactional: false);
+        await RunOnceAsync(conn, "add_rpm_metadata_owner_invariant_check", AddRpmMetadataOwnerInvariantCheckAsync, transactional: false);
+        await RunOnceAsync(conn, "add_mvf_owner_invariant_check", AddMvfOwnerInvariantCheckAsync, transactional: false);
+        await RunOnceAsync(conn, "add_cargo_metadata_owner_invariant_check", AddCargoMetadataOwnerInvariantCheckAsync, transactional: false);
+
+        // Delete proxy rows from package_versions that were backfilled to the global plane by
+        // migrate_proxy_versions_to_cache_plane. The ON DELETE CASCADE drops only the
+        // owner_kind='package_version' metadata rows; the owner_kind='cache_artifact' twins
+        // (package_version_id NULL) survive. Idempotent: re-running deletes nothing.
+        // xtenant: cross-tenant DELETE scoped to the proxy discriminator column.
+        await RunOnceAsync(conn, "delete_migrated_proxy_package_versions", DeleteMigratedProxyPackageVersionsAsync);
+
+        // Add CHECK (severity IN ('CRITICAL','HIGH','MEDIUM','LOW')) to vulnerabilities.severity.
+        // Fresh installs get this from the CREATE TABLE block in Schema.sql / Schema.pg.sql.
+        // Existing databases carry severity TEXT with no constraint (the column was present in the
+        // original CREATE TABLE before this migration). NULL values satisfy the CHECK because
+        // NULL IN (...) evaluates to NULL (not FALSE) in both SQLite and Postgres.
+        // transactional: false on SQLite — PRAGMA writable_schema does not compose with an
+        // enclosing transaction. Idempotent: the Postgres branch uses IF NOT EXISTS detection;
+        // the SQLite branch is a no-op REPLACE when the CHECK is already present.
+        await RunOnceAsync(conn, "add_severity_check_constraint", AddSeverityCheckConstraintAsync, transactional: false);
+
+        // Normalize existing RPM cache_artifact rows whose name was stored in mixed case (e.g.
+        // 'perl-AutoLoader' instead of 'perl-autoloader'). The cross-plane join uses
+        // ca.name = p.purl_name; packages.purl_name is always lowercased, so mixed-case
+        // cache_artifact.name rows never matched and their proxy versions showed a 0 version count.
+        // Idempotent: the WHERE name <> lower(name) predicate is a no-op on already-normalized rows.
+        await RunOnceAsync(conn, "normalize_rpm_cache_artifact_names", NormalizeRpmCacheArtifactNamesAsync);
     }
 
     // Copies each entry of the legacy org_settings.maven_reserved_prefixes JSON column into a
@@ -313,6 +429,31 @@ public sealed class SchemaInitializer
             seeded, skipped, orgIds.Count);
     }
 
+    // Seeds the two default OCI upstream registries (MCR at position 0, Docker Hub at position 1)
+    // for every org that has no 'oci' rows in upstream_registry. MCR is first so the dotnet/
+    // and playwright prefix paths match before Docker Hub's catch-all "". Idempotent via the
+    // per-(org, ecosystem) existence check and the UNIQUE(org_id, ecosystem, url) constraint.
+    // xtenant: one-shot backfill across every tenant on the instance.
+    private async Task SeedOciUpstreamRegistriesAsync(DbConnection conn)
+    {
+        var orgIds = (await conn.QueryAsync<string>("SELECT id FROM orgs")).ToList();
+        int seeded = 0;
+        int skipped = 0;
+        foreach (string orgId in orgIds)
+        {
+            int existing = await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM upstream_registry WHERE org_id = @orgId AND ecosystem = 'oci'",
+                new { orgId });
+            if (existing > 0) { skipped++; continue; }
+
+            await UpstreamRegistrySeeder.SeedOciDefaultsForOrgAsync(conn, orgId);
+            seeded++;
+        }
+        _logger.LogInformation(
+            "Seeded OCI upstream registries: {Seeded} orgs seeded, {Skipped} already configured.",
+            seeded, skipped);
+    }
+
     // Drops the `ecosystem` column from `allowlist` and `blocklist`. The ecosystem is already
     // encoded in every valid PURL (per the PURL spec), so the column was structurally
     // redundant — allowlist entries match against the PURL string directly, and blocklist
@@ -537,9 +678,23 @@ public sealed class SchemaInitializer
         conn.ExecuteAsync(
             "UPDATE package_versions SET origin = 'uploaded' WHERE origin IN ('imported','private')");
 
+    // Repairs package_versions rows whose origin is 'proxy' (the column default) but whose
+    // blob_key starts with 'hosted/'. Hosted artifacts published before the origin column existed
+    // received 'proxy' as the DEFAULT backfill even though they are user-supplied; the 'hosted/'
+    // prefix is the reliable discriminator. Reclassifying them to 'uploaded' prevents the cache-plane
+    // migrate and purge steps from treating them as proxy artifacts.
+    // Only rows with blob_key LIKE 'hosted/%' are reclassified; genuine proxy rows with cargo/ or
+    // go/ prefixes are left as origin='proxy' so the migrate and purge steps include them.
+    // xtenant: one-shot cross-tenant UPDATE; scoped to the mis-defaulted discriminator.
+    private static Task BackfillHostedOriginByBlobKeyAsync(DbConnection conn) =>
+        conn.ExecuteAsync(
+            "UPDATE package_versions SET origin = 'uploaded' WHERE origin = 'proxy' AND blob_key LIKE 'hosted/%'");
+
     // Each DDL statement is a single additive change (column add or index create). SQLite
     // has no native "IF NOT EXISTS" guard for column additions; MigrateSqliteAsync swallows
     // error 1 (duplicate column) instead. Postgres rewrites ADD COLUMN to ADD COLUMN IF NOT EXISTS.
+    [SuppressMessage("Major Code Smell", "S138:Functions should not have too many lines of code",
+        Justification = "Flat, ordered list of additive ALTER-TABLE migrations; sub-method grouping adds arbitrary boundaries without improving readability.")]
     private static string[] BuildAdditiveMigrations() => new[]
     {
             "ALTER TABLE package_versions ADD COLUMN vuln_checked_at TEXT",
@@ -734,6 +889,99 @@ public sealed class SchemaInitializer
             // ('30','14','7','1','expired'). NULL = no alert emitted (or cert replaced). Reset
             // to NULL by the cert-upload/clear paths so the sweep re-evaluates on the new cert.
             "ALTER TABLE tenant_saml_config ADD COLUMN cert_expiry_alert_stage TEXT",
+            // Install/lifecycle-script supply-chain signal on package_versions. 1 when the
+            // artefact ships a script that runs automatically on install; the kind column
+            // records which (npm:postinstall, pypi:setup.py, nuget:install.ps1, …). Captured
+            // at proxy first-fetch and hosted publish. Existing rows backfill to 0/NULL and are
+            // re-evaluated naturally on the next fetch/republish.
+            "ALTER TABLE package_versions ADD COLUMN has_install_script INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE package_versions ADD COLUMN install_script_kind TEXT",
+            // Per-tenant install-script proxy gate: 'off' (default) / 'warn' / 'block'. Opt-in,
+            // so existing orgs see no behaviour change until an operator enables it. Added
+            // without a CHECK (SQLite ALTER can't add one); upgraded DBs rely on controller
+            // validation, fresh installs get the CHECK from Schema.sql.
+            "ALTER TABLE org_settings ADD COLUMN block_install_scripts TEXT NOT NULL DEFAULT 'off'",
+            // Provenance/signature-verification outcome on package_versions: 'verified' / 'failed'
+            // / 'unsigned', or NULL when not applicable. Captured at proxy first-fetch when the
+            // tenant verify policy is on. Existing rows stay NULL and are re-evaluated on the next
+            // fetch. provenance_signer holds the verifying trust-anchor keyid for 'verified' rows.
+            "ALTER TABLE package_versions ADD COLUMN provenance_status TEXT",
+            "ALTER TABLE package_versions ADD COLUMN provenance_signer TEXT",
+            // Per-tenant npm signature-verification gate: 'off' (default) / 'warn' / 'block'.
+            // Opt-in; existing orgs see no behaviour change until an operator enables it and pins
+            // Npm:SignatureKeys. Added without a CHECK (SQLite ALTER can't add one); upgraded DBs
+            // rely on controller validation, fresh installs get the CHECK from Schema.sql.
+            "ALTER TABLE org_settings ADD COLUMN verify_npm_signatures TEXT NOT NULL DEFAULT 'off'",
+            // Per-tenant NuGet signature-verification gate: 'off' (default) / 'warn' / 'block'.
+            // Opt-in; existing orgs see no behaviour change until an operator enables it and pins
+            // NuGet:SignatureCertificates. Added without a CHECK (SQLite ALTER can't add one);
+            // upgraded DBs rely on controller validation, fresh installs get the CHECK from Schema.sql.
+            "ALTER TABLE org_settings ADD COLUMN verify_nuget_signatures TEXT NOT NULL DEFAULT 'off'",
+            // Per-tenant PyPI PEP 740 attestation-verification gate: 'off' (default) / 'warn' /
+            // 'block'. Opt-in; existing orgs see no behaviour change until an operator enables it and
+            // pins PyPI:SigstoreRoots + PyPI:TrustedPublishers. Added without a CHECK (SQLite ALTER
+            // can't add one); upgraded DBs rely on controller validation, fresh installs get the
+            // CHECK from Schema.sql.
+            "ALTER TABLE org_settings ADD COLUMN verify_pypi_attestations TEXT NOT NULL DEFAULT 'off'",
+            // Per-tenant RPM per-package GPG header signature-verification gate: 'off' (default) /
+            // 'warn' / 'block'. Enabling requires operator-pinned Rpm:GpgKey; without it the verifier
+            // reports not-applicable and nothing blocks. Added without a CHECK (SQLite ALTER can't add
+            // one); upgraded DBs rely on controller validation, fresh installs get the CHECK from Schema.sql.
+            "ALTER TABLE org_settings ADD COLUMN verify_rpm_signatures TEXT NOT NULL DEFAULT 'off'",
+            // Per-tenant Maven detached .asc OpenPGP signature-verification gate: 'off' (default) /
+            // 'warn' / 'block'. Enabling requires operator-pinned Maven:SignatureKeys; without them the
+            // verifier reports not-applicable and nothing blocks. Added without a CHECK (SQLite ALTER
+            // can't add one); upgraded DBs rely on controller validation, fresh installs get the CHECK.
+            "ALTER TABLE org_settings ADD COLUMN verify_maven_signatures TEXT NOT NULL DEFAULT 'off'",
+            // Global proxy-cache artifact enrichment. These columns extend cache_artifact with the
+            // same supply-chain signals package_versions already carries so ingest can populate them
+            // before a package_versions row exists. All are nullable/defaulted; existing rows stay
+            // NULL and are re-evaluated naturally on the next proxy fetch. Written at ingest but not
+            // yet read by any query in community (reserved capacity — see community/enterprise boundary rule).
+            "ALTER TABLE cache_artifact ADD COLUMN purl TEXT",
+            "ALTER TABLE cache_artifact ADD COLUMN checksum_sha1 TEXT",
+            "ALTER TABLE cache_artifact ADD COLUMN published_at TEXT",
+            "ALTER TABLE cache_artifact ADD COLUMN deprecated TEXT",
+            "ALTER TABLE cache_artifact ADD COLUMN deprecation_checked_at TEXT",
+            "ALTER TABLE cache_artifact ADD COLUMN has_install_script INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE cache_artifact ADD COLUMN install_script_kind TEXT",
+            "ALTER TABLE cache_artifact ADD COLUMN provenance_status TEXT",
+            "ALTER TABLE cache_artifact ADD COLUMN provenance_signer TEXT",
+            "ALTER TABLE cache_artifact ADD COLUMN upstream_integrity_value TEXT",
+            "ALTER TABLE cache_artifact ADD COLUMN upstream_integrity_algorithm TEXT",
+            "ALTER TABLE cache_artifact ADD COLUMN vuln_checked_at TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_cache_artifact_purl ON cache_artifact (purl)",
+            // Per-tenant policy state on cache_artifact rows (before a package_versions row exists).
+            // Mirrors the same columns on package_versions; all nullable/defaulted.
+            "ALTER TABLE tenant_artifact_access ADD COLUMN manual_block_state TEXT",
+            "ALTER TABLE tenant_artifact_access ADD COLUMN yanked INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tenant_artifact_access ADD COLUMN yank_reason TEXT",
+            "ALTER TABLE tenant_artifact_access ADD COLUMN last_used TEXT",
+            "ALTER TABLE tenant_artifact_access ADD COLUMN download_count INTEGER NOT NULL DEFAULT 0",
+            // Polymorphic metadata ownership: lets vulns, licenses, rpm, maven-files, and cargo-index
+            // rows attach to a cache_artifact instead of a package_versions row. owner_kind added
+            // without a CHECK (SQLite ALTER can't add one); upgraded DBs rely on app-side validation;
+            // fresh installs get the CHECK from the CREATE TABLE block in Schema.sql / Schema.pg.sql.
+            // FK index on cache_artifact_id so parent deletes (cache_artifact eviction) don't full-scan.
+            "ALTER TABLE package_version_vulns ADD COLUMN cache_artifact_id TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE",
+            "ALTER TABLE package_version_vulns ADD COLUMN owner_kind TEXT NOT NULL DEFAULT 'package_version'",
+            "CREATE INDEX IF NOT EXISTS idx_package_version_vulns_cache_artifact ON package_version_vulns (cache_artifact_id)",
+            "ALTER TABLE package_version_licenses ADD COLUMN cache_artifact_id TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE",
+            "ALTER TABLE package_version_licenses ADD COLUMN owner_kind TEXT NOT NULL DEFAULT 'package_version'",
+            "CREATE INDEX IF NOT EXISTS idx_package_version_licenses_cache_artifact ON package_version_licenses (cache_artifact_id)",
+            "ALTER TABLE rpm_metadata ADD COLUMN cache_artifact_id TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE",
+            "ALTER TABLE rpm_metadata ADD COLUMN owner_kind TEXT NOT NULL DEFAULT 'package_version'",
+            "CREATE INDEX IF NOT EXISTS idx_rpm_metadata_cache_artifact ON rpm_metadata (cache_artifact_id)",
+            "ALTER TABLE maven_version_files ADD COLUMN cache_artifact_id TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE",
+            "ALTER TABLE maven_version_files ADD COLUMN owner_kind TEXT NOT NULL DEFAULT 'package_version'",
+            "CREATE INDEX IF NOT EXISTS idx_maven_version_files_cache_artifact ON maven_version_files (cache_artifact_id)",
+            "ALTER TABLE cargo_metadata ADD COLUMN cache_artifact_id TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE",
+            "ALTER TABLE cargo_metadata ADD COLUMN owner_kind TEXT NOT NULL DEFAULT 'package_version'",
+            "CREATE INDEX IF NOT EXISTS idx_cargo_metadata_cache_artifact ON cargo_metadata (cache_artifact_id)",
+            // OCI upstream columns: operator-pinned token-exchange realm URL and repository-prefix
+            // routing list (JSON TEXT array). Both are OCI-only; all other ecosystems leave them NULL.
+            "ALTER TABLE upstream_registry ADD COLUMN token_endpoint TEXT",
+            "ALTER TABLE upstream_registry ADD COLUMN prefixes TEXT",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)
@@ -770,6 +1018,28 @@ public sealed class SchemaInitializer
             await conn.ExecuteAsync(cargoPg);
         }
         await conn.ExecuteAsync("CREATE INDEX IF NOT EXISTS idx_cargo_metadata_version ON cargo_metadata(version_id)");
+    }
+
+    // Drops the redundant index on package_version_vulns(package_version_id). That column is
+    // the leftmost component of the table's PRIMARY KEY (package_version_id, vuln_id), so the
+    // index never provides any query benefit. DROP INDEX IF EXISTS is idempotent on both SQLite
+    // and Postgres, so no existence guard is needed beyond the RunOnceAsync ledger.
+    private static async Task DropRedundantPkgVersionVulnsVersionIndexAsync(DbConnection conn)
+    {
+        await conn.ExecuteAsync("DROP INDEX IF EXISTS idx_pkg_version_vulns_version");
+    }
+
+    // Normalizes RPM cache_artifact.name to lowercase. Proxy RPMs were historically stored with the
+    // raw NEVRA name (e.g. 'perl-AutoLoader') while packages.purl_name was already lowercased. The
+    // cross-plane join uses ca.name = p.purl_name, so mixed-case rows never matched and their proxy
+    // versions reported a 0 version count. lower() is the same function on both SQLite and Postgres.
+    // Idempotent: rows already in lowercase satisfy name <> lower(name) = false and are not touched.
+    // xtenant: cache_artifact is the global plane (no tenant column); the WHERE clause keys only on
+    // ecosystem and the case-mismatch predicate, leaving rows from other ecosystems unchanged.
+    private static async Task NormalizeRpmCacheArtifactNamesAsync(DbConnection conn)
+    {
+        await conn.ExecuteAsync(
+            "UPDATE cache_artifact SET name = lower(name) WHERE ecosystem = 'rpm' AND name <> lower(name)");
     }
 
     private async Task EnsureMigrationsTableAsync(DbConnection conn)
@@ -854,6 +1124,26 @@ public sealed class SchemaInitializer
     {
         await action(conn);
         await conn.ExecuteAsync("INSERT INTO _applied_migrations (name) VALUES (@name)", new { name });
+    }
+
+    // Disables FK enforcement for the duration of action, then re-enables it regardless of
+    // outcome. Required for SQLite recreate-table reshapes: rows copied from the old table may
+    // have stale FK references (e.g. proxy package_version rows deleted by a prior migration
+    // while FK enforcement was off). SQLite does not retroactively validate existing rows when
+    // FK enforcement is re-enabled, so orphaned rows survive the reshape intact.
+    // Must only be called on the transactional: false (RunUnwrappedAsync) path — SQLite rejects
+    // PRAGMA foreign_keys inside an open transaction.
+    private static async Task WithForeignKeysOffAsync(DbConnection conn, Func<Task> action)
+    {
+        await conn.ExecuteAsync("PRAGMA foreign_keys = OFF");
+        try
+        {
+            await action();
+        }
+        finally
+        {
+            await conn.ExecuteAsync("PRAGMA foreign_keys = ON");
+        }
     }
 
     // Transaction-control statements go through raw ADO.NET, not Dapper: Dapper infers
@@ -1120,38 +1410,4 @@ public sealed class SchemaInitializer
               AND id IN (SELECT user_id FROM external_identities)
             """);
 
-    private static async Task MigrateSqliteAsync(DbConnection conn, string ddl)
-    {
-        try { await conn.ExecuteAsync(ddl); }
-        // SQLite returns the generic code 1 (SQLITE_ERROR) for many failures — no such table,
-        // no such column, syntax errors. Only "duplicate column" means the additive migration
-        // already applied and is safely ignorable; anything else is a real schema problem that
-        // must surface rather than be silently swallowed.
-        catch (Microsoft.Data.Sqlite.SqliteException ex)
-            when (ex.SqliteErrorCode == 1
-                  && ex.Message.Contains("duplicate column", StringComparison.OrdinalIgnoreCase))
-        { /* column already present — idempotent re-run, ignore */ }
-    }
-
-    private static async Task<string> ReadSchemaAsync(DbProvider provider, CancellationToken ct)
-    {
-        var assembly = typeof(SchemaInitializer).Assembly;
-        string suffix = provider == DbProvider.Postgres ? "Schema.pg.sql" : "Schema.sql";
-        string resourceName = assembly.GetManifestResourceNames()
-            .Single(n => n.EndsWith(suffix));
-
-        await using var stream = assembly.GetManifestResourceStream(resourceName)!;
-        using var reader = new StreamReader(stream);
-        return await reader.ReadToEndAsync(ct);
-    }
-
-    private sealed class DateTimeOffsetHandler : SqlMapper.TypeHandler<DateTimeOffset>
-    {
-        public override void SetValue(IDbDataParameter parameter, DateTimeOffset value)
-            => parameter.Value = value.ToString("o");
-
-        public override DateTimeOffset Parse(object value)
-            => DateTimeOffset.Parse((string)value, null,
-                System.Globalization.DateTimeStyles.RoundtripKind);
-    }
 }

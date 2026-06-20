@@ -52,10 +52,19 @@ public sealed class PackageRepository
                    p.upstream_latest_version as UpstreamLatestVersion,
                    CASE
                      WHEN p.upstream_latest_version IS NULL THEN 'unknown'
-                     WHEN EXISTS (SELECT 1 FROM package_versions pvl
-                                  WHERE pvl.package_id = p.id
-                                    AND pvl.version = p.upstream_latest_version
-                                    AND pvl.origin = 'proxy') THEN 'current'
+                     WHEN EXISTS (
+                         SELECT 1 FROM package_versions pvl
+                         WHERE pvl.package_id = p.id
+                           AND pvl.version = p.upstream_latest_version
+                           AND pvl.origin = 'uploaded'
+                     ) OR EXISTS (
+                         SELECT 1 FROM cache_artifact ca
+                         JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                         WHERE taa.org_id = p.org_id
+                           AND ca.ecosystem = p.ecosystem
+                           AND ca.name = p.purl_name
+                           AND ca.version = p.upstream_latest_version
+                     ) THEN 'current'
                      ELSE 'stale'
                    END as LatestState
             FROM packages p
@@ -95,13 +104,16 @@ public sealed class PackageRepository
     }
 
     /// <summary>
-    /// Finds a package version by its filename (the trailing path segment of blob_key),
-    /// joined with its parent package. Used by PyPI/npm/NuGet downloads — equality lookup
-    /// against <c>idx_package_versions_filename</c> instead of the legacy leading-wildcard
-    /// LIKE on blob_key (which couldn't use any index).
+    /// Finds a package version by its filename (the trailing path segment of blob_key), joined
+    /// with its parent package. When <paramref name="uploadedOnly"/> is <c>true</c> (default),
+    /// only <c>origin='uploaded'</c> rows are returned — proxy artifacts for ecosystems that
+    /// have been flipped to the global plane are excluded. Pass <c>false</c> for ecosystems
+    /// (e.g. RPM) that still record proxy origin rows in <c>package_versions</c>.
+    /// Uses an equality lookup against <c>idx_package_versions_filename</c>.
     /// </summary>
     public async Task<(Package Package, PackageVersion Version)?> FindVersionByBlobKeySuffixAsync(
-        string orgId, string ecosystem, string filename, CancellationToken ct = default)
+        string orgId, string ecosystem, string filename, CancellationToken ct = default,
+        bool uploadedOnly = true)
     {
         await using var conn = await _db.OpenAsync(ct);
         var (PkgId, PkgOrgId, PkgEcosystem, PkgName, PkgPurlName, PkgIsProxy, PkgCreatedAt,
@@ -126,9 +138,10 @@ public sealed class PackageRepository
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE pv.filename = @filename AND p.org_id = @orgId AND p.ecosystem = @ecosystem
+              AND (@uploadedOnly = 0 OR pv.origin = 'uploaded')
             LIMIT 1
             """,
-            new { orgId, ecosystem, filename });
+            new { orgId, ecosystem, filename, uploadedOnly = uploadedOnly ? 1 : 0 });
 
         if (PkgId is null)
         {
@@ -187,6 +200,10 @@ public sealed class PackageRepository
                    pv.checksum_sha1 as ChecksumSha1,
                    pv.upstream_integrity_value as UpstreamIntegrityValue,
                    pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm,
+                   pv.has_install_script as HasInstallScript,
+                   pv.install_script_kind as InstallScriptKind,
+                   pv.provenance_status as ProvenanceStatus,
+                   pv.provenance_signer as ProvenanceSigner,
                    EXISTS (SELECT 1 FROM package_version_vulns pvv
                            JOIN vulnerabilities v ON v.id = pvv.vuln_id
                            WHERE pvv.package_version_id = pv.id
@@ -214,7 +231,11 @@ public sealed class PackageRepository
                    deprecated as Deprecated, origin as Origin, published_at as PublishedAt,
                    checksum_sha1 as ChecksumSha1,
                    upstream_integrity_value as UpstreamIntegrityValue,
-                   upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
+                   upstream_integrity_algorithm as UpstreamIntegrityAlgorithm,
+                   has_install_script as HasInstallScript,
+                   install_script_kind as InstallScriptKind,
+                   provenance_status as ProvenanceStatus,
+                   provenance_signer as ProvenanceSigner
             FROM package_versions
             WHERE package_id = @packageId AND version = @version
             """,
@@ -239,7 +260,11 @@ public sealed class PackageRepository
                    pv.deprecated as Deprecated, pv.origin as Origin, pv.published_at as PublishedAt,
                    pv.checksum_sha1 as ChecksumSha1,
                    pv.upstream_integrity_value as UpstreamIntegrityValue,
-                   pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
+                   pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm,
+                   pv.has_install_script as HasInstallScript,
+                   pv.install_script_kind as InstallScriptKind,
+                   pv.provenance_status as ProvenanceStatus,
+                   pv.provenance_signer as ProvenanceSigner
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE pv.blob_key = @blobKey AND p.org_id = @orgId
@@ -296,7 +321,11 @@ public sealed class PackageRepository
                    deprecated as Deprecated, origin as Origin, published_at as PublishedAt,
                    checksum_sha1 as ChecksumSha1,
                    upstream_integrity_value as UpstreamIntegrityValue,
-                   upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
+                   upstream_integrity_algorithm as UpstreamIntegrityAlgorithm,
+                   has_install_script as HasInstallScript,
+                   install_script_kind as InstallScriptKind,
+                   provenance_status as ProvenanceStatus,
+                   provenance_signer as ProvenanceSigner
             FROM package_versions WHERE id = @id
             """,
             new { id }))!;
@@ -340,26 +369,36 @@ public sealed class PackageRepository
     }
 
     /// <summary>
-    /// Same as <see cref="IncrementDownloadCountAsync(string,CancellationToken)"/> but keyed by the
-    /// globally-unique <c>purl</c>, for download-serve paths (RPM proxy, OCI) that hold the purl but
-    /// not the version id. A no-op if the purl has no row yet.
+    /// Same as <see cref="IncrementDownloadCountAsync(string,CancellationToken)"/> but keyed by
+    /// <c>purl</c> and scoped to <paramref name="orgId"/>. Used by download-serve paths (RPM proxy,
+    /// Maven proxy) that hold the purl but not the version id. Increments
+    /// <c>tenant_artifact_access.download_count</c> for the org's cache_artifact rows matching the
+    /// purl. A no-op if no matching row exists yet.
     ///
     /// When a <see cref="DownloadCountWriter"/> is wired in, the increment is enqueued off the
     /// request path; otherwise falls back to a synchronous UPDATE.
     /// </summary>
-    public async Task IncrementDownloadCountByPurlAsync(string purl, CancellationToken ct = default)
+    public async Task IncrementDownloadCountByPurlAsync(string orgId, string purl, CancellationToken ct = default)
     {
         if (_downloadCountWriter is not null)
         {
-            _downloadCountWriter.TryEnqueue(new DownloadCountRecord(VersionId: null, Purl: purl));
+            _downloadCountWriter.TryEnqueue(new DownloadCountRecord(VersionId: null, Purl: purl, OrgId: orgId));
             return;
         }
 
         string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
-            "UPDATE package_versions SET download_count = download_count + 1, last_used = @now WHERE purl = @purl",
-            new { now, purl });
+            """
+            UPDATE tenant_artifact_access
+            SET download_count = download_count + 1,
+                last_used = @now
+            WHERE org_id = @orgId
+              AND cache_artifact_id IN (
+                  SELECT id FROM cache_artifact WHERE purl = @purl
+              )
+            """,
+            new { now, orgId, purl });
     }
 
     public async Task UpdateDeprecatedAsync(string versionId, string? message, CancellationToken ct = default)
@@ -368,6 +407,38 @@ public sealed class PackageRepository
         await conn.ExecuteAsync(
             "UPDATE package_versions SET deprecated = @message WHERE id = @id",
             new { id = versionId, message });
+    }
+
+    /// <summary>
+    /// Persists the install/lifecycle-script signal detected at ingest. <paramref name="kind"/>
+    /// is NULL when no script was found. Called by the proxy first-fetch recorder and the
+    /// hosted publish path after the version row exists.
+    /// </summary>
+    public async Task UpdateInstallScriptAsync(
+        string versionId, bool hasScript, string? kind, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: UPDATE by version_id; caller obtained the id from an org-scoped lookup.
+        await conn.ExecuteAsync(
+            "UPDATE package_versions SET has_install_script = @has, install_script_kind = @kind WHERE id = @id",
+            new { id = versionId, has = hasScript ? 1 : 0, kind = hasScript ? kind : null });
+    }
+
+    /// <summary>
+    /// Persists the provenance/signature-verification outcome captured at proxy first-fetch.
+    /// <paramref name="status"/> is one of <c>'verified'</c>/<c>'failed'</c>/<c>'unsigned'</c> (or
+    /// NULL when not applicable); <paramref name="signer"/> is the verifying trust-anchor keyid,
+    /// non-null only for <c>'verified'</c>. Called by the proxy first-fetch recorder after the
+    /// version row exists.
+    /// </summary>
+    public async Task UpdateProvenanceAsync(
+        string versionId, string? status, string? signer, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: UPDATE by version_id; caller obtained the id from an org-scoped lookup.
+        await conn.ExecuteAsync(
+            "UPDATE package_versions SET provenance_status = @status, provenance_signer = @signer WHERE id = @id",
+            new { id = versionId, status, signer });
     }
 
     /// <summary>
@@ -419,37 +490,102 @@ public sealed class PackageRepository
         WITH pkg_data AS (
             SELECT p.id, p.org_id as OrgId, p.ecosystem, p.name, p.purl_name as PurlName,
                    p.is_proxy as IsProxy, p.created_at as CreatedAt,
-                   (SELECT COUNT(*) FROM package_versions WHERE package_id = p.id) as VersionCount,
-                   (SELECT COUNT(DISTINCT pvv.vuln_id) FROM package_versions pv2
-                    JOIN package_version_vulns pvv ON pvv.package_version_id = pv2.id
-                    JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'CRITICAL'
-                    WHERE pv2.package_id = p.id) as CriticalCount,
-                   (SELECT COUNT(DISTINCT pvv.vuln_id) FROM package_versions pv2
-                    JOIN package_version_vulns pvv ON pvv.package_version_id = pv2.id
-                    JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'HIGH'
-                    WHERE pv2.package_id = p.id) as HighCount,
-                   (SELECT COUNT(DISTINCT pvv.vuln_id) FROM package_versions pv2
-                    JOIN package_version_vulns pvv ON pvv.package_version_id = pv2.id
-                    JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'MEDIUM'
-                    WHERE pv2.package_id = p.id) as MediumCount,
-                   (SELECT COUNT(DISTINCT pvv.vuln_id) FROM package_versions pv2
-                    JOIN package_version_vulns pvv ON pvv.package_version_id = pv2.id
-                    JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'LOW'
-                    WHERE pv2.package_id = p.id) as LowCount,
-                   (SELECT COALESCE(SUM(download_count), 0) FROM package_versions
-                    WHERE package_id = p.id) as TotalDownloads,
+                   (
+                       SELECT COUNT(*) FROM package_versions WHERE package_id = p.id AND origin = 'uploaded'
+                   ) + COALESCE((
+                       SELECT COUNT(*) FROM cache_artifact ca
+                       JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                       WHERE taa.org_id = p.org_id AND ca.ecosystem = p.ecosystem AND ca.name = p.purl_name
+                   ), 0) as VersionCount,
+                   -- Severity counts span both planes: uploaded versions carry
+                   -- owner_kind='package_version' vuln rows (joined via package_version_id),
+                   -- proxy versions carry owner_kind='cache_artifact' rows on the global plane
+                   -- (joined via cache_artifact_id, org-scoped through tenant_artifact_access and
+                   -- matched to this package by ecosystem + purl_name). UNION + COUNT(DISTINCT)
+                   -- dedupes a CVE present on both planes for the same package.
+                   (SELECT COUNT(DISTINCT vid) FROM (
+                        SELECT pvv.vuln_id AS vid FROM package_versions pv2
+                        JOIN package_version_vulns pvv ON pvv.package_version_id = pv2.id
+                        JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'CRITICAL'
+                        WHERE pv2.package_id = p.id
+                        UNION
+                        SELECT pvv.vuln_id FROM cache_artifact ca
+                        JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                        JOIN package_version_vulns pvv ON pvv.cache_artifact_id = ca.id
+                        JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'CRITICAL'
+                        WHERE taa.org_id = p.org_id AND ca.ecosystem = p.ecosystem AND ca.name = p.purl_name
+                   )) as CriticalCount,
+                   (SELECT COUNT(DISTINCT vid) FROM (
+                        SELECT pvv.vuln_id AS vid FROM package_versions pv2
+                        JOIN package_version_vulns pvv ON pvv.package_version_id = pv2.id
+                        JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'HIGH'
+                        WHERE pv2.package_id = p.id
+                        UNION
+                        SELECT pvv.vuln_id FROM cache_artifact ca
+                        JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                        JOIN package_version_vulns pvv ON pvv.cache_artifact_id = ca.id
+                        JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'HIGH'
+                        WHERE taa.org_id = p.org_id AND ca.ecosystem = p.ecosystem AND ca.name = p.purl_name
+                   )) as HighCount,
+                   (SELECT COUNT(DISTINCT vid) FROM (
+                        SELECT pvv.vuln_id AS vid FROM package_versions pv2
+                        JOIN package_version_vulns pvv ON pvv.package_version_id = pv2.id
+                        JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'MEDIUM'
+                        WHERE pv2.package_id = p.id
+                        UNION
+                        SELECT pvv.vuln_id FROM cache_artifact ca
+                        JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                        JOIN package_version_vulns pvv ON pvv.cache_artifact_id = ca.id
+                        JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'MEDIUM'
+                        WHERE taa.org_id = p.org_id AND ca.ecosystem = p.ecosystem AND ca.name = p.purl_name
+                   )) as MediumCount,
+                   (SELECT COUNT(DISTINCT vid) FROM (
+                        SELECT pvv.vuln_id AS vid FROM package_versions pv2
+                        JOIN package_version_vulns pvv ON pvv.package_version_id = pv2.id
+                        JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'LOW'
+                        WHERE pv2.package_id = p.id
+                        UNION
+                        SELECT pvv.vuln_id FROM cache_artifact ca
+                        JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                        JOIN package_version_vulns pvv ON pvv.cache_artifact_id = ca.id
+                        JOIN vulnerabilities v ON v.id = pvv.vuln_id AND v.severity = 'LOW'
+                        WHERE taa.org_id = p.org_id AND ca.ecosystem = p.ecosystem AND ca.name = p.purl_name
+                   )) as LowCount,
+                   (
+                       SELECT COALESCE(SUM(download_count), 0) FROM package_versions
+                       WHERE package_id = p.id AND origin = 'uploaded'
+                   ) + COALESCE((
+                       SELECT SUM(taa.download_count) FROM cache_artifact ca
+                       JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                       WHERE taa.org_id = p.org_id AND ca.ecosystem = p.ecosystem AND ca.name = p.purl_name
+                   ), 0) as TotalDownloads,
                    p.upstream_latest_version as UpstreamLatestVersion,
-                   EXISTS (SELECT 1 FROM package_versions pvm
+                   (EXISTS (SELECT 1 FROM package_versions pvm
                            JOIN package_version_vulns pvv ON pvv.package_version_id = pvm.id
                            JOIN vulnerabilities v ON v.id = pvv.vuln_id
                            WHERE pvm.package_id = p.id
-                             AND v.osv_id LIKE 'MAL-%') as HasMaliciousVersion,
+                             AND v.osv_id LIKE 'MAL-%')
+                    OR EXISTS (SELECT 1 FROM cache_artifact ca
+                           JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                           JOIN package_version_vulns pvv ON pvv.cache_artifact_id = ca.id
+                           JOIN vulnerabilities v ON v.id = pvv.vuln_id
+                           WHERE taa.org_id = p.org_id AND ca.ecosystem = p.ecosystem AND ca.name = p.purl_name
+                             AND v.osv_id LIKE 'MAL-%')) as HasMaliciousVersion,
                    CASE
                      WHEN p.upstream_latest_version IS NULL THEN 'unknown'
-                     WHEN EXISTS (SELECT 1 FROM package_versions pvl
-                                  WHERE pvl.package_id = p.id
-                                    AND pvl.version = p.upstream_latest_version
-                                    AND pvl.origin = 'proxy') THEN 'current'
+                     WHEN EXISTS (
+                         SELECT 1 FROM package_versions pvl
+                         WHERE pvl.package_id = p.id
+                           AND pvl.version = p.upstream_latest_version
+                           AND pvl.origin = 'uploaded'
+                     ) OR EXISTS (
+                         SELECT 1 FROM cache_artifact ca
+                         JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                         WHERE taa.org_id = p.org_id
+                           AND ca.ecosystem = p.ecosystem
+                           AND ca.name = p.purl_name
+                           AND ca.version = p.upstream_latest_version
+                     ) THEN 'current'
                      ELSE 'stale'
                    END as LatestState
             FROM packages p WHERE p.org_id = @orgId
@@ -496,7 +632,11 @@ public sealed class PackageRepository
                    pv.deprecated as Deprecated, pv.origin as Origin, pv.published_at as PublishedAt,
                    pv.checksum_sha1 as ChecksumSha1,
                    pv.upstream_integrity_value as UpstreamIntegrityValue,
-                   pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm
+                   pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm,
+                   pv.has_install_script as HasInstallScript,
+                   pv.install_script_kind as InstallScriptKind,
+                   pv.provenance_status as ProvenanceStatus,
+                   pv.provenance_signer as ProvenanceSigner
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE pv.id = @versionId AND p.org_id = @orgId
@@ -529,21 +669,24 @@ public sealed class PackageRepository
     }
 
     /// <summary>
-    /// Deletes a <c>package_versions</c> row and decrements the tenant's
-    /// <c>org_settings.storage_used_bytes</c> counter by the version's <c>size_bytes</c>.
+    /// Deletes a <c>package_versions</c> row, decrements the tenant's
+    /// <c>org_settings.storage_used_bytes</c> counter by the version's <c>size_bytes</c>,
+    /// and recomputes <c>packages.is_proxy</c> so it is <c>true</c> exactly when no
+    /// <c>origin='uploaded'</c> versions remain for the parent package.
     /// The decrement uses the same MAX(0, …) clamp as the release path so counter underflow
     /// (e.g. a row deleted before the counter column existed) cannot produce negative values.
     /// </summary>
     public async Task DeleteVersionAsync(string versionId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        // Resolve org and size before the delete so we can decrement the counter. If the
-        // join returns nothing (version already gone), the DELETE below is also a no-op.
+        // Resolve org, size, and parent package before the delete so we can decrement the
+        // counter and recompute is_proxy. If the join returns nothing (version already gone),
+        // the DELETE below is also a no-op.
         // xtenant: keyed by version PK (pv.id), a globally unique surrogate; caller already
         // verified org ownership before invoking this method.
-        var info = await conn.QuerySingleOrDefaultAsync<(string OrgId, long SizeBytes)>(
+        var info = await conn.QuerySingleOrDefaultAsync<(string OrgId, long SizeBytes, string PackageId)>(
             """
-            SELECT p.org_id AS OrgId, pv.size_bytes AS SizeBytes
+            SELECT p.org_id AS OrgId, pv.size_bytes AS SizeBytes, pv.package_id AS PackageId
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE pv.id = @id
@@ -561,6 +704,19 @@ public sealed class PackageRepository
                 WHERE org_id = @orgId
                 """,
                 new { orgId = info.OrgId, delta = info.SizeBytes });
+
+            // xtenant: keyed by packages.id (the package PK resolved above from an
+            // org-scoped version PK); the NOT EXISTS sub-select stays bound to that same id.
+            await conn.ExecuteAsync(
+                """
+                UPDATE packages
+                SET is_proxy = NOT EXISTS (
+                    SELECT 1 FROM package_versions
+                    WHERE package_id = @pkgId AND origin = 'uploaded'
+                )
+                WHERE id = @pkgId
+                """,
+                new { pkgId = info.PackageId });
         }
     }
 
@@ -709,38 +865,6 @@ public sealed class PackageRepository
             new { id = packageId, latestVersion, now });
     }
 
-    /// <summary>
-    /// Returns distinct packages that have at least one proxy version whose deprecation metadata
-    /// is stale (never checked, or checked more than <paramref name="ageHours"/> ago). Ordered
-    /// oldest-first so a partial run still makes progress on the most stale packages. Soft-deleted
-    /// tenants are excluded.
-    /// </summary>
-    // xtenant: cross-tenant query scoped to proxy origin and age threshold; caller (DeprecationRefreshService)
-    // processes each package independently and gates writes on the version id.
-    public async Task<IReadOnlyList<(string PackageId, string Ecosystem, string PurlName, string OrgId)>>
-        ListPackagesNeedingDeprecationRefreshAsync(int ageHours, int limit, CancellationToken ct = default)
-    {
-        string threshold = _time.GetUtcNow().AddHours(-ageHours).ToString("yyyy-MM-ddTHH:mm:ssZ");
-        await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.QueryAsync<(string PackageId, string Ecosystem, string PurlName, string OrgId)>(
-            """
-            SELECT p.id AS PackageId, p.ecosystem AS Ecosystem, p.purl_name AS PurlName, p.org_id AS OrgId
-            FROM package_versions pv
-            JOIN packages p ON p.id = pv.package_id
-            JOIN orgs o ON o.id = p.org_id
-            LEFT JOIN org_settings os ON os.org_id = p.org_id
-            WHERE pv.origin = 'proxy'
-              AND (pv.deprecation_checked_at IS NULL OR pv.deprecation_checked_at < @threshold)
-              AND o.deleted_at IS NULL
-              AND COALESCE(os.air_gapped, 0) = 0
-            GROUP BY p.id, p.ecosystem, p.purl_name, p.org_id
-            ORDER BY MIN(pv.deprecation_checked_at) ASC
-            LIMIT @limit
-            """,
-            new { threshold, limit });
-        return rows.ToList();
-    }
-
     // ── Go module proxy helpers ──────────────────────────────────────────────
 
     /// <summary>
@@ -751,7 +875,7 @@ public sealed class PackageRepository
         string orgId, string module, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.QueryAsync<string>(
+        var pvVersions = await conn.QueryAsync<string>(
             """
             SELECT pv.version
             FROM package_versions pv
@@ -762,18 +886,55 @@ public sealed class PackageRepository
             ORDER BY pv.created_at DESC
             """,
             new { orgId, module });
-        return rows.ToList();
+
+        // Also include versions from the global plane for proxy .zips cached after the P3b flip.
+        // xtenant: cache_artifact is global; org_id filter is on tenant_artifact_access.
+        var globalVersions = await conn.QueryAsync<string>(
+            """
+            SELECT ca.version
+            FROM cache_artifact ca
+            JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id AND taa.org_id = @orgId
+            WHERE ca.ecosystem = 'golang'
+              AND ca.name = @module
+            ORDER BY ca.first_cached_at DESC
+            """,
+            new { orgId, module });
+
+        var pvList = pvVersions.ToList();
+        var globalList = globalVersions.ToList();
+        if (globalList.Count == 0)
+        {
+            return pvList;
+        }
+        if (pvList.Count == 0)
+        {
+            return globalList;
+        }
+
+        // Union: local (package_versions) wins on collision; deduplicate.
+        var pvSet = new HashSet<string>(pvList, StringComparer.OrdinalIgnoreCase);
+        var merged = new List<string>(pvList);
+        foreach (string v in globalList)
+        {
+            if (!pvSet.Contains(v))
+            {
+                merged.Add(v);
+            }
+        }
+        return merged;
     }
 
     /// <summary>
     /// Returns the most-recently-created cached version for the given Go module, or null
-    /// when nothing is cached. Used by the <c>/@latest</c> endpoint.
+    /// when nothing is cached. Used by the <c>/@latest</c> endpoint. Checks both the
+    /// legacy <c>package_versions</c> path and the global plane (<c>cache_artifact</c>)
+    /// for proxy .zips cached after the P3b flip; returns the newest across both planes.
     /// </summary>
     public async Task<PackageVersion?> GetLatestGoVersionAsync(
         string orgId, string module, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        return await conn.QuerySingleOrDefaultAsync<PackageVersion>(
+        var pvLatest = await conn.QuerySingleOrDefaultAsync<PackageVersion>(
             """
             SELECT pv.id AS Id, pv.package_id AS PackageId,
                    pv.version AS Version, pv.purl AS Purl,
@@ -789,6 +950,59 @@ public sealed class PackageRepository
             LIMIT 1
             """,
             new { orgId, module });
+
+        // Also check global-plane proxy .zips for versions cached after the P3b flip.
+        // xtenant: cache_artifact is global; org_id filter is on tenant_artifact_access.
+        var caLatest = await conn.QuerySingleOrDefaultAsync<(string Version, string FirstCachedAt)>(
+            """
+            SELECT ca.version AS Version, ca.first_cached_at AS FirstCachedAt
+            FROM cache_artifact ca
+            JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id AND taa.org_id = @orgId
+            WHERE ca.ecosystem = 'golang'
+              AND ca.name = @module
+            ORDER BY ca.first_cached_at DESC
+            LIMIT 1
+            """,
+            new { orgId, module });
+
+        if (caLatest.Version is null)
+        {
+            return pvLatest;
+        }
+
+        if (pvLatest is null)
+        {
+            // Build a synthetic PackageVersion from the global-plane row so @latest can serve it.
+            return new PackageVersion
+            {
+                Id = string.Empty,
+                PackageId = string.Empty,
+                Version = caLatest.Version,
+                Purl = string.Empty,
+                BlobKey = string.Empty,
+                CreatedAt = DateTimeOffset.Parse(
+                    caLatest.FirstCachedAt,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal),
+            };
+        }
+
+        // Return whichever is more recent between the PV row and the global-plane row.
+        var caTime = DateTimeOffset.Parse(
+            caLatest.FirstCachedAt,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal);
+        return caTime > pvLatest.CreatedAt
+            ? new PackageVersion
+            {
+                Id = string.Empty,
+                PackageId = string.Empty,
+                Version = caLatest.Version,
+                Purl = string.Empty,
+                BlobKey = string.Empty,
+                CreatedAt = caTime,
+            }
+            : pvLatest;
     }
 
     /// <summary>

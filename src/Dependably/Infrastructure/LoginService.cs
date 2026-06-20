@@ -328,12 +328,7 @@ public sealed class LoginService
 
         if (AccountStatus is "locked" or "disabled")
         {
-            await _audit.LogAsync("auth.saml.login.failure",
-                orgId: ctx.TenantId, actorId: Id,
-                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = AccountStatus }),
-                sourceIp: ctx.SourceIp, ct: ct);
-            await EmitSamlFailureAsync(ctx.TenantId, Id, "account_status_" + AccountStatus, ctx.IdpEntityId, ctx.NameId, ct);
-            return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
+            return await RejectInactiveAccountAsync(Id, AccountStatus, ctx, ct);
         }
 
         await _externalIdentities.UpdateLastLoginAsync(existing.Id, ctx.AssertionEmail, ct);
@@ -370,13 +365,7 @@ public sealed class LoginService
 
         if (AccountStatus is "locked" or "disabled")
         {
-            await _audit.LogAsync("auth.saml.login.failure",
-                orgId: ctx.TenantId, actorId: Id,
-                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = AccountStatus }),
-                sourceIp: ctx.SourceIp, ct: ct);
-            await EmitSamlFailureAsync(ctx.TenantId, Id,
-                "account_status_" + AccountStatus, ctx.IdpEntityId, ctx.NameId, ct);
-            return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
+            return await RejectInactiveAccountAsync(Id, AccountStatus, ctx, ct);
         }
 
         // Guard: refuse to auto-link when the matched account is privileged beyond the IdP ceiling.
@@ -555,6 +544,20 @@ public sealed class LoginService
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeSamlSuccess,
             tenantId, "user", userId, "accepted",
             new Dependably.Infrastructure.Audit.Events.AuthEvents.SamlSuccess(idpEntityId, nameId, path).ToJson(), ct);
+    }
+
+    // Writes the audit event and emitter call for a locked/disabled account, then returns the
+    // inactive-account result. The audit action string and the "account_status_<status>" failure
+    // code are part of the observable security event schema — they must not be changed.
+    private async Task<SamlLoginResult> RejectInactiveAccountAsync(
+        string userId, string accountStatus, SamlLoginContext ctx, CancellationToken ct)
+    {
+        await _audit.LogAsync("auth.saml.login.failure",
+            orgId: ctx.TenantId, actorId: userId,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = accountStatus }),
+            sourceIp: ctx.SourceIp, ct: ct);
+        await EmitSamlFailureAsync(ctx.TenantId, userId, "account_status_" + accountStatus, ctx.IdpEntityId, ctx.NameId, ct);
+        return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
     }
 
     private Task EmitSamlFailureAsync(

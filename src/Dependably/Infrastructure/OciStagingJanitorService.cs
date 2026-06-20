@@ -1,4 +1,3 @@
-using Cronos;
 using Dapper;
 
 namespace Dependably.Infrastructure;
@@ -27,7 +26,7 @@ namespace Dependably.Infrastructure;
 /// <see cref="OrgRepository.GetActiveOciUploadCountAsync"/> is org-scoped; this sweep is
 /// the complementary fleet-wide reclaim that prevents the staging volume from filling up.
 /// </summary>
-public sealed class OciStagingJanitorService : BackgroundService
+public sealed class OciStagingJanitorService : ScheduledBackgroundService
 {
     // Default TTL for OCI upload sessions when OCI_UPLOAD_TTL_MINUTES is not configured.
     private const int DefaultUploadTtlMinutes = 60;
@@ -38,11 +37,17 @@ public sealed class OciStagingJanitorService : BackgroundService
     private readonly TimeProvider _time;
     private readonly string _stagingPath;
 
+    protected override string CronEnvKey => "OCI_STAGING_TTL_SCHEDULE";
+    protected override string DefaultCron => "*/15 * * * *";
+    protected override string ScopeJobName => "oci-staging-janitor";
+    protected override string ScopeMetricName => "oci.staging.janitor";
+
     public OciStagingJanitorService(
         IMetadataStore db,
         IConfiguration config,
         ILogger<OciStagingJanitorService> logger,
         TimeProvider time)
+        : base(config, logger, time)
     {
         _db = db;
         _config = config;
@@ -53,46 +58,7 @@ public sealed class OciStagingJanitorService : BackgroundService
         _stagingPath = string.IsNullOrWhiteSpace(configured) ? Path.GetTempPath() : configured;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        var schedule = CronExpression.Parse(
-            _config["OCI_STAGING_TTL_SCHEDULE"] ?? "*/15 * * * *",
-            CronFormat.Standard);
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
-            if (next is null)
-            {
-                break;
-            }
-
-            var delay = next.Value - _time.GetUtcNow();
-            if (delay > TimeSpan.Zero)
-            {
-                try { await Task.Delay(delay, stoppingToken); }
-                catch (OperationCanceledException) { break; }
-            }
-
-            if (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-
-            using var scope = Dependably.Infrastructure.Observability.BackgroundJobScope.Begin(
-                "oci-staging-janitor", "oci.staging.janitor", _time);
-            try
-            {
-                await RunOnceAsync(stoppingToken);
-                scope.Complete();
-            }
-            catch (Exception ex)
-            {
-                scope.Fail(ex);
-                _logger.LogError(ex, "OCI staging janitor pass failed.");
-            }
-        }
-    }
+    protected override Task RunTickAsync(CancellationToken ct) => RunOnceAsync(ct);
 
     /// <summary>
     /// Runs a single janitor pass. Public so tests can call it directly without waiting on

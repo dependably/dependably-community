@@ -13,63 +13,63 @@
       "id": "csharp/LogForging|src/Dependably/Api/CargoController.cs|2d06e3d6.5894468a.98cd919f.f5757239.a758fffc.f108b60a.7ef81ea2.09d05bb6.0beb912b.c2df1aca.0eee66c3.f5757239.a427b94e.9e43e5e8.ce0185b2.0b64a9d0",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/CargoController.cs",
-      "line": 785,
+      "line": 832,
       "text": "Unsanitized input from an HTTP parameter flows into LogDebug, where it is used as log input. This may result in a Logs Forging vul"
     },
     {
-      "id": "csharp/LogForging|src/Dependably/Api/CargoController.cs|b08a1ac2.5894468a.2ee7c83a.f5757239.a758fffc.2f4e1548.ef278380.09d05bb6.6e1a30e9.277c621c.cf0b0f6b.f5757239.a427b94e.fdb1e8cc.ce0185b2.bad79344",
+      "id": "csharp/LogForging|src/Dependably/Api/CargoController.cs|b08a1ac2.5894468a.2ee7c83a.f5757239.a758fffc.2f4e1548.ef278380.09d05bb6.6e1a30e9.8c06c0b2.cf0b0f6b.f5757239.a427b94e.77614345.ce0185b2.84d687f7",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/CargoController.cs",
-      "line": 830,
+      "line": 878,
       "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
     },
     {
-      "id": "csharp/PT|src/Dependably/Api/CargoController.cs|b08a1ac2.5894468a.2ee7c83a.f5757239.a758fffc.2f4e1548.ef278380.09d05bb6.62525518.277c621c.cf0b0f6b.f5757239.a427b94e.69bed284.ce0185b2.7903db83",
+      "id": "csharp/PT|src/Dependably/Api/CargoController.cs|b08a1ac2.5894468a.2ee7c83a.f5757239.a758fffc.2f4e1548.ef278380.09d05bb6.62525518.8c06c0b2.cf0b0f6b.f5757239.a427b94e.77614345.ce0185b2.7903db83",
       "rule": "csharp/PT",
       "file": "src/Dependably/Api/CargoController.cs",
-      "line": 830,
+      "line": 878,
       "text": "Unsanitized input from an HTTP parameter flows into CreateDirectory, where it is used as a path. This may result in a Path Travers"
     },
     {
       "id": "csharp/LogForging|src/Dependably/Api/CargoController.cs|2d06e3d6.5894468a.98cd919f.f5757239.a758fffc.a974faf9.ea4251f8.09d05bb6.ca0a8fe8.f0e6173c.0eee66c3.f5757239.a427b94e.9e43e5e8.ce0185b2.3ad76d61",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/CargoController.cs",
-      "line": 838,
+      "line": 886,
       "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
     },
     {
       "id": "csharp/LogForging|src/Dependably/Api/CargoController.cs|2d06e3d6.5894468a.98cd919f.f5757239.a758fffc.a974faf9.ea4251f8.09d05bb6.ca0a8fe8.cc378605.0eee66c3.f5757239.a427b94e.9e43e5e8.ce0185b2.3ad76d61",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/CargoController.cs",
-      "line": 856,
+      "line": 904,
       "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
     },
     {
       "id": "csharp/LogForging|src/Dependably/Api/CargoController.cs|2d06e3d6.25fa26f3.98cd919f.f5757239.43ad2118.b48c8c16.2766f794.09d05bb6.ca0a8fe8.277c621c.0eee66c3.f5757239.a427b94e.9e43e5e8.ce0185b2.3ad76d61",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/CargoController.cs",
-      "line": 881,
+      "line": 957,
       "text": "Unsanitized input from an HTTP parameter flows into LogInformation, where it is used as log input. This may result in a Logs Forgi"
     },
     {
-      "id": "csharp/LogForging|src/Dependably/Api/CargoController.cs|2d06e3d6.8f1b53f1.98cd919f.f5757239.a758fffc.0a41a01d.5f1fa597.09d05bb6.0beb912b.277c621c.0eee66c3.f5757239.a427b94e.9e43e5e8.ce0185b2.3ad76d61",
+      "id": "csharp/LogForging|src/Dependably/Api/CargoController.cs|2d06e3d6.8f1b53f1.98cd919f.f5757239.a758fffc.0a41a01d.5f1fa597.09d05bb6.ca0a8fe8.f0e6173c.0eee66c3.f5757239.a427b94e.9e43e5e8.ce0185b2.3ad76d61",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/CargoController.cs",
-      "line": 983,
+      "line": 1071,
       "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
     },
     {
-      "id": "csharp/LogForging|src/Dependably/Api/CargoController.cs|2d06e3d6.5894468a.98cd919f.f5757239.4a5c8084.bc2caeef.19b7df06.09d05bb6.ca0a8fe8.f0e6173c.0eee66c3.f5757239.a427b94e.9e43e5e8.ce0185b2.3ad76d61",
+      "id": "csharp/LogForging|src/Dependably/Api/CargoController.cs|2d06e3d6.25fa26f3.98cd919f.f5757239.4a5c8084.bc2caeef.2766f794.09d05bb6.ca0a8fe8.f0e6173c.0eee66c3.f5757239.a427b94e.9e43e5e8.ce0185b2.3ad76d61",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/CargoController.cs",
-      "line": 1086,
+      "line": 1139,
       "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
     },
     {
       "id": "csharp/LogForging|src/Dependably/Api/CargoController.cs|b84dc429.5894468a.98cd919f.f5757239.044b8caa.6c0f0764.7ef81ea2.09d05bb6.ca0a8fe8.f0e6173c.0eee66c3.f5757239.a427b94e.9e43e5e8.ce0185b2.3ad76d61",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/CargoController.cs",
-      "line": 1145,
+      "line": 1229,
       "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
     },
     {
@@ -83,35 +83,35 @@
       "id": "csharp/LogForging|src/Dependably/Api/GoController.cs|418e0d73.3c0dde6d.50fe9b47.f5757239.a758fffc.58a804be.8d7df0d8.545e9171.ee3c531f.ead03aec.c9330245.f5757239.625f5ab8.a0ea2ac0.ce0185b2.8ee23f63",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/GoController.cs",
-      "line": 592,
+      "line": 594,
       "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
     },
     {
       "id": "csharp/InsecureHash|src/Dependably/Api/MavenController.cs|a00b8be5.39b8d118.08cf54e0.b0b315d9.245fcd6f.29559ab0.e067aa37.8de8519c.a00b8be5.39b8d118.08cf54e0.b0b315d9.245fcd6f.29559ab0.e067aa37.8de8519c",
       "rule": "csharp/InsecureHash",
       "file": "src/Dependably/Api/MavenController.cs",
-      "line": 1098,
+      "line": 1279,
       "text": "The SHA1 hash (used by global::System.Security.Cryptography.SHA1.Create) is insecure. Consider changing it to a secure hash algori"
     },
     {
       "id": "csharp/InsecureHash|src/Dependably/Api/MavenController.cs|ad94c995.39b8d118.75077708.b0b315d9.4bb003e8.29559ab0.e067aa37.8de8519c.ad94c995.39b8d118.75077708.b0b315d9.4bb003e8.29559ab0.e067aa37.8de8519c",
       "rule": "csharp/InsecureHash",
       "file": "src/Dependably/Api/MavenController.cs",
-      "line": 1100,
+      "line": 1281,
       "text": "The MD5 hash (used by global::System.Security.Cryptography.MD5.Create) is insecure. Consider changing it to a secure hash algorith"
     },
     {
       "id": "csharp/InsecureHash|src/Dependably/Api/MavenController.cs|a00b8be5.39b8d118.08cf54e0.b0b315d9.245fcd6f.29559ab0.e067aa37.8de8519c.a00b8be5.39b8d118.08cf54e0.b0b315d9.245fcd6f.29559ab0.e067aa37.8de8519c",
       "rule": "csharp/InsecureHash",
       "file": "src/Dependably/Api/MavenController.cs",
-      "line": 1117,
+      "line": 1298,
       "text": "The SHA1 hash (used by global::System.Security.Cryptography.SHA1.Create) is insecure. Consider changing it to a secure hash algori"
     },
     {
       "id": "csharp/InsecureHash|src/Dependably/Api/MavenController.cs|ad94c995.39b8d118.75077708.b0b315d9.4bb003e8.29559ab0.e067aa37.8de8519c.ad94c995.39b8d118.75077708.b0b315d9.4bb003e8.29559ab0.e067aa37.8de8519c",
       "rule": "csharp/InsecureHash",
       "file": "src/Dependably/Api/MavenController.cs",
-      "line": 1119,
+      "line": 1300,
       "text": "The MD5 hash (used by global::System.Security.Cryptography.MD5.Create) is insecure. Consider changing it to a secure hash algorith"
     },
     {
@@ -192,13 +192,6 @@
       "text": "Unsanitized input from an HTTP parameter flows into Headers and reaches an HTTP header returned to the user. This may allow a mali"
     },
     {
-      "id": "csharp/RegexInjection|src/Dependably/Api/NpmController.cs|7bf5c746.277c621c.7be03776.f5757239.5ef953d3.e5e3a599.7ef81ea2.a142f64d.f93528c2.b91343e7.4ccf0703.f5757239.ec00e0a1.c220cf1f.c9ff8074.7d7ec2d8",
-      "rule": "csharp/RegexInjection",
-      "file": "src/Dependably/Api/NpmController.cs",
-      "line": 111,
-      "text": "Unsanitized input from an HTTP parameter flows into global::System.Text.RegularExpressions.Regex.IsMatch, where it is used as regu"
-    },
-    {
       "id": "csharp/LogForging|src/Dependably/Api/NpmController.cs|b08a1ac2.820b1d1a.91b97e27.f5757239.a758fffc.e5e3a599.7ef81ea2.649593a2.f93528c2.b91343e7.4ccf0703.f5757239.ec00e0a1.c220cf1f.c9ff8074.7d7ec2d8",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/NpmController.cs",
@@ -211,13 +204,6 @@
       "file": "src/Dependably/Api/NpmController.cs",
       "line": 117,
       "text": "Unsanitized input from an HTTP parameter flows into Headers and reaches an HTTP header returned to the user. This may allow a mali"
-    },
-    {
-      "id": "csharp/RegexInjection|src/Dependably/Api/NpmController.cs|7bf5c746.277c621c.8a9d1901.f5757239.5ef953d3.e5e3a599.7ef81ea2.16e113b7.190519be.277c621c.13cea12b.f5757239.5ef953d3.c167ec87.5f1fa597.6ed3aa92",
-      "rule": "csharp/RegexInjection",
-      "file": "src/Dependably/Api/NpmController.cs",
-      "line": 117,
-      "text": "Unsanitized input from an HTTP parameter flows into global::System.Text.RegularExpressions.Regex.IsMatch, where it is used as regu"
     },
     {
       "id": "csharp/LogForging|src/Dependably/Api/NpmController.cs|7bf5c746.277c621c.8a9d1901.f5757239.5ef953d3.e5e3a599.7ef81ea2.16e113b7.f93528c2.b91343e7.13cea12b.f5757239.ec00e0a1.c220cf1f.c9ff8074.7d7ec2d8",
@@ -234,13 +220,6 @@
       "text": "Unsanitized input from an HTTP parameter flows into Headers and reaches an HTTP header returned to the user. This may allow a mali"
     },
     {
-      "id": "csharp/RegexInjection|src/Dependably/Api/NpmController.cs|7bf5c746.b91343e7.7be03776.f5757239.5ef953d3.e5e3a599.7ef81ea2.107c54b2.f93528c2.b91343e7.4ccf0703.f5757239.ec00e0a1.c220cf1f.c9ff8074.7d7ec2d8",
-      "rule": "csharp/RegexInjection",
-      "file": "src/Dependably/Api/NpmController.cs",
-      "line": 123,
-      "text": "Unsanitized input from an HTTP parameter flows into global::System.Text.RegularExpressions.Regex.IsMatch, where it is used as regu"
-    },
-    {
       "id": "csharp/LogForging|src/Dependably/Api/NpmController.cs|b08a1ac2.b91343e7.91b97e27.f5757239.7bd5d425.e5e3a599.7ef81ea2.107c54b2.f93528c2.b91343e7.4ccf0703.f5757239.ec00e0a1.c220cf1f.c9ff8074.7d7ec2d8",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/NpmController.cs",
@@ -253,13 +232,6 @@
       "file": "src/Dependably/Api/NpmController.cs",
       "line": 129,
       "text": "Unsanitized input from an HTTP parameter flows into Headers and reaches an HTTP header returned to the user. This may allow a mali"
-    },
-    {
-      "id": "csharp/RegexInjection|src/Dependably/Api/NpmController.cs|2b3dbe14.277c621c.7be03776.f5757239.5ef953d3.e5e3a599.3da7e4cb.7a81defd.2b3dbe14.277c621c.13cea12b.f5757239.5ef953d3.fdce969d.3da7e4cb.6ed3aa92",
-      "rule": "csharp/RegexInjection",
-      "file": "src/Dependably/Api/NpmController.cs",
-      "line": 129,
-      "text": "Unsanitized input from an HTTP parameter flows into global::System.Text.RegularExpressions.Regex.IsMatch, where it is used as regu"
     },
     {
       "id": "csharp/LogForging|src/Dependably/Api/NpmController.cs|2b3dbe14.277c621c.7be03776.f5757239.5ef953d3.e5e3a599.3da7e4cb.7a81defd.f93528c2.b91343e7.13cea12b.f5757239.ec00e0a1.c220cf1f.c9ff8074.7d7ec2d8",
@@ -367,6 +339,27 @@
       "text": "Unsanitized input from the HTTP request body flows into global::System.Text.RegularExpressions.Regex, where it is used as regular "
     },
     {
+      "id": "csharp/HttpResponseSplitting|src/Dependably/Api/PyPiController.cs|7bf5c746.277c621c.7be03776.f5757239.2697f7a3.2e65b51d.7ef81ea2.8b56fea1.8c83c429.277c621c.e54dd2f7.f5757239.2697f7a3.69bed284.fda27bf6.d5ae33b7",
+      "rule": "csharp/HttpResponseSplitting",
+      "file": "src/Dependably/Api/PyPiController.cs",
+      "line": 70,
+      "text": "Unsanitized input from an HTTP parameter flows into Headers and reaches an HTTP header returned to the user. This may allow a mali"
+    },
+    {
+      "id": "csharp/LogForging|src/Dependably/Api/PyPiController.cs|7bf5c746.277c621c.7be03776.f5757239.2697f7a3.2e65b51d.7ef81ea2.8b56fea1.7890cfc7.277c621c.9fd815ef.f5757239.63feb440.c220cf1f.fda27bf6.675e3b61",
+      "rule": "csharp/LogForging",
+      "file": "src/Dependably/Api/PyPiController.cs",
+      "line": 70,
+      "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
+    },
+    {
+      "id": "csharp/HttpResponseSplitting|src/Dependably/Api/PyPiController.cs|7bf5c746.277c621c.7be03776.f5757239.2697f7a3.9ed129b6.7ef81ea2.391807af.8c83c429.277c621c.7be03776.f5757239.2697f7a3.69bed284.fda27bf6.d5ae33b7",
+      "rule": "csharp/HttpResponseSplitting",
+      "file": "src/Dependably/Api/PyPiController.cs",
+      "line": 76,
+      "text": "Unsanitized input from an HTTP parameter flows into Headers and reaches an HTTP header returned to the user. This may allow a mali"
+    },
+    {
       "id": "csharp/LogForging|src/Dependably/Api/PyPiController.cs|7bf5c746.277c621c.7be03776.f5757239.2697f7a3.9ed129b6.7ef81ea2.391807af.7890cfc7.277c621c.9fd815ef.f5757239.63feb440.c220cf1f.fda27bf6.675e3b61",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/PyPiController.cs",
@@ -381,45 +374,45 @@
       "text": "Unsanitized input from an HTTP parameter flows into CreateDirectory, where it is used as a path. This may result in a Path Travers"
     },
     {
-      "id": "csharp/LogForging|src/Dependably/Api/RpmController.cs|7bf5c746.277c621c.7be03776.f5757239.5ef953d3.b4bbb3ab.7ef81ea2.a142f64d.427b6d54.508de732.4d75e9bf.f5757239.b720b74d.a0ea2ac0.ce0185b2.19a4b6c4",
+      "id": "csharp/LogForging|src/Dependably/Api/RpmController.cs|7bf5c746.277c621c.7be03776.f5757239.5ef953d3.b4bbb3ab.7ef81ea2.a142f64d.427b6d54.508de732.4d75e9bf.f5757239.0c8cbee1.a0ea2ac0.4d8d466d.19a4b6c4",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/RpmController.cs",
-      "line": 396,
+      "line": 449,
       "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
     },
     {
-      "id": "csharp/LogForging|src/Dependably/Api/RpmController.cs|7bf5c746.277c621c.7be03776.f5757239.5ef953d3.b4bbb3ab.7ef81ea2.a142f64d.427b6d54.508de732.4d75e9bf.f5757239.b720b74d.a0ea2ac0.ce0185b2.161b9967",
+      "id": "csharp/LogForging|src/Dependably/Api/RpmController.cs|7bf5c746.277c621c.7be03776.f5757239.5ef953d3.b4bbb3ab.7ef81ea2.a142f64d.427b6d54.508de732.4d75e9bf.f5757239.0c8cbee1.a0ea2ac0.4d8d466d.161b9967",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/RpmController.cs",
-      "line": 690,
+      "line": 743,
       "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
     },
     {
-      "id": "csharp/LogForging|src/Dependably/Api/VulnerabilityController.cs|7bf5c746.277c621c.4c8561e8.f5757239.5ef953d3.f9554964.7ef81ea2.778421c6.559f8b00.277c621c.213dc67d.f5757239.7eafe4bb.8932d24a.ce0185b2.7d7ec2d8",
+      "id": "csharp/LogForging|src/Dependably/Api/RpmController.cs|c493a004.277c621c.023fd963.f5757239.e6753772.35da177b.31bbb486.b50f0ddc.427b6d54.508de732.7b02a014.f5757239.0c8cbee1.d5af52e6.4d8d466d.161b9967",
+      "rule": "csharp/LogForging",
+      "file": "src/Dependably/Api/RpmController.cs",
+      "line": 1021,
+      "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
+    },
+    {
+      "id": "csharp/LogForging|src/Dependably/Api/VulnerabilityController.cs|7bf5c746.277c621c.4c8561e8.f5757239.5ef953d3.f9554964.7ef81ea2.778421c6.559f8b00.277c621c.c9330245.f5757239.7eafe4bb.8932d24a.70bc868f.7d7ec2d8",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/VulnerabilityController.cs",
       "line": 143,
       "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
     },
     {
-      "id": "csharp/LogForging|src/Dependably/Api/VulnerabilityController.cs|c493a004.95891190.50fe9b47.f5757239.4a5c8084.2f4e1548.5f1fa597.d019a959.559f8b00.8c06c0b2.3e2311b0.f5757239.7eafe4bb.3dd4d0cc.e42c666e.9ecd9ce7",
-      "rule": "csharp/LogForging",
-      "file": "src/Dependably/Api/VulnerabilityController.cs",
-      "line": 209,
-      "text": "Unsanitized input from an HTTP parameter flows into LogInformation, where it is used as log input. This may result in a Logs Forgi"
-    },
-    {
       "id": "csharp/NoHardcodedCredentials|src/Dependably/Infrastructure/CacheEvictionService.cs|e25cd7e4.c4ec825f.9f7d21d2.f5757239.431166af.f665212a.1d8fed88.24b1e0e2.e25cd7e4.c4ec825f.9f7d21d2.f5757239.431166af.f665212a.1d8fed88.24b1e0e2",
       "rule": "csharp/NoHardcodedCredentials",
       "file": "src/Dependably/Infrastructure/CacheEvictionService.cs",
-      "line": 208,
+      "line": 174,
       "text": "Do not hardcode credentials in code. Found hardcoded credential used in secret key variable declaration."
     },
     {
       "id": "csharp/NoHardcodedCredentials|src/Dependably/Infrastructure/CacheEvictionService.cs|ec141d13.72d427ab.43d2d29f.f5757239.431166af.243aede3.1d8fed88.24b1e0e2.ec141d13.72d427ab.43d2d29f.f5757239.431166af.243aede3.1d8fed88.24b1e0e2",
       "rule": "csharp/NoHardcodedCredentials",
       "file": "src/Dependably/Infrastructure/CacheEvictionService.cs",
-      "line": 212,
+      "line": 178,
       "text": "Do not hardcode credentials in code. Found hardcoded credential used in secret key variable declaration."
     },
     {
@@ -433,7 +426,7 @@
       "id": "csharp/NoHardcodedCredentials|src/Dependably/Infrastructure/OrgRepository.cs|160a319b.39b8d118.41e7817d.f5757239.a427b94e.f67e3b64.c9ff8074.24b1e0e2.160a319b.39b8d118.41e7817d.f5757239.a427b94e.f67e3b64.c9ff8074.24b1e0e2",
       "rule": "csharp/NoHardcodedCredentials",
       "file": "src/Dependably/Infrastructure/OrgRepository.cs",
-      "line": 380,
+      "line": 285,
       "text": "Do not hardcode credentials in code. Found hardcoded credential used in secret key variable declaration."
     },
     {
@@ -442,6 +435,13 @@
       "file": "src/Dependably/Storage/BlobStoreFactory.cs",
       "line": 59,
       "text": "Do not hardcode credentials in code. Found hardcoded credential used in secret key variable declaration."
+    },
+    {
+      "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Infrastructure/DependablyMultiUpstreamFactory.cs|e29bae07.4fcd2987.a2282b2a.de031890.ef8c35ba.ce109560.63e0002b.b4cb6a6b.e29bae07.4fcd2987.a2282b2a.de031890.ef8c35ba.ce109560.63e0002b.b4cb6a6b",
+      "rule": "csharp/NoHardcodedCredentials/test",
+      "file": "tests/Dependably.Tests/Infrastructure/DependablyMultiUpstreamFactory.cs",
+      "line": 41,
+      "text": "Do not hardcode credentials in code. Found hardcoded credential used in password variable declaration."
     },
     {
       "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Integration/InviteAcceptRaceTests.cs|8de7314e.39b8d118.68418e3d.b0b315d9.a758fffc.bc2caeef.ce0185b2.7967f7f1.8de7314e.39b8d118.68418e3d.b0b315d9.a758fffc.bc2caeef.ce0185b2.7967f7f1",
@@ -461,7 +461,7 @@
       "id": "csharp/LogForging/test|tests/Dependably.Tests/Unit/Api/RpmControllerProxyTests.cs|7d881869.39b8d118.50c8bb92.f5757239.08d70d2a.2f4e1548.7ef81ea2.50471c28.77f0a774.8c06c0b2.c9330245.f5757239.bd070dd6.ca28b068.ce0185b2.f0c25939",
       "rule": "csharp/LogForging/test",
       "file": "tests/Dependably.Tests/Unit/Api/RpmControllerProxyTests.cs",
-      "line": 546,
+      "line": 644,
       "text": "Unsanitized input from an HTTP parameter flows into LogWarning, where it is used as log input. This may result in a Logs Forging v"
     },
     {

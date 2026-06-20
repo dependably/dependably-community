@@ -188,7 +188,13 @@ public sealed class RpmRepodataService
     private async Task<List<RpmPrimaryRow>> LoadLocalRowsAsync(string orgId, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
-        // xtenant: explicit org_id filter on the join through packages.
+        // Uploaded RPMs: sourced from package_versions (origin='uploaded') joined through packages.
+        // xtenant: filtered by p.org_id = @orgId.
+        // Proxy RPMs: sourced from cache_artifact joined via tenant_artifact_access for this org,
+        // with rpm_metadata linked via owner_kind='cache_artifact'. Excludes uploaded rows from
+        // this arm to prevent double-counting artefacts present in both planes during the P3
+        // transition.
+        // xtenant: tenant_artifact_access.org_id = @orgId scopes the global cache_artifact rows.
         return (await conn.QueryAsync<RpmPrimaryRow>(
             """
             SELECT p.purl_name AS PurlName,
@@ -220,8 +226,43 @@ public sealed class RpmRepodataService
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             JOIN rpm_metadata rm ON rm.package_version_id = pv.id
+                                 AND rm.owner_kind = 'package_version'
             WHERE p.org_id = @orgId AND p.ecosystem = 'rpm'
-            ORDER BY p.purl_name, pv.created_at DESC
+              AND pv.origin = 'uploaded'
+            UNION ALL
+            SELECT ca.name AS PurlName,
+                   ca.version AS Version,
+                   ca.content_hash AS Sha256,
+                   ca.size_bytes AS SizeBytes,
+                   ca.blob_key AS BlobKey,
+                   ca.filename AS Filename,
+                   rm.rpm_name AS Name,
+                   rm.arch     AS Arch,
+                   rm.epoch    AS Epoch,
+                   rm.rpm_version AS RpmVersion,
+                   rm.rpm_release AS RpmRelease,
+                   rm.summary  AS Summary,
+                   rm.description AS Description,
+                   rm.build_host AS BuildHost,
+                   rm.build_time AS BuildTime,
+                   rm.installed_size AS InstalledSize,
+                   rm.archive_size   AS ArchiveSize,
+                   rm.rpm_license    AS License,
+                   rm.packager       AS Packager,
+                   rm.url            AS Url,
+                   rm.rpm_group      AS RpmGroup,
+                   rm.source_rpm     AS SourceRpm,
+                   rm.header_start   AS HeaderStart,
+                   rm.header_end     AS HeaderEnd,
+                   rm.files_json     AS FilesJson,
+                   rm.changelogs_json AS ChangelogsJson
+            FROM cache_artifact ca
+            JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                                            AND taa.org_id = @orgId
+            JOIN rpm_metadata rm ON rm.cache_artifact_id = ca.id
+                                 AND rm.owner_kind = 'cache_artifact'
+            WHERE ca.ecosystem = 'rpm'
+            ORDER BY PurlName, Sha256 DESC
             """,
             new { orgId })).ToList();
     }

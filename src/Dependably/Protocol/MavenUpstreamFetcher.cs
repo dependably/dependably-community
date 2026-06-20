@@ -498,6 +498,35 @@ public sealed class MavenUpstreamFetcher
 
     // ── Sidecar fetching ───────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Fetches the detached OpenPGP <c>.asc</c> signature sidecar for a Maven artefact.
+    /// Returns the raw bytes of the sidecar, or null when no <c>.asc</c> exists upstream or
+    /// the fetch fails. Used by the Maven proxy ingest path to run provenance verification.
+    /// </summary>
+    public async Task<byte[]?> TryFetchAscSidecarAsync(
+        string upstreamBase,
+        string upstreamPath,
+        CancellationToken ct)
+    {
+        string sidecarPath = $"{upstreamPath}.asc";
+        string sidecarUrl = $"{upstreamBase.TrimEnd('/')}/{sidecarPath.TrimStart('/')}";
+        try
+        {
+            using var response = await _upstream.GetMetadataAsync(sidecarUrl, ct);
+            return !response.IsSuccessStatusCode
+                ? null
+                : await UpstreamClient.ReadBodyCappedAsync(
+                    response, UpstreamClient.MaxMetadataResponseBytes, sidecarUrl, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not AirGappedException)
+        {
+            _logger.LogWarning(ex,
+                "ExceptionType={ExceptionType} Maven .asc sidecar fetch failed for {Url}",
+                ex.GetType().Name, sidecarUrl);
+            return null;
+        }
+    }
+
     private async Task<string?> TryFetchSidecarAsync(
         string upstreamBase,
         string upstreamPath,

@@ -13,6 +13,8 @@ namespace Dependably.Tests.Unit;
 /// <see cref="PackageRepository.IncrementDownloadCountByPurlAsync"/> off-path behaviour:
 /// when a <see cref="DownloadCountWriter"/> is wired in, the hot path must enqueue without
 /// touching the DB; the hosted-service drainer must aggregate and flush the counts.
+/// The by-purl path increments <c>tenant_artifact_access.download_count</c> scoped to the
+/// caller's org_id (proxy download counts live in the global plane, not in package_versions).
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class DownloadCountWriterTests : IAsyncLifetime
@@ -21,6 +23,7 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
     private string _orgId = default!;
     private string _versionId = default!;
     private string _purl = default!;
+    private string _cacheArtifactId = default!;
 
     public async Task InitializeAsync()
     {
@@ -32,7 +35,7 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
             new { id = _orgId, slug = _orgId });
 
         string pkgId = $"pkg-{Guid.NewGuid():N}";
-        _purl = $"pkg:npm/{Guid.NewGuid():N}/lib@1.0.0";
+        _purl = "pkg:npm/lib@1.0.0";
         await conn.ExecuteAsync(
             "INSERT INTO packages (id, org_id, ecosystem, name, purl_name) VALUES (@pkgId, @orgId, 'npm', 'lib', 'lib')",
             new { pkgId, orgId = _orgId });
@@ -41,12 +44,32 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
         await conn.ExecuteAsync(
             """
             INSERT INTO package_versions
-                (id, package_id, version, purl, blob_key, size_bytes, checksum_sha256)
+                (id, package_id, version, purl, blob_key, size_bytes, checksum_sha256, origin)
             VALUES
                 (@id, @pkgId, '1.0.0', @purl, 'registry/npm/lib/1.0.0/lib-1.0.0.tgz',
-                 1000, 'aaaa')
+                 1000, 'aaaa', 'uploaded')
             """,
             new { id = _versionId, pkgId, purl = _purl });
+
+        // Seed a cache_artifact + tenant_artifact_access row for the by-purl path.
+        _cacheArtifactId = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO cache_artifact
+                (id, ecosystem, name, version, filename, blob_key, content_hash, purl)
+            VALUES
+                (@id, 'npm', 'lib', '1.0.0', 'lib-1.0.0.tgz',
+                 'proxy/aaaa/lib-1.0.0.tgz', 'aaaa', @purl)
+            """,
+            new { id = _cacheArtifactId, purl = _purl });
+
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO tenant_artifact_access
+                (org_id, cache_artifact_id, download_count)
+            VALUES (@orgId, @caId, 0)
+            """,
+            new { orgId = _orgId, caId = _cacheArtifactId });
     }
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
@@ -130,6 +153,9 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
     [Fact]
     public async Task MixedBurst_PartiallyExceedsCapacity_OnlyOverflowDropped()
     {
+        // Mixed burst: alternates versionId records (→ package_versions) and orgId+purl records
+        // (→ tenant_artifact_access). Both write to the correct target plane. Overflow records
+        // are dropped; only up to cap records reach the DB.
         const int cap = 4;
         const int burst = 7;
         const int expectedDrops = burst - cap;
@@ -145,10 +171,10 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
         int successCount = 0;
         for (int i = 0; i < burst; i++)
         {
-            // Alternate between versionId and purl keying strategies.
+            // Alternate between versionId (uploaded plane) and orgId+purl (global plane) strategies.
             var record = i % 2 == 0
                 ? new DownloadCountRecord(VersionId: _versionId, Purl: null)
-                : new DownloadCountRecord(VersionId: null, Purl: _purl);
+                : new DownloadCountRecord(VersionId: null, Purl: _purl, OrgId: _orgId);
             if (writer.TryEnqueue(record))
             {
                 successCount++;
@@ -158,15 +184,23 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
         Assert.Equal(cap, successCount);
         Assert.Equal(expectedDrops, drops);
 
-        // Drain and verify the DB accumulated only the persisted increments.
+        // Drain: versionId records land in package_versions; purl records in tenant_artifact_access.
         await service.DrainPendingAsync();
 
         await using var conn = await _db.OpenAsync();
-        int dbCount = await conn.ExecuteScalarAsync<int>(
+
+        // package_versions gets the even-index versionId records (indices 0, 2 → 2 records fit within cap=4).
+        int pvCount = await conn.ExecuteScalarAsync<int>(
             "SELECT download_count FROM package_versions WHERE id = @id",
             new { id = _versionId });
-        // Each queued record increments the count by 1 regardless of key strategy.
-        Assert.Equal(cap, dbCount);
+
+        // tenant_artifact_access gets the odd-index purl records (indices 1, 3 → 2 records fit within cap=4).
+        int taaCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT download_count FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @caId",
+            new { orgId = _orgId, caId = _cacheArtifactId });
+
+        // Total across both planes equals the number of successfully queued records.
+        Assert.Equal(cap, pvCount + taaCount);
     }
 
     // ── IncrementDownloadCountAsync — off-path enqueue ───────────────────────
@@ -201,6 +235,8 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
     }
 
     // ── IncrementDownloadCountByPurlAsync — off-path enqueue ─────────────────
+    // By-purl increments target tenant_artifact_access.download_count (global plane),
+    // not package_versions — proxy download counts are now per-tenant in the global plane.
 
     [Fact]
     public async Task IncrementDownloadCountByPurlAsync_WithWriter_DoesNotWriteSynchronously()
@@ -208,13 +244,13 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
         var writer = new DownloadCountWriter();
         var repo = new PackageRepository(_db, writer);
 
-        await repo.IncrementDownloadCountByPurlAsync(_purl);
+        await repo.IncrementDownloadCountByPurlAsync(_orgId, _purl);
 
         await using var conn = await _db.OpenAsync();
         int count = await conn.ExecuteScalarAsync<int>(
-            "SELECT download_count FROM package_versions WHERE purl = @purl",
-            new { purl = _purl });
-        Assert.Equal(0, count);
+            "SELECT download_count FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @caId",
+            new { orgId = _orgId, caId = _cacheArtifactId });
+        Assert.Equal(0, count); // not yet flushed
     }
 
     [Fact]
@@ -222,12 +258,12 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
     {
         var repo = new PackageRepository(_db);
 
-        await repo.IncrementDownloadCountByPurlAsync(_purl);
+        await repo.IncrementDownloadCountByPurlAsync(_orgId, _purl);
 
         await using var conn = await _db.OpenAsync();
         int count = await conn.ExecuteScalarAsync<int>(
-            "SELECT download_count FROM package_versions WHERE purl = @purl",
-            new { purl = _purl });
+            "SELECT download_count FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @caId",
+            new { orgId = _orgId, caId = _cacheArtifactId });
         Assert.Equal(1, count);
     }
 
@@ -268,15 +304,16 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
 
         for (int i = 0; i < 3; i++)
         {
-            await repo.IncrementDownloadCountByPurlAsync(_purl);
+            await repo.IncrementDownloadCountByPurlAsync(_orgId, _purl);
         }
 
         await service.DrainPendingAsync();
 
         await using var conn = await _db.OpenAsync();
+        // By-purl increments land in tenant_artifact_access.download_count (global plane).
         int count = await conn.ExecuteScalarAsync<int>(
-            "SELECT download_count FROM package_versions WHERE purl = @purl",
-            new { purl = _purl });
+            "SELECT download_count FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @caId",
+            new { orgId = _orgId, caId = _cacheArtifactId });
         Assert.Equal(3, count);
     }
 
@@ -305,7 +342,7 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task DrainPendingAsync_MixedKeys_UpdatesBothVersionIdAndPurl()
+    public async Task DrainPendingAsync_MixedKeys_UpdatesBothPlanesIndependently()
     {
         var writer = new DownloadCountWriter();
         var repo = new PackageRepository(_db, writer);
@@ -313,18 +350,26 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
             NullLogger<DownloadCountWriterHostedService>.Instance,
             TimeProvider.System);
 
+        // Two uploaded-plane increments by versionId.
         await repo.IncrementDownloadCountAsync(_versionId);
         await repo.IncrementDownloadCountAsync(_versionId);
-        await repo.IncrementDownloadCountByPurlAsync(_purl);
+        // One global-plane increment by orgId+purl.
+        await repo.IncrementDownloadCountByPurlAsync(_orgId, _purl);
 
         await service.DrainPendingAsync();
 
         await using var conn = await _db.OpenAsync();
-        // Both versionId and purl point to the same row, so the total is 3.
-        int count = await conn.ExecuteScalarAsync<int>(
+        // Uploaded plane: package_versions gets the 2 versionId increments.
+        int pvCount = await conn.ExecuteScalarAsync<int>(
             "SELECT download_count FROM package_versions WHERE id = @id",
             new { id = _versionId });
-        Assert.Equal(3, count);
+        Assert.Equal(2, pvCount);
+
+        // Global plane: tenant_artifact_access gets the 1 purl increment.
+        int taaCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT download_count FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @caId",
+            new { orgId = _orgId, caId = _cacheArtifactId });
+        Assert.Equal(1, taaCount);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

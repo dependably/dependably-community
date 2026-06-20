@@ -92,6 +92,17 @@ describe('navigate + takePendingRoute', () => {
     expect(window.history.state?.idx).toBeGreaterThanOrEqual(1)
   })
 
+  it('a fresh navigation serializes params into the URL query string', async () => {
+    // The dashboard ribbon deep-links the vulnerabilities list to a non-default sort; the
+    // list page reads that sort from window.location.search on mount, so navigate() must put
+    // the params there (not just in the route store).
+    const { navigate } = await import('./store.js')
+    const spy = vi.spyOn(window.history, 'pushState')
+    navigate('vulnerabilities', { sort: 'published', dir: 'desc' })
+    const url = spy.mock.calls[spy.mock.calls.length - 1][2]
+    expect(url).toBe('/vulnerabilities?sort=published&dir=desc')
+  })
+
   it('replace: true uses replaceState and does not bump idx', async () => {
     const { navigate, route } = await import('./store.js')
     navigate('packages', {})            // push #1, idx=1

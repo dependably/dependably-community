@@ -61,7 +61,7 @@ public sealed class ScrapeDiagnostics
 
     public void Record(IPAddress? remoteIp, Outcome outcome)
     {
-        var entry = new Entry(_time.GetUtcNow(), remoteIp?.ToString(), outcome);
+        var entry = new Entry(_time.GetUtcNow(), IpAddressExtensions.Normalize(remoteIp), outcome);
         long index = Interlocked.Increment(ref _writeIndex) - 1;
         _buffer[index % Capacity] = entry;
 

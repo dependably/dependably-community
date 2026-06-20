@@ -125,6 +125,7 @@
           {$t('system.settings.metrics.allowedIpsHint')}
           <span class="source-tag source-tag-{access.allowlistSource}">{access.allowlistSource}</span>
         </small>
+        <small class="hint">{$t('system.settings.metrics.sourceIpNote')}</small>
         {#if broadCidrWarning(accessAllowedText.split('\n').map((s) => s.trim()).filter(Boolean))}
           <small class="warn">{$t('system.settings.metrics.broadCidrWarn')}</small>
         {/if}

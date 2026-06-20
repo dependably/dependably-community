@@ -112,9 +112,9 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
 
         await conn.ExecuteAsync(
             """
-            INSERT INTO cargo_metadata (version_id, index_line)
-            VALUES (@versionId, @indexLine)
-            ON CONFLICT (version_id) DO UPDATE SET index_line = excluded.index_line
+            INSERT INTO cargo_metadata (version_id, index_line, owner_kind)
+            VALUES (@versionId, @indexLine, 'package_version')
+            ON CONFLICT (version_id) WHERE owner_kind = 'package_version' DO UPDATE SET index_line = excluded.index_line
             """,
             new { versionId, indexLine });
     }

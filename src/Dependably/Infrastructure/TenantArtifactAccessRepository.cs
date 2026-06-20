@@ -35,6 +35,30 @@ public sealed class TenantArtifactAccessRepository
     }
 
     /// <summary>
+    /// Upserts per-tenant download state for a proxy artefact: increments
+    /// <c>download_count</c> and touches <c>last_used</c> on every call. Always runs
+    /// immediately after <see cref="CacheAccessRecorder.RecordAccessAsync"/>, which owns
+    /// <c>access_count</c> and <c>last_accessed_at</c> via <see cref="UpsertAsync"/> — so this
+    /// method deliberately leaves those columns alone to avoid double-counting the same fetch.
+    /// The row therefore always exists by the time this runs (the conflict branch); the insert
+    /// branch is the standalone-safety path and seeds <c>access_count = 1</c> for that one case.
+    /// </summary>
+    public async Task UpsertStateAsync(
+        string orgId, string cacheArtifactId, DateTimeOffset at, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync("""
+            INSERT INTO tenant_artifact_access (
+                org_id, cache_artifact_id, first_accessed_at, last_accessed_at,
+                last_used, download_count, access_count)
+            VALUES (@orgId, @cacheArtifactId, @at, @at, @at, 1, 1)
+            ON CONFLICT (org_id, cache_artifact_id) DO UPDATE SET
+                last_used        = excluded.last_used,
+                download_count   = tenant_artifact_access.download_count + 1
+            """, new { orgId, cacheArtifactId, at });
+    }
+
+    /// <summary>
     /// Cross-tenant query for vulnerability response. Returns the orgs that have
     /// accessed any artifact matching the coordinate. Platform-admin scope only — callers
     /// must enforce.

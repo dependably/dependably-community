@@ -1,0 +1,36 @@
+# Opt-in observability overlay. The base docker-compose.yml is the production
+# appliance deploy and stays free of telemetry plumbing; this overlay stands up
+# a local OpenTelemetry Collector and points the app's OTLP exporter at it.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml logs otel-collector
+#
+# Dependably's logs (Serilog → OTLP), traces, and metrics only export when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set — so the endpoint and the collector are
+# enabled together here. Without this overlay the app logs to stdout only and no
+# OTLP export is attempted.
+services:
+  dependably:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-local}
+    depends_on:
+      - otel-collector
+
+  otel-collector:
+    image: otel/opentelemetry-collector:0.154.0@sha256:ea527f0f9a220c7b595863a658c262f31d08c07e034a16b502bfb2206aa987ff
+    volumes:
+      # Core image's default config path; mounting here needs no command override.
+      - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    # The app reaches the collector at http://otel-collector:4317 over the compose
+    # network — no host port mapping required. Uncomment to also accept OTLP from
+    # the host (e.g. sending telemetry from a process on your laptop):
+    # ports:
+    #   - "4317:4317"   # OTLP/gRPC
+    #   - "4318:4318"   # OTLP/HTTP
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

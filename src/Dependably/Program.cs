@@ -516,9 +516,21 @@ public partial class Program
         async ctx =>
         {
             string path = ctx.Request.Path.Value ?? "";
+            // Known API/registry prefixes that matched no route are genuine 404s, for any method.
             if (IsNonSpaPath(path))
             {
                 ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+            // Otherwise this is an SPA-eligible path: only GET/HEAD navigation resolves to
+            // index.html. A non-GET reaching here matched no real route (e.g. a mis-targeted
+            // `twine upload` POSTing to the bare host instead of /pypi/legacy/) — returning 200
+            // HTML would silently swallow the body and mask the misconfiguration as a success,
+            // so reject with 405 to make the client fail loudly.
+            if (!HttpMethods.IsGet(ctx.Request.Method) && !HttpMethods.IsHead(ctx.Request.Method))
+            {
+                ctx.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+                ctx.Response.Headers.Allow = "GET, HEAD";
                 return;
             }
             var file = embeddedProvider.GetFileInfo("index.html");

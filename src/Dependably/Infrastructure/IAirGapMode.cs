@@ -26,6 +26,7 @@ public sealed class AirGapMode : IAirGapMode
     {
         "vuln-scan",
         "vuln-rescan",
+        "threat-feed",
         "deprecation-refresh",
         "healthcheck-pinger",
         "cache-eviction",

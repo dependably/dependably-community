@@ -576,6 +576,55 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
         Assert.Equal("use newer-package instead", deprecated);
     }
 
+    // ── Publish — scoped via the real npm CLI's %2F-encoded URL ─────────────
+    // The npm client PUTs scoped packages to /npm/@scope%2Fname (slash encoded),
+    // which lands on the unscoped route. Regression test for that path resolving
+    // to a successful scoped publish rather than a 422 name-validation failure.
+    [Fact]
+    public async Task Publish_ScopedViaEncodedSlash_Succeeds()
+    {
+        string token = await _factory.CreateToken("push");
+        var (tarball, _, _) = NpmFixtures.BuildTarball("@dep/cli-scoped", "1.0.0");
+        string base64 = Convert.ToBase64String(tarball);
+        string filename = "@dep/cli-scoped-1.0.0.tgz";
+
+        string body = JsonSerializer.Serialize(new
+        {
+            name = "@dep/cli-scoped",
+            versions = new Dictionary<string, object>
+            {
+                ["1.0.0"] = new { name = "@dep/cli-scoped", version = "1.0.0" }
+            },
+            _attachments = new Dictionary<string, object>
+            {
+                [filename] = new
+                {
+                    content_type = "application/octet-stream",
+                    data = base64,
+                    length = tarball.Length
+                }
+            }
+        });
+
+        using var client = _factory.CreateClientWithBearer(token);
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        // %2F-encoded slash, exactly as the npm CLI sends it.
+        var resp = await client.PutAsync("/npm/@dep%2Fcli-scoped", content);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        // Stored under the real scoped name, not a mangled "@dep/cli-scoped" plain name.
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        long count = await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COUNT(*) FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.ecosystem = 'npm' AND p.purl_name = '@dep/cli-scoped' AND pv.version = '1.0.0'
+            """);
+        Assert.Equal(1, count);
+    }
+
     // ── Hosted GetPackage — package exists but no versions row → 404 path ──
 
     [Fact]
@@ -732,5 +781,32 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
         {
             await _factory.SetOrgLimit("default", "npm", long.MaxValue);
         }
+    }
+
+    // ── Publish — 4xx rejection body carries an npm-readable `error` member ───
+
+    /// <summary>
+    /// The npm CLI renders only the <c>error</c> member of a registry error body; it ignores
+    /// RFC 7807 <c>detail</c>/<c>title</c>. NpmErrorEnvelope mirrors <c>detail</c> into <c>error</c>
+    /// so a rejected publish shows its reason instead of a bare "422 Unprocessable Entity".
+    /// </summary>
+    [Fact]
+    public async Task Publish_Rejection_BodyCarriesNpmErrorMember()
+    {
+        string token = await _factory.CreateToken("push");
+        // Body name disagrees with the URL package — ValidatePackageName rejects with 422.
+        string body = JsonSerializer.Serialize(new { name = "other-name" });
+        using var client = _factory.CreateClientWithBearer(token);
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        var resp = await client.PutAsync("/npm/mismatch-pkg", content);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var root = doc.RootElement;
+        Assert.True(root.TryGetProperty("error", out var error), "npm requires a top-level 'error' member.");
+        Assert.False(string.IsNullOrWhiteSpace(error.GetString()));
+        // The envelope mirrors RFC 7807 detail, which is preserved for non-npm clients.
+        Assert.Equal(root.GetProperty("detail").GetString(), error.GetString());
     }
 }

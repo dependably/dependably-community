@@ -8,11 +8,14 @@ namespace Dependably.Api.NuGetProtocol;
 
 /// <summary>
 /// Handles NuGet v3 search (/nuget/query) and autocomplete (/nuget/autocomplete) endpoints.
-/// Both read only local package metadata — no upstream calls are made from these endpoints.
+/// Search and autocomplete merge uploaded package_versions with global-plane proxy entries
+/// (cache_artifact + tenant_artifact_access) so proxy-cached packages are discoverable.
 /// </summary>
 public sealed class NuGetSearchHandler(
     OrgRepository orgs,
     PackageRepository packages,
+    CacheArtifactRepository cacheArtifacts,
+    VulnerabilityRepository vulns,
     TokenRepository tokens,
     IPublicUrlBuilder urls)
 {
@@ -47,7 +50,7 @@ public sealed class NuGetSearchHandler(
 
         foreach (var pkg in filtered.Skip(skip).Take(take))
         {
-            var versions = await packages.GetVersionsAsync(pkg.Id, ct);
+            var versions = await LoadCombinedVersionsAsync(orgId, pkg.Id, pkg.Name.ToLowerInvariant(), ct);
             var latestVersion = versions.Where(v => !v.Yanked).MaxBy(v => v.CreatedAt);
             if (latestVersion is null)
             {
@@ -100,7 +103,7 @@ public sealed class NuGetSearchHandler(
         var ids = new List<string>();
         foreach (var pkg in filtered.Skip(skip).Take(take))
         {
-            var versions = await packages.GetVersionsAsync(pkg.Id, ct);
+            var versions = await LoadCombinedVersionsAsync(orgId, pkg.Id, pkg.Name.ToLowerInvariant(), ct);
             bool hasMatchingVersion = versions.Any(v =>
                 !v.Yanked && (query.Prerelease || !IsPrerelease(v.Version)));
             if (hasMatchingVersion)
@@ -122,7 +125,7 @@ public sealed class NuGetSearchHandler(
             return new JsonResult(new { data = Array.Empty<string>() });
         }
 
-        var versions = await packages.GetVersionsAsync(pkg.Id, ct);
+        var versions = await LoadCombinedVersionsAsync(orgId, pkg.Id, normalizedId, ct);
         var matching = versions
             .Where(v => !v.Yanked && (prerelease || !IsPrerelease(v.Version)))
             .Select(v => v.Version)
@@ -133,6 +136,49 @@ public sealed class NuGetSearchHandler(
 
     private static bool IsPrerelease(string version) =>
         NuGetVersion.TryParse(version, out var nv) && nv.IsPrerelease;
+
+    // Combines uploaded (package_versions) and global-plane proxy (cache_artifact) versions
+    // for a NuGet package. NuGet may have multiple cache_artifact rows per version (.nupkg,
+    // .nuspec, .sha512); deduplication groups by version so each version string appears once.
+    // Proxy entries whose version already appears in uploaded versions are skipped.
+    private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
+        string orgId, string packageId, string normalizedId, CancellationToken ct)
+    {
+        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
+        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, "nuget", normalizedId, ct);
+
+        if (proxyEntries.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var uploadedVersionSet = uploadedVersions
+            .Select(v => v.Version)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
+        var proxySignals = proxyIds.Count > 0
+            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        // Each NuGet version may have multiple cache_artifact rows; take one representative
+        // entry per version string (first in first_cached_at DESC order from the query).
+        var synthetic = proxyEntries
+            .Where(e => !uploadedVersionSet.Contains(e.Version))
+            .GroupBy(e => e.Version, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First().ToPackageVersionSynthetic(proxySignals))
+            .ToList();
+
+        if (synthetic.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
+        combined.AddRange(uploadedVersions);
+        combined.AddRange(synthetic);
+        return combined;
+    }
 }
 
 /// <summary>

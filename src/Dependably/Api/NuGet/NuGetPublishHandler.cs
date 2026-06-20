@@ -1,5 +1,3 @@
-using System.IO.Compression;
-using System.Xml.Linq;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
@@ -32,18 +30,6 @@ public sealed class NuGetPublishHandler(
     ILogger<NuGetPublishHandler> logger,
     string stagingPath)
 {
-    // Known Microsoft nuspec namespaces
-    private static readonly HashSet<string> KnownNuspecNamespaces = [
-        "http://schemas.microsoft.com/packaging/2010/07/nuspec.xsd",
-        "http://schemas.microsoft.com/packaging/2011/08/nuspec.xsd",
-        "http://schemas.microsoft.com/packaging/2011/10/nuspec.xsd",
-        "http://schemas.microsoft.com/packaging/2012/06/nuspec.xsd",
-        "http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd"
-    ];
-
-    // Maximum NuGet package id length per the NuGet.org spec.
-    private const int MaxNuGetIdLength = 100;
-
     public Task<IActionResult> PushAsync(HttpContext httpContext, string orgId, CancellationToken ct)
         => PushPackageAsync(httpContext, orgId, isSymbol: false, ct);
 
@@ -404,84 +390,17 @@ public sealed class NuGetPublishHandler(
     /// <summary>
     /// Parses the .nupkg or .snupkg ZIP archive from a staging temp file, extracting the
     /// nuspec id and version. Streams from disk — never materializes the archive in a byte[].
+    /// Delegates validation to <see cref="NuGetNupkgValidator.ParseFromStream"/> so the
+    /// publish path and the import path share a single set of validation rules.
     /// </summary>
     private static (ValidationResult, string? id, string? version) ParseNupkgFromFile(
         string stagedPath, bool isSymbol)
     {
-        try
-        {
-            // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
-            using var fileStream = new FileStream(
-                stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
-                bufferSize: 81920, useAsync: false);
-            using var zip = new ZipArchive(fileStream, ZipArchiveMode.Read);
-
-            if (isSymbol)
-            {
-                bool hasPdb = zip.Entries.Any(e => e.Name.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase));
-                if (!hasPdb)
-                {
-                    return (ValidationResult.Fail("content", ".snupkg must contain at least one .pdb file"), null, null);
-                }
-            }
-
-            var nuspecEntry = zip.Entries.FirstOrDefault(e =>
-                e.Name.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase) &&
-                !e.FullName.Contains('/'));
-
-            if (nuspecEntry is null)
-            {
-                return (ValidationResult.Fail("content", "No .nuspec found at ZIP root"), null, null);
-            }
-
-            using var nuspecStream = new LimitedReadStream(
-                nuspecEntry.Open(), ZipEntryLimits.MaxMetadataEntryBytes, "nuspec");
-            var doc = XDocument.Load(nuspecStream);
-            string ns = doc.Root?.Name.NamespaceName ?? "";
-
-            if (!KnownNuspecNamespaces.Contains(ns))
-            {
-                return (ValidationResult.Fail("content", $"Unknown nuspec namespace: {ns}"), null, null);
-            }
-
-            XNamespace xns = ns;
-            var metadata = doc.Root?.Element(xns + "metadata");
-            string? id = metadata?.Element(xns + "id")?.Value?.Trim();
-            string? version = metadata?.Element(xns + "version")?.Value?.Trim();
-            string? description = metadata?.Element(xns + "description")?.Value?.Trim();
-            string? authors = metadata?.Element(xns + "authors")?.Value?.Trim();
-
-            if (string.IsNullOrEmpty(id) || id.Length > MaxNuGetIdLength)
-            {
-                return (ValidationResult.Fail("id", "id must be 1-100 characters"), null, null);
-            }
-
-            if (!NuGetIdValidator.IsValidId(id))
-            {
-                return (ValidationResult.Fail("id", "id contains invalid characters"), null, null);
-            }
-
-            if (!NuGetVersion.TryParse(version, out _))
-            {
-                return (ValidationResult.Fail("version", $"Invalid NuGet version: {version}"), null, null);
-            }
-
-            if (string.IsNullOrEmpty(description))
-            {
-                return (ValidationResult.Fail("description", "description is required"), null, null);
-            }
-
-            if (string.IsNullOrEmpty(authors))
-            {
-                return (ValidationResult.Fail("authors", "authors is required"), null, null);
-            }
-
-            return (ValidationResult.Ok(), id, version);
-        }
-        catch (Exception ex)
-        {
-            return (ValidationResult.Fail("content", $"Invalid ZIP/OPC: {ex.Message}"), null, null);
-        }
+        // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        using var fileStream = new FileStream(
+            stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 81920, useAsync: false);
+        return NuGetNupkgValidator.ParseFromStream(fileStream, isSymbol);
     }
 
     // Publish-side context for NuGet push: tenant id, resolved token, the org's settings

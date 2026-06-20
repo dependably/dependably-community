@@ -1,17 +1,16 @@
+using System.Diagnostics.CodeAnalysis;
 using Dependably.Protocol;
 using Dependably.Storage;
+using Microsoft.Extensions.Logging;
 
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Records a first-fetch proxy version: get-or-create the parent package, create the
-/// version row with a content-addressed blob key, emit the <c>first_fetch</c> activity
-/// row, and run an ecosystem-specific licence extractor. Wraps the unique-constraint
-/// race-handling pattern (concurrent first-fetch already inserted the row → re-read it).
-///
-/// Each ecosystem controller previously inlined a near-identical copy of this flow
-/// (NuGet/PyPi/Npm). The only ecosystem-specific bit is licence extraction, which
-/// callers pass in as a delegate.
+/// Records a first-fetch proxy artifact. For proxy-origin artifacts, writes global-plane
+/// facts (<c>cache_artifact</c>) and emits the <c>first_fetch</c> activity row; the
+/// <c>package_versions</c> INSERT is skipped for proxy, because the global plane is
+/// authoritative for proxy metadata. For uploaded artifacts (origin != proxy), the full
+/// <c>package_versions</c> row, license, and install-script writes apply unchanged.
 /// </summary>
 public sealed class ProxyVersionRecorder
 {
@@ -21,23 +20,172 @@ public sealed class ProxyVersionRecorder
     private readonly PackageRepository _packages;
     private readonly AuditRepository _audit;
     private readonly LicenseRepository _licenses;
+    private readonly CacheArtifactRepository _cacheArtifacts;
+    private readonly IUpstreamLatestVersionResolver _latestResolver;
+    private readonly ILogger<ProxyVersionRecorder> _logger;
 
-    public ProxyVersionRecorder(PackageRepository packages, AuditRepository audit, LicenseRepository licenses)
+    public ProxyVersionRecorder(
+        PackageRepository packages,
+        AuditRepository audit,
+        LicenseRepository licenses,
+        CacheArtifactRepository cacheArtifacts,
+        IUpstreamLatestVersionResolver latestResolver,
+        ILogger<ProxyVersionRecorder> logger)
     {
         _packages = packages;
         _audit = audit;
         _licenses = licenses;
+        _cacheArtifacts = cacheArtifacts;
+        _latestResolver = latestResolver;
+        _logger = logger;
     }
 
     /// <summary>
-    /// Returns the recorded version id (new or existing on race), or null when the
-    /// concurrent insert succeeded but its row can't be re-located (rare: package
-    /// row was hard-deleted between the unique-constraint catch and the lookup).
+    /// Records the first-fetch event for a proxy artifact via the global plane.
+    ///
+    /// When <paramref name="cacheArtifactId"/> is non-null (proxy path):
+    ///   • Skips the <c>package_versions</c> INSERT — the global plane is authoritative.
+    ///   • Emits the <c>first_fetch</c> activity row against the purl.
+    ///   • Writes license, install-script, and supply-chain facts to <c>cache_artifact</c>.
+    ///   • Returns null — callers detect the proxy path by non-null <paramref name="cacheArtifactId"/>
+    ///     and treat a null return as "scan and gate via cache_artifact".
+    ///
+    /// When <paramref name="cacheArtifactId"/> is null (uploaded path, legacy callers):
+    ///   • Inserts a <c>package_versions</c> row and returns its id.
     /// </summary>
     public async Task<string?> RecordAsync(
         ProxyVersionRequest req,
         Func<Stream, LicenseExtractor.ExtractedMetadata>? extractLicenses,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? cacheArtifactId = null)
+    {
+        string? versionId = cacheArtifactId is not null
+            ? await RecordProxyViaGlobalPlaneAsync(req, extractLicenses, cacheArtifactId, ct)
+            : await RecordViaPvRowAsync(req, extractLicenses, cacheArtifactId: null, ct);
+
+        // Seed the upstream-latest baseline on first contact so the package shows its "Latest"
+        // immediately, instead of waiting for the next daily DeprecationRefreshService pass.
+        await TrySeedUpstreamLatestAsync(req, ct);
+        return versionId;
+    }
+
+    // Sets packages.upstream_latest_version from the upstream metadata the first time a package is
+    // proxied (when no baseline exists yet). Bounded to one upstream metadata fetch per package:
+    // once a baseline is recorded, the daily refresh keeps it current and this no-ops. Best-effort
+    // — a fetch failure must never fail the first-fetch, which has already served the artifact.
+    private async Task TrySeedUpstreamLatestAsync(ProxyVersionRequest req, CancellationToken ct)
+    {
+        try
+        {
+            var pkg = await _packages.GetByPurlNameAsync(req.OrgId, req.Ecosystem, req.PurlName, ct);
+            if (pkg is null || pkg.UpstreamLatestVersion is not null)
+            {
+                return;
+            }
+
+            string? latest = await _latestResolver.ResolveAsync(req.Ecosystem, req.OrgId, req.PurlName, ct);
+            if (!string.IsNullOrWhiteSpace(latest))
+            {
+                await _packages.UpdateUpstreamLatestAsync(pkg.Id, latest, ct);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "Failed to seed upstream latest for {Ecosystem}/{Package}: {ExceptionType}",
+                req.Ecosystem, req.PurlName, ex.GetType().Name);
+        }
+    }
+
+    // Proxy-origin path: write to the global plane only; skip package_versions.
+    [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out",
+        Justification = "Multi-sentence architectural explanation comment, not commented-out code.")]
+    private async Task<string?> RecordProxyViaGlobalPlaneAsync(
+        ProxyVersionRequest req,
+        Func<Stream, LicenseExtractor.ExtractedMetadata>? extractLicenses,
+        string cacheArtifactId,
+        CancellationToken ct)
+    {
+        // Ensure the per-tenant packages row exists so this org can discover the package in its
+        // listings, simple index, and UI. The per-VERSION catalogue moves to the global plane
+        // (cache_artifact), but the package identity stays per-tenant: packages has no
+        // cross-tenant collision (its UNIQUE is per org), so each tenant keeps its own row.
+        await _packages.GetOrCreateAsync(
+            req.OrgId, req.Ecosystem, req.PackageName, req.PurlName, isProxy: true, ct);
+
+        // Emit the first_fetch activity row — audit still fires for proxy artifacts so the
+        // per-tenant event stream is not silenced. Download-count is on tenant_artifact_access;
+        // the caller (ProxyFetchService) already called UpsertStateAsync before RecordAsync.
+        await _audit.LogActivityAsync(req.OrgId, req.Ecosystem, req.Purl, "first_fetch",
+            req.UserId, actorKind: req.ActorKind, sourceIp: req.SourceIp, ct: ct);
+
+        // License extraction writes only to the global plane.
+        if (extractLicenses is not null)
+        {
+            LicenseExtractor.ExtractedMetadata extracted;
+            try
+            {
+                var stream = await req.Blob.OpenAsync(ct);
+                extracted = extractLicenses(stream);
+            }
+            catch
+            {
+                extracted = LicenseExtractor.ExtractedMetadata.Empty;
+            }
+
+            if (extracted.Spdx.Count > 0)
+            {
+                await _licenses.SetLicensesForCacheArtifactAsync(cacheArtifactId, extracted.Spdx, "upstream", ct);
+            }
+        }
+
+        // Install/lifecycle-script detection on the freshly-cached artifact. Best-effort:
+        // a read or parse failure leaves has_install_script at its 0 default rather than
+        // failing the first-fetch — the artifact has already streamed to the client.
+        bool hasScript = false;
+        string? scriptKind = null;
+        try
+        {
+            await using var stream = await req.Blob.OpenAsync(ct);
+            var script = await ScriptDetectionService.DetectAsync(req.Ecosystem, req.File, stream, ct);
+            if (script.HasScript)
+            {
+                hasScript = true;
+                scriptKind = script.Kind;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Swallowed: detection is advisory; the cached version still serves.
+        }
+
+        // Write all supply-chain facts to the global cache_artifact row. Runs after script
+        // detection so has_install_script reflects the freshly-computed result.
+        await _cacheArtifacts.UpdateGlobalFactsAsync(
+            cacheArtifactId,
+            purl: req.Purl,
+            checksumSha1: req.Sha1Hex,
+            publishedAt: req.PublishedAt,
+            deprecated: req.Deprecated,
+            hasInstallScript: hasScript,
+            installScriptKind: scriptKind,
+            provenanceStatus: null,
+            provenanceSigner: null,
+            upstreamIntegrityValue: req.UpstreamIntegrityValue,
+            upstreamIntegrityAlgorithm: req.UpstreamIntegrityAlgorithm,
+            ct);
+
+        // Null signals to the caller (ProxyFetchService) to use the cache_artifact id for scanning
+        // and block-gate evaluation, rather than looking up a package_versions row.
+        return null;
+    }
+
+    // Uploaded-origin or legacy path: insert a package_versions row with full dual-write.
+    private async Task<string?> RecordViaPvRowAsync(
+        ProxyVersionRequest req,
+        Func<Stream, LicenseExtractor.ExtractedMetadata>? extractLicenses,
+        string? cacheArtifactId,
+        CancellationToken ct)
     {
         try
         {
@@ -55,39 +203,36 @@ public sealed class ProxyVersionRecorder
                     UpstreamIntegrityAlgorithm: req.UpstreamIntegrityAlgorithm),
                 ct);
             await _audit.LogActivityAsync(req.OrgId, req.Ecosystem, req.Purl, "first_fetch", req.UserId, actorKind: req.ActorKind, sourceIp: req.SourceIp, ct: ct);
-            // first_fetch is itself a served download (the artefact streams to the client on this
+            // first_fetch is itself a served download (the artifact streams to the client on this
             // same request), so count it — matching the analytics 'download' + 'first_fetch'
-            // taxonomy. The concurrent-insert branch below logs no first_fetch and is not counted,
+            // taxonomy. The concurrent-insert branch logs no first_fetch and is not counted,
             // since the winning fetch already recorded the download against this row.
             await _packages.IncrementDownloadCountAsync(newVer.Id, ct);
 
-            if (extractLicenses is not null)
-            {
-                // Open the blob lazily so cache-miss license extraction reads the cached
-                // file rather than holding the artefact in memory. Open / extract failures
-                // (transient backend error, malformed package) are tolerated: the response
-                // already streamed, so swallow and skip the licence row. See
-                // feedback_test_partial_failure_scenarios — this swallow covers both
-                // stream-open failures and extractor parse failures.
-                LicenseExtractor.ExtractedMetadata extracted;
-                try
-                {
-                    var stream = await req.Blob.OpenAsync(ct);
-                    extracted = extractLicenses(stream);
-                }
-                catch
-                {
-                    extracted = LicenseExtractor.ExtractedMetadata.Empty;
-                }
-                if (extracted.Spdx.Count > 0)
-                {
-                    await _licenses.SetLicensesAsync(newVer.Id, extracted.Spdx, "upstream", ct);
-                }
-            }
+            await WriteLicensesAsync(req, extractLicenses, newVer.Id, cacheArtifactId, ct);
 
             if (req.Deprecated is not null)
             {
                 await _packages.UpdateDeprecatedAsync(newVer.Id, req.Deprecated, ct);
+            }
+
+            var (hasScript, scriptKind) = await WriteInstallScriptAsync(req, newVer.Id, ct);
+
+            if (cacheArtifactId is not null)
+            {
+                await _cacheArtifacts.UpdateGlobalFactsAsync(
+                    cacheArtifactId,
+                    purl: req.Purl,
+                    checksumSha1: req.Sha1Hex,
+                    publishedAt: req.PublishedAt,
+                    deprecated: req.Deprecated,
+                    hasInstallScript: hasScript,
+                    installScriptKind: scriptKind,
+                    provenanceStatus: null,
+                    provenanceSigner: null,
+                    upstreamIntegrityValue: req.UpstreamIntegrityValue,
+                    upstreamIntegrityAlgorithm: req.UpstreamIntegrityAlgorithm,
+                    ct);
             }
 
             return newVer.Id;
@@ -105,6 +250,69 @@ public sealed class ProxyVersionRecorder
             var existing = await _packages.GetVersionAsync(pkg.Id, req.Version, ct);
             return existing?.Id;
         }
+    }
+
+    // Extracts and persists license data for an uploaded-origin version. Open / extract failures
+    // are tolerated: the response has already streamed so the license row is skipped rather than
+    // failing the caller.
+    private async Task WriteLicensesAsync(
+        ProxyVersionRequest req,
+        Func<Stream, LicenseExtractor.ExtractedMetadata>? extractLicenses,
+        string versionId,
+        string? cacheArtifactId,
+        CancellationToken ct)
+    {
+        if (extractLicenses is null)
+        {
+            return;
+        }
+
+        LicenseExtractor.ExtractedMetadata extracted;
+        try
+        {
+            var stream = await req.Blob.OpenAsync(ct);
+            extracted = extractLicenses(stream);
+        }
+        catch
+        {
+            extracted = LicenseExtractor.ExtractedMetadata.Empty;
+        }
+
+        if (extracted.Spdx.Count == 0)
+        {
+            return;
+        }
+
+        await _licenses.SetLicensesAsync(versionId, extracted.Spdx, "upstream", ct);
+        if (cacheArtifactId is not null)
+        {
+            await _licenses.SetLicensesForCacheArtifactAsync(cacheArtifactId, extracted.Spdx, "upstream", ct);
+        }
+    }
+
+    // Detects install/lifecycle scripts and persists the result. Best-effort: a read or parse
+    // failure leaves has_install_script at its default rather than failing the first-fetch.
+    private async Task<(bool HasScript, string? Kind)> WriteInstallScriptAsync(
+        ProxyVersionRequest req,
+        string versionId,
+        CancellationToken ct)
+    {
+        try
+        {
+            await using var stream = await req.Blob.OpenAsync(ct);
+            var script = await ScriptDetectionService.DetectAsync(req.Ecosystem, req.File, stream, ct);
+            if (script.HasScript)
+            {
+                await _packages.UpdateInstallScriptAsync(versionId, true, script.Kind, ct);
+                return (true, script.Kind);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Swallowed: detection is advisory; the cached version still serves.
+        }
+
+        return (false, null);
     }
 }
 

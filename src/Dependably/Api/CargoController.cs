@@ -33,6 +33,10 @@ namespace Dependably.Api;
 /// where <c>ab</c> and <c>cd</c> are the first and second pairs of the name.
 /// </summary>
 [ApiController]
+// Full Cargo protocol surface (sparse index, crate download/publish/yank, owners); the real
+// remedy for the coupling is per-concern handler extraction, a separate architectural change.
+[SuppressMessage("Major Code Smell", "S1200:Classes should not be coupled to too many other classes",
+    Justification = "Full Cargo protocol surface; coupling is inherent and the remedy is handler extraction, a separate change.")]
 public sealed class CargoController : OrgScopedControllerBase
 {
     private readonly OrgRepository _orgs;
@@ -45,6 +49,10 @@ public sealed class CargoController : OrgScopedControllerBase
     private readonly IPublicUrlBuilder _urls;
     private readonly UpstreamClient _upstream;
     private readonly CacheAccessRecorder _cacheRecorder;
+    private readonly CacheArtifactRepository _cacheArtifacts;
+    private readonly TenantArtifactAccessRepository _tenantAccess;
+    private readonly VulnerabilityRepository _vulns;
+    private readonly TimeProvider _time;
     private readonly IPackagePublishService _publish;
     private readonly IUploadLimitResolver _uploadLimits;
     private readonly ClaimResolver _claimResolver;
@@ -94,6 +102,10 @@ public sealed class CargoController : OrgScopedControllerBase
         IPublicUrlBuilder urls,
         UpstreamClient upstream,
         CacheAccessRecorder cacheRecorder,
+        CacheArtifactRepository cacheArtifacts,
+        TenantArtifactAccessRepository tenantAccess,
+        VulnerabilityRepository vulns,
+        TimeProvider time,
         IPackagePublishService publish,
         IUploadLimitResolver uploadLimits,
         ClaimResolver claimResolver,
@@ -112,6 +124,10 @@ public sealed class CargoController : OrgScopedControllerBase
         _urls = urls;
         _upstream = upstream;
         _cacheRecorder = cacheRecorder;
+        _cacheArtifacts = cacheArtifacts;
+        _tenantAccess = tenantAccess;
+        _vulns = vulns;
+        _time = time;
         _publish = publish;
         _uploadLimits = uploadLimits;
         _claimResolver = claimResolver;
@@ -216,8 +232,10 @@ public sealed class CargoController : OrgScopedControllerBase
         foreach (var pkg in packages)
         {
             // Resolve the latest non-yanked version so the search result shows the current
-            // installable version. Falls back to any version when all are yanked.
-            string? maxVersion = await ResolveMaxVersionAsync(pkg.Id, ct);
+            // installable version. Combines uploaded (package_versions) and global-plane proxy
+            // (cache_artifact) versions so proxy-cached crates are represented. Falls back to
+            // any version when all are yanked.
+            string? maxVersion = await ResolveMaxVersionAsync(orgId, pkg.Id, pkg.Name, ct);
             cratesArr.Add(new System.Text.Json.Nodes.JsonObject
             {
                 ["name"] = pkg.Name,
@@ -237,13 +255,45 @@ public sealed class CargoController : OrgScopedControllerBase
     }
 
     /// <summary>
-    /// Resolves the latest non-yanked version for a crate (most recently created among
-    /// non-yanked versions). Falls back to the most recently created version when all
-    /// versions are yanked. Returns null when the crate has no versions at all.
+    /// Resolves the latest non-yanked version for a crate across both uploaded
+    /// (package_versions) and global-plane proxy (cache_artifact) versions. Falls back to
+    /// the most recently created version when all versions are yanked. Returns null when the
+    /// crate has no versions at all.
     /// </summary>
-    private async Task<string?> ResolveMaxVersionAsync(string packageId, CancellationToken ct)
+    private async Task<string?> ResolveMaxVersionAsync(string orgId, string packageId, string name, CancellationToken ct)
     {
-        var versions = await _packages.GetVersionsAsync(packageId, ct);
+        var uploadedVersions = await _packages.GetVersionsAsync(packageId, ct);
+        var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, "cargo", name, ct);
+
+        // Deduplicate: proxy entries whose version already appears in uploaded are skipped.
+        IReadOnlyList<PackageVersion> versions;
+        if (proxyEntries.Count == 0)
+        {
+            versions = uploadedVersions;
+        }
+        else
+        {
+            var uploadedVersionSet = uploadedVersions
+                .Select(v => v.Version)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var proxyIds = proxyEntries.Select(e => e.Id).ToList();
+            var proxySignals = proxyIds.Count > 0
+                ? await _vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+                : new Dictionary<string, VulnGateSignals>();
+
+            var synthetic = proxyEntries
+                .Where(e => !uploadedVersionSet.Contains(e.Version))
+                .GroupBy(e => e.Version, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First().ToPackageVersionSynthetic(proxySignals))
+                .ToList();
+
+            var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
+            combined.AddRange(uploadedVersions);
+            combined.AddRange(synthetic);
+            versions = combined;
+        }
+
         var nonYanked = versions.Where(v => !v.Yanked).ToList();
         var candidates = nonYanked.Count > 0 ? nonYanked : versions.ToList();
         if (candidates.Count == 0)
@@ -870,14 +920,42 @@ public sealed class CargoController : OrgScopedControllerBase
             }
 
             string sha256Hex = ComputeSha256Hex(crateBytes);
-            await RecordProxiedVersionAsync(orgId, name, version, blobKey, sha256Hex, crateBytes.Length, ct);
+
+            // Resolve the index line to store alongside the cache_artifact row so the
+            // sparse-index renderer can serve it without a package_versions row.
+            string? upstreamIndexText = await FetchUpstreamIndexAsync(upstreamBase, name, ct);
+            string indexLine = BuildProxyIndexLine(name, version, sha256Hex, upstreamIndexText);
+
+            await RecordProxiedVersionAsync(orgId, name, ct);
 
             // Record the proxy first-fetch into the shared cache index so the eviction
             // pipeline and vulnerability-response query can see it. Best-effort — the
             // recorder swallows its own failures.
-            await _cacheRecorder.RecordAccessAsync(
+            string? cacheArtifactId = await _cacheRecorder.RecordAccessAsync(
                 new CacheAccess(orgId, "cargo", name, version, $"{name}-{version}.crate",
                     sha256Hex, crateBytes.Length, blobKey, downloadUrl), ct);
+            if (cacheArtifactId is not null)
+            {
+                // Dual-write per-tenant download state and global supply-chain facts.
+                await _tenantAccess.UpsertStateAsync(orgId, cacheArtifactId, _time.GetUtcNow(), ct);
+                await _cacheArtifacts.UpdateGlobalFactsAsync(
+                    cacheArtifactId,
+                    purl: PurlNormalizer.Cargo(name, version),
+                    checksumSha1: null,
+                    publishedAt: null,
+                    deprecated: null,
+                    hasInstallScript: false,
+                    installScriptKind: null,
+                    provenanceStatus: null,
+                    provenanceSigner: null,
+                    upstreamIntegrityValue: sha256Hex,
+                    upstreamIntegrityAlgorithm: "sha256",
+                    ct);
+
+                // Write the sparse-index line against the global cache_artifact row so the
+                // index renderer serves it without a package_versions row.
+                await _cargoMeta.UpsertIndexLineForCacheArtifactAsync(cacheArtifactId, indexLine, ct);
+            }
 
             // deepcode ignore LogForging: name and version pass PathSafeValidator; sha256Hex is a hex digest from ComputeSha256Hex; Serilog structured rendering prevents log injection.
             _logger.LogInformation(
@@ -892,17 +970,17 @@ public sealed class CargoController : OrgScopedControllerBase
 
     /// <summary>
     /// Returns the stored <c>blob_key</c> for a local crate version (proxy or hosted), or null
-    /// when no local row exists. Tenant-scoped via the JOIN on <c>packages.org_id</c>. The
-    /// hosted-publish path records the publish pipeline's hosted key here, which differs from
-    /// the reconstructed content-addressed Cargo key, so the download path must consult the
-    /// row rather than assume the key shape.
+    /// when no local row exists. Checks the hosted/legacy-proxy <c>package_versions</c> path
+    /// first; falls back to the global plane (<c>cache_artifact</c>) for proxy crates recorded
+    /// after the P3b flip. Tenant-scoped via the JOIN on <c>packages.org_id</c> (PV path) and
+    /// via <c>tenant_artifact_access</c> (global-plane path).
     /// </summary>
     private async Task<string?> ResolveLocalBlobKeyAsync(
         string orgId, string name, string version, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
         // Tenant gate: packages.org_id = @orgId confines the lookup to the requesting org.
-        return await conn.ExecuteScalarAsync<string?>(
+        string? pvKey = await conn.ExecuteScalarAsync<string?>(
             """
             SELECT pv.blob_key
             FROM package_versions pv
@@ -913,6 +991,17 @@ public sealed class CargoController : OrgScopedControllerBase
               AND pv.version = @version
             """,
             new { orgId, name, version });
+
+        if (pvKey is not null)
+        {
+            return pvKey;
+        }
+
+        // Global-plane lookup for proxy crates recorded after the P3b flip.
+        string filename = $"{name}-{version}.crate";
+        var ca = await _cacheArtifacts.GetServeFactsByCoordinateAsync(
+            orgId, "cargo", name, version, filename, ct);
+        return ca?.BlobKey;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -1004,61 +1093,26 @@ public sealed class CargoController : OrgScopedControllerBase
     }
 
     /// <summary>
-    /// Records a proxied Cargo version in the packages/package_versions tables. Uses the
-    /// standard GetOrCreate pattern so re-fetches are idempotent. Skips insertion when
-    /// the version already exists (the blob was refreshed but the DB row is authoritative).
+    /// Records a proxied Cargo version in the global cache plane. Ensures the per-tenant
+    /// <c>packages</c> row exists for discoverability; the per-version data lives in
+    /// <c>cache_artifact</c> + <c>tenant_artifact_access</c>. No <c>package_versions</c> row
+    /// is inserted for proxy artifacts — the global plane is authoritative for proxy versions.
+    /// The sparse-index line is written to <c>cargo_metadata</c> keyed by
+    /// <c>cache_artifact_id</c> so the index renderer finds it on the global-plane read path.
     /// </summary>
     private async Task RecordProxiedVersionAsync(
-        string orgId, string name, string version,
-        string blobKey, string sha256Hex, long sizeBytes,
-        CancellationToken ct)
+        string orgId, string name, CancellationToken ct)
     {
-        string purl = PurlNormalizer.Cargo(name, version);
-
-        var pkg = await _packages.GetOrCreateAsync(orgId, "cargo", name, name, isProxy: true, ct);
-
-        await using var conn = await _db.OpenAsync(ct);
-        // xtenant: package_id is derived from pkg.Id which is already org-scoped above.
-        int existing = await conn.ExecuteScalarAsync<int>(
-            "SELECT COUNT(*) FROM package_versions WHERE package_id = @pkgId AND version = @version",
-            new { pkgId = pkg.Id, version });
-
-        if (existing > 0)
-        {
-            return;
-        }
-
-        string filename = $"{name}-{version}.crate";
-        // xtenant: package_id is derived from pkg.Id which is already org-scoped by GetOrCreateAsync above.
-        await conn.ExecuteAsync(
-            """
-            INSERT INTO package_versions
-                (id, package_id, version, purl, blob_key, filename, size_bytes,
-                 checksum_sha256, first_fetch, origin)
-            VALUES
-                (@id, @pkgId, @version, @purl, @blobKey, @filename, @sizeBytes,
-                 @sha256, 1, 'proxy')
-            ON CONFLICT DO NOTHING
-            """,
-            new
-            {
-                id = Guid.NewGuid().ToString("N"),
-                pkgId = pkg.Id,
-                version,
-                purl,
-                blobKey,
-                filename,
-                sizeBytes,
-                sha256 = sha256Hex,
-            });
+        // Ensure per-tenant packages row so the crate appears in this org's search / sparse index.
+        await _packages.GetOrCreateAsync(orgId, "cargo", name, name, isProxy: true, ct);
     }
 
     /// <summary>
     /// On a cache hit, records the access into the shared cache index — but only when the
     /// cached version was proxied. Hosted (published) crates are durable registry artefacts
-    /// and never belong in <c>cache_artifact</c> / <c>tenant_artifact_access</c>. Looks up
-    /// the version's origin, checksum, and size from <c>package_versions</c> (org-scoped via
-    /// the join on <c>packages</c>) and forwards to the best-effort recorder. A lookup that
+    /// and never belong in <c>cache_artifact</c> / <c>tenant_artifact_access</c>. Checks the
+    /// legacy <c>package_versions</c> row first; falls back to the global plane
+    /// (<c>cache_artifact</c>) for proxy crates recorded after the P3b flip. A lookup that
     /// finds no proxied row is a no-op; the recorder swallows any recording failure itself.
     /// </summary>
     private async Task RecordProxiedCacheHitAsync(
@@ -1092,16 +1146,47 @@ public sealed class CargoController : OrgScopedControllerBase
             return;
         }
 
-        if (row is null || !string.Equals(row.Origin, "proxy", StringComparison.Ordinal))
+        if (row is not null && !string.Equals(row.Origin, "proxy", StringComparison.Ordinal))
         {
+            // Hosted crate — not a proxy artifact; do not record in cache_artifact.
             return;
+        }
+
+        string contentHash;
+        long sizeBytes;
+        if (row is not null)
+        {
+            contentHash = row.ChecksumSha256 ?? "";
+            sizeBytes = row.SizeBytes;
+        }
+        else
+        {
+            // Global-plane proxy (no package_versions row) — resolve checksum and size from
+            // cache_artifact so the recorder gets accurate metadata on cache hits.
+            string filename = $"{name}-{version}.crate";
+            var ca = await _cacheArtifacts.GetServeFactsByCoordinateAsync(
+                orgId, "cargo", name, version, filename, ct);
+            if (ca is null)
+            {
+                // Neither a package_versions row nor a cache_artifact row — hosted crate without
+                // a PV row, or the data was evicted. Do not record; nothing to attribute.
+                return;
+            }
+            contentHash = ca.ContentHash;
+            sizeBytes = ca.SizeBytes;
         }
 
         // upstream_url is left null on a hit: the originating upstream is not known here and
         // the row already carries it from the first-fetch insert.
-        await _cacheRecorder.RecordAccessAsync(
+        string? cacheArtifactId = await _cacheRecorder.RecordAccessAsync(
             new CacheAccess(orgId, "cargo", name, version, $"{name}-{version}.crate",
-                row.ChecksumSha256 ?? "", row.SizeBytes, blobKey, null), ct);
+                contentHash, sizeBytes, blobKey, null), ct);
+        // On cache hits, increment the per-tenant download counter; global facts are already
+        // populated from first-fetch and do not need to be re-written.
+        if (cacheArtifactId is not null)
+        {
+            await _tenantAccess.UpsertStateAsync(orgId, cacheArtifactId, _time.GetUtcNow(), ct);
+        }
     }
 
     private sealed record ProxiedVersionRow(string Origin, string? ChecksumSha256, long SizeBytes);
@@ -1182,6 +1267,53 @@ public sealed class CargoController : OrgScopedControllerBase
     {
         byte[] hash = SHA256.HashData(bytes);
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Builds a sparse-index JSON line for a proxied crate. When the upstream index text is
+    /// available and contains a line for the version, that line is returned verbatim (so the
+    /// full dependency/feature graph is preserved). Otherwise a minimal line is synthesised
+    /// from the known name, version, and computed SHA-256 so the crate remains resolvable
+    /// without the full upstream metadata.
+    /// </summary>
+    private static string BuildProxyIndexLine(
+        string name, string version, string sha256Hex, string? upstreamIndexText)
+    {
+        string? matchedLine = upstreamIndexText?
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault(line => MatchesUpstreamIndexVersion(line, version));
+        if (matchedLine is not null)
+        {
+            return matchedLine;
+        }
+
+        // Minimal line when upstream index is unavailable or does not contain the version.
+        var minimal = new System.Text.Json.Nodes.JsonObject
+        {
+            ["name"] = name,
+            ["vers"] = version,
+            ["deps"] = new System.Text.Json.Nodes.JsonArray(),
+            ["cksum"] = sha256Hex,
+            ["features"] = new System.Text.Json.Nodes.JsonObject(),
+            ["yanked"] = false,
+        };
+        return minimal.ToJsonString(CargoPublishJsonContext.CompactOptions);
+    }
+
+    // True when a sparse-index line is valid JSON whose "vers" field equals the target version.
+    // Malformed lines are treated as non-matching (skipped).
+    private static bool MatchesUpstreamIndexVersion(string line, string version)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(line);
+            return doc.RootElement.TryGetProperty("vers", out var v) && v.GetString() == version;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // Malformed line — skip.
+            return false;
+        }
     }
 
     /// <summary>

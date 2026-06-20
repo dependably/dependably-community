@@ -38,7 +38,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task NpmPackage_VersionBecomesDeprecated_UpdatesBothColumns()
     {
-        var (_, _, versionId, _) = await SeedVersionAsync(
+        var (_, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "left-pad", version: "1.0.0", origin: "proxy", deprecated: null);
 
         string packument = NpmPackument("left-pad", new Dictionary<string, string?>
@@ -50,8 +50,8 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 
         await using var conn = await _db.OpenAsync();
         var (dep, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
-            "SELECT deprecated, deprecation_checked_at FROM package_versions WHERE id = @id",
-            new { id = versionId });
+            "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
+            new { id = caId });
         Assert.Equal("use pad-left instead", dep);
         Assert.NotNull(checkedAt);
     }
@@ -59,7 +59,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task NpmPackage_DeprecationCleared_UpdatesBothColumns()
     {
-        var (_, _, versionId, _) = await SeedVersionAsync(
+        var (_, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "old-pkg", version: "2.0.0", origin: "proxy",
             deprecated: "was deprecated");
 
@@ -72,8 +72,8 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 
         await using var conn = await _db.OpenAsync();
         var (dep, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
-            "SELECT deprecated, deprecation_checked_at FROM package_versions WHERE id = @id",
-            new { id = versionId });
+            "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
+            new { id = caId });
         Assert.Null(dep);
         Assert.NotNull(checkedAt);
     }
@@ -81,7 +81,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task NpmPackage_UnchangedDeprecation_OnlyStampsCheckedAt()
     {
-        var (_, _, versionId, _) = await SeedVersionAsync(
+        var (_, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "stable-pkg", version: "3.0.0", origin: "proxy",
             deprecated: "still deprecated");
 
@@ -94,14 +94,14 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         // Record the deprecated value before the pass
         await using var connBefore = await _db.OpenAsync();
         string? depBefore = await connBefore.QuerySingleAsync<string?>(
-            "SELECT deprecated FROM package_versions WHERE id = @id", new { id = versionId });
+            "SELECT deprecated FROM cache_artifact WHERE id = @id", new { id = caId });
 
         await service.RunRefreshPassAsync(CancellationToken.None);
 
         await using var conn = await _db.OpenAsync();
         var (dep, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
-            "SELECT deprecated, deprecation_checked_at FROM package_versions WHERE id = @id",
-            new { id = versionId });
+            "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
+            new { id = caId });
         Assert.Equal(depBefore, dep); // unchanged
         Assert.NotNull(checkedAt);    // stamped
     }
@@ -109,7 +109,8 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task NpmPackage_UploadedVersion_NotUpdated()
     {
-        // origin='uploaded' versions are not proxy-cached; they should be skipped.
+        // origin='uploaded' versions are not in cache_artifact; the service only enumerates
+        // cache_artifact groups, so uploaded versions are skipped entirely.
         var (_, _, versionId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "my-pkg", version: "1.0.0", origin: "uploaded", deprecated: null);
 
@@ -123,13 +124,15 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         string? checkedAt = await conn.QuerySingleAsync<string?>(
             "SELECT deprecation_checked_at FROM package_versions WHERE id = @id", new { id = versionId });
-        // uploaded version is skipped entirely — no deprecation_checked_at stamp
+        // uploaded version stays untouched in package_versions
         Assert.Null(checkedAt);
     }
 
     [Fact]
     public async Task NpmPackage_RefreshPass_RecordsUpstreamLatestVersion()
     {
+        // The service looks up the packages row (if any) to record upstream's declared latest
+        // version; SeedVersionAsync always creates a packages row for the org.
         var (_, packageId, _, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "left-pad", version: "1.0.0", origin: "proxy", deprecated: null);
 
@@ -144,12 +147,47 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         Assert.Equal("2.5.0", latest);
     }
 
+    [Fact]
+    public async Task NuGetPackage_RefreshPass_RecordsUpstreamLatestStableVersion()
+    {
+        // NuGet has no per-version deprecation signal, but the refresh pass still resolves the
+        // upstream latest STABLE version (the 2.1.0-rc prerelease must be ignored).
+        var (orgId, packageId, _, _) = await SeedVersionAsync(
+            ecosystem: "nuget", name: "newtonsoft.json", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "nuget", "http://nuget.test/v3");
+
+        var service = BuildService("""{"versions":["1.0.0","2.0.0","2.1.0-rc.1"]}""");
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? latest = await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId });
+        Assert.Equal("2.0.0", latest);
+    }
+
+    [Fact]
+    public async Task MavenPackage_RefreshPass_RecordsUpstreamReleaseVersion()
+    {
+        var (orgId, packageId, _, _) = await SeedVersionAsync(
+            ecosystem: "maven", name: "org.example:widget", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "maven", "http://maven.test");
+
+        var service = BuildService(
+            "<metadata><versioning><latest>2.1.0-SNAPSHOT</latest><release>2.0.0</release></versioning></metadata>");
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? latest = await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId });
+        Assert.Equal("2.0.0", latest);
+    }
+
     // ── PyPI tests ─────────────────────────────────────────────────────────────
 
     [Fact]
     public async Task PyPiPackage_VersionYanked_SetsDeprecatedField()
     {
-        var (_, _, versionId, _) = await SeedVersionAsync(
+        var (_, _, caId, _) = await SeedVersionAsync(
             ecosystem: "pypi", name: "evil-lib", version: "0.1.0", origin: "proxy", deprecated: null);
 
         string pypiJson = PyPiJson("evil-lib", new Dictionary<string, (bool Yanked, string? Reason)>
@@ -161,8 +199,8 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 
         await using var conn = await _db.OpenAsync();
         var (dep, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
-            "SELECT deprecated, deprecation_checked_at FROM package_versions WHERE id = @id",
-            new { id = versionId });
+            "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
+            new { id = caId });
         Assert.Equal("security vulnerability", dep);
         Assert.NotNull(checkedAt);
     }
@@ -170,7 +208,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task PyPiPackage_VersionYankedNoReason_UsesDefaultMessage()
     {
-        var (_, _, versionId, _) = await SeedVersionAsync(
+        var (_, _, caId, _) = await SeedVersionAsync(
             ecosystem: "pypi", name: "bad-lib", version: "1.0.0", origin: "proxy", deprecated: null);
 
         string pypiJson = PyPiJson("bad-lib", new Dictionary<string, (bool Yanked, string? Reason)>
@@ -182,14 +220,14 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 
         await using var conn = await _db.OpenAsync();
         string? dep = await conn.QuerySingleAsync<string?>(
-            "SELECT deprecated FROM package_versions WHERE id = @id", new { id = versionId });
+            "SELECT deprecated FROM cache_artifact WHERE id = @id", new { id = caId });
         Assert.Equal("yanked", dep);
     }
 
     [Fact]
     public async Task PyPiPackage_NotYanked_LeavesDeprecatedNull()
     {
-        var (_, _, versionId, _) = await SeedVersionAsync(
+        var (_, _, caId, _) = await SeedVersionAsync(
             ecosystem: "pypi", name: "good-lib", version: "2.0.0", origin: "proxy", deprecated: null);
 
         string pypiJson = PyPiJson("good-lib", new Dictionary<string, (bool Yanked, string? Reason)>
@@ -201,8 +239,8 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 
         await using var conn = await _db.OpenAsync();
         var (dep, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
-            "SELECT deprecated, deprecation_checked_at FROM package_versions WHERE id = @id",
-            new { id = versionId });
+            "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
+            new { id = caId });
         Assert.Null(dep);
         Assert.NotNull(checkedAt);
     }
@@ -228,13 +266,15 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     // ── Unsupported ecosystem tests ────────────────────────────────────────────
 
     [Theory]
-    [InlineData("nuget")]
-    [InlineData("maven")]
     [InlineData("rpm")]
     [InlineData("oci")]
+    [InlineData("cargo")]
+    [InlineData("go")]
     public async Task UnsupportedEcosystem_VersionNotChecked(string ecosystem)
     {
-        var (_, _, versionId, _) = await SeedVersionAsync(
+        // The refresh query filters to npm/pypi/nuget/maven, so other ecosystems are excluded from
+        // enumeration; their cache_artifact rows remain unstamped.
+        var (_, _, caId, _) = await SeedVersionAsync(
             ecosystem: ecosystem, name: "some-pkg", version: "1.0.0", origin: "proxy", deprecated: null);
 
         var service = BuildService(responseBody: ""); // handler should never be called
@@ -242,7 +282,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 
         await using var conn = await _db.OpenAsync();
         string? checkedAt = await conn.QuerySingleAsync<string?>(
-            "SELECT deprecation_checked_at FROM package_versions WHERE id = @id", new { id = versionId });
+            "SELECT deprecation_checked_at FROM cache_artifact WHERE id = @id", new { id = caId });
         Assert.Null(checkedAt);
     }
 
@@ -251,7 +291,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task AirGapMode_PassSkipped_NoRowsUpdated()
     {
-        var (_, _, versionId, _) = await SeedVersionAsync(
+        var (_, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "pkg", version: "1.0.0", origin: "proxy", deprecated: null);
 
         var service = BuildService("{}", airGapped: true);
@@ -259,15 +299,15 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 
         await using var conn = await _db.OpenAsync();
         string? checkedAt = await conn.QuerySingleAsync<string?>(
-            "SELECT deprecation_checked_at FROM package_versions WHERE id = @id", new { id = versionId });
+            "SELECT deprecation_checked_at FROM cache_artifact WHERE id = @id", new { id = caId });
         Assert.Null(checkedAt);
     }
 
     /// <summary>
     /// Mixed per-tenant air-gap: tenant A is air-gapped (org_settings.air_gapped=1), tenant B is
     /// not. Both hold the same proxy npm package the upstream packument marks deprecated. Only
-    /// tenant B's version is refreshed; tenant A's is left untouched (excluded by the
-    /// per-tenant join in ListPackagesNeedingDeprecationRefreshAsync). The instance air-gap is
+    /// tenant B's cache_artifact row is refreshed; tenant A's is left untouched (excluded by
+    /// the per-tenant join in ListGroupsNeedingDeprecationRefreshAsync). The instance air-gap is
     /// off here, so this proves the per-tenant gate works independently of the instance posture.
     /// </summary>
     [Fact]
@@ -275,9 +315,11 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     {
         // Distinct names (PURL is globally unique) but the same upstream body — the npm parser
         // keys deprecation by version string, so version 1.0.0 is marked deprecated for both.
-        var (orgA, _, versionA, _) = await SeedVersionAsync(
+        // The per-tenant air-gap filter in ListGroupsNeedingDeprecationRefreshAsync excludes
+        // tenant A's group, so only tenant B's cache_artifact row is refreshed.
+        var (orgA, _, caIdA, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "airgap-pkg-a", version: "1.0.0", origin: "proxy", deprecated: null);
-        var (_, _, versionB, _) = await SeedVersionAsync(
+        var (_, _, caIdB, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "airgap-pkg-b", version: "1.0.0", origin: "proxy", deprecated: null);
         await SetAirGappedAsync(orgA, true);
 
@@ -290,11 +332,11 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 
         await using var conn = await _db.OpenAsync();
         var (depA, checkedA) = await conn.QuerySingleAsync<(string?, string?)>(
-            "SELECT deprecated, deprecation_checked_at FROM package_versions WHERE id = @id",
-            new { id = versionA });
+            "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
+            new { id = caIdA });
         var (depB, checkedB) = await conn.QuerySingleAsync<(string?, string?)>(
-            "SELECT deprecated, deprecation_checked_at FROM package_versions WHERE id = @id",
-            new { id = versionB });
+            "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
+            new { id = caIdB });
 
         // Air-gapped tenant A: untouched.
         Assert.Null(depA);
@@ -307,60 +349,64 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     // ── Repository method tests ────────────────────────────────────────────────
 
     [Fact]
-    public async Task ListPackagesNeedingDeprecationRefresh_NullDeprecationCheckedAt_Returned()
+    public async Task ListGroupsNeedingDeprecationRefresh_NullDeprecationCheckedAt_Returned()
     {
-        await SeedVersionAsync(ecosystem: "npm", name: "stale-pkg", version: "1.0.0",
-            origin: "proxy", deprecated: null, deprecationCheckedAt: null);
+        var (orgId, _, _, _) = await SeedVersionAsync(ecosystem: "npm", name: "stale-pkg",
+            version: "1.0.0", origin: "proxy", deprecated: null, deprecationCheckedAt: null);
 
-        var repo = new PackageRepository(_db, time: _clock);
-        var results = await repo.ListPackagesNeedingDeprecationRefreshAsync(ageHours: 24, limit: 10);
+        var repo = new CacheArtifactRepository(_db);
+        var results = await repo.ListGroupsNeedingDeprecationRefreshAsync(ageHours: 24, limit: 10, _clock);
 
-        Assert.Single(results, r => r.PurlName == "stale-pkg");
+        Assert.Contains(results, r => r.Name == "stale-pkg" && r.OrgId == orgId);
     }
 
     [Fact]
-    public async Task ListPackagesNeedingDeprecationRefresh_FreshRow_NotReturned()
+    public async Task ListGroupsNeedingDeprecationRefresh_FreshRow_NotReturned()
     {
         string freshAt = _clock.GetUtcNow().AddMinutes(-30).ToString("yyyy-MM-ddTHH:mm:ssZ");
-        await SeedVersionAsync(ecosystem: "npm", name: "fresh-pkg", version: "1.0.0",
-            origin: "proxy", deprecated: null, deprecationCheckedAt: freshAt);
+        var (orgId, _, _, _) = await SeedVersionAsync(ecosystem: "npm", name: "fresh-pkg",
+            version: "1.0.0", origin: "proxy", deprecated: null, deprecationCheckedAt: freshAt);
 
-        var repo = new PackageRepository(_db, time: _clock);
-        var results = await repo.ListPackagesNeedingDeprecationRefreshAsync(ageHours: 24, limit: 10);
+        var repo = new CacheArtifactRepository(_db);
+        var results = await repo.ListGroupsNeedingDeprecationRefreshAsync(ageHours: 24, limit: 10, _clock);
 
-        Assert.DoesNotContain(results, r => r.PurlName == "fresh-pkg");
+        Assert.DoesNotContain(results, r => r.Name == "fresh-pkg" && r.OrgId == orgId);
     }
 
     [Fact]
-    public async Task ListPackagesNeedingDeprecationRefresh_StaleRow_Returned()
+    public async Task ListGroupsNeedingDeprecationRefresh_StaleRow_Returned()
     {
+        // 48 hours old, well outside the 24-hour window
         string staleAt = _clock.GetUtcNow().AddHours(-48).ToString("yyyy-MM-ddTHH:mm:ssZ");
-        await SeedVersionAsync(ecosystem: "npm", name: "stale-pkg2", version: "1.0.0",
-            origin: "proxy", deprecated: null, deprecationCheckedAt: staleAt);
+        var (orgId, _, _, _) = await SeedVersionAsync(ecosystem: "npm", name: "stale-pkg2",
+            version: "1.0.0", origin: "proxy", deprecated: null, deprecationCheckedAt: staleAt);
 
-        var repo = new PackageRepository(_db, time: _clock);
-        var results = await repo.ListPackagesNeedingDeprecationRefreshAsync(ageHours: 24, limit: 10);
+        var repo = new CacheArtifactRepository(_db);
+        var results = await repo.ListGroupsNeedingDeprecationRefreshAsync(ageHours: 24, limit: 10, _clock);
 
-        Assert.Single(results, r => r.PurlName == "stale-pkg2");
+        Assert.Contains(results, r => r.Name == "stale-pkg2" && r.OrgId == orgId);
     }
 
     [Fact]
-    public async Task ListPackagesNeedingDeprecationRefresh_UploadedOrigin_NotReturned()
+    public async Task ListGroupsNeedingDeprecationRefresh_UploadedOrigin_NotReturned()
     {
-        await SeedVersionAsync(ecosystem: "npm", name: "uploaded-pkg", version: "1.0.0",
-            origin: "uploaded", deprecated: null, deprecationCheckedAt: null);
+        // Uploaded versions have no cache_artifact rows; the query enumerates cache_artifact only.
+        var (orgId, _, _, _) = await SeedVersionAsync(ecosystem: "npm", name: "uploaded-pkg",
+            version: "1.0.0", origin: "uploaded", deprecated: null, deprecationCheckedAt: null);
 
-        var repo = new PackageRepository(_db, time: _clock);
-        var results = await repo.ListPackagesNeedingDeprecationRefreshAsync(ageHours: 24, limit: 10);
+        var repo = new CacheArtifactRepository(_db);
+        var results = await repo.ListGroupsNeedingDeprecationRefreshAsync(ageHours: 24, limit: 10, _clock);
 
-        Assert.DoesNotContain(results, r => r.PurlName == "uploaded-pkg");
+        Assert.DoesNotContain(results, r => r.Name == "uploaded-pkg" && r.OrgId == orgId);
     }
 
     [Fact]
     public async Task UpdateDeprecationCheckedAtAsync_StampsTimestamp()
     {
+        // This PackageRepository method writes to package_versions; seed an uploaded version
+        // so RowId is the package_versions PK.
         var (_, _, versionId, _) = await SeedVersionAsync(
-            ecosystem: "npm", name: "x", version: "1.0.0", origin: "proxy", deprecated: null);
+            ecosystem: "npm", name: "x", version: "1.0.0", origin: "uploaded", deprecated: null);
 
         var repo = new PackageRepository(_db, time: _clock);
         await repo.UpdateDeprecationCheckedAtAsync(versionId);
@@ -374,8 +420,10 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task UpdateDeprecatedAndCheckedAsync_SetsBothColumns()
     {
+        // This PackageRepository method writes to package_versions; seed an uploaded version
+        // so RowId is the package_versions PK.
         var (_, _, versionId, _) = await SeedVersionAsync(
-            ecosystem: "npm", name: "y", version: "1.0.0", origin: "proxy", deprecated: null);
+            ecosystem: "npm", name: "y", version: "1.0.0", origin: "uploaded", deprecated: null);
 
         var repo = new PackageRepository(_db, time: _clock);
         await repo.UpdateDeprecatedAndCheckedAsync(versionId, "some reason");
@@ -391,8 +439,10 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     [Fact]
     public async Task UpdateDeprecatedAndCheckedAsync_ClearsDeprecation()
     {
+        // This PackageRepository method writes to package_versions; seed an uploaded version
+        // so RowId is the package_versions PK.
         var (_, _, versionId, _) = await SeedVersionAsync(
-            ecosystem: "npm", name: "z", version: "1.0.0", origin: "proxy", deprecated: "old reason");
+            ecosystem: "npm", name: "z", version: "1.0.0", origin: "uploaded", deprecated: "old reason");
 
         var repo = new PackageRepository(_db, time: _clock);
         await repo.UpdateDeprecatedAndCheckedAsync(versionId, null);
@@ -434,13 +484,21 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             Dependably.Infrastructure.StagingOptions.Resolve(config),
             NullLogger<UpstreamClient>.Instance);
         var packages = new PackageRepository(_db, time: _clock);
+        var cacheArtifacts = new CacheArtifactRepository(_db);
+        var registries = new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock));
+        var latestResolver = new UpstreamLatestVersionResolver(upstream, registries, config);
         return new DeprecationRefreshService(
-            packages, audit, upstream, airGap, config,
+            packages, cacheArtifacts, audit, upstream, latestResolver, airGap, config,
             NullLogger<DeprecationRefreshService>.Instance,
             _clock);
     }
 
-    private async Task<(string OrgId, string PackageId, string VersionId, string Purl)> SeedVersionAsync(
+    /// <summary>
+    /// Seeds a package version. For proxy origin, also seeds a <c>cache_artifact</c> row plus a
+    /// <c>tenant_artifact_access</c> row (the global-plane records the service now reads).
+    /// Returns: (orgId, packageId, cacheArtifactId-or-versionId-for-uploaded, purl).
+    /// </summary>
+    private async Task<(string OrgId, string PackageId, string RowId, string Purl)> SeedVersionAsync(
         string ecosystem,
         string name,
         string version,
@@ -468,7 +526,37 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             VALUES (@id, @pkgId, @version, @purl, @blobKey, @origin, @deprecated, @deprecationCheckedAt)
             """,
             new { id = versionId, pkgId = packageId, version, purl, blobKey = $"blobs/{versionId}", origin, deprecated, deprecationCheckedAt });
+
+        if (origin == "proxy")
+        {
+            // Seed the global-plane row. The deprecation refresh service reads from cache_artifact
+            // via tenant_artifact_access; without this row the service cannot find the package.
+            string caId = Guid.NewGuid().ToString("N");
+            string blobKey = $"proxy/{caId}/{name}-{version}.tgz";
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO cache_artifact
+                    (id, ecosystem, name, version, filename, blob_key, content_hash, purl,
+                     deprecated, deprecation_checked_at)
+                VALUES (@id, @ecosystem, @name, @version, @filename, @blobKey, 'h', @purl,
+                        @deprecated, @deprecationCheckedAt)
+                """,
+                new { id = caId, ecosystem, name, version, filename = $"{name}-{version}.tgz", blobKey, purl, deprecated, deprecationCheckedAt });
+
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
+                new { orgId, caId });
+
+            return (orgId, packageId, caId, purl);
+        }
+
         return (orgId, packageId, versionId, purl);
+    }
+
+    private async Task SeedUpstreamRegistryAsync(string orgId, string ecosystem, string url)
+    {
+        var repo = new UpstreamRegistryRepository(_db, _clock);
+        await repo.AddAsync(orgId, ecosystem, url, name: null);
     }
 
     private async Task SetAirGappedAsync(string orgId, bool airGapped)

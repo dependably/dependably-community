@@ -75,8 +75,10 @@ public sealed class PackageVersionsFilenameIndexTests : IAsyncLifetime
         }
         var pkg = await repo.GetOrCreateAsync("o1", "pypi", "demo", "demo", isProxy: false);
         string blobKey = BlobKeys.Hosted("o1", "pypi", "demo", "2.0", "demo-2.0.tar.gz");
+        // P3b: FindVersionByBlobKeySuffixAsync returns only uploaded-origin rows by default;
+        // proxy artifacts are served via CacheArtifactRepository on the global plane.
         _ = await repo.CreateVersionAsync(new NewPackageVersion(
-            pkg.Id, "2.0", "pkg:pypi/demo@2.0", blobKey, 100, "cafebabe"));
+            pkg.Id, "2.0", "pkg:pypi/demo@2.0", blobKey, 100, "cafebabe", Origin: "uploaded"));
 
         var found = await repo.FindVersionByBlobKeySuffixAsync("o1", "pypi", "demo-2.0.tar.gz");
         Assert.NotNull(found);

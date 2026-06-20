@@ -1,4 +1,3 @@
-using Cronos;
 using Dependably.Protocol;
 
 namespace Dependably.Infrastructure;
@@ -13,14 +12,19 @@ namespace Dependably.Infrastructure;
 /// hour from the OSV scan so the freshly scanned advisories get enriched the same morning),
 /// with the same thundering-herd jitter shape as <see cref="VulnerabilityScanService"/>.
 /// </summary>
-public sealed class ThreatFeedRefreshService : BackgroundService
+public sealed class ThreatFeedRefreshService : ScheduledBackgroundService
 {
     private readonly VulnerabilityRepository _vulns;
     private readonly IThreatFeedSource _source;
-    private readonly IConfiguration _config;
     private readonly IAirGapMode _airGap;
     private readonly ILogger<ThreatFeedRefreshService> _logger;
     private readonly TimeProvider _time;
+
+    protected override string CronEnvKey => "THREAT_FEED_SCHEDULE";
+    protected override string DefaultCron => "0 5 * * *";
+    protected override string? JitterEnvKey => "THREAT_FEED_JITTER_SECONDS";
+    protected override bool RunOnStartup => true;
+    protected override bool ContinueOnTickError => false;
 
     public ThreatFeedRefreshService(
         VulnerabilityRepository vulns,
@@ -29,55 +33,16 @@ public sealed class ThreatFeedRefreshService : BackgroundService
         IAirGapMode airGap,
         ILogger<ThreatFeedRefreshService> logger,
         TimeProvider time)
+        : base(config, logger, time)
     {
         _vulns = vulns;
         _source = source;
-        _config = config;
         _airGap = airGap;
         _logger = logger;
         _time = time;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        // Initial pass on startup so advisories that accumulated before the service existed
-        // (or while the instance was down) get enriched without waiting for the schedule.
-        await RunRefreshPassAsync(stoppingToken);
-
-        var schedule = CronExpression.Parse(
-            _config["THREAT_FEED_SCHEDULE"] ?? "0 5 * * *",
-            CronFormat.Standard);
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
-            if (next is null)
-            {
-                break;
-            }
-
-            int jitterMaxSeconds = int.TryParse(_config["THREAT_FEED_JITTER_SECONDS"], out int j) && j >= 0 ? j : 3600;
-            // SCS0005: load-spreading jitter, not a security boundary — weak RNG is intentional.
-#pragma warning disable SCS0005
-            var jitter = jitterMaxSeconds > 0
-                ? TimeSpan.FromSeconds(Random.Shared.Next(0, jitterMaxSeconds + 1))
-                : TimeSpan.Zero;
-#pragma warning restore SCS0005
-            var delay = (next.Value - _time.GetUtcNow()) + jitter;
-            if (delay > TimeSpan.Zero)
-            {
-                try { await Task.Delay(delay, stoppingToken); }
-                catch (OperationCanceledException) { break; }
-            }
-
-            if (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-
-            await RunRefreshPassAsync(stoppingToken);
-        }
-    }
+    protected override Task RunTickAsync(CancellationToken ct) => RunRefreshPassAsync(ct);
 
     internal async Task RunRefreshPassAsync(CancellationToken ct)
     {

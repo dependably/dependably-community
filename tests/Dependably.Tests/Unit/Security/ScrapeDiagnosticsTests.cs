@@ -254,4 +254,34 @@ public sealed class ScrapeDiagnosticsTests
         Assert.Single(denied);
         Assert.Equal("10.0.0.3", denied[0].Ip);
     }
+
+    [Fact]
+    public void Record_NormalizesIpv4MappedIpv6_InRecentDeniedIps()
+    {
+        // Dual-stack sockets report IPv4 connections as ::ffff:<v4>. Storing the
+        // raw form breaks the allowlist matcher, which always compares dotted-quad.
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 6, 17, 10, 0, 0, TimeSpan.Zero));
+        var d = new ScrapeDiagnostics(clock);
+
+        d.Record(IPAddress.Parse("::ffff:172.17.0.1"), ScrapeDiagnostics.Outcome.DeniedIp);
+
+        var denied = d.RecentDeniedIps();
+        Assert.Single(denied);
+        Assert.Equal("172.17.0.1", denied[0].Ip);
+    }
+
+    [Fact]
+    public void Record_NormalizesIpv4MappedIpv6_InRecent()
+    {
+        // Canonical form is stored at record time so the panel and add-button both
+        // see the dotted-quad string, not the ::ffff: prefix.
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 6, 17, 10, 0, 0, TimeSpan.Zero));
+        var d = new ScrapeDiagnostics(clock);
+
+        d.Record(IPAddress.Parse("::ffff:172.17.0.1"), ScrapeDiagnostics.Outcome.Allowed);
+
+        var recent = d.Recent();
+        Assert.Single(recent);
+        Assert.Equal("172.17.0.1", recent[0].RemoteIp);
+    }
 }

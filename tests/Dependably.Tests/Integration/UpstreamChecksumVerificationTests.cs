@@ -41,6 +41,7 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
     // already generates a Guid-suffixed name, so adding it to the WHERE clause is the
     // disambiguator with no extra coordination cost.
 
+    // Checks package_versions for UPLOADED artifacts.
     private async Task<bool> VersionRowExistsAsync(string ecosystem, string name, string version)
     {
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
@@ -55,6 +56,23 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
         return hits > 0;
     }
 
+    // Checks cache_artifact for proxy-origin artifacts whose first-fetch writes to the
+    // global plane (npm, NuGet). Mismatch/502 cases still use VersionRowExistsAsync
+    // because neither table gets a row on rejection.
+    // xtenant: cache_artifact is global (no org_id); scoped by coordinate.
+    private async Task<bool> CacheArtifactRowExistsAsync(string ecosystem, string name, string version)
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        long hits = await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COUNT(*) FROM cache_artifact
+            WHERE ecosystem = @ecosystem AND name = @name AND version = @version
+            """,
+            new { ecosystem, name, version });
+        return hits > 0;
+    }
+
     private async Task<long> ChecksumFailureAuditCountAsync()
     {
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
@@ -63,6 +81,7 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
             "SELECT COUNT(*) FROM audit_log WHERE action = 'checksum_failure'");
     }
 
+    // Reads integrity columns from package_versions for UPLOADED artifacts.
     private async Task<(string? Value, string? Algorithm, string? Sha1)> ReadUpstreamColumnsAsync(
         string ecosystem, string name, string version)
     {
@@ -77,6 +96,27 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
             JOIN packages p ON p.id = pv.package_id
             WHERE p.ecosystem = @ecosystem AND p.name = @name AND pv.version = @version
             ORDER BY pv.created_at DESC LIMIT 1
+            """,
+            new { ecosystem, name, version });
+        return row;
+    }
+
+    // Reads integrity columns from cache_artifact for proxy-origin artifacts whose
+    // first-fetch writes to the global plane (npm, NuGet).
+    // xtenant: cache_artifact is global (no org_id); scoped by coordinate.
+    private async Task<(string? Value, string? Algorithm, string? Sha1)> ReadCacheArtifactUpstreamColumnsAsync(
+        string ecosystem, string name, string version)
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        var row = await conn.QuerySingleOrDefaultAsync<(string? Value, string? Algorithm, string? Sha1)>(
+            """
+            SELECT upstream_integrity_value AS Value,
+                   upstream_integrity_algorithm AS Algorithm,
+                   checksum_sha1 AS Sha1
+            FROM cache_artifact
+            WHERE ecosystem = @ecosystem AND name = @name AND version = @version
+            ORDER BY first_cached_at DESC LIMIT 1
             """,
             new { ecosystem, name, version });
         return row;
@@ -116,10 +156,12 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.True(await VersionRowExistsAsync("npm", name, version));
+
+        // npm proxy first-fetch writes to cache_artifact (global plane); no package_versions row.
+        Assert.True(await CacheArtifactRowExistsAsync("npm", name, version));
 
         // Upstream integrity stored verbatim (SRI form) + the legacy shasum stored for npm.
-        var (value, algorithm, sha1) = await ReadUpstreamColumnsAsync("npm", name, version);
+        var (value, algorithm, sha1) = await ReadCacheArtifactUpstreamColumnsAsync("npm", name, version);
         Assert.Equal(integrity, value);
         Assert.Equal("sha512-sri", algorithm);
         Assert.Equal(shasum, sha1);
@@ -193,10 +235,12 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.True(await VersionRowExistsAsync("npm", name, version));
+
+        // npm proxy first-fetch writes to cache_artifact (global plane); no package_versions row.
+        Assert.True(await CacheArtifactRowExistsAsync("npm", name, version));
 
         // Fail-soft: no upstream integrity to surface, so the columns stay NULL.
-        var (value, algorithm, _) = await ReadUpstreamColumnsAsync("npm", name, version);
+        var (value, algorithm, _) = await ReadCacheArtifactUpstreamColumnsAsync("npm", name, version);
         Assert.Null(value);
         Assert.Null(algorithm);
     }
@@ -228,9 +272,11 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.True(await VersionRowExistsAsync("nuget", lowerId, version));
 
-        var (value, algorithm, _) = await ReadUpstreamColumnsAsync("nuget", lowerId, version);
+        // NuGet proxy first-fetch writes to cache_artifact (global plane); no package_versions row.
+        Assert.True(await CacheArtifactRowExistsAsync("nuget", lowerId, version));
+
+        var (value, algorithm, _) = await ReadCacheArtifactUpstreamColumnsAsync("nuget", lowerId, version);
         Assert.Equal(b64, value);
         Assert.Equal("sha512-b64", algorithm);
     }
@@ -291,9 +337,11 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.True(await VersionRowExistsAsync("pypi", name, version));
 
-        var (value, algorithm, _) = await ReadUpstreamColumnsAsync("pypi", name, version);
+        // PyPI proxy first-fetch writes to cache_artifact (global plane); no package_versions row.
+        Assert.True(await CacheArtifactRowExistsAsync("pypi", name, version));
+
+        var (value, algorithm, _) = await ReadCacheArtifactUpstreamColumnsAsync("pypi", name, version);
         Assert.Equal(sha256, value);
         Assert.Equal("sha256", algorithm);
     }
@@ -353,7 +401,9 @@ public sealed class UpstreamChecksumVerificationTests : IClassFixture<Dependably
         using var client = _factory.CreateClientWithBasic(token);
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.True(await VersionRowExistsAsync("pypi", name, version));
+
+        // PyPI proxy first-fetch writes to cache_artifact (global plane); no package_versions row.
+        Assert.True(await CacheArtifactRowExistsAsync("pypi", name, version));
     }
 
     // ── npm publish round-trip: dist.shasum is the correct SHA-1 ─────────────

@@ -19,6 +19,7 @@ namespace Dependably.Api.NuGetProtocol;
 public sealed class NuGetRegistrationHandler(
     OrgRepository orgs,
     PackageRepository packages,
+    CacheArtifactRepository cacheArtifacts,
     TokenRepository tokens,
     VulnerabilityRepository vulns,
     UpstreamClient upstream,
@@ -54,13 +55,10 @@ public sealed class NuGetRegistrationHandler(
             return new NotFoundResult();
         }
 
-        var settings = await orgs.GetSettingsAsync(orgId, ct);
-        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
-        var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
-        if (!settings!.AnonymousPull && token is null)
+        var (settings, _, authError) = await AuthorizeNuGetReadAsync(httpContext, orgId, ct);
+        if (authError is not null)
         {
-            httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
-            return new UnauthorizedResult();
+            return authError;
         }
 
         string normalizedId = id.ToLowerInvariant();
@@ -79,7 +77,7 @@ public sealed class NuGetRegistrationHandler(
 
         // Otherwise the version lives upstream — proxy its leaf when passthrough + claims
         // allow and the name is not operator-reserved.
-        return settings.ProxyPassthroughEffective
+        return settings!.ProxyPassthroughEffective
             && !await reserved.IsReservedAsync(orgId, "nuget", normalizedId, ct)
             && await claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct)
             ? await ProxyRegistrationLeafAsync(httpContext, orgId, normalizedId, version, semVer2, ct)
@@ -156,13 +154,10 @@ public sealed class NuGetRegistrationHandler(
             return new NotFoundResult();
         }
 
-        var settings = await orgs.GetSettingsAsync(orgId, ct);
-        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
-        var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
-        if (!settings!.AnonymousPull && token is null)
+        var (settings, _, authError) = await AuthorizeNuGetReadAsync(httpContext, orgId, ct);
+        if (authError is not null)
         {
-            httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
-            return new UnauthorizedResult();
+            return authError;
         }
 
         string normalizedId = id.ToLowerInvariant();
@@ -173,7 +168,7 @@ public sealed class NuGetRegistrationHandler(
         // a private prerelease must not delete the public version line from the listing, or
         // downstream packages pinning ">= <stable>" of the same name fail NU1103. Mirrors
         // FlatcontainerVersions and PyPi's PackageIndex.
-        bool passthroughAllowed = settings.ProxyPassthroughEffective
+        bool passthroughAllowed = settings!.ProxyPassthroughEffective
             && !await reserved.IsReservedAsync(orgId, "nuget", normalizedId, ct)
             && await claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct);
 
@@ -249,7 +244,8 @@ public sealed class NuGetRegistrationHandler(
     }
 
     // Local-only registration with an IMemoryCache front: a cache hit serves the stored
-    // bytes, and a miss rebuilds from the package's version rows and caches the document.
+    // bytes, and a miss rebuilds from the package's version rows (uploaded + proxy cached)
+    // and caches the document.
     private async Task<IActionResult> ServeLocalRegistrationAsync(
         HttpContext httpContext, string orgId, string id, string normalizedId, Package pkg, bool semVer2, CancellationToken ct)
     {
@@ -260,8 +256,8 @@ public sealed class NuGetRegistrationHandler(
         }
 
         var settings = await orgs.GetSettingsAsync(orgId, ct);
-        var versions = await packages.GetVersionsAsync(pkg.Id, ct);
-        var signals = await LoadVulnSignalsAsync(versions, ct);
+        var versions = await LoadCombinedVersionsAsync(orgId, pkg.Id, normalizedId, ct);
+        var signals = await LoadCombinedVulnSignalsAsync(versions, ct);
         object localResult = BuildLocalRegistration(httpContext, id, pkg, versions, settings!, signals, time.GetUtcNow());
         string localJson = System.Text.Json.JsonSerializer.Serialize(localResult, NuGetRegistrationHelpers.RelaxedJsonOptions);
         byte[] localBytes = System.Text.Encoding.UTF8.GetBytes(localJson);
@@ -269,15 +265,87 @@ public sealed class NuGetRegistrationHandler(
         return RegistrationBytesResult(httpContext, localBytes, "private, max-age=300");
     }
 
-    // Loads vuln gate signals for a version list in one batch query. Returns an empty dict when
-    // all versions lack advisory links. Callers pass the result into
-    // BlockGateService.IsHardBlockedByStoredState as the signals argument so the listing
-    // renderers evaluate all block-gate arms without per-version I/O.
-    private Task<IReadOnlyDictionary<string, VulnGateSignals>> LoadVulnSignalsAsync(
-        IReadOnlyList<PackageVersion> versions, CancellationToken ct) =>
-        versions.Count == 0
-            ? Task.FromResult<IReadOnlyDictionary<string, VulnGateSignals>>(new Dictionary<string, VulnGateSignals>())
-            : vulns.GetGateSignalsBatchAsync(versions.Select(v => v.Id).ToList(), ct);
+    // Loads vuln gate signals for a combined (uploaded + proxy synthetic) version list.
+    // Uploaded versions key on package_version_id; synthetic proxy versions key on
+    // cache_artifact_id (stored in PackageVersion.Id via ToPackageVersionSynthetic).
+    private async Task<IReadOnlyDictionary<string, VulnGateSignals>> LoadCombinedVulnSignalsAsync(
+        IReadOnlyList<PackageVersion> versions, CancellationToken ct)
+    {
+        if (versions.Count == 0)
+        {
+            return new Dictionary<string, VulnGateSignals>();
+        }
+
+        var uploadedIds = versions.Where(v => v.Origin == "uploaded").Select(v => v.Id).ToList();
+        var proxyIds = versions.Where(v => v.Origin == "proxy").Select(v => v.Id).ToList();
+
+        var uploadedSignals = uploadedIds.Count > 0
+            ? await vulns.GetGateSignalsBatchAsync(uploadedIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+        var proxySignals = proxyIds.Count > 0
+            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        if (uploadedSignals.Count == 0)
+        {
+            return proxySignals;
+        }
+
+        if (proxySignals.Count == 0)
+        {
+            return uploadedSignals;
+        }
+
+        var merged = new Dictionary<string, VulnGateSignals>(uploadedSignals);
+        foreach (var (k, v) in proxySignals)
+        {
+            merged[k] = v;
+        }
+
+        return merged;
+    }
+
+    // Returns the combined list of uploaded package_versions and synthetic PackageVersion
+    // objects projected from global-plane proxy cache entries. NuGet registration lists all
+    // cached versions for a package id; proxy entries whose version already appears in uploaded
+    // versions are deduplicated. Each NuGet version may produce multiple cache_artifact rows
+    // (.nupkg, .nuspec, .sha512); version deduplication ensures one entry per version string.
+    private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
+        string orgId, string packageId, string normalizedId, CancellationToken ct)
+    {
+        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
+        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, "nuget", normalizedId, ct);
+
+        if (proxyEntries.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var uploadedVersionSet = uploadedVersions
+            .Select(v => v.Version)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
+        var proxySignals = proxyIds.Count > 0
+            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        var synthetic = proxyEntries
+            .Where(e => !uploadedVersionSet.Contains(e.Version))
+            .GroupBy(e => e.Version, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First().ToPackageVersionSynthetic(proxySignals))
+            .ToList();
+
+        if (synthetic.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
+        combined.AddRange(uploadedVersions);
+        combined.AddRange(synthetic);
+        return combined;
+    }
 
     private object BuildLocalRegistration(
         HttpContext httpContext,
@@ -334,10 +402,10 @@ public sealed class NuGetRegistrationHandler(
 
         var localVersions = pkg is null
             ? Array.Empty<PackageVersion>() as IReadOnlyList<PackageVersion>
-            : await packages.GetVersionsAsync(pkg.Id, ct);
+            : await LoadCombinedVersionsAsync(orgId, pkg.Id, normalizedId, ct);
 
         var settings = await orgs.GetSettingsAsync(orgId, ct);
-        var signals = await LoadVulnSignalsAsync(localVersions, ct);
+        var signals = await LoadCombinedVulnSignalsAsync(localVersions, ct);
         var now = time.GetUtcNow();
         string baseUrl = urls.Absolute(httpContext, "/nuget");
 
@@ -414,6 +482,24 @@ public sealed class NuGetRegistrationHandler(
             }
         }
         return null;
+    }
+
+    // Returns (settings, token) when the caller is authorized to read NuGet packages from this org,
+    // or sets errorResult to a 401 challenge when AnonymousPull is disabled and no valid token was
+    // presented. Org-scoped token resolution means cross-org tokens are coerced to null so the
+    // AnonymousPull gate governs — this is a BOLA guard and must not be relaxed.
+    private async Task<(OrgSettings? Settings, TokenRecord? Token, IActionResult? Error)>
+        AuthorizeNuGetReadAsync(HttpContext httpContext, string orgId, CancellationToken ct)
+    {
+        var settings = await orgs.GetSettingsAsync(orgId, ct);
+        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
+        var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
+        if (!settings!.AnonymousPull && token is null)
+        {
+            httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
+            return (null, null, new UnauthorizedResult());
+        }
+        return (settings, token, null);
     }
 
     private static bool AreUpstreamSafeNuGetSegments(params string[] values)

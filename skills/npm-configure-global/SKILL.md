@@ -5,7 +5,6 @@ ecosystem: npm
 scope: global
 inputs:
   - DEPENDABLY_BASE_URL
-  - ORG_SLUG
   - NPM_TOKEN
 ---
 
@@ -19,9 +18,11 @@ directory only — not in source control.
 
 Ask the user for:
 
-1. **DEPENDABLY_BASE_URL** — e.g. `https://repo.example.com`.
-2. **ORG_SLUG** — e.g. `default`.
-3. **NPM_TOKEN** — created in dependably under **Tokens**.
+1. **DEPENDABLY_BASE_URL** — the base URL of your dependably org, e.g.
+   `https://repo.example.com`. Multi-tenant deployments put the org in the
+   subdomain (`https://my-org.repo.example.com`); single-tenant deployments use
+   the bare host.
+2. **NPM_TOKEN** — created in dependably under **Tokens**.
 
 ## File to write
 
@@ -29,8 +30,8 @@ Linux / macOS: `~/.npmrc`
 Windows: `%USERPROFILE%\.npmrc`
 
 ```ini
-registry=https://repo.example.com/o/default/npm/
-//repo.example.com/o/default/npm/:_authToken=<token>
+registry=https://repo.example.com/npm/
+//repo.example.com/npm/:_authToken=<token>
 # Uncomment the line below if dependably is served over plain HTTP:
 # strict-ssl=false
 ```
@@ -59,5 +60,5 @@ Either delete `~/.npmrc` or run:
 
 ```bash
 npm config delete registry --location=user
-npm config delete //repo.example.com/o/default/npm/:_authToken --location=user
+npm config delete //repo.example.com/npm/:_authToken --location=user
 ```

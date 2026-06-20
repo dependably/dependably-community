@@ -1,5 +1,6 @@
 using Dependably.Infrastructure;
 using Dependably.Protocol;
+using Dependably.Protocol.Provenance;
 using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.AspNetCore.Http;
@@ -10,12 +11,15 @@ namespace Dependably.Api.NpmProtocol;
 /// <summary>
 /// Handles npm tarball download endpoints (GET and HEAD) for both the rewritten
 /// <c>/npm/tarballs/…</c> paths and the conventional <c>/npm/{pkg}/-/{file}</c> paths.
-/// Routes by per-version origin; proxy cache-miss fetches are single-flighted via
+/// Routes by per-version origin; proxy cache-hits served from the global plane
+/// (<c>cache_artifact</c>); proxy cache-miss fetches are single-flighted via
 /// <see cref="ProxyFetchService"/>.
 /// </summary>
 public sealed class NpmTarballHandler(
     OrgRepository orgs,
     PackageRepository packages,
+    CacheArtifactRepository cacheArtifacts,
+    TenantArtifactAccessRepository tenantAccess,
     TokenRepository tokens,
     AuditRepository audit,
     IBlobStore blobs,
@@ -26,7 +30,9 @@ public sealed class NpmTarballHandler(
     ClaimResolver claimResolver,
     ReservedNamespaceService reserved,
     ProxyFetchService proxyFetch,
-    UpstreamRegistryResolver registries)
+    UpstreamRegistryResolver registries,
+    NpmProvenanceVerifier provenance,
+    TimeProvider time)
 {
     public Task<IActionResult> GetTarballAsync(
         HttpContext httpContext, string orgId, string pkg, string file, CancellationToken ct)
@@ -85,43 +91,47 @@ public sealed class NpmTarballHandler(
 
         var settings = await orgs.GetSettingsAsync(orgId, ct);
         var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
-        var pkgVersion = await LookupVersionByFilenameAsync(orgId, fullName, shortName, file, ct);
 
-        if (pkgVersion is null)
+        // Uploaded-only lookup: proxy rows are served via the global plane below.
+        var pkgVersion = await LookupUploadedVersionByFilenameAsync(orgId, fullName, shortName, file, ct);
+
+        return pkgVersion is not null
+            ? await HeadUploadedTarballAsync(httpContext, orgId, pkgVersion, file, token, settings, ct)
+            : await HeadProxyCachedTarballAsync(httpContext, orgId, fullName, shortName, file, token, settings!, ct);
+    }
+
+    // Returns HEAD headers for an uploaded-origin npm tarball. Requires a valid token with
+    // ReadArtifact; runs the block gate; returns 401/403/404 when denied or absent.
+    private async Task<IActionResult> HeadUploadedTarballAsync(
+        HttpContext httpContext, string orgId, PackageVersion pkgVersion, string file,
+        TokenRecord? token, OrgSettings? settings, CancellationToken ct)
+    {
+        // Uploaded version found — auth required for HEAD.
+        if (token is null)
         {
-            // No local record — treat as a proxy cache-miss; return 404.
+            httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
+            return new UnauthorizedResult();
+        }
+        if (!token.HasCapability(Capabilities.ReadArtifact))
+        {
+            return new ForbidResult();
+        }
+
+        if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase))
+        {
             return new NotFoundResult();
         }
 
-        // Auth gate mirrors GET: hosted requires a token; proxy follows AnonymousPull.
-        var authResult = await CheckTarballOriginGateAsync(httpContext, new TarballLookup(orgId, fullName, file, pkgVersion), token, settings, ct);
-        if (authResult is not null)
-        {
-            return authResult;
-        }
-
-        string? sourceIp = httpContext.GetNormalizedRemoteIp();
+        string? srcIp = httpContext.GetNormalizedRemoteIp();
         if (await blockGate.EvaluateAsync(
-                new BlockGateRequest(orgId, "npm", pkgVersion.Purl, pkgVersion.Id,
-                    pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
-                    token?.UserId, settings!.MaxOsvScoreTolerance, sourceIp,
-                    MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                    PublishedAt: pkgVersion.PublishedAt,
-                    ActorKind: token?.ActorKind,
-                    Deprecated: pkgVersion.Deprecated,
-                    BlockDeprecatedMode: settings.BlockDeprecated,
-                    BlockMaliciousMode: settings.BlockMalicious,
-                    BlockKevMode: settings.BlockKev,
-                    MaxEpssTolerance: settings.MaxEpssTolerance), ct)
+                BlockGateRequest.For(orgId, "npm", pkgVersion, token, settings, srcIp), ct)
             == BlockDecision.Blocked)
         {
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
 
-        // Confirm the blob is present without opening a stream.
-        string blobKey = BlobKeys.StoreKey(pkgVersion.BlobKey);
-        bool exists = await blobs.ExistsAsync(blobKey, ct);
-        if (!exists)
+        string uploadedBlobKey = BlobKeys.StoreKey(pkgVersion.BlobKey);
+        if (!await blobs.ExistsAsync(uploadedBlobKey, ct))
         {
             return new NotFoundResult();
         }
@@ -138,47 +148,63 @@ public sealed class NpmTarballHandler(
         return new OkResult();
     }
 
-    // Identifies the tarball being served: org scope, npm package name, filename, and the
-    // resolved version record. Bundled to keep CheckTarballOriginGateAsync under S107.
-    private sealed record TarballLookup(
-        string OrgId, string FullName, string File, PackageVersion Version);
-
-    // Checks the per-origin auth gate for a tarball request: uploaded versions require a
-    // token with ReadArtifact; proxy versions run the shared proxy gate (allowlist/blocklist).
-    // Also validates that the blob key matches the requested filename — a mismatch means the
-    // DB row exists but the file segment doesn't match (e.g. old rename artefact). Returns a
-    // non-null IActionResult when the gate denies access or the filename check fails.
-    private async Task<IActionResult?> CheckTarballOriginGateAsync(
-        HttpContext httpContext, TarballLookup lookup,
-        TokenRecord? token, OrgSettings? settings, CancellationToken ct)
+    // Returns HEAD headers for a proxy-cached npm tarball from the global plane. Enforces
+    // the AnonymousPull gate, then runs the block gate; returns 401/403/404 when denied or absent.
+    // Cohesive HEAD serve helper; all params are required for auth, block-gate, and blob lookup.
+#pragma warning disable S107
+    private async Task<IActionResult> HeadProxyCachedTarballAsync(
+        HttpContext httpContext, string orgId, string fullName, string shortName, string file,
+        TokenRecord? token, OrgSettings settings, CancellationToken ct)
+#pragma warning restore S107
     {
-        if (lookup.Version.Origin == "uploaded")
+        // Proxy cache-hit path: check the global plane.
+        if (!settings.AnonymousPull && token is null)
         {
-            if (token is null)
-            {
-                httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
-                return new UnauthorizedResult();
-            }
-            if (!token.HasCapability(Capabilities.ReadArtifact))
-            {
-                return new ForbidResult();
-            }
-        }
-        else
-        {
-            // Proxy version — run the same gates as GET: auth, allowlist, blocklist.
-            var gate = await CheckProxyGatesAsync(httpContext, lookup.OrgId, lookup.FullName, token, settings!, ct);
-            if (gate is not null)
-            {
-                return gate;
-            }
+            httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
+            return new UnauthorizedResult();
         }
 
-        // Filename mismatch: the DB row exists but the file segment in the URL doesn't match
-        // the stored blob key — treat as 404 to avoid leaking a neighbouring file path.
-        return !lookup.Version.BlobKey.EndsWith("/" + lookup.File, StringComparison.OrdinalIgnoreCase)
-            ? new NotFoundResult()
-            : null;
+        string? versionFromFilename = NpmSharedHelpers.ExtractVersionFromTarballFilename(shortName, file);
+        if (versionFromFilename is null)
+        {
+            return new NotFoundResult();
+        }
+
+        var caFacts = await cacheArtifacts.GetServeFactsByCoordinateAsync(
+            orgId, "npm", fullName, versionFromFilename, file, ct);
+        if (caFacts is null)
+        {
+            return new NotFoundResult();
+        }
+
+        string? sourceIp = httpContext.GetNormalizedRemoteIp();
+        if (await blockGate.EvaluateAsync(
+                BuildProxyBlockGateRequest(orgId, caFacts, token, settings, sourceIp), ct)
+            == BlockDecision.Blocked)
+        {
+            return new StatusCodeResult(StatusCodes.Status403Forbidden);
+        }
+
+        // blobkey-ok: proxy blob key from cache_artifact; no filename suffix needed for HEAD.
+        string blobKey = BlobKeys.StoreKey(caFacts.BlobKey);
+        if (!await blobs.ExistsAsync(blobKey, ct))
+        {
+            return new NotFoundResult();
+        }
+
+        httpContext.Response.Headers["X-Cache"] = "HIT";
+        if (caFacts.Purl is not null)
+        {
+            httpContext.Response.Headers["X-Dependably-PURL"] = NpmSharedHelpers.SanitizeHeader(caFacts.Purl);
+        }
+        httpContext.Response.ContentType = "application/octet-stream";
+        httpContext.Response.Headers["Content-Length"] = caFacts.SizeBytes.ToString();
+        if (!string.IsNullOrEmpty(caFacts.ContentHash))
+        {
+            httpContext.Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
+            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+        }
+        return new OkResult();
     }
 
     private async Task<IActionResult> GetTarballImplAsync(
@@ -197,25 +223,46 @@ public sealed class NpmTarballHandler(
         // Org-scoped resolve: cross-org tokens behave as anonymous (respecting AnonymousPull).
         var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
 
-        // Route by per-version origin, not packages.is_proxy. Extract version from the tarball
-        // filename ({shortName}-{version}.tgz) and branch on that row's origin.
-        var pkgVersion = await LookupVersionByFilenameAsync(orgId, fullName, shortName, file, ct);
+        // Uploaded-only lookup: proxy rows are no longer in package_versions.
+        var pkgVersion = await LookupUploadedVersionByFilenameAsync(orgId, fullName, shortName, file, ct);
 
-        if (pkgVersion is not null && pkgVersion.Origin == "uploaded")
+        if (pkgVersion is not null)
         {
             return await ServeHostedTarballVersionAsync(httpContext, orgId, pkgVersion, file, token, settings!, ct);
         }
 
-        if (pkgVersion is not null && pkgVersion.Origin == "proxy")
+        // Proxy cache-hit: an already-cached proxy artifact is served from the global plane
+        // before the proxy-fetch gates. A cached proxy version is public per the per-version
+        // origin routing (uploaded requires auth, proxy does not), so it must not be blocked by
+        // the AnonymousPull gate — that gate guards triggering an upstream FETCH on a miss, which
+        // is handled by CheckProxyGatesAsync below. The per-version policy block-gate is still
+        // re-evaluated on every hit.
+        string? versionFromFilename = NpmSharedHelpers.ExtractVersionFromTarballFilename(shortName, file);
+        if (versionFromFilename is not null)
         {
-            var cached = await ServeCachedProxyTarballAsync(httpContext, orgId, pkgVersion, file, token, settings!, ct);
-            if (cached is not null)
+            var caFacts = await cacheArtifacts.GetServeFactsByCoordinateAsync(
+                orgId, "npm", fullName, versionFromFilename, file, ct);
+
+            if (caFacts is not null)
             {
-                return cached;
+                string? sourceIpProxy = httpContext.GetNormalizedRemoteIp();
+                if (await blockGate.EvaluateAsync(
+                        BuildProxyBlockGateRequest(orgId, caFacts, token, settings!, sourceIpProxy), ct)
+                    == BlockDecision.Blocked)
+                {
+                    return new StatusCodeResult(StatusCodes.Status403Forbidden);
+                }
+
+                var proxyCached = await TryServeProxyCachedTarballAsync(httpContext, caFacts, file, orgId, token, sourceIpProxy, ct);
+                if (proxyCached is not null)
+                {
+                    return proxyCached;
+                }
             }
-            // Same version row exists but the cached blob doesn't match the requested file — fall through.
         }
 
+        // Miss → upstream fetch path. The anonymous-pull / allowlist / blocklist / passthrough
+        // gates apply here because a miss would trigger an outbound fetch.
         var gate = await CheckProxyGatesAsync(httpContext, orgId, fullName, token, settings!, ct);
         if (gate is not null)
         {
@@ -230,15 +277,77 @@ public sealed class NpmTarballHandler(
             : await ProxyFetchAndCacheAsync(httpContext, new NpmTarballKey(orgId, fullName, shortName, file), token, settings!, ct);
     }
 
-    // Looks up the package version record whose tarball filename matches the request.
-    private async Task<PackageVersion?> LookupVersionByFilenameAsync(
+    // Looks up an uploaded-origin package version record whose tarball filename matches the
+    // request. Proxy rows are no longer stored in package_versions and are excluded by the
+    // FindVersionByBlobKeySuffixAsync filter.
+    private async Task<PackageVersion?> LookupUploadedVersionByFilenameAsync(
         string orgId, string fullName, string shortName, string file, CancellationToken ct)
     {
         var pkgRecord = await packages.GetByPurlNameAsync(orgId, "npm", fullName, ct);
         string? versionFromFilename = NpmSharedHelpers.ExtractVersionFromTarballFilename(shortName, file);
-        return pkgRecord is null || versionFromFilename is null
-            ? null
-            : await packages.GetVersionAsync(pkgRecord.Id, versionFromFilename, ct);
+        if (pkgRecord is null || versionFromFilename is null)
+        {
+            return null;
+        }
+        var v = await packages.GetVersionAsync(pkgRecord.Id, versionFromFilename, ct);
+        // Exclude proxy rows — those are now served via the global plane.
+        return v?.Origin == "uploaded" ? v : null;
+    }
+
+    // Builds a BlockGateRequest for a proxy artifact from global-plane serve facts.
+    private static BlockGateRequest BuildProxyBlockGateRequest(
+        string orgId, CacheArtifactServeFacts caFacts, TokenRecord? token,
+        OrgSettings settings, string? sourceIp) =>
+        new(orgId, "npm", caFacts.Purl ?? string.Empty, string.Empty,
+            caFacts.ManualBlockState, caFacts.VulnCheckedAt,
+            token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
+            MinReleaseAgeHours: settings.MinReleaseAgeHours,
+            PublishedAt: caFacts.PublishedAt,
+            ActorKind: token?.ActorKind,
+            Deprecated: caFacts.Deprecated,
+            BlockDeprecatedMode: settings.BlockDeprecated,
+            BlockMaliciousMode: settings.BlockMalicious,
+            BlockKevMode: settings.BlockKev,
+            MaxEpssTolerance: settings.MaxEpssTolerance,
+            Origin: "proxy",
+            HasInstallScript: caFacts.HasInstallScript,
+            InstallScriptKind: caFacts.InstallScriptKind,
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            ProvenanceStatus: caFacts.ProvenanceStatus,
+            CacheArtifactId: caFacts.Id);
+
+    // Serves a proxy tarball from the global-plane cache. Increments per-tenant download count
+    // via tenant_artifact_access. Returns null when the blob is not yet in the store (the
+    // caller falls through to the upstream proxy fetch).
+    private async Task<IActionResult?> TryServeProxyCachedTarballAsync(
+        HttpContext httpContext, CacheArtifactServeFacts caFacts, string file, string orgId,
+        TokenRecord? token, string? sourceIp, CancellationToken ct)
+    {
+        // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to the cache tier.
+        var stream = await blobs.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
+        if (stream is null)
+        {
+            return null;
+        }
+
+        httpContext.Response.Headers["X-Cache"] = "HIT";
+        if (caFacts.Purl is not null)
+        {
+            httpContext.Response.Headers["X-Dependably-PURL"] = NpmSharedHelpers.SanitizeHeader(caFacts.Purl);
+        }
+        if (!string.IsNullOrEmpty(caFacts.ContentHash))
+        {
+            httpContext.Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
+            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+        }
+        if (caFacts.Purl is not null)
+        {
+            await audit.LogActivityAsync(orgId, "npm", caFacts.Purl, "download", token?.UserId,
+                actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
+        }
+        // Increment per-tenant download count on the global plane.
+        await tenantAccess.UpsertStateAsync(orgId, caFacts.Id, time.GetUtcNow(), ct);
+        return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
     }
 
     // Evaluates allowlist, blocklist, and proxy-passthrough gates for the proxy fetch path.
@@ -290,17 +399,7 @@ public sealed class NpmTarballHandler(
 
         string? sourceIp = httpContext.GetNormalizedRemoteIp();
         if (await blockGate.EvaluateAsync(
-                new BlockGateRequest(orgId, "npm", pkgVersion.Purl, pkgVersion.Id,
-                    pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
-                    token.UserId, settings.MaxOsvScoreTolerance, sourceIp,
-                    MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                    PublishedAt: pkgVersion.PublishedAt,
-                    ActorKind: token.ActorKind,
-                    Deprecated: pkgVersion.Deprecated,
-                    BlockDeprecatedMode: settings.BlockDeprecated,
-                    BlockMaliciousMode: settings.BlockMalicious,
-                    BlockKevMode: settings.BlockKev,
-                    MaxEpssTolerance: settings.MaxEpssTolerance), ct)
+                BlockGateRequest.For(orgId, "npm", pkgVersion, token, settings, sourceIp), ct)
             == BlockDecision.Blocked)
         {
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
@@ -321,52 +420,6 @@ public sealed class NpmTarballHandler(
         }
         await audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token.UserId,
             actorKind: token.ActorKind, sourceIp: sourceIp, ct: ct);
-        await packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
-        return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
-    }
-
-    private async Task<IActionResult?> ServeCachedProxyTarballAsync(
-        HttpContext httpContext, string orgId, PackageVersion pkgVersion, string file,
-        TokenRecord? token, OrgSettings settings, CancellationToken ct)
-    {
-        string? sourceIp = httpContext.GetNormalizedRemoteIp();
-        if (await blockGate.EvaluateAsync(
-                new BlockGateRequest(orgId, "npm", pkgVersion.Purl, pkgVersion.Id,
-                    pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
-                    token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
-                    MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                    PublishedAt: pkgVersion.PublishedAt,
-                    ActorKind: token?.ActorKind,
-                    Deprecated: pkgVersion.Deprecated,
-                    BlockDeprecatedMode: settings.BlockDeprecated,
-                    BlockMaliciousMode: settings.BlockMalicious,
-                    BlockKevMode: settings.BlockKev,
-                    MaxEpssTolerance: settings.MaxEpssTolerance), ct)
-            == BlockDecision.Blocked)
-        {
-            return new StatusCodeResult(StatusCodes.Status403Forbidden);
-        }
-
-        if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
-
-        var stream = await blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
-        if (stream is null)
-        {
-            return null;
-        }
-
-        httpContext.Response.Headers["X-Cache"] = "HIT";
-        httpContext.Response.Headers["X-Dependably-PURL"] = NpmSharedHelpers.SanitizeHeader(pkgVersion.Purl);
-        if (pkgVersion.ChecksumSha256 is not null)
-        {
-            httpContext.Response.Headers.ETag = $"\"sha256:{pkgVersion.ChecksumSha256}\"";
-            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
-        }
-        await audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token?.UserId,
-            actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         await packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
         return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
     }
@@ -406,6 +459,12 @@ public sealed class NpmTarballHandler(
 
             var meta = await TryFetchNpmFirstFetchMetadataAsync(upstreamBase, key.FullName, version, ct);
 
+            // Verify the upstream registry signature against operator-pinned trust anchors when the
+            // tenant enabled it and the verifier has pinned keys. Runs only for proxy-origin
+            // versions (this is the proxy fetch path). NotApplicable when the policy is off or no
+            // keys are configured — the status stays NULL and nothing blocks.
+            var prov = await ResolveProvenanceAsync(settings, key.FullName, version, meta, ct);
+
             // The streaming MISS path already wrote the blob and computed the SHA-256 inline —
             // no large byte[] allocation needed. Wrap the result in a BlobHandle so
             // ProxyFetchService can open a fresh blob-store stream for licence extraction
@@ -421,7 +480,7 @@ public sealed class NpmTarballHandler(
             // which validates a 64-char lowercase hex — path traversal cannot escape that key. All
             // structured logs use Serilog RenderedCompactJsonFormatter (CRLF-safe).
             var result = await proxyFetch.RecordAndScanAsync(
-                BuildNpmProxyFetchRequest(httpContext, key.OrgId, key.FullName, version, purl, key.File, blob, upstreamUrl, token, settings, meta), ct);
+                BuildNpmProxyFetchRequest(httpContext, key.OrgId, key.FullName, version, purl, key.File, blob, upstreamUrl, token, settings, meta, prov), ct);
 
             if (result.Decision == BlockDecision.Blocked)
             {
@@ -500,7 +559,7 @@ public sealed class NpmTarballHandler(
     private static ProxyFetchRequest BuildNpmProxyFetchRequest(
         HttpContext httpContext, string orgId, string fullName, string version, string purl, string file,
         BlobHandle blob, string upstreamUrl, TokenRecord? token, OrgSettings settings,
-        NpmFirstFetchMetadata meta)
+        NpmFirstFetchMetadata meta, ProvenanceResult prov)
 #pragma warning restore S107
     {
         var (integrityValue, integrityAlgo) = meta.IntegritySri is not null
@@ -528,7 +587,25 @@ public sealed class NpmTarballHandler(
             BlockDeprecatedMode: settings.BlockDeprecated,
             BlockMaliciousMode: settings.BlockMalicious,
             BlockKevMode: settings.BlockKev,
-            MaxEpssTolerance: settings.MaxEpssTolerance);
+            MaxEpssTolerance: settings.MaxEpssTolerance,
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            ProvenanceStatus: ProvenanceStatuses.ToColumn(prov.Status),
+            ProvenanceSigner: prov.Signer,
+            VerifyProvenanceMode: settings.VerifyNpmSignatures);
+    }
+
+    // Runs npm registry-signature verification for a proxy-origin version when the tenant enabled
+    // it. Off-policy or an unconfigured verifier short-circuits to NotApplicable (NULL status,
+    // never blocks). The signed payload is "{name}@{version}:{integrity}", so the integrity SRI
+    // and the registry-published signatures both come from the packument dist node.
+    private async Task<ProvenanceResult> ResolveProvenanceAsync(
+        OrgSettings settings, string fullName, string version,
+        NpmFirstFetchMetadata meta, CancellationToken ct)
+    {
+        return settings.VerifyNpmSignatures == "off" || !provenance.IsConfigured
+            ? ProvenanceResult.NotApplicable
+            : await provenance.VerifyAsync(
+                new ProvenanceInput("npm", fullName, version, meta.RawIntegrity, meta.Signatures), ct);
     }
 
     /// <summary>
@@ -580,9 +657,40 @@ public sealed class NpmTarballHandler(
 
             string? deprecated = LicenseExtractor.FromNpmPackumentVersion(versionNode).Deprecated;
 
-            return new NpmFirstFetchMetadata(publishedAt, checksum, shasum, integritySri, deprecated);
+            // Registry signatures over "{name}@{version}:{integrity}". The signed integrity is the
+            // exact dist.integrity string (signed packages always carry the sha512 SRI form), so
+            // pass it through verbatim — distinct from integritySri, which is NULLed for the UI
+            // label when not SRI-shaped.
+            var signatures = ParseNpmSignatures(dist?["signatures"]);
+
+            return new NpmFirstFetchMetadata(
+                publishedAt, checksum, shasum, integritySri, deprecated, integrity, signatures);
         }
         catch { return NpmFirstFetchMetadata.Empty; }
+    }
+
+    // Parses the dist.signatures array ([{ keyid, sig }, …]) into the provenance signature list.
+    // Returns an empty list (never null) when the field is absent or malformed — an unsigned
+    // version maps to a list with zero entries.
+    private static List<ProvenanceSignature> ParseNpmSignatures(System.Text.Json.Nodes.JsonNode? signaturesNode)
+    {
+        if (signaturesNode is not System.Text.Json.Nodes.JsonArray arr)
+        {
+            return [];
+        }
+
+        var list = new List<ProvenanceSignature>(arr.Count);
+        foreach (var entry in arr)
+        {
+            string? keyId = entry?["keyid"]?.GetValue<string>();
+            string? sig = entry?["sig"]?.GetValue<string>();
+            if (!string.IsNullOrEmpty(keyId) && !string.IsNullOrEmpty(sig))
+            {
+                list.Add(new ProvenanceSignature(keyId, sig));
+            }
+        }
+
+        return list;
     }
 
     private readonly record struct NpmFirstFetchMetadata(
@@ -590,8 +698,10 @@ public sealed class NpmTarballHandler(
         ChecksumSpec? Checksum,
         string? Sha1Hex,
         string? IntegritySri,
-        string? Deprecated)
+        string? Deprecated,
+        string? RawIntegrity,
+        IReadOnlyList<ProvenanceSignature> Signatures)
     {
-        public static NpmFirstFetchMetadata Empty => new(null, null, null, null, null);
+        public static NpmFirstFetchMetadata Empty => new(null, null, null, null, null, null, []);
     }
 }

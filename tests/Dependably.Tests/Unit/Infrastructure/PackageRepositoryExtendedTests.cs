@@ -159,22 +159,36 @@ public sealed class PackageRepositoryExtendedTests : IClassFixture<InMemoryDbFix
     }
 
     [Fact]
-    public async Task IncrementDownloadCountByPurlAsync_BumpsTheMatchingRow()
+    public async Task IncrementDownloadCountByPurlAsync_BumpsGlobalPlaneTenantRow()
     {
+        // By-purl increments now target tenant_artifact_access.download_count (global plane).
+        // Seed a cache_artifact + tenant_artifact_access row for the target org.
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "rpm", "acme");
         string purl = Purl();
-        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", purl,
-            blobKey: $"k-{Guid.NewGuid():N}");
+        string caId = Guid.NewGuid().ToString("N");
 
-        await _repo.IncrementDownloadCountByPurlAsync(purl);
-        await _repo.IncrementDownloadCountByPurlAsync(purl);
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, purl) " +
+                "VALUES (@id, 'rpm', 'acme', '1.0.0', 'acme-1.0.0.rpm', @bk, 'h', @purl)",
+                new { id = caId, bk = $"proxy/h/acme-1.0.0.rpm", purl });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id, download_count) VALUES (@orgId, @caId, 0)",
+                new { orgId, caId });
+        }
 
-        var after = await _repo.GetVersionAsync(pkgId, "1.0.0");
-        Assert.Equal(2, after!.DownloadCount);
+        await _repo.IncrementDownloadCountByPurlAsync(orgId, purl);
+        await _repo.IncrementDownloadCountByPurlAsync(orgId, purl);
+
+        await using var conn2 = await _fixture.Store.OpenAsync();
+        int count = await conn2.ExecuteScalarAsync<int>(
+            "SELECT download_count FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @caId",
+            new { orgId, caId });
+        Assert.Equal(2, count);
 
         // Unknown purl is a harmless no-op.
-        await _repo.IncrementDownloadCountByPurlAsync("pkg:rpm/nope@9.9.9");
+        await _repo.IncrementDownloadCountByPurlAsync(orgId, "pkg:rpm/nope@9.9.9");
     }
 
     // ── DeleteVersionAsync ───────────────────────────────────────────────────

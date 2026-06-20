@@ -464,6 +464,33 @@ public sealed class UploadEndpointTests : IClassFixture<DependablyFactory>, IAsy
     }
 
     [Fact]
+    public async Task BareHostPost_Returns405_NotSilent200()
+    {
+        // Regression: a `twine upload --repository-url <bare-host>/` POSTs to "/", which matches
+        // no route and used to fall through the SPA fallback returning 200 OK with the body
+        // silently discarded — a black-hole that masked mis-targeted uploads as success. The
+        // fallback must now reject non-GET/HEAD methods with 405 so the client fails loudly.
+        using var client = _factory.CreateClient();
+        using var content = new MultipartFormDataContent();
+        content.Add(File([0x01, 0x02, 0x03]), "content", "anything.whl");
+
+        var resp = await client.PostAsync("/", content);
+
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
+        Assert.Contains("GET", resp.Content.Headers.Allow);
+    }
+
+    [Fact]
+    public async Task SpaRoot_GetIsNotRejected()
+    {
+        // Guard the fix: GET "/" (SPA navigation) must still resolve through the fallback —
+        // the method gate blocks writes only, it must never break browser navigation.
+        using var client = _factory.CreateClient();
+        var resp = await client.GetAsync("/");
+        Assert.NotEqual(HttpStatusCode.MethodNotAllowed, resp.StatusCode);
+    }
+
+    [Fact]
     public async Task DeletedEcosystemEndpoint_Returns404()
     {
         // Sanity check that the four legacy file-upload endpoints are gone. The manifest

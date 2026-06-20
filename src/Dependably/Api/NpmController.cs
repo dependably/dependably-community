@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.RateLimiting;
 namespace Dependably.Api;
 
 [ApiController]
+[NpmErrorEnvelope]
 public class NpmController : ControllerBase
 {
     // Route-level hard ceiling for npm publish requests (500 MiB); per-tenant limits are

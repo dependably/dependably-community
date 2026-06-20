@@ -1,4 +1,3 @@
-using Cronos;
 using Dapper;
 using Dependably.Storage;
 
@@ -12,11 +11,11 @@ namespace Dependably.Infrastructure;
 ///   - activity_retention_days: delete old activity rows
 /// Respects the shutdown CancellationToken — stops at the next checkpoint.
 /// </summary>
-public sealed class RetentionService : BackgroundService
+public sealed class RetentionService : ScheduledBackgroundService
 {
     /// <summary>
-    /// Injected dependencies for <see cref="RetentionService"/>. Bundles the eight DI services
-    /// so the constructor stays within the parameter-count gate (S107).
+    /// Injected dependencies for <see cref="RetentionService"/>. Bundles all DI services into
+    /// one record so the constructor stays within the parameter-count gate (S107).
     /// </summary>
     public sealed record Dependencies(
         IMetadataStore Db,
@@ -37,7 +36,13 @@ public sealed class RetentionService : BackgroundService
     private readonly ILogger<RetentionService> _logger;
     private readonly TimeProvider _time;
 
+    protected override string CronEnvKey => "GC_SCHEDULE";
+    protected override string DefaultCron => "0 3 * * *";
+    protected override string ScopeJobName => "retention";
+    protected override string ScopeMetricName => "retention.gc";
+
     public RetentionService(Dependencies deps)
+        : base(deps.Config, deps.Logger, deps.Time)
     {
         _db = deps.Db;
         _blobs = deps.Blobs;
@@ -49,46 +54,7 @@ public sealed class RetentionService : BackgroundService
         _time = deps.Time;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        var schedule = CronExpression.Parse(
-            _config["GC_SCHEDULE"] ?? "0 3 * * *",
-            CronFormat.Standard);
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
-            if (next is null)
-            {
-                break;
-            }
-
-            var delay = next.Value - _time.GetUtcNow();
-            if (delay > TimeSpan.Zero)
-            {
-                try { await Task.Delay(delay, stoppingToken); }
-                catch (OperationCanceledException) { break; }
-            }
-
-            if (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-
-            using var scope = Dependably.Infrastructure.Observability.BackgroundJobScope.Begin(
-                "retention", "retention.gc", _time);
-            try
-            {
-                await RunGcPassAsync(stoppingToken);
-                scope.Complete();
-            }
-            catch (Exception ex)
-            {
-                scope.Fail(ex);
-                _logger.LogError(ex, "Retention GC pass failed.");
-            }
-        }
-    }
+    protected override Task RunTickAsync(CancellationToken ct) => RunGcPassAsync(ct);
 
     private async Task RunGcPassAsync(CancellationToken ct)
     {
@@ -177,32 +143,70 @@ public sealed class RetentionService : BackgroundService
     private async Task EnforceVersionLimitAsync(
         System.Data.Common.DbConnection conn, string orgId, int keepVersions, CancellationToken ct)
     {
-        // Find versions beyond the keep limit, oldest first, for proxy packages
-        var toDelete = await conn.QueryAsync<(string VersionId, string BlobKey)>(
+        // Uploaded versions: keep the most recent N per package; delete older ones from package_versions.
+        var uploadedToDelete = await conn.QueryAsync<(string VersionId, string BlobKey)>(
             """
             SELECT pv.id as VersionId, pv.blob_key as BlobKey
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
-            WHERE p.org_id = @orgId AND p.is_proxy = 1
+            WHERE p.org_id = @orgId AND pv.origin = 'uploaded'
               AND pv.id NOT IN (
                   SELECT id FROM package_versions pv2
                   WHERE pv2.package_id = pv.package_id
+                    AND pv2.origin = 'uploaded'
                   ORDER BY pv2.created_at DESC
                   LIMIT @keepVersions
               )
             """,
             new { orgId, keepVersions });
 
-        foreach (var (VersionId, BlobKey) in toDelete)
+        foreach (var (VersionId, BlobKey) in uploadedToDelete)
         {
-            if (ct.IsCancellationRequested)
-            {
-                break;
-            }
-
+            if (ct.IsCancellationRequested) { break; }
             await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
             await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = VersionId });
-            _logger.LogDebug("GC: deleted version {Id} (blob {Key})", VersionId, BlobKey);
+            _logger.LogDebug("GC: deleted uploaded version {Id} (blob {Key})", VersionId, BlobKey);
+        }
+
+        // Proxy versions: evict this org's least-recently-accessed cache_artifact rows per name,
+        // beyond the keep limit. Removes the tenant_artifact_access row; cascade-deletes the
+        // cache_artifact and its blob when no other tenant retains access.
+        // xtenant: cache_artifact is global; org_id filter is in tenant_artifact_access.
+        var proxyToEvict = await conn.QueryAsync<(string CacheArtifactId, string Name, string BlobKey)>(
+            """
+            SELECT ca.id AS CacheArtifactId, ca.name AS Name, ca.blob_key AS BlobKey
+            FROM tenant_artifact_access taa
+            JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
+            WHERE taa.org_id = @orgId
+              AND taa.cache_artifact_id NOT IN (
+                  SELECT taa2.cache_artifact_id
+                  FROM tenant_artifact_access taa2
+                  JOIN cache_artifact ca2 ON ca2.id = taa2.cache_artifact_id
+                  WHERE taa2.org_id = @orgId AND ca2.name = ca.name AND ca2.ecosystem = ca.ecosystem
+                  ORDER BY taa2.last_accessed_at DESC
+                  LIMIT @keepVersions
+              )
+            """,
+            new { orgId, keepVersions });
+
+        foreach (var (CacheArtifactId, Name, BlobKey) in proxyToEvict)
+        {
+            if (ct.IsCancellationRequested) { break; }
+
+            await conn.ExecuteAsync(
+                "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
+                new { orgId, id = CacheArtifactId });
+
+            // Delete the global cache_artifact and its blob when no tenant retains access.
+            long remaining = await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = @id",
+                new { id = CacheArtifactId });
+            if (remaining == 0)
+            {
+                await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
+                await conn.ExecuteAsync("DELETE FROM cache_artifact WHERE id = @id", new { id = CacheArtifactId });
+            }
+            _logger.LogDebug("GC: evicted proxy version {Id} name={Name} (blob {Key})", CacheArtifactId, Name, BlobKey);
         }
     }
 
@@ -211,25 +215,54 @@ public sealed class RetentionService : BackgroundService
     {
         string cutoff = _time.GetUtcNow().AddDays(-keepDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-        var stale = await conn.QueryAsync<(string VersionId, string BlobKey)>(
+        // Uploaded versions: evict by last_used timestamp on package_versions.
+        var uploadedStale = await conn.QueryAsync<(string VersionId, string BlobKey)>(
             """
             SELECT pv.id as VersionId, pv.blob_key as BlobKey
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
-            WHERE p.org_id = @orgId AND p.is_proxy = 1
+            WHERE p.org_id = @orgId AND pv.origin = 'uploaded'
               AND pv.last_used IS NOT NULL AND pv.last_used < @cutoff
             """,
             new { orgId, cutoff });
 
-        foreach (var (VersionId, BlobKey) in stale)
+        foreach (var (VersionId, BlobKey) in uploadedStale)
         {
-            if (ct.IsCancellationRequested)
-            {
-                break;
-            }
-
+            if (ct.IsCancellationRequested) { break; }
             await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
             await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = VersionId });
+        }
+
+        // Proxy versions: evict this org's tenant_artifact_access rows where the tenant's
+        // last_used is older than the cutoff. Removes the per-tenant row; cascade-deletes the
+        // global cache_artifact and its blob when no other tenant retains access.
+        // xtenant: cache_artifact is global; org_id filter is in tenant_artifact_access.
+        var proxyStale = await conn.QueryAsync<(string CacheArtifactId, string BlobKey)>(
+            """
+            SELECT ca.id AS CacheArtifactId, ca.blob_key AS BlobKey
+            FROM tenant_artifact_access taa
+            JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
+            WHERE taa.org_id = @orgId
+              AND taa.last_used IS NOT NULL AND taa.last_used < @cutoff
+            """,
+            new { orgId, cutoff });
+
+        foreach (var (CacheArtifactId, BlobKey) in proxyStale)
+        {
+            if (ct.IsCancellationRequested) { break; }
+
+            await conn.ExecuteAsync(
+                "DELETE FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @id",
+                new { orgId, id = CacheArtifactId });
+
+            long remaining = await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = @id",
+                new { id = CacheArtifactId });
+            if (remaining == 0)
+            {
+                await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
+                await conn.ExecuteAsync("DELETE FROM cache_artifact WHERE id = @id", new { id = CacheArtifactId });
+            }
         }
     }
 

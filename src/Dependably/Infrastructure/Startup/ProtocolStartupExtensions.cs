@@ -28,6 +28,7 @@ internal static class ProtocolStartupExtensions
     {
         builder.Services.AddSingleton<UpstreamClient>();
         builder.Services.AddSingleton<UpstreamRegistryResolver>();
+        builder.Services.AddSingleton<IUpstreamLatestVersionResolver, UpstreamLatestVersionResolver>();
         builder.Services.AddSingleton<IUpstreamUrlValidator, UpstreamUrlValidator>();
         // Connect-time SSRF gate shared by the upstream HTTP handlers. Validates the IP
         // actually dialed (every connection + every redirect hop), closing the DNS-rebinding
@@ -35,6 +36,19 @@ internal static class ProtocolStartupExtensions
         builder.Services.AddSingleton(new SsrfConnectCallback(SsrfGuard.IsBlockedIp));
         builder.Services.AddSingleton<AllowlistService>();
         builder.Services.AddSingleton<BlockGateService>();
+
+        // Artefact-provenance verifiers. The trust anchors are operator-pinned (Npm:SignatureKeys,
+        // NuGet:SignatureCertificates, PyPI:SigstoreRoots + PyPI:TrustedPublishers), never the
+        // upstream-fetched registry key/package/bundle. Resolved per-ecosystem at the proxy ingest path.
+        builder.Services.AddSingleton<Dependably.Protocol.Provenance.NpmSignatureKeyStore>();
+        builder.Services.AddSingleton<Dependably.Protocol.Provenance.NpmProvenanceVerifier>();
+        builder.Services.AddSingleton<Dependably.Protocol.Provenance.NuGetSignatureTrustStore>();
+        builder.Services.AddSingleton<Dependably.Protocol.Provenance.NuGetProvenanceVerifier>();
+        builder.Services.AddSingleton<Dependably.Protocol.Provenance.PyPiSigstoreTrustStore>();
+        builder.Services.AddSingleton<Dependably.Protocol.Provenance.PyPiProvenanceVerifier>();
+        builder.Services.AddSingleton<Dependably.Protocol.Provenance.RpmProvenanceVerifier>();
+        builder.Services.AddSingleton<Dependably.Protocol.Provenance.MavenSignatureKeyStore>();
+        builder.Services.AddSingleton<Dependably.Protocol.Provenance.MavenProvenanceVerifier>();
 
         // Maven upstream proxy
         builder.Services.AddSingleton<MavenUpstreamFetcher>();

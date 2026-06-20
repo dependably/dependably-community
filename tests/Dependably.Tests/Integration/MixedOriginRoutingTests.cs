@@ -238,18 +238,44 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         var primeResp = await authClient.GetAsync($"/nuget/flatcontainer/{id}/1.0.0/{id}.1.0.0.nupkg");
         Assert.Equal(HttpStatusCode.OK, primeResp.StatusCode);
 
-        // Confirm the DB has mixed origins on the same packages.id.
+        // Confirm the DB has the correct mixed-origin shape:
+        // - 99.0.0 is origin='uploaded' in package_versions (tenant-local row)
+        // - 1.0.0 is in the global plane (cache_artifact + tenant_artifact_access) with NO package_versions row
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
-        var origins = (await conn.QueryAsync<(string Version, string Origin)>(
+
+        // Uploaded version lives in package_versions.
+        string? uploadedOrigin = await conn.ExecuteScalarAsync<string>(
             """
-            SELECT pv.version, pv.origin
+            SELECT pv.origin
             FROM package_versions pv JOIN packages p ON p.id = pv.package_id
-            WHERE p.ecosystem='nuget' AND p.purl_name=@id
+            WHERE p.ecosystem='nuget' AND p.purl_name=@id AND pv.version='99.0.0'
             """,
-            new { id })).ToDictionary(r => r.Version, r => r.Origin);
-        Assert.Equal("uploaded", origins["99.0.0"]);
-        Assert.Equal("proxy", origins["1.0.0"]);
+            new { id });
+        Assert.Equal("uploaded", uploadedOrigin);
+
+        // Proxy version lives only in the global plane — no package_versions row.
+        int proxyInPackageVersions = await conn.ExecuteScalarAsync<int>(
+            """
+            SELECT COUNT(*)
+            FROM package_versions pv JOIN packages p ON p.id = pv.package_id
+            WHERE p.ecosystem='nuget' AND p.purl_name=@id AND pv.version='1.0.0'
+            """,
+            new { id });
+        Assert.Equal(0, proxyInPackageVersions);
+
+        // Proxy version is accessible via the global plane for this tenant.
+        int proxyInGlobalPlane = await conn.ExecuteScalarAsync<int>(
+            """
+            SELECT COUNT(*)
+            FROM cache_artifact ca
+            JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+            JOIN orgs o ON o.id = taa.org_id
+            WHERE ca.ecosystem='nuget' AND ca.name=@id AND ca.version='1.0.0'
+              AND o.slug='default'
+            """,
+            new { id });
+        Assert.Equal(1, proxyInGlobalPlane);
 
         // Now: anon request for the proxy version should succeed (cache hit, no auth required).
         using var anonClient = _factory.CreateClient();

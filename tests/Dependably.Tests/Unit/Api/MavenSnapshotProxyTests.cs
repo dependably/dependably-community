@@ -206,13 +206,16 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
             new StubAirGapMode(false),
             NullLogger<VulnerabilityScanService>.Instance,
             TimeProvider.System));
-        var proxyVersions = new ProxyVersionRecorder(_packages, _audit, licenses);
-        var blockGate = new BlockGateService(vulns, _audit, new QuarantineRepository(_db, TimeProvider.System), NullLogger<BlockGateService>.Instance, TimeProvider.System);
+        var cacheArtifact = new CacheArtifactRepository(_db);
+        var tenantAccess = new TenantArtifactAccessRepository(_db);
+        var proxyVersions = new ProxyVersionRecorder(_packages, _audit, licenses, cacheArtifact,
+            Substitute.For<IUpstreamLatestVersionResolver>(), NullLogger<ProxyVersionRecorder>.Instance);
+        var blockGate = new BlockGateService(vulns, _audit, new QuarantineRepository(_db, TimeProvider.System), new InstallScriptAllowlistService(_db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System), NullLogger<BlockGateService>.Instance, TimeProvider.System);
         var cacheRecorder = new CacheAccessRecorder(
-            new CacheArtifactRepository(_db), new TenantArtifactAccessRepository(_db),
+            cacheArtifact, tenantAccess,
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         var proxyFetch = new ProxyFetchService(
-            cacheRecorder, proxyVersions, scanner, blockGate, _packages, _audit, TimeProvider.System);
+            cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, _packages, _audit, TimeProvider.System);
 
         var svc = new MavenControllerServices(
             Packages: _packages, Tokens: _tokens, Audit: _audit, Orgs: _orgs,
@@ -223,7 +226,17 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System),
             Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System)),
             MetadataCache: _metadataCache,
-            Log: NullLogger<MavenController>.Instance);
+            Log: NullLogger<MavenController>.Instance,
+            CacheArtifacts: cacheArtifact,
+            TenantAccess: tenantAccess,
+            Time: TimeProvider.System,
+            CacheRecorder: cacheRecorder,
+            // No Maven:SignatureKeys configured — IsConfigured=false, provenance skipped.
+            MavenProvenance: new Dependably.Protocol.Provenance.MavenProvenanceVerifier(
+                new Dependably.Protocol.Provenance.MavenSignatureKeyStore(
+                    new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+                    Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenSignatureKeyStore>.Instance),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance));
 
         return new MavenController(svc)
         {

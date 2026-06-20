@@ -77,6 +77,15 @@ public static class RpmHeaderParser
     private const int TagBaseNames = 1117;
     private const int TagDirNames = 1118;
 
+    // RPM scriptlet phase tags — all are STRING-typed header entries. Each holds the
+    // shell script body that the package manager executes at the named lifecycle point.
+    private const int TagPreIn = 1023;
+    private const int TagPostIn = 1024;
+    private const int TagPreUn = 1025;
+    private const int TagPostUn = 1026;
+    private const int TagPreTrans = 1151;
+    private const int TagPostTrans = 1152;
+
     // Data type tags from header intro (per rpm headerlib.c). The full enum is retained
     // so the spec mapping is obvious to readers; the parser only branches on the subset
     // dnf/yum repodata actually needs (Int32 / String / StringArray / I18nString).
@@ -237,6 +246,78 @@ public static class RpmHeaderParser
         };
     }
 
+    // ── Scriptlet detection ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Inspects the main RPM header in <paramref name="data"/> and returns the set of
+    /// scriptlet phase names whose string value is non-empty (e.g. <c>%pre</c>, <c>%post</c>).
+    /// An absent tag or an empty/whitespace-only value does not count. Returns an empty array
+    /// when no scriptlets are present. Throws <see cref="RpmParseException"/> on malformed input.
+    /// </summary>
+    public static IReadOnlyList<string> DetectScriptlets(byte[] data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        if (data.Length < LeadSize + HeaderIntroSize)
+        {
+            throw new RpmParseException("RPM file too short to contain a lead + header intro.");
+        }
+
+        if (!(data[0] == LeadMagic0 && data[1] == LeadMagic1 &&
+              data[LeadMagicIndex2] == LeadMagic2 && data[LeadMagicIndex3] == LeadMagic3))
+        {
+            throw new RpmParseException("Invalid RPM lead magic.");
+        }
+
+        // Skip over the signature header to reach the main header.
+        int sigStart = LeadSize;
+        var (sigNindex, sigHsize) = ReadHeaderIntro(data, sigStart);
+        int sigEnd = sigStart + HeaderIntroSize + sigNindex * IndexEntrySize + sigHsize;
+        int mainHeaderStart = (sigEnd + 7) & ~7;
+        if (mainHeaderStart + HeaderIntroSize > data.Length)
+        {
+            throw new RpmParseException("RPM truncated before main header.");
+        }
+
+        var (nindex, hsize) = ReadHeaderIntro(data, mainHeaderStart);
+        int indexStart = mainHeaderStart + HeaderIntroSize;
+        int indexEnd = indexStart + nindex * IndexEntrySize;
+        int storeStart = indexEnd;
+        int storeEnd = storeStart + hsize;
+        if (storeEnd > data.Length)
+        {
+            throw new RpmParseException("RPM main header data store extends past EOF.");
+        }
+
+        var raw = new Dictionary<int, IndexEntry>();
+        for (int i = 0; i < nindex; i++)
+        {
+            var entry = ReadIndex(data, indexStart + i * IndexEntrySize);
+            raw[entry.Tag] = entry;
+        }
+
+        // Check each scriptlet tag; a tag is present and non-trivial when it resolves to a
+        // non-empty, non-whitespace-only string via the same bounded read helper Parse uses.
+        var phases = new List<string>(4);
+        CheckScriptletTag(data, storeStart, raw, TagPreIn, "%pre", phases);
+        CheckScriptletTag(data, storeStart, raw, TagPostIn, "%post", phases);
+        CheckScriptletTag(data, storeStart, raw, TagPreUn, "%preun", phases);
+        CheckScriptletTag(data, storeStart, raw, TagPostUn, "%postun", phases);
+        CheckScriptletTag(data, storeStart, raw, TagPreTrans, "%pretrans", phases);
+        CheckScriptletTag(data, storeStart, raw, TagPostTrans, "%posttrans", phases);
+        return phases;
+    }
+
+    private static void CheckScriptletTag(
+        byte[] data, int storeStart, Dictionary<int, IndexEntry> raw,
+        int tag, string phaseName, List<string> found)
+    {
+        string? value = ReadOptionalString(data, storeStart, raw, tag);
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            found.Add(phaseName);
+        }
+    }
+
     // ── Index / type readers ───────────────────────────────────────────────────
 
     private static (int Nindex, int Hsize) ReadHeaderIntro(byte[] data, int offset)
@@ -300,6 +381,16 @@ public static class RpmHeaderParser
             return Array.Empty<int>();
         }
 
+        // Validate that the claimed count is actually backed by data bytes before
+        // allocating. An attacker-controlled Count could otherwise trigger
+        // OutOfMemoryException before any byte is read.
+        long requiredEnd = (long)storeStart + entry.Offset + (long)entry.Count * Int32Size;
+        if (entry.Offset < 0 || requiredEnd > data.Length)
+        {
+            throw new RpmParseException(
+                $"Int32 array count {entry.Count} at offset {entry.Offset} extends past the data store.");
+        }
+
         int[] arr = new int[entry.Count];
         for (int i = 0; i < entry.Count; i++)
         {
@@ -311,6 +402,22 @@ public static class RpmHeaderParser
 
     private static string[] ReadStringArray(byte[] data, int offset, int count)
     {
+        // Validate before allocation: the number of NUL-terminated strings the
+        // caller claims to be present cannot exceed the number of bytes remaining
+        // from the start offset (each string needs at least one byte for the NUL).
+        if (offset < 0 || offset > data.Length)
+        {
+            throw new RpmParseException(
+                $"String array offset {offset} is outside the data store.");
+        }
+
+        int maxPossibleStrings = data.Length - offset;
+        if (count > maxPossibleStrings)
+        {
+            throw new RpmParseException(
+                $"String array count {count} exceeds the bytes available in the data store.");
+        }
+
         string[] result = new string[count];
         int pos = offset;
         for (int i = 0; i < count; i++)

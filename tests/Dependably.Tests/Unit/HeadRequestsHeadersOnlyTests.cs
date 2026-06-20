@@ -58,6 +58,16 @@ public sealed class HeadRequestsHeadersOnlyTests : IAsyncLifetime
         await conn.ExecuteAsync(
             "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId",
             new { orgId = _orgId });
+
+        // Seed a catch-all OCI upstream so resolver tests can find a matching upstream entry.
+        string prefixJson = System.Text.Json.JsonSerializer.Serialize(new[] { "" });
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO upstream_registry (id, org_id, ecosystem, name, url, position, auth_type, prefixes)
+            VALUES (@id, @orgId, 'oci', 'dockerhub', 'registry-1.docker.io', 0, 'anonymous', @prefixes)
+            ON CONFLICT (org_id, ecosystem, url) DO NOTHING
+            """,
+            new { id = Guid.NewGuid().ToString("N"), orgId = _orgId, prefixes = prefixJson });
     }
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
@@ -411,16 +421,6 @@ public sealed class HeadRequestsHeadersOnlyTests : IAsyncLifetime
         var options = Options.Create(opts ?? new OciOptions
         {
             ManifestTagTtl = TimeSpan.FromMinutes(5),
-            Upstreams =
-            [
-                new OciUpstreamRegistryOptions
-                {
-                    Name = "dockerhub",
-                    Host = "registry-1.docker.io",
-                    AuthType = OciAuthType.Anonymous,
-                    Prefixes = [""],
-                }
-            ],
         });
 
         var authSvc = new OciUpstreamAuthService(

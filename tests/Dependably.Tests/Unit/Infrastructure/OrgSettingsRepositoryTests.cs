@@ -6,9 +6,8 @@ using Dependably.Tests.Infrastructure.Seeding;
 namespace Dependably.Tests.Unit.Infrastructure;
 
 /// <summary>
-/// Covers <see cref="OrgSettingsRepository"/> directly (a distinct surface from
-/// <see cref="OrgRepository"/>'s same-named settings methods). Focus is on
-/// branches the OrgRepository tests don't exercise: Clamp(null,*) /
+/// Covers <see cref="OrgSettingsRepository"/> — the settings write path used by
+/// <c>OrgSettingsController</c>. Tests all Upsert branches: Clamp(null,*) /
 /// Clamp(*,null), DefaultLanguage whitespace handling, every Upsert's
 /// insert + update path, instance settings get/list/set including the
 /// jwt_secret filter and conflict overwrite.
@@ -147,8 +146,9 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     [Fact]
     public async Task UpsertSettingsAsync_AllowVersionOverwriteFalse_PersistsAsFalse()
     {
-        // Hits ToOverwriteFlag(false) → returns 0 (distinct from the null/true paths already
-        // covered by OrgRepositoryTests). Then a follow-up call with null preserves false.
+        // Hits ToBoolFlag(false) → returns 0. The null case is covered by
+        // AirGapped_RoundTripsAndTristateNullPreserves; this test covers the false arm.
+        // Then a follow-up call with null preserves false.
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ow-false-{Guid.NewGuid():N}");
         await _repo.UpsertSettingsAsync(new OrgSettingsUpdate(
             orgId, AnonymousPull: false, AllowlistMode: false,

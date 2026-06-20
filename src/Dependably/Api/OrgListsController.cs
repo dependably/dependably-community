@@ -7,11 +7,12 @@ using Microsoft.AspNetCore.Mvc;
 namespace Dependably.Api;
 
 /// <summary>
-/// Tenant policy lists: allowlist, blocklist, and reserved namespaces. Split out of
-/// <see cref="OrgController"/>. All three share the same shape (list / add / delete) and live
-/// alongside each other as policy lists — allowlist takes PURL prefix patterns, blocklist
-/// takes regular expressions on the package PURL, and reserved namespaces take per-ecosystem
-/// name patterns that must never consult upstream (dependency-confusion guard).
+/// Tenant policy lists: allowlist, blocklist, reserved namespaces, and install-script
+/// allowlist. All share the same shape (list / add / delete) and live alongside each other
+/// as policy lists — allowlist takes PURL prefix patterns, blocklist takes regular expressions
+/// on the package PURL, reserved namespaces take per-ecosystem name patterns that must never
+/// consult upstream (dependency-confusion guard), and install-script allowlist exempts specific
+/// packages from the install-script block-gate arm.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -21,9 +22,14 @@ public sealed class OrgListsController : OrgScopedControllerBase
     private const int AllowlistPatternMaxLength = 512;
     private const int BlocklistPatternMaxLength = 256;
 
+    // Maximum lengths for install-script allowlist fields.
+    private const int InstallScriptNameMaxLength = 512;
+    private const int InstallScriptVersionPatternMaxLength = 128;
+
     private readonly AllowlistRepository _allowlist;
     private readonly BlocklistRepository _blocklist;
     private readonly Protocol.ReservedNamespaceService _reserved;
+    private readonly Protocol.InstallScriptAllowlistService _installScriptAllowlist;
     private readonly OrgAccessGuard _guard;
     private readonly AuditRepository _audit;
     private readonly ProblemResults _problems;
@@ -32,6 +38,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
         AllowlistRepository allowlist,
         BlocklistRepository blocklist,
         Protocol.ReservedNamespaceService reserved,
+        Protocol.InstallScriptAllowlistService installScriptAllowlist,
         OrgAccessGuard guard,
         AuditRepository audit,
         ProblemResults problems)
@@ -39,6 +46,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
         _allowlist = allowlist;
         _blocklist = blocklist;
         _reserved = reserved;
+        _installScriptAllowlist = installScriptAllowlist;
         _guard = guard;
         _audit = audit;
         _problems = problems;
@@ -285,6 +293,116 @@ public sealed class OrgListsController : OrgScopedControllerBase
         if (await _reserved.DeleteAsync(orgId, id, ct) > 0)
         {
             await _audit.LogAsync("reserved_namespace_removed", orgId, GetUserId(),
+                detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
+        }
+
+        return NoContent();
+    }
+
+    // ── Install-script allowlist ───────────────────────────────────────────────
+
+    /// <summary>GET /api/v1/install-script-allowlist</summary>
+    [HttpGet("api/v1/install-script-allowlist")]
+    public async Task<IActionResult> GetInstallScriptAllowlist(CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadTenant, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        string orgId = CurrentTenantId();
+        var entries = await _installScriptAllowlist.ListAsync(orgId, ct);
+        return Ok(entries);
+    }
+
+    /// <summary>POST /api/v1/install-script-allowlist</summary>
+    [HttpPost("api/v1/install-script-allowlist")]
+    [ProducesResponseType(StatusCodes.Status201Created)]
+    public async Task<IActionResult> AddInstallScriptAllowlist(
+        [FromBody] InstallScriptAllowlistRequest req, CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        string ecosystem = (req.Ecosystem ?? "").Trim().ToLowerInvariant();
+        if (!Protocol.InstallScriptAllowlistService.SupportedEcosystems.Contains(ecosystem))
+        {
+            return _problems.ValidationErrorAction("ecosystem",
+                "ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang, rpm, oci.");
+        }
+
+        string name = (req.Name ?? "").Trim();
+        if (name.Length == 0)
+        {
+            return _problems.ValidationErrorAction("name", "name is required.");
+        }
+
+        if (name.Length > InstallScriptNameMaxLength)
+        {
+            return _problems.ValidationErrorAction("name", "name must be 512 characters or fewer.");
+        }
+
+        // version_pattern is optional; validate length when present.
+        string? versionPattern = req.VersionPattern?.Trim();
+        if (versionPattern is not null && versionPattern.Length == 0)
+        {
+            versionPattern = null;
+        }
+
+        if (versionPattern is not null && versionPattern.Length > InstallScriptVersionPatternMaxLength)
+        {
+            return _problems.ValidationErrorAction("version_pattern",
+                "version_pattern must be 128 characters or fewer.");
+        }
+
+        // Globs are trailing-only: '*' anywhere else would silently match nothing useful.
+        if (versionPattern is not null)
+        {
+            int star = versionPattern.IndexOf('*');
+            if (star >= 0 && star != versionPattern.Length - 1)
+            {
+                return _problems.ValidationErrorAction("version_pattern",
+                    "'*' is only supported as the final character (trailing glob).");
+            }
+        }
+
+        string orgId = CurrentTenantId();
+        var entry = await _installScriptAllowlist.AddAsync(
+            orgId, ecosystem, name, versionPattern, GetUserId(), ct);
+
+        await _audit.LogAsync("install_script_allowlist_added", orgId, GetUserId(),
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                id = entry.Id,
+                ecosystem = entry.Ecosystem,
+                name = entry.Name,
+                version_pattern = entry.VersionPattern,
+            }), ct: ct);
+
+        return CreatedAtAction(nameof(GetInstallScriptAllowlist), null, entry);
+    }
+
+    /// <summary>DELETE /api/v1/install-script-allowlist/{id}</summary>
+    [HttpDelete("api/v1/install-script-allowlist/{id}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> DeleteInstallScriptAllowlist(string id, CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        // org_id-scoped: a cross-tenant (or unknown) id deletes 0 rows. Delete stays idempotent
+        // (204 either way); the org scope is what enforces isolation. Audit only a real removal.
+        string orgId = CurrentTenantId();
+        if (await _installScriptAllowlist.DeleteAsync(orgId, id, ct) > 0)
+        {
+            await _audit.LogAsync("install_script_allowlist_removed", orgId, GetUserId(),
                 detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
         }
 

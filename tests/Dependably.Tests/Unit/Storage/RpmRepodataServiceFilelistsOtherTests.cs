@@ -421,11 +421,13 @@ public sealed class RpmRepodataServiceFilelistsOtherTests : IClassFixture<InMemo
         await conn.ExecuteAsync(
             """
             INSERT INTO rpm_metadata
-                (package_version_id, rpm_name, epoch, rpm_version, rpm_release, arch,
+                (id, package_version_id, owner_kind,
+                 rpm_name, epoch, rpm_version, rpm_release, arch,
                  installed_size, archive_size, header_start, header_end, rpm_license,
                  files_json, changelogs_json)
             VALUES
-                (@pvId, @name, 0, @rpmVersion, @rpmRelease, @arch,
+                (lower(hex(randomblob(16))), @pvId, 'package_version',
+                 @name, 0, @rpmVersion, @rpmRelease, @arch,
                  65536, 60000, 440, 2048, 'GPL-3.0-or-later',
                  @filesJson, @changelogsJson)
             """,

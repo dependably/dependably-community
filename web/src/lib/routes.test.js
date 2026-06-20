@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useRouter, pathFor, routeFor, routesEqual } from './routes.js'
+import { useRouter, pathFor, searchFor, routeFor, routesEqual } from './routes.js'
 
 describe('routes — tenant table', () => {
   beforeEach(() => useRouter('tenant'))
@@ -48,6 +48,25 @@ describe('routes — tenant table', () => {
   it('routeFor returns null for unknown paths or non-strings', () => {
     expect(routeFor('/totally-bogus')).toBeNull()
     expect(routeFor(undefined)).toBeNull()
+  })
+
+  it('searchFor serializes params into a query string for list pages', () => {
+    expect(searchFor('vulnerabilities', { sort: 'published', dir: 'desc' }))
+      .toBe('?sort=published&dir=desc')
+  })
+
+  it('searchFor returns "" when there are no params', () => {
+    expect(searchFor('vulnerabilities')).toBe('')
+    expect(searchFor('packages', {})).toBe('')
+  })
+
+  it('searchFor drops empty/nullish values so a bare nav stays a clean URL', () => {
+    expect(searchFor('vulnerabilities', { sort: '', eco: null, page: undefined })).toBe('')
+    expect(searchFor('vulnerabilities', { sort: 'severity', eco: '' })).toBe('?sort=severity')
+  })
+
+  it('searchFor returns "" for version-detail — its params live in the path', () => {
+    expect(searchFor('version-detail', { ecosystem: 'npm', name: 'foo' })).toBe('')
   })
 })
 

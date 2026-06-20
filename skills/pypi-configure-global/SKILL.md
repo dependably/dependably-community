@@ -5,7 +5,6 @@ ecosystem: pypi
 scope: global
 inputs:
   - DEPENDABLY_BASE_URL
-  - ORG_SLUG
   - DEPENDABLY_TOKEN
 ---
 
@@ -18,9 +17,11 @@ your dependably instance, without per-project config.
 
 Ask the user for:
 
-1. **DEPENDABLY_BASE_URL** — e.g. `https://repo.example.com`.
-2. **ORG_SLUG** — e.g. `default`.
-3. **DEPENDABLY_TOKEN** — from dependably **Tokens**.
+1. **DEPENDABLY_BASE_URL** — the base URL of your dependably org, e.g.
+   `https://repo.example.com`. Multi-tenant deployments put the org in the
+   subdomain (`https://my-org.repo.example.com`); single-tenant deployments use
+   the bare host.
+2. **DEPENDABLY_TOKEN** — from dependably **Tokens**.
 
 ## File to write
 
@@ -31,7 +32,7 @@ Choose the path for the user's OS:
 
 ```ini
 [global]
-index-url = https://user:<token>@repo.example.com/o/default/simple/
+index-url = https://user:<token>@repo.example.com/simple/
 # Uncomment if served over plain HTTP:
 # trusted-host = repo.example.com
 ```

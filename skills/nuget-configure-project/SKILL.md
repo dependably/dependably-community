@@ -5,7 +5,6 @@ ecosystem: nuget
 scope: project
 inputs:
   - DEPENDABLY_BASE_URL
-  - ORG_SLUG
   - DEPENDABLY_TOKEN
 ---
 
@@ -19,9 +18,11 @@ variable so it does not get committed.
 
 Ask the user for:
 
-1. **DEPENDABLY_BASE_URL** — e.g. `https://repo.example.com`.
-2. **ORG_SLUG** — e.g. `default`.
-3. **DEPENDABLY_TOKEN** — created in dependably under **Tokens** or
+1. **DEPENDABLY_BASE_URL** — the base URL of your dependably org, e.g.
+   `https://repo.example.com`. Multi-tenant deployments put the org in the
+   subdomain (`https://my-org.repo.example.com`); single-tenant deployments use
+   the bare host.
+2. **DEPENDABLY_TOKEN** — created in dependably under **Tokens** or
    **Service tokens**. NuGet uses HTTP Basic with `user` as the username.
 
 ## File to write
@@ -35,7 +36,7 @@ for this file.
 <configuration>
   <packageSources>
     <clear />
-    <add key="dependably" value="https://repo.example.com/o/default/nuget/v3/index.json" />
+    <add key="dependably" value="https://repo.example.com/nuget/v3/index.json" />
   </packageSources>
   <packageSourceCredentials>
     <dependably>
@@ -57,7 +58,7 @@ for this file.
 > attribute to the `<add key="dependably" ...>` element:
 > ```xml
 > <add key="dependably"
->      value="http://repo.example.com/o/default/nuget/v3/index.json"
+>      value="http://repo.example.com/nuget/v3/index.json"
 >      allowInsecureConnections="true" />
 > ```
 

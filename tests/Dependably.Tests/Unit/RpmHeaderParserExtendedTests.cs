@@ -530,6 +530,165 @@ public sealed class RpmHeaderParserExtendedTests
         Assert.Equal("file", info.Files[0].Type);
     }
 
+    // ── DetectScriptlets ──────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(1023, "%pre")]
+    [InlineData(1024, "%post")]
+    [InlineData(1025, "%preun")]
+    [InlineData(1026, "%postun")]
+    [InlineData(1151, "%pretrans")]
+    [InlineData(1152, "%posttrans")]
+    public void DetectScriptlets_SinglePhase_ReturnsItsName(int tag, string expectedPhase)
+    {
+        var tags = MandatoryTags();
+        tags.Add(TagWrite.Str(tag, "echo hello"));
+        byte[] bytes = BuildRpmWithMainHeader(tags);
+
+        var phases = RpmHeaderParser.DetectScriptlets(bytes);
+
+        Assert.Single(phases);
+        Assert.Equal(expectedPhase, phases[0]);
+    }
+
+    [Fact]
+    public void DetectScriptlets_NoScriptletTags_ReturnsEmpty()
+    {
+        byte[] bytes = BuildRpmWithMainHeader(MandatoryTags());
+        var phases = RpmHeaderParser.DetectScriptlets(bytes);
+        Assert.Empty(phases);
+    }
+
+    [Fact]
+    public void DetectScriptlets_EmptyStringScriptlet_NotCounted()
+    {
+        // An empty-string scriptlet value must not be counted as present.
+        var tags = MandatoryTags();
+        tags.Add(TagWrite.Str(1024, ""));     // %post with empty body
+        tags.Add(TagWrite.Str(1023, "   ")); // %pre with whitespace-only body
+        byte[] bytes = BuildRpmWithMainHeader(tags);
+
+        var phases = RpmHeaderParser.DetectScriptlets(bytes);
+
+        Assert.Empty(phases);
+    }
+
+    [Fact]
+    public void DetectScriptlets_MultiplePhases_ReturnsAll()
+    {
+        var tags = MandatoryTags();
+        tags.Add(TagWrite.Str(1023, "echo pre"));
+        tags.Add(TagWrite.Str(1024, "echo post"));
+        tags.Add(TagWrite.Str(1026, "echo postun"));
+        byte[] bytes = BuildRpmWithMainHeader(tags);
+
+        var phases = RpmHeaderParser.DetectScriptlets(bytes);
+
+        Assert.Equal(3, phases.Count);
+        Assert.Contains("%pre", phases);
+        Assert.Contains("%post", phases);
+        Assert.Contains("%postun", phases);
+    }
+
+    [Fact]
+    public void DetectScriptlets_NullData_Throws_ArgumentNullException()
+    {
+        Assert.Throws<ArgumentNullException>(() => RpmHeaderParser.DetectScriptlets(null!));
+    }
+
+    [Fact]
+    public void DetectScriptlets_TooShort_Throws_RpmParseException()
+    {
+        byte[] bytes = new byte[50];
+        Assert.Throws<RpmParseException>(() => RpmHeaderParser.DetectScriptlets(bytes));
+    }
+
+    // ── Bounds checks: attacker-controlled Count field ────────────────────────
+
+    /// <summary>
+    /// A crafted Int32-array tag whose index entry Count claims Int32.MaxValue entries
+    /// but the store contains only 4 real bytes. The parser must reject it with
+    /// RpmParseException instead of attempting to allocate ~8 GiB.
+    /// </summary>
+    [Fact]
+    public void ReadInt32Array_OversizedCount_ThrowsRpmParseException()
+    {
+        // Build an RPM whose DIRINDEXES (1116) index entry has Count = Int32.MaxValue
+        // but the store only contains 4 bytes (one real int). The Count is injected
+        // via a raw TagWrite that bypasses the normal builder's count inference.
+        var tags = MandatoryTags();
+        // Provide minimal legitimate file-list tags so ExtractFiles is reached.
+        tags.Add(new TagWrite(1117, Type: 8, Count: 1, Bytes: NullTerm("ls")));
+        tags.Add(new TagWrite(1118, Type: 8, Count: 1, Bytes: NullTerm("/bin/")));
+        // DIRINDEXES as Int32 array: actual store has 4 bytes but claims MaxValue entries.
+        tags.Add(new TagWrite(1116, Type: 4, Count: int.MaxValue, Bytes: BeInt32(0)));
+
+        byte[] bytes = BuildRpmWithMainHeader(tags);
+        var ex = Assert.Throws<RpmParseException>(() => RpmHeaderParser.Parse(bytes));
+        Assert.Contains("extends past", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A crafted string-array tag whose Count claims far more strings than the store
+    /// holds bytes. The parser must reject it rather than allocating a string[] with
+    /// billions of elements.
+    /// </summary>
+    [Fact]
+    public void ReadStringArray_OversizedCount_ThrowsRpmParseException()
+    {
+        // RPMTAG_REQUIRENAME (1049) typed as StringArray with Count = Int32.MaxValue
+        // but the store only contains the bytes for one short name.
+        var tags = MandatoryTags();
+        // Count deliberately exceeds the bytes actually in the store.
+        tags.Add(new TagWrite(1049, Type: 8, Count: int.MaxValue, Bytes: NullTerm("glibc")));
+
+        byte[] bytes = BuildRpmWithMainHeader(tags);
+        var ex = Assert.Throws<RpmParseException>(() => RpmHeaderParser.Parse(bytes));
+        Assert.Contains("exceeds", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A crafted FILEFLAGS Int32 array whose Count claims more entries than store bytes.
+    /// This covers the fileFlags path inside ExtractFiles (separate branch from dirIndexes).
+    /// </summary>
+    [Fact]
+    public void ReadInt32Array_FileFlags_OversizedCount_ThrowsRpmParseException()
+    {
+        var tags = MandatoryTags();
+        tags.Add(new TagWrite(1117, Type: 8, Count: 1, Bytes: NullTerm("ls")));
+        tags.Add(new TagWrite(1118, Type: 8, Count: 1, Bytes: NullTerm("/bin/")));
+        tags.Add(new TagWrite(1116, Type: 4, Count: 1, Bytes: BeInt32(0)));
+        // FILEFLAGS (1037) with oversized Count — only 4 bytes in store.
+        tags.Add(new TagWrite(1037, Type: 4, Count: int.MaxValue, Bytes: BeInt32(0)));
+
+        byte[] bytes = BuildRpmWithMainHeader(tags);
+        var ex = Assert.Throws<RpmParseException>(() => RpmHeaderParser.Parse(bytes));
+        Assert.Contains("extends past", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Partial-failure scenario: the RPM has two dependency arrays (requires + conflicts).
+    /// Requires has a valid count; conflicts carries an oversized Count. The parser must
+    /// reject the file entirely (not silently succeed on just the valid dependency).
+    /// </summary>
+    [Fact]
+    public void Parse_PartiallyMalformed_MixedValidAndOversizedArrays_Throws()
+    {
+        var tags = MandatoryTags();
+        // Requires: 1 valid name + 1 valid flag + 1 valid version — all well-formed.
+        tags.Add(new TagWrite(1049, Type: 8, Count: 1, Bytes: NullTerm("glibc")));
+        tags.Add(new TagWrite(1048, Type: 4, Count: 1, Bytes: BeInt32(0x08)));
+        tags.Add(new TagWrite(1050, Type: 8, Count: 1, Bytes: NullTerm("2.34")));
+        // Conflicts: valid name bytes but Count = Int32.MaxValue — oversized.
+        tags.Add(new TagWrite(1054, Type: 8, Count: int.MaxValue, Bytes: NullTerm("bad-pkg")));
+
+        byte[] bytes = BuildRpmWithMainHeader(tags);
+        var ex = Assert.Throws<RpmParseException>(() => RpmHeaderParser.Parse(bytes));
+        Assert.True(
+            ex.Message.Contains("exceeds", StringComparison.OrdinalIgnoreCase),
+            $"Expected 'exceeds' in message but got: {ex.Message}");
+    }
+
     // ── Builder helpers ────────────────────────────────────────────────────────
 
     private static List<TagWrite> MandatoryTags() => new()

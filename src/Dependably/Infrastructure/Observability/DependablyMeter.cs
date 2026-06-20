@@ -215,6 +215,47 @@ public static class DependablyMeter
             "dependably.security.epss_blocks",
             description: "Downloads blocked by the max_epss_tolerance proxy policy. Attributes: ecosystem.");
 
+    /// <summary>
+    /// Downloads blocked because the version ships an install/lifecycle script and the tenant's
+    /// <c>block_install_scripts</c> policy is 'block'. Attributes: <c>ecosystem</c>.
+    /// </summary>
+    public static readonly Counter<long> InstallScriptBlocks =
+        Meter.CreateCounter<long>(
+            "dependably.security.install_script_blocks",
+            description: "Downloads blocked by the block_install_scripts proxy policy. Attributes: ecosystem.");
+
+    /// <summary>
+    /// Outcome of an artefact-provenance/signature check at proxy ingest. Attributes:
+    /// <c>ecosystem</c> and <c>result</c> (<c>verified</c> / <c>failed</c> / <c>unsigned</c>).
+    /// Deliberately carries no per-package labels — package name and version would blow the
+    /// cardinality budget.
+    /// </summary>
+    public static readonly Counter<long> ProvenanceVerified =
+        Meter.CreateCounter<long>(
+            "dependably.security.provenance_verified",
+            description: "Artefact provenance/signature checks at ingest. Attributes: ecosystem, result.");
+
+    /// <summary>
+    /// Downloads refused because provenance verification failed or was missing under a tenant
+    /// require policy (the block-gate Provenance arm). Attributes: <c>ecosystem</c>.
+    /// </summary>
+    public static readonly Counter<long> ProvenanceBlocks =
+        Meter.CreateCounter<long>(
+            "dependably.security.provenance_blocks",
+            description: "Downloads blocked by the verify-signatures proxy policy. Attributes: ecosystem.");
+
+    /// <summary>
+    /// First-fetch content-divergence events on the shared cache plane: a tenant fetched bytes
+    /// whose SHA-256 differs from the already-cached global row for the same coordinate. Signals
+    /// that two organisations resolved different bytes for the same (ecosystem, name, version,
+    /// filename) tuple — typically because their upstream registries returned different content.
+    /// Attributes: <c>ecosystem</c>. No per-tenant or per-package labels (cardinality budget).
+    /// </summary>
+    public static readonly Counter<long> CacheContentDivergences =
+        Meter.CreateCounter<long>(
+            "dependably.cache.content_divergences",
+            description: "First-fetch content divergences on the shared cache plane: a tenant's fetched SHA-256 differs from the cached global row. Attributes: ecosystem.");
+
     // ── Observable gauges — values pushed from elsewhere, read on scrape ────
 
     /// <summary>Background-job last-success unix timestamps, keyed by job_name.</summary>

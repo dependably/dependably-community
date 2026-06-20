@@ -59,6 +59,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<AllowlistRepository>();
         services.AddSingleton<BlocklistRepository>();
         services.AddSingleton<Dependably.Protocol.ReservedNamespaceService>();
+        services.AddSingleton<Dependably.Protocol.InstallScriptAllowlistService>();
         services.AddSingleton<QuarantineRepository>();
         services.AddSingleton<UpstreamRegistryRepository>();
         services.AddSingleton<LicenseRepository>();

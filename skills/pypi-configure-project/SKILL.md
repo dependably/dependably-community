@@ -5,7 +5,6 @@ ecosystem: pypi
 scope: project
 inputs:
   - DEPENDABLY_BASE_URL
-  - ORG_SLUG
   - DEPENDABLY_TOKEN
 ---
 
@@ -19,10 +18,11 @@ covers raw pip, Poetry, and uv.
 
 Ask the user for:
 
-1. **DEPENDABLY_BASE_URL** — e.g. `https://repo.example.com` or
-   `http://192.168.1.50:8080`.
-2. **ORG_SLUG** — e.g. `default`.
-3. **DEPENDABLY_TOKEN** — created in dependably under **Tokens**. PyPI uses
+1. **DEPENDABLY_BASE_URL** — the base URL of your dependably org, e.g.
+   `https://repo.example.com` or `http://192.168.1.50:8080`. Tenancy is
+   host-resolved: single-tenant deployments use the bare host; multi-tenant
+   deployments put the org in the subdomain (`https://my-org.repo.example.com`).
+2. **DEPENDABLY_TOKEN** — created in dependably under **Tokens**. PyPI uses
    HTTP Basic auth with `user` as the username and the token as the password.
 
 ## Files to write
@@ -31,7 +31,7 @@ Ask the user for:
 
 ```ini
 [global]
-index-url = https://user:${DEPENDABLY_TOKEN}@repo.example.com/o/default/simple/
+index-url = https://user:${DEPENDABLY_TOKEN}@repo.example.com/simple/
 # Uncomment if served over plain HTTP:
 # trusted-host = repo.example.com
 ```
@@ -44,7 +44,7 @@ local file rather than `~/.pip/pip.conf`.
 ```toml
 [[tool.poetry.source]]
 name = "dependably"
-url = "https://repo.example.com/o/default/simple/"
+url = "https://repo.example.com/simple/"
 priority = "primary"
 ```
 
@@ -59,7 +59,7 @@ poetry config http-basic.dependably user ${DEPENDABLY_TOKEN}
 ```toml
 [[tool.uv.index]]
 name = "dependably"
-url = "https://repo.example.com/o/default/simple/"
+url = "https://repo.example.com/simple/"
 default = true
 ```
 

@@ -322,11 +322,25 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task ListPaginatedAsync_TotalDownloads_SumsAcrossAllVersions()
     {
+        // v1 is proxy-cached (download count tracked in tenant_artifact_access);
+        // v2 is uploaded (download count tracked in package_versions). The aggregated
+        // TotalDownloads must sum both planes.
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
         string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
-        string v1 = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0"), origin: "proxy");
+        // Proxy plane: seed cache_artifact + tenant_artifact_access with download_count=7.
+        string caId = Guid.NewGuid().ToString("N");
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync("""
+                INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash)
+                VALUES (@id, 'npm', 'acme', '1.0.0', 'acme-1.0.0.tgz', 'proxy/k1', 'h1')
+                """, new { id = caId });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id, download_count) VALUES (@orgId, @caId, 7)",
+                new { orgId, caId });
+        }
+        // Uploaded plane: version in package_versions with download_count=5.
         string v2 = await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0"), origin: "uploaded");
-        await SetDownloadCountAsync(v1, 7);
         await SetDownloadCountAsync(v2, 5);
 
         var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
@@ -351,11 +365,26 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task ListPaginatedAsync_LatestState_CurrentWhenUpstreamLatestIsProxyCached()
     {
+        // Proxy-cached versions live in cache_artifact + tenant_artifact_access; the LatestState
+        // query checks that table for the upstream-latest version.
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme", isProxy: true);
-        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0"), origin: "proxy");
-        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0"), origin: "proxy");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "latestproxy", isProxy: true);
         await _repo.UpdateUpstreamLatestAsync(pkgId, "2.0.0");
+        // Seed both 1.0.0 and 2.0.0 in cache_artifact so the package has proxy entries.
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            string ca1 = Guid.NewGuid().ToString("N");
+            string ca2 = Guid.NewGuid().ToString("N");
+            await conn.ExecuteAsync("""
+                INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash)
+                VALUES (@id, 'npm', 'latestproxy', '1.0.0', 'latestproxy-1.0.0.tgz', 'proxy/lp1', 'h1'),
+                       (@id2, 'npm', 'latestproxy', '2.0.0', 'latestproxy-2.0.0.tgz', 'proxy/lp2', 'h2')
+                """, new { id = ca1, id2 = ca2 });
+            await conn.ExecuteAsync("""
+                INSERT INTO tenant_artifact_access (org_id, cache_artifact_id)
+                VALUES (@orgId, @ca1), (@orgId, @ca2)
+                """, new { orgId, ca1, ca2 });
+        }
 
         var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
 
@@ -379,17 +408,95 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     }
 
     [Fact]
-    public async Task ListPaginatedAsync_LatestState_StaleWhenUpstreamLatestExistsOnlyAsUploaded()
+    public async Task ListPaginatedAsync_LatestState_CurrentWhenUpstreamLatestIsUploaded()
     {
+        // An uploaded version at upstream-latest counts as "current" — the tenant has that
+        // version available regardless of whether it came from the proxy cache or a publish.
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
-        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme", isProxy: true);
-        // A locally uploaded row at the upstream-latest version does NOT count as proxy-cached.
-        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0"), origin: "uploaded");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "uploadedlatest", isProxy: true);
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0", "uploadedlatest"), origin: "uploaded");
         await _repo.UpdateUpstreamLatestAsync(pkgId, "2.0.0");
 
         var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
 
-        Assert.Equal("stale", Assert.Single(items).LatestState);
+        Assert.Equal("current", Assert.Single(items).LatestState);
+    }
+
+    // The package-detail query (GetByPurlNameAsync) drives the per-package upstream-currency
+    // banner. It must compute LatestState identically to the packages-list query above —
+    // otherwise the detail banner and the list "Latest" indicator disagree. The proxy-cached
+    // case is the one that regressed: npm/PyPI proxy artifacts live in the global plane
+    // (cache_artifact + tenant_artifact_access), not package_versions, so a detail query that
+    // only checked package_versions reported the package "stale" while the version was cached.
+
+    [Fact]
+    public async Task GetByPurlNameAsync_LatestState_UnknownWhenNoUpstreamBaseline()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "detailunknown", isProxy: true);
+
+        var pkg = await _repo.GetByPurlNameAsync(orgId, "npm", "detailunknown");
+
+        Assert.NotNull(pkg);
+        Assert.Equal("unknown", pkg.LatestState);
+        Assert.Null(pkg.UpstreamLatestVersion);
+    }
+
+    [Fact]
+    public async Task GetByPurlNameAsync_LatestState_CurrentWhenUpstreamLatestIsProxyCached()
+    {
+        // Proxy-cached versions live in cache_artifact + tenant_artifact_access; the detail
+        // LatestState query must check that plane for the upstream-latest version.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "detailproxy", isProxy: true);
+        await _repo.UpdateUpstreamLatestAsync(pkgId, "2.0.0");
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            string ca = Guid.NewGuid().ToString("N");
+            await conn.ExecuteAsync("""
+                INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash)
+                VALUES (@id, 'npm', 'detailproxy', '2.0.0', 'detailproxy-2.0.0.tgz', 'proxy/dp2', 'h2')
+                """, new { id = ca });
+            await conn.ExecuteAsync("""
+                INSERT INTO tenant_artifact_access (org_id, cache_artifact_id)
+                VALUES (@orgId, @ca)
+                """, new { orgId, ca });
+        }
+
+        var pkg = await _repo.GetByPurlNameAsync(orgId, "npm", "detailproxy");
+
+        Assert.NotNull(pkg);
+        Assert.Equal("current", pkg.LatestState);
+        Assert.Equal("2.0.0", pkg.UpstreamLatestVersion);
+    }
+
+    [Fact]
+    public async Task GetByPurlNameAsync_LatestState_StaleWhenUpstreamLatestNotCached()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "detailstale", isProxy: true);
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "1.0.0", Purl("1.0.0", "detailstale"), origin: "uploaded");
+        // Upstream's latest (3.0.0) is newer than anything cached locally.
+        await _repo.UpdateUpstreamLatestAsync(pkgId, "3.0.0");
+
+        var pkg = await _repo.GetByPurlNameAsync(orgId, "npm", "detailstale");
+
+        Assert.NotNull(pkg);
+        Assert.Equal("stale", pkg.LatestState);
+    }
+
+    [Fact]
+    public async Task GetByPurlNameAsync_LatestState_CurrentWhenUpstreamLatestIsUploaded()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "detailuploaded", isProxy: true);
+        await PackageSeeder.InsertVersionAsync(_fixture.Store, pkgId, "2.0.0", Purl("2.0.0", "detailuploaded"), origin: "uploaded");
+        await _repo.UpdateUpstreamLatestAsync(pkgId, "2.0.0");
+
+        var pkg = await _repo.GetByPurlNameAsync(orgId, "npm", "detailuploaded");
+
+        Assert.NotNull(pkg);
+        Assert.Equal("current", pkg.LatestState);
     }
 
     private async Task SetDownloadCountAsync(string versionId, long count)
@@ -499,6 +606,43 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
         Assert.False(Assert.Single(await _repo.GetVersionsAsync(pkgB)).IsMalicious);
     }
 
+    [Fact]
+    public async Task ListPaginatedAsync_SeverityCounts_And_Malicious_SpanProxyCachePlane()
+    {
+        // Proxy packages keep a per-tenant packages row but their versions and vuln links live on
+        // the global cache plane (cache_artifact + tenant_artifact_access; owner_kind='cache_artifact').
+        // The list's severity counts and malicious flag must read that plane, not just package_versions.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string name = "cacheplane-" + Guid.NewGuid().ToString("N")[..8];
+        await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", name, isProxy: true);
+        string caId = Guid.NewGuid().ToString("N");
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash)
+                VALUES (@caId, 'npm', @name, '1.0.0', @fn, @bk, @ch)
+                """,
+                new { caId, name, fn = name + "-1.0.0.tgz", bk = "proxy/" + caId, ch = "h-" + caId });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
+                new { orgId, caId });
+        }
+        string crit = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, osvId: "GHSA-" + Guid.NewGuid().ToString("N")[..8], severity: "CRITICAL");
+        string mal = await VulnerabilitySeeder.InsertVulnAsync(
+            _fixture.Store, osvId: "MAL-2024-" + Guid.NewGuid().ToString("N")[..8], severity: null, cvssScore: null);
+        await VulnerabilitySeeder.LinkToCacheArtifactAsync(_fixture.Store, caId, crit);
+        await VulnerabilitySeeder.LinkToCacheArtifactAsync(_fixture.Store, caId, mal);
+
+        var (items, _) = await _repo.ListPaginatedAsync(
+            new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+
+        var pkg = Assert.Single(items);
+        Assert.Equal(1, pkg.CriticalCount);   // CRITICAL advisory on the cache plane surfaces in the list
+        Assert.True(pkg.HasMaliciousVersion); // MAL- advisory on the cache plane flips the flag
+    }
+
     // ── Delete + proxy-purge ─────────────────────────────────────────────────
 
     [Fact]
@@ -537,5 +681,93 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
         var remaining = await _repo.GetVersionsAsync(pkgId);
         Assert.Single(remaining);
         Assert.Equal("uploaded", remaining[0].Origin);
+    }
+
+    // ── RPM mixed-case name normalization ─────────────────────────────────────
+
+    /// <summary>
+    /// Regression guard for the cross-plane case-sensitivity bug. A proxy RPM whose name
+    /// contains uppercase letters (e.g. 'perl-AutoLoader') was stored in cache_artifact.name
+    /// with the raw NEVRA case, while packages.purl_name was always lowercased. The join
+    /// <c>ca.name = p.purl_name</c> is case-sensitive in SQLite, so 'perl-AutoLoader' never
+    /// matched 'perl-autoloader' and the version counted as 0 in the dashboard.
+    ///
+    /// The fix stores a lowercase name in cache_artifact (matching purl_name); this test seeds
+    /// an uppercase-name row as the OLD code would have and verifies that VersionCount is 0
+    /// (pinning the bug), then reseeds with the correct lowercase name and verifies VersionCount
+    /// is 1 (pinning the fix).
+    /// </summary>
+    [Fact]
+    public async Task ListPaginatedAsync_RpmMixedCaseProxy_VersionCountIsNonZero_WhenNameNormalized()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+
+        // packages.purl_name is lowercase (as set by GetOrCreateAsync / the proxy write path).
+        await PackageSeeder.InsertAsync(
+            _fixture.Store, orgId, "rpm", "perl-AutoLoader",
+            isProxy: true, purlName: "perl-autoloader");
+
+        string caId = Guid.NewGuid().ToString("N");
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            // OLD behaviour: name stored with raw NEVRA case — causes the join to miss.
+            await conn.ExecuteAsync("""
+                INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash)
+                VALUES (@id, 'rpm', 'perl-AutoLoader', '5.74-513.fc42', 'perl-AutoLoader-5.74-513.fc42.noarch.rpm', 'proxy/abcd1234', 'abcd1234')
+                """, new { id = caId });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
+                new { orgId, caId });
+        }
+
+        // With the OLD code (raw-case name in cache_artifact), VersionCount would be 0
+        // because 'perl-AutoLoader' <> 'perl-autoloader' in SQLite.
+        var (itemsBefore, _) = await _repo.ListPaginatedAsync(
+            new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "rpm"));
+        Assert.Equal(0, Assert.Single(itemsBefore).VersionCount);
+
+        // Simulate what the migration does: normalize the name to lowercase.
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE cache_artifact SET name = lower(name) WHERE ecosystem = 'rpm' AND name <> lower(name)");
+        }
+
+        // After normalization (matching the fixed write path), VersionCount must be 1.
+        var (itemsAfter, _) = await _repo.ListPaginatedAsync(
+            new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "rpm"));
+        Assert.Equal(1, Assert.Single(itemsAfter).VersionCount);
+    }
+
+    /// <summary>
+    /// Verifies that a freshly proxied mixed-case RPM (as written by the fixed code path)
+    /// registers a non-zero VersionCount immediately — no migration needed for new fetches.
+    /// </summary>
+    [Fact]
+    public async Task ListPaginatedAsync_RpmMixedCaseProxy_NewFetch_VersionCountIsOne()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+
+        // packages.purl_name is lowercase — mirrors GetOrCreateAsync behavior.
+        await PackageSeeder.InsertAsync(
+            _fixture.Store, orgId, "rpm", "perl-Carp",
+            isProxy: true, purlName: "perl-carp");
+
+        // Fixed write path: cache_artifact.name is also lowercased.
+        string caId = Guid.NewGuid().ToString("N");
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync("""
+                INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash)
+                VALUES (@id, 'rpm', 'perl-carp', '1.50-511.fc42', 'perl-Carp-1.50-511.fc42.noarch.rpm', 'proxy/ef012345', 'ef012345')
+                """, new { id = caId });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
+                new { orgId, caId });
+        }
+
+        var (items, _) = await _repo.ListPaginatedAsync(
+            new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "rpm"));
+        Assert.Equal(1, Assert.Single(items).VersionCount);
     }
 }

@@ -148,12 +148,83 @@ public class OrgSettings
     /// </summary>
     public double? MaxEpssTolerance { get; set; }
     /// <summary>
+    /// Proxy gate for artefacts that ship an install/lifecycle script
+    /// (<c>package_versions.has_install_script</c>). 'off' (default) = allow through; 'warn' =
+    /// surface in UI only; 'block' = deny fetch and serve. A manual per-version allow override
+    /// still wins.
+    /// </summary>
+    public string BlockInstallScripts { get; set; } = "off";
+    /// <summary>
+    /// Proxy gate for npm registry signature verification of proxy-origin versions
+    /// (<c>package_versions.provenance_status</c>). 'off' (default) = do not verify; 'warn' =
+    /// verify and surface in UI only; 'block' = fail closed (a version that fails verification or
+    /// is unsigned is refused, not cached or served). Enabling 'warn'/'block' requires
+    /// operator-pinned <c>Npm:SignatureKeys</c>; without them the verifier reports
+    /// not-applicable and nothing blocks. A manual per-version allow override still wins.
+    /// </summary>
+    public string VerifyNpmSignatures { get; set; } = "off";
+    /// <summary>
+    /// Proxy gate for NuGet <c>.nupkg</c> signature verification of proxy-origin versions
+    /// (<c>package_versions.provenance_status</c>). 'off' (default) = do not verify; 'warn' =
+    /// verify and surface in UI only; 'block' = fail closed (a version whose signature fails
+    /// verification or is unsigned is refused, not cached or served). Enabling 'warn'/'block'
+    /// requires operator-pinned <c>NuGet:SignatureCertificates</c>; without them the verifier
+    /// reports not-applicable and nothing blocks. A manual per-version allow override still wins.
+    /// </summary>
+    public string VerifyNuGetSignatures { get; set; } = "off";
+    /// <summary>
+    /// Proxy gate for PyPI PEP 740 attestation verification of proxy-origin versions
+    /// (<c>package_versions.provenance_status</c>). 'off' (default) = do not verify; 'warn' =
+    /// verify and surface in UI only; 'block' = fail closed (a version whose attestation fails
+    /// verification or that carries none is refused, not cached or served). Enabling 'warn'/'block'
+    /// requires operator-pinned <c>PyPI:SigstoreRoots</c> and <c>PyPI:TrustedPublishers</c>; without
+    /// them the verifier reports not-applicable and nothing blocks. A manual per-version allow
+    /// override still wins.
+    /// </summary>
+    public string VerifyPyPiAttestations { get; set; } = "off";
+    /// <summary>
+    /// Proxy gate for RPM per-package GPG header signature verification of proxy-origin versions
+    /// (<c>cache_artifact.provenance_status</c>). 'off' (default) = do not verify; 'warn' = verify
+    /// and surface in UI only; 'block' = fail closed (a version whose header signature fails
+    /// verification or carries none is refused, not cached or served). Enabling 'warn'/'block'
+    /// requires operator-pinned <c>Rpm:GpgKey</c>; without it the verifier reports not-applicable
+    /// and nothing blocks. A manual per-version allow override still wins.
+    /// </summary>
+    public string VerifyRpmSignatures { get; set; } = "off";
+    /// <summary>
+    /// Proxy gate for Maven detached <c>.asc</c> OpenPGP signature verification of proxy-origin
+    /// versions (<c>cache_artifact.provenance_status</c>). 'off' (default) = do not verify; 'warn' =
+    /// verify and surface in UI only; 'block' = fail closed (a version whose <c>.asc</c> signature
+    /// fails verification or is absent is refused, not cached or served). Enabling 'warn'/'block'
+    /// requires operator-pinned <c>Maven:SignatureKeys</c>; without them the verifier reports
+    /// not-applicable and nothing blocks. A manual per-version allow override still wins.
+    /// </summary>
+    public string VerifyMavenSignatures { get; set; } = "off";
+    /// <summary>
     /// Running tally of hosted-artefact bytes for this tenant. Maintained atomically by the
     /// publish path (reserve-before-write UPDATE) and decremented on delete. 0 on new rows
     /// and on rows upgraded from a pre-counter schema version; the publish path backfills from
     /// the real SUM on first access via a WHERE storage_used_bytes = 0 guard.
     /// </summary>
     public long StorageUsedBytes { get; set; }
+
+    /// <summary>
+    /// Resolves the signature-verification mode ('off' | 'warn' | 'block') for an ecosystem so the
+    /// block-gate provenance arm reads the right per-ecosystem policy on the serve path. The
+    /// stored <c>package_versions.provenance_status</c> column is ecosystem-agnostic, but the
+    /// tenant policy that governs it is per-ecosystem (<see cref="VerifyNpmSignatures"/> for npm,
+    /// <see cref="VerifyNuGetSignatures"/> for nuget, <see cref="VerifyPyPiAttestations"/> for pypi).
+    /// An ecosystem with no signature policy returns 'off', so its versions never block on provenance.
+    /// </summary>
+    public string VerifyProvenanceMode(string ecosystem) => ecosystem switch
+    {
+        "npm" => VerifyNpmSignatures,
+        "nuget" => VerifyNuGetSignatures,
+        "pypi" => VerifyPyPiAttestations,
+        "rpm" => VerifyRpmSignatures,
+        "maven" => VerifyMavenSignatures,
+        _ => "off",
+    };
 }
 
 public class Package
@@ -235,12 +306,48 @@ public class PackageVersion
     /// <summary>ISO 8601 UTC; set by <c>DeprecationRefreshService</c> after each upstream metadata check. NULL = never checked.</summary>
     public DateTimeOffset? DeprecationCheckedAt { get; set; }
     /// <summary>
+    /// True when the artefact ships an install/lifecycle script that runs automatically on
+    /// install — an npm preinstall/install/postinstall hook, a PyPI sdist <c>setup.py</c>, or a
+    /// NuGet <c>tools/install.ps1</c>/<c>init.ps1</c> or <c>build/*.targets</c>/<c>*.props</c>.
+    /// Detected at proxy first-fetch and hosted publish by <see cref="Protocol.ScriptDetectionService"/>
+    /// and stored in <c>package_versions.has_install_script</c>; drives the install-script block-gate arm.
+    /// </summary>
+    public bool HasInstallScript { get; set; }
+    /// <summary>
+    /// Discriminator for the detected script kind, e.g. <c>'npm:postinstall'</c>,
+    /// <c>'pypi:setup.py'</c>, <c>'nuget:install.ps1'</c>, <c>'nuget:msbuild'</c>. NULL when
+    /// <see cref="HasInstallScript"/> is false.
+    /// </summary>
+    public string? InstallScriptKind { get; set; }
+    /// <summary>
+    /// Provenance/signature-verification outcome captured at proxy first-fetch:
+    /// <c>'verified'</c> (a pinned trust anchor produced a valid signature over the canonical
+    /// signing payload), <c>'failed'</c> (a signature was present but did not verify), or
+    /// <c>'unsigned'</c> (upstream published no signature). NULL when verification was not
+    /// applicable (policy off, no verifier, hosted origin) or for rows that pre-date the column.
+    /// Drives the provenance block-gate arm.
+    /// </summary>
+    public string? ProvenanceStatus { get; set; }
+    /// <summary>
+    /// Identity of the verifying signer (the trust-anchor keyid) when
+    /// <see cref="ProvenanceStatus"/> is <c>'verified'</c>. NULL otherwise.
+    /// </summary>
+    public string? ProvenanceSigner { get; set; }
+    /// <summary>
     /// True when this version is linked to an OSV <c>MAL-</c> advisory (OpenSSF
     /// malicious-packages feed) — i.e. known-malicious. MAL advisories usually carry no CVSS
     /// score, so this is a distinct signal from the vulnerability-severity counts. Derived in
     /// SQL by <see cref="PackageRepository.GetVersionsAsync"/>; not a stored column.
     /// </summary>
     public bool IsMalicious { get; set; }
+    /// <summary>
+    /// Canonical artifact filename for proxy cache-plane versions (e.g. <c>vite-8.0.16.tgz</c>),
+    /// populated by <see cref="CacheArtifactIndexFacts.ToPackageVersionSynthetic"/>. Null for
+    /// uploaded versions, which use the blob-key suffix as the filename. Metadata renderers
+    /// prefer this value over the blob-key suffix so proxy versions advertise a resolvable
+    /// download URL instead of a content-addressed SHA-256 path segment.
+    /// </summary>
+    public string? Filename { get; set; }
     /// <summary>
     /// True when this version is linked to at least one OSV advisory of any kind (scored,
     /// unscored, or MAL-). Lets the status projection distinguish "scanned, no advisories"
@@ -483,6 +590,11 @@ public class BlocklistEntry
 /// A single configured upstream proxy registry for one (org, ecosystem). The org's entries for
 /// an ecosystem form a priority-ordered list (ascending <see cref="Position"/>, lowest first).
 /// Zero entries for an ecosystem disables proxying for it.
+///
+/// OCI-specific fields: <see cref="AuthType"/> drives pull authentication;
+/// <see cref="TokenEndpoint"/> pins the token-exchange realm; <see cref="Prefixes"/> is the
+/// first-match-wins repository-prefix routing list. <see cref="HasSecret"/> indicates whether
+/// a credential is stored without exposing the secret itself.
 /// </summary>
 public class UpstreamRegistryEntry
 {
@@ -493,6 +605,18 @@ public class UpstreamRegistryEntry
     public string Url { get; set; } = "";
     public int Position { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+
+    // OCI-only fields (NULL for all other ecosystems).
+    /// <summary>Auth mechanism: 'anonymous' | 'basic' | 'dockerhub_token_exchange'. Null for non-OCI rows.</summary>
+    public string? AuthType { get; set; }
+    /// <summary>Basic/token-exchange username. Null for anonymous or non-OCI rows.</summary>
+    public string? Username { get; set; }
+    /// <summary>Operator-pinned token-exchange realm URL. Null when not set.</summary>
+    public string? TokenEndpoint { get; set; }
+    /// <summary>Repository-name prefix routing list. Null for non-OCI rows.</summary>
+    public IReadOnlyList<string>? Prefixes { get; set; }
+    /// <summary>True when a secret/password is stored for this entry (secret is never projected).</summary>
+    public bool HasSecret { get; set; }
 }
 
 public class AuditEntry

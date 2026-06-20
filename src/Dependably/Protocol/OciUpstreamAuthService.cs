@@ -11,17 +11,16 @@ namespace Dependably.Protocol;
 /// <summary>
 /// Manages upstream Bearer tokens for OCI pull operations.
 ///
-/// Each (upstream host, repository, scope) triple gets its own cached token. Thundering-herd
-/// prevention: a SemaphoreSlim per key ensures only one concurrent token-exchange request
-/// per distinct triple. Tokens are refreshed 30 seconds before they expire.
+/// Each (orgId, upstream host, repository, scope) quad gets its own cached token. The orgId
+/// dimension prevents cross-tenant token reuse when different orgs configure different credentials
+/// for the same upstream host. Thundering-herd prevention: a SemaphoreSlim per key ensures only
+/// one concurrent token-exchange request per distinct quad. Tokens are refreshed 30 seconds
+/// before they expire.
 ///
 /// DockerHub: parses the Www-Authenticate challenge from GET /v2/, then exchanges at the
 /// realm endpoint for a scoped JWT.
 ///
 /// Basic: returns a static base64(user:password) credential.
-///
-/// AwsEcr: calls GetAuthorizationToken and decodes the response; token lifetime is set by ECR
-/// (typically 12 hours).
 ///
 /// Anonymous: returns null (no Authorization header).
 /// </summary>
@@ -33,11 +32,13 @@ public sealed class OciUpstreamAuthService : IDisposable
     private readonly ILogger<OciUpstreamAuthService> _logger;
     private readonly TimeProvider _time;
 
-    // Token cache: (host, repository, scope) → CachedToken
-    private readonly ConcurrentDictionary<(string, string, string), CachedToken> _tokens = new();
+    // Token cache: (orgId, host, repository, scope) → CachedToken.
+    // orgId ensures different tenants with different credentials for the same host
+    // get separate cache entries and cannot observe each other's tokens.
+    private readonly ConcurrentDictionary<(string, string, string, string), CachedToken> _tokens = new();
 
     // Per-key semaphores to prevent thundering herd on token exchange.
-    private readonly ConcurrentDictionary<(string, string, string), SemaphoreSlim> _sems = new();
+    private readonly ConcurrentDictionary<(string, string, string, string), SemaphoreSlim> _sems = new();
 
     private sealed record CachedToken(string Value, DateTimeOffset ExpiresAt);
 
@@ -56,10 +57,12 @@ public sealed class OciUpstreamAuthService : IDisposable
     }
 
     /// <summary>
-    /// Returns an Authorization header value for the given upstream, repository, and scope, or
-    /// null for anonymous upstreams. Throws <see cref="OciUnauthorizedException"/> on auth failure.
+    /// Returns an Authorization header value for the given org, upstream, repository, and
+    /// scope, or null for anonymous upstreams. Throws <see cref="OciUnauthorizedException"/>
+    /// on auth failure.
     /// </summary>
     public async Task<string?> GetAuthorizationAsync(
+        string orgId,
         OciUpstreamRegistryOptions upstream,
         string repository,
         string scope,
@@ -72,8 +75,8 @@ public sealed class OciUpstreamAuthService : IDisposable
                 OciAuthType.Anonymous => null,
                 OciAuthType.Basic => "Basic " + Convert.ToBase64String(
                     Encoding.UTF8.GetBytes($"{upstream.Username}:{upstream.Password}")),
-                OciAuthType.DockerHubTokenExchange => await GetDockerHubTokenAsync(upstream, repository, scope, ct),
-                OciAuthType.AwsEcr => await GetEcrTokenAsync(upstream, ct),
+                OciAuthType.DockerHubTokenExchange => await GetDockerHubTokenAsync(orgId, upstream, repository, scope, ct),
+                OciAuthType.AwsEcr => await GetEcrTokenAsync(orgId, upstream, ct),
                 _ => null,
             };
     }
@@ -81,20 +84,21 @@ public sealed class OciUpstreamAuthService : IDisposable
     /// <summary>
     /// Evicts a cached token so the next call acquires a fresh one. Called after a 401 response.
     /// </summary>
-    public void InvalidateToken(OciUpstreamRegistryOptions upstream, string repository, string scope)
+    public void InvalidateToken(string orgId, OciUpstreamRegistryOptions upstream, string repository, string scope)
     {
-        _tokens.TryRemove((upstream.Host, repository, scope), out _);
+        _tokens.TryRemove((orgId, upstream.Host, repository, scope), out _);
     }
 
     // ── DockerHub token exchange ────────────────────────────────────────────────
 
     private async Task<string?> GetDockerHubTokenAsync(
+        string orgId,
         OciUpstreamRegistryOptions upstream,
         string repository,
         string scope,
         CancellationToken ct)
     {
-        var key = (upstream.Host, repository, scope);
+        var key = (orgId, upstream.Host, repository, scope);
         var sem = _sems.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
 
         // Check cache before acquiring semaphore.
@@ -143,7 +147,7 @@ public sealed class OciUpstreamAuthService : IDisposable
             {
                 _logger.LogWarning(
                     "OCI token exchange refused for upstream {Host}: challenge realm {Realm} is not HTTPS " +
-                    "on the upstream's own host. Set Oci:Upstreams[*].TokenEndpoint to pin an auth realm " +
+                    "on the upstream's own host. Set the entry's TokenEndpoint to pin an auth realm " +
                     "hosted on a different domain (e.g. https://auth.docker.io/token for Docker Hub).",
                     upstream.Host, realm);
                 throw new OciUnauthorizedException(
@@ -198,12 +202,13 @@ public sealed class OciUpstreamAuthService : IDisposable
     // ── AWS ECR ────────────────────────────────────────────────────────────────
 
     private async Task<string?> GetEcrTokenAsync(
+        string orgId,
         OciUpstreamRegistryOptions upstream,
         CancellationToken ct)
     {
-        // ECR tokens are expensive to exchange (AWS API call). Cache them for their full
-        // lifetime minus a 5-minute buffer.
-        var key = (upstream.Host, "", "ecr");
+        // ECR tokens are expensive to exchange (AWS API call). Cache them keyed by org so
+        // different tenants with different ECR credentials get separate entries.
+        var key = (orgId, upstream.Host, "", "ecr");
         var sem = _sems.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
 
         if (_tokens.TryGetValue(key, out var cached) &&
@@ -221,14 +226,8 @@ public sealed class OciUpstreamAuthService : IDisposable
                 return "Basic " + cached.Value;
             }
 
-            // Use the AWS ECR GetAuthorizationToken API via HTTP (avoids a hard AWSSDK dependency).
-            // The endpoint is: POST https://ecr.{region}.amazonaws.com/ with action=GetAuthorizationToken.
-            // We use a simplified approach with a pre-signed AWS Signature v4 request.
-            // For environments with IAM roles (EC2/ECS), fall back to IMDSv2.
-            //
-            // Community edition: for now surface a clear error asking the operator to provide
-            // credentials via environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY).
-            // A full SigV4 implementation is a follow-up.
+            // Community edition: ECR GetAuthorizationToken integration is not yet implemented.
+            // Configure AuthType=Basic with a GetAuthorizationToken-derived password in the meantime.
             _logger.LogWarning(
                 "ECR auth requires AWS SDK integration. Configure AuthType=Basic with a GetAuthorizationToken-derived password as a workaround.");
             return null;

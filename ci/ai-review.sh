@@ -61,7 +61,7 @@ VERIFY_PERSONA_FILE="${AI_REVIEW_VERIFY_PERSONA_FILE:-ci/prompts/verify.md}"
 # (hedge words), cap the number of findings, and cap total report length. These
 # are heuristics — they can drop a genuine but tentatively-worded finding — but
 # for an advisory check, suppressing confident-sounding noise wins.
-MAX_FINDINGS="${AI_REVIEW_MAX_FINDINGS:-5}"
+MAX_FINDINGS="${AI_REVIEW_MAX_FINDINGS:-8}"
 MAX_REPORT_CHARS="${AI_REVIEW_MAX_REPORT_CHARS:-2200}"
 BASE_URL="${OLLAMA_URL%/}"
 # Lens label shown in report/comment titles (e.g. "Security"). Set per job via
@@ -280,11 +280,10 @@ has_findings() {  # <file>; exit 0 if the output contains >=1 finding
 # Deterministic finding filter (busybox-awk compatible — no gawk extensions).
 # Segments the output into finding blocks, robust to the formats the model
 # actually emits ("- bullet", "Finding N:", numbered, header, or a quote-led
-# block), drops a block whose prose (non-quote lines) reads as speculation
-# rather than a concrete problem, and keeps at most MAX_FINDINGS. Quote lines
-# (`> ...`, the cited diff) are exempt from the hedge check — a quoted line may
-# contain "may" without the finding being speculative. Echoes filtered Markdown;
-# if nothing survives, echoes the single token @@NONE@@.
+# block), drops an UNgrounded speculation block (hedged prose with no cited diff
+# line), keeps any block that cites a `> ` diff line even when its prose hedges,
+# and keeps at most MAX_FINDINGS. Echoes filtered Markdown; if nothing survives,
+# echoes the single token @@NONE@@.
 filter_findings() {  # <file>
   awk -v max="$MAX_FINDINGS" '
     function hedged(s,   l) {
@@ -304,19 +303,25 @@ filter_findings() {  # <file>
       if (pblank && line ~ /^[[:space:]]*>/) return 1
       return 0
     }
+    # Keep a finding if it is grounded (cites a diff line) OR reads concretely.
+    # A finding that quotes a `> ` diff line survives even if its prose hedges —
+    # the high-value findings (cross-tenant access, missing revocation) are
+    # reasoning-heavy and naturally cautious in wording but still grounded. Only
+    # an UNgrounded hedged block (pure speculation, no quoted line) is dropped.
     function flush() {
       if (cur == "") return
-      if (kept < max && drop == 0) { printf "%s", cur; kept++ }
-      cur = ""; drop = 0
+      if (kept < max && (drop == 0 || hasquote == 1)) { printf "%s", cur; kept++ }
+      cur = ""; drop = 0; hasquote = 0
     }
-    BEGIN { kept = 0; drop = 0; cur = ""; pblank = 1 }
+    BEGIN { kept = 0; drop = 0; hasquote = 0; cur = ""; pblank = 1 }
     {
       line = $0
       if (line ~ /^[[:space:]]*$/)        { if (cur != "") cur = cur line "\n"; pblank = 1; next }
       if (line ~ /^[[:space:]]*-{3,}[[:space:]]*$/) { flush(); pblank = 1; next }  # --- separator
       if (is_start(line, pblank)) flush()
       cur = cur line "\n"
-      if (line !~ /^[[:space:]]*>/ && hedged(line)) drop = 1
+      if (line ~ /^[[:space:]]*>/) hasquote = 1
+      else if (hedged(line)) drop = 1
       pblank = 0
     }
     END { flush(); if (kept == 0) print "@@NONE@@" }

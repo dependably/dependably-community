@@ -38,6 +38,10 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     {
         await new SchemaInitializer(_db).InitializeAsync();
         _orgId = await OrgSeeder.InsertAsync(_db, "oci-resolver-org");
+
+        // Seed a default catch-all upstream for _orgId so tests that fetch library/ubuntu
+        // via the inline resolver have a matching route without seeding per-test.
+        await SeedOciUpstreamAsync(_orgId, "registry-1.docker.io", [""], position: 0);
     }
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
@@ -66,25 +70,41 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
     }
 
-    private static OciOptions DefaultOptions(string? host = "registry-1.docker.io", string prefix = "")
+    private static OciOptions DefaultOptions()
         => new()
         {
             ManifestTagTtl = TimeSpan.FromMinutes(5),
             TokenCacheDuration = TimeSpan.FromMinutes(55),
-            Upstreams =
-            [
-                new OciUpstreamRegistryOptions
-                {
-                    Name = "dockerhub",
-                    Host = host ?? "registry-1.docker.io",
-                    AuthType = OciAuthType.Anonymous,
-                    Prefixes = [prefix],
-                }
-            ],
         };
 
-    private static OciOptions OptionsWithNoUpstreams()
-        => new() { Upstreams = [] };
+    /// <summary>
+    /// Seeds one OCI upstream_registry row for the given org directly into the DB.
+    /// Mirrors the shape AddOciAsync writes so MatchUpstreamAsync and BuildOciUpstreamsForOrgAsync
+    /// pick it up during tests.
+    /// </summary>
+    private async Task SeedOciUpstreamAsync(
+        string orgId, string host, string[] prefixes,
+        OciAuthType authType = OciAuthType.Anonymous,
+        string? name = null,
+        int position = 0)
+    {
+        await using var conn = await _db.OpenAsync();
+        string prefixJson = System.Text.Json.JsonSerializer.Serialize(prefixes);
+        string authTypeStr = authType switch
+        {
+            OciAuthType.Anonymous => "anonymous",
+            OciAuthType.Basic => "basic",
+            OciAuthType.DockerHubTokenExchange => "dockerhub_token_exchange",
+            _ => "anonymous",
+        };
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO upstream_registry (id, org_id, ecosystem, name, url, position, auth_type, prefixes)
+            VALUES (@id, @orgId, 'oci', @name, @host, @position, @authType, @prefixes)
+            ON CONFLICT (org_id, ecosystem, url) DO NOTHING
+            """,
+            new { id = Guid.NewGuid().ToString("N"), orgId, name = name ?? host, host, position, authType = authTypeStr, prefixes = prefixJson });
+    }
 
     private static string Sha256Hex(byte[] data)
         => Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
@@ -130,47 +150,43 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         return digest;
     }
 
-    // ── MatchUpstream ──────────────────────────────────────────────────────────
+    // ── MatchUpstreamAsync ─────────────────────────────────────────────────────
 
     [Fact]
-    public void MatchUpstream_PrefixMatch_ReturnsMatchingEntry()
+    public async Task MatchUpstreamAsync_PrefixMatch_ReturnsMatchingEntry()
     {
-        var opts = new OciOptions
-        {
-            Upstreams =
-            [
-                new() { Name = "ghcr",  Host = "ghcr.io",               Prefixes = ["ghcr/"] },
-                new() { Name = "docker", Host = "registry-1.docker.io", Prefixes = ["library/"] },
-            ],
-        };
-        var resolver = Build(options: opts);
+        string orgId = await OrgSeeder.InsertAsync(_db, "match-prefix-org");
+        // Position 0: ghcr.io routes ghcr/ prefix.
+        await SeedOciUpstreamAsync(orgId, "ghcr.io", ["ghcr/"], position: 0);
+        // Position 1: docker routes library/ prefix.
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", ["library/"], position: 1);
 
-        Assert.Equal("ghcr.io", resolver.MatchUpstream("ghcr/myapp")?.Host);
-        Assert.Equal("registry-1.docker.io", resolver.MatchUpstream("library/ubuntu")?.Host);
-        Assert.Null(resolver.MatchUpstream("private/custom"));
+        var resolver = Build();
+
+        Assert.Equal("ghcr.io", (await resolver.MatchUpstreamAsync(orgId, "ghcr/myapp", default))?.Host);
+        Assert.Equal("registry-1.docker.io", (await resolver.MatchUpstreamAsync(orgId, "library/ubuntu", default))?.Host);
+        Assert.Null(await resolver.MatchUpstreamAsync(orgId, "private/custom", default));
     }
 
     [Fact]
-    public void MatchUpstream_EmptyPrefix_IsCatchAll()
+    public async Task MatchUpstreamAsync_EmptyPrefix_IsCatchAll()
     {
-        var opts = new OciOptions
-        {
-            Upstreams =
-            [
-                new() { Name = "fallback", Host = "mirror.example.com", Prefixes = [""] },
-            ],
-        };
-        var resolver = Build(options: opts);
+        string orgId = await OrgSeeder.InsertAsync(_db, "catchall-prefix-org");
+        await SeedOciUpstreamAsync(orgId, "mirror.example.com", [""], position: 0);
 
-        Assert.Equal("mirror.example.com", resolver.MatchUpstream("anything/goes")?.Host);
-        Assert.Equal("mirror.example.com", resolver.MatchUpstream("other")?.Host);
+        var resolver = Build();
+
+        Assert.Equal("mirror.example.com", (await resolver.MatchUpstreamAsync(orgId, "anything/goes", default))?.Host);
+        Assert.Equal("mirror.example.com", (await resolver.MatchUpstreamAsync(orgId, "other", default))?.Host);
     }
 
     [Fact]
-    public void MatchUpstream_EmptyUpstreamList_ReturnsNull()
+    public async Task MatchUpstreamAsync_EmptyUpstreamList_ReturnsNull()
     {
-        var resolver = Build(options: OptionsWithNoUpstreams());
-        Assert.Null(resolver.MatchUpstream("library/ubuntu"));
+        // Use an org with no OCI rows in the DB (OrgSeeder does not seed OCI defaults).
+        string orgId = await OrgSeeder.InsertAsync(_db, "no-upstream-org");
+        var resolver = Build();
+        Assert.Null(await resolver.MatchUpstreamAsync(orgId, "library/ubuntu", default));
     }
 
     // ── FetchManifestAsync — cache hits ───────────────────────────────────────
@@ -210,6 +226,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     public async Task FetchManifestAsync_TagRef_Stale_FetchesFromUpstream()
     {
         string orgId = await OrgSeeder.InsertAsync(_db, "stale-tag-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
 
         // Seed a tag that was revalidated long ago (outside TTL).
         byte[] oldManifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"old\":true}");
@@ -266,6 +283,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     public async Task FetchManifestAsync_UpstreamDigestHeaderMismatch_UsesComputedDigest()
     {
         string orgId = await OrgSeeder.InsertAsync(_db, "digest-mismatch-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
 
         byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"x\":1}");
         string computedDigest = "sha256:" + Sha256Hex(manifestBytes);
@@ -308,10 +326,12 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     [Fact]
     public async Task FetchManifestAsync_NoMatchingUpstream_ReturnsNull()
     {
-        var resolver = Build(options: OptionsWithNoUpstreams());
+        // An org with no OCI rows in upstream_registry returns null (OrgSeeder does not seed them).
+        string emptyOrg = await OrgSeeder.InsertAsync(_db, "no-manifest-upstream-org");
+        var resolver = Build();
 
         var result = await resolver.FetchManifestAsync(
-            _orgId, "library/ubuntu", "latest", isDigest: false, default);
+            emptyOrg, "library/ubuntu", "latest", isDigest: false, default);
 
         Assert.Null(result);
     }
@@ -324,6 +344,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         // null — so OciController emits a clean OCI 404 MANIFEST_UNKNOWN — rather than
         // letting an HttpRequestException escape to a 500 with an empty body.
         string orgId = await OrgSeeder.InsertAsync(_db, "oci-401-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
 
         var http = new StatusFactory(HttpStatusCode.Unauthorized);
         var opts = Options.Create(DefaultOptions());
@@ -472,10 +493,12 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     [Fact]
     public async Task FetchBlobAsync_NoMatchingUpstream_ReturnsNull()
     {
-        var resolver = Build(options: OptionsWithNoUpstreams());
+        // An org with no OCI rows in upstream_registry returns null.
+        string emptyOrg = await OrgSeeder.InsertAsync(_db, "no-blob-upstream-org");
+        var resolver = Build();
         string digest = "sha256:" + new string('a', 64);
 
-        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default);
+        var result = await resolver.FetchBlobAsync(emptyOrg, "library/ubuntu", digest, default);
 
         Assert.Null(result);
     }
@@ -526,6 +549,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     {
         // Upstream returns bytes whose true SHA-256 differs from the requested digest.
         string orgId = await OrgSeeder.InsertAsync(_db, "manifest-digest-mismatch-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
 
         byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"mismatch\":true}");
         string computedHex = Sha256Hex(manifestBytes);
@@ -568,6 +592,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     {
         // When the computed digest matches the requested digest, the manifest is cached and returned.
         string orgId = await OrgSeeder.InsertAsync(_db, "manifest-digest-match-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
 
         byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"match\":true}");
         string computedDigest = Sha256Digest(manifestBytes);
@@ -606,6 +631,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         // The existing Docker-Content-Digest divergence test covers the log behaviour;
         // this confirms the tag path is still cached even when the header disagrees.
         string orgId = await OrgSeeder.InsertAsync(_db, "manifest-tag-nocmp-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
 
         byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"tag\":true}");
         string computedDigest = Sha256Digest(manifestBytes);
@@ -645,6 +671,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         // not match the requested digest is rejected with no cache writes and no DB row.
         // Proves one poisoned response does not corrupt a concurrent legitimate one.
         string orgId = await OrgSeeder.InsertAsync(_db, "manifest-partial-failure-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
 
         // Good manifest — computed digest matches the request.
         byte[] goodBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"good\":true}");
@@ -724,6 +751,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         // the content-addressed key; a blob whose computed digest mismatches is rejected
         // and leaves no entry at the content-addressed key and no staging leftovers.
         string orgId = await OrgSeeder.InsertAsync(_db, "blob-partial-failure-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
 
         byte[] goodBytes = RandomBytes(128);
         string goodHex = Sha256Hex(goodBytes);
@@ -799,7 +827,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
             NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
 
-        var result = await resolver.FetchTagsAsync("library/ubuntu", default);
+        var result = await resolver.FetchTagsAsync(_orgId, "library/ubuntu", default);
 
         Assert.NotNull(result);
         Assert.Equal(tags.OrderBy(t => t), result!.OrderBy(t => t));
@@ -817,7 +845,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
             NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
 
-        var result = await resolver.FetchTagsAsync("library/ubuntu", default);
+        var result = await resolver.FetchTagsAsync(_orgId, "library/ubuntu", default);
 
         Assert.Null(result);
     }
@@ -825,8 +853,10 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     [Fact]
     public async Task FetchTagsAsync_NoMatchingUpstream_ReturnsNull()
     {
-        var resolver = Build(options: OptionsWithNoUpstreams());
-        var result = await resolver.FetchTagsAsync("library/ubuntu", default);
+        // An org with no OCI rows in upstream_registry returns null.
+        string emptyOrg = await OrgSeeder.InsertAsync(_db, "no-tags-upstream-org");
+        var resolver = Build();
+        var result = await resolver.FetchTagsAsync(emptyOrg, "library/ubuntu", default);
         Assert.Null(result);
     }
 
@@ -854,7 +884,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     {
         var resolver = Build(airGapped: true);
         await Assert.ThrowsAsync<AirGappedException>(() =>
-            resolver.FetchTagsAsync("library/ubuntu", default));
+            resolver.FetchTagsAsync(_orgId, "library/ubuntu", default));
     }
 
     // ── Verify-then-commit ordering: spy-based pinning tests ──────────────────
@@ -956,7 +986,233 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             "digest must be verified before bytes are promoted to the content-addressed slot.");
     }
 
+    // ── Auth-retry helper regression: 401 → evict → retry → success ──────────
+
+    /// <summary>
+    /// A 401 on the first attempt must trigger token eviction and a single retry.
+    /// The retry succeeds (200 with manifest body) and the manifest is cached and returned.
+    /// This pins the shared <c>SendUpstreamWithAuthRetryAsync</c> logic for the GET manifest
+    /// path — fails on any code that does not retry on 401.
+    /// </summary>
+    [Fact]
+    public async Task FetchManifestAsync_FirstAttempt401ThenSuccess_RetriesAndReturnsManifest()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, "manifest-auth-retry-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
+
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"authRetry\":true}");
+        string digest = Sha256Digest(manifestBytes);
+
+        // First call returns 401; second call returns 200 with manifest body.
+        var seq = new SequenceFactory(
+            new HttpResponseMessage(HttpStatusCode.Unauthorized),
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(manifestBytes)
+                {
+                    Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/vnd.oci.image.manifest.v1+json") },
+                },
+            });
+
+        var opts = Options.Create(DefaultOptions());
+        var authSvc = new OciUpstreamAuthService(seq, opts, new StubAirGap(false),
+            NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
+        var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
+        var resolver = new OciUpstreamResolver(seq, authSvc, opts, blobs, _db, new StubAirGap(false),
+            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
+
+        var result = await resolver.FetchManifestAsync(orgId, "library/ubuntu", "latest", isDigest: false, default);
+
+        // Retry succeeded — manifest is returned and cached.
+        Assert.NotNull(result);
+        Assert.Equal(digest, result!.Digest);
+        // Both the 401 and the 200 must have been sent (one attempt for auth, one for retry).
+        Assert.Equal(2, seq.CallCount);
+    }
+
+    /// <summary>
+    /// A 401 on the first attempt for a HEAD manifest request must trigger a retry.
+    /// The second attempt succeeds — verifies the HEAD path uses the same auth-retry helper.
+    /// Fails on old code that had a separate per-method retry loop removed in this refactor.
+    /// </summary>
+    [Fact]
+    public async Task FetchManifestMetadataAsync_FirstAttempt401ThenSuccess_RetriesAndReturnsMetadata()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, "manifest-head-auth-retry-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
+
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
+        string digest = Sha256Digest(manifestBytes);
+
+        var headSuccess = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent([])
+            {
+                Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/vnd.oci.image.manifest.v1+json") },
+            },
+        };
+        headSuccess.Headers.TryAddWithoutValidation("Docker-Content-Digest", digest);
+        headSuccess.Content.Headers.ContentLength = manifestBytes.Length;
+
+        var seq = new SequenceFactory(
+            new HttpResponseMessage(HttpStatusCode.Unauthorized),
+            headSuccess);
+
+        var opts = Options.Create(DefaultOptions());
+        var authSvc = new OciUpstreamAuthService(seq, opts, new StubAirGap(false),
+            NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
+        var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
+        var resolver = new OciUpstreamResolver(seq, authSvc, opts, blobs, _db, new StubAirGap(false),
+            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
+
+        var result = await resolver.FetchManifestMetadataAsync(orgId, "library/ubuntu", "latest", isDigest: false, default);
+
+        Assert.NotNull(result);
+        Assert.Equal(digest, result!.Digest);
+        Assert.Equal(2, seq.CallCount);
+    }
+
+    /// <summary>
+    /// A 401 on the first attempt for a HEAD blob request must trigger a retry.
+    /// Verifies the blob HEAD path uses the shared auth-retry helper.
+    /// </summary>
+    [Fact]
+    public async Task FetchBlobMetadataAsync_FirstAttempt401ThenSuccess_RetriesAndReturnsMetadata()
+    {
+        byte[] blobBytes = RandomBytes(64);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+        // Not in cache — forces upstream round-trip.
+
+        var headSuccess = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent([])
+            {
+                Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream") },
+            },
+        };
+
+        var seq = new SequenceFactory(
+            new HttpResponseMessage(HttpStatusCode.Unauthorized),
+            headSuccess);
+
+        var opts = Options.Create(DefaultOptions());
+        var authSvc = new OciUpstreamAuthService(seq, opts, new StubAirGap(false),
+            NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
+        var blobs = new TieredBlobStorage(new InMemoryBlobStore(), new InMemoryBlobStore());
+        var resolver = new OciUpstreamResolver(seq, authSvc, opts, blobs, _db, new StubAirGap(false),
+            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
+
+        string orgId = await OrgSeeder.InsertAsync(_db, "blob-head-auth-retry-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
+        var result = await resolver.FetchBlobMetadataAsync(orgId, "library/ubuntu", digest, default);
+
+        Assert.NotNull(result);
+        Assert.Equal("application/octet-stream", result!.MediaType);
+        Assert.Equal(2, seq.CallCount);
+    }
+
+    /// <summary>
+    /// Mixed partial-failure across the auth-retry helper:
+    /// - One manifest HEAD request: 401 → retry → 200 (succeeds)
+    /// - One manifest HEAD request: 404 on first attempt (returns null cleanly)
+    /// Proves the shared helper handles 401-retry and 404-null correctly in the same process.
+    /// </summary>
+    [Fact]
+    public async Task AuthRetry_MixedPartialFailure_401RetrySucceeds_404ReturnsNull()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, "auth-retry-mixed-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
+
+        byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"mixed\":true}");
+        string digest = Sha256Digest(manifestBytes);
+
+        var headSuccess = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent([])
+            {
+                Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/vnd.oci.image.manifest.v1+json") },
+            },
+        };
+        headSuccess.Headers.TryAddWithoutValidation("Docker-Content-Digest", digest);
+        headSuccess.Content.Headers.ContentLength = manifestBytes.Length;
+
+        // Request 1: 401 → 200 (auth-retry succeeds)
+        var seqGood = new SequenceFactory(
+            new HttpResponseMessage(HttpStatusCode.Unauthorized),
+            headSuccess);
+
+        var optsGood = Options.Create(DefaultOptions());
+        var authGood = new OciUpstreamAuthService(seqGood, optsGood, new StubAirGap(false),
+            NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
+        var blobsGood = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
+        var resolverGood = new OciUpstreamResolver(seqGood, authGood, optsGood, blobsGood, _db, new StubAirGap(false),
+            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
+
+        // Request 2: 404 on first attempt (no retry for 404)
+        var seq404 = new SequenceFactory(new HttpResponseMessage(HttpStatusCode.NotFound));
+        var opts404 = Options.Create(DefaultOptions());
+        var auth404 = new OciUpstreamAuthService(seq404, opts404, new StubAirGap(false),
+            NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
+        var blobs404 = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
+        var resolver404 = new OciUpstreamResolver(seq404, auth404, opts404, blobs404, _db, new StubAirGap(false),
+            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
+
+        var goodResult = await resolverGood.FetchManifestMetadataAsync(orgId, "library/ubuntu", "latest", isDigest: false, default);
+        var nullResult = await resolver404.FetchManifestMetadataAsync(orgId, "library/ubuntu", "missing", isDigest: false, default);
+
+        // 401→retry path: succeeds and returns metadata.
+        Assert.NotNull(goodResult);
+        Assert.Equal(digest, goodResult!.Digest);
+        Assert.Equal(2, seqGood.CallCount); // exactly 2 HTTP calls (401 + 200)
+
+        // 404 path: null, no retry (only 1 HTTP call).
+        Assert.Null(nullResult);
+        Assert.Equal(1, seq404.CallCount); // exactly 1 HTTP call (404 → no retry)
+    }
+
     // ── Test doubles ──────────────────────────────────────────────────────────
+
+    // Returns responses from a fixed sequence in order; tracks the total call count.
+    // Each SendAsync call pops the next response; throws if the sequence is exhausted.
+    // Test factories are used sequentially so a simple non-atomic counter is sufficient.
+    private sealed class SequenceFactory : IHttpClientFactory
+    {
+        private readonly Queue<HttpResponseMessage> _responses;
+        private readonly SequenceCallCounter _counter = new();
+
+        public SequenceFactory(params HttpResponseMessage[] responses)
+            => _responses = new Queue<HttpResponseMessage>(responses);
+
+        public int CallCount => _counter.Value;
+
+        public HttpClient CreateClient(string name) => new(new SequenceHandler(this));
+
+        private sealed class SequenceCallCounter
+        {
+            private int _count;
+            public int Value => _count;
+            public void Increment() => Interlocked.Increment(ref _count);
+        }
+
+        private sealed class SequenceHandler : HttpMessageHandler
+        {
+            private readonly SequenceFactory _owner;
+            public SequenceHandler(SequenceFactory owner) => _owner = owner;
+
+            protected override Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                _owner._counter.Increment();
+                return !_owner._responses.TryDequeue(out var resp)
+                    ? throw new InvalidOperationException(
+                        $"SequenceFactory exhausted — no more responses queued (URL={request.RequestUri})")
+                    : Task.FromResult(resp);
+            }
+        }
+    }
+
+
 
     /// <summary>
     /// Wraps an inner <see cref="IBlobStore"/> and records the key argument of every
@@ -1089,6 +1345,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
 
         string orgId = await OrgSeeder.InsertAsync(_db, "blob-singleflight-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
 
         const int concurrency = 6;
         // Start all callers before releasing the gate so they all queue behind the Lazy.
@@ -1147,6 +1404,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
 
         string orgId = await OrgSeeder.InsertAsync(_db, "blob-distinct-singleflight-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
 
         var tasks = new[]
         {
@@ -1198,6 +1456,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
 
         string orgId = await OrgSeeder.InsertAsync(_db, "blob-mixed-singleflight-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
 
         // Two callers on the shared digest, one each on B and C.
         var tasks = new[]

@@ -1,0 +1,39 @@
+# OpenTelemetry Collector config for the local observability overlay
+# (docker-compose.observability.yml). Receives Dependably's logs, traces, and
+# metrics over OTLP and prints them to the collector's own stdout via the debug
+# exporter — readable with `docker compose ... logs otel-collector`. Swap the
+# debug exporter for a real backend (Loki/Tempo/Prometheus, Grafana Cloud,
+# Datadog, …) when you want to retain or query the telemetry.
+#
+# All components used here (otlp receiver, batch processor, debug exporter) ship
+# in the core collector distribution, so the lightweight
+# otel/opentelemetry-collector image is sufficient.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

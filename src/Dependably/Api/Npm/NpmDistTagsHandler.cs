@@ -16,6 +16,8 @@ namespace Dependably.Api.NpmProtocol;
 public sealed class NpmDistTagsHandler(
     OrgRepository orgs,
     PackageRepository packages,
+    CacheArtifactRepository cacheArtifacts,
+    VulnerabilityRepository vulns,
     TokenRepository tokens,
     AuditRepository audit,
     NpmDistTagRepository distTags,
@@ -78,10 +80,11 @@ public sealed class NpmDistTagsHandler(
         var tags = await distTags.GetTagsAsync(orgId, pkg.Id, ct);
         if (tags.Count == 0)
         {
-            // Lazy seed: compute the default latest and return it without persisting.
-            var versions = await packages.GetVersionsAsync(pkg.Id, ct);
+            // Lazy seed: compute the default latest across both uploaded and global-plane proxy
+            // versions so the dist-tag reflects the true newest version in this tenant.
+            var allVersions = await LoadCombinedVersionsAsync(orgId, pkg.Id, fullName, ct);
             string? latest = NpmSharedHelpers.ComputeLazyLatest(
-                versions.Where(v => !v.Yanked).OrderByDescending(v => v.CreatedAt).ToList());
+                allVersions.Where(v => !v.Yanked).OrderByDescending(v => v.CreatedAt).ToList());
             tags = latest is not null ? new Dictionary<string, string> { ["latest"] = latest } : tags;
         }
 
@@ -230,7 +233,8 @@ public sealed class NpmDistTagsHandler(
         foreach (var p in pkgs)
         {
             // Find the 'latest' version for each package by checking persisted tags first,
-            // then falling back to the lazy latest calculation.
+            // then falling back to the lazy latest calculation across both uploaded and
+            // global-plane proxy versions.
             var tags = await distTags.GetTagsAsync(orgId, p.Id, ct);
             string? latestVersion = null;
             if (tags.TryGetValue("latest", out string? tagVer))
@@ -239,7 +243,7 @@ public sealed class NpmDistTagsHandler(
             }
             else
             {
-                var vers = await packages.GetVersionsAsync(p.Id, ct);
+                var vers = await LoadCombinedVersionsAsync(orgId, p.Id, p.Name, ct);
                 latestVersion = NpmSharedHelpers.ComputeLazyLatest(
                     vers.Where(v => !v.Yanked).OrderByDescending(v => v.CreatedAt).ToList());
             }
@@ -261,5 +265,44 @@ public sealed class NpmDistTagsHandler(
             ["time"] = time.GetUtcNow().ToString("ddd, dd MMM yyyy HH:mm:ss 'GMT'",
                 System.Globalization.CultureInfo.InvariantCulture)
         });
+    }
+
+    // Combines uploaded (package_versions) and global-plane proxy (cache_artifact) versions
+    // for a package. Proxy entries whose version already appears in uploaded versions are
+    // deduplicated. Used by dist-tag lazy-latest computation and search result version lookup.
+    private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
+        string orgId, string packageId, string fullName, CancellationToken ct)
+    {
+        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
+        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, "npm", fullName, ct);
+
+        if (proxyEntries.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var uploadedVersionSet = uploadedVersions
+            .Select(v => v.Version)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
+        var proxySignals = proxyIds.Count > 0
+            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        var synthetic = proxyEntries
+            .Where(e => !uploadedVersionSet.Contains(e.Version))
+            .Select(e => e.ToPackageVersionSynthetic(proxySignals))
+            .ToList();
+
+        if (synthetic.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
+        combined.AddRange(uploadedVersions);
+        combined.AddRange(synthetic);
+        return combined;
     }
 }

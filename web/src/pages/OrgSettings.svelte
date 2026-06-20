@@ -33,6 +33,11 @@
   let reservedEntries = [], reservedLoaded = false
   let showAddReserved = false, newRsvdEcosystem = 'npm', newRsvdPattern = '', addingRsvd = false
 
+  // Install-script allowlist state
+  let installScriptAllowlistEntries = [], installScriptAllowlistLoaded = false
+  let showAddInstallScriptAllowlist = false
+  let newIsaEcosystem = 'npm', newIsaName = '', newIsaVersionPattern = '', addingIsa = false
+
   // License policy state. Single fetch returns mode + both lists.
   let licensePolicyLoaded = false
   let licenseMode = 'off'
@@ -89,6 +94,7 @@
       if (!allowlistLoaded) loadAllowlist()
       if (!blocklistLoaded) loadBlocklist()
       if (!reservedLoaded) loadReserved()
+      if (!installScriptAllowlistLoaded) loadInstallScriptAllowlist()
     }
     if (key === 'licenses' && !licensePolicyLoaded) await loadLicensePolicy()
   }
@@ -222,6 +228,12 @@
         blockMalicious:          proxySettings.block_malicious,
         blockKev:                proxySettings.block_kev,
         maxEpssTolerance,
+        blockInstallScripts:     proxySettings.block_install_scripts,
+        verifyNpmSignatures:     proxySettings.verify_npm_signatures,
+        verifyNuGetSignatures:   proxySettings.verify_nuget_signatures,
+        verifyPyPiAttestations:  proxySettings.verify_pypi_attestations,
+        verifyRpmSignatures:     proxySettings.verify_rpm_signatures,
+        verifyMavenSignatures:   proxySettings.verify_maven_signatures,
       }),
       api.updateOrgSettings(settings),
     ]), {
@@ -312,6 +324,30 @@
     reservedEntries = reservedEntries.filter(e => e.id !== id)
   }
 
+  // Install-script allowlist handlers
+  async function loadInstallScriptAllowlist() {
+    try {
+      installScriptAllowlistEntries = await api.getInstallScriptAllowlist()
+      installScriptAllowlistLoaded = true
+    } catch (e) { error = extractErrorMessage(e) }
+  }
+
+  async function addInstallScriptAllowlist() {
+    addingIsa = true; error = ''
+    try {
+      const e = await api.addInstallScriptAllowlist(newIsaEcosystem, newIsaName, newIsaVersionPattern)
+      installScriptAllowlistEntries = [...installScriptAllowlistEntries, e]
+      showAddInstallScriptAllowlist = false; newIsaName = ''; newIsaVersionPattern = ''
+    } catch (e) { error = extractErrorMessage(e) }
+    finally { addingIsa = false }
+  }
+
+  async function removeInstallScriptAllowlist(id) {
+    if (!confirm($t('installScriptAllowlist.removeConfirm'))) return
+    await api.deleteInstallScriptAllowlist(id)
+    installScriptAllowlistEntries = installScriptAllowlistEntries.filter(e => e.id !== id)
+  }
+
   // Service-tokens tab is admin-only — service tokens are an org-level resource that
   // only admins/owners can mint (controller enforces tenant:configure). Filtering here
   // is cosmetic; the backend is the authority.
@@ -383,6 +419,9 @@
         {reservedEntries} {reservedLoaded}
         onAddReserved={() => showAddReserved = true}
         onRemoveReserved={removeReserved}
+        {installScriptAllowlistEntries} {installScriptAllowlistLoaded}
+        onAddInstallScriptAllowlist={() => showAddInstallScriptAllowlist = true}
+        onRemoveInstallScriptAllowlist={removeInstallScriptAllowlist}
         {saving}
         onSave={saveProxySettings} />
 
@@ -634,6 +673,42 @@
       <div class="modal-actions">
         <button on:click={() => showAddReserved = false}>{$t('common.actions.cancel')}</button>
         <button class="primary" on:click={addReserved} disabled={addingRsvd}>{addingRsvd ? $t('common.actions.adding') : $t('common.actions.add')}</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showAddInstallScriptAllowlist}
+  <div class="modal-backdrop">
+    <div class="modal">
+      <h3>{$t('installScriptAllowlist.modal.title')}</h3>
+      {#if error}<div class="error-msg">{error}</div>{/if}
+      <div class="form-row">
+        <label for="isa-ecosystem">{$t('installScriptAllowlist.modal.ecosystem')}</label>
+        <select id="isa-ecosystem" bind:value={newIsaEcosystem}>
+          <option value="npm">npm</option>
+          <option value="pypi">PyPI</option>
+          <option value="nuget">NuGet</option>
+          <option value="maven">Maven</option>
+          <option value="cargo">Cargo</option>
+          <option value="golang">Go</option>
+          <option value="rpm">RPM</option>
+          <option value="oci">OCI</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label for="isa-name">{$t('installScriptAllowlist.modal.name')}</label>
+        <input id="isa-name" bind:value={newIsaName} placeholder={$t('installScriptAllowlist.modal.namePlaceholder')} />
+        <div class="form-hint">{$t('installScriptAllowlist.modal.nameHint')}</div>
+      </div>
+      <div class="form-row">
+        <label for="isa-version">{$t('installScriptAllowlist.modal.versionPattern')}</label>
+        <input id="isa-version" bind:value={newIsaVersionPattern} placeholder={$t('installScriptAllowlist.modal.versionPatternPlaceholder')} />
+        <div class="form-hint">{$t('installScriptAllowlist.modal.versionPatternHint')}</div>
+      </div>
+      <div class="modal-actions">
+        <button on:click={() => showAddInstallScriptAllowlist = false}>{$t('common.actions.cancel')}</button>
+        <button class="primary" on:click={addInstallScriptAllowlist} disabled={addingIsa || !newIsaName.trim()}>{addingIsa ? $t('common.actions.adding') : $t('common.actions.add')}</button>
       </div>
     </div>
   </div>

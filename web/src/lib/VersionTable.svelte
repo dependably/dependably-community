@@ -164,6 +164,10 @@
           <strong>{ver.version}</strong>
           {#if ver.yanked}<span class="badge yanked ml-1">{$t('versionDetail.badges.yanked')}</span>{/if}
           {#if ver.deprecated}<span class="badge deprecated ml-1" title={ver.deprecated}>{$t('versionDetail.badges.deprecated')}</span>{/if}
+          {#if ver.hasInstallScript}<span class="badge install-script ml-1" title={$t('versionDetail.badges.installScriptHelp', { values: { kind: ver.installScriptKind || '' } })}>{$t('versionDetail.badges.installScript')}</span>{/if}
+          {#if ver.provenanceStatus === 'verified'}<span class="badge prov-verified ml-1" title={$t('versionDetail.badges.provenanceVerifiedHelp', { values: { signer: ver.provenanceSigner || '' } })}>{$t('versionDetail.badges.provenanceVerified')}</span>{/if}
+          {#if ver.provenanceStatus === 'failed'}<span class="badge prov-failed ml-1" title={$t('versionDetail.badges.provenanceFailedHelp')}>{$t('versionDetail.badges.provenanceFailed')}</span>{/if}
+          {#if ver.provenanceStatus === 'unsigned'}<span class="badge prov-unsigned ml-1" title={$t('versionDetail.badges.provenanceUnsignedHelp')}>{$t('versionDetail.badges.provenanceUnsigned')}</span>{/if}
           {#if vulns.length > 0}
             {@const critical = vulns.filter(v => v.severity === 'CRITICAL').length}
             {@const high     = vulns.filter(v => v.severity === 'HIGH').length}
@@ -178,10 +182,14 @@
           {/if}
         </td>
         <td class="text-center latest-cell">
+          <!-- When the upstream latest is known, every row resolves to current (check) or behind (x);
+               the dash is reserved for packages with no upstream baseline to compare against. -->
           {#if pkg?.upstreamLatestVersion && ver.version === pkg.upstreamLatestVersion}
-            <svg class="latest-yes" width="14" height="14" role="img" aria-label={$t('versionDetail.columns.latest')}><use href="/icons.svg#icon-check"/></svg>
+            <svg class="latest-yes" width="14" height="14" role="img" aria-label={$t('versionDetail.latestCell.isLatest')}><use href="/icons.svg#icon-check"/></svg>
+          {:else if pkg?.upstreamLatestVersion}
+            <svg class="latest-no" width="14" height="14" role="img" aria-label={$t('versionDetail.latestCell.behind')}><use href="/icons.svg#icon-x"/></svg>
           {:else}
-            <span class="text-muted">—</span>
+            <span class="text-muted" aria-label={$t('versionDetail.latestCell.unknown')}>—</span>
           {/if}
         </td>
         <td class="nowrap">

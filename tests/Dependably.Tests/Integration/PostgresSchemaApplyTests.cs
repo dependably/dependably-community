@@ -167,6 +167,83 @@ public sealed class PostgresSchemaApplyTests
         Assert.False(await repo.TryConsumePendingRequestAsync(reqId, org));
     }
 
+    // ── Reshape row-preservation on live Postgres ──────────────────────────────────────────
+    // The Postgres branch of make_pvv_package_version_id_nullable uses in-place ALTER TABLE
+    // statements (not a recreate-table). This test seeds rows including a dangling one
+    // (inserted while FK enforcement is bypassed via session_replication_role), resets the
+    // ledger, re-runs InitializeAsync, and confirms no row was lost. The in-place ALTER is
+    // inherently row-preserving, but this catches future regressions where a DELETE or
+    // TRUNCATE is accidentally introduced.
+    // Unverified locally (requires TEST_POSTGRES_CONNECTION / CI postgres service).
+    [Fact]
+    public async Task MakePvvPackageVersionIdNullable_OnLivePostgres_AllRowsSurviveReshape()
+    {
+        var store = await FreshPostgresAsync();
+        var initializer = new SchemaInitializer(store);
+        await initializer.InitializeAsync();
+
+        await using var conn = await store.OpenAsync();
+
+        // Seed org, package, and a real package_version to own the valid child row.
+        string orgId = Guid.NewGuid().ToString("N");
+        string pkgId = Guid.NewGuid().ToString("N");
+        string pvId = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync(
+            "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
+            new { id = orgId, slug = "pg-reshape-" + orgId[..8] });
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES (@pkgId, @orgId, 'npm', 'test', 'test', 0)",
+            new { pkgId, orgId });
+        await conn.ExecuteAsync(
+            "INSERT INTO package_versions (id, package_id, version, purl, blob_key) VALUES (@pvId, @pkgId, '1.0.0', 'pkg:npm/test@1.0.0', 'npm/r/test/1.0.0/test-1.0.0.tgz')",
+            new { pvId, pkgId });
+
+        // Seed a vulnerability so the FK on vuln_id can be satisfied.
+        string vulnId = "GHSA-pg-reshape-test01";
+        await conn.ExecuteAsync("""
+            INSERT INTO vulnerabilities (id, osv_id, ecosystem, package_name)
+            VALUES (@vulnId, @vulnId, 'npm', 'test')
+            ON CONFLICT (id) DO NOTHING
+            """, new { vulnId });
+
+        // Insert via session_replication_role = replica to bypass FK enforcement,
+        // so we can plant a dangling row (parent package_version_id does not exist).
+        await conn.ExecuteAsync("SET session_replication_role = replica");
+        await conn.ExecuteAsync("""
+            INSERT INTO package_version_vulns (id, package_version_id, vuln_id, owner_kind)
+            VALUES (@id1, @pvId, @vulnId, 'package_version'),
+                   (@id2, 'pv-DANGLING-PG-GONE', @vulnId, 'package_version')
+            """,
+            new
+            {
+                id1 = Guid.NewGuid().ToString("N"),
+                pvId,
+                id2 = Guid.NewGuid().ToString("N"),
+                vulnId,
+            });
+        await conn.ExecuteAsync("SET session_replication_role = DEFAULT");
+
+        long beforeCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_version_vulns");
+        Assert.Equal(2, beforeCount);
+
+        // Reset the migration ledger entry so InitializeAsync re-runs the reshape.
+        await conn.ExecuteAsync(
+            "DELETE FROM _applied_migrations WHERE name = 'make_pvv_package_version_id_nullable'");
+
+        // Re-run: the Postgres branch uses in-place ALTER TABLE, which preserves all rows.
+        await initializer.InitializeAsync();
+
+        long afterCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_version_vulns");
+        Assert.Equal(beforeCount, afterCount);
+
+        // The dangling row must still be present.
+        long danglingCount = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_version_vulns WHERE package_version_id = 'pv-DANGLING-PG-GONE'");
+        Assert.Equal(1, danglingCount);
+    }
+
     private static async Task<Dictionary<string, HashSet<string>>> PostgresShapeAsync(NpgsqlMetadataStore store)
     {
         await using var conn = await store.OpenAsync();

@@ -498,45 +498,31 @@ public sealed class OrgControllerExtendedTests
     }
 
     [Fact]
-    public async Task GetSetup_PyPi_PerEcosystemLimit_Wins_Over_GlobalLimit()
+    public async Task GetSetup_PyPi_IncludesNetrcAuth()
     {
-        // Both per-ecosystem and global limits set — per-ecosystem must win in the snippet.
+        // Pulls require a token by default (anonymous_pull off), so the snippet must show how
+        // to authenticate — pip reads credentials from ~/.netrc.
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
-
-        await using (var conn = await b.Db.OpenAsync())
-        {
-            await conn.ExecuteAsync(
-                "UPDATE org_settings SET max_upload_bytes = 1000, max_upload_bytes_pypi = 2000 " +
-                "WHERE org_id = @org",
-                new { org = b.PrimaryOrgId });
-        }
 
         var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("pypi", CancellationToken.None));
         string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
-        Assert.Contains("2000 bytes", snippet);
+        Assert.Contains(".netrc", snippet);
+        Assert.Contains("password <token>", snippet);
     }
 
     [Fact]
-    public async Task GetSetup_Npm_FallsBack_To_GlobalLimit_When_PerEcosystemNull()
+    public async Task GetSetup_Npm_IncludesRegistryAndAuthToken()
     {
         await using var s = await ControllerScenario.CreateAsync();
         await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
-
-        await using (var conn = await b.Db.OpenAsync())
-        {
-            await conn.ExecuteAsync(
-                "UPDATE org_settings SET max_upload_bytes = 555, max_upload_bytes_npm = NULL " +
-                "WHERE org_id = @org",
-                new { org = b.PrimaryOrgId });
-        }
 
         var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("npm", CancellationToken.None));
         string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
         Assert.Contains("registry=", snippet);
-        Assert.Contains("555 bytes", snippet);
+        Assert.Contains("_authToken=<token>", snippet);
     }
 
     [Fact]
@@ -550,5 +536,27 @@ public sealed class OrgControllerExtendedTests
         string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
         Assert.Contains("/nuget/v3/index.json", snippet);
         Assert.Contains("packageSources", snippet);
+        Assert.Contains("packageSourceCredentials", snippet);
+    }
+
+    [Theory]
+    [InlineData("pypi")]
+    [InlineData("npm")]
+    [InlineData("nuget")]
+    [InlineData("maven")]
+    [InlineData("rpm")]
+    [InlineData("oci")]
+    [InlineData("golang")]
+    [InlineData("cargo")]
+    public async Task GetSetup_Snippets_OmitMaxUploadLine(string eco)
+    {
+        // The setup snippets no longer advertise an upload-size limit.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup(eco, CancellationToken.None));
+        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
+        Assert.DoesNotContain("Max upload", snippet);
     }
 }

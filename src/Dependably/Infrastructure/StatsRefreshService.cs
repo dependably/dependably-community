@@ -10,7 +10,9 @@ namespace Dependably.Infrastructure;
 /// aggregate queries on every page load (which took seconds on large instances).
 ///
 /// Runs one pass on startup so snapshots populate shortly after boot, then refreshes on a
-/// fixed interval (STATS_REFRESH_INTERVAL_SECONDS env var, default 300s).
+/// fixed interval (STATS_REFRESH_INTERVAL_SECONDS env var, default 60s). Large multi-tenant
+/// instances where the aggregate pass is expensive can raise the interval to trade dashboard
+/// freshness for less background query load.
 /// </summary>
 public sealed class StatsRefreshService : BackgroundService
 {
@@ -45,7 +47,7 @@ public sealed class StatsRefreshService : BackgroundService
     {
         int intervalSeconds = int.TryParse(_config["STATS_REFRESH_INTERVAL_SECONDS"], out int s) && s > 0
             ? s
-            : 300;
+            : 60;
 
         // Initial pass on startup so the dashboard hits a warm snapshot soon after boot.
         await RunRefreshPassAsync(stoppingToken);

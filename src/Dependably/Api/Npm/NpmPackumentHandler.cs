@@ -20,6 +20,7 @@ namespace Dependably.Api.NpmProtocol;
 public sealed class NpmPackumentHandler(
     OrgRepository orgs,
     PackageRepository packages,
+    CacheArtifactRepository cacheArtifacts,
     TokenRepository tokens,
     VulnerabilityRepository vulns,
     IPublicUrlBuilder urls,
@@ -147,7 +148,7 @@ public sealed class NpmPackumentHandler(
         }, ct);
 
     // Local-only packument path (passthrough disabled or claim-local): authenticated reads
-    // over hosted versions, served from cache when fresh.
+    // over hosted versions plus globally-cached proxy versions, served from cache when fresh.
     private async Task<IActionResult> ServeLocalPackumentAsync(
         HttpContext httpContext, string orgId, string fullName, Package? pkg, TokenRecord? token, CancellationToken ct)
     {
@@ -169,7 +170,7 @@ public sealed class NpmPackumentHandler(
         }
 
         var settings = await orgs.GetSettingsAsync(orgId, ct);
-        var versions = await packages.GetVersionsAsync(pkg.Id, ct);
+        var versions = await LoadCombinedVersionsAsync(orgId, pkg.Id, fullName, ct);
         var signals = await LoadVulnSignalsAsync(versions, ct);
         var tags = await distTags.GetTagsAsync(orgId, pkg.Id, ct);
         var metadata = BuildNpmMetadata(httpContext, pkg, versions,
@@ -201,11 +202,11 @@ public sealed class NpmPackumentHandler(
     {
         var localVersions = localPkg is null
             ? Array.Empty<PackageVersion>() as IReadOnlyList<PackageVersion>
-            : await packages.GetVersionsAsync(localPkg.Id, ct);
+            : await LoadCombinedVersionsAsync(orgId, localPkg.Id, fullName, ct);
 
-        // Load vuln signals once for the local version list — used in both the fallback
-        // (BuildNpmMetadata) and the merge (MergeLocalVersionsIntoPackument) paths so
-        // block-gate filtering is consistent across both without extra I/O.
+        // Load vuln signals once for the local version list (uploaded + proxy cached) — used
+        // in both the fallback (BuildNpmMetadata) and the merge (MergeLocalVersionsIntoPackument)
+        // paths so block-gate filtering is consistent across both without extra I/O.
         var localSignals = await LoadVulnSignalsAsync(localVersions, ct);
 
         var metadata = await FetchUpstreamPackumentAsync(httpContext, orgId, fullName, ct);
@@ -313,7 +314,8 @@ public sealed class NpmPackumentHandler(
             BlockMaliciousMode: settings.BlockMalicious,
             BlockKevMode: settings.BlockKev,
             MaxEpssTolerance: settings.MaxEpssTolerance,
-            MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance);
+            MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
+            BlockInstallScriptsMode: settings.BlockInstallScripts);
 
         var (removed, survivingWithTime) = EvaluateVersionsAgainstPolicy(versionsObj, policy, publishedAtByVersion, now);
 
@@ -494,7 +496,7 @@ public sealed class NpmPackumentHandler(
                 continue;
             }
 
-            string filename = v.BlobKey.Split('/').Last();
+            string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
             var dist = new JsonObject
             {
                 ["tarball"] = $"{tarballBase}/{localPkg.Name}/{filename}"
@@ -517,15 +519,85 @@ public sealed class NpmPackumentHandler(
         }
     }
 
-    // Loads vuln gate signals for a version list in one batch query. Returns an empty dict when
-    // all versions lack advisory links. Callers pass the result into
-    // BlockGateService.IsHardBlockedByStoredState as the signals argument so the packument
-    // renderers evaluate all block-gate arms without per-version I/O.
-    private Task<IReadOnlyDictionary<string, VulnGateSignals>> LoadVulnSignalsAsync(
-        IReadOnlyList<PackageVersion> versions, CancellationToken ct) =>
-        versions.Count == 0
-            ? Task.FromResult<IReadOnlyDictionary<string, VulnGateSignals>>(new Dictionary<string, VulnGateSignals>())
-            : vulns.GetGateSignalsBatchAsync(versions.Select(v => v.Id).ToList(), ct);
+    // Loads vuln gate signals for a combined (uploaded + proxy synthetic) version list.
+    // Uploaded versions key on package_version_id; synthetic proxy versions key on
+    // cache_artifact_id (stored in PackageVersion.Id via ToPackageVersionSynthetic).
+    private async Task<IReadOnlyDictionary<string, VulnGateSignals>> LoadVulnSignalsAsync(
+        IReadOnlyList<PackageVersion> versions, CancellationToken ct)
+    {
+        if (versions.Count == 0)
+        {
+            return new Dictionary<string, VulnGateSignals>();
+        }
+
+        var uploadedIds = versions.Where(v => v.Origin == "uploaded").Select(v => v.Id).ToList();
+        var proxyIds = versions.Where(v => v.Origin == "proxy").Select(v => v.Id).ToList();
+
+        var uploadedSignals = uploadedIds.Count > 0
+            ? await vulns.GetGateSignalsBatchAsync(uploadedIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+        var proxySignals = proxyIds.Count > 0
+            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        if (uploadedSignals.Count == 0)
+        {
+            return proxySignals;
+        }
+
+        if (proxySignals.Count == 0)
+        {
+            return uploadedSignals;
+        }
+
+        var merged = new Dictionary<string, VulnGateSignals>(uploadedSignals);
+        foreach (var (k, v) in proxySignals)
+        {
+            merged[k] = v;
+        }
+
+        return merged;
+    }
+
+    // Returns the combined list of uploaded package_versions and synthetic PackageVersion
+    // objects projected from global-plane proxy cache entries for the given package. Proxy
+    // entries whose version already appears in uploaded versions are deduplicated so a name
+    // cached before upload does not double-list that version.
+    private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
+        string orgId, string packageId, string fullName, CancellationToken ct)
+    {
+        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
+        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, "npm", fullName, ct);
+
+        if (proxyEntries.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var uploadedVersionSet = uploadedVersions
+            .Select(v => v.Version)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
+        var proxySignals = proxyIds.Count > 0
+            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        var synthetic = proxyEntries
+            .Where(e => !uploadedVersionSet.Contains(e.Version))
+            .Select(e => e.ToPackageVersionSynthetic(proxySignals))
+            .ToList();
+
+        if (synthetic.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
+        combined.AddRange(uploadedVersions);
+        combined.AddRange(synthetic);
+        return combined;
+    }
 
     /// <summary>
     /// Tarball download URL base. Tenant-implicit: every request is already on the tenant's host,
@@ -552,7 +624,7 @@ public sealed class NpmPackumentHandler(
 
         foreach (var v in activeVersions)
         {
-            string filename = v.BlobKey.Split('/').Last();
+            string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
             var dist = new JsonObject
             {
                 ["tarball"] = $"{tarballBase}/{pkg.Name}/{filename}"

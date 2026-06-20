@@ -9,11 +9,15 @@ instance. Pick the cell in the table that matches your ecosystem and scope.
 | **PyPI**  | [pypi-configure-project](./pypi-configure-project/SKILL.md) | [pypi-configure-global](./pypi-configure-global/SKILL.md) |
 | **NuGet** | [nuget-configure-project](./nuget-configure-project/SKILL.md) | [nuget-configure-global](./nuget-configure-global/SKILL.md) |
 
-Each skill prompts for three inputs, in order:
+Each skill prompts for two inputs, in order:
 
-1. **Dependably base URL** — e.g. `https://repo.example.com` or `http://192.168.1.50:8080`
-2. **Org slug** — e.g. `default`, `acme`
-3. **Token** — created in the dependably web UI under **Tokens** (user token) or
+1. **Dependably base URL** — the base URL of your dependably org, e.g.
+   `https://repo.example.com` or `http://192.168.1.50:8080`. Registry paths are
+   ecosystem-only (`/npm/`, `/simple/`, `/nuget/v3/index.json`); the org is
+   resolved from the host, not a URL path segment. Single-tenant deployments use
+   the bare host; multi-tenant deployments put the org in the subdomain
+   (`https://acme.repo.example.com`).
+2. **Token** — created in the dependably web UI under **Tokens** (user token) or
    **Settings → Service tokens** (long-lived non-personal token).
 
 > **Plain HTTP gotcha.** Self-hosted dependably is commonly served over plain

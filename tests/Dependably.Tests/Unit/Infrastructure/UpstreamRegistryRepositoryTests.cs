@@ -1,3 +1,4 @@
+using Dependably.Configuration;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -108,5 +109,137 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
         await repo.AddAsync(org, "pypi", "https://pypi.org", "dup");
 
         Assert.Single(await repo.ListUrlsForEcosystemAsync(org, "pypi"));
+    }
+
+    // ── OCI-specific: AddOciAsync, BuildOciUpstreamsForOrgAsync ────────────────
+
+    [Fact]
+    public async Task AddOci_StoresAllFields_SecretNotExposedInList()
+    {
+        string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        var repo = NewRepo();
+
+        var req = new NewOciUpstreamRegistry(
+            Host: "ghcr.io",
+            AuthType: OciAuthType.Basic,
+            Prefixes: ["ghcr/"],
+            Name: "GHCR",
+            Username: "robot",
+            Secret: "super-secret-token",
+            TokenEndpoint: null);
+
+        var entry = await repo.AddOciAsync(org, req);
+
+        Assert.Equal("oci", entry.Ecosystem);
+        Assert.Equal("ghcr.io", entry.Url);
+        Assert.Equal("basic", entry.AuthType);
+        Assert.Equal("robot", entry.Username);
+        Assert.True(entry.HasSecret);  // secret is set
+        Assert.Equal(["ghcr/"], entry.Prefixes);
+
+        // ListAsync must NEVER return the secret; only HasSecret bool.
+        var listed = await repo.ListAsync(org);
+        var ociEntry = listed.Single(e => e.Ecosystem == "oci");
+        Assert.True(ociEntry.HasSecret);
+        Assert.Equal(["ghcr/"], ociEntry.Prefixes);
+    }
+
+    [Fact]
+    public async Task BuildOciUpstreams_ReturnsEntriesInPositionOrder_WithParsedPrefixes()
+    {
+        string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        var repo = NewRepo();
+
+        // Insert in reverse order; BuildOciUpstreams should return by position.
+        await repo.AddOciAsync(org, new NewOciUpstreamRegistry(
+            Host: "registry-1.docker.io",
+            AuthType: OciAuthType.DockerHubTokenExchange,
+            Prefixes: ["library/", ""],
+            TokenEndpoint: "https://auth.docker.io/token"));
+
+        await repo.AddOciAsync(org, new NewOciUpstreamRegistry(
+            Host: "ghcr.io",
+            AuthType: OciAuthType.Anonymous,
+            Prefixes: ["ghcr/"]));
+
+        var upstreams = await repo.BuildOciUpstreamsForOrgAsync(org);
+
+        Assert.Equal(2, upstreams.Count);
+        Assert.Equal("registry-1.docker.io", upstreams[0].Host);
+        Assert.Equal(OciAuthType.DockerHubTokenExchange, upstreams[0].AuthType);
+        Assert.Equal("https://auth.docker.io/token", upstreams[0].TokenEndpoint);
+        Assert.Equal(["library/", ""], upstreams[0].Prefixes);
+        Assert.Equal("ghcr.io", upstreams[1].Host);
+        Assert.Equal(OciAuthType.Anonymous, upstreams[1].AuthType);
+        Assert.Equal(["ghcr/"], upstreams[1].Prefixes);
+    }
+
+    [Fact]
+    public async Task BuildOciUpstreams_DifferentOrgs_Isolated()
+    {
+        // OCI upstreams for org A must not appear in org B's list.
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"a-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
+        var repo = NewRepo();
+
+        await repo.AddOciAsync(orgA, new NewOciUpstreamRegistry(
+            Host: "private.a.example",
+            AuthType: OciAuthType.Basic,
+            Prefixes: ["a/"],
+            Username: "user-a",
+            Secret: "secret-a"));
+
+        await repo.AddOciAsync(orgB, new NewOciUpstreamRegistry(
+            Host: "private.b.example",
+            AuthType: OciAuthType.Anonymous,
+            Prefixes: ["b/"]));
+
+        var aUpstreams = await repo.BuildOciUpstreamsForOrgAsync(orgA);
+        var bUpstreams = await repo.BuildOciUpstreamsForOrgAsync(orgB);
+
+        Assert.Single(aUpstreams);
+        Assert.Equal("private.a.example", aUpstreams[0].Host);
+        Assert.Single(bUpstreams);
+        Assert.Equal("private.b.example", bUpstreams[0].Host);
+    }
+
+    /// <summary>
+    /// Mixed partial-failure: org A's OCI write succeeds; org B's duplicate-host write is
+    /// silently ignored (ON CONFLICT DO NOTHING). Both orgs' upstreams remain independent
+    /// and neither is contaminated by the other's state.
+    /// </summary>
+    [Fact]
+    public async Task AddOci_MixedOutcome_DuplicateIgnoredFirstSucceeds()
+    {
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"a-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
+        var repo = NewRepo();
+
+        var req = new NewOciUpstreamRegistry(
+            Host: "mirror.example.com",
+            AuthType: OciAuthType.Anonymous,
+            Prefixes: [""]);
+
+        // First write for orgA — succeeds.
+        var entryA1 = await repo.AddOciAsync(orgA, req);
+        // Duplicate write for orgA with same host — silently ignored, first entry retained.
+        await repo.AddOciAsync(orgA, req with { Name = "dup" });
+
+        // orgB's write for the same host — succeeds (separate tenant).
+        var entryB = await repo.AddOciAsync(orgB, req);
+
+        var aUpstreams = await repo.BuildOciUpstreamsForOrgAsync(orgA);
+        var bUpstreams = await repo.BuildOciUpstreamsForOrgAsync(orgB);
+
+        // orgA: exactly one entry (duplicate ignored).
+        Assert.Single(aUpstreams);
+        Assert.Equal("mirror.example.com", aUpstreams[0].Host);
+
+        // orgB: one independent entry — not contaminated by orgA's data.
+        Assert.Single(bUpstreams);
+        Assert.Equal("mirror.example.com", bUpstreams[0].Host);
+
+        // The two entries are distinct rows (different org_id).
+        Assert.NotEqual(entryA1.Id, entryB.Id);
     }
 }

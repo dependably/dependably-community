@@ -166,7 +166,7 @@ internal static class NuGetNupkgProxyHelper
         string orgId, string normalizedId, string normalizedVersion, string purl,
         string file, BlobHandle blob, string upstreamBase,
         TokenRecord? token, OrgSettings settings, NuGetFirstFetchMetadata meta,
-        string? sourceIp)
+        string? sourceIp, Dependably.Protocol.Provenance.ProvenanceResult prov)
 #pragma warning restore S107
     {
         return new ProxyFetchRequest(
@@ -191,7 +191,11 @@ internal static class NuGetNupkgProxyHelper
             BlockDeprecatedMode: settings.BlockDeprecated,
             BlockMaliciousMode: settings.BlockMalicious,
             BlockKevMode: settings.BlockKev,
-            MaxEpssTolerance: settings.MaxEpssTolerance);
+            MaxEpssTolerance: settings.MaxEpssTolerance,
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            ProvenanceStatus: Dependably.Protocol.Provenance.ProvenanceStatuses.ToColumn(prov.Status),
+            ProvenanceSigner: prov.Signer,
+            VerifyProvenanceMode: settings.VerifyNuGetSignatures);
     }
 }
 

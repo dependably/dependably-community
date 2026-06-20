@@ -93,5 +93,8 @@ public sealed class DownloadCountWriter
 /// One download-count increment queued for async aggregation and write.
 /// Exactly one of <see cref="VersionId"/> or <see cref="Purl"/> is non-null,
 /// matching the two keying strategies used by the download-serve paths.
+/// When <see cref="Purl"/> is set, <see cref="OrgId"/> must also be set —
+/// the by-purl path increments <c>tenant_artifact_access.download_count</c>
+/// which is scoped per tenant, so the org identity is load-bearing.
 /// </summary>
-public sealed record DownloadCountRecord(string? VersionId, string? Purl);
+public sealed record DownloadCountRecord(string? VersionId, string? Purl, string? OrgId = null);

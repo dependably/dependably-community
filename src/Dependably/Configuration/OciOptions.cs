@@ -3,8 +3,10 @@ using Microsoft.Extensions.Options;
 namespace Dependably.Configuration;
 
 /// <summary>
-/// Strongly typed configuration for OCI upstream proxy.
-/// Bound from <c>Oci</c> section in appsettings.json / env vars.
+/// Strongly typed configuration for the OCI proxy layer.
+/// Bound from the <c>Oci</c> section in appsettings.json / env vars.
+/// Upstream registry entries are stored per-org in the <c>upstream_registry</c> DB table,
+/// not in this config object. The scalars here (timeouts, CatalogEnabled) remain config-driven.
 /// </summary>
 public sealed class OciOptions
 {
@@ -19,17 +21,16 @@ public sealed class OciOptions
 
     /// <summary>Whether the /v2/_catalog endpoint is enabled (default false — admin only).</summary>
     public bool CatalogEnabled { get; set; }
-
-    /// <summary>Upstream registry entries in prefix-match order (first match wins).</summary>
-    public List<OciUpstreamRegistryOptions> Upstreams { get; set; } = [];
 }
 
 /// <summary>
-/// Per-upstream-registry configuration entry.
+/// Runtime descriptor for one OCI upstream registry entry. Used as the DTO between
+/// <see cref="Dependably.Infrastructure.UpstreamRegistryRepository.BuildOciUpstreamsForOrgAsync"/>
+/// and <see cref="Dependably.Protocol.OciUpstreamAuthService"/> — not bound from config.
 /// </summary>
 public sealed class OciUpstreamRegistryOptions
 {
-    /// <summary>Human-readable label (e.g. "dockerhub", "ghcr", "ecr-prod").</summary>
+    /// <summary>Human-readable label.</summary>
     public string Name { get; set; } = "";
 
     /// <summary>Upstream host (e.g. "registry-1.docker.io", "ghcr.io").</summary>
@@ -38,7 +39,7 @@ public sealed class OciUpstreamRegistryOptions
     /// <summary>Authentication mechanism for this upstream.</summary>
     public OciAuthType AuthType { get; set; } = OciAuthType.Anonymous;
 
-    /// <summary>Basic/token exchange username (AuthType=Basic or DockerHubTokenExchange with rate-limit budget).</summary>
+    /// <summary>Basic/token exchange username.</summary>
     public string? Username { get; set; }
 
     /// <summary>Basic/token exchange password or personal access token.</summary>
@@ -47,20 +48,11 @@ public sealed class OciUpstreamRegistryOptions
     /// <summary>
     /// Operator-pinned token-exchange endpoint (AuthType=DockerHubTokenExchange). The
     /// <c>Www-Authenticate</c> realm presented by the upstream must be HTTPS and live on the
-    /// upstream's own host or registrable domain before credentials are attached; set this to
-    /// the exact realm URL (e.g. <c>https://auth.example.net/token</c>) to allow a registry
-    /// whose auth realm is hosted on an unrelated domain.
+    /// upstream's own host before credentials are attached; set this to the exact realm URL
+    /// (e.g. <c>https://auth.docker.io/token</c>) to allow a registry whose auth realm is
+    /// hosted on an unrelated domain.
     /// </summary>
     public string? TokenEndpoint { get; set; }
-
-    /// <summary>AWS region for ECR (AuthType=AwsEcr).</summary>
-    public string? AwsRegion { get; set; }
-
-    /// <summary>AWS access key ID for ECR (AuthType=AwsEcr). Falls back to instance role credentials when null.</summary>
-    public string? AwsAccessKeyId { get; set; }
-
-    /// <summary>AWS secret access key for ECR (AuthType=AwsEcr). Falls back to instance role credentials when null.</summary>
-    public string? AwsSecretAccessKey { get; set; }
 
     /// <summary>
     /// Repository name prefixes that route to this upstream (e.g. "library/", "ghcr.io/").
@@ -81,13 +73,17 @@ public enum OciAuthType
     /// <summary>Docker Hub's token exchange flow (GET /token?service=registry.docker.io&amp;scope=...).</summary>
     DockerHubTokenExchange,
 
-    /// <summary>AWS ECR GetAuthorizationToken-based token exchange.</summary>
+    /// <summary>
+    /// AWS ECR GetAuthorizationToken-based token exchange. The enum arm is retained for
+    /// future use but is rejected at the API controller layer — configure ECR via Basic
+    /// with a GetAuthorizationToken-derived password in the meantime.
+    /// </summary>
     AwsEcr,
 }
 
 /// <summary>
-/// Startup validator for <see cref="OciOptions"/>. Rejects invalid configurations before
-/// the first request can reach the proxy path.
+/// Startup validator for <see cref="OciOptions"/>. Validates the scalar timeouts only;
+/// per-upstream-entry validation is performed at API time in the controller.
 /// </summary>
 public sealed class OciOptionsValidator : IValidateOptions<OciOptions>
 {
@@ -95,11 +91,6 @@ public sealed class OciOptionsValidator : IValidateOptions<OciOptions>
     {
         var errors = new List<string>();
         ValidateTimeSpans(options, errors);
-        for (int i = 0; i < options.Upstreams.Count; i++)
-        {
-            ValidateUpstream(options.Upstreams[i], i, errors);
-        }
-
         return errors.Count > 0
             ? ValidateOptionsResult.Fail(errors)
             : ValidateOptionsResult.Success;
@@ -120,42 +111,6 @@ public sealed class OciOptionsValidator : IValidateOptions<OciOptions>
         if (options.UpstreamHttpTimeout <= TimeSpan.Zero)
         {
             errors.Add("Oci:UpstreamHttpTimeout must be positive.");
-        }
-    }
-
-    private static void ValidateUpstream(OciUpstreamRegistryOptions u, int i, List<string> errors)
-    {
-        if (string.IsNullOrWhiteSpace(u.Name))
-        {
-            errors.Add($"Oci:Upstreams[{i}].Name is required.");
-        }
-
-        if (string.IsNullOrWhiteSpace(u.Host))
-        {
-            errors.Add($"Oci:Upstreams[{i}].Host is required.");
-        }
-
-        if (u.AuthType == OciAuthType.Basic)
-        {
-            ValidateBasicAuth(u, i, errors);
-        }
-
-        if (u.AuthType == OciAuthType.AwsEcr && string.IsNullOrWhiteSpace(u.AwsRegion))
-        {
-            errors.Add($"Oci:Upstreams[{i}] AuthType=AwsEcr requires AwsRegion.");
-        }
-    }
-
-    private static void ValidateBasicAuth(OciUpstreamRegistryOptions u, int i, List<string> errors)
-    {
-        if (string.IsNullOrWhiteSpace(u.Username))
-        {
-            errors.Add($"Oci:Upstreams[{i}] AuthType=Basic requires Username.");
-        }
-
-        if (string.IsNullOrWhiteSpace(u.Password))
-        {
-            errors.Add($"Oci:Upstreams[{i}] AuthType=Basic requires Password.");
         }
     }
 }

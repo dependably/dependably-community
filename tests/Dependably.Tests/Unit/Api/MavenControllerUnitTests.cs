@@ -113,7 +113,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             // ProxyFetch is only reached on the proxy-miss path, which short-circuits to 404
             // here because Upstream is null. BlockGate runs on every cache hit, so it's real.
             ProxyFetch: null!,
-            BlockGate: new BlockGateService(new VulnerabilityRepository(_db, _clock), _audit, new QuarantineRepository(_db, _clock), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, _clock),
+            BlockGate: new BlockGateService(new VulnerabilityRepository(_db, _clock), _audit, new QuarantineRepository(_db, _clock), new InstallScriptAllowlistService(_db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, _clock),
             ReservedNamespaces: new ReservedNamespaceService(
                 _db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock),
@@ -124,7 +124,21 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
                 new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions { SizeLimit = 8 * 1024 * 1024 }),
                 Dependably.Infrastructure.Caching.MetadataCacheKeys.MavenMetadata),
-            Log: Microsoft.Extensions.Logging.Abstractions.NullLogger<MavenController>.Instance);
+            Log: Microsoft.Extensions.Logging.Abstractions.NullLogger<MavenController>.Instance,
+            CacheArtifacts: new CacheArtifactRepository(_db),
+            TenantAccess: new TenantArtifactAccessRepository(_db),
+            Time: _clock,
+            CacheRecorder: new CacheAccessRecorder(
+                new CacheArtifactRepository(_db),
+                new TenantArtifactAccessRepository(_db),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<CacheAccessRecorder>.Instance,
+                _clock),
+            // No Maven:SignatureKeys configured — IsConfigured=false, provenance skipped.
+            MavenProvenance: new Dependably.Protocol.Provenance.MavenProvenanceVerifier(
+                new Dependably.Protocol.Provenance.MavenSignatureKeyStore(
+                    new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+                    Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenSignatureKeyStore>.Instance),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance));
 
         return new MavenController(svc)
         {
@@ -561,9 +575,10 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             VALUES (@id, @osv, 'maven', 'com.example:lib', 'HIGH', @score)
             """,
             new { id = vulnId, osv = $"OSV-{Guid.NewGuid():N}", score = cvssScore });
+        string pvvId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
-            "INSERT INTO package_version_vulns (package_version_id, vuln_id) VALUES (@pv, @vuln)",
-            new { pv = versionId, vuln = vulnId });
+            "INSERT INTO package_version_vulns (id, package_version_id, vuln_id, owner_kind) VALUES (@pvvId, @pv, @vuln, 'package_version')",
+            new { pvvId, pv = versionId, vuln = vulnId });
         await conn.ExecuteAsync(
             "UPDATE package_versions SET vuln_checked_at = @ts WHERE id = @id",
             new { ts = _clock.GetUtcNow().ToString("o"), id = versionId });

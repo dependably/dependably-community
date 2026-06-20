@@ -213,8 +213,8 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
 
     /// <summary>
     /// Aggregates records in <paramref name="records"/> by key and issues one UPDATE per
-    /// unique versionId and one per unique purl. Aggregation reduces write-lock hold time:
-    /// N downloads of the same version in a batch become a single UPDATE with delta=N.
+    /// unique versionId and one per unique (org_id, purl) pair. Aggregation reduces write-lock
+    /// hold time: N downloads of the same version in a batch become a single UPDATE with delta=N.
     /// </summary>
     internal async Task FlushAsync(IReadOnlyList<DownloadCountRecord> records, CancellationToken ct)
     {
@@ -225,7 +225,8 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
 
         // Aggregate: sum increments per unique key within this batch.
         var byVersionId = new Dictionary<string, int>(StringComparer.Ordinal);
-        var byPurl = new Dictionary<string, int>(StringComparer.Ordinal);
+        // Key is (orgId, purl) so each tenant's counter advances independently.
+        var byOrgPurl = new Dictionary<(string OrgId, string Purl), int>();
         foreach (var rec in records)
         {
             if (rec.VersionId is not null)
@@ -233,10 +234,11 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
                 byVersionId.TryGetValue(rec.VersionId, out int current);
                 byVersionId[rec.VersionId] = current + 1;
             }
-            else if (rec.Purl is not null)
+            else if (rec.Purl is not null && rec.OrgId is not null)
             {
-                byPurl.TryGetValue(rec.Purl, out int current);
-                byPurl[rec.Purl] = current + 1;
+                var key = (rec.OrgId, rec.Purl);
+                byOrgPurl.TryGetValue(key, out int current);
+                byOrgPurl[key] = current + 1;
             }
         }
 
@@ -257,14 +259,23 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
                 transaction: tx);
         }
 
-        foreach (var kv in byPurl)
+        foreach (var kv in byOrgPurl)
         {
-            // xtenant: purl is the canonical globally-unique package identity built by
-            // PurlNormalizer — it encodes ecosystem, name, and version, so it is unique
-            // across orgs and no org_id filter is needed.
+            string orgId = kv.Key.OrgId;
+            string purl = kv.Key.Purl;
+            // Increment the per-tenant download counter for all cache_artifact rows that
+            // match the purl (Maven maps one purl to multiple filenames) scoped to the tenant.
             await conn.ExecuteAsync(
-                "UPDATE package_versions SET download_count = download_count + @n, last_used = @now WHERE purl = @purl",
-                new { n = kv.Value, now, purl = kv.Key },
+                """
+                UPDATE tenant_artifact_access
+                SET download_count = download_count + @n,
+                    last_used = @now
+                WHERE org_id = @orgId
+                  AND cache_artifact_id IN (
+                      SELECT id FROM cache_artifact WHERE purl = @purl
+                  )
+                """,
+                new { n = kv.Value, now, orgId, purl },
                 transaction: tx);
         }
 

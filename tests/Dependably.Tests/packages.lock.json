@@ -1631,8 +1631,8 @@
       },
       "SQLitePCLRaw.lib.e_sqlite3": {
         "type": "Transitive",
-        "resolved": "2.1.11",
-        "contentHash": "Ev2ytaXiOlWZ4b3R67GZBsemTINslLD1DCJr2xiacpn4tbapu0Q4dHEzSvZSMnVWeE5nlObU3VZN2p81q3XOYQ=="
+        "resolved": "3.50.3",
+        "contentHash": "tVyhqQ8wxgedWiiPFChyZhE8I3PkOM/AE1azsj1qsdYUws13ONBFyi3aDxju4tD2kzedB2q5+50WrTyY0h2gMQ=="
       },
       "SQLitePCLRaw.provider.e_sqlite3": {
         "type": "Transitive",
@@ -1918,10 +1918,12 @@
           "OpenTelemetry.Extensions.Hosting": "[1.15.3, )",
           "OpenTelemetry.Instrumentation.AspNetCore": "[1.15.2, )",
           "OpenTelemetry.Instrumentation.Http": "[1.12.0, )",
+          "SQLitePCLRaw.lib.e_sqlite3": "[3.50.3, )",
           "Serilog.AspNetCore": "[10.0.0, )",
           "Serilog.Sinks.OpenTelemetry": "[4.2.0, )",
           "StackExchange.Redis": "[2.8.41, )",
           "System.IdentityModel.Tokens.Jwt": "[8.15.0, )",
+          "System.Security.Cryptography.Pkcs": "[10.0.8, )",
           "Tomlyn": "[2.4.2, )",
           "zxcvbn-core": "[7.0.92, )"
         }

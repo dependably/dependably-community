@@ -5,7 +5,6 @@ ecosystem: npm
 scope: project
 inputs:
   - DEPENDABLY_BASE_URL
-  - ORG_SLUG
   - NPM_TOKEN
 ---
 
@@ -19,10 +18,12 @@ machine. The token is read from an env var so no secret is committed.
 
 Ask the user for:
 
-1. **DEPENDABLY_BASE_URL** — e.g. `https://repo.example.com` or
-   `http://192.168.1.50:8080`. Trailing slash will be stripped.
-2. **ORG_SLUG** — e.g. `default`.
-3. **NPM_TOKEN** — created in dependably under **Tokens** (any scope). Keep
+1. **DEPENDABLY_BASE_URL** — the base URL of your dependably org, e.g.
+   `https://repo.example.com` or `http://192.168.1.50:8080`. Tenancy is
+   host-resolved: single-tenant deployments use the bare host; multi-tenant
+   deployments put the org in the subdomain (`https://my-org.repo.example.com`).
+   Trailing slash will be stripped.
+2. **NPM_TOKEN** — created in dependably under **Tokens** (any scope). Keep
    it out of source control; reference it as `${NPM_TOKEN}` in the file.
 
 ## File to write
@@ -30,15 +31,15 @@ Ask the user for:
 Create `.npmrc` in the repository root (alongside `package.json`):
 
 ```ini
-registry=https://repo.example.com/o/default/npm/
-//repo.example.com/o/default/npm/:_authToken=${NPM_TOKEN}
+registry=https://repo.example.com/npm/
+//repo.example.com/npm/:_authToken=${NPM_TOKEN}
 # Uncomment the line below if dependably is served over plain HTTP:
 # strict-ssl=false
 ```
 
 Substitutions:
-- Replace `repo.example.com` with the host portion of `DEPENDABLY_BASE_URL`.
-- Replace `default` with `ORG_SLUG`.
+- Replace `repo.example.com` with the host portion of `DEPENDABLY_BASE_URL`
+  (for a multi-tenant deployment that host already includes the org subdomain).
 - Keep `${NPM_TOKEN}` literal — npm reads it from the environment.
 
 > **HTTP gotcha.** If your `DEPENDABLY_BASE_URL` starts with `http://` (no `s`),

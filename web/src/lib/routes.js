@@ -59,6 +59,23 @@ export function pathFor(page, params = {}) {
   return '/'
 }
 
+// searchFor: page → query string ('' or '?a=b&c=d'). version-detail carries its params in the
+// path (see pathFor), so it never contributes a query string. Every other page serializes its
+// params into the query string — which is how list pages (vulnerabilities, packages…) read their
+// initial table state on mount (lib/tableState.js readQuery). This lets navigate() deep-link a
+// list page with a non-default filter/sort, e.g. navigate('vulnerabilities', { sort: 'published' }).
+// Empty/nullish values are dropped so a bare navigation still yields a clean URL = default state.
+export function searchFor(page, params = {}) {
+  if (activeTable === 'tenant' && page === 'version-detail') return ''
+  const sp = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue
+    sp.set(key, String(value))
+  }
+  const qs = sp.toString()
+  return qs ? `?${qs}` : ''
+}
+
 // routeFor: pathname → { page, params } | null. Trailing slashes are normalized away.
 // Segments are decodeURIComponent'd. Matching is case-sensitive against the canonical lowercase
 // paths in the tables.

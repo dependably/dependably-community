@@ -89,19 +89,12 @@ public sealed class OrgTokensController : OrgScopedControllerBase
             return Forbid();
         }
 
-        string role = User.FindFirst("role")?.Value ?? "member";
-        var callerGrants = Capabilities.ForRole(role);
-
-        if (!Capabilities.TryNormalizeAndAuthorize(
-                req.Capabilities, callerGrants,
-                out string? canonicalJson, out string[]? caps, out string? error, out string? field))
+        var normalizeError = TryNormalizeTokenRequest(
+            req.Capabilities, req.Description,
+            out string? canonicalJson, out string[]? caps, out string? description);
+        if (normalizeError is not null)
         {
-            return _problems.ValidationErrorAction(field ?? "capabilities", error!);
-        }
-
-        if (!TryNormalizeDescription(req.Description, out string? description, out string? descError))
-        {
-            return _problems.ValidationErrorAction("description", descError!);
+            return normalizeError;
         }
 
         // Token cap. Count+insert is intentionally non-transactional: a small race overshoot
@@ -116,7 +109,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         }
 
         var (raw, record) = await _tokens.CreateUserTokenAsync(
-            orgId, userId, canonicalJson, req.ExpiresAt, description, ct);
+            orgId, userId, canonicalJson!, req.ExpiresAt, description, ct);
 
         await _audit.LogAsync("token_created", orgId, userId,
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -130,7 +123,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenCreate,
             orgId, "user", userId, "accepted",
-            new TenantEvents.TokenCreate(record.Id, canonicalJson, caps, "user", record.ExpiresAt).ToJson(), ct);
+            new TenantEvents.TokenCreate(record.Id, canonicalJson!, caps!, "user", record.ExpiresAt).ToJson(), ct);
 
         return Ok(new { token = raw, record });
     }
@@ -218,19 +211,12 @@ public sealed class OrgTokensController : OrgScopedControllerBase
 
         // Service tokens are minted under tenant:configure; the caller's role grants form the
         // ceiling. The minted token still gets its own narrowed cap set.
-        string role = User.FindFirst("role")?.Value ?? "member";
-        var callerGrants = Capabilities.ForRole(role);
-
-        if (!Capabilities.TryNormalizeAndAuthorize(
-                req.Capabilities, callerGrants,
-                out string? canonicalJson, out string[]? caps, out string? error, out string? field))
+        var normalizeError = TryNormalizeTokenRequest(
+            req.Capabilities, req.Description,
+            out string? canonicalJson, out string[]? caps, out string? description);
+        if (normalizeError is not null)
         {
-            return _problems.ValidationErrorAction(field ?? "capabilities", error!);
-        }
-
-        if (!TryNormalizeDescription(req.Description, out string? description, out string? descError))
-        {
-            return _problems.ValidationErrorAction("description", descError!);
+            return normalizeError;
         }
 
         string orgId = CurrentTenantId();
@@ -244,7 +230,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
                 $"Active token limit ({capSvc}) reached for this tenant. Revoke unused tokens before creating new ones.");
         }
 
-        var (raw, record) = await _tokens.CreateServiceTokenAsync(orgId, req.Name, canonicalJson, req.ExpiresAt, description, ct);
+        var (raw, record) = await _tokens.CreateServiceTokenAsync(orgId, req.Name, canonicalJson!, req.ExpiresAt, description, ct);
 
         await _audit.LogAsync("service_token_created", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -259,7 +245,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenCreate,
             orgId, "user", GetUserId(), "accepted",
-            new TenantEvents.TokenCreate(record.Id, canonicalJson, caps, "service", record.ExpiresAt).ToJson(), ct);
+            new TenantEvents.TokenCreate(record.Id, canonicalJson!, caps!, "service", record.ExpiresAt).ToJson(), ct);
 
         return Ok(new { token = raw, record });
     }
@@ -292,6 +278,27 @@ public sealed class OrgTokensController : OrgScopedControllerBase
             new TenantEvents.TokenRevoke(id, "service").ToJson(), ct);
 
         return NoContent();
+    }
+
+    // Validates and normalizes the capabilities + description fields shared by user-token and
+    // service-token creation. Returns the normalized values on success, or an error IActionResult
+    // when either field is invalid. The caller's role grants form the capabilities ceiling.
+    private IActionResult? TryNormalizeTokenRequest(
+        IReadOnlyList<string>? capabilities, string? description,
+        out string? canonicalJson, out string[]? caps, out string? normalizedDescription)
+    {
+        normalizedDescription = null;
+
+        string role = User.FindFirst("role")?.Value ?? "member";
+        var callerGrants = Capabilities.ForRole(role);
+
+        return !Capabilities.TryNormalizeAndAuthorize(
+                capabilities, callerGrants,
+                out canonicalJson, out caps, out string? capError, out string? capField)
+            ? _problems.ValidationErrorAction(capField ?? "capabilities", capError!)
+            : TryNormalizeDescription(description, out normalizedDescription, out string? descError)
+                ? null
+                : _problems.ValidationErrorAction("description", descError!);
     }
 
     private const int MaxDescriptionLength = 200;

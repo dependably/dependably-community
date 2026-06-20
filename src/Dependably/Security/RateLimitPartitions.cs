@@ -7,33 +7,47 @@ namespace Dependably.Security;
 /// <summary>
 /// Partition-key derivation for the download / push rate limiters.
 ///
-/// Bucketing strategy: per-token-hash when an Authorization header is present so a single
-/// misbehaving CI client can't DoS the writer queue, falling back to client IP so anonymous
-/// fetches still get a sane cap. The token hash is truncated to a 12-character prefix so
-/// metric labels (e.g. <c>dependably_rate_limit_rejected_total{token_hash_prefix=...}</c>)
-/// stay low-cardinality without leaking the full SHA-256.
+/// Bucketing strategy: prefer the validated principal identity (<c>sub</c> claim from
+/// <c>httpContext.User</c>, populated by <c>UseAuthentication</c> before the rate limiter
+/// runs) so that each authenticated user gets a private, NAT-safe budget. Unauthenticated
+/// requests fall back to the remote IP. Raw Authorization headers are never hashed:
+/// an attacker sending unique forged headers has no validated <c>sub</c> claim, so all
+/// such requests land in the same IP bucket — the per-principal unlimited-bucket attack
+/// is closed without collapsing legitimate users behind the same NAT into one shared budget.
 /// </summary>
 public static class RateLimitPartitions
 {
     // Number of SHA-256 bytes taken for the token partition key prefix (6 bytes = 12 hex chars).
+    // Used by GetManagementPartitionKey, which partitions management-API traffic by raw
+    // Authorization header (highest priority) then by validated sub claim, then by IP.
     private const int TokenHashPrefixBytes = 6;
 
     /// <summary>
-    /// Returns a partition key for the request: either <c>token:HHHHHHHHHHHH</c> (first 12
-    /// hex chars of the SHA-256 of the bearer/basic credential) or <c>ip:1.2.3.4</c>.
-    /// Falls back to the string <c>unknown</c> when neither is available — bundling all
-    /// such requests into one bucket keeps it from becoming the noisy-neighbor vector
-    /// the per-token bucket prevents.
+    /// Returns a partition key for the request, in preference order:
+    /// <list type="number">
+    ///   <item><c>user:{sub}</c> — the validated principal's <c>sub</c> claim (populated by
+    ///     <c>UseAuthentication</c> before the rate limiter runs). Each authenticated user
+    ///     gets a private budget regardless of NAT; forged Authorization headers yield no
+    ///     validated claim and therefore do not produce a fresh bucket.</item>
+    ///   <item><c>ip:1.2.3.4</c> — unauthenticated requests fall back to the remote IP.</item>
+    ///   <item><c>unknown</c> — no authenticated principal and no resolvable IP (in-process
+    ///     test probes).</item>
+    /// </list>
+    /// Raw Authorization headers are intentionally ignored: a forged or invalid token fails
+    /// authentication, so <c>httpContext.User</c> carries no <c>sub</c> claim and the request
+    /// shares the IP bucket with every other unauthenticated probe from the same address.
     /// </summary>
     public static string GetPartitionKey(HttpContext httpContext)
     {
-        string? raw = ExtractRawTokenIfAny(httpContext);
-        if (raw is not null)
+        // Validated principal: UseAuthentication runs before UseRateLimiter, so User is
+        // already populated for any endpoint that opted in to an authentication scheme.
+        // MapInboundClaims=false keeps the JWT "sub" as-is; NameIdentifier covers schemes
+        // that map claims to the URI type.
+        string? sub = httpContext.User.FindFirst("sub")?.Value
+            ?? httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (!string.IsNullOrEmpty(sub))
         {
-            byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
-            // 12 hex chars = 48 bits — collision-resistant enough for partitioning while
-            // staying short in metric labels.
-            return "token:" + Convert.ToHexString(hashBytes, 0, TokenHashPrefixBytes).ToLowerInvariant();
+            return "user:" + sub;
         }
 
         string? ip = httpContext.GetNormalizedRemoteIp();

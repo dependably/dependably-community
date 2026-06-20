@@ -36,7 +36,24 @@ public sealed class NpmPublishHandler(
 
     public Task<IActionResult> PublishAsync(
         HttpContext httpContext, string orgId, string package, CancellationToken ct)
-        => PublishPackageAsync(httpContext, orgId, package, scope: null, ct);
+    {
+        // The npm CLI publishes a scoped package as a single %2F-encoded path segment
+        // (PUT /npm/@scope%2Fname), which never matches the two-segment scoped route
+        // [HttpPut("/npm/@{scope}/{package}")] — ASP.NET keeps %2F encoded — so it lands
+        // here on the unscoped route. Decode (as every other unscoped npm route already
+        // does) and split the leading @scope/ so the publish is validated as scoped
+        // instead of failing name validation as a bogus plain name ("@scope/name").
+        string decoded = NpmSharedHelpers.DecodeNpmName(package);
+        if (decoded.StartsWith('@'))
+        {
+            int slash = decoded.IndexOf('/');
+            if (slash > 1 && slash < decoded.Length - 1)
+            {
+                return PublishPackageAsync(httpContext, orgId, decoded[(slash + 1)..], decoded[..slash], ct);
+            }
+        }
+        return PublishPackageAsync(httpContext, orgId, decoded, scope: null, ct);
+    }
 
     public Task<IActionResult> PublishScopedAsync(
         HttpContext httpContext, string orgId, string scope, string package, CancellationToken ct)

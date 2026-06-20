@@ -110,6 +110,144 @@ public sealed class BlockGatePolicyParityTests
         Assert.True(IsHardBlocked(facts, policy));
     }
 
+    // ── install-script arm (lowest priority) ─────────────────────────────────
+
+    [Fact]
+    public void InstallScript_BlockMode_Returns_BlockedInstallScript()
+    {
+        var facts = BaseFacts() with { HasInstallScript = true };
+        var policy = BasePolicy() with { BlockInstallScriptsMode = "block" };
+        var verdict = BlockGateService.Evaluate(facts, policy, _now);
+        Assert.False(verdict.Servable);
+        Assert.Equal(BlockArm.InstallScript, verdict.Arm);
+        Assert.True(IsHardBlocked(facts, policy));
+    }
+
+    [Fact]
+    public void InstallScript_BlocksEvenWhenUnscanned()
+    {
+        // The install-script property is static — it does not depend on a completed vuln scan,
+        // so the arm fires on an unscanned version (unlike the vuln arms).
+        var facts = BaseFacts() with { Scanned = false, HasInstallScript = true };
+        var policy = BasePolicy() with { BlockInstallScriptsMode = "block" };
+        var verdict = BlockGateService.Evaluate(facts, policy, _now);
+        Assert.False(verdict.Servable);
+        Assert.Equal(BlockArm.InstallScript, verdict.Arm);
+        Assert.True(IsHardBlocked(facts, policy));
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("warn")]
+    [InlineData(null)]
+    public void InstallScript_NonBlockModes_AreServable(string? mode)
+    {
+        var facts = BaseFacts() with { HasInstallScript = true };
+        var policy = BasePolicy() with { BlockInstallScriptsMode = mode };
+        var verdict = BlockGateService.Evaluate(facts, policy, _now);
+        Assert.True(verdict.Servable);
+        Assert.Equal(BlockArm.None, verdict.Arm);
+        Assert.False(IsHardBlocked(facts, policy));
+    }
+
+    [Fact]
+    public void InstallScript_BlockMode_NoScript_IsServable()
+    {
+        var facts = BaseFacts() with { HasInstallScript = false };
+        var policy = BasePolicy() with { BlockInstallScriptsMode = "block" };
+        var verdict = BlockGateService.Evaluate(facts, policy, _now);
+        Assert.True(verdict.Servable);
+        Assert.False(IsHardBlocked(facts, policy));
+    }
+
+    [Fact]
+    public void InstallScript_IsLowerPriorityThanVulnScore()
+    {
+        // A version that both ships an install script and exceeds the CVSS ceiling reports the
+        // stronger VulnScore arm, not InstallScript — the install-script arm only fires when no
+        // higher arm blocked.
+        var facts = BaseFacts() with { Scanned = true, MaxCvss = 9.8, HasInstallScript = true };
+        var policy = BasePolicy() with { MaxOsvScoreTolerance = 5.0, BlockInstallScriptsMode = "block" };
+        var verdict = BlockGateService.Evaluate(facts, policy, _now);
+        Assert.False(verdict.Servable);
+        Assert.Equal(BlockArm.VulnScore, verdict.Arm);
+    }
+
+    // ── provenance arm (just below malicious) ────────────────────────────────
+
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("unsigned")]
+    public void Provenance_BlockMode_FailedOrUnsigned_Returns_BlockedProvenance(string status)
+    {
+        var facts = BaseFacts() with { ProvenanceStatus = status };
+        var policy = BasePolicy() with { VerifyProvenanceMode = "block" };
+        var verdict = BlockGateService.Evaluate(facts, policy, _now);
+        Assert.False(verdict.Servable);
+        Assert.Equal(BlockArm.Provenance, verdict.Arm);
+        Assert.True(IsHardBlocked(facts, policy));
+    }
+
+    [Fact]
+    public void Provenance_BlockMode_Verified_IsServable()
+    {
+        var facts = BaseFacts() with { ProvenanceStatus = "verified" };
+        var policy = BasePolicy() with { VerifyProvenanceMode = "block" };
+        var verdict = BlockGateService.Evaluate(facts, policy, _now);
+        Assert.True(verdict.Servable);
+        Assert.Equal(BlockArm.None, verdict.Arm);
+        Assert.False(IsHardBlocked(facts, policy));
+    }
+
+    [Fact]
+    public void Provenance_BlockMode_NullStatus_IsServable()
+    {
+        // NULL status = verification not applicable (no keys / off) — nothing to block on.
+        var facts = BaseFacts() with { ProvenanceStatus = null };
+        var policy = BasePolicy() with { VerifyProvenanceMode = "block" };
+        var verdict = BlockGateService.Evaluate(facts, policy, _now);
+        Assert.True(verdict.Servable);
+        Assert.False(IsHardBlocked(facts, policy));
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("warn")]
+    [InlineData(null)]
+    public void Provenance_NonBlockModes_FailedStatus_AreServable(string? mode)
+    {
+        var facts = BaseFacts() with { ProvenanceStatus = "failed" };
+        var policy = BasePolicy() with { VerifyProvenanceMode = mode };
+        var verdict = BlockGateService.Evaluate(facts, policy, _now);
+        Assert.True(verdict.Servable);
+        Assert.Equal(BlockArm.None, verdict.Arm);
+        Assert.False(IsHardBlocked(facts, policy));
+    }
+
+    [Fact]
+    public void Provenance_IsLowerPriorityThanMalicious()
+    {
+        // A version that is both malicious and fails provenance reports the stronger Malicious
+        // arm — provenance sits just below malicious in priority.
+        var facts = BaseFacts() with { Scanned = true, HasMalicious = true, ProvenanceStatus = "failed" };
+        var policy = BasePolicy() with { BlockMaliciousMode = "block", VerifyProvenanceMode = "block" };
+        var verdict = BlockGateService.Evaluate(facts, policy, _now);
+        Assert.False(verdict.Servable);
+        Assert.Equal(BlockArm.Malicious, verdict.Arm);
+    }
+
+    [Fact]
+    public void Provenance_IsHigherPriorityThanInstallScript()
+    {
+        // A version that fails provenance and ships an install script reports Provenance — it sits
+        // above the lowest-priority install-script arm.
+        var facts = BaseFacts() with { ProvenanceStatus = "failed", HasInstallScript = true };
+        var policy = BasePolicy() with { VerifyProvenanceMode = "block", BlockInstallScriptsMode = "block" };
+        var verdict = BlockGateService.Evaluate(facts, policy, _now);
+        Assert.False(verdict.Servable);
+        Assert.Equal(BlockArm.Provenance, verdict.Arm);
+    }
+
     // ── negative / parity cases — Evaluate returns Servable ──────────────────
 
     [Fact]
@@ -298,6 +436,10 @@ public sealed class BlockGatePolicyParityTests
         var version = new PackageVersion
         {
             Id = "test-version-id",
+            // The provenance gate resolves its mode per-ecosystem from the version's PURL; this
+            // parity matrix exercises the npm policy (VerifyNpmSignatures below), so the PURL must
+            // be npm-shaped for IsHardBlockedByStoredState to read that toggle.
+            Purl = "pkg:npm/lib@1.0.0",
             ManualBlockState = facts.ManualState,
             Deprecated = facts.Deprecated,
             PublishedAt = facts.PublishedAt,
@@ -305,6 +447,8 @@ public sealed class BlockGatePolicyParityTests
             VulnCheckedAt = facts.Scanned ? _now : null,
             // Index path uses IsMalicious row flag.
             IsMalicious = facts.HasMalicious,
+            HasInstallScript = facts.HasInstallScript,
+            ProvenanceStatus = facts.ProvenanceStatus,
         };
 
         var settings = new OrgSettings
@@ -315,6 +459,8 @@ public sealed class BlockGatePolicyParityTests
             BlockKev = policy.BlockKevMode ?? "off",
             MaxEpssTolerance = policy.MaxEpssTolerance,
             MaxOsvScoreTolerance = policy.MaxOsvScoreTolerance,
+            BlockInstallScripts = policy.BlockInstallScriptsMode ?? "off",
+            VerifyNpmSignatures = policy.VerifyProvenanceMode ?? "off",
         };
 
         // When no signals (no KEV, no EPSS, no CVSS), pass null to match current callers.

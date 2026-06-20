@@ -11,11 +11,15 @@ namespace Dependably.Api.NuGetProtocol;
 /// <summary>
 /// Handles NuGet v3 flatcontainer endpoints: version list, package download, and HEAD probe.
 /// Block-gate filtering applies on both the version list and download paths so a blocked
-/// version is never listed or served. Proxy-fetch helpers are in <see cref="NuGetNupkgProxyHelper"/>.
+/// version is never listed or served. Proxy cache-hits are served from the global plane
+/// (<c>cache_artifact</c> + <c>tenant_artifact_access</c>). Proxy-fetch helpers are in
+/// <see cref="NuGetNupkgProxyHelper"/>.
 /// </summary>
 public sealed class NuGetFlatContainerHandler(
     OrgRepository orgs,
     PackageRepository packages,
+    CacheArtifactRepository cacheArtifacts,
+    TenantArtifactAccessRepository tenantAccess,
     TokenRepository tokens,
     AuditRepository audit,
     IBlobStore blobs,
@@ -28,6 +32,7 @@ public sealed class NuGetFlatContainerHandler(
     ClaimResolver claimResolver,
     ReservedNamespaceService reserved,
     ProxyFetchService proxyFetch,
+    Dependably.Protocol.Provenance.NuGetProvenanceVerifier provenance,
     TimeProvider time,
     ILogger<NuGetFlatContainerHandler> logger)
 {
@@ -41,24 +46,21 @@ public sealed class NuGetFlatContainerHandler(
             return new NotFoundResult();
         }
 
-        var settings = await orgs.GetSettingsAsync(orgId, ct);
-        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
-        var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
-        if (!settings!.AnonymousPull && token is null)
+        var (settings, _, authError) = await AuthorizeNuGetReadAsync(httpContext, orgId, ct);
+        if (authError is not null)
         {
-            httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
-            return new UnauthorizedResult();
+            return authError;
         }
 
         string normalizedId = id.ToLowerInvariant();
         var pkg = await packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
 
-        // Pre-load vuln signals for all local versions in one batch query so block-gate
-        // filtering in CollectLocalVersions avoids per-version I/O.
+        // Pre-load vuln signals for all local versions (uploaded + proxy cached) in one
+        // batch query so block-gate filtering in CollectLocalVersions avoids per-version I/O.
         var localVersions = pkg is null
             ? Array.Empty<PackageVersion>() as IReadOnlyList<PackageVersion>
-            : await packages.GetVersionsAsync(pkg.Id, ct);
-        var signals = await LoadVulnSignalsAsync(localVersions, ct);
+            : await LoadCombinedVersionsAsync(orgId, pkg.Id, normalizedId, ct);
+        var signals = await LoadCombinedVulnSignalsAsync(localVersions, ct);
         var now = time.GetUtcNow();
 
         var versionSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -67,7 +69,7 @@ public sealed class NuGetFlatContainerHandler(
         // Merge upstream regardless of pkg.IsProxy — a name with uploaded versions is still a
         // namespace that can hold proxy-fetched versions. Gate on passthrough + claims, not on
         // whether anyone has ever published into this name.
-        if (settings.ProxyPassthroughEffective
+        if (settings!.ProxyPassthroughEffective
             && !await reserved.IsReservedAsync(orgId, "nuget", normalizedId, ct)
             && await claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct))
         {
@@ -169,9 +171,9 @@ public sealed class NuGetFlatContainerHandler(
         string normalizedId = id.ToLowerInvariant();
         var pkg = await packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
 
-        // Route by the specific version's origin (per-version state), not by the package-level
-        // is_proxy flag. A package name is a namespace that can hold mixed-origin versions:
-        // some uploaded private builds and some proxy-fetched public versions can coexist.
+        // Route uploaded-origin versions (private builds) via package_versions. A package name
+        // is a namespace that can hold mixed-origin versions; proxy rows are no longer stored
+        // in package_versions and fall through to the global-plane cache-hit path below.
         if (pkg is not null)
         {
             var routed = await TryRouteToKnownVersionAsync(
@@ -182,7 +184,61 @@ public sealed class NuGetFlatContainerHandler(
             }
         }
 
-        if (!settings!.AnonymousPull && token is null)
+        // Proxy cache-hit: an already-cached proxy artifact is served from the global plane before
+        // the anon-pull / allowlist / blocklist gates. A cached proxy version is public per the
+        // per-version origin routing (uploaded requires auth, proxy does not), so it must not be
+        // blocked by the AnonymousPull gate — that gate guards triggering an upstream FETCH on a
+        // miss, handled below. The per-version policy block-gate is still re-evaluated on every hit.
+        var proxyCacheHit = await TryServeProxyCacheHitAsync(
+            httpContext, orgId, normalizedId, version, file, token, settings!, ct);
+        if (proxyCacheHit is not null)
+        {
+            return proxyCacheHit;
+        }
+
+        // Miss → upstream fetch path. The anonymous-pull / allowlist / blocklist / passthrough
+        // gates apply here because a miss would trigger an outbound fetch.
+        return await FetchFromUpstreamAsync(httpContext, orgId, id, normalizedId, version, file, token, settings!, ct);
+    }
+
+    // Attempts to serve an already-cached proxy artifact from the global plane. Returns
+    // the IActionResult to send (including block-gate denials) when a cache_artifact row
+    // exists, or null when the artifact is not cached and the caller should fall through
+    // to the upstream fetch path.
+    // Cohesive proxy-cache serve helper; all params are required for coordinate lookup, block-gate, and serve.
+#pragma warning disable S107
+    private async Task<IActionResult?> TryServeProxyCacheHitAsync(
+        HttpContext httpContext, string orgId, string normalizedId, string version, string file,
+        TokenRecord? token, OrgSettings settings, CancellationToken ct)
+#pragma warning restore S107
+    {
+        string normalizedVersion = NuGetNormalization.NormalizeVersion(version);
+        var caFacts = await cacheArtifacts.GetServeFactsByCoordinateAsync(
+            orgId, "nuget", normalizedId, normalizedVersion, file, ct);
+        if (caFacts is null)
+        {
+            return null;
+        }
+
+        string? sourceIpCa = httpContext.GetNormalizedRemoteIp();
+        return await blockGate.EvaluateAsync(
+                BuildProxyBlockGateRequest(orgId, caFacts, token, settings, sourceIpCa), ct)
+            == BlockDecision.Blocked
+            ? new StatusCodeResult(StatusCodes.Status403Forbidden)
+            : await TryServeProxyCachedNupkgAsync(httpContext, caFacts, file, orgId, token, sourceIpCa, ct);
+    }
+
+    // Evaluates the anonymous-pull / allowlist / blocklist / passthrough gates for a cache miss
+    // and delegates to the upstream fetch when all gates pass. Returns 401/403/404 when a
+    // gate denies access, or the proxied artifact on success.
+    // Cohesive upstream-fetch helper; id + normalizedId + version + file each carry distinct semantics.
+#pragma warning disable S107
+    private async Task<IActionResult> FetchFromUpstreamAsync(
+        HttpContext httpContext, string orgId, string id, string normalizedId, string version, string file,
+        TokenRecord? token, OrgSettings settings, CancellationToken ct)
+#pragma warning restore S107
+    {
+        if (!settings.AnonymousPull && token is null)
         {
             httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
             return new UnauthorizedResult();
@@ -213,7 +269,7 @@ public sealed class NuGetFlatContainerHandler(
             || !await claimResolver.IsProxyFetchAllowedAsync(orgId, "nuget", normalizedId, ct)
             ? new NotFoundResult()
             : await ProxyFetchNupkgAsync(httpContext, id, version, file,
-                new NuGetDownloadContext(orgId, token, settings!), ct);
+                new NuGetDownloadContext(orgId, token, settings), ct);
     }
 
     public async Task<IActionResult> FlatcontainerHeadAsync(
@@ -228,64 +284,44 @@ public sealed class NuGetFlatContainerHandler(
         var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
         string normalizedId = id.ToLowerInvariant();
         var pkg = await packages.GetByPurlNameAsync(orgId, "nuget", normalizedId, ct);
-
-        if (pkg is null)
-        {
-            // No local record — could be a proxy cache-miss; return 404 for HEAD.
-            return new NotFoundResult();
-        }
-
         string normalizedVersion = NuGetNormalization.NormalizeVersion(version);
-        var pkgVersion = await packages.GetVersionAsync(pkg.Id, normalizedVersion, ct);
-        if (pkgVersion is null)
-        {
-            return new NotFoundResult();
-        }
 
-        // Auth gate: hosted versions require a token; proxy follows AnonymousPull.
-        if (pkgVersion.Origin == "uploaded")
+        // Uploaded-origin lookup first: proxy rows are served from the global plane below.
+        if (pkg is not null)
         {
-            if (token is null)
+            var pkgVersion = await packages.GetVersionAsync(pkg.Id, normalizedVersion, ct);
+            if (pkgVersion?.Origin == "uploaded")
             {
-                httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
-                return new UnauthorizedResult();
+                return await HeadUploadedVersionAsync(httpContext, orgId, pkgVersion, token, settings, ct);
             }
         }
-        else if (!settings!.AnonymousPull && token is null)
+
+        return await HeadProxyCachedVersionAsync(
+            httpContext, orgId, normalizedId, normalizedVersion, file, token, settings!, ct);
+    }
+
+    // Returns HEAD headers for an uploaded-origin .nupkg. Requires a valid token and runs the
+    // block gate; returns 401/403/404 when a gate denies access.
+    private async Task<IActionResult> HeadUploadedVersionAsync(
+        HttpContext httpContext, string orgId, PackageVersion pkgVersion,
+        TokenRecord? token, OrgSettings? settings, CancellationToken ct)
+    {
+        if (token is null)
         {
             httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
             return new UnauthorizedResult();
         }
 
-        string? sourceIp = httpContext.GetNormalizedRemoteIp();
+        string? srcIp = httpContext.GetNormalizedRemoteIp();
         if (await blockGate.EvaluateAsync(
-                new BlockGateRequest(orgId, "nuget", pkgVersion.Purl, pkgVersion.Id,
-                    pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
-                    token?.UserId, settings!.MaxOsvScoreTolerance, sourceIp,
-                    MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                    PublishedAt: pkgVersion.PublishedAt,
-                    ActorKind: token?.ActorKind,
-                    Deprecated: pkgVersion.Deprecated,
-                    BlockDeprecatedMode: settings.BlockDeprecated,
-                    BlockMaliciousMode: settings.BlockMalicious,
-                    BlockKevMode: settings.BlockKev,
-                    MaxEpssTolerance: settings.MaxEpssTolerance), ct)
+                BlockGateRequest.For(orgId, "nuget", pkgVersion, token, settings, srcIp), ct)
             == BlockDecision.Blocked)
         {
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
 
-        // For proxy versions, confirm the blob key corresponds to the requested file.
-        if (pkgVersion.Origin == "proxy" &&
-            !pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase))
-        {
-            return new NotFoundResult();
-        }
-
-        // Confirm the blob is present without opening a stream.
-        string blobKey = BlobKeys.StoreKey(pkgVersion.BlobKey);
-        bool exists = await blobs.ExistsAsync(blobKey, ct);
-        if (!exists)
+        string uploadedBlobKey = BlobKeys.StoreKey(pkgVersion.BlobKey);
+        if (!await blobs.ExistsAsync(uploadedBlobKey, ct))
         {
             return new NotFoundResult();
         }
@@ -302,20 +338,72 @@ public sealed class NuGetFlatContainerHandler(
         return new OkResult();
     }
 
-    // Per-version origin routing: returns a hosted version, a cached proxy version, or null
-    // when the caller should fall through to the proxy-fetch path (no matching version row,
-    // or cached proxy blob is for a different file type than requested).
+    // Returns HEAD headers for a proxy-cached artifact from the global plane. Enforces the
+    // AnonymousPull gate, then runs the block gate; returns 401/403/404 when denied or absent.
+    // Cohesive HEAD serve helper; all params are required for auth, block-gate, and blob lookup.
+#pragma warning disable S107
+    private async Task<IActionResult> HeadProxyCachedVersionAsync(
+        HttpContext httpContext, string orgId, string normalizedId, string normalizedVersion,
+        string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
+#pragma warning restore S107
+    {
+        // Proxy cache-hit path: check the global plane.
+        if (!settings.AnonymousPull && token is null)
+        {
+            httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
+            return new UnauthorizedResult();
+        }
+
+        var caFacts = await cacheArtifacts.GetServeFactsByCoordinateAsync(
+            orgId, "nuget", normalizedId, normalizedVersion, file, ct);
+        if (caFacts is null)
+        {
+            return new NotFoundResult();
+        }
+
+        string? sourceIp = httpContext.GetNormalizedRemoteIp();
+        if (await blockGate.EvaluateAsync(
+                BuildProxyBlockGateRequest(orgId, caFacts, token, settings, sourceIp), ct)
+            == BlockDecision.Blocked)
+        {
+            return new StatusCodeResult(StatusCodes.Status403Forbidden);
+        }
+
+        // blobkey-ok: proxy blob key from cache_artifact; no filename suffix needed for HEAD.
+        string blobKey = BlobKeys.StoreKey(caFacts.BlobKey);
+        if (!await blobs.ExistsAsync(blobKey, ct))
+        {
+            return new NotFoundResult();
+        }
+
+        httpContext.Response.Headers["X-Cache"] = "HIT";
+        if (caFacts.Purl is not null)
+        {
+            httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(caFacts.Purl);
+        }
+        httpContext.Response.ContentType = "application/octet-stream";
+        httpContext.Response.Headers["Content-Length"] = caFacts.SizeBytes.ToString();
+        if (!string.IsNullOrEmpty(caFacts.ContentHash))
+        {
+            httpContext.Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
+            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+        }
+        return new OkResult();
+    }
+
+    // Per-version origin routing: returns a hosted (uploaded-origin) version, or null when the
+    // caller should fall through to the global-plane proxy path or the upstream proxy-fetch path.
     private async Task<IActionResult?> TryRouteToKnownVersionAsync(
         HttpContext httpContext, Package pkg, string version, string file,
         NuGetDownloadContext ctx, CancellationToken ct)
     {
         string normalizedVersion = NuGetNormalization.NormalizeVersion(version);
         var pkgVersion = await packages.GetVersionAsync(pkg.Id, normalizedVersion, ct);
-        return pkgVersion is null
-            ? null
-            : pkgVersion.Origin == "uploaded"
+        // Proxy-origin rows are no longer written to package_versions; fall through to the
+        // global-plane lookup in FlatcontainerDownloadAsync.
+        return pkgVersion?.Origin == "uploaded"
             ? await ServeHostedVersionAsync(httpContext, ctx.OrgId, pkgVersion, file, ctx.Token, ctx.Settings, ct)
-            : pkgVersion.Origin == "proxy" ? await TryServeCachedProxyVersionAsync(httpContext, ctx.OrgId, pkgVersion, file, ctx.Token, ctx.Settings, ct) : null;
+            : null;
     }
 
     private async Task<IActionResult> ServeHostedVersionAsync(
@@ -331,17 +419,7 @@ public sealed class NuGetFlatContainerHandler(
 
         string? sourceIp = httpContext.GetNormalizedRemoteIp();
         if (await blockGate.EvaluateAsync(
-                new BlockGateRequest(orgId, "nuget", pkgVersion.Purl, pkgVersion.Id,
-                    pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
-                    token.UserId, settings.MaxOsvScoreTolerance, sourceIp,
-                    MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                    PublishedAt: pkgVersion.PublishedAt,
-                    ActorKind: token.ActorKind,
-                    Deprecated: pkgVersion.Deprecated,
-                    BlockDeprecatedMode: settings.BlockDeprecated,
-                    BlockMaliciousMode: settings.BlockMalicious,
-                    BlockKevMode: settings.BlockKev,
-                    MaxEpssTolerance: settings.MaxEpssTolerance), ct)
+                BlockGateRequest.For(orgId, "nuget", pkgVersion, token, settings, sourceIp), ct)
             == BlockDecision.Blocked)
         {
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
@@ -366,53 +444,60 @@ public sealed class NuGetFlatContainerHandler(
         return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
     }
 
-    // For proxy versions: serve from cache only when the cached blob is for the exact requested file.
-    // Each file type (nupkg, nuspec, sha512) has a distinct sha256 and blob. Serving the wrong blob
-    // (e.g., nupkg bytes when the client requests the .sha512 hash) causes integrity verification to fail.
-    // Returns 403 if blocked, the file IActionResult if cached, or null if cache miss → caller proxies.
-    private async Task<IActionResult?> TryServeCachedProxyVersionAsync(
-        HttpContext httpContext, string orgId,
-        PackageVersion pkgVersion, string file, TokenRecord? token, OrgSettings settings, CancellationToken ct)
+    // Builds a BlockGateRequest for a proxy artifact from global-plane serve facts.
+    private static BlockGateRequest BuildProxyBlockGateRequest(
+        string orgId, CacheArtifactServeFacts caFacts, TokenRecord? token,
+        OrgSettings settings, string? sourceIp) =>
+        new(orgId, "nuget", caFacts.Purl ?? string.Empty, string.Empty,
+            caFacts.ManualBlockState, caFacts.VulnCheckedAt,
+            token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
+            MinReleaseAgeHours: settings.MinReleaseAgeHours,
+            PublishedAt: caFacts.PublishedAt,
+            ActorKind: token?.ActorKind,
+            Deprecated: caFacts.Deprecated,
+            BlockDeprecatedMode: settings.BlockDeprecated,
+            BlockMaliciousMode: settings.BlockMalicious,
+            BlockKevMode: settings.BlockKev,
+            MaxEpssTolerance: settings.MaxEpssTolerance,
+            Origin: "proxy",
+            HasInstallScript: caFacts.HasInstallScript,
+            InstallScriptKind: caFacts.InstallScriptKind,
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            ProvenanceStatus: caFacts.ProvenanceStatus,
+            CacheArtifactId: caFacts.Id);
+
+    // Serves a proxy NuGet artifact from the global-plane cache. Each NuGet file type
+    // (.nupkg, .nuspec, .sha512) is stored as a separate cache_artifact row keyed by
+    // filename, so the GET coordinate already selects the exact blob. Returns null when
+    // the blob is not yet in the store (the caller falls through to the upstream proxy fetch).
+    private async Task<IActionResult?> TryServeProxyCachedNupkgAsync(
+        HttpContext httpContext, CacheArtifactServeFacts caFacts, string file, string orgId,
+        TokenRecord? token, string? sourceIp, CancellationToken ct)
     {
-        string? sourceIp = httpContext.GetNormalizedRemoteIp();
-        if (await blockGate.EvaluateAsync(
-                new BlockGateRequest(orgId, "nuget", pkgVersion.Purl, pkgVersion.Id,
-                    pkgVersion.ManualBlockState, pkgVersion.VulnCheckedAt,
-                    token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
-                    MinReleaseAgeHours: settings.MinReleaseAgeHours,
-                    PublishedAt: pkgVersion.PublishedAt,
-                    ActorKind: token?.ActorKind,
-                    Deprecated: pkgVersion.Deprecated,
-                    BlockDeprecatedMode: settings.BlockDeprecated,
-                    BlockMaliciousMode: settings.BlockMalicious,
-                    BlockKevMode: settings.BlockKev,
-                    MaxEpssTolerance: settings.MaxEpssTolerance), ct)
-            == BlockDecision.Blocked)
-        {
-            return new StatusCodeResult(StatusCodes.Status403Forbidden);
-        }
-
-        if (!pkgVersion.BlobKey.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
-
-        var stream = await blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
+        // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to the cache tier.
+        var stream = await blobs.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
         if (stream is null)
         {
             return null;
         }
 
         httpContext.Response.Headers["X-Cache"] = "HIT";
-        httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
-        if (pkgVersion.ChecksumSha256 is not null)
+        if (caFacts.Purl is not null)
         {
-            httpContext.Response.Headers.ETag = $"\"sha256:{pkgVersion.ChecksumSha256}\"";
+            httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(caFacts.Purl);
+        }
+        if (!string.IsNullOrEmpty(caFacts.ContentHash))
+        {
+            httpContext.Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
             httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
-        await audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token?.UserId,
-            actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
-        await packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
+        if (caFacts.Purl is not null)
+        {
+            await audit.LogActivityAsync(orgId, "nuget", caFacts.Purl, "download", token?.UserId,
+                actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
+        }
+        // Increment per-tenant download count on the global plane.
+        await tenantAccess.UpsertStateAsync(orgId, caFacts.Id, time.GetUtcNow(), ct);
         return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
     }
 
@@ -465,13 +550,19 @@ public sealed class NuGetFlatContainerHandler(
                 async openCt => await blobs.GetAsync(proxyKey, openCt)
                     ?? Stream.Null);
 
+            // Verify the .nupkg signature against operator-pinned trust anchors when the tenant
+            // enabled it. Runs only for proxy-origin .nupkg files (the signature lives in the
+            // package ZIP, not the sidecar .nuspec/.sha512); off-policy or an unconfigured verifier
+            // short-circuits to NotApplicable (NULL status, never blocks).
+            var prov = await ResolveProvenanceAsync(settings, file, blob, ct);
+
             // deepcode ignore PT,LogForging: ProxyFetchService stores under BlobKeys.Proxy(sha256),
             // which validates a 64-char lowercase hex — path traversal cannot escape that key. All
             // structured logs use Serilog RenderedCompactJsonFormatter (CRLF-safe).
             var result = await proxyFetch.RecordAndScanAsync(
                 NuGetNupkgProxyHelper.BuildNuGetProxyFetchRequest(
                     orgId, normalizedId, normalizedVersion, purl, file, blob,
-                    upstreamBase, token, settings, meta, httpContext.GetNormalizedRemoteIp()), ct);
+                    upstreamBase, token, settings, meta, httpContext.GetNormalizedRemoteIp(), prov), ct);
 
             if (result.Decision == BlockDecision.Blocked)
             {
@@ -490,6 +581,29 @@ public sealed class NuGetFlatContainerHandler(
         catch (UpstreamResponseTooLargeException) { return new StatusCodeResult(StatusCodes.Status502BadGateway); }
         catch (UpstreamFetchFailedException) { throw; }
         catch { return new NotFoundResult(); }
+    }
+
+    // Caps the in-memory buffer the signature verifier allocates to seek the .nupkg ZIP central
+    // directory. Generous (the upstream streaming fetch already bounds artefact size); a package
+    // above this cap verifies as Failed rather than allocating without bound.
+    private const long NuGetSignatureVerifyCapBytes = 256L * 1024 * 1024;
+
+    // Runs NuGet .nupkg signature verification for a proxy-origin version when the tenant enabled
+    // it. Only .nupkg files carry a .signature.p7s — sidecar files (.nuspec/.sha512) and an
+    // off-policy or unconfigured verifier short-circuit to NotApplicable (NULL status, never
+    // blocks). The package bytes come from the freshly-staged cache blob via the BlobHandle.
+    private async Task<Dependably.Protocol.Provenance.ProvenanceResult> ResolveProvenanceAsync(
+        OrgSettings settings, string file, BlobHandle blob, CancellationToken ct)
+    {
+        if (settings.VerifyNuGetSignatures == "off"
+            || !provenance.IsConfigured
+            || !file.EndsWith(".nupkg", StringComparison.OrdinalIgnoreCase))
+        {
+            return Dependably.Protocol.Provenance.ProvenanceResult.NotApplicable;
+        }
+
+        await using var stream = await blob.OpenAsync(ct);
+        return await provenance.VerifyPackageAsync(stream, NuGetSignatureVerifyCapBytes, ct);
     }
 
     // Walks upstreams in priority order; streams and stages the first successful flatcontainer
@@ -520,13 +634,107 @@ public sealed class NuGetFlatContainerHandler(
         return null;
     }
 
-    // Loads vuln gate signals for a version list in one batch query. Returns an empty dict when
-    // all versions lack advisory links.
-    private Task<IReadOnlyDictionary<string, VulnGateSignals>> LoadVulnSignalsAsync(
-        IReadOnlyList<PackageVersion> versions, CancellationToken ct) =>
-        versions.Count == 0
-            ? Task.FromResult<IReadOnlyDictionary<string, VulnGateSignals>>(new Dictionary<string, VulnGateSignals>())
-            : vulns.GetGateSignalsBatchAsync(versions.Select(v => v.Id).ToList(), ct);
+    // Loads vuln gate signals for a combined (uploaded + proxy synthetic) version list.
+    // Uploaded versions key on package_version_id; synthetic proxy versions key on
+    // cache_artifact_id (stored in PackageVersion.Id via ToPackageVersionSynthetic).
+    private async Task<IReadOnlyDictionary<string, VulnGateSignals>> LoadCombinedVulnSignalsAsync(
+        IReadOnlyList<PackageVersion> versions, CancellationToken ct)
+    {
+        if (versions.Count == 0)
+        {
+            return new Dictionary<string, VulnGateSignals>();
+        }
+
+        var uploadedIds = versions.Where(v => v.Origin == "uploaded").Select(v => v.Id).ToList();
+        var proxyIds = versions.Where(v => v.Origin == "proxy").Select(v => v.Id).ToList();
+
+        var uploadedSignals = uploadedIds.Count > 0
+            ? await vulns.GetGateSignalsBatchAsync(uploadedIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+        var proxySignals = proxyIds.Count > 0
+            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        if (uploadedSignals.Count == 0)
+        {
+            return proxySignals;
+        }
+
+        if (proxySignals.Count == 0)
+        {
+            return uploadedSignals;
+        }
+
+        var merged = new Dictionary<string, VulnGateSignals>(uploadedSignals);
+        foreach (var (k, v) in proxySignals)
+        {
+            merged[k] = v;
+        }
+
+        return merged;
+    }
+
+    // Returns the combined list of uploaded package_versions and synthetic PackageVersion
+    // objects projected from global-plane proxy cache entries. NuGet flatcontainer lists all
+    // cached versions for a package id; proxy entries whose version already appears in uploaded
+    // versions are deduplicated.
+    private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
+        string orgId, string packageId, string normalizedId, CancellationToken ct)
+    {
+        var uploadedVersions = await packages.GetVersionsAsync(packageId, ct);
+        var proxyEntries = await cacheArtifacts.ListServeFactsForNameAsync(orgId, "nuget", normalizedId, ct);
+
+        if (proxyEntries.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var uploadedVersionSet = uploadedVersions
+            .Select(v => v.Version)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var proxyIds = proxyEntries.Select(e => e.Id).ToList();
+        var proxySignals = proxyIds.Count > 0
+            ? await vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        // Each .nupkg, .nuspec, and .sha512 file for a version produces a separate
+        // cache_artifact row. Deduplicate by version (case-insensitive) so the version
+        // list only carries one entry per version string.
+        var synthetic = proxyEntries
+            .Where(e => !uploadedVersionSet.Contains(e.Version))
+            .GroupBy(e => e.Version, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First().ToPackageVersionSynthetic(proxySignals))
+            .ToList();
+
+        if (synthetic.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
+        combined.AddRange(uploadedVersions);
+        combined.AddRange(synthetic);
+        return combined;
+    }
+
+    // Returns (settings, token) when the caller is authorized to read NuGet packages from this org,
+    // or sets errorResult to a 401 challenge when AnonymousPull is disabled and no valid token was
+    // presented. Org-scoped token resolution means cross-org tokens are coerced to null so the
+    // AnonymousPull gate governs — this is a BOLA guard and must not be relaxed.
+    private async Task<(OrgSettings? Settings, TokenRecord? Token, IActionResult? Error)>
+        AuthorizeNuGetReadAsync(HttpContext httpContext, string orgId, CancellationToken ct)
+    {
+        var settings = await orgs.GetSettingsAsync(orgId, ct);
+        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
+        var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
+        if (!settings!.AnonymousPull && token is null)
+        {
+            httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
+            return (null, null, new UnauthorizedResult());
+        }
+        return (settings, token, null);
+    }
 
     private static bool AreUpstreamSafeNuGetSegments(params string[] values)
         => Array.TrueForAll(values, v => PathSafeValidator.ValidateUpstreamSegment(v, "segment").IsValid);

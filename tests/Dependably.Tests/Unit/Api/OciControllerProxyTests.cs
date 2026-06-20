@@ -40,6 +40,7 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     private readonly InMemoryBlobStore _registryBlobs = new();
 
     private string _orgId = null!;
+    private string _emptyOrgId = null!; // org with no OCI upstreams — for "no upstream" tests
     private string _userId = null!;
     private TokenRepository _tokens = null!;
     private AuditRepository _audit = null!;
@@ -53,13 +54,28 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         _audit = new AuditRepository(_db);
 
         _orgId = await OrgSeeder.InsertAsync(_db, "oci-proxy-org");
+        _emptyOrgId = await OrgSeeder.InsertAsync(_db, "oci-proxy-no-upstream-org");
         _userId = await UserSeeder.InsertAsync(_db, _orgId, "dev@oci.test", "admin");
 
-        // Enable anonymous pull for all tests.
         await using var conn = await _db.OpenAsync();
+
+        // Enable anonymous pull for both orgs.
         await conn.ExecuteAsync(
             "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId",
             new { orgId = _orgId });
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId",
+            new { orgId = _emptyOrgId });
+
+        // Seed a catch-all OCI upstream for _orgId so proxy tests can resolve library/ubuntu.
+        string prefixJson = System.Text.Json.JsonSerializer.Serialize(new[] { "" });
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO upstream_registry (id, org_id, ecosystem, name, url, position, auth_type, prefixes)
+            VALUES (@id, @orgId, 'oci', 'dockerhub', 'registry-1.docker.io', 0, 'anonymous', @prefixes)
+            ON CONFLICT (org_id, ecosystem, url) DO NOTHING
+            """,
+            new { id = Guid.NewGuid().ToString("N"), orgId = _orgId, prefixes = prefixJson });
     }
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
@@ -215,16 +231,6 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         var options = Options.Create(opts ?? new OciOptions
         {
             ManifestTagTtl = TimeSpan.FromMinutes(5),
-            Upstreams =
-            [
-                new OciUpstreamRegistryOptions
-                {
-                    Name     = "dockerhub",
-                    Host     = "registry-1.docker.io",
-                    AuthType = OciAuthType.Anonymous,
-                    Prefixes = [""],
-                }
-            ],
         });
 
         http ??= new NeverCallFactory();
@@ -236,8 +242,10 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
             new DisabledAirGap(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
     }
 
-    private OciUpstreamResolver BuildResolverNoUpstream()
-        => BuildResolver(opts: new OciOptions { Upstreams = [] });
+    // Returns a controller that uses _emptyOrgId (no OCI upstreams in the DB) so that
+    // upstream-routed operations return null (no upstream configured).
+    private OciController BuildControllerNoUpstream()
+        => BuildControllerForOrg(_emptyOrgId, BuildResolver());
 
     // ── GET manifest — local cache HIT ────────────────────────────────────────
 
@@ -307,7 +315,7 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     [Fact]
     public async Task GetManifest_NoUpstream_Returns404()
     {
-        var ctl = BuildController(BuildResolverNoUpstream());
+        var ctl = BuildControllerNoUpstream();
         var result = await ctl.Get("library/ubuntu/manifests/latest", default);
 
         var obj = Assert.IsType<ObjectResult>(result);
@@ -377,7 +385,7 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         string sha256 = Sha256Hex(RandomBytes());
         string digest = "sha256:" + sha256;
 
-        var ctl = BuildController(BuildResolverNoUpstream());
+        var ctl = BuildControllerNoUpstream();
         var result = await ctl.Get($"library/ubuntu/blobs/{digest}", default);
 
         var obj = Assert.IsType<ObjectResult>(result);
@@ -392,8 +400,9 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
         await SeedManifestAsync(manifestBytes, tag: "stable");
 
-        // Use no-upstream resolver: local tags are returned without an upstream call.
-        var ctl = BuildController(BuildResolverNoUpstream());
+        // Local tags are returned first, before any upstream call is attempted.
+        // NeverCallFactory ensures no upstream HTTP call is issued.
+        var ctl = BuildController(BuildResolver());
 
         var result = await ctl.Get("library/ubuntu/tags/list", default);
 
@@ -469,7 +478,8 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         byte[] manifestBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
         await SeedManifestAsync(manifestBytes, tag: "exists");
 
-        var ctl = BuildController(BuildResolverNoUpstream());
+        // n=0 must return an empty list regardless of local tags; no upstream call needed.
+        var ctl = BuildController(BuildResolver());
         // Simulate ?n=0
         ctl.ControllerContext.HttpContext.Request.QueryString = new QueryString("?n=0");
 
@@ -612,7 +622,7 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
             _orgId, "yank-shared", """["yank:oci","read:artifact"]""", expiresAt: null);
 
         // ── Delete as org A ───────────────────────────────────────────────────
-        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolverNoUpstream());
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
         var result = await ctl.Delete($"{repo}/manifests/{digest}", default);
 
         var objResult = Assert.IsAssignableFrom<StatusCodeResult>(result);
@@ -664,7 +674,7 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         var (rawToken, _) = await _tokens.CreateServiceTokenAsync(
             _orgId, "yank-sole", """["yank:oci","read:artifact"]""", expiresAt: null);
 
-        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolverNoUpstream());
+        var ctl = BuildControllerForOrgWithAuth(_orgId, rawToken, BuildResolver());
         var result = await ctl.Delete($"{repo}/manifests/{digest}", default);
 
         Assert.IsAssignableFrom<StatusCodeResult>(result);
@@ -690,16 +700,6 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         var options = Options.Create(new OciOptions
         {
             ManifestTagTtl = TimeSpan.FromMinutes(5),
-            Upstreams =
-            [
-                new OciUpstreamRegistryOptions
-                {
-                    Name     = "dockerhub",
-                    Host     = "registry-1.docker.io",
-                    AuthType = OciAuthType.Anonymous,
-                    Prefixes = [""],
-                }
-            ],
         });
 
         // Air-gap mode: any call to the upstream HTTP client would fail, but the controller

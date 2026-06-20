@@ -87,10 +87,12 @@ public sealed class RpmRepodataServiceMergeTests : IClassFixture<InMemoryDbFixtu
         await using var conn = await _fixture.Store.OpenAsync();
         await conn.ExecuteAsync("""
             INSERT INTO rpm_metadata
-                (package_version_id, rpm_name, epoch, rpm_version, rpm_release, arch,
+                (id, package_version_id, owner_kind,
+                 rpm_name, epoch, rpm_version, rpm_release, arch,
                  summary, description, installed_size, archive_size, header_start, header_end, rpm_license)
             VALUES
-                (@pvId, 'hello', 0, '2.10', '1.el9', 'x86_64',
+                (lower(hex(randomblob(16))), @pvId, 'package_version',
+                 'hello', 0, '2.10', '1.el9', 'x86_64',
                  'A GNU greeting program', 'greeting', 65536, 60000, 440, 2048, 'GPL-3.0-or-later')
             """,
             new { pvId });

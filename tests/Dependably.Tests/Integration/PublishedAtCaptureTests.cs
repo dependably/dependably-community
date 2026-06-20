@@ -25,6 +25,7 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
     public Task InitializeAsync() => ((IAsyncLifetime)_factory).InitializeAsync();
     public Task DisposeAsync() => Task.CompletedTask;
 
+    // Reads published_at from package_versions for uploaded-origin ecosystems only.
     private async Task<string?> QueryPublishedAtAsync(string ecosystem, string version)
     {
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
@@ -38,6 +39,25 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
             ORDER BY pv.created_at DESC LIMIT 1
             """,
             new { ecosystem, version });
+    }
+
+    // Reads published_at from cache_artifact for proxy-origin ecosystems whose first-fetch
+    // path writes to the global plane (npm, NuGet). Uses (ecosystem, name, version) for
+    // uniqueness because multiple names may share the same version string.
+    // xtenant: cache_artifact is global (no org_id); scoped by coordinate.
+    private async Task<string?> QueryCacheArtifactPublishedAtAsync(
+        string ecosystem, string name, string version)
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        return await conn.ExecuteScalarAsync<string?>(
+            """
+            SELECT published_at
+            FROM cache_artifact
+            WHERE ecosystem = @ecosystem AND name = @name AND version = @version
+            ORDER BY first_cached_at DESC LIMIT 1
+            """,
+            new { ecosystem, name, version });
     }
 
     // ── npm ──────────────────────────────────────────────────────────────────
@@ -71,7 +91,8 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryPublishedAtAsync("npm", version);
+        // npm proxy first-fetch writes to cache_artifact (global plane); no package_versions row.
+        string? stored = await QueryCacheArtifactPublishedAtAsync("npm", name, version);
         Assert.NotNull(stored);
         Assert.Equal(DateTimeOffset.Parse(upstreamIso).ToUniversalTime(),
             DateTimeOffset.Parse(stored!).ToUniversalTime());
@@ -97,7 +118,8 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
         var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryPublishedAtAsync("npm", version);
+        // Packument 500 is fail-soft: the cache_artifact row is created but published_at stays NULL.
+        string? stored = await QueryCacheArtifactPublishedAtAsync("npm", name, version);
         Assert.Null(stored);
     }
 
@@ -131,7 +153,8 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryPublishedAtAsync("nuget", version);
+        // NuGet proxy first-fetch writes to cache_artifact (global plane); no package_versions row.
+        string? stored = await QueryCacheArtifactPublishedAtAsync("nuget", lowerId, version);
         Assert.NotNull(stored);
         Assert.Equal(DateTimeOffset.Parse(upstreamIso).ToUniversalTime(),
             DateTimeOffset.Parse(stored!).ToUniversalTime());
@@ -163,7 +186,8 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
         var resp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/{version}/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryPublishedAtAsync("nuget", version);
+        // Unlisted sentinel coerced to null published_at — verified against cache_artifact.
+        string? stored = await QueryCacheArtifactPublishedAtAsync("nuget", lowerId, version);
         Assert.Null(stored);
     }
 
@@ -208,7 +232,8 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryPublishedAtAsync("pypi", version);
+        // PyPI proxy first-fetch writes to cache_artifact (global plane); no package_versions row.
+        string? stored = await QueryCacheArtifactPublishedAtAsync("pypi", name, version);
         Assert.NotNull(stored);
         Assert.Equal(DateTimeOffset.Parse(uploadIso).ToUniversalTime(),
             DateTimeOffset.Parse(stored!).ToUniversalTime());
@@ -242,7 +267,8 @@ public sealed class PublishedAtCaptureTests : IClassFixture<DependablyFactory>, 
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        string? stored = await QueryPublishedAtAsync("pypi", version);
+        // JSON API 500 is fail-soft: the cache_artifact row is created but published_at stays NULL.
+        string? stored = await QueryCacheArtifactPublishedAtAsync("pypi", name, version);
         Assert.Null(stored);
     }
 }

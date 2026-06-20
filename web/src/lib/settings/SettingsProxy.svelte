@@ -11,6 +11,7 @@
   import { t } from 'svelte-i18n'
   import SettingsList from './SettingsList.svelte'
   import SettingsNamespaces from './SettingsNamespaces.svelte'
+  import SettingsInstallScriptAllowlist from './SettingsInstallScriptAllowlist.svelte'
   import SettingsUpstreamRegistries from './SettingsUpstreamRegistries.svelte'
   import InfoTip from '../InfoTip.svelte'
 
@@ -40,6 +41,13 @@
   export let onAddReserved = () => {}
   /** @type {(id: string) => void} */
   export let onRemoveReserved = () => {}
+
+  export let installScriptAllowlistEntries = []
+  export let installScriptAllowlistLoaded = false
+  /** @type {() => void} */
+  export let onAddInstallScriptAllowlist = () => {}
+  /** @type {(id: string) => void} */
+  export let onRemoveInstallScriptAllowlist = () => {}
 </script>
 
 <div class="card card-narrow">
@@ -106,6 +114,89 @@
     </select>
   </div>
   <div class="form-row">
+    <label class="label-row" for="block-install-scripts">{$t('settings.proxy.blockInstallScripts')} <InfoTip text={$t('settings.proxy.blockInstallScriptsHint')} /></label>
+    <select id="block-install-scripts" bind:value={proxySettings.block_install_scripts}>
+      <option value="off">{$t('settings.proxy.blockInstallScriptsOff')}</option>
+      <option value="warn">{$t('settings.proxy.blockInstallScriptsWarn')}</option>
+      <option value="block">{$t('settings.proxy.blockInstallScriptsBlock')}</option>
+    </select>
+  </div>
+  <div class="form-row">
+    <label class="label-row" for="verify-npm-signatures">{$t('settings.proxy.verifyNpmSignatures')} <InfoTip text={$t('settings.proxy.verifyNpmSignaturesHint')} /></label>
+    <select
+      id="verify-npm-signatures"
+      bind:value={proxySettings.verify_npm_signatures}
+      disabled={!proxySettings.npm_signature_keys_configured}
+    >
+      <option value="off">{$t('settings.proxy.verifyNpmSignaturesOff')}</option>
+      <option value="warn">{$t('settings.proxy.verifyNpmSignaturesWarn')}</option>
+      <option value="block">{$t('settings.proxy.verifyNpmSignaturesBlock')}</option>
+    </select>
+  </div>
+  {#if !proxySettings.npm_signature_keys_configured}
+    <p class="form-hint">{$t('settings.proxy.verifyNpmSignaturesNoKeys')}</p>
+  {/if}
+  <div class="form-row">
+    <label class="label-row" for="verify-nuget-signatures">{$t('settings.proxy.verifyNuGetSignatures')} <InfoTip text={$t('settings.proxy.verifyNuGetSignaturesHint')} /></label>
+    <select
+      id="verify-nuget-signatures"
+      bind:value={proxySettings.verify_nuget_signatures}
+      disabled={!proxySettings.nuget_signature_certs_configured}
+    >
+      <option value="off">{$t('settings.proxy.verifyNuGetSignaturesOff')}</option>
+      <option value="warn">{$t('settings.proxy.verifyNuGetSignaturesWarn')}</option>
+      <option value="block">{$t('settings.proxy.verifyNuGetSignaturesBlock')}</option>
+    </select>
+  </div>
+  {#if !proxySettings.nuget_signature_certs_configured}
+    <p class="form-hint">{$t('settings.proxy.verifyNuGetSignaturesNoCerts')}</p>
+  {/if}
+  <div class="form-row">
+    <label class="label-row" for="verify-pypi-attestations">{$t('settings.proxy.verifyPyPiAttestations')} <InfoTip text={$t('settings.proxy.verifyPyPiAttestationsHint')} /></label>
+    <select
+      id="verify-pypi-attestations"
+      bind:value={proxySettings.verify_pypi_attestations}
+      disabled={!proxySettings.pypi_sigstore_roots_configured}
+    >
+      <option value="off">{$t('settings.proxy.verifyPyPiAttestationsOff')}</option>
+      <option value="warn">{$t('settings.proxy.verifyPyPiAttestationsWarn')}</option>
+      <option value="block">{$t('settings.proxy.verifyPyPiAttestationsBlock')}</option>
+    </select>
+  </div>
+  {#if !proxySettings.pypi_sigstore_roots_configured}
+    <p class="form-hint">{$t('settings.proxy.verifyPyPiAttestationsNoRoots')}</p>
+  {/if}
+  <div class="form-row">
+    <label class="label-row" for="verify-rpm-signatures">{$t('settings.proxy.verifyRpmSignatures')} <InfoTip text={$t('settings.proxy.verifyRpmSignaturesHint')} /></label>
+    <select
+      id="verify-rpm-signatures"
+      bind:value={proxySettings.verify_rpm_signatures}
+      disabled={!proxySettings.rpm_gpg_key_configured}
+    >
+      <option value="off">{$t('settings.proxy.verifyRpmSignaturesOff')}</option>
+      <option value="warn">{$t('settings.proxy.verifyRpmSignaturesWarn')}</option>
+      <option value="block">{$t('settings.proxy.verifyRpmSignaturesBlock')}</option>
+    </select>
+  </div>
+  {#if !proxySettings.rpm_gpg_key_configured}
+    <p class="form-hint">{$t('settings.proxy.verifyRpmSignaturesNoKey')}</p>
+  {/if}
+  <div class="form-row">
+    <label class="label-row" for="verify-maven-signatures">{$t('settings.proxy.verifyMavenSignatures')} <InfoTip text={$t('settings.proxy.verifyMavenSignaturesHint')} /></label>
+    <select
+      id="verify-maven-signatures"
+      bind:value={proxySettings.verify_maven_signatures}
+      disabled={!proxySettings.maven_signature_keys_configured}
+    >
+      <option value="off">{$t('settings.proxy.verifyMavenSignaturesOff')}</option>
+      <option value="warn">{$t('settings.proxy.verifyMavenSignaturesWarn')}</option>
+      <option value="block">{$t('settings.proxy.verifyMavenSignaturesBlock')}</option>
+    </select>
+  </div>
+  {#if !proxySettings.maven_signature_keys_configured}
+    <p class="form-hint">{$t('settings.proxy.verifyMavenSignaturesNoKeys')}</p>
+  {/if}
+  <div class="form-row">
     <label class="label-row" for="max-epss">{$t('settings.proxy.maxEpssTolerance')} <InfoTip text={$t('settings.proxy.maxEpssToleranceHint')} /></label>
     <input
       id="max-epss"
@@ -152,6 +243,16 @@
   loading={!reservedLoaded}
   onAdd={onAddReserved}
   onRemove={onRemoveReserved} />
+
+<div class="page-header list-header mt-4">
+  <h3 class="section-h">{$t('settings.proxy.installScriptAllowlistSection')}</h3>
+</div>
+<p class="form-hint">{$t('settings.proxy.installScriptAllowlistHint')}</p>
+<SettingsInstallScriptAllowlist
+  entries={installScriptAllowlistEntries}
+  loading={!installScriptAllowlistLoaded}
+  onAdd={onAddInstallScriptAllowlist}
+  onRemove={onRemoveInstallScriptAllowlist} />
 
 <SettingsUpstreamRegistries />
 

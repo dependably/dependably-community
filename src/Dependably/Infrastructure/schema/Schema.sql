@@ -87,6 +87,42 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- EPSS exploitation-probability ceiling (0.0–1.0). A version is blocked when the maximum
     -- epss_score across its advisories exceeds this value. NULL = policy off (default).
     max_epss_tolerance        REAL,
+    -- Policy for artefacts that ship an install/lifecycle script (package_versions.has_install_script).
+    -- 'off' (default) / 'warn' (surface in UI only) / 'block' (deny fetch and serve). Opt-in;
+    -- a manual per-version allow override still wins.
+    block_install_scripts     TEXT    NOT NULL DEFAULT 'off' CHECK (block_install_scripts IN ('off', 'warn', 'block')),
+    -- Policy for npm proxy-origin signature verification (package_versions.provenance_status).
+    -- 'off' (default) = do not verify; 'warn' = verify and surface in UI without blocking;
+    -- 'block' = fail closed (a version that fails verification or is unsigned is refused, not
+    -- cached or served). Enabling 'warn'/'block' requires operator-pinned Npm:SignatureKeys, or
+    -- the verifier reports the column NULL and nothing blocks. A manual per-version allow wins.
+    verify_npm_signatures     TEXT    NOT NULL DEFAULT 'off' CHECK (verify_npm_signatures IN ('off', 'warn', 'block')),
+    -- Policy for NuGet proxy-origin .nupkg signature verification (package_versions.provenance_status).
+    -- 'off' (default) = do not verify; 'warn' = verify and surface in UI without blocking;
+    -- 'block' = fail closed (a version whose .nupkg signature fails verification or is unsigned is
+    -- refused, not cached or served). Enabling 'warn'/'block' requires operator-pinned
+    -- NuGet:SignatureCertificates, or the verifier reports the column NULL and nothing blocks. A
+    -- manual per-version allow override still wins.
+    verify_nuget_signatures   TEXT    NOT NULL DEFAULT 'off' CHECK (verify_nuget_signatures IN ('off', 'warn', 'block')),
+    -- Policy for PyPI proxy-origin PEP 740 attestation verification (package_versions.provenance_status).
+    -- 'off' (default) = do not verify; 'warn' = verify and surface in UI without blocking;
+    -- 'block' = fail closed (a version whose attestation fails verification or that carries none is
+    -- refused, not cached or served). Enabling 'warn'/'block' requires operator-pinned
+    -- PyPI:SigstoreRoots and PyPI:TrustedPublishers, or the verifier reports the column NULL and
+    -- nothing blocks. A manual per-version allow override still wins.
+    verify_pypi_attestations  TEXT    NOT NULL DEFAULT 'off' CHECK (verify_pypi_attestations IN ('off', 'warn', 'block')),
+    -- Policy for RPM proxy-origin per-package GPG header signature verification
+    -- (cache_artifact.provenance_status). 'off' (default) = do not verify; 'warn' = verify and
+    -- surface in UI without blocking; 'block' = fail closed. Enabling 'warn'/'block' requires
+    -- operator-pinned Rpm:GpgKey; without it the verifier reports not-applicable and nothing blocks.
+    -- A manual per-version allow override still wins.
+    verify_rpm_signatures     TEXT    NOT NULL DEFAULT 'off' CHECK (verify_rpm_signatures IN ('off', 'warn', 'block')),
+    -- Policy for Maven proxy-origin detached .asc OpenPGP signature verification
+    -- (cache_artifact.provenance_status). 'off' (default) = do not verify; 'warn' = verify and
+    -- surface in UI without blocking; 'block' = fail closed. Enabling 'warn'/'block' requires
+    -- operator-pinned Maven:SignatureKeys; without it the verifier reports not-applicable and
+    -- nothing blocks. A manual per-version allow override still wins.
+    verify_maven_signatures   TEXT    NOT NULL DEFAULT 'off' CHECK (verify_maven_signatures IN ('off', 'warn', 'block')),
     -- Running tally of hosted-artefact bytes for this tenant. Maintained atomically by the
     -- publish path (reserve-before-write) and decremented on delete. Backfilled from
     -- SUM(package_versions.size_bytes) on first access when the counter is 0 and the real
@@ -144,7 +180,7 @@ CREATE TABLE IF NOT EXISTS system_admins (
 CREATE TABLE IF NOT EXISTS packages (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,   -- 'pypi' | 'npm' | 'nuget'
+    ecosystem   TEXT NOT NULL,   -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm' | 'oci' | 'cargo' | 'golang'
     name        TEXT NOT NULL,
     purl_name   TEXT NOT NULL,   -- normalized per ecosystem
     is_proxy    INTEGER NOT NULL DEFAULT 0,
@@ -160,7 +196,7 @@ CREATE TABLE IF NOT EXISTS package_versions (
     id          TEXT PRIMARY KEY,
     package_id  TEXT NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
     version     TEXT NOT NULL,
-    purl        TEXT NOT NULL UNIQUE,
+    purl        TEXT NOT NULL,
     blob_key    TEXT NOT NULL,
     size_bytes  INTEGER NOT NULL DEFAULT 0,
     checksum_sha256 TEXT,
@@ -207,6 +243,25 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- ISO 8601 UTC; set after the last upstream deprecation metadata refresh.
     -- NULL on rows that pre-date the deprecation refresh service or have never been checked.
     deprecation_checked_at TEXT,
+    -- Supply-chain signal: 1 when the artefact ships an install/lifecycle script that runs
+    -- automatically on install (npm preinstall/install/postinstall, a PyPI sdist setup.py,
+    -- a NuGet tools install.ps1/init.ps1 or build .targets/.props). Captured at proxy
+    -- first-fetch and hosted publish by ScriptDetectionService; drives the install-script
+    -- block-gate arm. 0 on rows that pre-date the column and on artefacts with no script.
+    has_install_script INTEGER NOT NULL DEFAULT 0,
+    -- Discriminator describing which script kind fired, e.g. 'npm:postinstall',
+    -- 'pypi:setup.py', 'nuget:install.ps1', 'nuget:msbuild'. NULL when has_install_script is 0.
+    install_script_kind TEXT,
+    -- Provenance/signature-verification outcome at proxy ingest: 'verified' (a pinned trust
+    -- anchor produced a valid signature over the canonical signing payload), 'failed' (a
+    -- signature was present but did not verify or chained to no pinned key), or 'unsigned' (the
+    -- upstream published no signature). NULL when verification was not applicable (policy off,
+    -- ecosystem without a verifier, hosted origin) or for rows that pre-date the column. Drives
+    -- the provenance block-gate arm.
+    provenance_status TEXT,
+    -- Identity of the verifying signer (the trust-anchor keyid) when provenance_status is
+    -- 'verified'. NULL for every other status.
+    provenance_signer TEXT,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     UNIQUE (package_id, version)
 );
@@ -309,19 +364,25 @@ CREATE INDEX IF NOT EXISTS idx_quarantine_org_state ON quarantine(org_id, state,
 
 -- Per-org upstream proxy registries. One ordered list per ecosystem; `position` ascending is
 -- priority (lowest tried first, falling through on miss/unreachable). An ecosystem with zero
--- rows has proxying effectively disabled for that org. auth_type/username/secret are reserved
--- for authenticated upstreams and are dormant in community (anonymous-only).
+-- rows has proxying effectively disabled for that org. For non-OCI ecosystems auth_type,
+-- username, and secret are reserved capacity (unused in community). For OCI rows: auth_type
+-- drives the pull auth mechanism ('anonymous'|'basic'|'dockerhub_token_exchange'); url holds
+-- the registry host (e.g. 'registry-1.docker.io'); token_endpoint is the operator-pinned
+-- auth realm for DockerHubTokenExchange; prefixes is a JSON TEXT array (e.g. '["library/",""]')
+-- — first-match-wins prefix routing, empty string is the catch-all fallback.
 CREATE TABLE IF NOT EXISTS upstream_registry (
-    id          TEXT PRIMARY KEY,
-    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,              -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm'
-    name        TEXT,                       -- optional display label
-    url         TEXT NOT NULL,
-    position    INTEGER NOT NULL DEFAULT 0, -- ascending = priority; lowest tried first
-    auth_type   TEXT NOT NULL DEFAULT 'anonymous',
-    username    TEXT,
-    secret      TEXT,
-    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    id             TEXT PRIMARY KEY,
+    org_id         TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem      TEXT NOT NULL,              -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm' | 'oci'
+    name           TEXT,                       -- optional display label
+    url            TEXT NOT NULL,
+    position       INTEGER NOT NULL DEFAULT 0, -- ascending = priority; lowest tried first
+    auth_type      TEXT NOT NULL DEFAULT 'anonymous',
+    username       TEXT,
+    secret         TEXT,
+    token_endpoint TEXT,                       -- OCI: operator-pinned token-exchange realm URL
+    prefixes       TEXT,                       -- OCI: JSON array of repository-name prefix strings
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     UNIQUE (org_id, ecosystem, url)
 );
 CREATE INDEX IF NOT EXISTS idx_upstream_registry_org_eco
@@ -334,6 +395,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     -- /api/v1/system/audit filters by scope='system'; tenant audit endpoints filter by
     -- scope='tenant' AND org_id = caller's tid.
     scope       TEXT NOT NULL DEFAULT 'tenant' CHECK (scope IN ('tenant','system')),
+    -- No FK to orgs: rows are retained for forensic purposes after an org is deleted.
     org_id      TEXT,
     actor_id    TEXT,
     -- Discriminator for actor_id: 'user' (users.id) or 'service' (service_tokens.id). NULL
@@ -371,7 +433,8 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     package_name    TEXT NOT NULL,
     aliases         TEXT,           -- JSON array of alias IDs
     summary         TEXT,
-    severity        TEXT,           -- 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | NULL
+    severity        TEXT            -- NULL when the advisory carries no CVSS severity classification
+                    CHECK (severity IN ('CRITICAL','HIGH','MEDIUM','LOW')),
     cvss_score      REAL,
     affected_versions TEXT,         -- JSON array of version strings
     osv_json        TEXT,           -- full OSV advisory JSON; source of truth for the rich detail panel
@@ -390,13 +453,40 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
 );
 
 CREATE TABLE IF NOT EXISTS package_version_vulns (
-    package_version_id  TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    -- Surrogate PK so cache_artifact-owned rows can exist without a package_versions FK.
+    id                  TEXT PRIMARY KEY,
+    -- NULL when owner_kind='cache_artifact'; NOT NULL for the 'package_version' arm.
+    package_version_id  TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
     vuln_id             TEXT NOT NULL REFERENCES vulnerabilities(id) ON DELETE CASCADE,
     checked_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    PRIMARY KEY (package_version_id, vuln_id)
+    -- Polymorphic metadata owner: NULL for the package_version arm; set to the
+    -- cache_artifact row for proxy-origin metadata. owner_kind discriminates which FK
+    -- is authoritative.
+    cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+    owner_kind          TEXT NOT NULL DEFAULT 'package_version'
+                        CHECK (owner_kind IN ('package_version','cache_artifact')),
+    -- Owner invariant: exactly one FK arm is active and matches owner_kind.
+    CHECK (
+        (owner_kind = 'package_version' AND package_version_id IS NOT NULL AND cache_artifact_id IS NULL)
+        OR
+        (owner_kind = 'cache_artifact' AND cache_artifact_id IS NOT NULL AND package_version_id IS NULL)
+    )
 );
+-- Partial unique indexes enforce per-arm dedup without a composite PK.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pvv_pv_vuln
+    ON package_version_vulns (package_version_id, vuln_id)
+    WHERE owner_kind = 'package_version';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pvv_ca_vuln
+    ON package_version_vulns (cache_artifact_id, vuln_id)
+    WHERE owner_kind = 'cache_artifact';
+CREATE INDEX IF NOT EXISTS idx_package_version_vulns_cache_artifact
+    ON package_version_vulns (cache_artifact_id);
 
 -- Indexes for common query patterns
+-- Cross-tenant email-hash throttle: lockout is keyed by SHA-256(lowercased email) with no tenant
+-- component, so repeated attempts from different tenants share the same failure counter. This is
+-- intentional anti-enumeration behaviour — an attacker who controls one tenant cannot probe
+-- whether a given email exists in another by observing different lockout responses.
 CREATE TABLE IF NOT EXISTS login_attempts (
     email_hash  TEXT PRIMARY KEY,   -- SHA-256 of lowercased email — avoids storing PII
     failed_count INTEGER NOT NULL DEFAULT 0,
@@ -406,7 +496,9 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 
 CREATE INDEX IF NOT EXISTS idx_packages_org_ecosystem ON packages(org_id, ecosystem);
 CREATE INDEX IF NOT EXISTS idx_vulns_ecosystem_pkg ON vulnerabilities(ecosystem, package_name);
-CREATE INDEX IF NOT EXISTS idx_pkg_version_vulns_version ON package_version_vulns(package_version_id);
+-- vuln_id FK index: cascade deletes on vulnerabilities scan the child table without this.
+-- package_version_id and cache_artifact_id are covered by the partial unique indexes above.
+CREATE INDEX IF NOT EXISTS idx_pkg_version_vulns_vuln ON package_version_vulns(vuln_id);
 CREATE INDEX IF NOT EXISTS idx_package_versions_package ON package_versions(package_id);
 -- Hot path: PyPI/npm/NuGet downloads resolve a file to a version row by trailing filename.
 -- A leading-wildcard `blob_key LIKE '%/' || filename` lookup cannot be served from any
@@ -417,16 +509,42 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_org ON audit_log(org_id, created_at DES
 CREATE INDEX IF NOT EXISTS idx_activity_org ON activity(org_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_tokens_hash ON user_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_service_tokens_hash ON service_tokens(token_hash);
+-- FK-column indexes: SQLite and Postgres do not auto-index foreign key columns; without these,
+-- cascade deletes on the parent table cause full child-table scans. Indexes for tables
+-- defined later in this file are placed adjacent to those tables below.
+CREATE INDEX IF NOT EXISTS idx_user_tokens_org ON user_tokens(org_id);
+CREATE INDEX IF NOT EXISTS idx_user_tokens_user ON user_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_service_tokens_org ON service_tokens(org_id);
+CREATE INDEX IF NOT EXISTS idx_quarantine_version ON quarantine(package_version_id);
+CREATE INDEX IF NOT EXISTS idx_quarantine_decided_by ON quarantine(decided_by);
+CREATE INDEX IF NOT EXISTS idx_invites_created_by ON invites(created_by);
+CREATE INDEX IF NOT EXISTS idx_reserved_namespace_created_by ON reserved_namespace(created_by);
 
 -- License governance
 CREATE TABLE IF NOT EXISTS package_version_licenses (
     id                  TEXT PRIMARY KEY,
-    package_version_id  TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    -- NULL when owner_kind='cache_artifact'; NOT NULL for the 'package_version' arm.
+    package_version_id  TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
     license_spdx        TEXT NOT NULL,                  -- SPDX identifier e.g. MIT, Apache-2.0
     source              TEXT NOT NULL DEFAULT 'upstream',   -- 'upstream' | 'sbom' | 'manual'
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    UNIQUE (package_version_id, license_spdx)
+    -- Polymorphic metadata owner: NULL for hosted package_version rows; set to the
+    -- cache_artifact row for proxy-origin metadata scanned before a version row exists.
+    -- owner_kind discriminates which FK is authoritative. Reserved capacity in community.
+    cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+    owner_kind          TEXT NOT NULL DEFAULT 'package_version'
+                        CHECK (owner_kind IN ('package_version','cache_artifact')),
+    UNIQUE (package_version_id, license_spdx),
+    UNIQUE (cache_artifact_id, license_spdx),
+    -- Owner invariant: exactly one FK arm is active and matches owner_kind.
+    CHECK (
+        (owner_kind = 'package_version' AND package_version_id IS NOT NULL AND cache_artifact_id IS NULL)
+        OR
+        (owner_kind = 'cache_artifact' AND cache_artifact_id IS NOT NULL AND package_version_id IS NULL)
+    )
 );
+CREATE INDEX IF NOT EXISTS idx_package_version_licenses_cache_artifact
+    ON package_version_licenses (cache_artifact_id);
 
 CREATE TABLE IF NOT EXISTS license_allowlist (
     id          TEXT PRIMARY KEY,
@@ -446,12 +564,17 @@ CREATE TABLE IF NOT EXISTS license_blocklist (
 
 CREATE INDEX IF NOT EXISTS idx_pkg_version_licenses ON package_version_licenses(package_version_id);
 
--- RPM metadata. One row per package_versions row carrying everything the RPM header
--- parser pulls from a .rpm upload. Arrays (requires/provides/files/changelogs) are stored
--- as JSON strings so the repodata generator can re-emit them as XML without a second
--- query roundtrip.
+-- RPM metadata. One row per artifact carrying everything the RPM header parser pulls from
+-- a .rpm upload. Arrays (requires/provides/files/changelogs) are stored as JSON strings so
+-- the repodata generator can re-emit them as XML without a second query roundtrip.
+-- Each row is owned by exactly one package_versions row (owner_kind='package_version') or
+-- one cache_artifact row (owner_kind='cache_artifact'); the respective FK is set and the
+-- other is NULL. Partial unique indexes enforce per-arm dedup.
 CREATE TABLE IF NOT EXISTS rpm_metadata (
-    package_version_id  TEXT PRIMARY KEY REFERENCES package_versions(id) ON DELETE CASCADE,
+    -- Surrogate PK so cache_artifact-owned rows can exist without a package_versions FK.
+    id                  TEXT PRIMARY KEY,
+    -- NULL when owner_kind='cache_artifact'; NOT NULL for the 'package_version' arm.
+    package_version_id  TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
     rpm_name            TEXT NOT NULL,
     epoch               INTEGER NOT NULL DEFAULT 0,
     rpm_version         TEXT NOT NULL,
@@ -477,9 +600,29 @@ CREATE TABLE IF NOT EXISTS rpm_metadata (
     files_json          TEXT NOT NULL DEFAULT '[]',
     changelogs_json     TEXT NOT NULL DEFAULT '[]',
     rpm_license         TEXT,
-    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    -- Polymorphic metadata owner: NULL for hosted package_version rows; set to the
+    -- cache_artifact row for proxy-origin metadata scanned before a version row exists.
+    -- owner_kind discriminates which FK is authoritative. Reserved capacity in community.
+    cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+    owner_kind          TEXT NOT NULL DEFAULT 'package_version'
+                        CHECK (owner_kind IN ('package_version','cache_artifact')),
+    -- Owner invariant: exactly one FK arm is active and matches owner_kind.
+    CHECK (
+        (owner_kind = 'package_version' AND package_version_id IS NOT NULL AND cache_artifact_id IS NULL)
+        OR
+        (owner_kind = 'cache_artifact' AND cache_artifact_id IS NOT NULL AND package_version_id IS NULL)
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_rpm_metadata_arch ON rpm_metadata(arch);
+CREATE INDEX IF NOT EXISTS idx_rpm_metadata_cache_artifact ON rpm_metadata(cache_artifact_id);
+-- Partial unique indexes enforce per-arm dedup (one row per artifact per owner arm).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rpm_metadata_pv
+    ON rpm_metadata (package_version_id)
+    WHERE owner_kind = 'package_version';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rpm_metadata_ca
+    ON rpm_metadata (cache_artifact_id)
+    WHERE owner_kind = 'cache_artifact';
 
 -- Repodata generation state. One row per (org, arch); dirty flag drives the async
 -- rebuild service. generation increments each rebuild so concurrent rebuilds detect
@@ -497,9 +640,13 @@ CREATE TABLE IF NOT EXISTS rpm_repodata_state (
 -- per version (JAR + POM + sources JAR + javadoc + checksum sidecars). This table tracks
 -- the per-file extension/classifier/blob mapping so the controller can answer arbitrary
 -- file-suffix requests without re-parsing PURLs at the DB layer.
+-- Each row is owned by exactly one package_versions row (owner_kind='package_version') or
+-- one cache_artifact row (owner_kind='cache_artifact'); the respective FK is set and the
+-- other is NULL. Partial unique indexes enforce per-arm dedup.
 CREATE TABLE IF NOT EXISTS maven_version_files (
     id                  TEXT PRIMARY KEY,
-    package_version_id  TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    -- NULL when owner_kind='cache_artifact'; NOT NULL for the 'package_version' arm.
+    package_version_id  TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
     filename            TEXT NOT NULL,
     classifier          TEXT,
     extension           TEXT NOT NULL,
@@ -510,10 +657,29 @@ CREATE TABLE IF NOT EXISTS maven_version_files (
     checksum_md5        TEXT,
     origin              TEXT NOT NULL DEFAULT 'uploaded',  -- 'uploaded' | 'proxy'
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-    UNIQUE (package_version_id, filename)
+    -- Polymorphic metadata owner: NULL for hosted package_version rows; set to the
+    -- cache_artifact row for proxy-origin metadata scanned before a version row exists.
+    -- owner_kind discriminates which FK is authoritative. Reserved capacity in community.
+    cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+    owner_kind          TEXT NOT NULL DEFAULT 'package_version'
+                        CHECK (owner_kind IN ('package_version','cache_artifact')),
+    -- Owner invariant: exactly one FK arm is active and matches owner_kind.
+    CHECK (
+        (owner_kind = 'package_version' AND package_version_id IS NOT NULL AND cache_artifact_id IS NULL)
+        OR
+        (owner_kind = 'cache_artifact' AND cache_artifact_id IS NOT NULL AND package_version_id IS NULL)
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_maven_version_files_version ON maven_version_files(package_version_id);
 CREATE INDEX IF NOT EXISTS idx_maven_version_files_filename ON maven_version_files(filename);
+CREATE INDEX IF NOT EXISTS idx_maven_version_files_cache_artifact ON maven_version_files(cache_artifact_id);
+-- Partial unique indexes replace the old UNIQUE(package_version_id, filename) constraint.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mvf_pv_filename
+    ON maven_version_files (package_version_id, filename)
+    WHERE owner_kind = 'package_version';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mvf_ca_filename
+    ON maven_version_files (cache_artifact_id, filename)
+    WHERE owner_kind = 'cache_artifact';
 
 -- OCI / Docker registry storage. Manifests and blobs are both content-addressed; this
 -- table is the metadata index. Bytes live under BlobKeys.OciBlob in the blob store.
@@ -539,6 +705,8 @@ CREATE TABLE IF NOT EXISTS oci_tags (
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     repository  TEXT NOT NULL,
     tag         TEXT NOT NULL,
+    -- No FK to oci_blobs: a tag may validly dangle to a GC'd or not-yet-stored manifest.
+    -- Dangling tags are resolved lazily; the OCI pull path re-fetches the manifest on miss.
     digest      TEXT NOT NULL,
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     last_revalidated TEXT,  -- per-tag TTL revalidation timestamp; NULL forces a re-check on first access
@@ -636,6 +804,8 @@ CREATE TABLE IF NOT EXISTS saml_test_runs (
     consumed_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_saml_test_runs_expires ON saml_test_runs(expires_at);
+-- FK-column index: tenant_id is not the PK; without this, cascade deletes on orgs scan the table.
+CREATE INDEX IF NOT EXISTS idx_saml_test_runs_tenant ON saml_test_runs(tenant_id);
 
 -- One-time-use store binding SP-initiated AuthnRequests to their responses. /saml/login inserts
 -- the AuthnRequest id; ACS consumes it by matching the response's InResponseTo. An unsolicited
@@ -649,6 +819,8 @@ CREATE TABLE IF NOT EXISTS saml_pending_requests (
     consumed_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_saml_pending_requests_expires ON saml_pending_requests(expires_at);
+-- FK-column index: tenant_id is not the PK; without this, cascade deletes on orgs scan the table.
+CREATE INDEX IF NOT EXISTS idx_saml_pending_requests_tenant ON saml_pending_requests(tenant_id);
 
 -- Replay guard for production SAML logins. ACS records each accepted assertion's signed ID
 -- (per tenant) the first time it is seen; presenting the same assertion again within its
@@ -704,6 +876,8 @@ CREATE TABLE IF NOT EXISTS claim (
     UNIQUE (org_id, ecosystem, name)
 );
 CREATE INDEX IF NOT EXISTS idx_claim_org_state ON claim (org_id, state);
+-- FK-column index: created_by references users(id) but is not covered by any other index.
+CREATE INDEX IF NOT EXISTS idx_claim_created_by ON claim(created_by);
 
 -- Append-only history of claim transitions. Forensic record + UI history view.
 CREATE TABLE IF NOT EXISTS claim_history (
@@ -721,10 +895,16 @@ CREATE TABLE IF NOT EXISTS claim_history (
 );
 CREATE INDEX IF NOT EXISTS idx_claim_history_org_time ON claim_history (org_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_claim_history_claim ON claim_history (claim_id, occurred_at DESC);
+-- FK-column index: actor_id references users(id) but is not covered by any other index.
+CREATE INDEX IF NOT EXISTS idx_claim_history_actor ON claim_history(actor_id);
 
 -- Global shared proxy-cache index. One row per (ecosystem, name, version, filename).
 -- No tenant column: the artifact is content-addressed and shared across tenants.
 -- last_accessed_at drives LRU eviction; per-tenant access lives in tenant_artifact_access.
+-- purl is the canonical package identity for cross-ecosystem lookups; no UNIQUE constraint
+-- because Maven maps one purl to many filenames (jar + pom + sources + javadoc sidecars).
+-- Supply-chain columns (provenance, install_script, vuln) are reserved capacity: written
+-- at ingest but not yet read by any query in community. See community/enterprise boundary rule.
 CREATE TABLE IF NOT EXISTS cache_artifact (
     id                  TEXT PRIMARY KEY,
     ecosystem           TEXT NOT NULL,
@@ -738,18 +918,56 @@ CREATE TABLE IF NOT EXISTS cache_artifact (
     upstream_etag       TEXT,
     first_cached_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     last_accessed_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    -- Canonical PURL for this artifact. No UNIQUE: Maven maps one purl to many filenames.
+    purl                TEXT,
+    -- Hex SHA-1 of the artifact bytes (npm packument shasum field uses SHA-1 by spec).
+    checksum_sha1       TEXT,
+    -- ISO 8601 UTC; upstream first-publish timestamp captured at ingest. NULL when unavailable.
+    published_at        TEXT,
+    -- Upstream deprecation message when set; NULL when not deprecated.
+    deprecated          TEXT,
+    -- ISO 8601 UTC; last time the deprecation state was refreshed from upstream.
+    deprecation_checked_at TEXT,
+    -- Supply-chain signal: 1 when the artifact ships an install/lifecycle script.
+    has_install_script  INTEGER NOT NULL DEFAULT 0,
+    -- Discriminator for which kind of install script fired (e.g. 'npm:postinstall').
+    install_script_kind TEXT,
+    -- Provenance/signature-verification outcome at ingest: 'verified', 'failed', 'unsigned', or NULL.
+    provenance_status   TEXT,
+    -- Trust-anchor keyid when provenance_status is 'verified'. NULL otherwise.
+    provenance_signer   TEXT,
+    -- Upstream-published integrity hash in native encoding (see package_versions for encoding notes).
+    upstream_integrity_value TEXT,
+    -- Algorithm tag for upstream_integrity_value: 'sha256' | 'sha512-sri' | 'sha512-b64'.
+    upstream_integrity_algorithm TEXT,
+    -- ISO 8601 UTC; set after the last OSV vulnerability scan against this artifact.
+    vuln_checked_at     TEXT,
     UNIQUE (ecosystem, name, version, filename)
 );
 CREATE INDEX IF NOT EXISTS idx_cache_artifact_lru ON cache_artifact (last_accessed_at);
+CREATE INDEX IF NOT EXISTS idx_cache_artifact_purl ON cache_artifact (purl);
 
 -- Per-tenant access tracking on the shared cache. Answers "which tenants pulled X" for
--- vulnerability response. Upserted on every cache hit and lazy fetch.
+-- vulnerability response. Upserted on every cache hit and lazy fetch. Per-tenant policy
+-- state (manual_block_state, yanked) mirrors the package_versions columns but applies
+-- to proxy-origin artifacts before a version row exists; reserved capacity in community.
 CREATE TABLE IF NOT EXISTS tenant_artifact_access (
     org_id              TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     cache_artifact_id   TEXT NOT NULL REFERENCES cache_artifact(id) ON DELETE CASCADE,
     first_accessed_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     last_accessed_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     access_count        INTEGER NOT NULL DEFAULT 1,
+    -- Per-tenant manual policy override: NULL = follow auto policy, 'blocked' = manual block,
+    -- 'allowed' = manual override of auto-block. Mirrors package_versions.manual_block_state.
+    manual_block_state  TEXT,
+    -- Per-tenant yank: 1 when an operator has yanked this artifact for this tenant.
+    yanked              INTEGER NOT NULL DEFAULT 0,
+    -- Optional reason recorded when yanked = 1.
+    yank_reason         TEXT,
+    -- ISO 8601 UTC; most recent time any user in this tenant downloaded this artifact.
+    last_used           TEXT,
+    -- Cumulative download count for this tenant. Monotonic; survives activity-log pruning.
+    download_count      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (org_id, cache_artifact_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_artifact_access_artifact
@@ -777,7 +995,9 @@ CREATE TABLE IF NOT EXISTS audit_event (
     event_id            TEXT PRIMARY KEY,                    -- UUIDv7
     schema_version      INTEGER NOT NULL DEFAULT 1,
     event_type          TEXT NOT NULL,                       -- e.g. 'package.publish'
-    org_id              TEXT REFERENCES orgs(id) ON DELETE SET NULL,  -- NULL for cross-tenant platform events
+    -- ON DELETE SET NULL retains the event row after org deletion for forensic purposes.
+    -- NULL also covers cross-tenant platform events that have no org scope.
+    org_id              TEXT REFERENCES orgs(id) ON DELETE SET NULL,
     tenant_resolver     TEXT NOT NULL,                       -- single | multi | header | bound
     actor_type          TEXT NOT NULL CHECK (actor_type IN ('user','api_token','system')),
     actor_id            TEXT,
@@ -894,13 +1114,59 @@ CREATE INDEX IF NOT EXISTS idx_npm_dist_tags_org ON npm_dist_tags(org_id, packag
 -- features, cksum, yanked, and links as defined by the Cargo sparse registry spec.
 -- Tenant-scoped via JOIN to packages.org_id; every query must join through package_versions
 -- → packages and filter on packages.org_id.
+-- Each row is owned by exactly one package_versions row (owner_kind='package_version') or
+-- one cache_artifact row (owner_kind='cache_artifact'); the respective FK is set and the
+-- other is NULL. Partial unique indexes enforce per-arm dedup.
 CREATE TABLE IF NOT EXISTS cargo_metadata (
+    -- AUTOINCREMENT retained for compatibility with existing databases created by the additive
+    -- migration path; changing the PK type would require a table rebuild on every install.
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    version_id  TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    -- NULL when owner_kind='cache_artifact'; NOT NULL for the 'package_version' arm.
+    version_id  TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
     index_line  TEXT NOT NULL,  -- full JSON line for this version as served in the sparse index
-    UNIQUE(version_id)
+    -- Polymorphic metadata owner: NULL for hosted package_version rows; set to the
+    -- cache_artifact row for proxy-origin metadata scanned before a version row exists.
+    -- owner_kind discriminates which FK is authoritative. Reserved capacity in community.
+    cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+    owner_kind          TEXT NOT NULL DEFAULT 'package_version'
+                        CHECK (owner_kind IN ('package_version','cache_artifact')),
+    -- Owner invariant: exactly one FK arm is active and matches owner_kind.
+    CHECK (
+        (owner_kind = 'package_version' AND version_id IS NOT NULL AND cache_artifact_id IS NULL)
+        OR
+        (owner_kind = 'cache_artifact' AND cache_artifact_id IS NOT NULL AND version_id IS NULL)
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_cargo_metadata_version ON cargo_metadata(version_id);
+CREATE INDEX IF NOT EXISTS idx_cargo_metadata_cache_artifact ON cargo_metadata(cache_artifact_id);
+-- Partial unique indexes replace the old UNIQUE(version_id) constraint.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cargo_metadata_pv
+    ON cargo_metadata (version_id)
+    WHERE owner_kind = 'package_version';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cargo_metadata_ca
+    ON cargo_metadata (cache_artifact_id)
+    WHERE owner_kind = 'cache_artifact';
+
+-- Install-script allowlist: packages exempt from the install-script block-gate arm (arm 9).
+-- A tenant may block install scripts globally via org_settings.block_install_scripts='block'
+-- while permitting specific known-good packages here. Each entry scopes the exemption to a
+-- single (org, ecosystem, name) tuple; version_pattern optionally restricts to matching
+-- versions (NULL = all versions). Matching uses simple trailing-glob semantics on version
+-- strings; NULL matches any version.
+CREATE TABLE IF NOT EXISTS install_script_allowlist (
+    id               TEXT PRIMARY KEY,
+    org_id           TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem        TEXT NOT NULL,       -- 'npm' | 'pypi' | 'nuget' | 'maven' | 'cargo' | 'golang' | 'rpm' | 'oci'
+    name             TEXT NOT NULL,       -- exact package name (purl name segment)
+    version_pattern  TEXT,                -- NULL = all versions; non-NULL = exact or trailing-* glob
+    created_by       TEXT REFERENCES users(id),
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    UNIQUE (org_id, ecosystem, name, version_pattern)
+);
+-- Primary lookup path: all allowlist entries for a given org.
+CREATE INDEX IF NOT EXISTS idx_install_script_allowlist_org ON install_script_allowlist(org_id);
+-- FK-column index: cascade delete on users scans this table without it.
+CREATE INDEX IF NOT EXISTS idx_install_script_allowlist_created_by ON install_script_allowlist(created_by);
 
 -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
 -- Those are no-ops on fresh installs (duplicate column error is swallowed / IF NOT EXISTS).

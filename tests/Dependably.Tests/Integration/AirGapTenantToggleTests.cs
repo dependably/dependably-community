@@ -20,10 +20,10 @@ namespace Dependably.Tests.Integration;
 
 /// <summary>
 /// End-to-end coverage of the per-tenant air-gap toggle: PUT/GET /api/v1/settings,
-/// the tenant.setting.change audit, the proxy-passthrough 404 for an uncached upstream
-/// package while air-gapped (npm + PyPI), and the multi-tenant property that one tenant's
-/// air-gap does not affect another. A second class boots the instance with AIR_GAPPED=true
-/// to assert the enforced posture surfaces in the GET.
+/// the tenant.setting.change audit, and the proxy-passthrough 404 for an uncached upstream
+/// package while air-gapped (npm + PyPI). A second class boots the instance with AIR_GAPPED=true
+/// to assert the enforced posture surfaces in the GET. The multi-tenant isolation property
+/// (one tenant air-gapped, another unaffected) lives in MultiTenantAirGapIsolationTests.
 /// </summary>
 [Trait("Category", "Integration")]
 public sealed class AirGapTenantToggleTests : IClassFixture<DependablyFactory>, IAsyncLifetime
@@ -140,41 +140,10 @@ public sealed class AirGapTenantToggleTests : IClassFixture<DependablyFactory>, 
         }
     }
 
-    [Fact]
-    public async Task MultiTenant_OneAirGapped_OtherUnaffected()
-    {
-        string pkg = $"airgap-multi-{Guid.NewGuid():N}";
-        StubNpmPackument(pkg);
-
-        // A second org that is NOT air-gapped.
-        var orgs = _factory.Services.GetRequiredService<OrgRepository>();
-        var other = await orgs.CreateOrgAsync($"other-{Guid.NewGuid():N}"[..18]);
-
-        try
-        {
-            await SetDefaultAirGapped(true);
-
-            // Default (air-gapped) tenant: passthrough off → 404 for the uncached package.
-            string defaultToken = await _factory.CreateToken("pull");
-            using (var c1 = _factory.CreateClientWithBearer(defaultToken))
-            {
-                var r1 = await c1.GetAsync($"/npm/{pkg}");
-                Assert.Equal(HttpStatusCode.NotFound, r1.StatusCode);
-            }
-
-            // Second tenant: not air-gapped → passthrough reaches upstream and serves the
-            // package (200), in contrast to the air-gapped tenant's 404 above. The status
-            // contrast is the per-tenant-isolation signal.
-            string otherToken = await _factory.CreateToken("pull", other.Slug);
-            using var c2 = _factory.CreateClientWithBearer(otherToken);
-            var r2 = await c2.GetAsync($"/o/{other.Slug}/npm/{pkg}");
-            Assert.Equal(HttpStatusCode.OK, r2.StatusCode);
-        }
-        finally
-        {
-            await SetDefaultAirGapped(false);
-        }
-    }
+    // The per-tenant air-gap isolation property (one tenant air-gapped, another unaffected) is
+    // covered by MultiTenantAirGapIsolationTests, which uses a multi-mode fixture where tenants
+    // are genuinely reachable by subdomain. It cannot be expressed here: single mode resolves
+    // every request to the one default org, so a second tenant is unreachable.
 
     // Stubs the upstream npm packument so a connected tenant's metadata GET resolves to 200.
     private void StubNpmPackument(string pkg)

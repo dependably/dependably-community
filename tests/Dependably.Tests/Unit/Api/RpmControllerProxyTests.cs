@@ -127,23 +127,121 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         Assert.Equal(bytes, ms.ToArray());
         Assert.Equal("application/x-rpm", fsr.ContentType);
 
-        // DB row should be written.
+        // The proxy first-fetch must NOT write a package_versions row — the global plane
+        // (cache_artifact + tenant_artifact_access) is now authoritative for proxy RPMs.
         await using var conn = await _db.OpenAsync();
-        var row = await conn.QuerySingleOrDefaultAsync(
+        long pvCount = await conn.ExecuteScalarAsync<long>(
             """
-            SELECT pv.checksum_sha256, pv.origin
-            FROM package_versions pv
+            SELECT COUNT(*) FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
-            WHERE p.org_id = @orgId AND p.ecosystem = 'rpm'
-              AND p.purl_name = 'tree'
-              AND pv.filename = @filename
+            WHERE p.org_id = @orgId AND p.ecosystem = 'rpm' AND p.purl_name = 'tree'
             """,
-            new { orgId = _orgId, filename });
+            new { orgId = _orgId });
+        Assert.Equal(0, pvCount);
 
-        Assert.NotNull(row);
-        var r = row!;
-        Assert.Equal(sha256, (string)r.checksum_sha256);
-        Assert.Equal("proxy", (string)r.origin);
+        // A cache_artifact row must be written for the fetched RPM.
+        var caRow = await conn.QuerySingleOrDefaultAsync(
+            """
+            SELECT ca.content_hash, ca.ecosystem, ca.name, ca.version
+            FROM cache_artifact ca
+            WHERE ca.ecosystem = 'rpm' AND ca.name = 'tree'
+            LIMIT 1
+            """);
+        Assert.NotNull(caRow);
+        Assert.Equal(sha256, (string)caRow!.content_hash);
+
+        // A tenant_artifact_access row must tie the cache_artifact to this org.
+        long taaCount = await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COUNT(*) FROM tenant_artifact_access taa
+            JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
+            WHERE taa.org_id = @orgId AND ca.ecosystem = 'rpm' AND ca.name = 'tree'
+            """,
+            new { orgId = _orgId });
+        Assert.Equal(1, taaCount);
+    }
+
+    [Fact]
+    public async Task Download_GlobalPlaneOnly_NoPackageVersionsRow_Serves200()
+    {
+        // After delete_migrated_proxy_package_versions removes proxy rows from package_versions,
+        // proxy artifacts exist only in cache_artifact + tenant_artifact_access. This test verifies
+        // the download path serves a proxy RPM that has NO package_versions row — the global
+        // plane is the sole source of truth.
+        await EnableAnonPullAsync();
+        byte[] bytes = RandomBytes(256);
+        string sha256 = Sha256Hex(bytes);
+        string filename = "curl-8.0.1-1.fc40.x86_64.rpm";
+        string caId = Guid.NewGuid().ToString("N");
+
+        // Seed the blob in the cache tier (simulates a previously fetched proxy artifact).
+        await _blobs.PutAsync(BlobKeys.Proxy(sha256), new MemoryStream(bytes), default);
+
+        // Seed only global-plane rows — no package_versions row.
+        await using var conn = await _db.OpenAsync();
+        string pkgId = Guid.NewGuid().ToString("N");
+        await conn.ExecuteAsync("""
+            INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy)
+            VALUES (@pkgId, @orgId, 'rpm', 'curl', 'curl', 1)
+            """, new { pkgId, orgId = _orgId });
+        await conn.ExecuteAsync("""
+            INSERT INTO cache_artifact
+                (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes, purl)
+            VALUES (@caId, 'rpm', 'curl', '8.0.1-1.fc40', @filename,
+                    @blobKey, @sha256, @size, 'pkg:rpm/curl@8.0.1-1.fc40?arch=x86_64')
+            """, new { caId, filename, blobKey = $"proxy/{sha256}", sha256, size = bytes.Length });
+        await conn.ExecuteAsync("""
+            INSERT INTO tenant_artifact_access
+                (org_id, cache_artifact_id, first_accessed_at, last_accessed_at, access_count)
+            VALUES (@orgId, @caId, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 1)
+            """, new { orgId = _orgId, caId });
+
+        var ctl = BuildController(proxy: null);
+
+        var result = await ctl.Download(filename, default);
+
+        // Global-plane lookup succeeds — artifact served.
+        var fsr = Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("application/x-rpm", fsr.ContentType);
+        using var ms = new MemoryStream();
+        await fsr.FileStream.CopyToAsync(ms);
+        Assert.Equal(bytes, ms.ToArray());
+    }
+
+    [Fact]
+    public async Task Download_LegacyProxyFallbackRemoved_ProxyRowNotFound_GoesToGlobalPlane()
+    {
+        // Regression guard: the legacy fallback (FindVersionByBlobKeySuffixAsync with uploadedOnly=false
+        // for proxy rows) was removed in P4. A proxy artifact that no longer has a package_versions row
+        // must be served via the global-plane coordinate lookup (ParseNevra → GetServeFactsByCoordinateAsync)
+        // and not produce a 404 that would have been a cache-hit if the legacy path were still present.
+        await EnableAnonPullAsync();
+        byte[] bytes = RandomBytes(256);
+        string sha256 = Sha256Hex(bytes);
+        string filename = "bash-5.2.15-3.fc40.x86_64.rpm";
+        string caId = Guid.NewGuid().ToString("N");
+
+        await _blobs.PutAsync(BlobKeys.Proxy(sha256), new MemoryStream(bytes), default);
+
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("""
+            INSERT INTO cache_artifact
+                (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes, purl)
+            VALUES (@caId, 'rpm', 'bash', '5.2.15-3.fc40', @filename,
+                    @blobKey, @sha256, @size, 'pkg:rpm/bash@5.2.15-3.fc40?arch=x86_64')
+            """, new { caId, filename, blobKey = $"proxy/{sha256}", sha256, size = bytes.Length });
+        await conn.ExecuteAsync("""
+            INSERT INTO tenant_artifact_access
+                (org_id, cache_artifact_id, first_accessed_at, last_accessed_at, access_count)
+            VALUES (@orgId, @caId, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', 1)
+            """, new { orgId = _orgId, caId });
+
+        // No package_versions row — the legacy fallback path would have found nothing;
+        // the global-plane path must serve it correctly.
+        var ctl = BuildController(proxy: null);
+        var result = await ctl.Download(filename, default);
+
+        Assert.IsType<FileStreamResult>(result);
     }
 
     [Fact]
@@ -772,9 +870,11 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync("""
             INSERT INTO rpm_metadata
-                (package_version_id, rpm_name, epoch, rpm_version, rpm_release, arch,
+                (id, package_version_id, owner_kind,
+                 rpm_name, epoch, rpm_version, rpm_release, arch,
                  summary, description, installed_size, archive_size, header_start, header_end, rpm_license)
-            VALUES (@pvId, @name, 0, @ver, @rel, @arch, 'sum', 'desc', 1, 1, 0, 1, 'MIT')
+            VALUES (lower(hex(randomblob(16))), @pvId, 'package_version',
+                    @name, 0, @ver, @rel, @arch, 'sum', 'desc', 1, 1, 0, 1, 'MIT')
             """,
             new { pvId, name, ver, rel, arch });
     }
@@ -839,6 +939,10 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         // Tests that need the proxy path pre-stage the blob so GetOrFetchAsync returns a HIT.
         var upstreamClient = BuildRealUpstreamClient();
 
+        var cacheArtifacts = new CacheArtifactRepository(_db);
+        var tenantAccess = new TenantArtifactAccessRepository(_db);
+        var cacheRecorder = new CacheAccessRecorder(cacheArtifacts, tenantAccess,
+            NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         var svc = new RpmControllerServices(
             Packages: _packages,
             Tokens: _tokens,
@@ -853,6 +957,13 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             LocalRepodataCache: new RenderedResponseCache<RpmLocalRepodataKey>(
                 new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmLocalRepodata),
             Time: TimeProvider.System,
+            CacheRecorder: cacheRecorder,
+            CacheArtifacts: cacheArtifacts,
+            TenantAccess: tenantAccess,
+            // No Rpm:GpgKey configured — IsConfigured=false, provenance skipped.
+            RpmProvenance: new Dependably.Protocol.Provenance.RpmProvenanceVerifier(
+                new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.RpmProvenanceVerifier>.Instance),
             UpstreamClient: upstreamClient,
             Proxy: proxy);
 

@@ -6,6 +6,7 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
 using Dependably.Protocol;
+using Dependably.Protocol.Provenance;
 using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.AspNetCore.Authorization;
@@ -39,7 +40,7 @@ namespace Dependably.Api;
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "SCS0006",
     Justification = "MD5/SHA-1 used only for Maven sidecar compatibility, not authentication.")]
 [ApiController]
-public sealed class MavenController : OrgScopedControllerBase
+public sealed partial class MavenController : OrgScopedControllerBase
 {
     // Proxy-merged metadata may include upstream versions; short TTL so new upstream releases
     // propagate. Local-only metadata is stable; a longer TTL is appropriate. These bound the
@@ -245,6 +246,30 @@ public sealed class MavenController : OrgScopedControllerBase
             return await ServeCachedArtifactAsync(orgId, coords, settings, token, row, ct);
         }
 
+        // ── Global-plane proxy cache-hit: check cache_artifact for newly-proxied artifacts ──
+        // Proxy artifacts whose first-fetch happened after P3b are stored in cache_artifact
+        // (not maven_version_files). Look up the primary filename for both primary and sidecar
+        // requests so sidecars can be synthesised from the primary's content_hash.
+        var globalCa = await _svc.CacheArtifacts.GetServeFactsByCoordinateAsync(
+            orgId, "maven", coords.PackageName, coords.Version ?? "", primaryFilename, ct);
+        if (globalCa is not null)
+        {
+            // Literal SNAPSHOT freshness re-check on the global-plane path: before serving
+            // the cached alias, confirm that upstream hasn't published a newer timestamped
+            // build. This mirrors the freshness logic for maven_version_files rows above.
+            // Uploaded SNAPSHOTs never reach this branch (they are served from row ≠ null).
+            if (isLiteralSnapshot && _svc.Upstream is not null)
+            {
+                var freshnessResult = await CheckSnapshotFreshnessAsync(
+                    orgId, coords, conn, settings, token, ct);
+                if (freshnessResult is not null)
+                {
+                    return freshnessResult;
+                }
+            }
+            return await ServeGlobalPlaneArtifactAsync(orgId, coords, settings, token, globalCa, ct);
+        }
+
         // ── Cache miss: proxy upstream ──────────────────────────────────
         return await ProxyFetchAndCacheAsync(orgId, coords, settings, token, ct);
     }
@@ -267,7 +292,9 @@ public sealed class MavenController : OrgScopedControllerBase
             return null;
         }
 
-        // Check whether the resolved timestamped artifact is already in cache.
+        // Check whether the resolved timestamped artifact is already in cache:
+        // first in maven_version_files (legacy / uploaded rows), then in cache_artifact
+        // (global-plane proxy rows written by the P3b path).
         bool timestampedIsCached = await conn.ExecuteScalarAsync<int>(
             """
             SELECT COUNT(1) FROM maven_version_files mvf
@@ -285,6 +312,17 @@ public sealed class MavenController : OrgScopedControllerBase
                 version = coords.Version,
                 filename = currentTimestampedFilename,
             }) > 0;
+
+        if (!timestampedIsCached)
+        {
+            // Also check the global plane — the timestamped row may be in cache_artifact
+            // rather than maven_version_files when it was fetched after the P3b migration.
+            // The check uses the same tenant join as the serve-facts lookup.
+            var caRow = await _svc.CacheArtifacts.GetServeFactsByCoordinateAsync(
+                orgId, "maven", coords.PackageName, coords.Version ?? "",
+                currentTimestampedFilename, ct);
+            timestampedIsCached = caRow is not null;
+        }
 
         // Upstream has a newer build — fetch and update the alias.
         if (!timestampedIsCached)
@@ -339,7 +377,8 @@ public sealed class MavenController : OrgScopedControllerBase
                     BlockDeprecatedMode: settings?.BlockDeprecated,
                     BlockMaliciousMode: settings?.BlockMalicious,
                     BlockKevMode: settings?.BlockKev,
-                    MaxEpssTolerance: settings?.MaxEpssTolerance), ct)
+                    MaxEpssTolerance: settings?.MaxEpssTolerance,
+                    Origin: row.Origin), ct)
             == BlockDecision.Blocked)
         {
             return StatusCode(StatusCodes.Status403Forbidden);
@@ -350,6 +389,107 @@ public sealed class MavenController : OrgScopedControllerBase
         return coords.IsChecksumSidecar
             ? await ServeChecksumSidecarAsync(coords, row, ct)
             : await ServePrimaryFromCacheAsync(orgId, coords, token?.UserId, row, ct);
+    }
+
+    // Serves a Maven proxy artifact that was cached in the global plane (cache_artifact) rather
+    // than in maven_version_files. Auth and block-gate semantics match ServeCachedArtifactAsync.
+    // For checksum sidecars the content_hash from the primary cache_artifact row is returned
+    // directly (only SHA-256 available from cache_artifact; other algorithms compute on-the-fly).
+    private async Task<IActionResult> ServeGlobalPlaneArtifactAsync(
+        string orgId, MavenCoordinates coords, OrgSettings? settings, TokenRecord? token,
+        CacheArtifactServeFacts caFacts, CancellationToken ct)
+    {
+        if (settings is not null && !settings.AnonymousPull && token is null)
+        {
+            Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
+            return Unauthorized();
+        }
+
+        if (await _svc.BlockGate.EvaluateAsync(
+                new BlockGateRequest(orgId, "maven", caFacts.Purl ?? string.Empty, string.Empty,
+                    caFacts.ManualBlockState, caFacts.VulnCheckedAt,
+                    token?.UserId, settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScoreTolerance,
+                    HttpContext.GetNormalizedRemoteIp(),
+                    MinReleaseAgeHours: settings?.MinReleaseAgeHours,
+                    PublishedAt: caFacts.PublishedAt,
+                    ActorKind: token?.ActorKind,
+                    Deprecated: caFacts.Deprecated,
+                    BlockDeprecatedMode: settings?.BlockDeprecated,
+                    BlockMaliciousMode: settings?.BlockMalicious,
+                    BlockKevMode: settings?.BlockKev,
+                    MaxEpssTolerance: settings?.MaxEpssTolerance,
+                    Origin: "proxy",
+                    HasInstallScript: caFacts.HasInstallScript,
+                    InstallScriptKind: caFacts.InstallScriptKind,
+                    BlockInstallScriptsMode: settings?.BlockInstallScripts,
+                    ProvenanceStatus: caFacts.ProvenanceStatus,
+                    CacheArtifactId: caFacts.Id), ct)
+            == BlockDecision.Blocked)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden);
+        }
+
+        Response.Headers["X-Cache"] = "HIT";
+
+        // Checksum sidecar: synthesise from the primary's stored content_hash.
+        if (coords.IsChecksumSidecar)
+        {
+            return await ServeGlobalPlaneChecksumSidecarAsync(coords, caFacts, ct);
+        }
+
+        // Primary artifact: stream from blob store.
+        // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to cache tier.
+        var stream = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
+        if (stream is null)
+        {
+            return NotFound();
+        }
+
+        if (!string.IsNullOrEmpty(caFacts.ContentHash))
+        {
+            Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash[..Math.Min(ETagHexPrefixLength, caFacts.ContentHash.Length)]}\"";
+            Response.Headers.CacheControl = coords.IsSnapshot
+                ? "private, max-age=60"
+                : "private, max-age=31536000, immutable";
+        }
+        string purl = caFacts.Purl ?? PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version ?? "unknown");
+        await _svc.Audit.LogActivityAsync(orgId, "maven", purl, "download", token?.UserId,
+            actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        // Increment per-tenant download count on the global plane.
+        await _svc.TenantAccess.UpsertStateAsync(orgId, caFacts.Id, _svc.Time.GetUtcNow(), ct);
+        return File(stream, ContentTypeFor(coords.Extension), coords.Filename);
+    }
+
+    // Synthesises a checksum sidecar for a global-plane (cache_artifact) primary: returns the
+    // stored content_hash for sha256, otherwise opens the blob and computes the requested digest.
+    private async Task<IActionResult> ServeGlobalPlaneChecksumSidecarAsync(
+        MavenCoordinates coords, CacheArtifactServeFacts caFacts, CancellationToken ct)
+    {
+        if (coords.ChecksumAlgorithm == "sha256" && !string.IsNullOrEmpty(caFacts.ContentHash))
+        {
+            return new ContentResult
+            {
+                Content = caFacts.ContentHash,
+                ContentType = "text/plain",
+                StatusCode = StatusCodes.Status200OK,
+            };
+        }
+
+        // Other algorithms require the blob bytes — open from store and compute on-the-fly.
+        if (coords.ChecksumAlgorithm is { } algo)
+        {
+            // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to cache tier.
+            var blobForChecksum = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
+            if (blobForChecksum is null)
+            {
+                return NotFound();
+            }
+            string? hex = await ComputeChecksumAsync(blobForChecksum, algo, ct);
+            return hex is null
+                ? NotFound()
+                : (IActionResult)new ContentResult { Content = hex, ContentType = "text/plain", StatusCode = StatusCodes.Status200OK };
+        }
+        return NotFound();
     }
 
     private async Task<IActionResult> ServeChecksumSidecarAsync(
@@ -408,7 +548,7 @@ public sealed class MavenController : OrgScopedControllerBase
             "download", actorId,
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
-        await _svc.Packages.IncrementDownloadCountByPurlAsync(purl, ct);
+        await _svc.Packages.IncrementDownloadCountByPurlAsync(orgId, purl, ct);
 
         return File(stream, ContentTypeFor(coords.Extension), coords.Filename);
     }
@@ -492,20 +632,85 @@ public sealed class MavenController : OrgScopedControllerBase
             }
         }
 
-        return result is null
-            ? NotFound()
-            : await RecordScanAndServeAsync(orgId, resolvedCoords, result, settings, token, ct);
+        // Capture the literal filename before resolving so the literal alias can be written
+        // after a successful SNAPSHOT first-fetch. When the literal and resolved filenames
+        // differ (i.e. the SNAPSHOT resolved to a timestamped build), RecordScanAndServeAsync
+        // writes a cache_artifact alias row under the literal name so subsequent literal
+        // requests serve from the global plane without another upstream round-trip.
+        string? snapshotLiteralFilename = resolvedCoords.Filename != coords.Filename
+            ? coords.Filename
+            : null;
+
+        if (result is null)
+        {
+            return NotFound();
+        }
+
+        // Verify detached OpenPGP signature when the tenant has Maven signature verification
+        // enabled and the verifier is configured with operator-pinned keys. The .asc sidecar
+        // is fetched from the same upstream that produced the artifact; the trust root is
+        // always Maven:SignatureKeys, never the upstream-served key. NotApplicable
+        // (off or not configured) leaves provenance_status NULL (no gate effect).
+        string? mavenVerifyMode = settings?.VerifyMavenSignatures;
+        (string? mavenProvenanceStatus, string? mavenProvenanceSigner) =
+            await VerifyMavenSignatureAsync(mavenVerifyMode, bases, upstreamPath, result.Bytes, ct);
+
+        return await RecordScanAndServeAsync(orgId, resolvedCoords, result, settings, token,
+            snapshotLiteralFilename, mavenProvenanceStatus, mavenProvenanceSigner, mavenVerifyMode, ct);
     }
 
-    // Records the artifact in the proxy pipeline (package_versions row, OSV scan, block gate)
-    // and serves the artifact bytes. Returns 403 when the gate blocks, or a File result.
+    // Verifies the detached OpenPGP (.asc) signature for a freshly-fetched Maven artifact when the
+    // tenant has signature verification enabled and the verifier is configured with operator-pinned
+    // keys. The .asc sidecar is fetched from the same upstreams that produced the artifact; the trust
+    // root is always Maven:SignatureKeys, never the upstream-served key. Returns (null, null) when
+    // verification is off or not configured, leaving provenance_status NULL (no gate effect).
+    private async Task<(string? Status, string? Signer)> VerifyMavenSignatureAsync(
+        string? verifyMode, IReadOnlyList<string> bases, string upstreamPath, byte[] artifactBytes,
+        CancellationToken ct)
+    {
+        if (verifyMode == "off" || !_svc.MavenProvenance.IsConfigured)
+        {
+            return (null, null);
+        }
+
+        byte[]? ascBytes = null;
+        foreach (string upstreamBase in bases)
+        {
+            ascBytes = await _svc.Upstream.TryFetchAscSidecarAsync(upstreamBase, upstreamPath, ct);
+            if (ascBytes is not null)
+            {
+                break;
+            }
+        }
+
+        var provResult = _svc.MavenProvenance.VerifyArtifact(artifactBytes, ascBytes);
+        return (ProvenanceStatuses.ToColumn(provResult.Status), provResult.Signer);
+    }
+
+    // Records the artifact via the global proxy pipeline (OSV scan, block gate, cache_artifact
+    // write) and serves the artifact bytes. Returns 403 when the gate blocks, or a File result.
+    // When snapshotLiteralFilename is set (literal -SNAPSHOT.jar requested, resolved to a
+    // timestamped build), a cache_artifact alias row is written under the literal filename so
+    // subsequent literal requests are served directly from the global plane.
+    // provenanceStatus / provenanceSigner / verifyProvenanceMode carry the detached-signature
+    // outcome computed in ProxyFetchAndCacheAsync; they are forwarded into ProxyFetchRequest
+    // so the shared pipeline can persist and gate on them.
+    // Each parameter is a distinct pipeline input (request context, fetch result, gate settings,
+    // and the precomputed provenance trio forwarded verbatim into ProxyFetchRequest); grouping
+    // them into an aggregate would hide the data flow without adding cohesion.
+#pragma warning disable S107
     private async Task<IActionResult> RecordScanAndServeAsync(
         string orgId, MavenCoordinates resolvedCoords, MavenArtifactFetchResult result,
-        OrgSettings? settings, TokenRecord? token, CancellationToken ct)
+        OrgSettings? settings, TokenRecord? token,
+        string? snapshotLiteralFilename,
+        string? provenanceStatus, string? provenanceSigner, string? verifyProvenanceMode,
+        CancellationToken ct)
+#pragma warning restore S107
     {
         string purl = PurlNormalizer.Maven(resolvedCoords.GroupId, resolvedCoords.ArtifactId, resolvedCoords.Version!);
+        string upstreamPath = $"{resolvedCoords.GroupId.Replace('.', '/')}/{resolvedCoords.ArtifactId}/{resolvedCoords.Version}/{resolvedCoords.Filename}";
 
-        // Run the shared proxy pipeline: record the package_versions row, synchronously
+        // Run the shared proxy pipeline: write cache_artifact (global plane), synchronously
         // scan OSV, and evaluate the block gate so a vulnerable artifact is refused on the
         // very first fetch — the same record→scan→gate sequence PyPI/npm/NuGet use. The
         // blob already lives at result.BlobKey (UpstreamClient hash-and-staged it during
@@ -524,25 +729,46 @@ public sealed class MavenController : OrgScopedControllerBase
             ActorKind: token?.ActorKind,
             SourceIp: HttpContext.GetNormalizedRemoteIp(),
             MaxOsvScoreTolerance: settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScoreTolerance,
-            CacheAccess: null,
+            CacheAccess: new CacheAccess(orgId, "maven", resolvedCoords.PackageName,
+                resolvedCoords.Version!, resolvedCoords.Filename,
+                Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: upstreamPath),
             MinReleaseAgeHours: settings?.MinReleaseAgeHours,
             Sha1Hex: result.Sha1,
             BlockDeprecatedMode: settings?.BlockDeprecated,
             BlockMaliciousMode: settings?.BlockMalicious,
             BlockKevMode: settings?.BlockKev,
-            MaxEpssTolerance: settings?.MaxEpssTolerance), ct);
+            MaxEpssTolerance: settings?.MaxEpssTolerance,
+            ProvenanceStatus: provenanceStatus,
+            ProvenanceSigner: provenanceSigner,
+            VerifyProvenanceMode: verifyProvenanceMode), ct);
 
         if (fetch.Decision == BlockDecision.Blocked)
         {
             return StatusCode(StatusCodes.Status403Forbidden);
         }
 
-        // The shared pipeline owns package_versions + the first_fetch activity; Maven owns
-        // its per-file mapping. Record it only when the gate allowed the artifact — a
-        // refused version never gets a serve-row, and a later attempt re-fetches + re-gates.
+        // RecordMavenFileAsync survives for legacy rows (VersionId non-null from pre-P3b rows
+        // still in package_versions). New proxy artifacts take the global-plane path (VersionId
+        // null) and skip the maven_version_files write — the cache_artifact row is authoritative.
         if (fetch.VersionId is not null)
         {
             await RecordMavenFileAsync(fetch.VersionId, resolvedCoords, result, ct);
+        }
+
+        // SNAPSHOT literal alias: when the caller requested a literal -SNAPSHOT.jar but the
+        // artifact resolved to a timestamped build (e.g. lib-1.0-20240101.120000-3.jar), write
+        // a cache_artifact alias row under the literal filename so a second literal request
+        // finds the global plane and gets a HIT instead of another upstream round-trip. The
+        // alias shares the same blob_key and content_hash as the primary timestamped row.
+        if (snapshotLiteralFilename is not null && fetch.VersionId is null)
+        {
+            _ = await _svc.CacheRecorder.RecordAccessAsync(new CacheAccess(
+                orgId, "maven", resolvedCoords.PackageName,
+                resolvedCoords.Version!, snapshotLiteralFilename,
+                Sha256: result.Sha256,
+                SizeBytes: result.Bytes.LongLength,
+                BlobKey: result.BlobKey,
+                UpstreamUrl: null), ct);
         }
 
         Response.Headers["X-Cache"] = "MISS";
@@ -553,6 +779,11 @@ public sealed class MavenController : OrgScopedControllerBase
     // recursive ProxyFetchAndCacheAsync call), then the sidecar is served from the checksum
     // columns of the newly-cached primary row. The block gate and scan run exactly once,
     // on the primary, and are not re-run for the sidecar.
+    // For global-plane artifacts (VersionId null after the primary fetch), the sidecar
+    // is served from the cache_artifact row written by the primary fetch instead of
+    // maven_version_files. This handles both non-SNAPSHOT and SNAPSHOT (literal or
+    // timestamped) coordinates transparently because RecordScanAndServeAsync writes a
+    // literal alias row when the SNAPSHOT was resolved to a timestamped build.
     private async Task<IActionResult> ProxySidecarViaPrimaryAsync(
         string orgId, MavenCoordinates coords, OrgSettings? settings, TokenRecord? token, CancellationToken ct)
     {
@@ -597,9 +828,20 @@ public sealed class MavenController : OrgScopedControllerBase
                 filename = primaryFilename,
             });
 
-        return row is null
+        if (row is not null)
+        {
+            return await ServeChecksumSidecarAsync(coords, row, ct);
+        }
+
+        // Global-plane path: primary was stored in cache_artifact (not maven_version_files).
+        // RecordScanAndServeAsync writes both the timestamped row and a literal alias when a
+        // SNAPSHOT literal was resolved, so a lookup by primaryFilename finds the row for
+        // both non-SNAPSHOT and literal-SNAPSHOT sidecar requests.
+        var caFacts = await _svc.CacheArtifacts.GetServeFactsByCoordinateAsync(
+            orgId, "maven", coords.PackageName, coords.Version ?? "", primaryFilename, ct);
+        return caFacts is null
             ? NotFound()
-            : await ServeChecksumSidecarAsync(coords, row, ct);
+            : await ServeGlobalPlaneArtifactAsync(orgId, coords, settings, token, caFacts, ct);
     }
 
     /// <summary>
@@ -623,10 +865,10 @@ public sealed class MavenController : OrgScopedControllerBase
             """
             INSERT INTO maven_version_files
                 (id, package_version_id, filename, classifier, extension, blob_key, size_bytes,
-                 checksum_sha256, checksum_sha1, checksum_md5, origin)
+                 checksum_sha256, checksum_sha1, checksum_md5, origin, owner_kind)
             VALUES (@id, @pvId, @filename, @classifier, @extension, @blobKey, @sizeBytes,
-                    @sha256, @sha1, @md5, 'proxy')
-            ON CONFLICT(package_version_id, filename) DO NOTHING
+                    @sha256, @sha1, @md5, 'proxy', 'package_version')
+            ON CONFLICT(package_version_id, filename) WHERE owner_kind = 'package_version' DO NOTHING
             """,
             new
             {
@@ -661,10 +903,10 @@ public sealed class MavenController : OrgScopedControllerBase
                     """
                     INSERT INTO maven_version_files
                         (id, package_version_id, filename, classifier, extension, blob_key, size_bytes,
-                         checksum_sha256, checksum_sha1, checksum_md5, origin)
+                         checksum_sha256, checksum_sha1, checksum_md5, origin, owner_kind)
                     VALUES (@id, @pvId, @filename, @classifier, @extension, @blobKey, @sizeBytes,
-                            @sha256, @sha1, @md5, 'proxy')
-                    ON CONFLICT(package_version_id, filename) DO UPDATE SET
+                            @sha256, @sha1, @md5, 'proxy', 'package_version')
+                    ON CONFLICT(package_version_id, filename) WHERE owner_kind = 'package_version' DO UPDATE SET
                         blob_key         = excluded.blob_key,
                         size_bytes       = excluded.size_bytes,
                         checksum_sha256  = excluded.checksum_sha256,
@@ -688,218 +930,6 @@ public sealed class MavenController : OrgScopedControllerBase
         }
     }
 
-    // Resolves the SNAPSHOT coordinates to a timestamped filename by fetching the upstream
-    // version-level maven-metadata.xml. Prefers the explicit snapshotVersions list (Maven 3);
-    // falls back to the top-level timestamp + buildNumber (Maven 2). Returns the original
-    // coords unchanged when metadata is unreachable or no timestamped name resolves.
-    [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Descriptive documentation comment, not commented-out code.")]
-    private async Task<MavenCoordinates> ResolveSnapshotCoordsAsync(
-        MavenCoordinates coords, string groupPath, IReadOnlyList<string> bases, CancellationToken ct)
-    {
-        MavenSnapshotMetadata? snapMeta = null;
-        foreach (string upstreamBase in bases)
-        {
-            snapMeta = await _svc.Upstream!.FetchSnapshotMetadataAsync(
-                upstreamBase, groupPath, coords.ArtifactId, coords.Version!, ct);
-            if (snapMeta is not null)
-            {
-                break;
-            }
-        }
-
-        if (snapMeta is null || coords.Extension is null)
-        {
-            return coords;
-        }
-
-        // Prefer the explicit snapshotVersions list (Maven 3 metadata).
-        string? timestampedValue = snapMeta.ResolveTimestampedValue(coords.Extension, coords.Classifier);
-        if (timestampedValue is not null)
-        {
-            string classifier = coords.Classifier is not null ? $"-{coords.Classifier}" : "";
-            string timestampedFilename = $"{coords.ArtifactId}-{timestampedValue}{classifier}.{coords.Extension}";
-            return coords with { Filename = timestampedFilename };
-        }
-
-        // Fall back to the top-level <snapshot> timestamp + buildNumber (Maven 2 style).
-        if (snapMeta.Timestamp is not null && snapMeta.BuildNumber is not null)
-        {
-            string classifier = coords.Classifier is not null ? $"-{coords.Classifier}" : "";
-            string baseVer = coords.Version![..^"-SNAPSHOT".Length];
-            string tsFilename = $"{coords.ArtifactId}-{baseVer}-{snapMeta.Timestamp}-{snapMeta.BuildNumber}{classifier}.{coords.Extension}";
-            return coords with { Filename = tsFilename };
-        }
-
-        return coords;
-    }
-
-    /// <summary>
-    /// Resolves the current upstream timestamped filename for a literal SNAPSHOT coordinate
-    /// (e.g. <c>lib-1.0-SNAPSHOT.jar</c>) by fetching the version-level
-    /// <c>maven-metadata.xml</c> from the org's configured upstreams. Returns the resolved
-    /// timestamped filename (e.g. <c>lib-1.0-20240101.120000-3.jar</c>), or null when
-    /// upstream metadata is unreachable or does not contain a matching entry.
-    /// </summary>
-    private async Task<string?> ResolveCurrentSnapshotFilenameAsync(
-        string orgId, MavenCoordinates coords, CancellationToken ct)
-    {
-        var bases = await _svc.Registries.ResolveAsync(orgId, "maven", ct);
-        if (bases.Count == 0 || coords.Extension is null)
-        {
-            return null;
-        }
-
-        string groupPath = coords.GroupId.Replace('.', '/');
-        MavenSnapshotMetadata? snapMeta = null;
-        foreach (string upstreamBase in bases)
-        {
-            snapMeta = await _svc.Upstream.FetchSnapshotMetadataAsync(
-                upstreamBase, groupPath, coords.ArtifactId, coords.Version!, ct);
-            if (snapMeta is not null)
-            {
-                break;
-            }
-        }
-
-        if (snapMeta is null)
-        {
-            return null;
-        }
-
-        // Prefer the explicit snapshotVersions list (Maven 3 metadata).
-        string? timestampedValue = snapMeta.ResolveTimestampedValue(coords.Extension, coords.Classifier);
-        if (timestampedValue is not null)
-        {
-            string classifierPart = coords.Classifier is not null ? $"-{coords.Classifier}" : "";
-            return $"{coords.ArtifactId}-{timestampedValue}{classifierPart}.{coords.Extension}";
-        }
-
-        // Fall back to the top-level <snapshot> timestamp + buildNumber (Maven 2 style).
-        if (snapMeta.Timestamp is not null && snapMeta.BuildNumber is not null)
-        {
-            string classifierPart = coords.Classifier is not null ? $"-{coords.Classifier}" : "";
-            string baseVer = coords.Version![..^"-SNAPSHOT".Length];
-            return $"{coords.ArtifactId}-{baseVer}-{snapMeta.Timestamp}-{snapMeta.BuildNumber}{classifierPart}.{coords.Extension}";
-        }
-
-        return null;
-    }
-
-    private async Task<IActionResult> ServeMetadataAsync(
-        string orgId, MavenCoordinates coords, CancellationToken ct)
-    {
-        var cacheKey = new MavenMetadataKey(orgId, coords.GroupId, coords.ArtifactId);
-
-        // Decide proxy-vs-local up front from the cheap checks: a configured upstream registry
-        // and a non-reserved groupId. This drives both the in-memory cache TTL and the HTTP
-        // Cache-Control header. On a cache HIT the rebuild below is skipped, so the only work
-        // these incur is a registry resolve + reserved-namespace lookup (DB/registry reads,
-        // not the upstream HTTP fetch that the cache exists to avoid).
-        var bases = await _svc.Registries.ResolveAsync(orgId, "maven", ct);
-        bool useUpstream = _svc.Upstream is not null &&
-            bases.Count > 0 &&
-            !await _svc.ReservedNamespaces.IsReservedAsync(orgId, "maven", coords.GroupId, ct);
-        var ttl = useUpstream ? MetadataProxyTtl : MetadataLocalTtl;
-
-        // Both the metadata response and the checksum sidecar must read the SAME rendered bytes —
-        // the sidecar hashes the document we serve. Producing the body once through the cache
-        // guarantees the .sha1/.md5 can't diverge from the served XML.
-        byte[]? bodyBytes = await _svc.MetadataCache.GetOrRebuildAsync(
-            cacheKey, ttl,
-            rebuildCt => BuildMavenMetadataBytesAsync(orgId, coords, bases, useUpstream, rebuildCt),
-            ct);
-
-        if (bodyBytes is null)
-        {
-            return NotFound();
-        }
-
-        if (coords.IsChecksumSidecar)
-        {
-            // Hash the SAME cached bytes the metadata path serves.
-            string hex = ComputeHex(coords.ChecksumAlgorithm!, bodyBytes);
-            return new ContentResult
-            {
-                Content = hex,
-                ContentType = "text/plain",
-                StatusCode = StatusCodes.Status200OK,
-            };
-        }
-
-        string metaETag = ComputeETagFromBytes(bodyBytes);
-        if (Request.Headers.IfNoneMatch.FirstOrDefault() == metaETag)
-        {
-            Response.Headers.ETag = metaETag;
-            return StatusCode(StatusCodes.Status304NotModified);
-        }
-        Response.Headers.ETag = metaETag;
-        // HTTP cache header (distinct from the in-memory TTL): proxy-merged responses may include
-        // upstream versions, so a short max-age; local-only responses are stable, so longer.
-        Response.Headers.CacheControl = useUpstream
-            ? "private, max-age=60"
-            : "private, max-age=300";
-        return Content(Encoding.UTF8.GetString(bodyBytes), "application/xml", Encoding.UTF8);
-    }
-
-    // Builds the maven-metadata.xml bytes from local DB rows merged with upstream versions.
-    // Returns null when the version list is empty (caller surfaces as 404).
-    // Used as the GetOrRebuildAsync factory inside ServeMetadataAsync.
-    private async Task<byte[]?> BuildMavenMetadataBytesAsync(
-        string orgId, MavenCoordinates coords, IReadOnlyList<string> bases,
-        bool useUpstream, CancellationToken ct)
-    {
-        await using var conn = await _svc.Db.OpenAsync(ct);
-        var localRows = (await conn.QueryAsync<(string Version, string CreatedAt)>(
-            """
-            SELECT pv.version, pv.created_at
-            FROM package_versions pv
-            JOIN packages p ON p.id = pv.package_id
-            WHERE p.org_id = @orgId AND p.ecosystem = 'maven' AND p.purl_name = @purlName
-            ORDER BY pv.created_at ASC
-            """,
-            new { orgId, purlName = coords.PackageName })).ToList();
-        var localVersions = localRows.Select(r => r.Version).ToList();
-
-        // lastUpdated comes from the newest local publish, not the wall clock — the metadata
-        // body must be byte-stable for a given version set so the ETag honours If-None-Match
-        // and the generated checksum sidecars match the document clients fetched.
-        DateTimeOffset? lastUpdated = localRows.Count > 0
-            ? DateTimeOffset.Parse(
-                localRows[^1].CreatedAt, CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal)
-            : null;
-
-        // Merge upstream versions when proxying is live for this coordinate. An empty
-        // registry list (proxying disabled) or a reserved groupId leaves it local-only.
-        var mergedVersions = localVersions;
-        if (useUpstream)
-        {
-            string groupPath = coords.GroupId.Replace('.', '/');
-            string artifactPath = $"{groupPath}/{coords.ArtifactId}";
-
-            // Walk upstreams in priority order; the first that returns versions wins.
-            foreach (string upstreamBase in bases)
-            {
-                var upstreamVersions = await _svc.Upstream!.FetchUpstreamVersionsAsync(upstreamBase, artifactPath, ct);
-                if (upstreamVersions is { Count: > 0 })
-                {
-                    // Union: local wins on collision; preserve order (local first, then upstream-only additions).
-                    var localSet = new HashSet<string>(localVersions, StringComparer.OrdinalIgnoreCase);
-                    mergedVersions = [.. localVersions, .. upstreamVersions.Where(v => !localSet.Contains(v))];
-                    break;
-                }
-            }
-        }
-
-        // Null caches nothing and surfaces as the empty-version-set 404 below.
-        if (mergedVersions.Count == 0)
-        {
-            return null;
-        }
-
-        string body = MavenMetadataBuilder.Build(coords.GroupId, coords.ArtifactId, mergedVersions, lastUpdated);
-        return Encoding.UTF8.GetBytes(body);
-    }
 
     private async Task<IActionResult> StoreFileAsync(
         string orgId, MavenCoordinates coords, byte[] bytes, TokenRecord token, CancellationToken ct)
@@ -978,15 +1008,15 @@ public sealed class MavenController : OrgScopedControllerBase
         // packages(id) — the org_id is reachable transitively. The package_version_id
         // we're inserting against came from a tenant-scoped GetOrCreateAsync chain above.
         // Insert / replace maven_version_files row. ON CONFLICT(package_version_id, filename)
-        // overwrites so a republished file gets the new hash.
+        // WHERE owner_kind='package_version' overwrites so a republished file gets the new hash.
         await conn.ExecuteAsync(
             """
             INSERT INTO maven_version_files
                 (id, package_version_id, filename, classifier, extension, blob_key, size_bytes,
-                 checksum_sha256, checksum_sha1, checksum_md5, origin)
+                 checksum_sha256, checksum_sha1, checksum_md5, origin, owner_kind)
             VALUES (@id, @pvId, @filename, @classifier, @extension, @blobKey, @sizeBytes,
-                    @sha256, @sha1, @md5, 'uploaded')
-            ON CONFLICT(package_version_id, filename) DO UPDATE SET
+                    @sha256, @sha1, @md5, 'uploaded', 'package_version')
+            ON CONFLICT(package_version_id, filename) WHERE owner_kind = 'package_version' DO UPDATE SET
                 blob_key = @blobKey,
                 size_bytes = @sizeBytes,
                 checksum_sha256 = @sha256,
@@ -1186,4 +1216,9 @@ public sealed record MavenControllerServices(
     ReservedNamespaceService ReservedNamespaces,
     UpstreamRegistryResolver Registries,
     RenderedResponseCache<MavenMetadataKey> MetadataCache,
-    ILogger<MavenController> Log);
+    ILogger<MavenController> Log,
+    CacheArtifactRepository CacheArtifacts,
+    TenantArtifactAccessRepository TenantAccess,
+    TimeProvider Time,
+    CacheAccessRecorder CacheRecorder,
+    Dependably.Protocol.Provenance.MavenProvenanceVerifier MavenProvenance);

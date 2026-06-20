@@ -32,32 +32,7 @@ public sealed class OrgSettingsRepository
     {
         await using var conn = await _db.OpenAsync(ct);
         return await conn.QuerySingleOrDefaultAsync<OrgSettings>(
-            """
-            SELECT org_id as OrgId, anonymous_pull as AnonymousPull, allowlist_mode as AllowlistMode,
-                   max_upload_bytes as MaxUploadBytes,
-                   max_upload_bytes_pypi as MaxUploadBytesPyPi,
-                   max_upload_bytes_npm as MaxUploadBytesNpm,
-                   max_upload_bytes_nuget as MaxUploadBytesNuGet,
-                   max_upload_bytes_maven as MaxUploadBytesMaven,
-                   max_upload_bytes_rpm as MaxUploadBytesRpm,
-                   max_upload_bytes_oci as MaxUploadBytesOci,
-                   max_upload_bytes_cargo as MaxUploadBytesCargo,
-                   keep_versions as KeepVersions, keep_days as KeepDays,
-                   activity_retention_days as ActivityRetentionDays,
-                   COALESCE(license_enforcement_mode, 'off') as LicenseEnforcementMode,
-                   COALESCE(proxy_passthrough_enabled, 1) as ProxyPassthroughEnabled,
-                   COALESCE(max_osv_score_tolerance, 10.0) as MaxOsvScoreTolerance,
-                   min_release_age_hours as MinReleaseAgeHours,
-                   COALESCE(default_language, 'en') as DefaultLanguage,
-                   COALESCE(allow_version_overwrite, 0) as AllowVersionOverwrite,
-                   COALESCE(air_gapped, 0) as AirGapped,
-                   COALESCE(block_deprecated, 'off') as BlockDeprecated,
-                   COALESCE(block_malicious, 'block') as BlockMalicious,
-                   COALESCE(block_kev, 'off') as BlockKev,
-                   max_epss_tolerance as MaxEpssTolerance,
-                   COALESCE(storage_used_bytes, 0) as StorageUsedBytes
-            FROM org_settings WHERE org_id = @orgId
-            """,
+            OrgRepository.OrgSettingsSelect,
             new { orgId });
     }
 
@@ -145,8 +120,16 @@ public sealed class OrgSettingsRepository
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO org_settings (org_id, proxy_passthrough_enabled, max_osv_score_tolerance, min_release_age_hours, block_deprecated, block_malicious, block_kev, max_epss_tolerance)
-            VALUES (@orgId, @proxyEnabled, @maxScore, @minAgeHours, @blockDeprecated, @blockMalicious, @blockKev, @maxEpss)
+            INSERT INTO org_settings (
+                org_id, proxy_passthrough_enabled, max_osv_score_tolerance, min_release_age_hours,
+                block_deprecated, block_malicious, block_kev, max_epss_tolerance,
+                block_install_scripts, verify_npm_signatures, verify_nuget_signatures,
+                verify_pypi_attestations, verify_rpm_signatures, verify_maven_signatures)
+            VALUES (
+                @orgId, @proxyEnabled, @maxScore, @minAgeHours,
+                @blockDeprecated, @blockMalicious, @blockKev, @maxEpss,
+                @blockInstallScripts, @verifyNpmSignatures, @verifyNuGetSignatures,
+                @verifyPyPiAttestations, @verifyRpmSignatures, @verifyMavenSignatures)
             ON CONFLICT(org_id) DO UPDATE SET
                 proxy_passthrough_enabled = @proxyEnabled,
                 max_osv_score_tolerance   = @maxScore,
@@ -154,7 +137,13 @@ public sealed class OrgSettingsRepository
                 block_deprecated          = @blockDeprecated,
                 block_malicious           = @blockMalicious,
                 block_kev                 = @blockKev,
-                max_epss_tolerance        = @maxEpss
+                max_epss_tolerance        = @maxEpss,
+                block_install_scripts     = @blockInstallScripts,
+                verify_npm_signatures     = @verifyNpmSignatures,
+                verify_nuget_signatures   = @verifyNuGetSignatures,
+                verify_pypi_attestations  = @verifyPyPiAttestations,
+                verify_rpm_signatures     = @verifyRpmSignatures,
+                verify_maven_signatures   = @verifyMavenSignatures
             """,
             new
             {
@@ -166,6 +155,12 @@ public sealed class OrgSettingsRepository
                 blockMalicious = policy.BlockMalicious,
                 blockKev = policy.BlockKev,
                 maxEpss = policy.MaxEpssTolerance,
+                blockInstallScripts = policy.BlockInstallScripts,
+                verifyNpmSignatures = policy.VerifyNpmSignatures,
+                verifyNuGetSignatures = policy.VerifyNuGetSignatures,
+                verifyPyPiAttestations = policy.VerifyPyPiAttestations,
+                verifyRpmSignatures = policy.VerifyRpmSignatures,
+                verifyMavenSignatures = policy.VerifyMavenSignatures,
             });
         _orgs?.InvalidateSettingsCache(orgId);
     }
@@ -220,4 +215,10 @@ public sealed record ProxyPolicySettings(
     string BlockDeprecated = "off",
     string BlockMalicious = "block",
     string BlockKev = "off",
-    double? MaxEpssTolerance = null);
+    double? MaxEpssTolerance = null,
+    string BlockInstallScripts = "off",
+    string VerifyNpmSignatures = "off",
+    string VerifyNuGetSignatures = "off",
+    string VerifyPyPiAttestations = "off",
+    string VerifyRpmSignatures = "off",
+    string VerifyMavenSignatures = "off");
