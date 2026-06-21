@@ -8,11 +8,6 @@
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
-    <!-- IL trimming is incompatible with ASP.NET Core MVC controllers + ApiExplorer:
-         the trimmer flips Microsoft.AspNetCore.Mvc.ApiExplorer.IsEnhancedModelMetadataSupported
-         off and InferParameterBindingInfoConvention crashes on first request. ASP.NET Core
-         only supports trimming for minimal APIs. We keep single-file + compression for the
-         size win without the trim incompatibility. -->
     <PublishSingleFile>true</PublishSingleFile>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <InvariantGlobalization>false</InvariantGlobalization>
@@ -36,7 +31,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Embed compiled Svelte frontend; run `npm run build` in /web first -->
     <EmbeddedResource Include="wwwroot/**" />
   </ItemGroup>
 
@@ -53,27 +47,16 @@
     <PackageReference Include="IPAddressRange" Version="6.3.0" />
     <PackageReference Include="ITfoxtec.Identity.Saml2.MvcCore" Version="4.17.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.8" />
-    <!-- Pin Microsoft.IdentityModel.* and System.IdentityModel.* to a coherent version. Without
-         these pins, ITfoxtec.Identity.Saml2 pulls in Microsoft.IdentityModel.Tokens 8.15.0 while
-         the JwtBearer chain stays on 8.0.1, producing a binary mismatch that surfaces at runtime
-         as `MissingMethodException: Base64UrlEncoder.Decode(...)` during JWT validation. -->
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.15.0" />
     <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.15.0" />
     <PackageReference Include="Microsoft.IdentityModel.Protocols" Version="8.15.0" />
     <PackageReference Include="Microsoft.IdentityModel.Protocols.OpenIdConnect" Version="8.15.0" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.8" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.8" />
-    <!-- Pin the native SQLite engine ahead of the version Microsoft.Data.Sqlite pulls in
-         transitively: SQLitePCLRaw.lib.e_sqlite3 2.1.11 ships a SQLite build with a known
-         high-severity advisory (GHSA-2m69-gcr7-jv3q). The lib package is the native binary only
-         and is ABI-compatible with the 2.1.x managed core/provider, so overriding just it
-         upgrades the embedded SQLite engine without changing the managed wrapper. -->
     <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.50.3" />
     <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" Version="3.0.1" />
     <PackageReference Include="Npgsql" Version="8.0.7" />
     <PackageReference Include="NuGet.Versioning" Version="7.3.0" />
-    <!-- PKCS#7/CMS (SignedCms) for NuGet .nupkg signature verification at proxy ingest. Ships in
-         the shared framework but is not auto-referenced, so the type forwards need this reference. -->
     <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.8" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
     <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.15.2" />

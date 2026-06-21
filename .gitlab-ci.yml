@@ -24,6 +24,14 @@ stages:
   - dast
   - release
 
+# OCI pull-through mirror for CI container images. Override DEP_IMAGE_REGISTRY
+# per-fork or unset (set to empty string) to fall back to pulling directly from
+# the public registries. Requires the instance's Oci:Upstreams to route
+# docker.io and mcr.microsoft.com, and a DOCKER_AUTH_CONFIG CI/CD variable
+# for authenticated pulls (GitLab's standard mechanism for OCI credentials).
+variables:
+  DEP_IMAGE_REGISTRY: "dependably.northwardlabs.ca"
+
 # All job images are pinned by digest; bump tag+digest together.
 # No container image is built in CI (deploy builds locally via docker compose), so no image-scanning job exists by design.
 
@@ -161,7 +169,7 @@ validate-release-tag:
   # alpine/git's entrypoint is `git`; override so the runner's shell wrapper
   # can execute the step script (otherwise it runs as `git sh ...`).
   image:
-    name: alpine/git@sha256:d453f54c83320412aa89c391b076930bd8569bc1012285e8c68ce2d4435826a3
+    name: ${DEP_IMAGE_REGISTRY}/alpine/git@sha256:d453f54c83320412aa89c391b076930bd8569bc1012285e8c68ce2d4435826a3
     entrypoint: [""]
   variables:
     GIT_DEPTH: 0
@@ -197,7 +205,7 @@ release-contract-lint:
   # alpine:3 (not python:3-alpine) so apk's py3-yaml lands in the same
   # python path that `python3` resolves to. The official python image keeps
   # its interpreter under /usr/local and ignores Alpine's site-packages.
-  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
     - apk add --no-cache python3 py3-yaml
     - |
@@ -275,7 +283,7 @@ ci-config-lint:
   # amd64-pinned: the job downloads the linux_amd64 glsec binary, which would
   # fail with an exec-format error on an arm64 runner.
   tags: [amd64]
-  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
     - apk add --no-cache curl tar
     - |
@@ -300,7 +308,7 @@ ci-config-lint:
 lockfile-registry-guard:
   stage: validate
   extends: [.runs-on-ci, .release-required]
-  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
     - apk add --no-cache grep
     - |
@@ -321,7 +329,7 @@ lockfile-registry-guard:
 # legitimately lack the unprotected project vars (so they aren't failed for it).
 private-registry-guard:
   stage: validate
-  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID'
       when: never
@@ -359,7 +367,7 @@ build-web:
   stage: build
   # Not in .release-required: gated transitively via `build`'s `needs:`.
   extends: [.private-registry-setup, .runs-on-ci]
-  image: node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  image: ${DEP_IMAGE_REGISTRY}/library/node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
   script:
     - cd web && npm ci && npm run build
   artifacts:
@@ -370,7 +378,7 @@ build-web:
 build:
   stage: build
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   needs: [build-web]
   # Heavy job + produces the linux-x64 artifact consumed by e2e/zap. Pin to amd64
   # runners so the publish happens natively (faster, and avoids qemu surprises).
@@ -390,7 +398,7 @@ build:
 lint:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  image: ${DEP_IMAGE_REGISTRY}/library/node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
   script:
     - cd web && npm ci && npm run lint && npm run lint:css && npm run check
 
@@ -401,7 +409,7 @@ lint:
 dotnet-format:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
     - dotnet format whitespace --verify-no-changes
@@ -410,7 +418,7 @@ dotnet-format:
 csp-inline-style-guard:
   stage: test
   extends: [.runs-on-ci, .release-required]
-  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
     - apk add --no-cache grep
     - |
@@ -422,7 +430,7 @@ csp-inline-style-guard:
 chrome-emoji-guard:
   stage: test
   extends: [.runs-on-ci, .release-required]
-  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
     - apk add --no-cache grep
     - |
@@ -435,7 +443,7 @@ secret-scan:
   stage: test
   extends: [.runs-on-ci, .release-required]
   image:
-    name: trufflesecurity/trufflehog:3.95.3@sha256:9cc33bb080cac0efbbf228a17667172875b529eeeab01efcc4697adfb55f568a
+    name: ${DEP_IMAGE_REGISTRY}/trufflesecurity/trufflehog:3.95.3@sha256:9cc33bb080cac0efbbf228a17667172875b529eeeab01efcc4697adfb55f568a
     entrypoint: [""]
   variables:
     GIT_DEPTH: 0
@@ -450,7 +458,7 @@ secret-scan-deep:
   stage: test
   extends: [.runs-on-ci, .release-required]
   image:
-    name: trufflesecurity/trufflehog:3.95.3@sha256:9cc33bb080cac0efbbf228a17667172875b529eeeab01efcc4697adfb55f568a
+    name: ${DEP_IMAGE_REGISTRY}/trufflesecurity/trufflehog:3.95.3@sha256:9cc33bb080cac0efbbf228a17667172875b529eeeab01efcc4697adfb55f568a
     entrypoint: [""]
   variables:
     GIT_DEPTH: 0
@@ -460,7 +468,7 @@ secret-scan-deep:
 unit-tests:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
     # No --collect:"XPlat Code Coverage" here on purpose. The coverage it would produce is
@@ -480,7 +488,7 @@ unit-tests:
 api-contract:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
     - dotnet test --filter "Category=ApiContract" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/contract.xml"
@@ -493,7 +501,7 @@ api-contract:
 integration-tests:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
     - dotnet test --filter "Category=Integration" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/integration.xml"
@@ -516,10 +524,10 @@ integration-tests:
 schema-integrity:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   services:
-    - name: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+    - name: ${DEP_IMAGE_REGISTRY}/library/postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
       alias: postgres
   variables:
     POSTGRES_DB: dependably_test
@@ -537,7 +545,7 @@ schema-integrity:
 frontend-tests:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  image: ${DEP_IMAGE_REGISTRY}/library/node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
   script:
     - cd web
     - npm ci
@@ -559,7 +567,7 @@ frontend-tests:
 sca-backend:
   stage: test
   extends: [.runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
     - |
@@ -601,7 +609,7 @@ sca-backend:
 sca-frontend:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  image: ${DEP_IMAGE_REGISTRY}/library/node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
   script:
     - cd web
     - npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
@@ -614,7 +622,7 @@ docker-lint:
   stage: test
   extends: .runs-on-ci
   image:
-    name: hadolint/hadolint:latest-alpine@sha256:7aba693c1442eb31c0b015c129697cb3b6cb7da589d85c7562f9deb435a6657c
+    name: ${DEP_IMAGE_REGISTRY}/hadolint/hadolint:latest-alpine@sha256:7aba693c1442eb31c0b015c129697cb3b6cb7da589d85c7562f9deb435a6657c
     entrypoint: [""]
   script:
     - hadolint Dockerfile
@@ -622,7 +630,7 @@ docker-lint:
 e2e:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/playwright:v1.59.1-noble@sha256:b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53
+  image: ${DEP_IMAGE_REGISTRY}/playwright:v1.59.1-noble@sha256:b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53
   needs: [build]
   # Playwright image is amd64-only; on Pi runners it ran under qemu and the slow
   # emulation caused intermittent timing flakes. Pin to native amd64.
@@ -652,7 +660,7 @@ e2e:
 sonarqube-check:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci-main]
-  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   needs: [frontend-tests]
   tags: [amd64]
   variables:
@@ -717,7 +725,7 @@ snyk-code:
   stage: test
   extends: [.runs-on-ci]
   image:
-    name: snyk/snyk:linux@sha256:aeb296d943659dccbc7464340bb8741f6e11999cd99644dc92e6d315d6eda3f4
+    name: ${DEP_IMAGE_REGISTRY}/snyk/snyk:linux@sha256:aeb296d943659dccbc7464340bb8741f6e11999cd99644dc92e6d315d6eda3f4
     entrypoint: [""]
   before_script:
     - command -v jq >/dev/null 2>&1 || { apt-get update && apt-get install -y --no-install-recommends jq; }
@@ -823,7 +831,7 @@ integration-external:
 sbom-backend:
   stage: sbom
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   script:
     - dotnet tool restore
     - dotnet CycloneDX src/Dependably/Dependably.csproj -o . -fn sbom-backend.json -F json -spv 1.6 --exclude-dev
@@ -835,7 +843,7 @@ sbom-backend:
 sbom-frontend:
   stage: sbom
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
-  image: node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  image: ${DEP_IMAGE_REGISTRY}/library/node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
   script:
     - cd web && npm ci && npm run sbom
   artifacts:
@@ -846,7 +854,7 @@ sbom-frontend:
 dt-publish:
   stage: sbom
   extends: [.runs-on-ci-main, .release-required]
-  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   needs:
     - job: sbom-backend
       artifacts: true
@@ -902,7 +910,7 @@ dt-publish:
 # local model isn't hit by four concurrent 30B requests.
 .ai-review:
   stage: ai-review
-  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   # MR-only: the diff and the MR to comment on only exist on a merge_request
   # pipeline. Inline rules are safe here because these jobs do NOT extend
   # .release-required, so release-contract-lint's "no inline rules" guard
@@ -1015,7 +1023,7 @@ zap-baseline:
   stage: dast
   extends: [.runs-on-ci, .release-required]
   image:
-    name: zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
+    name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]
   needs: [build]
   # ZAP image is multi-arch; on a Pi runner Docker pulls the native arm64 variant
@@ -1049,7 +1057,7 @@ zap-full:
   stage: dast
   extends: [.runs-on-ci, .release-required]
   image:
-    name: zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
+    name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]
   needs: [build]
   tags: [amd64]
@@ -1083,7 +1091,7 @@ zap-api-management:
   stage: dast
   extends: [.runs-on-ci, .release-required]
   image:
-    name: zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
+    name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]
   needs: [build]
   tags: [amd64]
@@ -1118,7 +1126,7 @@ zap-api-protocol:
   stage: dast
   extends: [.runs-on-ci, .release-required]
   image:
-    name: zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
+    name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]
   needs: [build]
   tags: [amd64]
@@ -1151,7 +1159,7 @@ zap-api-protocol:
 release-gate:
   stage: dast
   extends: .runs-on-release-tag
-  image: alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   needs: *release-required-jobs
   script:
     - echo "release contract satisfied for $CI_COMMIT_TAG"
@@ -1169,7 +1177,7 @@ release-to-github:
   needs: [release-gate]
   # See validate-release-tag for why the alpine/git entrypoint is overridden.
   image:
-    name: alpine/git@sha256:d453f54c83320412aa89c391b076930bd8569bc1012285e8c68ce2d4435826a3
+    name: ${DEP_IMAGE_REGISTRY}/alpine/git@sha256:d453f54c83320412aa89c391b076930bd8569bc1012285e8c68ce2d4435826a3
     entrypoint: [""]
   tags: [amd64]
   resource_group: github-release

@@ -82,6 +82,12 @@ internal static class ObservabilityStartupExtensions
                 mb.AddAspNetCoreInstrumentation()
                   .AddHttpClientInstrumentation()
                   .AddMeter(DependablyMeter.MeterName)
+                  // Built-in .NET runtime meter (net10): GC heap/collections/pause,
+                  // thread-pool size+queue, process CPU+working-set, exceptions, lock
+                  // contention. Emits the stable `dotnet.*` instruments directly, so no
+                  // extra instrumentation package is needed — these are the resource-
+                  // saturation signals the performance dashboard charts under load.
+                  .AddMeter("System.Runtime")
                   .AddPrometheusExporter();
 
                 if (!string.IsNullOrWhiteSpace(otlpEndpoint))

@@ -481,13 +481,20 @@ public sealed class SystemController : ControllerBase
     /// </summary>
     [HttpGet("dashboard")]
     public async Task<IActionResult> GetDashboard(
-        [FromServices] BackgroundJobRunRepository jobs, CancellationToken ct = default)
+        [FromServices] BackgroundJobRunRepository jobs,
+        [FromServices] Dependably.Infrastructure.Observability.MetricsSnapshotProvider snapshots,
+        CancellationToken ct = default)
     {
         var (activeTenants, suspendedTenants, softDeletedTenants) = await _orgs.CountByStatusAsync(ct);
         var (activeAdmins, lockedAdmins, disabledAdmins) = await _systemAdmins.CountByAccountStatusAsync(ct);
         var (recentJobs, _) = await jobs.ListAsync(
             new BackgroundJobRunQuery(SortBy: "startedAt", SortDir: "desc", Limit: 5, Offset: 0),
             ct);
+
+        // Instance-wide disk figure from the same in-memory poller snapshot the
+        // observability page reads. Empty dictionary (poller hasn't run yet) sums to 0.
+        var byTier = snapshots.Capture().BlobStoreSizesByTier;
+        long totalBytes = byTier.Values.Sum();
 
         return Ok(new
         {
@@ -504,6 +511,11 @@ public sealed class SystemController : ControllerBase
                 locked = lockedAdmins,
                 disabled = disabledAdmins,
                 total = activeAdmins + lockedAdmins + disabledAdmins,
+            },
+            storage = new
+            {
+                totalBytes,
+                byTier,
             },
             recentJobs,
         });

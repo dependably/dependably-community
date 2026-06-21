@@ -349,6 +349,31 @@ public sealed partial class PyPiComplianceTests : IClassFixture<DependablyFactor
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
     }
 
+    [Fact]
+    public async Task Upload_MetadataVersion24_Accepted()
+    {
+        // Metadata-Version 2.4 (PEP 639) is the default output of modern
+        // setuptools/twine; it must be accepted, not 422'd. The handler already
+        // reads the 2.4-only License-Expression field post-publish.
+        string token = await _factory.CreateToken("push");
+        var (bytes, sha256) = PyPiFixtures.BuildWheel("meta-ver-24", "1.0.0");
+
+        using var client = _factory.CreateClientWithBasic(token);
+        using var form = new MultipartFormDataContent();
+        form.Add(new StringContent("file_upload"), ":action");
+        form.Add(new StringContent("2.4"), "metadata_version");
+        form.Add(new StringContent("meta-ver-24"), "name");
+        form.Add(new StringContent("1.0.0"), "version");
+        form.Add(new StringContent(sha256), "sha256_digest");
+        var fileContent = new ByteArrayContent(bytes);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        form.Add(fileContent, "content", "meta_ver_24-1.0.0-py3-none-any.whl");
+
+        var resp = await client.PostAsync("/pypi/legacy/", form);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
     // ── Download auth — hosted packages ──────────────────────────────────────
 
     [Fact]

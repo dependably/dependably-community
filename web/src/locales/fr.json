@@ -1129,6 +1129,12 @@
         "disabled": "Désactivés",
         "total": "{count} au total"
       },
+      "storage": {
+        "title": "Stockage",
+        "cache": "Cache",
+        "registry": "Registre",
+        "total": "{total} au total"
+      },
       "recentJobs": {
         "title": "Tâches en arrière-plan récentes",
         "empty": "Aucune exécution de tâche enregistrée.",
@@ -1310,6 +1316,7 @@
         "tenant": "Locataire",
         "detail": "Détail"
       },
+      "apexTenant": "admin",
       "empty": "Aucun événement système.",
       "pageInfo": "Page {page} · {total} au total",
       "prev": "← Précédent",

@@ -242,7 +242,7 @@
         <td>{new Date(e.createdAt).toLocaleString()}</td>
         <td><code>{e.action}</code></td>
         <td>{e.actorEmail ?? e.actorId ?? '—'}</td>
-        <td>{e.orgId ?? '—'}</td>
+        <td>{e.orgSlug ?? (e.orgId ?? $t('system.audit.apexTenant'))}</td>
         <td><pre>{fmtDetail(e.detail)}</pre></td>
       </tr>
     </DataTable>

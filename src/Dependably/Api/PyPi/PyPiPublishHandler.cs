@@ -35,7 +35,7 @@ public sealed class PyPiPublishHandler(
         new(@"^\d[\w\.\!\+\-]*$", RegexOptions.Compiled, TimeSpan.FromSeconds(2));
 
     private static readonly HashSet<string> ValidMetadataVersions =
-        new(StringComparer.Ordinal) { "1.0", "1.1", "1.2", "2.0", "2.1", "2.2", "2.3" };
+        new(StringComparer.Ordinal) { "1.0", "1.1", "1.2", "2.0", "2.1", "2.2", "2.3", "2.4" };
 
     public async Task<IActionResult> UploadAsync(HttpContext httpContext, string orgId, CancellationToken ct)
     {

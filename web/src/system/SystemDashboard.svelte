@@ -3,6 +3,7 @@
   import { t } from 'svelte-i18n'
   import { systemApi } from '../lib/api.js'
   import { navigate } from '../lib/store.js'
+  import { formatBytes } from '../lib/format.js'
 
   let data = null
   let loading = true
@@ -61,6 +62,15 @@
         </div>
         <div class="stat-foot">{$t('system.dashboard.admins.total', { values: { count: data.admins.total } })}</div>
       </section>
+
+      <section class="card">
+        <h2>{$t('system.dashboard.storage.title')}</h2>
+        <div class="stat-grid storage-grid">
+          <div class="stat"><div class="stat-value">{$formatBytes(data.storage?.byTier?.cache ?? 0)}</div><div class="stat-label">{$t('system.dashboard.storage.cache')}</div></div>
+          <div class="stat"><div class="stat-value">{$formatBytes(data.storage?.byTier?.registry ?? 0)}</div><div class="stat-label">{$t('system.dashboard.storage.registry')}</div></div>
+        </div>
+        <div class="stat-foot">{$t('system.dashboard.storage.total', { values: { total: $formatBytes(data.storage?.totalBytes ?? 0) } })}</div>
+      </section>
     </div>
 
     <section class="card">
@@ -112,6 +122,7 @@
   .card.clickable:hover, .card.clickable:focus-visible { border-color: var(--accent); outline: none; }
 
   .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .stat-grid.storage-grid { grid-template-columns: repeat(2, 1fr); }
   .stat { text-align: left; }
   .stat-value { font-size: 28px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
   .stat-value.warn { color: var(--warning); }

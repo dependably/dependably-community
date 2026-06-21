@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Diagnostics;
 using Dapper;
 
@@ -207,17 +208,60 @@ public sealed class ActivityWriterHostedService : BackgroundService
         }
 
         await using var conn = await _db.OpenAsync(ct);
-        // Wrap the batch in a single transaction so the writer holds the WAL writer lock
-        // once per batch instead of once per row.
+        // Wrap the batch in a single transaction so the writer takes the write lock and
+        // commits to disk once per batch instead of once per row.
         await using var tx = await conn.BeginTransactionAsync(ct);
-        const string sql = """
-            INSERT INTO activity (id, org_id, ecosystem, purl, event_type, actor_id, actor_kind, detail, source_ip, created_at)
-            VALUES (@Id, @OrgId, @Ecosystem, @Purl, @EventType, @ActorId, @ActorKind, @Detail, @SourceIp, @CreatedAt)
-            """;
-        // Dapper accepts an IEnumerable of params and emits a single multi-row execution.
-        await conn.ExecuteAsync(sql, rows, transaction: tx);
+
+        if (_db.Provider == DbProvider.Postgres)
+        {
+            // Npgsql supports DbBatch and pipelines the whole batch into a single network
+            // round-trip. One DbBatchCommand per row; the command text is a constant
+            // parameterized INSERT — no SQL is built from row data.
+            await using var batch = conn.CreateBatch();
+            batch.Transaction = tx;
+            foreach (var row in rows)
+            {
+                var cmd = batch.CreateBatchCommand();
+                cmd.CommandText = InsertActivitySql;
+                AddParameter(cmd, "@Id", row.Id);
+                AddParameter(cmd, "@OrgId", row.OrgId);
+                AddParameter(cmd, "@Ecosystem", row.Ecosystem);
+                AddParameter(cmd, "@Purl", row.Purl);
+                AddParameter(cmd, "@EventType", row.EventType);
+                AddParameter(cmd, "@ActorId", row.ActorId);
+                AddParameter(cmd, "@ActorKind", row.ActorKind);
+                AddParameter(cmd, "@Detail", row.Detail);
+                AddParameter(cmd, "@SourceIp", row.SourceIp);
+                AddParameter(cmd, "@CreatedAt", row.CreatedAt);
+                batch.BatchCommands.Add(cmd);
+            }
+
+            await batch.ExecuteNonQueryAsync(ct);
+        }
+        else
+        {
+            // Microsoft.Data.Sqlite does not implement DbBatch. Dapper's IEnumerable
+            // overload executes the command once per row; because all rows share the
+            // same transaction the fsync is still amortised to a single commit.
+            await conn.ExecuteAsync(InsertActivitySql, rows, transaction: tx);
+        }
+
         await tx.CommitAsync(ct);
         Interlocked.Add(ref _flushed, rows.Count);
+    }
+
+    private const string InsertActivitySql =
+        """
+        INSERT INTO activity (id, org_id, ecosystem, purl, event_type, actor_id, actor_kind, detail, source_ip, created_at)
+        VALUES (@Id, @OrgId, @Ecosystem, @Purl, @EventType, @ActorId, @ActorKind, @Detail, @SourceIp, @CreatedAt)
+        """;
+
+    private static void AddParameter(DbBatchCommand command, string name, object? value)
+    {
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = name;
+        parameter.Value = value ?? DBNull.Value;
+        command.Parameters.Add(parameter);
     }
 
     /// <summary>

@@ -144,6 +144,70 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal(0L, empty.StorageBytes);
     }
 
+    [Fact]
+    public async Task ListOrgsAsync_StorageBytes_SpansUploadedProxyCacheAndOciPlanes()
+    {
+        // After the global-plane dedup, proxy artifacts live in the shared cache_artifact table
+        // (attributed per-org via tenant_artifact_access) and OCI bytes live in oci_blobs — neither
+        // is reachable from package_versions. The operator tenant list must report the SAME total
+        // the tenant dashboard shows, summing all three org-scoped planes. A package_versions-only
+        // query would report 100 here instead of 100 + 250 + 700 = 1050.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"planes-{Guid.NewGuid():N}");
+
+        // (1) Uploaded hosted version on package_versions (100 bytes, origin='uploaded').
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", $"pkg-{Guid.NewGuid():N}");
+        await PackageSeeder.InsertVersionAsync(
+            _fixture.Store, pkgId, "1.0.0", $"pkg:npm/p@1.0.0-{Guid.NewGuid():N}", sizeBytes: 100);
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            string caId = $"ca-{Guid.NewGuid():N}";
+            // (2) Proxy artifact on the shared cache plane, accessed by this org (250 bytes).
+            await conn.ExecuteAsync(
+                "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes) " +
+                "VALUES (@caId, 'npm', 'left-pad', '1.0.0', 'left-pad-1.0.0.tgz', @blobKey, @hash, 250)",
+                new { caId, blobKey = $"proxy/{caId}", hash = caId });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
+                new { orgId, caId });
+
+            // (3) OCI blob bytes (700 bytes) — not in either sized table.
+            await conn.ExecuteAsync(
+                "INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key) " +
+                "VALUES (@digest, @orgId, 'application/octet-stream', 700, @blobKey)",
+                new { digest = $"sha256:{Guid.NewGuid():N}", orgId, blobKey = $"oci/{Guid.NewGuid():N}" });
+        }
+
+        var (items, _) = await _repo.ListOrgsAsync(limit: 200, offset: 0);
+        var row = Assert.Single(items, o => o.Id == orgId);
+        Assert.Equal(1050L, row.StorageBytes);   // 100 uploaded + 250 proxy cache + 700 OCI
+    }
+
+    [Fact]
+    public async Task ListOrgsAsync_StorageBytes_ProxyCache_AttributedPerTenant_NoCrossTenantLeak()
+    {
+        // A cache_artifact is shared; tenant_artifact_access decides whose footprint it counts in.
+        // Org A pulled it, org B did not — so the artifact's bytes belong only to A.
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"taa-a-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"taa-b-{Guid.NewGuid():N}");
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            string caId = $"ca-{Guid.NewGuid():N}";
+            await conn.ExecuteAsync(
+                "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes) " +
+                "VALUES (@caId, 'pypi', 'requests', '2.0.0', 'requests-2.0.0.whl', @blobKey, @hash, 4096)",
+                new { caId, blobKey = $"proxy/{caId}", hash = caId });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgA, @caId)",
+                new { orgA, caId });
+        }
+
+        var (items, _) = await _repo.ListOrgsAsync(limit: 200, offset: 0);
+        Assert.Equal(4096L, Assert.Single(items, o => o.Id == orgA).StorageBytes);
+        Assert.Equal(0L, Assert.Single(items, o => o.Id == orgB).StorageBytes);
+    }
+
     // ── Create + Settings ────────────────────────────────────────────────────
 
     [Fact]

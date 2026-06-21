@@ -256,6 +256,73 @@ public static class DependablyMeter
             "dependably.cache.content_divergences",
             description: "First-fetch content divergences on the shared cache plane: a tenant's fetched SHA-256 differs from the cached global row. Attributes: ecosystem.");
 
+    // ── Foundation instruments — declared here; emission wired in follow-up ──
+
+    /// <summary>
+    /// Search and autocomplete request latency. Attributes: <c>ecosystem</c>,
+    /// <c>operation</c> (search|autocomplete), <c>outcome</c>.
+    /// </summary>
+    public static readonly Histogram<double> SearchDuration =
+        Meter.CreateHistogram<double>(
+            "dependably.search.duration",
+            unit: "s",
+            description: "Search and autocomplete request latency in seconds. Attributes: ecosystem, operation (search|autocomplete), outcome.");
+
+    /// <summary>
+    /// Metadata document build latency. Attributes: <c>ecosystem</c>,
+    /// <c>document</c> (simple_index|package_index|registration_index|registration_leaf|rpm_primary|rpm_filelists|rpm_other|rpm_merged_primary|rpm_merged_filelists|maven_metadata),
+    /// <c>outcome</c>.
+    /// </summary>
+    public static readonly Histogram<double> MetadataBuildDuration =
+        Meter.CreateHistogram<double>(
+            "dependably.metadata.build.duration",
+            unit: "s",
+            description: "Metadata document build latency in seconds. Attributes: ecosystem, document (simple_index|package_index|registration_index|registration_leaf|rpm_primary|rpm_filelists|rpm_other|rpm_merged_primary|rpm_merged_filelists|maven_metadata), outcome.");
+
+    /// <summary>
+    /// Blob-store operation-initiation latency (open/seek/stat/connect). Measures the time
+    /// to initiate the operation, NOT stream transfer time — the returned stream is drained
+    /// later by the caller; end-to-end transfer is already captured by the HTTP span.
+    /// Attributes: <c>operation</c> (get|put|exists|range|delete), <c>backend</c>
+    /// (local|s3|azure), <c>outcome</c>.
+    /// </summary>
+    public static readonly Histogram<double> BlobStoreOperationDuration =
+        Meter.CreateHistogram<double>(
+            "dependably.blobstore.operation.duration",
+            unit: "s",
+            description: "Blob-store operation-initiation latency in seconds (open/seek/stat/connect). Measures operation-initiation latency, NOT stream transfer time. Attributes: operation (get|put|exists|range|delete), backend (local|s3|azure), outcome.");
+
+    /// <summary>
+    /// Token-auth resolve latency. Reuses the outcome vocabulary already used by the
+    /// existing <see cref="TokenAuthRequests"/> counter: <c>success</c>, <c>invalid</c>,
+    /// <c>no_auth</c>. Attribute: <c>outcome</c>.
+    /// </summary>
+    public static readonly Histogram<double> TokenAuthResolveDuration =
+        Meter.CreateHistogram<double>(
+            "dependably.token_auth.resolve.duration",
+            unit: "s",
+            description: "Token-auth resolve latency in seconds. Attribute: outcome (success|invalid|no_auth).");
+
+    /// <summary>
+    /// Async writer flush duration. Attributes: <c>writer</c> (download_count|activity),
+    /// <c>outcome</c>.
+    /// </summary>
+    public static readonly Histogram<double> WriterFlushDuration =
+        Meter.CreateHistogram<double>(
+            "dependably.writer.flush.duration",
+            unit: "s",
+            description: "Async writer flush duration in seconds. Attributes: writer (download_count|activity), outcome.");
+
+    /// <summary>
+    /// Number of records flushed in a single async writer flush pass. Attribute:
+    /// <c>writer</c> (download_count|activity).
+    /// </summary>
+    public static readonly Histogram<long> WriterFlushBatchSize =
+        Meter.CreateHistogram<long>(
+            "dependably.writer.flush.batch_size",
+            unit: "{record}",
+            description: "Number of records flushed in a single async writer flush pass. Attribute: writer (download_count|activity).");
+
     // ── Observable gauges — values pushed from elsewhere, read on scrape ────
 
     /// <summary>Background-job last-success unix timestamps, keyed by job_name.</summary>

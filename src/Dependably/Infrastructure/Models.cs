@@ -625,6 +625,8 @@ public class AuditEntry
     /// <summary>'tenant' | 'system'. system events are operator-only; tenant events are per-tenant.</summary>
     public string Scope { get; set; } = "tenant";
     public string? OrgId { get; set; }
+    /// <summary>Tenant slug resolved from orgs for display; NULL for apex/system events or a deleted org.</summary>
+    public string? OrgSlug { get; set; }
     public string? ActorId { get; set; }
     public string? ActorEmail { get; set; }
     public string Action { get; set; } = "";

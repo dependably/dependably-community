@@ -230,19 +230,9 @@ public sealed class AuditRepository
         string? searchPattern = string.IsNullOrWhiteSpace(search) ? null : $"%{search.Trim().ToLowerInvariant()}%";
         string? actionFilter = string.IsNullOrWhiteSpace(action) ? null : action;
 
-        // Two where clauses because the count query doesn't need the system_admins join — but
-        // the list query does, so search can match on operator email and the result projection
-        // can return ActorEmail without a second round-trip.
-        const string countWhereClause = """
-            scope = 'system'
-              AND (@action IS NULL OR action = @action)
-              AND (@searchPattern IS NULL
-                   OR lower(action) LIKE @searchPattern
-                   OR lower(COALESCE(actor_id, '')) LIKE @searchPattern
-                   OR lower(COALESCE(org_id, '')) LIKE @searchPattern
-                   OR lower(COALESCE(detail, '')) LIKE @searchPattern)
-            """;
-
+        // Single where clause shared by the count and list queries — both join system_admins
+        // (for ActorEmail / email search) and orgs (for OrgSlug / tenant-name search), so the
+        // total reflects the same slug matches the page shows.
         const string listWhereClause = """
             a.scope = 'system'
               AND (@action IS NULL OR a.action = @action)
@@ -251,23 +241,25 @@ public sealed class AuditRepository
                    OR lower(COALESCE(a.actor_id, '')) LIKE @searchPattern
                    OR lower(COALESCE(sa.email, '')) LIKE @searchPattern
                    OR lower(COALESCE(a.org_id, '')) LIKE @searchPattern
+                   OR lower(COALESCE(o.slug, '')) LIKE @searchPattern
                    OR lower(COALESCE(a.detail, '')) LIKE @searchPattern)
             """;
 
-        // rawsql: countWhereClause is a const with only @param placeholders (see S2077 justification above).
+        // rawsql: only the const listWhereClause (only @param placeholders) is interpolated (see S2077 justification above).
         int total = await conn.ExecuteScalarAsync<int>(
-            $"SELECT COUNT(*) FROM audit_log WHERE {countWhereClause}",
+            $"SELECT COUNT(*) FROM audit_log a LEFT JOIN system_admins sa ON sa.id = a.actor_id LEFT JOIN orgs o ON o.id = a.org_id WHERE {listWhereClause}",
             new { action = actionFilter, searchPattern });
 
         // LEFT JOIN system_admins (not users) — every scope='system' actor is a system_admin.
         // Unmatched actor_ids surface as NULL ActorEmail; the UI falls back to actor_id.
+        // LEFT JOIN orgs resolves the tenant slug for display; NULL for apex events or a deleted org.
         // rawsql: only the whitelisted ORDER BY column/direction are interpolated (see S2077 justification above).
         string listSql = $"""
-            SELECT a.id, a.scope as Scope, a.org_id as OrgId, a.actor_id as ActorId,
+            SELECT a.id, a.scope as Scope, a.org_id as OrgId, o.slug as OrgSlug, a.actor_id as ActorId,
                    sa.email as ActorEmail, a.action as Action,
                    a.ecosystem as Ecosystem, a.purl as Purl, a.detail as Detail,
                    a.created_at as CreatedAt
-            FROM audit_log a LEFT JOIN system_admins sa ON sa.id = a.actor_id
+            FROM audit_log a LEFT JOIN system_admins sa ON sa.id = a.actor_id LEFT JOIN orgs o ON o.id = a.org_id
             WHERE {listWhereClause}
             ORDER BY a.{orderColumn} {orderDirection}, a.id DESC LIMIT @limit OFFSET @offset
             """;

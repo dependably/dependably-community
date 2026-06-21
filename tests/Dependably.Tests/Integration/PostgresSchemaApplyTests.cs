@@ -22,6 +22,7 @@ namespace Dependably.Tests.Integration;
 /// throwaway database (the CI service container, or a local docker postgres).
 /// </summary>
 [Trait("Category", "SchemaPostgres")]
+[Collection("LivePostgres")]
 public sealed class PostgresSchemaApplyTests
 {
     private static string ConnectionString =>

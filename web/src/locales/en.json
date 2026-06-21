@@ -1131,6 +1131,12 @@
         "disabled": "Disabled",
         "total": "{count} total"
       },
+      "storage": {
+        "title": "Storage",
+        "cache": "Cache",
+        "registry": "Registry",
+        "total": "{total} total"
+      },
       "recentJobs": {
         "title": "Recent background jobs",
         "empty": "No background-job runs recorded yet.",
@@ -1354,6 +1360,7 @@
         "tenant": "Tenant",
         "detail": "Detail"
       },
+      "apexTenant": "admin",
       "empty": "No system events yet.",
       "pageInfo": "Page {page} · {total} total",
       "prev": "← Prev",

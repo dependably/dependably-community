@@ -126,11 +126,19 @@ public sealed class OrgRepository
     /// render the restore UI within the grace window); business surfaces should filter to
     /// active only.
     ///
+    /// Storage bytes span three org-scoped sources, summed per tenant so this list reports the
+    /// same total the tenant dashboard shows (<see cref="PackageAnalyticsRepository.GetOrgStatsAsync"/>):
+    /// (1) uploaded hosted versions in <c>package_versions</c> (origin='uploaded', non-OCI,
+    /// org-scoped via <c>packages.org_id</c>); (2) proxy artifacts on the shared
+    /// <c>cache_artifact</c> plane, attributed per-tenant via <c>tenant_artifact_access</c>;
+    /// (3) OCI blob bytes in <c>oci_blobs</c> (content-addressed, deduped within an org).
+    ///
     /// Aggregates are computed inline using pre-aggregated subqueries so each tenant produces
     /// exactly one outer row — a naive <c>LEFT JOIN users LEFT JOIN packages LEFT JOIN
     /// package_versions</c> would produce N×M rows and inflate both counts. Indexes
     /// (<c>users.tenant_id</c>, <c>idx_packages_org_ecosystem</c>,
-    /// <c>idx_package_versions_package</c>) keep this sub-100ms at the page-size cap of 200.
+    /// <c>idx_package_versions_package</c>, <c>tenant_artifact_access</c>'s org-prefixed primary
+    /// key, <c>idx_oci_blobs_org</c>) keep this sub-100ms at the page-size cap of 200.
     /// </summary>
     // xtenant: system-admin tenant list — aggregates roll up across all tenants by design.
     public async Task<(IReadOnlyList<OrgListItem> Items, int Total)> ListOrgsAsync(int limit, int offset, bool includeDeleted = true, CancellationToken ct = default)
@@ -155,10 +163,22 @@ public sealed class OrgRepository
                 GROUP BY tenant_id
             ) u ON u.tenant_id = o.id
             LEFT JOIN (
-                SELECT p.org_id, SUM(pv.size_bytes) AS storage_bytes
-                FROM packages p
-                JOIN package_versions pv ON pv.package_id = p.id
-                GROUP BY p.org_id
+                SELECT org_id, SUM(bytes) AS storage_bytes
+                FROM (
+                    SELECT p.org_id AS org_id, pv.size_bytes AS bytes
+                    FROM package_versions pv
+                    JOIN packages p ON p.id = pv.package_id
+                    WHERE p.ecosystem != 'oci' AND pv.origin = 'uploaded'
+                    UNION ALL
+                    SELECT taa.org_id AS org_id, ca.size_bytes AS bytes
+                    FROM cache_artifact ca
+                    JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                    WHERE ca.ecosystem != 'oci'
+                    UNION ALL
+                    SELECT org_id AS org_id, size_bytes AS bytes
+                    FROM oci_blobs
+                )
+                GROUP BY org_id
             ) s ON s.org_id = o.id
             WHERE (@includeDeleted = 1 OR o.deleted_at IS NULL)
             ORDER BY o.created_at ASC, o.id ASC

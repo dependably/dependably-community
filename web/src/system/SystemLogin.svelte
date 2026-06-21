@@ -18,7 +18,7 @@
         navigate('system-profile', {}, { replace: true })
       } else {
         const pending = takePendingRoute()
-        navigate(pending?.page ?? 'system-tenants', pending?.params ?? {}, { replace: true })
+        navigate(pending?.page ?? 'system-dashboard', pending?.params ?? {}, { replace: true })
       }
     } catch (e) {
       error = e.message || $t('system.login.failed')
