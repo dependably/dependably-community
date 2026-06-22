@@ -96,10 +96,10 @@ public sealed record PublishRequest
     public string? AuditDetail { get; init; }
 
     /// <summary>
-    /// When true, a duplicate (name, version) overwrites the existing artefact and emits a
-    /// <c>package.replace</c> audit event recording both old and new hashes. Wired from the
-    /// per-tenant <c>org_settings.allow_version_overwrite</c> setting. Default false
-    /// preserves the strict immutable-coordinate behaviour.
+    /// Retained for backward compatibility but no longer consulted by the service. Overwrite
+    /// permission is now resolved from <c>org_settings.version_overwrite_policy</c> and the
+    /// per-package <c>packages.same_version_push_override</c> via
+    /// <c>PackagePublishService.ResolveOverwriteAllowed</c>. Callers may omit this field.
     /// </summary>
     public bool AllowOverwrite { get; init; }
 

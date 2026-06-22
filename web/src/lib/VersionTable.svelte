@@ -13,7 +13,6 @@
   import { createEventDispatcher } from 'svelte'
   import { t } from 'svelte-i18n'
   import VulnerabilityRow from './VulnerabilityRow.svelte'
-  import InfoTip from './InfoTip.svelte'
   import { formatDate, formatBytes, formatNumber } from './format.js'
   import { sortIndicator } from './sortIndicator.js'
 
@@ -58,6 +57,17 @@
   function toggleSort(col) {
     if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc'
     else { sortCol = col; sortDir = 'desc' }
+  }
+
+  // OCI hosted images are keyed by their manifest digest; the full `sha256:…` string
+  // is 71 unbreakable characters that blow out the version column and squish the tag
+  // column beside it. Show a short digest in the cell (full value on hover); the tag
+  // column, the checksum column, and the expanded row's PURL/SHA-256 carry the rest.
+  function shortVersion(version) {
+    if (pkg?.ecosystem === 'oci' && /^sha256:[0-9a-f]{64}$/i.test(version)) {
+      return version.slice(0, 19) + '…'
+    }
+    return version
   }
 
   function toggleExpand(purl) {
@@ -119,6 +129,7 @@
 <table class="table-auto versions-table">
   <colgroup>
     <col class="col-version">
+    {#if pkg?.ecosystem === 'oci'}<col class="col-tag">{/if}
     <col class="col-latest">
     <col class="col-origin">
     <col class="col-checksum">
@@ -132,6 +143,7 @@
   <thead>
     <tr>
       <th class="sortable" on:click={() => toggleSort('version')}>{$t('versionDetail.columns.version')}{sortIndicator('version', sortCol, sortDir)}</th>
+      {#if pkg?.ecosystem === 'oci'}<th>{$t('versionDetail.columns.tag')}</th>{/if}
       <th class="text-center">{$t('versionDetail.columns.latest')}</th>
       <th>{$t('versionDetail.columns.origin')}</th>
       <th class="sortable" on:click={() => toggleSort('checksum')}>{$t('versionDetail.columns.checksum')}{sortIndicator('checksum', sortCol, sortDir)}</th>
@@ -139,14 +151,14 @@
       <th class="sortable" on:click={() => toggleSort('pushed')}>{$t('versionDetail.columns.pushed')}{sortIndicator('pushed', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('license')}>{$t('versionDetail.columns.license')}{sortIndicator('license', sortCol, sortDir)}</th>
       <th class="sortable num-col" on:click={() => toggleSort('downloads')}>{$t('versionDetail.columns.downloads')}{sortIndicator('downloads', sortCol, sortDir)}</th>
-      <th class="sortable status-th" on:click={() => toggleSort('status')}>{$t('versionDetail.columns.status')}{sortIndicator('status', sortCol, sortDir)}<InfoTip text={$t('versionDetail.statusHelp')} /></th>
+      <th class="sortable status-th" on:click={() => toggleSort('status')}>{$t('versionDetail.columns.status')}{sortIndicator('status', sortCol, sortDir)}</th>
       <th>{$t('versionDetail.columns.actions')}</th>
     </tr>
   </thead>
   {#if loading}
     <tbody>
       {#each [0,1,2,3,4] as i (i)}
-        <tr><td colspan="10"><span class="skeleton"></span></td></tr>
+        <tr><td colspan={pkg?.ecosystem === 'oci' ? 11 : 10}><span class="skeleton"></span></td></tr>
       {/each}
     </tbody>
   {:else}
@@ -154,14 +166,15 @@
     {#each sortedVersions as ver (ver.id)}
       {@const vulns = (vulnsByPurl.get(ver.purl) ?? []).slice().sort((a, b) => severityOrder(a.severity) - severityOrder(b.severity))}
       {@const isExpanded = expandedPurl === ver.purl}
+      {@const verShort = shortVersion(ver.version)}
       <tr
         class:first-fetch-row={ver.firstFetch}
         class:expanded-row={isExpanded}
         class="cursor-pointer"
         on:click={() => toggleExpand(ver.purl)}
       >
-        <td>
-          <strong>{ver.version}</strong>
+        <td class="version-cell">
+          <strong class:mono={verShort !== ver.version} title={verShort === ver.version ? null : ver.version}>{verShort}</strong>
           {#if ver.yanked}<span class="badge yanked ml-1">{$t('versionDetail.badges.yanked')}</span>{/if}
           {#if ver.deprecated}<span class="badge deprecated ml-1" title={ver.deprecated}>{$t('versionDetail.badges.deprecated')}</span>{/if}
           {#if ver.hasInstallScript}<span class="badge install-script ml-1" title={$t('versionDetail.badges.installScriptHelp', { values: { kind: ver.installScriptKind || '' } })}>{$t('versionDetail.badges.installScript')}</span>{/if}
@@ -181,6 +194,17 @@
             </span>
           {/if}
         </td>
+        {#if pkg?.ecosystem === 'oci'}
+          <td class="tag-cell">
+            {#if ver.tags?.length > 0}
+              {#each ver.tags as tag (tag)}
+                <span class="badge tag-badge">{tag}</span>
+              {/each}
+            {:else}
+              <span class="text-muted">—</span>
+            {/if}
+          </td>
+        {/if}
         <td class="text-center latest-cell">
           <!-- When the upstream latest is known, every row resolves to current (check) or behind (x);
                the dash is reserved for packages with no upstream baseline to compare against. -->
@@ -234,7 +258,7 @@
 
       {#if isExpanded}
         <tr class="detail-row">
-          <td colspan="10">
+          <td colspan={pkg?.ecosystem === 'oci' ? 11 : 10}>
             <div class="detail-panel">
               <div class="detail-section">
                 <span class="detail-label">{$t('versionDetail.detail.purl')}</span>
@@ -349,9 +373,12 @@
   }
 
   .nowrap { white-space: nowrap; }
+  .version-cell { overflow-wrap: anywhere; }
+  .version-cell .mono { font-size: 12px; }
   .checksum-cell { font-size: 11px; color: var(--text2); }
   .license-cell { font-size: 12px; overflow-wrap: anywhere; }
   .versions-table .col-version   { width: 180px; }
+  .versions-table .col-tag       { width: 140px; }
   .versions-table .col-latest    { width: 70px; }
   .versions-table .col-origin    { width: 90px; }
   .versions-table .col-checksum  { width: 100px; }
@@ -362,6 +389,8 @@
   .versions-table .col-status    { width: 100px; }
   .versions-table .col-actions   { width: 60px; }
   .num-col { text-align: right; font-variant-numeric: tabular-nums; }
+  .tag-cell { font-size: 12px; overflow-wrap: anywhere; }
+  .tag-badge { margin-right: 3px; margin-bottom: 2px; font-family: var(--font-mono, monospace); font-size: 11px; }
   .latest-cell { font-weight: 600; }
   .latest-yes { color: var(--success); }
   .latest-no { color: var(--danger); }

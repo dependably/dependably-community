@@ -95,7 +95,9 @@ public sealed class OrgController : OrgScopedControllerBase
 
         var (items, total) = await _packages.ListPaginatedAsync(
             new PackageListQuery(orgId, limit, offset, ecosystem, search, sortBy, sortDir), ct);
-        return Ok(new { items, total, limit, offset });
+        var settings = await _orgs.GetSettingsAsync(orgId, ct);
+        string versionOverwritePolicy = settings?.VersionOverwritePolicy ?? "block";
+        return Ok(new { items, total, limit, offset, versionOverwritePolicy });
     }
 
     /// <summary>GET /api/v1/orgs/{org}/packages/{ecosystem}/{name}</summary>
@@ -116,6 +118,10 @@ public sealed class OrgController : OrgScopedControllerBase
         }
 
         var versions = await LoadCombinedVersionsForOrgAsync(orgId, pkg.Id, ecosystem, AsPurlName(name), ct);
+        // OCI: load the digest → tags lookup so each version row surfaces its associated tags.
+        var ociTagsByDigest = ecosystem == "oci"
+            ? await _packages.GetOciTagsByDigestAsync(orgId, pkg.PurlName, ct)
+            : null;
         // License map: uploaded versions key by package_version_id; proxy versions key by
         // cache_artifact_id. Merge both lookups into one dictionary.
         var uploadedIds = versions.Where(v => v.Origin != "proxy").Select(v => v.Id).ToList();
@@ -179,7 +185,10 @@ public sealed class OrgController : OrgScopedControllerBase
                 v.ProvenanceSigner,
                 MaxOsvScore = hasMax ? maxScore : (double?)null,
                 Status = status,
-                Licenses = (v.Origin == "proxy" ? proxyLicenses[v.Id] : uploadedLicenses[v.Id]).ToArray()
+                Licenses = (v.Origin == "proxy" ? proxyLicenses[v.Id] : uploadedLicenses[v.Id]).ToArray(),
+                Tags = ociTagsByDigest != null && ociTagsByDigest.Contains(v.Version)
+                    ? ociTagsByDigest[v.Version].ToArray()
+                    : Array.Empty<string>()
             };
         });
         return Ok(new { package = pkg, versions = versionsWithLicenses });
@@ -415,6 +424,53 @@ public sealed class OrgController : OrgScopedControllerBase
             ? facts.BlobKey.Split('/').Last()
             : facts.Filename;
         return File(proxyStream, "application/octet-stream", proxyFilename);
+    }
+
+    /// <summary>
+    /// PATCH /api/v1/packages/{ecosystem}/{name}/version-overwrite
+    /// Sets or clears the per-package same-version-push override. Requires TenantConfigure.
+    /// Body: { "override": "allow" | "block" | null }
+    /// </summary>
+    [HttpPatch("api/v1/packages/{ecosystem}/{name}/version-overwrite")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> SetPackageVersionOverwrite(
+        string ecosystem, string name,
+        [FromBody] SetPackageVersionOverwriteRequest req,
+        CancellationToken ct)
+    {
+        var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (authResult is not null)
+        {
+            return authResult;
+        }
+
+        if (req.Override is { } ov && ov is not ("allow" or "block"))
+        {
+            return BadRequest(new { error = "override", detail = "Must be 'allow', 'block', or null." });
+        }
+
+        string orgId = CurrentTenantId();
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(name), ct);
+        if (pkg is null)
+        {
+            return NotFound();
+        }
+
+        await _packages.SetSameVersionPushOverrideAsync(pkg.Id, orgId, req.Override, ct);
+
+        string? actorId = GetUserId();
+        string detail = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            ecosystem,
+            purl_name = pkg.PurlName,
+            override_value = req.Override,
+        });
+        await _audit.LogAsync("package.override.set", orgId, actorId, ActorKinds.User,
+            ecosystem, pkg.PurlName, detail, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        await _audit.LogActivityAsync(orgId, ecosystem, pkg.PurlName, "package.override.set",
+            actorId, actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        return NoContent();
     }
 
     // ── Stats ─────────────────────────────────────────────────────────────────

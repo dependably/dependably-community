@@ -72,6 +72,7 @@ public sealed class OrgRepository
                min_release_age_hours as MinReleaseAgeHours,
                COALESCE(default_language, 'en') as DefaultLanguage,
                COALESCE(allow_version_overwrite, 0) as AllowVersionOverwrite,
+               COALESCE(version_overwrite_policy, 'block') as VersionOverwritePolicy,
                COALESCE(air_gapped, 0) as AirGapped,
                COALESCE(block_deprecated, 'off') as BlockDeprecated,
                COALESCE(block_malicious, 'block') as BlockMalicious,
@@ -743,6 +744,7 @@ public sealed record OrgSettingsUpdate(
     long? MaxUploadBytesNuGet,
     long? InstanceMaxUploadBytes,
     string? DefaultLanguage,
+    // Retained for call-site compatibility; ignored by UpsertSettingsAsync (use VersionOverwritePolicy).
     bool? AllowVersionOverwrite = null,
     // New fields land at the end with defaults so the positional call sites
     // (incl. unit tests in tests/Dependably.Tests/Unit/Infrastructure) keep compiling
@@ -751,7 +753,7 @@ public sealed record OrgSettingsUpdate(
     long? MaxUploadBytesRpm = null,
     long? MaxUploadBytesOci = null,
     long? MaxUploadBytesCargo = null,
-    // Per-tenant air-gap posture. null = leave unchanged (the controller passes the request
-    // value through; tristate matches AllowVersionOverwrite). Only OrgSettingsRepository's
-    // upsert persists it — see OrgSettings.AirGapped.
-    bool? AirGapped = null);
+    // Per-tenant air-gap posture. null = leave unchanged.
+    bool? AirGapped = null,
+    // Tri-state same-version-push policy. null = leave unchanged. 'block' | 'exception' | 'allow'.
+    string? VersionOverwritePolicy = null);

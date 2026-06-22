@@ -61,7 +61,13 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- row created when the hold first fired is cleared from the queue at that point.
     min_release_age_hours     INTEGER,
     default_language          TEXT    NOT NULL DEFAULT 'en',  -- new tenant users start with this locale
-    allow_version_overwrite   INTEGER NOT NULL DEFAULT 0,   -- replacement policy; off by default
+    allow_version_overwrite   INTEGER NOT NULL DEFAULT 0,   -- legacy boolean; kept for blue-green safety; see version_overwrite_policy
+    -- Tri-state same-version-push policy: 'block' (default) = always reject duplicates;
+    -- 'exception' = reject by default but individual packages can grant permission;
+    -- 'allow' = allow by default but individual packages can deny. Supersedes the legacy
+    -- allow_version_overwrite boolean; dual-write keeps the boolean in sync on every upsert.
+    version_overwrite_policy  TEXT    NOT NULL DEFAULT 'block'
+                              CHECK (version_overwrite_policy IN ('block','exception','allow')),
     maven_reserved_prefixes   TEXT    NOT NULL DEFAULT '[]', -- dep-confusion guard; JSON array of groupId prefixes
     -- Per-tenant air-gap posture. When 1, this org makes no outbound network requests:
     -- proxy passthrough is forced off (uncached upstream returns 404), and the vulnerability
@@ -189,6 +195,12 @@ CREATE TABLE IF NOT EXISTS packages (
     -- the background upstream-metadata pass. NULL when no upstream baseline is known.
     upstream_latest_version    TEXT,
     upstream_latest_checked_at TEXT,
+    -- Per-package same-version-push override. NULL = inherit the org version_overwrite_policy.
+    -- 'allow' = grant overwrite even when the org policy is 'exception' (blocked by default).
+    -- 'block' = deny overwrite even when the org policy is 'allow' (allowed by default).
+    -- Ignored when the org policy is 'block' (hard lockdown; no per-package escape hatch).
+    same_version_push_override TEXT
+                               CHECK (same_version_push_override IN ('allow','block')),
     UNIQUE (org_id, ecosystem, purl_name)
 );
 

@@ -7,6 +7,7 @@
   import DataTable from '../lib/DataTable.svelte'
   import Pagination from '../lib/Pagination.svelte'
   import SearchInput from '../lib/SearchInput.svelte'
+  import RowActionsMenu from '../lib/RowActionsMenu.svelte'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
   import { readQuery, writeQuery } from '../lib/tableState.js'
 
@@ -20,6 +21,8 @@
   let search = init.q, filterEco = init.eco
   let page = init.page, limit = init.limit, total = 0
   let sortCol = init.sort, sortDir = init.dir
+  let versionOverwritePolicy = 'block'
+  let openActionsId = null
 
   function sync() {
     writeQuery({ q: search, eco: filterEco, page, limit, sort: sortCol, dir: sortDir }, DEFAULTS)
@@ -37,6 +40,7 @@
       const data = await api.listPackages( params)
       items = data.items
       total = data.total
+      versionOverwritePolicy = data.versionOverwritePolicy ?? 'block'
     } catch (e) { error = e.message }
     finally { loading = false }
   }
@@ -67,10 +71,14 @@
     { key: 'latest',    label: $t('packages.columns.latest'),    sortable: false, width: '70px' },
     { key: 'vulns',     label: $t('packages.columns.vulns'),     sortable: true,  width: '130px', defaultDir: 'desc' },
     { key: 'created',   label: $t('packages.columns.created'),   sortable: true,  width: '120px' },
+    ...(versionOverwritePolicy !== 'block'
+      ? [{ key: 'actions', label: '', sortable: false, width: '48px' }]
+      : []),
   ]
   const comparators = {
     name: NOOP_CMP, ecosystem: NOOP_CMP, purl: NOOP_CMP,
     versions: NOOP_CMP, downloads: NOOP_CMP, latest: NOOP_CMP, vulns: NOOP_CMP, created: NOOP_CMP,
+    actions: NOOP_CMP,
   }
 
   function handleSearch() {
@@ -91,6 +99,16 @@
 
   function openPackage(pkg) {
     navigate('version-detail', { ecosystem: pkg.ecosystem, name: pkg.purlName })
+  }
+
+  async function setOverwrite(pkg, override) {
+    openActionsId = null
+    try {
+      await api.setPackageVersionOverwrite(pkg.ecosystem, pkg.name, override)
+      await load()
+    } catch (e) {
+      error = e.message
+    }
   }
 </script>
 
@@ -157,6 +175,51 @@
         {#if (pkg.lowCount ?? 0) > 0}<span class="sev sev-low" aria-label="{pkg.lowCount} low">{pkg.lowCount}</span>{/if}
       </td>
       <td class="nowrap text-muted">{$formatDateShort(pkg.createdAt)}</td>
+      {#if versionOverwritePolicy !== 'block'}
+        <td class="actions-cell" on:click|stopPropagation>
+          <div class="row-actions">
+            <RowActionsMenu id={pkg.name + '/' + pkg.ecosystem} bind:openId={openActionsId} ariaLabel={$t('packages.actionsMenu.open')}>
+              {#if versionOverwritePolicy === 'exception'}
+                <button
+                  class="popover-item"
+                  disabled={pkg.sameVersionPushOverride === 'allow'}
+                  on:click|stopPropagation={() => setOverwrite(pkg, 'allow')}
+                >
+                  {#if pkg.sameVersionPushOverride === 'allow'}
+                    <svg width="12" height="12" aria-hidden="true" class="menu-check"><use href="/icons.svg#icon-check"/></svg>
+                  {/if}
+                  {$t('packages.actionsMenu.allowSameVersionPush')}
+                </button>
+                <button
+                  class="popover-item"
+                  disabled={!pkg.sameVersionPushOverride}
+                  on:click|stopPropagation={() => setOverwrite(pkg, null)}
+                >
+                  {$t('packages.actionsMenu.inheritOrgDefault')}
+                </button>
+              {:else if versionOverwritePolicy === 'allow'}
+                <button
+                  class="popover-item"
+                  disabled={pkg.sameVersionPushOverride === 'block'}
+                  on:click|stopPropagation={() => setOverwrite(pkg, 'block')}
+                >
+                  {#if pkg.sameVersionPushOverride === 'block'}
+                    <svg width="12" height="12" aria-hidden="true" class="menu-check"><use href="/icons.svg#icon-check"/></svg>
+                  {/if}
+                  {$t('packages.actionsMenu.blockSameVersionPush')}
+                </button>
+                <button
+                  class="popover-item"
+                  disabled={!pkg.sameVersionPushOverride}
+                  on:click|stopPropagation={() => setOverwrite(pkg, null)}
+                >
+                  {$t('packages.actionsMenu.inheritOrgDefault')}
+                </button>
+              {/if}
+            </RowActionsMenu>
+          </div>
+        </td>
+      {/if}
     </tr>
   </DataTable>
 
@@ -222,4 +285,7 @@
   .name-cell { overflow-wrap: anywhere; }
   .purl-cell { font-size: 12px; color: var(--text2); overflow-wrap: anywhere; }
   .eco-select { width: auto; }
+  .actions-cell { overflow: visible; width: 48px; }
+  .row-actions { display: flex; justify-content: center; }
+  .menu-check { color: var(--success); margin-right: 4px; vertical-align: middle; }
 </style>

@@ -112,11 +112,17 @@ public class OrgSettings
     /// <summary>BCP-47 short code (e.g. "en", "fr"). New users in this tenant inherit this value.</summary>
     public string DefaultLanguage { get; set; } = "en";
     /// <summary>
-    /// Replacement policy. When true, publishing a duplicate (name, version) overwrites
-    /// the existing artefact and emits a <c>package.replace</c> audit event recording both
-    /// hashes. Default false — the strict immutable-coordinate behaviour.
+    /// Legacy boolean; kept for blue-green safety. Superseded by <see cref="VersionOverwritePolicy"/>.
     /// </summary>
     public bool AllowVersionOverwrite { get; set; }
+    /// <summary>
+    /// Tri-state same-version-push org policy: 'block' (default) = always reject duplicate
+    /// coordinates; 'exception' = blocked by default but individual packages can grant permission
+    /// via <c>packages.same_version_push_override = 'allow'</c>; 'allow' = allowed by default
+    /// but individual packages can deny via <c>'block'</c>. When 'block', per-package overrides
+    /// are ignored (hard lockdown). Resolution lives in PackagePublishService.ResolveOverwriteAllowed.
+    /// </summary>
+    public string VersionOverwritePolicy { get; set; } = "block";
     /// <summary>
     /// Per-tenant air-gap posture. When true, this org makes no outbound network requests:
     /// proxy passthrough is forced off (uncached upstream returns 404 via
@@ -262,6 +268,12 @@ public class Package
     // True when any version of this package is linked to an OSV MAL- advisory (OpenSSF
     // malicious-packages feed). Drives the packages-list malicious indicator. Computed in SQL.
     public bool HasMaliciousVersion { get; set; }
+    /// <summary>
+    /// Per-package same-version-push override. NULL = inherit the org <c>version_overwrite_policy</c>.
+    /// 'allow' = grant overwrite permission even when the org policy is 'exception'. 'block' = deny
+    /// overwrite even when the org policy is 'allow'. Ignored when the org policy is 'block'.
+    /// </summary>
+    public string? SameVersionPushOverride { get; set; }
 }
 
 public class PackageVersion

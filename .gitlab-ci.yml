@@ -1239,7 +1239,7 @@ publish-image:
     # bridge network, which is never reachable outside the job.
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: "" # glsec:ignore GL031 -- TLS on 2376 needs the runner to share dind's /certs/client volume into the job, which these self-hosted runners do not; the docker executor isolates the dind daemon on this job's per-build service network, so 2375 is not reachable by other jobs
-    IMAGE_REPO: ${DEP_IMAGE_REGISTRY}/itest/dependably
+    IMAGE_REPO: ${DEP_IMAGE_REGISTRY}/dependably/community
   # Auth + build-time dep routing reuse the existing REGISTRY_URL / REGISTRY_KEY
   # CI vars (same as the build job); REGISTRY_KEY must carry publish:oci to push.
   script:
@@ -1253,12 +1253,19 @@ publish-image:
       docker info >/dev/null 2>&1 || { echo "dind daemon did not become ready on $DOCKER_HOST"; exit 1; }
     - docker buildx create --use --name dep-builder
     - printf '%s' "$REGISTRY_KEY" > /tmp/registry_key
+    # Stamp a valid SemVer prerelease (a raw SHA is not a valid .NET version
+    # string); FILE_VERSION is the single source of truth in Directory.Build.props.
+    - |
+      FILE_VERSION=$(grep -oE '<Version>[^<]+</Version>' Directory.Build.props \
+        | sed -E 's|<Version>(.*)</Version>|\1|')
+      BUILD_VERSION="${FILE_VERSION}-main.${CI_COMMIT_SHORT_SHA}"
+      echo "Stamping image version $BUILD_VERSION"
     - >-
       docker buildx build
-      --build-arg VERSION="$CI_COMMIT_SHORT_SHA"
+      --build-arg VERSION="$BUILD_VERSION"
       --build-arg REGISTRY_URL="$REGISTRY_URL"
       --secret id=registry_key,src=/tmp/registry_key
       --tag "$IMAGE_REPO:main"
-      --tag "$IMAGE_REPO:$CI_COMMIT_SHA"
+      --tag "$IMAGE_REPO:$BUILD_VERSION"
       --push .
     - rm -f /tmp/registry_key

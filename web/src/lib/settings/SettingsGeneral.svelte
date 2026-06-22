@@ -1,6 +1,6 @@
 <!--
   General tab of OrgSettings — anonymous pull, allowlist mode, default language,
-  allow_version_overwrite (with the supply-chain warning surface).
+  version-overwrite policy (tri-state select with supply-chain warning surface).
 
   Parent owns the `settings` object and the save handler so all the cross-tab
   state lives in one place; this component is a thin form binding + markup view.
@@ -12,6 +12,11 @@
   export let settings
   export let saving = false
   export let onSave = () => {}
+
+  // Default to 'block' if the field is missing on first load so the select binds cleanly.
+  $: if (settings && !settings.versionOverwritePolicy) {
+    settings.versionOverwritePolicy = 'block'
+  }
 </script>
 
 <div class="card card-narrow">
@@ -28,11 +33,15 @@
   </div>
 
   <div class="form-row form-row-inline">
-    <label class="flex-1 label-row">{$t('settings.general.allowVersionOverwrite')} <InfoTip text={$t('settings.general.allowVersionOverwriteHint')} /></label>
-    <input type="checkbox" bind:checked={settings.allowVersionOverwrite} class="w-auto" />
+    <label class="flex-1 label-row">{$t('settings.general.versionOverwritePolicy')} <InfoTip text={$t('settings.general.versionOverwritePolicyHint')} /></label>
+    <select bind:value={settings.versionOverwritePolicy} class="w-auto">
+      <option value="block">{$t('settings.general.versionOverwritePolicyBlock')}</option>
+      <option value="exception">{$t('settings.general.versionOverwritePolicyException')}</option>
+      <option value="allow">{$t('settings.general.versionOverwritePolicyAllow')}</option>
+    </select>
   </div>
-  {#if settings.allowVersionOverwrite}
-    <div class="warning-box mb-3">{$t('settings.general.allowVersionOverwriteWarning')}</div>
+  {#if settings.versionOverwritePolicy === 'allow'}
+    <div class="warning-box mb-3">{$t('settings.general.versionOverwritePolicyWarning')}</div>
   {/if}
 
   <div class="form-row form-row-inline">

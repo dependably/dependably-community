@@ -469,6 +469,19 @@
         }
       }
     },
+    "/api/v1/packages/{ecosystem}/{name}/version-overwrite": {
+      "operations": {
+        "patch": {
+          "requiredParams": [
+            "ecosystem",
+            "name"
+          ],
+          "responseCodes": [
+            "204"
+          ]
+        }
+      }
+    },
     "/api/v1/packages/{ecosystem}/{name}/{version}": {
       "operations": {
         "delete": {

@@ -109,15 +109,19 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             return BadRequest(new { detail = $"Unsupported language code '{lang}'. Allowed: {string.Join(", ", LanguageCodes.Supported)}." });
         }
 
+        if (req.VersionOverwritePolicy is { } pol && pol is not ("block" or "exception" or "allow"))
+        {
+            return _problems.ValidationErrorAction("version_overwrite_policy",
+                "Must be 'block', 'exception', or 'allow'.");
+        }
+
         string orgId = CurrentTenantId();
         long? instanceMax = _config["MAX_UPLOAD_BYTES"] is { } s && long.TryParse(s, out long v) ? (long?)v : null;
 
-        // Capture prior allow_version_overwrite + air_gapped so the targeted
-        // tenant.setting.change events can carry before/after when a toggle moves — that's the
-        // supply-chain-shaped surface audit reviewers grep for.
+        // Capture prior values so the targeted tenant.setting.change events can carry before/after.
         var prior = await _settings.GetSettingsAsync(orgId, ct);
-        bool priorOverwrite = prior?.AllowVersionOverwrite ?? false;
         bool priorAirGapped = prior?.AirGapped ?? false;
+        string priorPolicy = prior?.VersionOverwritePolicy ?? "block";
 
         await _settings.UpsertSettingsAsync(new OrgSettingsUpdate(
             orgId,
@@ -129,12 +133,12 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             req.MaxUploadBytesNuGet,
             instanceMax,
             req.DefaultLanguage,
-            req.AllowVersionOverwrite,
             MaxUploadBytesMaven: req.MaxUploadBytesMaven,
             MaxUploadBytesRpm: req.MaxUploadBytesRpm,
             MaxUploadBytesOci: req.MaxUploadBytesOci,
             MaxUploadBytesCargo: req.MaxUploadBytesCargo,
-            AirGapped: req.AirGapped), ct);
+            AirGapped: req.AirGapped,
+            VersionOverwritePolicy: req.VersionOverwritePolicy), ct);
 
         await _audit.LogAsync("org_settings_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -150,24 +154,24 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 max_upload_bytes_oci = req.MaxUploadBytesOci,
                 max_upload_bytes_cargo = req.MaxUploadBytesCargo,
                 default_language = req.DefaultLanguage,
-                allow_version_overwrite = req.AllowVersionOverwrite,
+                version_overwrite_policy = req.VersionOverwritePolicy,
                 air_gapped = req.AirGapped,
             }), ct: ct);
 
-        if (req.AllowVersionOverwrite is { } newOverwrite && newOverwrite != priorOverwrite)
+        if (req.VersionOverwritePolicy is { } newPolicy && newPolicy != priorPolicy)
         {
             await _audit.LogAsync("tenant.setting.change", orgId, GetUserId(),
                 detail: System.Text.Json.JsonSerializer.Serialize(new
                 {
-                    key = "allow_version_overwrite",
-                    prior_value = priorOverwrite,
-                    new_value = newOverwrite,
+                    key = "version_overwrite_policy",
+                    prior_value = priorPolicy,
+                    new_value = newPolicy,
                 }), ct: ct);
             await _auditEmitter.EmitAsync(
                 Dependably.Infrastructure.Audit.Events.TenantEvents.TypeSettingChange,
                 orgId, "user", GetUserId(), "accepted",
                 new Dependably.Infrastructure.Audit.Events.TenantEvents.SettingChange(
-                    "allow_version_overwrite", priorOverwrite, newOverwrite).ToJson(), ct);
+                    "version_overwrite_policy", priorPolicy, newPolicy).ToJson(), ct);
         }
 
         if (req.AirGapped is { } newAirGapped && newAirGapped != priorAirGapped)

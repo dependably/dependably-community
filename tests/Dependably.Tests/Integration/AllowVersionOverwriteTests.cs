@@ -33,7 +33,7 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
         {
             anonymousPull = true,
             allowlistMode = false,
-            allowVersionOverwrite = true,
+            versionOverwritePolicy = "allow",
         });
         Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
 
@@ -41,6 +41,8 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
         var getResp = await client.GetAsync("/api/v1/settings");
         getResp.EnsureSuccessStatusCode();
         var doc = JsonDocument.Parse(await getResp.Content.ReadAsStringAsync()).RootElement;
+        // Both the tri-state policy and the legacy bool must reflect the 'allow' setting.
+        Assert.Equal("allow", doc.GetProperty("versionOverwritePolicy").GetString());
         Assert.True(doc.GetProperty("allowVersionOverwrite").GetBoolean());
 
         // Audit should carry both the wide org_settings_updated event AND the targeted
@@ -48,25 +50,25 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
         var db = _factory.Services.GetRequiredService<Dependably.Infrastructure.IMetadataStore>();
         await using var conn = await db.OpenAsync();
         var rows = (await conn.QueryAsync<(string Action, string Detail)>(
-            "SELECT action, detail FROM audit_log WHERE action = 'tenant.setting.change' AND detail LIKE '%allow_version_overwrite%' ORDER BY created_at DESC LIMIT 1"))
+            "SELECT action, detail FROM audit_log WHERE action = 'tenant.setting.change' AND detail LIKE '%version_overwrite_policy%' ORDER BY created_at DESC LIMIT 1"))
             .ToList();
         Assert.NotEmpty(rows);
-        Assert.Contains("\"new_value\":true", rows[0].Detail);
+        Assert.Contains("\"new_value\":\"allow\"", rows[0].Detail);
     }
 
     [Fact]
     public async Task PublishDuplicate_OverwriteOff_Returns409()
     {
         // Tests share a DependablyFactory (IClassFixture) and so share the
-        // allow_version_overwrite setting. Explicitly set it off at the start so this test
-        // is order-independent.
+        // version_overwrite_policy setting. Explicitly set it to 'block' at the start so
+        // this test is order-independent.
         using (var admin = await AdminJwtClient())
         {
             var settingsResp = await admin.PutAsJsonAsync("/api/v1/settings", new
             {
                 anonymousPull = false,
                 allowlistMode = false,
-                allowVersionOverwrite = false,
+                versionOverwritePolicy = "block",
             });
             settingsResp.EnsureSuccessStatusCode();
         }
@@ -85,14 +87,14 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
     [Fact]
     public async Task PublishDuplicate_OverwriteOn_AcceptsAndAuditsPackageReplace()
     {
-        // Enable overwrite first.
+        // Enable overwrite first via the tri-state policy.
         using (var admin = await AdminJwtClient())
         {
             var settingsResp = await admin.PutAsJsonAsync("/api/v1/settings", new
             {
                 anonymousPull = false,
                 allowlistMode = false,
-                allowVersionOverwrite = true,
+                versionOverwritePolicy = "allow",
             });
             settingsResp.EnsureSuccessStatusCode();
         }

@@ -162,6 +162,7 @@ export const api = {
     maxUploadBytesOci: s.maxUploadBytesOci,
     defaultLanguage: s.defaultLanguage,
     allowVersionOverwrite: s.allowVersionOverwrite,
+    versionOverwritePolicy: s.versionOverwritePolicy,
     airGapped: s.airGapped,
   }),
   getRetention: () => req('GET', '/retention'),
@@ -325,6 +326,8 @@ export const api = {
     req('POST', `/packages/${eco}/${name.replaceAll('/', '%2F')}/${version}/block`),
   unblockVersion: (eco, name, version) =>
     req('POST', `/packages/${eco}/${name.replaceAll('/', '%2F')}/${version}/unblock`),
+  setPackageVersionOverwrite: (eco, name, override) =>
+    req('PATCH', `/packages/${eco}/${name.replaceAll('/', '%2F')}/version-overwrite`, { override }),
 
   // Stats
   getStats: () => req('GET', '/stats'),

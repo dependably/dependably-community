@@ -50,6 +50,7 @@ public sealed class PackageRepository
             SELECT p.id, p.org_id as OrgId, p.ecosystem, p.name, p.purl_name as PurlName,
                    p.is_proxy as IsProxy, p.created_at as CreatedAt,
                    p.upstream_latest_version as UpstreamLatestVersion,
+                   p.same_version_push_override as SameVersionPushOverride,
                    CASE
                      WHEN p.upstream_latest_version IS NULL THEN 'unknown'
                      WHEN EXISTS (
@@ -99,7 +100,7 @@ public sealed class PackageRepository
             new { id, orgId, ecosystem, name, purlName, isProxy = isProxy ? 1 : 0 });
 
         return (await conn.QuerySingleOrDefaultAsync<Package>(
-            "SELECT id, org_id as OrgId, ecosystem, name, purl_name as PurlName, is_proxy as IsProxy, created_at as CreatedAt FROM packages WHERE id = @id",
+            "SELECT id, org_id as OrgId, ecosystem, name, purl_name as PurlName, is_proxy as IsProxy, created_at as CreatedAt, same_version_push_override as SameVersionPushOverride FROM packages WHERE id = @id",
             new { id }))!;
     }
 
@@ -490,6 +491,7 @@ public sealed class PackageRepository
         WITH pkg_data AS (
             SELECT p.id, p.org_id as OrgId, p.ecosystem, p.name, p.purl_name as PurlName,
                    p.is_proxy as IsProxy, p.created_at as CreatedAt,
+                   p.same_version_push_override as SameVersionPushOverride,
                    (
                        SELECT COUNT(*) FROM package_versions WHERE package_id = p.id AND origin = 'uploaded'
                    ) + COALESCE((
@@ -810,6 +812,20 @@ public sealed class PackageRepository
     }
 
     /// <summary>
+    /// Sets or clears the per-package same-version-push override for an org-scoped package row.
+    /// <paramref name="overrideValue"/> is one of <c>'allow'</c>, <c>'block'</c>, or <c>null</c>
+    /// (null clears the override, restoring inheritance from the org policy).
+    /// </summary>
+    public async Task SetSameVersionPushOverrideAsync(
+        string packageId, string orgId, string? overrideValue, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE packages SET same_version_push_override = @override WHERE id = @id AND org_id = @orgId",
+            new { id = packageId, orgId, @override = overrideValue });
+    }
+
+    /// <summary>
     /// Flips the <c>yanked</c> flag on a version, clearing <c>yank_reason</c> when unyanking.
     /// Yank hides a version from dependency resolution (Cargo, npm) without deleting the
     /// artefact — a yanked crate is still downloadable by exact coordinate. The caller resolves
@@ -1039,6 +1055,26 @@ public sealed class PackageRepository
                 filename,
                 now,
             });
+    }
+
+    /// <summary>
+    /// Returns all tags in <c>oci_tags</c> for the given org and repository, grouped by
+    /// digest. Callers join the result against <c>package_versions.version</c> (which equals
+    /// the digest for OCI) to surface tag names alongside each image version row.
+    /// </summary>
+    public async Task<ILookup<string, string>> GetOciTagsByDigestAsync(
+        string orgId, string repository, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var rows = await conn.QueryAsync<(string Digest, string Tag)>(
+            // rawsql: ORDER BY tag is a whitelisted constant, not user input.
+            """
+            SELECT digest, tag FROM oci_tags
+            WHERE org_id = @orgId AND repository = @repo
+            ORDER BY tag
+            """,
+            new { orgId, repo = repository });
+        return rows.ToLookup(r => r.Digest, r => r.Tag);
     }
 }
 

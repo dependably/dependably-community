@@ -201,6 +201,11 @@ public sealed partial class SchemaInitializer
         // cache_artifact.name rows never matched and their proxy versions showed a 0 version count.
         // Idempotent: the WHERE name <> lower(name) predicate is a no-op on already-normalized rows.
         await RunOnceAsync(conn, "normalize_rpm_cache_artifact_names", NormalizeRpmCacheArtifactNamesAsync);
+        // Backfill version_overwrite_policy from the legacy allow_version_overwrite boolean for
+        // orgs that had it set to 1. The tri-state policy supersedes the boolean; the boolean
+        // column is kept but dual-written going forward. Idempotent via the applied-migrations ledger.
+        // xtenant: one-shot data migration across every tenant on the instance.
+        await RunOnceAsync(conn, "migrate_allow_version_overwrite_to_policy", MigrateAllowVersionOverwriteToPolicyAsync);
     }
 
     // Copies each entry of the legacy org_settings.maven_reserved_prefixes JSON column into a
@@ -982,6 +987,15 @@ public sealed partial class SchemaInitializer
             // routing list (JSON TEXT array). Both are OCI-only; all other ecosystems leave them NULL.
             "ALTER TABLE upstream_registry ADD COLUMN token_endpoint TEXT",
             "ALTER TABLE upstream_registry ADD COLUMN prefixes TEXT",
+            // Tri-state same-version-push org policy. 'block' (default) = always reject duplicates;
+            // 'exception' = blocked by default but per-package grant allowed;
+            // 'allow' = allowed by default but per-package block allowed.
+            // Added without a CHECK (SQLite ALTER can't add one); upgraded DBs rely on controller
+            // validation; fresh installs get the CHECK from Schema.sql.
+            "ALTER TABLE org_settings ADD COLUMN version_overwrite_policy TEXT NOT NULL DEFAULT 'block'",
+            // Per-package same-version-push override. NULL = inherit org policy. 'allow' or 'block'.
+            // Added without a CHECK for the same SQLite ALTER reason as above.
+            "ALTER TABLE packages ADD COLUMN same_version_push_override TEXT",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)
@@ -1040,6 +1054,17 @@ public sealed partial class SchemaInitializer
     {
         await conn.ExecuteAsync(
             "UPDATE cache_artifact SET name = lower(name) WHERE ecosystem = 'rpm' AND name <> lower(name)");
+    }
+
+    // Promotes the legacy allow_version_overwrite boolean to the tri-state version_overwrite_policy
+    // column. Org rows where allow_version_overwrite = 1 are set to 'allow'; all others stay at the
+    // column default 'block'. The boolean column is retained for blue-green safety and dual-written
+    // by UpsertSettingsAsync going forward.
+    // xtenant: one-shot data migration, runs across every tenant on the instance.
+    private static async Task MigrateAllowVersionOverwriteToPolicyAsync(DbConnection conn)
+    {
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET version_overwrite_policy = 'allow' WHERE allow_version_overwrite = 1");
     }
 
     private async Task EnsureMigrationsTableAsync(DbConnection conn)

@@ -222,6 +222,12 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
     [Fact]
     public async Task AllowOverwriteOn_DuplicateReplacesAndEmitsPackageReplaceEvent()
     {
+        // Org policy must permit overwrites for this test — set version_overwrite_policy to 'allow'.
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync(
+                "INSERT INTO org_settings (org_id, version_overwrite_policy, allow_version_overwrite) VALUES ('o1', 'allow', 1)");
+        }
         var svc = Build();
         var first = Sample(version: "1.0.0");
         var firstResult = (PublishResult.Accepted)await svc.StoreAndRecordAsync(first);
@@ -416,6 +422,12 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         // An overwrite must not double-count the artefact's existing size. Two consecutive
         // 600-byte writes of the SAME version under a 1000-byte cap would otherwise reject
         // the second — but a 600 → 700 overwrite is only +100 against the cap.
+        // Org policy must permit overwrites.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO org_settings (org_id, version_overwrite_policy, allow_version_overwrite) VALUES ('o1', 'allow', 1)");
+        }
         var orgs = new OrgRepository(_db);
         await orgs.SetStorageQuotaBytesAsync("o1", 1_000);
         var svc = Build();
@@ -430,6 +442,12 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
     public async Task Quota_OverwriteThatStillExceeds_Rejects()
     {
         // Edge of the delta logic: prior 600 + (1500-600 delta) = 1500 > 1000 cap → reject.
+        // Org policy must permit overwrites so the quota gate (not policy gate) is the one rejecting.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO org_settings (org_id, version_overwrite_policy, allow_version_overwrite) VALUES ('o1', 'allow', 1)");
+        }
         var orgs = new OrgRepository(_db);
         await orgs.SetStorageQuotaBytesAsync("o1", 1_000);
         var svc = Build();
@@ -590,6 +608,12 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         // PutAsync. Sequence inside the SUT: GetVersionAsync (table still there) →
         // SHA256 → GetRegistryAsync → PutAsync (drops the table) → UpdateVersionForOverwriteAsync
         // (SQL error, 'no such table').
+        // Org policy must permit overwrites so the overwrite path is reached.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO org_settings (org_id, version_overwrite_policy, allow_version_overwrite) VALUES ('o1', 'allow', 1)");
+        }
         var svc = BuildWithRegistry(_blobs);
         await svc.StoreAndRecordAsync(Sample(version: "1.0.0", size: 100));
 

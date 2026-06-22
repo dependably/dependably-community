@@ -26,7 +26,10 @@ public sealed record UpdateOrgSettingsRequest(
     long? MaxUploadBytesCargo = null,
     string? DefaultLanguage = null,
     bool? AllowVersionOverwrite = null,
-    bool? AirGapped = null);
+    bool? AirGapped = null,
+    // Tri-state same-version-push org policy. null = leave unchanged.
+    // 'block' | 'exception' | 'allow'. Validated by OrgSettingsController.
+    string? VersionOverwritePolicy = null);
 
 public sealed record UpdateRetentionRequest(
     int? KeepVersions,
@@ -90,6 +93,10 @@ public sealed record AddUpstreamRegistryRequest(
     string? Host = null);
 
 public sealed record ReorderUpstreamRegistryRequest(IReadOnlyList<string> Ids);
+
+// Body for PATCH /api/v1/packages/{eco}/{name}/version-overwrite.
+// null Override clears the per-package setting (inherit org policy).
+public sealed record SetPackageVersionOverwriteRequest(string? Override = null);
 
 public sealed record PatchRoleRequest(string Role);
 

@@ -117,6 +117,12 @@
       "label": "Malveillant",
       "help": "Ce paquet a une version signalée comme malveillante (avis OSV MAL-)."
     },
+    "actionsMenu": {
+      "open": "Actions du paquet",
+      "allowSameVersionPush": "Autoriser la publication de la même version",
+      "blockSameVersionPush": "Bloquer la publication de la même version",
+      "inheritOrgDefault": "Hériter (valeur par défaut de l'organisation)"
+    },
     "empty": "Aucun paquet trouvé"
   },
   "claims": {
@@ -192,6 +198,7 @@
     "columns": {
       "version": "Version",
       "latest": "Dernière",
+      "tag": "Étiquette",
       "checksum": "Somme de contrôle",
       "size": "Taille",
       "pushed": "Reçu le",
@@ -233,7 +240,6 @@
       "malicious": "Malveillant",
       "maliciousHelp": "Lié à un avis de paquet malveillant connu (OSV MAL-)."
     },
-    "statusHelp": "Le statut correspond au contrôle de service (version bloquée ou servable), et non à un verdict sur les vulnérabilités. Une version servable peut tout de même comporter des avis — voir le badge Vulnérable et le décompte par sévérité.",
     "latestBanner": {
       "stale": "En retard sur l'amont — la dernière version {version} n'est pas mise en cache ici.",
       "current": "À jour avec l'amont — la dernière version {version} est mise en cache."
@@ -591,6 +597,12 @@
       "allowVersionOverwrite": "Autoriser l'écrasement de version",
       "allowVersionOverwriteHint": "Lorsque désactivé, publier un (nom, version) en doublon est rejeté. Les opérateurs doivent d'abord supprimer la version existante.",
       "allowVersionOverwriteWarning": "Activer cette option permet à une publication de remplacer le contenu d'une version existante. Le changement est audité (package.replace enregistre les deux empreintes) mais les implications pour la chaîne d'approvisionnement sont réelles — les paquets déjà téléchargés par vos développeurs peuvent avoir un contenu différent au prochain téléchargement. Le basculement de ce paramètre est lui-même audité.",
+      "versionOverwritePolicy": "Politique d'écrasement de version",
+      "versionOverwritePolicyHint": "Contrôle si la publication d'un (nom, version) en doublon est autorisée. Bloquer rejette tous les écrasements. Exception permet des remplacements par paquet via la page Paquets. Autoriser permet les écrasements pour toute l'organisation.",
+      "versionOverwritePolicyBlock": "Bloquer — rejeter tous les écrasements",
+      "versionOverwritePolicyException": "Exception — remplacements par paquet",
+      "versionOverwritePolicyAllow": "Autoriser — permettre tous les écrasements",
+      "versionOverwritePolicyWarning": "Autoriser les écrasements permet à une publication de remplacer le contenu d'une version existante. Le changement est audité (package.replace enregistre les deux empreintes) mais les implications pour la chaîne d'approvisionnement sont réelles — les paquets déjà téléchargés par vos développeurs peuvent avoir un contenu différent au prochain téléchargement. Le basculement de ce paramètre est lui-même audité.",
       "airGapped": "Environnement isolé (air-gap)",
       "airGappedHint": "Lorsque activé, Dependably n'émet aucune requête réseau sortante pour cette organisation : les récupérations via le proxy amont sont désactivées (les paquets non mis en cache renvoient 404), et les analyses de vulnérabilités et de métadonnées d'obsolescence ignorent cette organisation. À utiliser pour les déploiements isolés / air-gap.",
       "airGappedEnforcedNote": "Imposé pour toute l'instance par l'opérateur (AIR_GAPPED) ; non modifiable ici.",

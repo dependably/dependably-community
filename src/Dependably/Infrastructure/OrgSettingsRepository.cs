@@ -45,15 +45,26 @@ public sealed class OrgSettingsRepository
 
         await using var conn = await _db.OpenAsync(ct);
         string? lang = string.IsNullOrWhiteSpace(update.DefaultLanguage) ? null : update.DefaultLanguage;
+        // Resolve the effective legacy boolean and policy from whichever field the caller set.
+        // If VersionOverwritePolicy is supplied it is authoritative; allow_version_overwrite
+        // is derived from it for blue-green compatibility. If only AllowVersionOverwrite is
+        // supplied (legacy callers) we preserve the legacy bool directly and leave the policy
+        // unchanged (null → COALESCE falls through to the current row value).
+        int? legacyOverwrite = update.VersionOverwritePolicy is not null
+            ? (update.VersionOverwritePolicy == "allow" ? 1 : 0)
+            : ToBoolFlag(update.AllowVersionOverwrite);
+        string? policy = update.VersionOverwritePolicy;
+
         await conn.ExecuteAsync(
             """
             INSERT INTO org_settings (org_id, anonymous_pull, allowlist_mode,
                 max_upload_bytes, max_upload_bytes_pypi, max_upload_bytes_npm, max_upload_bytes_nuget,
                 max_upload_bytes_maven, max_upload_bytes_rpm, max_upload_bytes_oci, max_upload_bytes_cargo,
-                default_language, allow_version_overwrite, air_gapped)
+                default_language, allow_version_overwrite, version_overwrite_policy, air_gapped)
             VALUES (@orgId, @anonPull, @allowlist, @maxBytes, @maxBytesPyPi, @maxBytesNpm, @maxBytesNuGet,
                 @maxBytesMaven, @maxBytesRpm, @maxBytesOci, @maxBytesCargo,
-                COALESCE(@lang, 'en'), COALESCE(@overwrite, 0), COALESCE(@airGapped, 0))
+                COALESCE(@lang, 'en'), COALESCE(@legacyOverwrite, 0),
+                COALESCE(@policy, 'block'), COALESCE(@airGapped, 0))
             ON CONFLICT(org_id) DO UPDATE SET
                 anonymous_pull      = @anonPull,
                 allowlist_mode      = @allowlist,
@@ -66,7 +77,9 @@ public sealed class OrgSettingsRepository
                 max_upload_bytes_oci   = @maxBytesOci,
                 max_upload_bytes_cargo = @maxBytesCargo,
                 default_language    = COALESCE(@lang, default_language),
-                allow_version_overwrite = COALESCE(@overwrite, allow_version_overwrite),
+                version_overwrite_policy = COALESCE(@policy, version_overwrite_policy),
+                allow_version_overwrite  = CASE WHEN @legacyOverwrite IS NULL THEN allow_version_overwrite
+                                                ELSE @legacyOverwrite END,
                 air_gapped          = COALESCE(@airGapped, air_gapped)
             """,
             new
@@ -83,7 +96,8 @@ public sealed class OrgSettingsRepository
                 maxBytesOci = Clamp(update.MaxUploadBytesOci, update.InstanceMaxUploadBytes),
                 maxBytesCargo = Clamp(update.MaxUploadBytesCargo, update.InstanceMaxUploadBytes),
                 lang,
-                overwrite = ToBoolFlag(update.AllowVersionOverwrite),
+                legacyOverwrite,
+                policy,
                 airGapped = ToBoolFlag(update.AirGapped),
             });
 

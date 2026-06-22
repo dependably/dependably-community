@@ -117,6 +117,12 @@
       "label": "Malicious",
       "help": "This package has a version flagged as known-malicious (OSV MAL- advisory)."
     },
+    "actionsMenu": {
+      "open": "Package actions",
+      "allowSameVersionPush": "Allow same-version push",
+      "blockSameVersionPush": "Block same-version push",
+      "inheritOrgDefault": "Inherit (org default)"
+    },
     "empty": "No packages found"
   },
   "claims": {
@@ -192,6 +198,7 @@
     "columns": {
       "version": "Version",
       "latest": "Latest",
+      "tag": "Tag",
       "checksum": "Checksum",
       "size": "Size",
       "pushed": "Pushed",
@@ -232,7 +239,6 @@
       "malicious": "Malicious",
       "maliciousHelp": "Linked to a known-malicious package advisory (OSV MAL-)."
     },
-    "statusHelp": "Status is the serving gate (whether this version is blocked or servable), not a verdict on vulnerabilities. A servable version can still carry advisories — see the Vulnerable badge and the severity counts.",
     "latestBanner": {
       "stale": "Behind upstream — latest version {version} is not cached here.",
       "current": "Up to date with upstream — latest version {version} is cached."
@@ -592,6 +598,12 @@
       "allowVersionOverwrite": "Allow version overwrite",
       "allowVersionOverwriteHint": "When off, publishing a duplicate (name, version) is rejected. Operators must delete the existing version first.",
       "allowVersionOverwriteWarning": "Enabling this lets a publish replace an existing version's bytes. The change is audited (package.replace records both hashes) but the supply-chain implications are real — packages your developers already pulled may have different contents on a refetch. Toggling this setting is itself audited.",
+      "versionOverwritePolicy": "Version overwrite policy",
+      "versionOverwritePolicyHint": "Controls whether publishing a duplicate (name, version) is allowed. Block rejects all overwrites. Exception allows per-package overrides via the Packages page. Allow permits overwrites org-wide.",
+      "versionOverwritePolicyBlock": "Block — reject all overwrites",
+      "versionOverwritePolicyException": "Exception — per-package overrides",
+      "versionOverwritePolicyAllow": "Allow — permit all overwrites",
+      "versionOverwritePolicyWarning": "Allowing overwrites lets a publish replace an existing version's bytes. The change is audited (package.replace records both hashes) but the supply-chain implications are real — packages your developers already pulled may have different contents on a refetch. Toggling this setting is itself audited.",
       "airGapped": "Air-gapped environment",
       "airGappedHint": "When on, Dependably makes no outbound network requests for this organization: upstream proxy fetches are disabled (uncached packages return 404), and vulnerability and deprecation-metadata scans skip this organization. Use for isolated / air-gapped deployments.",
       "airGappedEnforcedNote": "Enforced instance-wide by the operator (AIR_GAPPED); can't be changed here.",

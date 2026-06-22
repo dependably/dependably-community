@@ -45,7 +45,10 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- See Schema.sql for the full rationale.
     min_release_age_hours     INTEGER,
     default_language          TEXT    NOT NULL DEFAULT 'en',
-    allow_version_overwrite   INTEGER NOT NULL DEFAULT 0,
+    allow_version_overwrite   INTEGER NOT NULL DEFAULT 0,   -- legacy boolean; kept for blue-green safety; see version_overwrite_policy
+    -- Tri-state same-version-push policy. See Schema.sql for the full rationale.
+    version_overwrite_policy  TEXT    NOT NULL DEFAULT 'block'
+                              CHECK (version_overwrite_policy IN ('block','exception','allow')),
     maven_reserved_prefixes   TEXT    NOT NULL DEFAULT '[]', -- dep-confusion guard; JSON array of groupId prefixes
     -- Per-tenant air-gap posture; forces proxy passthrough off and skips the vuln/deprecation
     -- scan passes for this org. Composes with the instance AIR_GAPPED env var. See Schema.sql.
@@ -124,6 +127,9 @@ CREATE TABLE IF NOT EXISTS packages (
     -- the background upstream-metadata pass. NULL when no upstream baseline is known.
     upstream_latest_version    TEXT,
     upstream_latest_checked_at TEXT,
+    -- Per-package same-version-push override. NULL = inherit. See Schema.sql for the full rationale.
+    same_version_push_override TEXT
+                               CHECK (same_version_push_override IN ('allow','block')),
     UNIQUE (org_id, ecosystem, purl_name)
 );
 

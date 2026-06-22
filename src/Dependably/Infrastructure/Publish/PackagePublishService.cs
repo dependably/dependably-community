@@ -119,17 +119,17 @@ public sealed class PackagePublishService : IPackagePublishService
                 $"Name '{request.PurlName}' is unclaimed; create a 'local_only' or 'mixed' claim first.");
         }
 
-        // Dedup vs overwrite. When AllowOverwrite is false (default) a duplicate
-        // coordinate rejects with 409. When true, the existing row's artefact is replaced
-        // in place and a package.replace audit event records both old and new hashes.
+        // Dedup vs overwrite. Resolution is policy-driven (org tri-state + per-package override).
+        // ResolveOverwriteAllowed returns true only when the effective combination permits it.
         string blobKey = BlobKeys.Hosted(request.OrgId, request.Ecosystem, request.PurlName, request.Version, request.Filename);
         var pkg = await _packages.GetOrCreateAsync(request.OrgId, request.Ecosystem, request.Name, request.PurlName, isProxy: false, ct);
         var existing = await _packages.GetVersionAsync(pkg.Id, request.Version, ct);
-        if (existing is not null && !request.AllowOverwrite)
+        var settings = await _orgs.GetSettingsAsync(request.OrgId, ct);
+        if (existing is not null && !ResolveOverwriteAllowed(settings?.VersionOverwritePolicy, pkg.SameVersionPushOverride))
         {
             return new PublishResult.Rejected(409, "version_exists",
                 $"Tarball parsed as {request.PurlName}@{request.Version}; that version already exists. " +
-                "Delete it first or enable allow_version_overwrite.");
+                "Same-version push is blocked by this package's policy.");
         }
 
         // Atomic quota reservation: reserves the net delta (new size minus replaced size)
@@ -276,11 +276,15 @@ public sealed class PackagePublishService : IPackagePublishService
         if (pkg is not null)
         {
             var existing = await _packages.GetVersionAsync(pkg.Id, request.Version, ct);
-            if (existing is not null && !request.AllowOverwrite)
+            if (existing is not null)
             {
-                return new PublishResult.Rejected(409, "version_exists",
-                    $"Tarball parsed as {request.PurlName}@{request.Version}; that version already exists. " +
-                    "Delete it first or enable allow_version_overwrite.");
+                var settings = await _orgs.GetSettingsAsync(request.OrgId, ct);
+                if (!ResolveOverwriteAllowed(settings?.VersionOverwritePolicy, pkg.SameVersionPushOverride))
+                {
+                    return new PublishResult.Rejected(409, "version_exists",
+                        $"Tarball parsed as {request.PurlName}@{request.Version}; that version already exists. " +
+                        "Same-version push is blocked by this package's policy.");
+                }
             }
         }
 
@@ -342,6 +346,19 @@ public sealed class PackagePublishService : IPackagePublishService
         => request.ArtifactStagingPath is not null
             ? request.ArtifactSizeBytes
             : request.ArtifactBytes!.LongLength;
+
+    // Resolves whether a same-version overwrite is permitted given the org-level policy
+    // and the per-package override. The resolution matrix is:
+    //   org 'block'     -> always false  (hard lockdown; per-package overrides ignored)
+    //   org 'exception' -> pkgOverride == 'allow'  (blocked by default; package can grant)
+    //   org 'allow'     -> pkgOverride != 'block'  (allowed by default; package can deny)
+    internal static bool ResolveOverwriteAllowed(string? orgPolicy, string? pkgOverride)
+        => (orgPolicy ?? "block") switch
+        {
+            "allow" => pkgOverride != "block",
+            "exception" => pkgOverride == "allow",
+            _ => false,
+        };
 
     // Size cap. Callers know per-tenant + per-ecosystem cap; we enforce as a final
     // safety net so no single path can write a too-large blob even if a caller forgets.
