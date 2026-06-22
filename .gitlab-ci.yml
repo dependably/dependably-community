@@ -1196,3 +1196,69 @@ release-to-github:
       - provenance.json
     expire_in: never
     when: on_success
+
+# === publish (runtime image) ===
+#
+# Build the runtime image and push it to the Dependably OCI registry on every
+# GREEN main push, so dependably-integration-tests can pull it to stand up an
+# ephemeral, permissive instance for the client matrix. Post-merge only
+# (.runs-on-ci-main) and in the `release` stage with NO `needs:`, so it runs
+# only after every earlier stage (build/test/sbom/dast) has passed — i.e. main
+# is green.
+#
+# NOT .release-required: a side-effect publish, not a release gate, so it stays
+# outside release-contract-lint. Uses buildx because the Dockerfile is
+# `# syntax=docker/dockerfile:1` with `RUN --mount=type=secret` (BuildKit-only,
+# matching the GitHub build) — Kaniko can't build it. This therefore needs a
+# PRIVILEGED, BuildKit-capable runner (same requirement as the rpm/docker test
+# suites).
+#
+# Prereqs (set as masked CI/CD variables):
+#   REGISTRY_KEY  — token for $DEP_IMAGE_REGISTRY. Already used by the build job
+#                   for proxy dep routing; must carry publish:oci to push here.
+#                   If it doesn't, add a dedicated publish token var and use it
+#                   for `docker login` below.
+#   DOCKER_AUTH_CONFIG — base-image pull creds (already required pipeline-wide).
+# TODO before enabling: pin docker:27-cli / docker:27-dind by digest like every
+# other image (glsec/supply-chain lint expects it).
+publish-image:
+  stage: release
+  extends: .runs-on-ci-main
+  image: ${DEP_IMAGE_REGISTRY}/library/docker:27-cli
+  services:
+    - name: ${DEP_IMAGE_REGISTRY}/library/docker:27-dind   # glsec:ignore GL054 -- buildx needs BuildKit (Dockerfile uses RUN --mount=type=secret); privileged/BuildKit runner is the documented, chosen prerequisite
+      alias: docker
+  tags: [amd64]   # must be a privileged / BuildKit-capable runner
+  # serialize publishes so concurrent main pipelines can't race the registry (GL019)
+  resource_group: publish-image
+  variables:
+    # Talk to the dind service over its plaintext endpoint. TLS (2376) needs the
+    # runner to share dind's generated /certs/client volume into the job container;
+    # the self-hosted runners do not, so a TLS client finds no ca.pem and fails to
+    # initialize. The dind<->client traffic stays on the job's isolated service
+    # bridge network, which is never reachable outside the job.
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: "" # glsec:ignore GL031 -- TLS on 2376 needs the runner to share dind's /certs/client volume into the job, which these self-hosted runners do not; the docker executor isolates the dind daemon on this job's per-build service network, so 2375 is not reachable by other jobs
+    IMAGE_REPO: ${DEP_IMAGE_REGISTRY}/itest/dependably
+  # Auth + build-time dep routing reuse the existing REGISTRY_URL / REGISTRY_KEY
+  # CI vars (same as the build job); REGISTRY_KEY must carry publish:oci to push.
+  script:
+    - echo "$REGISTRY_KEY" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
+    # The dind service daemon comes up a few seconds after the job container, so the
+    # first command that talks to it races startup ("Cannot connect to the Docker
+    # daemon at tcp://docker:2375"). docker login above is a local config write and
+    # does not touch the daemon, so wait for the daemon to accept connections here.
+    - |
+      for i in $(seq 30); do docker info >/dev/null 2>&1 && break; echo "waiting for dind ($i)..."; sleep 1; done
+      docker info >/dev/null 2>&1 || { echo "dind daemon did not become ready on $DOCKER_HOST"; exit 1; }
+    - docker buildx create --use --name dep-builder
+    - printf '%s' "$REGISTRY_KEY" > /tmp/registry_key
+    - >-
+      docker buildx build
+      --build-arg VERSION="$CI_COMMIT_SHORT_SHA"
+      --build-arg REGISTRY_URL="$REGISTRY_URL"
+      --secret id=registry_key,src=/tmp/registry_key
+      --tag "$IMAGE_REPO:main"
+      --tag "$IMAGE_REPO:$CI_COMMIT_SHA"
+      --push .
+    - rm -f /tmp/registry_key

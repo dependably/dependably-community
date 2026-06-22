@@ -277,7 +277,10 @@ public static class DependablyMeter
         Meter.CreateHistogram<double>(
             "dependably.metadata.build.duration",
             unit: "s",
-            description: "Metadata document build latency in seconds. Attributes: ecosystem, document (simple_index|package_index|registration_index|registration_leaf|rpm_primary|rpm_filelists|rpm_other|rpm_merged_primary|rpm_merged_filelists|maven_metadata), outcome.");
+            description: "Metadata document build latency in seconds. Attributes: ecosystem, " +
+                "document (simple_index|package_index|registration_index|registration_leaf|" +
+                "rpm_primary|rpm_filelists|rpm_other|rpm_merged_primary|rpm_merged_filelists|" +
+                "maven_metadata), outcome.");
 
     /// <summary>
     /// Blob-store operation-initiation latency (open/seek/stat/connect). Measures the time
@@ -290,7 +293,9 @@ public static class DependablyMeter
         Meter.CreateHistogram<double>(
             "dependably.blobstore.operation.duration",
             unit: "s",
-            description: "Blob-store operation-initiation latency in seconds (open/seek/stat/connect). Measures operation-initiation latency, NOT stream transfer time. Attributes: operation (get|put|exists|range|delete), backend (local|s3|azure), outcome.");
+            description: "Blob-store operation-initiation latency in seconds (open/seek/stat/connect). " +
+                "Measures operation-initiation latency, NOT stream transfer time. " +
+                "Attributes: operation (get|put|exists|range|delete), backend (local|s3|azure), outcome.");
 
     /// <summary>
     /// Token-auth resolve latency. Reuses the outcome vocabulary already used by the
@@ -432,4 +437,16 @@ public static class DependablyMeter
 
     public static IReadOnlyDictionary<string, long> ReadBlobStoreSizes()
         => BlobStoreSizes.ToDictionary(kv => kv.Key, kv => kv.Value);
+
+    /// <summary>
+    /// Returns the last recorded available bytes on the staging volume, as set by
+    /// <see cref="RecordStagingDiskAvailable"/>. Zero when the poller has not yet run.
+    /// </summary>
+    public static long ReadStagingDiskAvailable() => Interlocked.Read(ref _stagingDiskAvailableBytes);
+
+    /// <summary>
+    /// Returns the last recorded bytes used in the staging directory, as set by
+    /// <see cref="RecordStagingDiskUsed"/>. Zero when the poller has not yet run.
+    /// </summary>
+    public static long ReadStagingDiskUsed() => Interlocked.Read(ref _stagingDiskUsedBytes);
 }

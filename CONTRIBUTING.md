@@ -24,6 +24,29 @@ dotnet publish src/Dependably -c Release -r linux-musl-arm64 --self-contained tr
 cd web && npm ci && npm run prepare
 ```
 
+### Dependency checks (pre-commit)
+
+When dependency manifests change, the pre-commit hook audits them with the dependably
+checkers: `@dependably/npm-check` runs on `web/package.json` / `web/package-lock.json`, and
+`Dependably.NuGetCheck` (the `nuget-check` local dotnet tool) runs on the backend
+`packages.lock.json` files. Both flag known vulnerabilities and any package source/registry
+host that isn't public or allowlisted in the repo-root **`.dependably-check`** config.
+
+Both tools live on the private dogfood feed, so the checks require a `DEPENDABLY_TOKEN`
+environment variable with access to `dependably.northwardlabs.ca`:
+
+```bash
+export DEPENDABLY_TOKEN=…   # a dogfood-registry token; read from env, never committed
+```
+
+Without `DEPENDABLY_TOKEN` the checks are skipped with a warning (so contributors without
+feed access can still commit); CI enforces them regardless. To trust an additional private
+registry host, add it to `.dependably-check`:
+
+```json
+{ "common": { "allowedRegistryHosts": ["dependably.northwardlabs.ca"] } }
+```
+
 ### Docker
 
 ```bash
@@ -259,14 +282,13 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 
 | Variable | Default | Description |
 |---|---|---|
-| `BASE_URL` | `http://localhost:8080` | Public base URL — used in NuGet service index and npm tarball URLs |
+| `BASE_URL` | `http://localhost:8080` | Public base URL. The host portion (scheme and port stripped) is the apex hostname for multi-tenant subdomain routing and host-header filtering. When the host is non-localhost, the `AllowedHosts` allowlist is derived at startup — unknown `Host` headers are rejected before tenant resolution. In `DEPLOYMENT_MODE=single`, only the apex host and localhost are permitted. In `DEPLOYMENT_MODE=multi`, the apex host, `*.apex` (all tenant subdomains), and localhost are permitted. When `BASE_URL` is unset or localhost (local/dev), filtering is permissive (`AllowedHosts=*`) and a startup warning is logged. |
 | `DB_PATH` | `/data/dependably.db` | SQLite database file path |
 | `DB_PROVIDER` | `sqlite` | Database backend: `sqlite` (default, uses `DB_PATH`) or `postgres` (requires `DB_CONNECTION_STRING`). |
 | `DB_CONNECTION_STRING` | — | Postgres connection string. Required when `DB_PROVIDER=postgres`; ignored for SQLite. |
 | `DEFAULT_ORG_SLUG` | `default` | Slug of the org created on first boot |
-| `DEPLOYMENT_MODE` | `single` | Tenancy mode: `single` or `multi`. `multi` requires a usable `APEX_HOST` (or a non-localhost `BASE_URL`). `bound` pins every request to `BOUND_TENANT_SLUG` regardless of host (single-tenant intercept mode). |
+| `DEPLOYMENT_MODE` | `single` | Tenancy mode: `single` or `multi`. `multi` requires a non-localhost `BASE_URL` (the host portion is the apex domain). `bound` pins every request to `BOUND_TENANT_SLUG` regardless of host (single-tenant intercept mode). |
 | `BOUND_TENANT_SLUG` | — | Required when `DEPLOYMENT_MODE=bound`. Every request resolves to this tenant slug; the request host is ignored. |
-| `APEX_HOST` | — | Apex domain for subdomain-routed tenancy when `DEPLOYMENT_MODE=multi`. Also gates host-header filtering: when set (or when `BASE_URL` contains a non-localhost host), the `AllowedHosts` allowlist is derived at startup — unknown `Host` headers are rejected before tenant resolution. In `DEPLOYMENT_MODE=single`, only the apex host and localhost are permitted. In `DEPLOYMENT_MODE=multi`, the apex host, `*.apex` (all tenant subdomains), and localhost are permitted. When unset and `BASE_URL` is localhost (local/dev), filtering is permissive (`AllowedHosts=*`) and a startup warning is logged. |
 | `RESERVED_SUBDOMAINS` | — | Comma-separated slugs to add to the built-in reserved list (e.g. `api,status,docs`). Prevents those subdomains from being claimed as tenant slugs in multi-tenant mode. |
 | `DEPENDABLY_DEPLOYMENT_MODE` | `standalone` | Set to `ha` to require Redis and enable distributed locking |
 | `DEPENDABLY_INSTANCE_ROLE` | `single` | Attached to OTel resource attributes as `dependably.instance.role`. Use to distinguish control-plane vs data-plane replicas in distributed traces. |
@@ -614,7 +636,7 @@ Ecosystem metadata responses (the npm/PyPI/NuGet/Maven index and registration do
 - **Scope enforcement**: `pull` and `push` scopes enforced at the HTTP handler level; scope mismatch returns 403, not 401
 - **Account lockout**: 10 failed login attempts → 15-minute lockout with `Retry-After` header
 - **Security headers**: `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Content-Security-Policy` (management API), `Strict-Transport-Security` (when behind HTTPS proxy)
-- **Trusted proxy / host hardening**: Forwarded-header processing is fail-closed — when `TRUSTED_PROXIES` is unset, `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` are ignored entirely so caller-supplied values cannot spoof `RemoteIpAddress`, scheme, or host. When `TRUSTED_PROXIES` is set, those headers are processed only from the listed IPs/CIDRs. Host-header filtering is derived at startup from `APEX_HOST` / `BASE_URL`: when an apex is configured, only that host (plus `*.apex` in multi mode) and localhost are accepted; unknown `Host` headers are rejected before tenant resolution prevents Host injection into SAML SP URLs, absolute links, and CSRF Origin comparisons. When no apex is configured (dev/local), filtering is permissive and a startup warning is logged.
+- **Trusted proxy / host hardening**: Forwarded-header processing is fail-closed — when `TRUSTED_PROXIES` is unset, `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` are ignored entirely so caller-supplied values cannot spoof `RemoteIpAddress`, scheme, or host. When `TRUSTED_PROXIES` is set, those headers are processed only from the listed IPs/CIDRs. Host-header filtering is derived at startup from the host portion of `BASE_URL`: when that host is non-localhost, only that host (plus `*.apex` in multi mode) and localhost are accepted; unknown `Host` headers are rejected before tenant resolution, preventing Host injection into SAML SP URLs, absolute links, and CSRF Origin comparisons. When `BASE_URL` is unset or localhost (dev/local), filtering is permissive and a startup warning is logged.
 - **Schema**: idempotent `CREATE TABLE IF NOT EXISTS` applied on startup; one-shot data migrations are recorded in the `_applied_migrations` ledger (see [src/Dependably/Infrastructure/schema/schema-migrations.md](src/Dependably/Infrastructure/schema/schema-migrations.md))
 
 ---

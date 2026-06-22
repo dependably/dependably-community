@@ -400,6 +400,9 @@ export const systemApi = {
   issuePasswordReset: (email, tenantSlug) =>
     req('POST', `/system/users/${encodeURIComponent(email)}/password-reset`, { tenantSlug }),
 
+  // Instance health rollup — dependencies, job statuses, staging disk, tenants needing attention.
+  getHealth: () => req('GET', '/system/health'),
+
   // system_admin self
   me: () => req('GET', '/system/me'),
   changePassword: (currentPassword, newPassword) =>

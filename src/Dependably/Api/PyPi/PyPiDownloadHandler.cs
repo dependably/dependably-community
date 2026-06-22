@@ -53,7 +53,7 @@ public sealed class PyPiDownloadHandler(
         var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
 
         // Uploaded-only lookup: proxy versions are served via the global plane below.
-        var pkgVersions = await packages.FindVersionByBlobKeySuffixAsync(orgId, "pypi", file, ct);
+        var pkgVersions = await packages.FindVersionByBlobKeySuffixAsync(orgId, "pypi", file, ct: ct);
 
         return pkgVersions is not null
             ? await HeadUploadedPackageAsync(httpContext, orgId, pkgVersions.Value.Version, token, settings, ct)
@@ -181,7 +181,7 @@ public sealed class PyPiDownloadHandler(
         string? sourceIp = httpContext.GetNormalizedRemoteIp();
 
         // Uploaded-only lookup first: proxy rows are no longer in package_versions.
-        var pkgVersions = await packages.FindVersionByBlobKeySuffixAsync(orgId, "pypi", file, ct);
+        var pkgVersions = await packages.FindVersionByBlobKeySuffixAsync(orgId, "pypi", file, ct: ct);
 
         if (pkgVersions is not null)
         {

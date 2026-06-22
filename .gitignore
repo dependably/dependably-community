@@ -1,6 +1,8 @@
 node_modules/
 **/bin/
 **/obj/
+# Local pre-commit tool cache (nuget-check installed via dotnet tool install --tool-path)
+.dependably-tools/
 # Built Svelte output is generated into wwwroot/ — ignore everything except the
 # vendored Swagger UI bundle (checked in to replace the external CDN load).
 src/Dependably/wwwroot/*

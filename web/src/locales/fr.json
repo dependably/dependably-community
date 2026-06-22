@@ -1139,6 +1139,50 @@
         "title": "Tâches en arrière-plan récentes",
         "empty": "Aucune exécution de tâche enregistrée.",
         "viewAll": "Tout voir →"
+      },
+      "health": {
+        "title": "Santé de l'instance",
+        "refresh": "Actualiser",
+        "loading": "Vérification en cours…",
+        "overall": {
+          "healthy": "Sain",
+          "degraded": "Dégradé",
+          "down": "Hors service"
+        },
+        "dependencies": "Dépendances",
+        "jobs": "Tâches en arrière-plan",
+        "jobSummary": "{ok} ok, {stale} obsolètes, {failing} en échec, {disabled} désactivées",
+        "staging": {
+          "label": "Disque intermédiaire",
+          "low": "Disque intermédiaire sous le seuil — les récupérations proxy peuvent échouer."
+        },
+        "tenants": {
+          "needAttention": "{count} locataire nécessite attention",
+          "needAttentionPlural": "{count} locataires nécessitent attention",
+          "viewAll": "Voir les locataires →"
+        },
+        "overallSummary": {
+          "healthy": "Tous les systèmes sont opérationnels",
+          "degraded": "Dégradé — {detail}",
+          "down": "Hors service — base de données inaccessible"
+        },
+        "depsLabel": "Dépendances",
+        "depDatabase": "Base de données",
+        "depBlobStore": "Stockage blob",
+        "depRedis": "Redis",
+        "jobsLabel": "Tâches en arrière-plan",
+        "jobsAllHealthy": "Toutes les {count} tâches sont saines",
+        "jobNotOkRow": "{name} — {status}",
+        "jobLastRan": "Dernière exécution {age}",
+        "viewJobsLink": "Voir toutes les tâches →",
+        "stagingLabel": "Disque intermédiaire",
+        "stagingLowDetail": "{free} libres sur {total} — les récupérations proxy peuvent échouer",
+        "ageRelative": {
+          "justNow": "à l'instant",
+          "minutesAgo": "il y a {n}m",
+          "hoursAgo": "il y a {n}h",
+          "daysAgo": "il y a {n}j"
+        }
       }
     },
     "login": {
@@ -1156,12 +1200,26 @@
       "columns": {
         "slug": "Locataire",
         "status": "Statut",
+        "health": "Santé",
         "users": "Utilisateurs",
         "storage": "Stockage",
         "quota": "Quota de stockage",
         "created": "Créé",
         "deleted": "Supprimé",
         "actions": "Actions"
+      },
+      "health": {
+        "ok": "Sain",
+        "warn": "Avertissement",
+        "critical": "Critique",
+        "reasons": {
+          "suspended": "Locataire suspendu",
+          "storage_quota_exceeded": "Quota de stockage dépassé",
+          "storage_quota_near": "Quota de stockage presque atteint",
+          "stats_stale": "Instantané de statistiques obsolète",
+          "stats_missing": "Instantané de statistiques manquant",
+          "quarantine_pending": "Paquets en attente de révision de quarantaine"
+        }
       },
       "status": {
         "active": "Actif",
@@ -1215,6 +1273,32 @@
         "saving": "Enregistrement…",
         "clear": "Effacer",
         "invalid": "Le quota doit être un entier positif, ou vide pour effacer."
+      },
+      "detail": {
+        "sectionHealth": "Santé",
+        "sectionInventory": "Inventaire",
+        "sectionActivity": "Activité",
+        "sectionStorage": "Stockage",
+        "status": "Statut",
+        "members": "Membres",
+        "created": "Créé",
+        "deleted": "Supprimé",
+        "storagePct": "{used} sur {quota} ({pct}%)",
+        "storageUnlimited": "{used} utilisés (aucun quota)",
+        "packagesLabel": "{ecosystem} : {count} paquets",
+        "diskLabel": "{ecosystem} : {size}",
+        "downloads30d": "{count} téléchargements (30 j)",
+        "quarantinePending": "{count} en attente de révision de quarantaine",
+        "noStats": "Aucun instantané de statistiques.",
+        "healthOk": "Aucun problème détecté.",
+        "reasonDetail": {
+          "suspended": "Locataire suspendu — les écritures sont refusées.",
+          "storage_quota_exceeded": "Quota de stockage dépassé.",
+          "storage_quota_near": "Stockage proche de la limite du quota.",
+          "stats_stale": "Instantané de statistiques obsolète.",
+          "stats_missing": "Aucun instantané de statistiques.",
+          "quarantine_pending": "{count} paquets en attente de révision de quarantaine."
+        }
       }
     },
     "admins": {

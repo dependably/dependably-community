@@ -59,7 +59,7 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
     [Fact]
     public async Task KnownSubdomain_ReturnsTenant()
     {
-        var r = new SubdomainTenantResolver(_db, Cfg(("APEX_HOST", "example.com")));
+        var r = new SubdomainTenantResolver(_db, Cfg(("BASE_URL", "https://example.com")));
 
         var t = await r.ResolveAsync(WithHost("acme.example.com"));
 
@@ -71,7 +71,7 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
     [Fact]
     public async Task KnownSubdomain_IsCaseInsensitive()
     {
-        var r = new SubdomainTenantResolver(_db, Cfg(("APEX_HOST", "example.com")));
+        var r = new SubdomainTenantResolver(_db, Cfg(("BASE_URL", "https://example.com")));
 
         var t = await r.ResolveAsync(WithHost("ACME.Example.COM"));
 
@@ -82,7 +82,7 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
     [Fact]
     public async Task KnownSubdomain_StripsPort()
     {
-        var r = new SubdomainTenantResolver(_db, Cfg(("APEX_HOST", "example.com")));
+        var r = new SubdomainTenantResolver(_db, Cfg(("BASE_URL", "https://example.com")));
 
         var t = await r.ResolveAsync(WithHost("acme.example.com:8443"));
 
@@ -93,7 +93,7 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
     [Fact]
     public async Task KnownSubdomain_TrailingDotTolerated()
     {
-        var r = new SubdomainTenantResolver(_db, Cfg(("APEX_HOST", "example.com")));
+        var r = new SubdomainTenantResolver(_db, Cfg(("BASE_URL", "https://example.com")));
 
         var t = await r.ResolveAsync(WithHost("acme.example.com."));
 
@@ -104,7 +104,7 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
     [Fact]
     public async Task UnknownSlug_Uninitialized()
     {
-        var r = new SubdomainTenantResolver(_db, Cfg(("APEX_HOST", "example.com")));
+        var r = new SubdomainTenantResolver(_db, Cfg(("BASE_URL", "https://example.com")));
 
         var t = await r.ResolveAsync(WithHost("nobody.example.com"));
 
@@ -116,7 +116,7 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
     {
         // Soft-deleted orgs (deleted_at IS NOT NULL) must not resolve, even when the slug
         // matches an existing row. Restoring is a system_admin action.
-        var r = new SubdomainTenantResolver(_db, Cfg(("APEX_HOST", "example.com")));
+        var r = new SubdomainTenantResolver(_db, Cfg(("BASE_URL", "https://example.com")));
 
         var t = await r.ResolveAsync(WithHost("ghost.example.com"));
 
@@ -131,7 +131,7 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
         // state: Request.Host is set to the subdomain (as the middleware would have done),
         // while a raw X-Forwarded-Host header is also present to confirm the resolver reads
         // Request.Host and not the raw header directly.
-        var r = new SubdomainTenantResolver(_db, Cfg(("APEX_HOST", "example.com")));
+        var r = new SubdomainTenantResolver(_db, Cfg(("BASE_URL", "https://example.com")));
 
         // Request.Host = subdomain (post-ForwardedHeaders rewrite); raw header present but ignored.
         var ctx = WithHost("acme.example.com", rawForwardedHost: "attacker.evil.com");
@@ -148,7 +148,7 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
         // Request.Host unchanged. A raw X-Forwarded-Host from an untrusted client must
         // not affect tenant resolution. The resolver reads Request.Host, which still
         // points at the apex, so the result is Apex — not the tenant named in the header.
-        var r = new SubdomainTenantResolver(_db, Cfg(("APEX_HOST", "example.com")));
+        var r = new SubdomainTenantResolver(_db, Cfg(("BASE_URL", "https://example.com")));
 
         // Request.Host = apex (not rewritten); raw X-Forwarded-Host carries a tenant subdomain
         // that an untrusted client is trying to inject. The resolver must ignore the raw header.
@@ -162,12 +162,11 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ApexHost_DerivedFromBaseUrl_WhenApexHostMissing()
+    public async Task ApexHost_DerivedFromBaseUrl_WithExplicitPort()
     {
-        // BASE_URL fallback path: single-tenant installs already configure BASE_URL,
-        // so promoting to multi-mode without an APEX_HOST flip should still resolve.
+        // BASE_URL with an explicit port: the host portion (not including the port) is used
+        // as the apex, matching the behavior of Uri.Host.
         var r = new SubdomainTenantResolver(_db, Cfg(
-            ("APEX_HOST", null),
             ("BASE_URL", "https://example.com:443")));
 
         var apex = await r.ResolveAsync(WithHost("example.com"));
@@ -181,9 +180,8 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
     [Fact]
     public async Task BaseUrl_Malformed_FallsThroughToUninitialized()
     {
-        // Non-absolute BASE_URL leaves apex empty → resolver short-circuits.
+        // Non-absolute, non-parseable BASE_URL leaves apex empty → resolver short-circuits.
         var r = new SubdomainTenantResolver(_db, Cfg(
-            ("APEX_HOST", null),
             ("BASE_URL", "not-a-real-url")));
 
         var t = await r.ResolveAsync(WithHost("acme.example.com"));
@@ -196,7 +194,7 @@ public class SubdomainTenantResolverTests : IAsyncLifetime
     {
         // RESERVED_SUBDOMAINS extends the built-in reserved set; the slug must not hit DB.
         var r = new SubdomainTenantResolver(_db, Cfg(
-            ("APEX_HOST", "example.com"),
+            ("BASE_URL", "https://example.com"),
             ("RESERVED_SUBDOMAINS", "acme")));
 
         var t = await r.ResolveAsync(WithHost("acme.example.com"));

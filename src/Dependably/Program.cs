@@ -148,31 +148,18 @@ public partial class Program
                 "Configuration key Maven:MetadataTtl is deprecated and ignored (configured value: {ConfiguredValue}). Maven metadata caching is now handled by UpstreamClient (single-flight, no TTL).",
                 mavenMetadataTtl);
         }
-    }
 
-    /// <summary>
-    /// True when DEPLOYMENT_MODE=multi has an apex host it can route tenant subdomains
-    /// under: an explicit APEX_HOST, or a BASE_URL whose host is not localhost. Mirrors
-    /// the apex derivation in <see cref="SubdomainTenantResolver"/> — the default
-    /// BASE_URL of http://localhost:8080 is not usable for real multi-tenant routing.
-    /// </summary>
-    private static bool HasUsableApexHost(ConfigurationManager configuration)
-    {
-        string? apex = configuration["APEX_HOST"];
-        if (!string.IsNullOrWhiteSpace(apex))
+        // APEX_HOST is no longer read. The apex hostname is derived solely from the host
+        // portion of BASE_URL. Operators who set APEX_HOST need to know it has no effect.
+        string? apexHost = configuration["APEX_HOST"];
+        if (!string.IsNullOrWhiteSpace(apexHost))
         {
-            return true;
+            Log.Warning(
+                "Configuration key APEX_HOST is deprecated and ignored (configured value: {ConfiguredValue}). " +
+                "The apex hostname is now derived from BASE_URL. Set BASE_URL to your public URL " +
+                "(e.g. https://repo.example.com) — the host portion is used as the apex.",
+                apexHost);
         }
-
-        string? baseUrl = configuration["BASE_URL"];
-        if (!string.IsNullOrWhiteSpace(baseUrl)
-            && Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
-        {
-            string host = uri.Host.ToLowerInvariant();
-            return host is not "localhost" and not "127.0.0.1" and not "[::1]";
-        }
-
-        return false;
     }
 
     private static void WarnOnAirGapContradictions(IConfiguration configuration)

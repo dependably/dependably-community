@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <Version>0.1.18</Version>
+    <Version>0.1.19</Version>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RestoreLockedMode Condition="'$(CI)' == 'true' and '$(RuntimeIdentifier)' == ''">true</RestoreLockedMode>
 

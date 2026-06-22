@@ -137,6 +137,39 @@ public sealed class ScheduledBackgroundServiceTests
         return (svc, cts);
     }
 
+    // Generous safety bound for the deterministic wait below. Tests complete in
+    // microseconds normally; this only caps a genuinely hung loop so it fails fast
+    // instead of hanging the runner. It is never reached in a healthy run.
+    private static readonly TimeSpan CompletionTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Awaits the service's background <c>ExecuteTask</c> to a terminal state, bounded by
+    /// a safety timeout. Every test drives the service to termination — via the maxTicks
+    /// cancel, a fatal tick exception, or the silent invalid-cron exit — so task completion
+    /// is the deterministic "all expected ticks have run" signal. This replaces fixed
+    /// <see cref="Task.Delay"/> sleeps, which guess at scheduling latency and flake under
+    /// thread-pool starvation on shared CI runners (a starved loop ran zero ticks inside a
+    /// 200&#160;ms window). Faults are swallowed here; each test asserts on the final state
+    /// (<c>TickCount</c>, <c>OutcomeHistory</c>, or <c>ExecuteTask.IsFaulted</c>) instead.
+    /// </summary>
+    private static async Task WaitForServiceCompletionAsync(TrackingService svc)
+    {
+        Assert.NotNull(svc.ExecuteTask);
+        var finished = await Task.WhenAny(svc.ExecuteTask!, Task.Delay(CompletionTimeout));
+        Assert.True(finished == svc.ExecuteTask,
+            $"ScheduledBackgroundService did not terminate within {CompletionTimeout.TotalSeconds:0}s; " +
+            $"TickCount={svc.TickCount}.");
+        // Observe the task so a fault is not left unobserved; tests assert on final state.
+        try
+        {
+            await svc.ExecuteTask!;
+        }
+        catch
+        {
+            // Expected for the terminate-on-failure and invalid-cron-throws cases.
+        }
+    }
+
     // ── tests ─────────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -147,7 +180,7 @@ public sealed class ScheduledBackgroundServiceTests
         var (svc, cts) = Build(outcomes, maxTicks: 1, runOnStartup: true);
 
         await svc.StartAsync(cts.Token);
-        await Task.Delay(50);   // give the async task a moment to finish
+        await WaitForServiceCompletionAsync(svc);
 
         Assert.True(svc.TickCount >= 1, $"Expected at least one startup tick; got {svc.TickCount}");
         cts.Dispose();
@@ -164,7 +197,7 @@ public sealed class ScheduledBackgroundServiceTests
             defaultCron: "not-a-cron-expression");
 
         await svc.StartAsync(cts.Token);
-        await Task.Delay(50);
+        await WaitForServiceCompletionAsync(svc);
 
         Assert.Equal(0, svc.TickCount);
         cts.Dispose();
@@ -185,8 +218,8 @@ public sealed class ScheduledBackgroundServiceTests
         // a background task). We need to await the inner ExecuteTask to observe the fault.
         await svc.StartAsync(cts.Token);
 
-        // Give ExecuteAsync a moment to run and fault.
-        await Task.Delay(100);
+        // Drive ExecuteAsync to its terminal (faulted) state deterministically.
+        await WaitForServiceCompletionAsync(svc);
 
         // The ExecuteTask should be faulted or the service should be stopped.
         Assert.NotNull(svc.ExecuteTask);
@@ -210,7 +243,7 @@ public sealed class ScheduledBackgroundServiceTests
         var (svc, cts) = Build(outcomes, maxTicks: 3, continueOnTickError: true);
 
         await svc.StartAsync(cts.Token);
-        await Task.Delay(200);
+        await WaitForServiceCompletionAsync(svc);
 
         Assert.Equal(3, svc.TickCount);
         Assert.IsType<InvalidOperationException>(svc.OutcomeHistory[0]);
@@ -235,7 +268,7 @@ public sealed class ScheduledBackgroundServiceTests
             runOnStartup: true);
 
         await svc.StartAsync(cts.Token);
-        await Task.Delay(200);
+        await WaitForServiceCompletionAsync(svc);
 
         // Only one tick was attempted — the exception terminated the service.
         Assert.Equal(1, svc.TickCount);
@@ -254,7 +287,7 @@ public sealed class ScheduledBackgroundServiceTests
             runOnStartup: true);
 
         await svc.StartAsync(cts.Token);
-        await Task.Delay(100);
+        await WaitForServiceCompletionAsync(svc);
 
         Assert.Equal(1, svc.TickCount);
         Assert.Null(svc.OutcomeHistory[0]);
@@ -277,7 +310,7 @@ public sealed class ScheduledBackgroundServiceTests
             continueOnTickError: true);
 
         await svc.StartAsync(cts.Token);
-        await Task.Delay(200);
+        await WaitForServiceCompletionAsync(svc);
 
         Assert.Equal(2, svc.TickCount);
         cts.Dispose();
@@ -294,7 +327,7 @@ public sealed class ScheduledBackgroundServiceTests
             jitterEnvKey: "TEST_JITTER_SECONDS");
 
         await svc.StartAsync(cts.Token);
-        await Task.Delay(200);
+        await WaitForServiceCompletionAsync(svc);
 
         Assert.True(svc.TickCount >= 1);
         cts.Dispose();
@@ -323,7 +356,7 @@ public sealed class ScheduledBackgroundServiceTests
         var (svc, cts) = Build(outcomes, maxTicks: 4, continueOnTickError: true);
 
         await svc.StartAsync(cts.Token);
-        await Task.Delay(400);
+        await WaitForServiceCompletionAsync(svc);
 
         // All 4 ticks must have been attempted regardless of intermediate failures.
         Assert.Equal(4, svc.TickCount);

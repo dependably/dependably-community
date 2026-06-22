@@ -374,6 +374,33 @@ public sealed partial class PyPiComplianceTests : IClassFixture<DependablyFactor
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
     }
 
+    [Fact]
+    public async Task Upload_Sdist_Pep625UnderscoreFilename_Accepted()
+    {
+        // PEP 625: an sdist for "meta-sdist-625" is named with underscores
+        // (meta_sdist_625-1.0.0.tar.gz) while the declared name normalizes to
+        // hyphens. filetype=sdist triggers the filename-vs-name check, which must
+        // normalize both sides — otherwise every modern sdist 422s.
+        string token = await _factory.CreateToken("push");
+        var (bytes, sha256) = PyPiFixtures.BuildSdist("meta-sdist-625", "1.0.0");
+
+        using var client = _factory.CreateClientWithBasic(token);
+        using var form = new MultipartFormDataContent();
+        form.Add(new StringContent("file_upload"), ":action");
+        form.Add(new StringContent("2.1"), "metadata_version");
+        form.Add(new StringContent("meta-sdist-625"), "name");
+        form.Add(new StringContent("1.0.0"), "version");
+        form.Add(new StringContent("sdist"), "filetype");
+        form.Add(new StringContent(sha256), "sha256_digest");
+        var fileContent = new ByteArrayContent(bytes);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        form.Add(fileContent, "content", "meta_sdist_625-1.0.0.tar.gz");
+
+        var resp = await client.PostAsync("/pypi/legacy/", form);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
     // ── Download auth — hosted packages ──────────────────────────────────────
 
     [Fact]

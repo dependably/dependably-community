@@ -40,10 +40,11 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     {
         var builder = WebApplication.CreateBuilder();
 
-        // Inject DEPLOYMENT_MODE + APEX_HOST + first-boot env BEFORE ConfigureBuilder runs so
+        // Inject DEPLOYMENT_MODE + BASE_URL + first-boot env BEFORE ConfigureBuilder runs so
         // the resolver registration (which reads DEPLOYMENT_MODE) picks up multi mode.
+        // The apex hostname is derived from the host portion of BASE_URL.
         builder.Configuration["DEPLOYMENT_MODE"] = "multi";
-        builder.Configuration["APEX_HOST"] = ApexHost;
+        builder.Configuration["BASE_URL"] = $"http://{ApexHost}";
         builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] = SystemAdminEmail;
         builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_PASSWORD"] = SystemAdminPassword;
 

@@ -42,22 +42,10 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
         _db = db;
         _cache = cache;
 
-        // Prefer APEX_HOST when set (multi mode). Fall back to deriving from BASE_URL so
-        // existing single-tenant installs that already configure BASE_URL continue to work
-        // when promoted to multi mode without a separate config flip.
-        string? apex = config["APEX_HOST"];
-        if (string.IsNullOrWhiteSpace(apex))
-        {
-            string? baseUrl = config["BASE_URL"];
-            if (!string.IsNullOrWhiteSpace(baseUrl) &&
-                Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
-            {
-                apex = uri.Host;
-            }
-        }
+        // Apex hostname is derived exclusively from BASE_URL (host portion only).
+        string? apex = BaseUrlHostHelper.ExtractHost(config["BASE_URL"]);
 
         _apexHost = (apex ?? "")
-            .ToLowerInvariant()
             .TrimEnd('.');
 
         _extraReserved = ReservedSlugs.ParseExtra(config["RESERVED_SUBDOMAINS"]);

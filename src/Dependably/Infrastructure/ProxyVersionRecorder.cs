@@ -56,8 +56,8 @@ public sealed class ProxyVersionRecorder
     public async Task<string?> RecordAsync(
         ProxyVersionRequest req,
         Func<Stream, LicenseExtractor.ExtractedMetadata>? extractLicenses,
-        CancellationToken ct = default,
-        string? cacheArtifactId = null)
+        string? cacheArtifactId = null,
+        CancellationToken ct = default)
     {
         string? versionId = cacheArtifactId is not null
             ? await RecordProxyViaGlobalPlaneAsync(req, extractLicenses, cacheArtifactId, ct)

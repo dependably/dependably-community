@@ -1141,6 +1141,50 @@
         "title": "Recent background jobs",
         "empty": "No background-job runs recorded yet.",
         "viewAll": "View all →"
+      },
+      "health": {
+        "title": "Instance health",
+        "refresh": "Refresh",
+        "loading": "Checking health…",
+        "overall": {
+          "healthy": "Healthy",
+          "degraded": "Degraded",
+          "down": "Down"
+        },
+        "dependencies": "Dependencies",
+        "jobs": "Background jobs",
+        "jobSummary": "{ok} ok, {stale} stale, {failing} failing, {disabled} disabled",
+        "staging": {
+          "label": "Staging disk",
+          "low": "Staging disk below threshold — proxy fetches may fail."
+        },
+        "tenants": {
+          "needAttention": "{count} tenant needs attention",
+          "needAttentionPlural": "{count} tenants need attention",
+          "viewAll": "View tenants →"
+        },
+        "overallSummary": {
+          "healthy": "All systems healthy",
+          "degraded": "Degraded — {detail}",
+          "down": "Down — database unreachable"
+        },
+        "depsLabel": "Dependencies",
+        "depDatabase": "Database",
+        "depBlobStore": "Blob store",
+        "depRedis": "Redis",
+        "jobsLabel": "Background jobs",
+        "jobsAllHealthy": "All {count} jobs healthy",
+        "jobNotOkRow": "{name} — {status}",
+        "jobLastRan": "Last ran {age}",
+        "viewJobsLink": "View all jobs →",
+        "stagingLabel": "Staging disk",
+        "stagingLowDetail": "{free} free of {total} — proxy fetches may fail",
+        "ageRelative": {
+          "justNow": "just now",
+          "minutesAgo": "{n}m ago",
+          "hoursAgo": "{n}h ago",
+          "daysAgo": "{n}d ago"
+        }
       }
     },
     "observability": {
@@ -1200,12 +1244,26 @@
       "columns": {
         "slug": "Tenant",
         "status": "Status",
+        "health": "Health",
         "users": "Users",
         "storage": "Storage",
         "quota": "Storage quota",
         "created": "Created",
         "deleted": "Deleted",
         "actions": "Actions"
+      },
+      "health": {
+        "ok": "Healthy",
+        "warn": "Warning",
+        "critical": "Critical",
+        "reasons": {
+          "suspended": "Tenant suspended",
+          "storage_quota_exceeded": "Storage quota exceeded",
+          "storage_quota_near": "Storage quota near limit",
+          "stats_stale": "Stats snapshot stale",
+          "stats_missing": "Stats snapshot missing",
+          "quarantine_pending": "Packages pending quarantine review"
+        }
       },
       "status": {
         "active": "Active",
@@ -1259,6 +1317,32 @@
         "saving": "Saving…",
         "clear": "Clear",
         "invalid": "Quota must be a positive whole number, or empty to clear."
+      },
+      "detail": {
+        "sectionHealth": "Health",
+        "sectionInventory": "Inventory",
+        "sectionActivity": "Activity",
+        "sectionStorage": "Storage",
+        "status": "Status",
+        "members": "Members",
+        "created": "Created",
+        "deleted": "Deleted",
+        "storagePct": "{used} of {quota} ({pct}%)",
+        "storageUnlimited": "{used} used (no quota)",
+        "packagesLabel": "{ecosystem}: {count} packages",
+        "diskLabel": "{ecosystem}: {size}",
+        "downloads30d": "{count} downloads (30 d)",
+        "quarantinePending": "{count} pending quarantine review",
+        "noStats": "No statistics snapshot yet.",
+        "healthOk": "No issues detected.",
+        "reasonDetail": {
+          "suspended": "Tenant is suspended — writes are rejected.",
+          "storage_quota_exceeded": "Storage quota exceeded.",
+          "storage_quota_near": "Storage near quota limit.",
+          "stats_stale": "Statistics snapshot is stale.",
+          "stats_missing": "No statistics snapshot yet.",
+          "quarantine_pending": "{count} packages pending quarantine review."
+        }
       }
     },
     "admins": {

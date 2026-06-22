@@ -13,10 +13,10 @@ using Microsoft.Extensions.Hosting;
 namespace Dependably.Tests.Integration;
 
 /// <summary>
-/// Host-header filtering: when APEX_HOST (or a non-localhost BASE_URL) is set, Kestrel's
+/// Host-header filtering: when BASE_URL contains a non-localhost host, Kestrel's
 /// HostFilteringMiddleware rejects requests with unknown Host headers before tenant resolution
-/// runs. When no apex is configured (dev/local), filtering is permissive so the local loop
-/// is not broken.
+/// runs. When BASE_URL is unset or localhost (dev/local), filtering is permissive so the
+/// local loop is not broken.
 ///
 /// Mixed scenario: same factory, one request with a valid Host accepted (2xx/non-400) and one
 /// request with a forged Host rejected (400) — both in a single test class.
@@ -74,9 +74,9 @@ public sealed class HostFilteringTests
     }
 
     /// <summary>
-    /// Mixed scenario: within a single factory (APEX_HOST configured), one request with
-    /// the correct apex host is accepted and one with a forged Host is rejected. This pins
-    /// the filtering logic without requiring two separate factories.
+    /// Mixed scenario: within a single factory (BASE_URL configured with a real host), one
+    /// request with the correct apex host is accepted and one with a forged Host is rejected.
+    /// This pins the filtering logic without requiring two separate factories.
     /// </summary>
     [Fact]
     public async Task SingleMode_Mixed_AcceptedAndRejectedInSameClass()
@@ -153,7 +153,7 @@ public sealed class HostFilteringTests
     [Fact]
     public async Task NoApex_PermissiveFallback_ArbitraryHostIsAccepted()
     {
-        // Factory with no APEX_HOST and localhost BASE_URL: AllowedHosts stays "*"
+        // Factory with localhost BASE_URL: AllowedHosts stays "*"
         await using var factory = NewNoApexFactory();
         await factory.InitializeAsync();
 
@@ -171,13 +171,13 @@ public sealed class HostFilteringTests
 
     private static HostFilterFactory NewSingleModeFactory() => new(new Dictionary<string, string>
     {
-        ["APEX_HOST"] = ApexHost,
+        ["BASE_URL"] = $"https://{ApexHost}",
         ["DEPLOYMENT_MODE"] = "single",
     });
 
     private static HostFilterFactory NewMultiModeFactory() => new(new Dictionary<string, string>
     {
-        ["APEX_HOST"] = ApexHost,
+        ["BASE_URL"] = $"https://{ApexHost}",
         ["DEPLOYMENT_MODE"] = "multi",
     });
 
@@ -206,7 +206,7 @@ public sealed class HostFilteringTests
             var builder = WebApplication.CreateBuilder();
 
             // Inject settings into IConfiguration before ConfigureBuilder runs so
-            // ConfigureHostFiltering (which reads APEX_HOST/DEPLOYMENT_MODE from
+            // ConfigureHostFiltering (which reads BASE_URL/DEPLOYMENT_MODE from
             // builder.Configuration at call time) sees the correct values.
             foreach (var (key, value) in _settings)
             {

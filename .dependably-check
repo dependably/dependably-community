@@ -1,0 +1,5 @@
+{
+  "common": {
+    "allowedRegistryHosts": ["dependably.northwardlabs.ca"]
+  }
+}

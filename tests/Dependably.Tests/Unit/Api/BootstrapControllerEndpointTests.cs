@@ -66,7 +66,7 @@ public sealed class BootstrapControllerEndpointTests
     {
         var result = NewCtrl(Cfg(
                 ("DEPLOYMENT_MODE", "multi"),
-                ("APEX_HOST", "dependably.example.com")),
+                ("BASE_URL", "https://dependably.example.com")),
             tenant: TenantContext.Apex).Get();
 
         var body = Body(result);
@@ -83,7 +83,7 @@ public sealed class BootstrapControllerEndpointTests
     {
         var result = NewCtrl(Cfg(
                 ("DEPLOYMENT_MODE", "multi"),
-                ("APEX_HOST", "dependably.example.com")),
+                ("BASE_URL", "https://dependably.example.com")),
             tenant: TenantContext.ForTenant("o-1", "acme")).Get();
 
         var body = Body(result);
@@ -132,7 +132,7 @@ public sealed class BootstrapControllerEndpointTests
         // to the tenant-subdomain response shape (isApex=false, no tenantSlug echoed).
         var result = NewCtrl(Cfg(
             ("DEPLOYMENT_MODE", "multi"),
-            ("APEX_HOST", "dependably.example.com"))).Get();
+            ("BASE_URL", "https://dependably.example.com"))).Get();
 
         var body = Body(result);
         Assert.Equal("multi", Prop<string>(body, "mode"));

@@ -37,6 +37,7 @@ public class Org
 /// List-projection of <see cref="Org"/> that carries the per-tenant aggregates needed by the
 /// system_admin tenants page (member count, storage bytes used). Kept separate from
 /// <see cref="Org"/> so single-tenant callers don't pay for the join.
+/// Also carries the most recent <c>org_stats_snapshot</c> JSON blob for health derivation.
 /// </summary>
 public class OrgListItem
 {
@@ -49,6 +50,16 @@ public class OrgListItem
     public long? StorageQuotaBytes { get; set; }
     public int MemberCount { get; set; }
     public long StorageBytes { get; set; }
+    /// <summary>
+    /// JSON from <c>org_stats_snapshot.stats_json</c> for this org. Null when no
+    /// snapshot exists yet. Deserialized in the controller to derive health signals.
+    /// </summary>
+    public string? StatsJson { get; set; }
+    /// <summary>
+    /// ISO 8601 UTC string from <c>org_stats_snapshot.computed_at</c>. Null when no
+    /// snapshot exists yet.
+    /// </summary>
+    public string? StatsComputedAt { get; set; }
 }
 
 /// <summary>

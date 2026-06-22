@@ -125,7 +125,7 @@ public sealed class TenantSettingsTokenCacheTests : IAsyncLifetime
     public async Task SubdomainResolver_CachesTenantContext()
     {
         var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?> { ["APEX_HOST"] = "apex.test" })
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["BASE_URL"] = "https://apex.test" })
             .Build();
         var resolver = new SubdomainTenantResolver(_db, config, _cache);
 

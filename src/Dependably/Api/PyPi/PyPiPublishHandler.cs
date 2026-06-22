@@ -441,9 +441,14 @@ public sealed class PyPiPublishHandler(
             return ValidationResult.Fail("filename", "sdist must end in .tar.gz or .zip");
         }
 
-        // Basic check: filename should contain name-version
+        // Basic check: filename should start with the package name. Normalize BOTH
+        // sides the same way (PEP 503: lowercase, runs of [-_.] -> "-") before
+        // comparing — PEP 625 sdist filenames use underscores
+        // (e.g. python_library_checker-1.0.tar.gz) while the declared name normalizes
+        // to hyphens, so a raw prefix check would spuriously 422 every modern sdist.
         string normalized = Regex.Replace(name, @"[-_.]+", "-", RegexOptions.None, PyPiConstants.RegexTimeout).ToLowerInvariant();
-        return !filename.StartsWith(normalized, StringComparison.OrdinalIgnoreCase)
+        string normalizedFilename = Regex.Replace(filename, @"[-_.]+", "-", RegexOptions.None, PyPiConstants.RegexTimeout).ToLowerInvariant();
+        return !normalizedFilename.StartsWith(normalized, StringComparison.Ordinal)
             ? ValidationResult.Fail("filename", "Filename does not match declared package name")
             : ValidationResult.Ok();
     }

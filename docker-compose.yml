@@ -18,9 +18,9 @@ services:
       BASE_URL: ${BASE_URL:-http://localhost:8080}
       DEFAULT_ORG_SLUG: ${DEFAULT_ORG_SLUG:-default}
       # Single-tenant appliance by default. Set DEPLOYMENT_MODE=multi for
-      # subdomain-routed multi-tenancy — that mode also requires APEX_HOST and
-      # per-tenant access via slug.apexhost (a bare host resolves to apex and
-      # hides per-tenant login methods such as SAML).
+      # subdomain-routed multi-tenancy — the apex domain is the host portion of
+      # BASE_URL; per-tenant access is via slug.apexhost (a bare host resolves
+      # to apex and hides per-tenant login methods such as SAML).
       DEPLOYMENT_MODE: ${DEPLOYMENT_MODE:-single}
       # RPM upstream proxy. There is no canonical default RPM repo (distro/release
       # specific), so this is opt-in via env — here the demo points at Fedora 40

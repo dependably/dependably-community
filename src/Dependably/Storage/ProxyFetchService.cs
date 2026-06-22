@@ -105,7 +105,7 @@ public sealed class ProxyFetchService
                 UpstreamIntegrityValue: request.UpstreamIntegrityValue,
                 UpstreamIntegrityAlgorithm: request.UpstreamIntegrityAlgorithm,
                 Deprecated: request.Deprecated),
-            request.ExtractLicenses, ct, cacheArtifactId);
+            request.ExtractLicenses, cacheArtifactId, ct);
 
         // Proxy path: cacheArtifactId is set, RecordAsync returned null. Scan and gate via the
         // global plane.

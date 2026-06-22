@@ -74,11 +74,11 @@ internal static class NetworkStartupExtensions
         });
     }
 
-    // Host filtering — derives AllowedHosts from APEX_HOST / BASE_URL so Kestrel rejects unknown
-    // Host headers before tenant resolution, preventing Host-header injection into SAML SP URLs,
-    // absolute links, and CSRF Origin comparisons. Single mode permits the apex host and localhost;
-    // multi mode additionally permits *.apex (all tenant subdomains). When neither APEX_HOST nor a
-    // non-localhost BASE_URL is configured (dev/local mode), AllowedHosts stays "*" and a startup
+    // Host filtering — derives AllowedHosts from the host portion of BASE_URL so Kestrel rejects
+    // unknown Host headers before tenant resolution, preventing Host-header injection into SAML SP
+    // URLs, absolute links, and CSRF Origin comparisons. Single mode permits the apex host and
+    // localhost; multi mode additionally permits *.apex (all tenant subdomains). When BASE_URL is
+    // unset or contains a localhost host (dev/local mode), AllowedHosts stays "*" and a startup
     // warning is logged via StartupService — the permissive fallback keeps the local dev loop working
     // without requiring configuration. AllowEmptyHosts=false ensures requests with no Host header are
     // always rejected rather than passed through silently.
@@ -118,28 +118,16 @@ internal static class NetworkStartupExtensions
             options => options.AllowEmptyHosts = false);
     }
 
-    // Resolves the apex hostname from APEX_HOST (explicit) or the host portion of BASE_URL,
-    // excluding localhost variants which are not a real apex for filtering purposes. Returns null
-    // when no non-localhost apex is available (dev/unconfigured deployments).
+    // Resolves the apex hostname from the host portion of BASE_URL, excluding localhost variants
+    // which are not a real apex for filtering purposes. Returns null when no non-localhost apex
+    // is available (dev/unconfigured deployments).
     private static string? ResolveApexHostName(ConfigurationManager configuration)
     {
-        string? apex = configuration["APEX_HOST"];
-        if (!string.IsNullOrWhiteSpace(apex))
-        {
-            return apex.Trim().TrimEnd('.').ToLowerInvariant();
-        }
-
-        string? baseUrl = configuration["BASE_URL"];
-        if (!string.IsNullOrWhiteSpace(baseUrl)
-            && Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
-        {
-            string host = uri.Host.ToLowerInvariant();
-            if (host is not "localhost" and not "127.0.0.1" and not "[::1]")
-            {
-                return host;
-            }
-        }
-
-        return null;
+        string? host = BaseUrlHostHelper.ExtractHost(configuration["BASE_URL"]);
+        return host is not null
+            and not "localhost"
+            and not "127.0.0.1"
+            and not "[::1]"
+            ? host : null;
     }
 }

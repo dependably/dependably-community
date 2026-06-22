@@ -336,6 +336,48 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         Assert.Contains("9.9.9", versions);  // local page present → index handler ran, not the leaf
     }
 
+    [Fact]
+    public async Task RegistrationIndexAndLeaf_LocalOnlyHostedPackage_EmitJsonLdAtIdAndType()
+    {
+        // Regression: the local-only registration render must emit JSON-LD "@id"/"@type" keys
+        // (with the leading "@"). An anonymous-object property `@id` is a C# verbatim identifier
+        // whose name is "id" (no "@"), so anonymous objects silently produce a spec-violating
+        // document that crashes `dotnet restore` / `dotnet tool install` with
+        // "Value cannot be null or an empty string". No upstream is mocked for this id, so the
+        // index and leaf are served by BuildLocalRegistration / BuildLocalLeafResponse.
+        string id = $"jsonld{Guid.NewGuid():N}"[..16].ToLowerInvariant();
+        await _factory.PushNuGetPackage(id, "1.1.0");
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        var idxResp = await client.GetAsync($"/nuget/registration/{id}/index.json");
+        Assert.Equal(HttpStatusCode.OK, idxResp.StatusCode);
+        var idx = JsonDocument.Parse(await idxResp.Content.ReadAsStringAsync()).RootElement;
+        Assert.False(string.IsNullOrEmpty(idx.GetProperty("@id").GetString()));
+        Assert.True(idx.TryGetProperty("@type", out _));
+        var page = idx.GetProperty("items").EnumerateArray().First();
+        Assert.False(string.IsNullOrEmpty(page.GetProperty("@id").GetString()));
+        Assert.Equal("catalog:CatalogPage", page.GetProperty("@type").GetString());
+        var leafItem = page.GetProperty("items").EnumerateArray().First();
+        Assert.Equal("Package", leafItem.GetProperty("@type").GetString());
+        Assert.False(string.IsNullOrEmpty(leafItem.GetProperty("@id").GetString()));
+        var catalog = leafItem.GetProperty("catalogEntry");
+        Assert.False(string.IsNullOrEmpty(catalog.GetProperty("@id").GetString()));
+        Assert.Equal("1.1.0", catalog.GetProperty("version").GetString());
+        Assert.False(string.IsNullOrEmpty(catalog.GetProperty("packageContent").GetString()));
+
+        var leafResp = await client.GetAsync($"/nuget/registration/{id}/1.1.0.json");
+        Assert.Equal(HttpStatusCode.OK, leafResp.StatusCode);
+        var leaf = JsonDocument.Parse(await leafResp.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("Package", leaf.GetProperty("@type").GetString());
+        Assert.False(string.IsNullOrEmpty(leaf.GetProperty("@id").GetString()));
+        Assert.False(string.IsNullOrEmpty(leaf.GetProperty("packageContent").GetString()));
+        var leafCatalog = leaf.GetProperty("catalogEntry");
+        Assert.Equal(id, leafCatalog.GetProperty("id").GetString(), ignoreCase: true);
+        Assert.Equal("1.1.0", leafCatalog.GetProperty("version").GetString());
+    }
+
     // ── FlatcontainerVersions: upstream malformed JSON → error header ─────────
 
     [Fact]

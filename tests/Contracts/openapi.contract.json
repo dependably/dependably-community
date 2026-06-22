@@ -839,6 +839,16 @@
         }
       }
     },
+    "/api/v1/system/health": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/system/me": {
       "operations": {
         "get": {

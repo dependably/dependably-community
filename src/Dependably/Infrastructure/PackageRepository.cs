@@ -112,8 +112,8 @@ public sealed class PackageRepository
     /// Uses an equality lookup against <c>idx_package_versions_filename</c>.
     /// </summary>
     public async Task<(Package Package, PackageVersion Version)?> FindVersionByBlobKeySuffixAsync(
-        string orgId, string ecosystem, string filename, CancellationToken ct = default,
-        bool uploadedOnly = true)
+        string orgId, string ecosystem, string filename, bool uploadedOnly = true,
+        CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         var (PkgId, PkgOrgId, PkgEcosystem, PkgName, PkgPurlName, PkgIsProxy, PkgCreatedAt,

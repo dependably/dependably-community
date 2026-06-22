@@ -124,19 +124,15 @@ public sealed class StartupService : IHostedService
                 "client-facing scheme and source IP are visible to the application.");
         }
 
-        bool hasApexHost = !string.IsNullOrWhiteSpace(_config["APEX_HOST"])
-            || (!string.IsNullOrWhiteSpace(_config["BASE_URL"])
-                && Uri.TryCreate(_config["BASE_URL"], UriKind.Absolute, out var baseUri)
-                && baseUri.Host is not "localhost" and not "127.0.0.1" and not "[::1]");
-        if (!hasApexHost)
+        if (!BaseUrlHostHelper.IsUsableApexHost(_config["BASE_URL"]))
         {
             _logger.LogWarning(
-                "APEX_HOST (and BASE_URL with a non-localhost host) is not set. Host header " +
+                "BASE_URL is not set or contains a localhost host. Host header " +
                 "filtering is permissive (AllowedHosts=*): any Host value is accepted. This " +
                 "allows Host header injection into SAML SP entity IDs / ACS URLs, absolute links, " +
-                "and CSRF Origin comparisons. In production, set APEX_HOST to your public domain " +
-                "(e.g. repo.example.com) so unknown Host headers are rejected before reaching " +
-                "tenant resolution.");
+                "and CSRF Origin comparisons. In production, set BASE_URL to your public domain " +
+                "(e.g. https://repo.example.com) so unknown Host headers are rejected before " +
+                "reaching tenant resolution.");
         }
 
         bool isReplica =

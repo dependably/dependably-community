@@ -20,22 +20,39 @@ public interface IAirGapMode
     bool IsJobDisabled(string jobName);
 }
 
+/// <summary>
+/// Canonical registry of all background job names used across <see cref="AirGapMode"/>
+/// and <see cref="Dependably.Infrastructure.Health.HealthService"/>. A job that writes
+/// <c>background_job_runs</c> rows should also appear in
+/// <see cref="Health.HealthService.RunRowJobs"/>.
+/// </summary>
+internal static class BackgroundJobs
+{
+    internal static readonly IReadOnlySet<string> Known =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "vuln-scan",
+            "vuln-rescan",
+            "threat-feed",
+            "deprecation-refresh",
+            "healthcheck-pinger",
+            "cache-eviction",
+            "retention",
+            "orphan-reconciler",
+            "oci-staging-janitor",
+            "tenant-hard-delete",
+            "blob-size-poller",
+            "tenant-count-poller",
+            "stats-refresh",
+            "saml-cert-expiry",
+        };
+}
+
 public sealed class AirGapMode : IAirGapMode
 {
-    private static readonly HashSet<string> KnownJobNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "vuln-scan",
-        "vuln-rescan",
-        "threat-feed",
-        "deprecation-refresh",
-        "healthcheck-pinger",
-        "cache-eviction",
-        "retention",
-        "orphan-reconciler",
-        "tenant-hard-delete",
-        "blob-size-poller",
-        "tenant-count-poller",
-    };
+    // Delegates to the shared registry so DISABLE_BACKGROUND_JOBS validation stays in sync
+    // with any new jobs registered in BackgroundJobs.Known.
+    private static readonly IReadOnlySet<string> KnownJobNames = BackgroundJobs.Known;
 
     public bool IsEnabled { get; }
     public IReadOnlySet<string> DisabledJobs { get; }

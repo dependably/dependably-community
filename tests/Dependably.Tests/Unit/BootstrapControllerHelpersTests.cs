@@ -35,18 +35,19 @@ public sealed class BootstrapControllerHelpersTests
     }
 
     // ── ResolveApexHost ───────────────────────────────────────────────────────
+    // The apex hostname is derived solely from BASE_URL (host portion only).
+    // APEX_HOST is no longer read; these tests cover the BASE_URL derivation paths.
 
     [Fact]
-    public void ResolveApexHost_PrefersApexHostOverBaseUrl()
+    public void ResolveApexHost_DerivesHostFromFullBaseUrl()
     {
         string? apex = BootstrapController.ResolveApexHost(Cfg(
-            ("APEX_HOST", "Apex.Example.Com"),
-            ("BASE_URL", "https://other.example.com")));
+            ("BASE_URL", "https://apex.example.com")));
         Assert.Equal("apex.example.com", apex);
     }
 
     [Fact]
-    public void ResolveApexHost_FallsBackToBaseUrlHost()
+    public void ResolveApexHost_StripsPortFromBaseUrl()
     {
         string? apex = BootstrapController.ResolveApexHost(Cfg(("BASE_URL", "https://APEX.example.com:8443/")));
         Assert.Equal("apex.example.com", apex);
@@ -59,17 +60,27 @@ public sealed class BootstrapControllerHelpersTests
     }
 
     [Fact]
-    public void ResolveApexHost_MalformedBaseUrl_ReturnsNull()
+    public void ResolveApexHost_SchemeOnlyBaseUrl_ReturnsNull()
     {
-        Assert.Null(BootstrapController.ResolveApexHost(Cfg(("BASE_URL", "not-a-url"))));
+        // No host component to extract once the scheme is stripped.
+        Assert.Null(BootstrapController.ResolveApexHost(Cfg(("BASE_URL", "http://"))));
     }
 
     [Fact]
-    public void ResolveApexHost_BlankApexHost_FallsThroughToBaseUrl()
+    public void ResolveApexHost_BareHostname_IsPreserved()
     {
+        // A scheme-less single-label host is legitimate (e.g. a Docker service name);
+        // BASE_URL host extraction preserves it rather than rejecting it.
+        string? apex = BootstrapController.ResolveApexHost(Cfg(("BASE_URL", "dependably")));
+        Assert.Equal("dependably", apex);
+    }
+
+    [Fact]
+    public void ResolveApexHost_BaseUrlOnly_NoApexHostKey()
+    {
+        // BASE_URL is the single source of truth; APEX_HOST is not consulted.
         string? apex = BootstrapController.ResolveApexHost(Cfg(
-            ("APEX_HOST", "   "),
-            ("BASE_URL", "https://fallback.example.com")));
-        Assert.Equal("fallback.example.com", apex);
+            ("BASE_URL", "https://real.example.com")));
+        Assert.Equal("real.example.com", apex);
     }
 }

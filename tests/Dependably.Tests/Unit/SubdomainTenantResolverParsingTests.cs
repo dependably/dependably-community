@@ -38,8 +38,13 @@ public sealed class SubdomainTenantResolverParsingTests
         return ctx;
     }
 
-    private static SubdomainTenantResolver New(string? apexHost) =>
-        new(new ThrowingStore(), Cfg(("APEX_HOST", apexHost)));
+    // Creates a resolver whose apex is derived from BASE_URL. Pass null to simulate an
+    // unconfigured BASE_URL (no apex → all requests are Uninitialized).
+    private static SubdomainTenantResolver New(string? apexHost)
+    {
+        string? baseUrl = apexHost is null ? null : $"https://{apexHost}";
+        return new(new ThrowingStore(), Cfg(("BASE_URL", baseUrl)));
+    }
 
     [Fact]
     public async Task NoApexConfigured_AlwaysUninitialized()

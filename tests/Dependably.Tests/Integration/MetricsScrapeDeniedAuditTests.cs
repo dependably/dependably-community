@@ -287,10 +287,10 @@ public sealed class MetricsScrapeDeniedAuditTenantScopeTests : IAsyncLifetime
 // ── Factories ─────────────────────────────────────────────────────────────────
 
 /// <summary>
-/// Multi-mode factory: DEPLOYMENT_MODE=multi, APEX_HOST=localhost, loopback IP injected,
-/// allowlist set to 10.0.0.0/8 (excludes loopback). Requests via the apex host produce
-/// scope='system' audit rows. Exposes a <see cref="FakeTimeProvider"/> so the cooldown
-/// window can be advanced in tests that need to reset it.
+/// Multi-mode factory: DEPLOYMENT_MODE=multi, BASE_URL=http://localhost (apex=localhost),
+/// loopback IP injected, allowlist set to 10.0.0.0/8 (excludes loopback). Requests via
+/// the apex host produce scope='system' audit rows. Exposes a <see cref="FakeTimeProvider"/>
+/// so the cooldown window can be advanced in tests that need to reset it.
 /// </summary>
 internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
@@ -310,7 +310,7 @@ internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, 
         var builder = WebApplication.CreateBuilder();
 
         builder.Configuration["DEPLOYMENT_MODE"] = "multi";
-        builder.Configuration["APEX_HOST"] = ApexHost;
+        builder.Configuration["BASE_URL"] = $"http://{ApexHost}";
         builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] = SystemAdminEmail;
         builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_PASSWORD"] = SystemAdminPassword;
 

@@ -46,16 +46,17 @@ internal static class AuthStartupExtensions
                 // cache it touches is IMemoryCache (singleton), so any instance can evict.
                 builder.Services.AddScoped<ITenantSlugCacheInvalidator>(
                     sp => (SubdomainTenantResolver)sp.GetRequiredService<ITenantResolver>());
-                // Multi mode resolves tenants by subdomain under an apex host. Without a real
-                // apex host, every bare/IP/non-subdomain request falls to apex/uninitialized and
-                // per-tenant login methods (forms, SAML) never render. Warn so the misconfig is
-                // visible instead of silently hiding the login page.
-                if (!HasUsableApexHost(builder.Configuration))
+                // Multi mode resolves tenants by subdomain under an apex host derived from BASE_URL.
+                // Without a real (non-localhost) BASE_URL host, every bare/IP/non-subdomain request
+                // falls to apex/uninitialized and per-tenant login methods (forms, SAML) never render.
+                // Warn so the misconfig is visible instead of silently hiding the login page.
+                if (!BaseUrlHostHelper.IsUsableApexHost(builder.Configuration["BASE_URL"]))
                 {
                     Serilog.Log.Warning(
-                        "DEPLOYMENT_MODE=multi but no usable APEX_HOST (and BASE_URL is unset or localhost). "
+                        "DEPLOYMENT_MODE=multi but BASE_URL is unset or contains a localhost host. "
                         + "Tenants are reached at slug.apexhost; non-subdomain hosts resolve to apex/uninitialized "
-                        + "and per-tenant login methods such as SAML will not appear. Set APEX_HOST, or use "
+                        + "and per-tenant login methods such as SAML will not appear. Set BASE_URL to a "
+                        + "non-localhost URL (e.g. https://repo.example.com), or use "
                         + "DEPLOYMENT_MODE=single for a single-tenant appliance.");
                 }
 
@@ -485,24 +486,4 @@ internal static class AuthStartupExtensions
         });
     }
 
-    // Resolves whether DEPLOYMENT_MODE=multi has an apex host it can route tenant subdomains
-    // under: an explicit APEX_HOST, or a BASE_URL whose host is not localhost.
-    private static bool HasUsableApexHost(ConfigurationManager configuration)
-    {
-        string? apex = configuration["APEX_HOST"];
-        if (!string.IsNullOrWhiteSpace(apex))
-        {
-            return true;
-        }
-
-        string? baseUrl = configuration["BASE_URL"];
-        if (!string.IsNullOrWhiteSpace(baseUrl)
-            && Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
-        {
-            string host = uri.Host.ToLowerInvariant();
-            return host is not "localhost" and not "127.0.0.1" and not "[::1]";
-        }
-
-        return false;
-    }
 }

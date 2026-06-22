@@ -95,17 +95,5 @@ public sealed class BootstrapController : ControllerBase
     }
 
     internal static string? ResolveApexHost(IConfiguration config)
-    {
-        string? apex = config["APEX_HOST"];
-        if (!string.IsNullOrWhiteSpace(apex))
-        {
-            return apex.Trim().ToLowerInvariant();
-        }
-
-        string? baseUrl = config["BASE_URL"];
-        return !string.IsNullOrWhiteSpace(baseUrl) &&
-            Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)
-            ? uri.Host.ToLowerInvariant()
-            : null;
-    }
+        => BaseUrlHostHelper.ExtractHost(config["BASE_URL"]);
 }

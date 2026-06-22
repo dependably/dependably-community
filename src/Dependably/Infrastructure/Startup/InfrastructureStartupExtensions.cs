@@ -89,6 +89,7 @@ internal static class InfrastructureStartupExtensions
 
         // Health infrastructure
         builder.Services.AddSingleton<ReadinessAggregator>();
+        builder.Services.AddSingleton<Dependably.Infrastructure.Health.HealthService>();
         builder.Services.AddHostedService<HealthcheckPinger>();
 
         builder.Services.AddSingleton<Dependably.Storage.UpstreamFetchCoordinator>();

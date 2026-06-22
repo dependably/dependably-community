@@ -243,7 +243,7 @@ public sealed class MetricsAccessPropagationTests
             var builder = WebApplication.CreateBuilder();
 
             builder.Configuration["DEPLOYMENT_MODE"] = "multi";
-            builder.Configuration["APEX_HOST"] = DependablyMultiFactory.ApexHost;
+            builder.Configuration["BASE_URL"] = $"http://{DependablyMultiFactory.ApexHost}";
             builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] =
                 DependablyMultiFactory.SystemAdminEmail;
             builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_PASSWORD"] =

@@ -288,7 +288,7 @@ public sealed class RpmController : OrgScopedControllerBase
         }
 
         // Uploaded RPMs are served from the package_versions path.
-        var versionMatch = await _svc.Packages.FindVersionByBlobKeySuffixAsync(orgId, "rpm", file, ct, uploadedOnly: true);
+        var versionMatch = await _svc.Packages.FindVersionByBlobKeySuffixAsync(orgId, "rpm", file, uploadedOnly: true, ct: ct);
 
         if (versionMatch is not null)
         {

@@ -147,6 +147,7 @@ public sealed class OrgRepository
         int includeDeletedFlag = includeDeleted ? 1 : 0;
         const string countSql =
             "SELECT COUNT(*) FROM orgs WHERE (@includeDeleted = 1 OR deleted_at IS NULL)";
+        // xtenant: system-admin tenant list — aggregates roll up across all tenants by design.
         const string listSql = """
             SELECT o.id                AS Id,
                    o.slug              AS Slug,
@@ -155,7 +156,9 @@ public sealed class OrgRepository
                    o.storage_quota_bytes AS StorageQuotaBytes,
                    o.created_at        AS CreatedAt,
                    COALESCE(u.member_count, 0)  AS MemberCount,
-                   COALESCE(s.storage_bytes, 0) AS StorageBytes
+                   COALESCE(s.storage_bytes, 0) AS StorageBytes,
+                   sn.stats_json       AS StatsJson,
+                   sn.computed_at      AS StatsComputedAt
             FROM orgs o
             LEFT JOIN (
                 SELECT tenant_id, COUNT(*) AS member_count
@@ -180,6 +183,7 @@ public sealed class OrgRepository
                 )
                 GROUP BY org_id
             ) s ON s.org_id = o.id
+            LEFT JOIN org_stats_snapshot sn ON sn.org_id = o.id
             WHERE (@includeDeleted = 1 OR o.deleted_at IS NULL)
             ORDER BY o.created_at ASC, o.id ASC
             LIMIT @limit OFFSET @offset

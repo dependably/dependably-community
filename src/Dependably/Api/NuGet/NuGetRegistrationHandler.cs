@@ -87,27 +87,41 @@ public sealed class NuGetRegistrationHandler(
     private ContentResult BuildLocalLeafResponse(HttpContext httpContext, string normalizedId, string pkgName, string version)
     {
         string baseUrl = urls.Absolute(httpContext, "/nuget");
+        string leafId = $"{baseUrl}/registration/{normalizedId}/{version}.json";
+        string registration = $"{baseUrl}/registration/{normalizedId}/index.json";
         string packageContent = $"{baseUrl}/flatcontainer/{normalizedId}/{version}/{normalizedId}.{version}.nupkg";
+        var leaf = new Dictionary<string, object?>
+        {
+            ["@id"] = leafId,
+            ["@type"] = "Package",
+            ["catalogEntry"] = LocalCatalogEntry(leafId, pkgName, version, packageContent),
+            ["listed"] = true,
+            ["packageContent"] = packageContent,
+            ["registration"] = registration
+        };
         return new ContentResult
         {
-            Content = System.Text.Json.JsonSerializer.Serialize(new
-            {
-                @id = $"{baseUrl}/registration/{normalizedId}/{version}.json",
-                @type = "Package",
-                catalogEntry = new
-                {
-                    id = pkgName,
-                    version,
-                    listed = true,
-                    packageContent
-                },
-                listed = true,
-                packageContent,
-                registration = $"{baseUrl}/registration/{normalizedId}/index.json"
-            }, NuGetRegistrationHelpers.RelaxedJsonOptions),
+            Content = JsonSerializer.Serialize(leaf, NuGetRegistrationHelpers.RelaxedJsonOptions),
             ContentType = "application/json"
         };
     }
+
+    // The NuGet v3 registration format is JSON-LD: the document keys "@id" and "@type" carry the
+    // leading "@". A C# anonymous property `@id` is a *verbatim identifier* whose name is "id"
+    // (no "@"), so anonymous objects silently emit a spec-violating document the NuGet client
+    // rejects with "Value cannot be null or an empty string". Build these documents with explicit
+    // dictionary keys so the "@" survives serialization. (The proxy-merge path already does this
+    // via NuGetRegistrationHelpers' JsonObject builders; this is the local-only render path.)
+    private static Dictionary<string, object?> LocalCatalogEntry(
+        string leafId, string pkgName, string version, string packageContent) => new()
+        {
+            ["@id"] = leafId,
+            ["@type"] = "PackageDetails",
+            ["id"] = pkgName,
+            ["version"] = version,
+            ["listed"] = true,
+            ["packageContent"] = packageContent
+        };
 
     private async Task<IActionResult> ProxyRegistrationLeafAsync(
         HttpContext httpContext, string orgId, string normalizedId, string version, bool semVer2, CancellationToken ct)
@@ -347,13 +361,14 @@ public sealed class NuGetRegistrationHandler(
         return combined;
     }
 
-    private object BuildLocalRegistration(
+    private Dictionary<string, object?> BuildLocalRegistration(
         HttpContext httpContext,
         string id, Package pkg, IReadOnlyList<PackageVersion> versions,
         OrgSettings settings, IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now)
     {
         string normalizedId = id.ToLowerInvariant();
         string baseUrl = urls.Absolute(httpContext, "/nuget");
+        string registration = $"{baseUrl}/registration/{normalizedId}/index.json";
 
         // Exclude yanked versions and versions the block gate will hard-block on the download
         // path. The registration index must not advertise a version the flatcontainer endpoint
@@ -361,29 +376,34 @@ public sealed class NuGetRegistrationHandler(
         var leaves = versions
             .Where(v => !v.Yanked
                 && !BlockGateService.IsHardBlockedByStoredState(v, settings, signals.GetValueOrDefault(v.Id), now))
-            .Select(v => new
+            .Select(v =>
             {
-                @id = $"{baseUrl}/registration/{normalizedId}/{v.Version}.json",
-                catalogEntry = new
+                string leafId = $"{baseUrl}/registration/{normalizedId}/{v.Version}.json";
+                string packageContent = $"{baseUrl}/flatcontainer/{normalizedId}/{v.Version}/{normalizedId}.{v.Version}.nupkg";
+                return new Dictionary<string, object?>
                 {
-                    id = pkg.Name,
-                    version = v.Version,
-                    listed = true,
-                    packageContent = $"{baseUrl}/flatcontainer/{normalizedId}/{v.Version}/{normalizedId}.{v.Version}.nupkg"
-                }
+                    ["@id"] = leafId,
+                    ["@type"] = "Package",
+                    ["catalogEntry"] = LocalCatalogEntry(leafId, pkg.Name, v.Version, packageContent),
+                    ["packageContent"] = packageContent,
+                    ["registration"] = registration
+                };
             }).ToList();
 
-        return new
+        var page = new Dictionary<string, object?>
         {
-            @id = $"{baseUrl}/registration/{normalizedId}/",
-            items = new[]
-            {
-                new
-                {
-                    @id = $"{baseUrl}/registration/{normalizedId}/index.json",
-                    items = leaves
-                }
-            }
+            ["@id"] = $"{registration}#page",
+            ["@type"] = "catalog:CatalogPage",
+            ["count"] = leaves.Count,
+            ["items"] = leaves
+        };
+
+        return new Dictionary<string, object?>
+        {
+            ["@id"] = registration,
+            ["@type"] = new[] { "catalog:CatalogRoot", "PackageRegistration", "catalog:Permalink" },
+            ["count"] = 1,
+            ["items"] = new[] { page }
         };
     }
 

@@ -27,3 +27,51 @@ if [ -n "$staged_dotnet" ]; then
     exit 1
   fi
 fi
+
+# Supply-chain: audit dependency manifests with the dependably checkers when they change.
+# @dependably/npm-check runs on the npm lockfile; nuget-check (a pinned local dotnet tool)
+# runs on the backend packages.lock.json files. Both surface known vulnerabilities and any
+# package source/registry host that isn't public or allowlisted in the repo-root
+# .dependably-check config. Both tools live on the private dogfood feed, so the checks need
+# DEPENDABLY_TOKEN; without it they are skipped (a warning, not a failure) so contributors
+# without feed access can still commit. CI enforces them regardless.
+staged_npm_deps=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^web/package(-lock)?\.json$' || true)
+staged_nuget_deps=$(git diff --cached --name-only --diff-filter=ACM | grep -E '(\.csproj|packages\.lock\.json|(^|/)nuget\.config)$' || true)
+
+if [ -n "$staged_npm_deps" ] || [ -n "$staged_nuget_deps" ]; then
+  if [ -z "${DEPENDABLY_TOKEN:-}" ]; then
+    echo "⚠ Skipping dependably dependency checks: DEPENDABLY_TOKEN not set (private feed unavailable). CI will still enforce them."
+  else
+    if [ -n "$staged_npm_deps" ]; then
+      echo "Auditing web/package-lock.json (@dependably/npm-check)…"
+      if ! npx -y @dependably/npm-check@1.6.0 audit web/package-lock.json; then
+        echo "✗ npm-check found issues. Fix them, or allowlist a host in .dependably-check."
+        exit 1
+      fi
+    fi
+    if [ -n "$staged_nuget_deps" ]; then
+      # nuget-check is a private, dev-only tool — install it into a local, never-committed
+      # path rather than the shared .config/dotnet-tools.json (which CI restores and must not
+      # depend on the private feed). Cached after first install. .git is a file in worktrees,
+      # so use a gitignored top-level dir for worktree compatibility.
+      nuget_check=".dependably-tools/nuget-check"
+      if [ ! -x "$nuget_check" ]; then
+        echo "Installing nuget-check (dependably tool feed)…"
+        dotnet tool install Dependably.NuGetCheck --version 1.1.0 \
+          --tool-path .dependably-tools \
+          --configfile .config/dependably-tools.nuget.config >/dev/null 2>&1 \
+          || echo "⚠ Skipping nuget-check: tool install failed (dogfood feed or DEPENDABLY_TOKEN issue)."
+      fi
+      if [ -x "$nuget_check" ]; then
+        for lock in src/Dependably/packages.lock.json tests/Dependably.Tests/packages.lock.json; do
+          [ -f "$lock" ] || continue
+          echo "Auditing $lock (nuget-check)…"
+          if ! "$nuget_check" "$lock" --source osv; then
+            echo "✗ nuget-check found issues in $lock. Fix them, or allowlist a host in .dependably-check."
+            exit 1
+          fi
+        done
+      fi
+    fi
+  fi
+fi
