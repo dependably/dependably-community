@@ -60,11 +60,11 @@ public sealed class OrgSettingsRepository
             INSERT INTO org_settings (org_id, anonymous_pull, allowlist_mode,
                 max_upload_bytes, max_upload_bytes_pypi, max_upload_bytes_npm, max_upload_bytes_nuget,
                 max_upload_bytes_maven, max_upload_bytes_rpm, max_upload_bytes_oci, max_upload_bytes_cargo,
-                default_language, allow_version_overwrite, version_overwrite_policy, air_gapped)
+                default_language, allow_version_overwrite, version_overwrite_policy, air_gapped, require_mfa)
             VALUES (@orgId, @anonPull, @allowlist, @maxBytes, @maxBytesPyPi, @maxBytesNpm, @maxBytesNuGet,
                 @maxBytesMaven, @maxBytesRpm, @maxBytesOci, @maxBytesCargo,
                 COALESCE(@lang, 'en'), COALESCE(@legacyOverwrite, 0),
-                COALESCE(@policy, 'block'), COALESCE(@airGapped, 0))
+                COALESCE(@policy, 'block'), COALESCE(@airGapped, 0), COALESCE(@requireMfa, 0))
             ON CONFLICT(org_id) DO UPDATE SET
                 anonymous_pull      = @anonPull,
                 allowlist_mode      = @allowlist,
@@ -80,7 +80,8 @@ public sealed class OrgSettingsRepository
                 version_overwrite_policy = COALESCE(@policy, version_overwrite_policy),
                 allow_version_overwrite  = CASE WHEN @legacyOverwrite IS NULL THEN allow_version_overwrite
                                                 ELSE @legacyOverwrite END,
-                air_gapped          = COALESCE(@airGapped, air_gapped)
+                air_gapped          = COALESCE(@airGapped, air_gapped),
+                require_mfa         = COALESCE(@requireMfa, require_mfa)
             """,
             new
             {
@@ -99,6 +100,7 @@ public sealed class OrgSettingsRepository
                 legacyOverwrite,
                 policy,
                 airGapped = ToBoolFlag(update.AirGapped),
+                requireMfa = ToBoolFlag(update.RequireMfa),
             });
 
         _orgs?.InvalidateSettingsCache(update.OrgId);

@@ -5,12 +5,20 @@
   popover itself. Parent passes the data and the action handlers and supplies the
   copy helper.
 
-  Severity badges in the expanded detail panel come from VulnerabilityRow.svelte
-  (extracted in 7660c04); UNSCORED / NO CVSS labelling is preserved there
-  intentionally (security-UI uncertainty surface).
+  Rows are grouped by version. Most ecosystems map a version to a single artifact, so
+  a group holds one file and renders as a flat row. Maven (jar + pom + sidecars) and
+  PyPI (wheel + sdist) map one version to several files; their group collapses into a
+  single version row whose expanded panel lists each file with a per-file download.
+  Release-level actions (block / unblock / rescan / delete) act on the whole version;
+  download is per-file because each file has its own bytes.
+
+  Severity badges in the expanded detail panel come from VulnerabilityRow.svelte;
+  UNSCORED / NO CVSS labelling is preserved there intentionally (security-UI
+  uncertainty surface).
 -->
 <script>
   import { createEventDispatcher } from 'svelte'
+  import { SvelteMap } from 'svelte/reactivity'
   import { t } from 'svelte-i18n'
   import VulnerabilityRow from './VulnerabilityRow.svelte'
   import { formatDate, formatBytes, formatNumber } from './format.js'
@@ -38,11 +46,81 @@
   const dispatch = createEventDispatcher()
 
   let sortCol = 'pushed', sortDir = 'desc'
-  let expandedPurl = null
+  let expandedKey = null
   let openActionsId = null
   let popoverPos = { top: 0, left: 0 }
 
-  $: sortedVersions = [...versions].sort((a, b) => {
+  // Worst-first rank for collapsing several files' statuses into the version's overall status.
+  const STATUS_RANK = { blocked: 0, vulnerable: 1, deprecated: 2, unscanned: 3, allowed: 4, clean: 5 }
+
+  // Collapse the flat per-file list into one display group per version. A single-file group
+  // renders exactly like the old flat row; a multi-file group aggregates the file-level columns
+  // and exposes the per-file breakdown only in the expanded panel.
+  function buildGroups(list) {
+    const byKey = new SvelteMap()
+    for (const v of list) {
+      let g = byKey.get(v.version)
+      if (!g) { g = { key: v.version, version: v.version, purl: v.purl, files: [] }; byKey.set(v.version, g) }
+      g.files.push(v)
+    }
+    return [...byKey.values()].map(summarize)
+  }
+
+  function summarize(g) {
+    const files = g.files
+    const single = files.length === 1
+    const rep = files[0]
+    const worstStatus = files
+      .map(f => f.status)
+      .filter(Boolean)
+      .sort((a, b) => (STATUS_RANK[a] ?? 9) - (STATUS_RANK[b] ?? 9))[0] ?? null
+    // Most-recent cache time represents the version's recency for the default "pushed" sort.
+    const createdAt = files.reduce((m, f) => (m && new Date(m) >= new Date(f.createdAt) ? m : f.createdAt), null)
+    // Surface the strongest provenance signal across the version's files (failed dominates).
+    const provenanceStatus =
+        files.some(f => f.provenanceStatus === 'failed') ? 'failed'
+      : files.some(f => f.provenanceStatus === 'unsigned') ? 'unsigned'
+      : files.some(f => f.provenanceStatus === 'verified') ? 'verified'
+      : null
+    return {
+      key: g.key,
+      version: g.version,
+      purl: g.purl,
+      // Release-level actions key by version string, so the representative id only needs to be
+      // stable for the scanning/cooldown highlight and the open-popover lookup.
+      id: rep.id,
+      files,
+      fileCount: files.length,
+      single,
+      firstFetch: files.some(f => f.firstFetch),
+      yanked: files.some(f => f.yanked),
+      deprecated: files.find(f => f.deprecated)?.deprecated ?? null,
+      hasInstallScript: files.some(f => f.hasInstallScript),
+      installScriptKind: files.find(f => f.hasInstallScript)?.installScriptKind ?? null,
+      provenanceStatus,
+      provenanceSigner: files.find(f => f.provenanceStatus === 'verified')?.provenanceSigner ?? null,
+      isMalicious: files.some(f => f.isMalicious),
+      status: worstStatus,
+      // Single-checksum / integrity belong to one file; null them out for multi-file groups
+      // (the per-file checksums live in the expanded panel).
+      checksumSha256: single ? rep.checksumSha256 : null,
+      checksumSha1: single ? rep.checksumSha1 : null,
+      upstreamIntegrityValue: single ? rep.upstreamIntegrityValue : null,
+      upstreamIntegrityAlgorithm: single ? rep.upstreamIntegrityAlgorithm : null,
+      origin: rep.origin,
+      licenses: [...new Set(files.flatMap(f => f.licenses ?? []))],
+      sizeBytes: files.reduce((s, f) => s + (f.sizeBytes ?? 0), 0),
+      downloadCount: files.reduce((s, f) => s + (f.downloadCount ?? 0), 0),
+      createdAt,
+      publishedAt: rep.publishedAt,
+      vulnCheckedAt: rep.vulnCheckedAt,
+      tags: rep.tags,
+    }
+  }
+
+  $: groups = buildGroups(versions)
+
+  $: sortedGroups = [...groups].sort((a, b) => {
     let cmp = 0
     if (sortCol === 'version')  cmp = a.version.localeCompare(b.version, undefined, { numeric: true, sensitivity: 'base' })
     else if (sortCol === 'size')      cmp = a.sizeBytes - b.sizeBytes
@@ -70,13 +148,32 @@
     return version
   }
 
-  function toggleExpand(purl) {
-    expandedPurl = expandedPurl === purl ? null : purl
+  // Short, technical label for a constituent file so the per-file rows read as
+  // "jar / pom / wheel / sdist" rather than opaque hashes. Falls back to the extension.
+  function fileType(filename) {
+    const f = (filename ?? '').toLowerCase()
+    if (pkg?.ecosystem === 'pypi') {
+      if (f.endsWith('.whl')) return 'wheel'
+      if (f.endsWith('.tar.gz') || f.endsWith('.zip') || f.endsWith('.tar.bz2') || f.endsWith('.egg')) return 'sdist'
+    }
+    if (pkg?.ecosystem === 'maven') {
+      if (f.endsWith('-sources.jar')) return 'sources'
+      if (f.endsWith('-javadoc.jar')) return 'javadoc'
+      if (f.endsWith('.jar')) return 'jar'
+      if (f.endsWith('.pom')) return 'pom'
+      if (f.endsWith('.module')) return 'module'
+    }
+    const dot = f.lastIndexOf('.')
+    return dot >= 0 ? f.slice(dot + 1) : 'file'
+  }
+
+  function toggleExpand(key) {
+    expandedKey = expandedKey === key ? null : key
   }
 
   /** Reset state when the package or selected version churns (parent reloads after action). */
   export function reset() {
-    expandedPurl = null
+    expandedKey = null
     openActionsId = null
   }
 
@@ -84,16 +181,16 @@
     return { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 }[s] ?? 4
   }
 
-  function toggleActions(verId, e) {
+  function toggleActions(id, e) {
     e.stopPropagation()
-    if (openActionsId === verId) { openActionsId = null; return }
+    if (openActionsId === id) { openActionsId = null; return }
     const rect = e.currentTarget.getBoundingClientRect()
     const POPOVER_WIDTH = 160
     popoverPos = {
       top: rect.bottom + 4,
       left: Math.max(8, rect.right - POPOVER_WIDTH),
     }
-    openActionsId = verId
+    openActionsId = id
   }
 
   function handleWindowClick(e) {
@@ -102,9 +199,9 @@
     openActionsId = null
   }
 
-  function fire(name, ver) {
+  function fire(name, payload) {
     openActionsId = null
-    dispatch(name, ver)
+    dispatch(name, payload)
   }
 </script>
 
@@ -163,24 +260,25 @@
     </tbody>
   {:else}
   <tbody>
-    {#each sortedVersions as ver (ver.id)}
-      {@const vulns = (vulnsByPurl.get(ver.purl) ?? []).slice().sort((a, b) => severityOrder(a.severity) - severityOrder(b.severity))}
-      {@const isExpanded = expandedPurl === ver.purl}
-      {@const verShort = shortVersion(ver.version)}
+    {#each sortedGroups as g (g.key)}
+      {@const vulns = (vulnsByPurl.get(g.purl) ?? []).slice().sort((a, b) => severityOrder(a.severity) - severityOrder(b.severity))}
+      {@const isExpanded = expandedKey === g.key}
+      {@const verShort = shortVersion(g.version)}
       <tr
-        class:first-fetch-row={ver.firstFetch}
+        class:first-fetch-row={g.firstFetch}
         class:expanded-row={isExpanded}
         class="cursor-pointer"
-        on:click={() => toggleExpand(ver.purl)}
+        on:click={() => toggleExpand(g.key)}
       >
         <td class="version-cell">
-          <strong class:mono={verShort !== ver.version} title={verShort === ver.version ? null : ver.version}>{verShort}</strong>
-          {#if ver.yanked}<span class="badge yanked ml-1">{$t('versionDetail.badges.yanked')}</span>{/if}
-          {#if ver.deprecated}<span class="badge deprecated ml-1" title={ver.deprecated}>{$t('versionDetail.badges.deprecated')}</span>{/if}
-          {#if ver.hasInstallScript}<span class="badge install-script ml-1" title={$t('versionDetail.badges.installScriptHelp', { values: { kind: ver.installScriptKind || '' } })}>{$t('versionDetail.badges.installScript')}</span>{/if}
-          {#if ver.provenanceStatus === 'verified'}<span class="badge prov-verified ml-1" title={$t('versionDetail.badges.provenanceVerifiedHelp', { values: { signer: ver.provenanceSigner || '' } })}>{$t('versionDetail.badges.provenanceVerified')}</span>{/if}
-          {#if ver.provenanceStatus === 'failed'}<span class="badge prov-failed ml-1" title={$t('versionDetail.badges.provenanceFailedHelp')}>{$t('versionDetail.badges.provenanceFailed')}</span>{/if}
-          {#if ver.provenanceStatus === 'unsigned'}<span class="badge prov-unsigned ml-1" title={$t('versionDetail.badges.provenanceUnsignedHelp')}>{$t('versionDetail.badges.provenanceUnsigned')}</span>{/if}
+          <strong class:mono={verShort !== g.version} title={verShort === g.version ? null : g.version}>{verShort}</strong>
+          {#if !g.single}<span class="badge files-badge ml-1">{$t('versionDetail.fileCount', { values: { count: g.fileCount } })}</span>{/if}
+          {#if g.yanked}<span class="badge yanked ml-1">{$t('versionDetail.badges.yanked')}</span>{/if}
+          {#if g.deprecated}<span class="badge deprecated ml-1" title={g.deprecated}>{$t('versionDetail.badges.deprecated')}</span>{/if}
+          {#if g.hasInstallScript}<span class="badge install-script ml-1" title={$t('versionDetail.badges.installScriptHelp', { values: { kind: g.installScriptKind || '' } })}>{$t('versionDetail.badges.installScript')}</span>{/if}
+          {#if g.provenanceStatus === 'verified'}<span class="badge prov-verified ml-1" title={$t('versionDetail.badges.provenanceVerifiedHelp', { values: { signer: g.provenanceSigner || '' } })}>{$t('versionDetail.badges.provenanceVerified')}</span>{/if}
+          {#if g.provenanceStatus === 'failed'}<span class="badge prov-failed ml-1" title={$t('versionDetail.badges.provenanceFailedHelp')}>{$t('versionDetail.badges.provenanceFailed')}</span>{/if}
+          {#if g.provenanceStatus === 'unsigned'}<span class="badge prov-unsigned ml-1" title={$t('versionDetail.badges.provenanceUnsignedHelp')}>{$t('versionDetail.badges.provenanceUnsigned')}</span>{/if}
           {#if vulns.length > 0}
             {@const critical = vulns.filter(v => v.severity === 'CRITICAL').length}
             {@const high     = vulns.filter(v => v.severity === 'HIGH').length}
@@ -196,8 +294,8 @@
         </td>
         {#if pkg?.ecosystem === 'oci'}
           <td class="tag-cell">
-            {#if ver.tags?.length > 0}
-              {#each ver.tags as tag (tag)}
+            {#if g.tags?.length > 0}
+              {#each g.tags as tag (tag)}
                 <span class="badge tag-badge">{tag}</span>
               {/each}
             {:else}
@@ -208,7 +306,7 @@
         <td class="text-center latest-cell">
           <!-- When the upstream latest is known, every row resolves to current (check) or behind (x);
                the dash is reserved for packages with no upstream baseline to compare against. -->
-          {#if pkg?.upstreamLatestVersion && ver.version === pkg.upstreamLatestVersion}
+          {#if pkg?.upstreamLatestVersion && g.version === pkg.upstreamLatestVersion}
             <svg class="latest-yes" width="14" height="14" role="img" aria-label={$t('versionDetail.latestCell.isLatest')}><use href="/icons.svg#icon-check"/></svg>
           {:else if pkg?.upstreamLatestVersion}
             <svg class="latest-no" width="14" height="14" role="img" aria-label={$t('versionDetail.latestCell.behind')}><use href="/icons.svg#icon-x"/></svg>
@@ -223,36 +321,42 @@
             </span>
           {/if}
         </td>
-        <td class="mono checksum-cell nowrap" title={ver.checksumSha256 ?? ''}>{ver.checksumSha256?.slice(0,8) ?? '—'}…</td>
-        <td class="nowrap">{$formatBytes(ver.sizeBytes)}</td>
-        <td class="nowrap text-muted">{$formatDate(ver.createdAt)}</td>
+        {#if g.single}
+          <td class="mono checksum-cell nowrap" title={g.checksumSha256 ?? ''}>{g.checksumSha256?.slice(0,8) ?? '—'}…</td>
+        {:else}
+          <td class="checksum-cell nowrap text-muted" title={$t('versionDetail.multiFileHint')}>—</td>
+        {/if}
+        <td class="nowrap">{$formatBytes(g.sizeBytes)}</td>
+        <td class="nowrap text-muted">{$formatDate(g.createdAt)}</td>
         <td class="license-cell">
-          {#if ver.licenses?.length > 0}
-            {ver.licenses.join(', ')}
+          {#if g.licenses?.length > 0}
+            {g.licenses.join(', ')}
           {:else}
             <span class="text-muted">—</span>
           {/if}
         </td>
-        <td class="nowrap num-col">{$formatNumber(ver.downloadCount)}</td>
+        <td class="nowrap num-col">{$formatNumber(g.downloadCount)}</td>
         <td>
-          {#if ver.isMalicious}
+          {#if g.isMalicious}
             <span class="status-badge status-malicious" title={$t('versionDetail.status.maliciousHelp')}>
               <svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>
               {$t('versionDetail.status.malicious')}
             </span>
           {/if}
-          {#if ver.status}
-            <span class="status-badge status-{ver.status}">{$t(`versionDetail.status.${ver.status}`)}</span>
+          {#if g.status}
+            <span class="status-badge status-{g.status}">{$t(`versionDetail.status.${g.status}`)}</span>
           {/if}
         </td>
         <td>
-          <button
-            class="kebab-btn"
-            on:click={(e) => toggleActions(ver.id, e)}
-            aria-label={$t('versionDetail.actionsMenu.open')}
-            aria-haspopup="true"
-            aria-expanded={openActionsId === ver.id}
-          >⋯</button>
+          {#if isAdmin || g.single}
+            <button
+              class="kebab-btn"
+              on:click={(e) => toggleActions(g.id, e)}
+              aria-label={$t('versionDetail.actionsMenu.open')}
+              aria-haspopup="true"
+              aria-expanded={openActionsId === g.id}
+            >⋯</button>
+          {/if}
         </td>
       </tr>
 
@@ -260,34 +364,75 @@
         <tr class="detail-row">
           <td colspan={pkg?.ecosystem === 'oci' ? 11 : 10}>
             <div class="detail-panel">
-              <div class="detail-section">
-                <span class="detail-label">{$t('versionDetail.detail.purl')}</span>
-                <code class="detail-value mono">{ver.purl}</code>
-                <button class="copy-btn" on:click={() => copy(ver.purl)}>{$t('versionDetail.detail.copy')}</button>
-              </div>
-
-              {#if ver.checksumSha256}
-                <div class="detail-section">
-                  <span class="detail-label">{$t('versionDetail.detail.checksum')}</span>
-                  <code class="detail-value mono">{ver.checksumSha256}</code>
-                  <button class="copy-btn" on:click={() => copy(ver.checksumSha256)}>{$t('versionDetail.detail.copy')}</button>
+              {#if !g.single}
+                <div class="files-section">
+                  <span class="detail-label">{$t('versionDetail.detail.files')}</span>
+                  <table class="files-table">
+                    <thead>
+                      <tr>
+                        <th>{$t('versionDetail.files.name')}</th>
+                        <th>{$t('versionDetail.files.type')}</th>
+                        <th>{$t('versionDetail.columns.checksum')}</th>
+                        <th>{$t('versionDetail.columns.size')}</th>
+                        <th class="num-col">{$t('versionDetail.columns.downloads')}</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each g.files as f (f.id)}
+                        <tr>
+                          <td class="mono filename-cell">{f.filename ?? '—'}</td>
+                          <td><span class="badge file-type">{fileType(f.filename)}</span></td>
+                          <td class="checksum-cell">
+                            {#if f.checksumSha256}
+                              <span class="checksum-inline">
+                                <code class="mono checksum-full">{f.checksumSha256}</code>
+                                <button class="copy-btn" on:click|stopPropagation={() => copy(f.checksumSha256)}>{$t('versionDetail.detail.copy')}</button>
+                              </span>
+                            {:else}
+                              <span class="text-muted">—</span>
+                            {/if}
+                          </td>
+                          <td class="nowrap">{$formatBytes(f.sizeBytes)}</td>
+                          <td class="nowrap num-col">{$formatNumber(f.downloadCount)}</td>
+                          <td class="text-right">
+                            <button class="file-dl-btn" on:click|stopPropagation={() => fire('download', { version: g.version, file: f.filename })}>{$t('versionDetail.actionsMenu.download')}</button>
+                          </td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
                 </div>
               {/if}
 
-              {#if ver.upstreamIntegrityValue || (pkg?.ecosystem === 'npm' && ver.origin === 'proxy' && ver.checksumSha1)}
-                {@const showNpmShasum = pkg?.ecosystem === 'npm' && ver.origin === 'proxy' && ver.checksumSha1}
-                {#if ver.upstreamIntegrityValue}
+              <div class="detail-section">
+                <span class="detail-label">{$t('versionDetail.detail.purl')}</span>
+                <code class="detail-value mono">{g.purl}</code>
+                <button class="copy-btn" on:click={() => copy(g.purl)}>{$t('versionDetail.detail.copy')}</button>
+              </div>
+
+              {#if g.single && g.checksumSha256}
+                <div class="detail-section">
+                  <span class="detail-label">{$t('versionDetail.detail.checksum')}</span>
+                  <code class="detail-value mono">{g.checksumSha256}</code>
+                  <button class="copy-btn" on:click={() => copy(g.checksumSha256)}>{$t('versionDetail.detail.copy')}</button>
+                </div>
+              {/if}
+
+              {#if g.single && (g.upstreamIntegrityValue || (pkg?.ecosystem === 'npm' && g.origin === 'proxy' && g.checksumSha1))}
+                {@const showNpmShasum = pkg?.ecosystem === 'npm' && g.origin === 'proxy' && g.checksumSha1}
+                {#if g.upstreamIntegrityValue}
                   <div class="detail-section">
-                    <span class="detail-label">{$t(`versionDetail.detail.upstreamIntegrity.${ver.upstreamIntegrityAlgorithm}`)}</span>
-                    <code class="detail-value mono">{ver.upstreamIntegrityValue}</code>
-                    <button class="copy-btn" on:click={() => copy(ver.upstreamIntegrityValue)}>{$t('versionDetail.detail.copy')}</button>
+                    <span class="detail-label">{$t(`versionDetail.detail.upstreamIntegrity.${g.upstreamIntegrityAlgorithm}`)}</span>
+                    <code class="detail-value mono">{g.upstreamIntegrityValue}</code>
+                    <button class="copy-btn" on:click={() => copy(g.upstreamIntegrityValue)}>{$t('versionDetail.detail.copy')}</button>
                   </div>
                 {/if}
                 {#if showNpmShasum}
                   <div class="detail-section">
                     <span class="detail-label">{$t('versionDetail.detail.upstreamIntegrity.shasum')}</span>
-                    <code class="detail-value mono">{ver.checksumSha1}</code>
-                    <button class="copy-btn" on:click={() => copy(ver.checksumSha1)}>{$t('versionDetail.detail.copy')}</button>
+                    <code class="detail-value mono">{g.checksumSha1}</code>
+                    <button class="copy-btn" on:click={() => copy(g.checksumSha1)}>{$t('versionDetail.detail.copy')}</button>
                   </div>
                 {/if}
               {/if}
@@ -295,14 +440,14 @@
               <div class="detail-section">
                 <span class="detail-label">{$t('versionDetail.detail.published')}</span>
                 <span class="detail-value text-muted">
-                  {ver.publishedAt ? $formatDate(ver.publishedAt) : '—'}
+                  {g.publishedAt ? $formatDate(g.publishedAt) : '—'}
                 </span>
               </div>
 
               <div class="detail-section">
                 <span class="detail-label">{$t('versionDetail.detail.vulnScan')}</span>
                 <span class="detail-value text-muted">
-                  {ver.vulnCheckedAt ? $formatDate(ver.vulnCheckedAt) : $t('versionDetail.vulnNever')}
+                  {g.vulnCheckedAt ? $formatDate(g.vulnCheckedAt) : $t('versionDetail.vulnNever')}
                 </span>
               </div>
 
@@ -328,33 +473,37 @@
 </table>
 
 {#if openActionsId !== null}
-  {@const ver = versions.find(v => v.id === openActionsId)}
-  {#if ver}
+  {@const g = groups.find(v => v.id === openActionsId)}
+  {#if g}
     <div class="actions-popover" style:top="{popoverPos.top}px" style:left="{popoverPos.left}px">
-      <!-- Download is available to every viewer; the admin-only actions below are gated. -->
-      <button class="popover-item" on:click|stopPropagation={() => fire('download', ver)}>{$t('versionDetail.actionsMenu.download')}</button>
+      <!-- Download is available to every viewer. For a multi-file version each file downloads
+           from its own row in the expanded panel, so the version-level menu only offers
+           download when the version maps to a single file. -->
+      {#if g.single}
+        <button class="popover-item" on:click|stopPropagation={() => fire('download', { version: g.version })}>{$t('versionDetail.actionsMenu.download')}</button>
+      {/if}
       {#if isAdmin}
-        <div class="popover-divider"></div>
+        {#if g.single}<div class="popover-divider"></div>{/if}
         <button
           class="popover-item"
-          on:click|stopPropagation={() => fire('rescan', ver)}
-          disabled={scanningId === ver.id || scanCooldownRemaining(ver) > 0}
-          title={scanCooldownRemaining(ver) > 0 ? $t('versionDetail.rescanCooldown', { values: { minutes: Math.ceil(scanCooldownRemaining(ver)/60000) } }) : $t('versionDetail.rescanTitle')}
-        >{scanningId === ver.id ? $t('versionDetail.rescanning') : $t('versionDetail.actionsMenu.rescan')}</button>
+          on:click|stopPropagation={() => fire('rescan', g)}
+          disabled={scanningId === g.id || scanCooldownRemaining(g) > 0}
+          title={scanCooldownRemaining(g) > 0 ? $t('versionDetail.rescanCooldown', { values: { minutes: Math.ceil(scanCooldownRemaining(g)/60000) } }) : $t('versionDetail.rescanTitle')}
+        >{scanningId === g.id ? $t('versionDetail.rescanning') : $t('versionDetail.actionsMenu.rescan')}</button>
         <button
           class="popover-item"
-          on:click|stopPropagation={() => fire('block', ver)}
-          disabled={ver.status === 'blocked'}
-          title={ver.status === 'blocked' ? $t('versionDetail.blockDisabledTitle') : ''}
+          on:click|stopPropagation={() => fire('block', g)}
+          disabled={g.status === 'blocked'}
+          title={g.status === 'blocked' ? $t('versionDetail.blockDisabledTitle') : ''}
         >{$t('versionDetail.actionsMenu.block')}</button>
         <button
           class="popover-item"
-          on:click|stopPropagation={() => fire('unblock', ver)}
-          disabled={ver.status !== 'blocked'}
-          title={ver.status !== 'blocked' ? $t('versionDetail.unblockDisabledTitle') : ''}
+          on:click|stopPropagation={() => fire('unblock', g)}
+          disabled={g.status !== 'blocked'}
+          title={g.status !== 'blocked' ? $t('versionDetail.unblockDisabledTitle') : ''}
         >{$t('versionDetail.actionsMenu.unblock')}</button>
         <div class="popover-divider"></div>
-        <button class="popover-item danger" on:click|stopPropagation={() => fire('delete', ver)}>{$t('versionDetail.actionsMenu.delete')}</button>
+        <button class="popover-item danger" on:click|stopPropagation={() => fire('delete', g)}>{$t('versionDetail.actionsMenu.delete')}</button>
       {/if}
     </div>
   {/if}
@@ -389,8 +538,10 @@
   .versions-table .col-status    { width: 100px; }
   .versions-table .col-actions   { width: 60px; }
   .num-col { text-align: right; font-variant-numeric: tabular-nums; }
+  .text-right { text-align: right; }
   .tag-cell { font-size: 12px; overflow-wrap: anywhere; }
   .tag-badge { margin-right: 3px; margin-bottom: 2px; font-family: var(--font-mono, monospace); font-size: 11px; }
+  .files-badge { background: var(--badge-sky-bg); color: var(--badge-sky-text); font-size: 11px; }
   .latest-cell { font-weight: 600; }
   .latest-yes { color: var(--success); }
   .latest-no { color: var(--danger); }
@@ -412,6 +563,34 @@
   .detail-row td { padding: 0; border-top: none; }
   .copy-btn { padding: 1px 6px; font-size: 11px; flex-shrink: 0; }
   .vuln-list { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+
+  /* Per-file breakdown for multi-file versions (Maven jar/pom/sidecars, PyPI wheel/sdist). */
+  .files-section { margin-bottom: 12px; }
+  .files-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 12px; }
+  .files-table th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 11px;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    padding: 2px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .files-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .files-table tr:last-child td { border-bottom: none; }
+  .filename-cell { overflow-wrap: anywhere; }
+  /* Full per-file checksum with an inline copy button; the hash wraps rather than truncating. */
+  .checksum-inline { display: inline-flex; align-items: center; gap: 6px; }
+  .checksum-full { font-size: 11px; color: var(--text2); overflow-wrap: anywhere; }
+  .file-type {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    background: var(--bg3);
+    color: var(--text2);
+  }
+  .file-dl-btn { padding: 2px 10px; font-size: 11px; white-space: nowrap; }
 
   .status-badge {
     display: inline-flex;

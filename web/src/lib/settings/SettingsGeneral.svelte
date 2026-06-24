@@ -58,6 +58,18 @@
     <div class="warning-box mb-3">{$t('settings.general.airGappedWarning')}</div>
   {/if}
 
+  <div class="form-row form-row-inline">
+    <label class="flex-1 label-row">{$t('settings.general.requireMfa')} <InfoTip text={$t('settings.general.requireMfaHint')} /></label>
+    {#if settings.requireMfaEnforced}
+      <input type="checkbox" checked disabled class="w-auto" />
+    {:else}
+      <input type="checkbox" bind:checked={settings.requireMfa} class="w-auto" />
+    {/if}
+  </div>
+  {#if settings.requireMfaEnforced}
+    <div class="form-hint mb-3">{$t('settings.general.requireMfaEnforcedNote')}</div>
+  {/if}
+
   <button class="primary" on:click={onSave} disabled={saving}>
     {saving ? $t('common.actions.saving') : $t('common.actions.save')}
   </button>

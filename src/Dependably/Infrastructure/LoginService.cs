@@ -3,6 +3,7 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using Dapper;
+using Dependably.Infrastructure.Identity;
 using Microsoft.IdentityModel.Tokens;
 
 namespace Dependably.Infrastructure;
@@ -29,7 +30,7 @@ public sealed class LoginService
     }
 
     /// <summary>
-    /// Injected dependencies for <see cref="LoginService"/>. Bundles the eight DI services
+    /// Injected dependencies for <see cref="LoginService"/>. Bundles DI services
     /// so the constructor stays within the parameter-count gate (S107).
     /// </summary>
     public sealed record Dependencies(
@@ -40,7 +41,9 @@ public sealed class LoginService
         AuditRepository Audit,
         ExternalIdentityRepository ExternalIdentities,
         Audit.IAuditEmitter AuditEmitter,
-        TimeProvider Time);
+        TimeProvider Time,
+        IMfaEnrollmentService Mfa,
+        ISystemMfaEnrollmentService SystemMfa);
 
     private readonly IMetadataStore _db;
     private readonly OrgRepository _orgs;
@@ -50,6 +53,8 @@ public sealed class LoginService
     private readonly ExternalIdentityRepository _externalIdentities;
     private readonly Dependably.Infrastructure.Audit.IAuditEmitter _auditEmitter;
     private readonly TimeProvider _time;
+    private readonly IMfaEnrollmentService _mfa;
+    private readonly ISystemMfaEnrollmentService _systemMfa;
 
     public LoginService(Dependencies deps)
     {
@@ -61,15 +66,117 @@ public sealed class LoginService
         _externalIdentities = deps.ExternalIdentities;
         _auditEmitter = deps.AuditEmitter;
         _time = deps.Time;
+        _mfa = deps.Mfa;
+        _systemMfa = deps.SystemMfa;
+    }
+
+    /// <summary>
+    /// Result of a successful or failed tenant first-factor (password) check.
+    /// <see cref="Token"/> is set (only) when MFA is not enabled — the completed-login path.
+    /// When <see cref="MfaEnabled"/> is true the caller must proceed to the second factor.
+    /// </summary>
+    public sealed record TenantFirstFactorResult(
+        string? UserId,
+        string? TenantId,
+        string? Role,
+        long TokenVersion,
+        bool MfaEnabled,
+        string? Token,
+        string? Error,
+        int? RetryAfterSeconds);
+
+    /// <summary>
+    /// Result of a successful or failed tenant second-factor (TOTP or recovery-code) check.
+    /// <see cref="Token"/> is set on success.
+    /// </summary>
+    public sealed record SecondFactorResult(
+        string? Token,
+        bool RecoveryCodeUsed,
+        string? Error,
+        int? RetryAfterSeconds);
+
+    /// <summary>
+    /// Request-side inputs shared by the tenant and system second-factor checks: the realm-scoped
+    /// lockout key and audit email hash (both derived from the verified challenge), the submitted
+    /// TOTP/recovery code, and the caller's source IP.
+    /// </summary>
+    public readonly record struct SecondFactorContext(
+        string LockoutKey,
+        string EmailHash,
+        string Code,
+        string? SourceIp);
+
+    /// <summary>
+    /// Result of a successful or failed system first-factor (password) check.
+    /// <see cref="Token"/> is set (only) when MFA is not enabled — the completed-login path.
+    /// When <see cref="MfaEnabled"/> is true the caller must proceed to the second factor.
+    /// </summary>
+    public sealed record SystemFirstFactorResult(
+        string? AdminId,
+        string? Email,
+        long TokenVersion,
+        bool MfaEnabled,
+        string? Token,
+        string? Error,
+        int? RetryAfterSeconds);
+
+    /// <summary>
+    /// Verifies the first factor (password) for a tenant user and returns a result that tells the
+    /// caller whether MFA is required. This is the timing-oracle-safe credential check: BCrypt.Verify
+    /// runs unconditionally so unknown-email and wrong-password rejections take the same time.
+    /// The MFA branch is only reachable when <c>valid == true</c>; an unknown user never receives a
+    /// challenge token.
+    /// </summary>
+    public async Task<TenantFirstFactorResult> BeginTenantLoginAsync(
+        string email, string password, string tenantId, string? sourceIp = null, CancellationToken ct = default)
+    {
+        var ff = await VerifyTenantFirstFactorAsync(email, password, tenantId, sourceIp, ct);
+        if (ff.Error is not null)
+        {
+            return ff;
+        }
+
+        if (!ff.MfaEnabled)
+        {
+            string token = await CompleteTenantLoginAsync(
+                ff.UserId!, ff.TenantId!, ff.Role!, ff.TokenVersion, "forms", sourceIp, ct);
+            return ff with { Token = token };
+        }
+
+        return ff;
     }
 
     /// <summary>
     /// Authenticates a tenant user. The user must be a member of <paramref name="tenantId"/> —
     /// in single mode this is the one tenant; in multi mode it's the tenant whose subdomain
     /// the request hit. Returns a tenant-scoped JWT (<c>scope=tenant</c>) on success.
+    /// Non-MFA path only; MFA-enrolled users go through <see cref="BeginTenantLoginAsync"/>
+    /// and <see cref="CompleteTenantSecondFactorAsync"/>.
     /// </summary>
     public async Task<(string? Token, string? Error, int? RetryAfterSeconds)> LoginTenantAsync(
         string email, string password, string tenantId, string? sourceIp = null, CancellationToken ct = default)
+    {
+        var ff = await VerifyTenantFirstFactorAsync(email, password, tenantId, sourceIp, ct);
+        if (ff.Error is not null)
+        {
+            return (null, ff.Error, ff.RetryAfterSeconds);
+        }
+
+        // MFA-enrolled users: auto-login path (invite accept) completes as non-MFA for simplicity.
+        // The invite flow always creates a fresh user without MFA enrolled.
+        string token = await CompleteTenantLoginAsync(
+            ff.UserId!, ff.TenantId!, ff.Role!, ff.TokenVersion, "forms", sourceIp, ct);
+        return (token, null, null);
+    }
+
+    /// <summary>
+    /// Extracts the credential-check body shared by all tenant login entry points.
+    /// Preserves the timing-oracle defense: BCrypt.Verify runs unconditionally on the first
+    /// operand regardless of whether the email is known. Only returns a non-error result when
+    /// the password matched a real stored hash (<c>valid == true</c>).
+    /// </summary>
+    private async Task<TenantFirstFactorResult> VerifyTenantFirstFactorAsync(
+        string email, string password, string tenantId, string? sourceIp, CancellationToken ct)
     {
         // Lockout key is realm+tenant scoped so each (realm, tenant, email) identity gets an
         // independent counter. Tenant isolation lives in the key derivation — login_attempts
@@ -92,17 +199,18 @@ public sealed class LoginService
                 Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLockout,
                 tenantId, "system", null, "rejected",
                 new Dependably.Infrastructure.Audit.Events.AuthEvents.Lockout("tenant", emailHash).ToJson(), ct);
-            return (null, "Account locked due to too many failed attempts.", retryAfter);
+            return new TenantFirstFactorResult(null, null, null, 0, false, null, "Account locked due to too many failed attempts.", retryAfter);
         }
 
         await using var conn = await _db.OpenAsync(ct);
-        var (Id, _, PasswordHash, TenantId, Role, AccountLocked, TokenVersion) =
+        var (Id, _, PasswordHash, DbTenantId, Role, AccountLocked, TokenVersion, MfaEnabled) =
             await conn.QuerySingleOrDefaultAsync<(string Id, string Email, string PasswordHash,
-                string TenantId, string Role, int AccountLocked, long TokenVersion)>(
+                string TenantId, string Role, int AccountLocked, long TokenVersion, int MfaEnabled)>(
             """
             SELECT id, email, password_hash, tenant_id AS TenantId, role,
                    CASE WHEN account_status IN ('locked','disabled') THEN 1 ELSE 0 END AS AccountLocked,
-                   token_version AS TokenVersion
+                   token_version AS TokenVersion,
+                   mfa_enabled AS MfaEnabled
             FROM users
             WHERE lower(email) = lower(@email) AND tenant_id = @tenantId
             LIMIT 1
@@ -116,32 +224,225 @@ public sealed class LoginService
 
         if (!valid)
         {
-            await RecordFailureAsync(lockoutKey, emailHash, failedCount, "tenant", tenantId, sourceIp, ct);
-            return (null, "Invalid credentials.", null);
+            await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "tenant", tenantId), failedCount, sourceIp, "invalid_credentials", ct);
+            return new TenantFirstFactorResult(null, null, null, 0, false, null, "Invalid credentials.", null);
         }
 
-        await _lockout.ClearAsync(lockoutKey, ct);
-        await _audit.LogAsync("login.success", actorId: Id, sourceIp: sourceIp, ct: ct);
-        await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { method = "forms" }),
+        // For non-MFA users the login is complete here — clear the failure counter.
+        // For MFA users, clearing is deferred until the second factor succeeds (in
+        // CompleteTenantSecondFactorAsync) so the budget accumulates across both steps and a
+        // correct password cannot reset the TOTP brute-force counter.
+        if (MfaEnabled == 0)
+        {
+            await _lockout.ClearAsync(lockoutKey, ct);
+        }
+        return new TenantFirstFactorResult(Id!, DbTenantId, Role, TokenVersion, MfaEnabled == 1, null, null, null);
+    }
+
+    /// <summary>
+    /// Completes a tenant login after all factors have been verified: stamps last_login_at,
+    /// emits the three audit calls with the supplied method string, and returns the session JWT.
+    /// Calling this on a partial first-factor would falsely record the user as logged in —
+    /// callers must only invoke it after all required factors succeed.
+    /// </summary>
+    private async Task<string> CompleteTenantLoginAsync(
+        string userId, string tenantId, string role, long tokenVersion,
+        string method, string? sourceIp, CancellationToken ct)
+    {
+        string loginDetail = System.Text.Json.JsonSerializer.Serialize(new { method });
+        await _audit.LogAsync("login.success", actorId: userId, detail: loginDetail, sourceIp: sourceIp, ct: ct);
+        await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: userId,
+            detail: loginDetail,
             sourceIp: sourceIp, ct: ct);
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginSuccess,
-            tenantId, "user", Id, "accepted",
-            new Dependably.Infrastructure.Audit.Events.AuthEvents.LoginSuccess("tenant", "forms").ToJson(), ct);
+            tenantId, "user", userId, "accepted",
+            new Dependably.Infrastructure.Audit.Events.AuthEvents.LoginSuccess("tenant", method).ToJson(), ct);
 
         // Stamp last_login_at on the user row so the system_admin lookup endpoint can surface
         // it without a separate auth audit query.
+        await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "UPDATE users SET last_login_at = @now WHERE id = @id",
-            new { id = Id, now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { id = userId, now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") });
 
         string jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", ct)
             ?? throw new InvalidOperationException("JWT secret not found in instance_settings.");
 
-        string token = IssueTenantJwt(Id!, TenantId, Role, jwtSecret, TokenVersion, _time);
-        return (token, null, null);
+        return IssueTenantJwt(userId, tenantId, role, jwtSecret, tokenVersion, _time);
     }
+
+    /// <summary>
+    /// Verifies the second factor (TOTP or recovery code) for a tenant MFA login. The lockout
+    /// budget is shared with the first factor — the same key and counter carry failures from
+    /// both steps so brute-forcing TOTP eats into the same budget as brute-forcing the password.
+    /// </summary>
+    public async Task<SecondFactorResult> CompleteTenantSecondFactorAsync(
+        string userId, string tenantId, string role, long tokenVersion,
+        SecondFactorContext context, CancellationToken ct = default)
+    {
+        var (lockoutKey, emailHash, code, sourceIp) = context;
+        // Re-check the lockout at the top of step 2 so a burst of second-factor attempts cannot
+        // exceed MaxFailedAttempts regardless of how they are interleaved with first-factor attempts.
+        var (failedCount, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
+        if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
+        {
+            int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
+            await _audit.LogAsync("lockout.triggered",
+                detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "tenant" }),
+                sourceIp: sourceIp, ct: ct);
+            await _auditEmitter.EmitAsync(
+                Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLockout,
+                tenantId, "system", null, "rejected",
+                new Dependably.Infrastructure.Audit.Events.AuthEvents.Lockout("tenant", emailHash).ToJson(), ct);
+            return new SecondFactorResult(null, false, "Account locked due to too many failed attempts.", retryAfter);
+        }
+
+        bool totpOk = await _mfa.VerifyTotpAsync(userId, code, ct);
+        bool recoveryOk = false;
+        if (!totpOk)
+        {
+            recoveryOk = await _mfa.RedeemRecoveryCodeAsync(userId, code, ct);
+        }
+
+        if (!totpOk && !recoveryOk)
+        {
+            await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "tenant", tenantId), failedCount, sourceIp, "mfa_invalid", ct);
+            await _audit.LogAsync(
+                Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginFailure,
+                orgId: tenantId, sourceIp: sourceIp, ct: ct);
+            return new SecondFactorResult(null, false, "Invalid credentials.", null);
+        }
+
+        await _lockout.ClearAsync(lockoutKey, ct);
+        string method = recoveryOk ? "forms+recovery" : "forms+totp";
+        string token = await CompleteTenantLoginAsync(userId, tenantId, role, tokenVersion, method, sourceIp, ct);
+        return new SecondFactorResult(token, recoveryOk, null, null);
+    }
+
+    /// <summary>
+    /// Issues a short-lived MFA challenge JWT (<c>scope=mfa_challenge</c>). The challenge
+    /// is signed with the instance JWT secret and expires in 5 minutes. It is validated
+    /// manually by <see cref="TryReadMfaChallenge"/>; it never flows through JwtBearer
+    /// (which only reads <c>scope=tenant</c> tokens).
+    /// </summary>
+    internal static string IssueMfaChallengeJwt(
+        string userId, string tenantId, string role, string email,
+        long tokenVersion, string secret, TimeProvider time)
+    {
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
+        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        var now = time.GetUtcNow().UtcDateTime;
+
+        var claims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Sub, userId),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N")),
+            new("tid", tenantId),
+            new("org_id", tenantId),
+            new("role", role),
+            new("scope", "mfa_challenge"),
+            new("tver", tokenVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            new("eml", email.ToLowerInvariant()),
+            new("amr", "pwd"),
+        };
+
+        var token = new JwtSecurityToken(
+            claims: claims,
+            notBefore: now,
+            expires: now.AddMinutes(5),
+            signingCredentials: creds);
+
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    /// <summary>
+    /// Async wrapper for <see cref="IssueMfaChallengeJwt"/> that resolves the JWT secret.
+    /// </summary>
+    public async Task<string> IssueMfaChallengeAsync(
+        string userId, string tenantId, string role, string email,
+        long tokenVersion, CancellationToken ct = default)
+    {
+        string secret = await JwtSecretAsync(ct);
+        return IssueMfaChallengeJwt(userId, tenantId, role, email, tokenVersion, secret, _time);
+    }
+
+    /// <summary>
+    /// Validates an MFA challenge token: checks the HMAC-SHA256 signature, lifetime, and
+    /// <c>scope=mfa_challenge</c> claim. Populates the out parameters from the verified claims.
+    /// <paramref name="realm"/> defaults to <c>"tenant"</c> when the claim is absent (back-compat
+    /// with tenant challenges issued before the realm claim was added). For system challenges the
+    /// realm claim is always present; tid/role are absent (system_admins live outside the tenant model).
+    /// </summary>
+    public (bool Valid, string? Sub, string? Tid, string? Role, string? Eml, long Tver, string? Jti, string Realm)
+        TryReadMfaChallenge(string token, string secret)
+    {
+        try
+        {
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
+            var handler = new JwtSecurityTokenHandler { MapInboundClaims = false };
+            var validationParams = new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = key,
+                ValidateIssuer = false,
+                ValidateAudience = false,
+                ValidateLifetime = true,
+                ClockSkew = TimeSpan.Zero,
+                ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha256 },
+            };
+            var principal = handler.ValidateToken(token, validationParams, out _);
+            string? scope = principal.FindFirst("scope")?.Value;
+            if (scope != "mfa_challenge")
+            {
+                return (false, null, null, null, null, 0, null, "tenant");
+            }
+
+            string? sub = principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value
+                ?? principal.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            string? tid = principal.FindFirst("tid")?.Value;
+            string? role = principal.FindFirst("role")?.Value;
+            string? eml = principal.FindFirst("eml")?.Value;
+            string? jti = principal.FindFirst(JwtRegisteredClaimNames.Jti)?.Value;
+            string? tverStr = principal.FindFirst("tver")?.Value;
+            long tver = long.TryParse(tverStr, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out long tv) ? tv : 0;
+            // Absent realm claim defaults to "tenant" for back-compat with existing challenge JWTs.
+            string realm = principal.FindFirst("realm")?.Value ?? "tenant";
+
+            // System challenge carries no tid/role — validate only the fields that are present;
+            // a tenant challenge additionally requires tid and role.
+            bool valid = realm == "system"
+                ? sub is not null && eml is not null && jti is not null
+                : sub is not null && tid is not null && role is not null && eml is not null && jti is not null;
+
+            return (valid, sub, tid, role, eml, tver, jti, realm);
+        }
+        catch
+        {
+            return (false, null, null, null, null, 0, null, "tenant");
+        }
+    }
+
+    /// <summary>
+    /// Async wrapper that resolves the JWT secret and validates the MFA challenge token.
+    /// Returns the realm alongside the other claims (absent realm defaults to "tenant").
+    /// </summary>
+    public async Task<(bool Valid, string? Sub, string? Tid, string? Role, string? Eml, long Tver, string? Jti, string Realm)>
+        TryReadMfaChallengeAsync(string token, CancellationToken ct = default)
+    {
+        string secret = await JwtSecretAsync(ct);
+        return TryReadMfaChallenge(token, secret);
+    }
+
+    /// <summary>
+    /// Issues a trusted-device session JWT for a user who has presented a valid device cookie.
+    /// Delegates to CompleteTenantLoginAsync so audit and last_login_at stamping fire identically.
+    /// </summary>
+    public async Task<string> IssueTrustedDeviceSessionAsync(
+        string userId, string tenantId, string role, long tokenVersion,
+        string method, string? sourceIp, CancellationToken ct = default) =>
+        await CompleteTenantLoginAsync(userId, tenantId, role, tokenVersion, method, sourceIp, ct);
 
     /// <summary>
     /// Runs <c>BCrypt.Verify</c> against the stored hash, substituting the per-process
@@ -158,16 +459,14 @@ public sealed class LoginService
     }
 
     /// <summary>
-    /// Authenticates a system_admin (apex login in multi mode). Issues a system-scoped JWT
-    /// (<c>scope=system</c>, no <c>tid</c>). Returns null in single-mode installs because
-    /// <c>system_admins</c> is empty there.
+    /// Verifies the first factor (password) for a system_admin and returns a result that tells
+    /// the caller whether MFA is required. BCrypt.Verify runs unconditionally so unknown-email
+    /// and wrong-password rejections take the same time (no timing oracle). The MFA branch is
+    /// only reachable when <c>valid == true</c>; an unknown admin never receives a challenge token.
     /// </summary>
-    public async Task<(string? Token, string? Error, int? RetryAfterSeconds)> LoginSystemAsync(
-        string email, string password, string? sourceIp = null, CancellationToken ct = default)
+    private async Task<SystemFirstFactorResult> VerifySystemFirstFactorAsync(
+        string email, string password, string? sourceIp, CancellationToken ct)
     {
-        // System-realm lockout key is scoped to the system realm so it cannot collide with a
-        // same-email tenant identity. Tenant isolation lives in the key derivation — see comment
-        // in LoginTenantAsync.
         string lockoutKey = HashLockoutKey("system", null, email);
         string emailHash = HashEmail(email);
 
@@ -182,7 +481,7 @@ public sealed class LoginService
                 Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLockout,
                 null, "system", null, "rejected",
                 new Dependably.Infrastructure.Audit.Events.AuthEvents.Lockout("system", emailHash).ToJson(), ct);
-            return (null, "Account locked due to too many failed attempts.", retryAfter);
+            return new SystemFirstFactorResult(null, null, 0, false, null, "Account locked due to too many failed attempts.", retryAfter);
         }
 
         var creds = await _systemAdmins.GetCredentialsByEmailAsync(email, ct);
@@ -193,28 +492,181 @@ public sealed class LoginService
 
         if (!valid)
         {
-            await RecordFailureAsync(lockoutKey, emailHash, failedCount, "system", orgIdForActivity: null, sourceIp, ct);
-            return (null, "Invalid credentials.", null);
+            await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "system", null), failedCount, sourceIp, "invalid_credentials", ct);
+            return new SystemFirstFactorResult(null, null, 0, false, null, "Invalid credentials.", null);
         }
 
-        await _lockout.ClearAsync(lockoutKey, ct);
-        await _audit.LogAsync("login.success", actorId: creds!.Value.Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { realm = "system" }),
+        // For non-MFA admins the login is complete here — clear the failure counter.
+        // For MFA admins, clearing is deferred until the second factor succeeds so the budget
+        // accumulates across both steps and a correct password cannot reset the TOTP brute-force counter.
+        if (!creds!.Value.MfaEnabled)
+        {
+            await _lockout.ClearAsync(lockoutKey, ct);
+        }
+
+        return new SystemFirstFactorResult(creds.Value.Id, creds.Value.Email, creds.Value.TokenVersion,
+            creds.Value.MfaEnabled, null, null, null);
+    }
+
+    /// <summary>
+    /// Begins a system_admin login: verifies the password and — when MFA is not enrolled —
+    /// completes the login and returns a system-scoped session token. When MFA is enrolled
+    /// the caller receives a partial result with <c>MfaEnabled=true</c> and must proceed
+    /// to <see cref="CompleteSystemSecondFactorAsync"/>.
+    /// </summary>
+    public async Task<SystemFirstFactorResult> BeginSystemLoginAsync(
+        string email, string password, string? sourceIp = null, CancellationToken ct = default)
+    {
+        var ff = await VerifySystemFirstFactorAsync(email, password, sourceIp, ct);
+        if (ff.Error is not null)
+        {
+            return ff;
+        }
+
+        if (!ff.MfaEnabled)
+        {
+            string token = await CompleteSystemLoginAsync(ff.AdminId!, ff.TokenVersion, "forms", sourceIp, ct);
+            return ff with { Token = token };
+        }
+
+        return ff;
+    }
+
+    /// <summary>
+    /// Completes a system_admin login after all factors have been verified: stamps last_login_at,
+    /// emits audit calls, and returns the system-scoped session JWT with the current token version.
+    /// Callers must only invoke this after all required factors succeed.
+    /// </summary>
+    private async Task<string> CompleteSystemLoginAsync(
+        string adminId, long tokenVersion, string method, string? sourceIp, CancellationToken ct)
+    {
+        await _audit.LogSystemAsync("login.success", actorId: adminId,
+            detail: System.Text.Json.JsonSerializer.Serialize(new { realm = "system", method }),
             sourceIp: sourceIp, ct: ct);
         // deepcode ignore PrivateInformationExposure: payload contains only the user UUID,
-        // realm name, and method name — no email. The `email` arg was reduced to emailHash
-        // (SHA-256) by HashEmail before any audit/log call in this method.
+        // realm name, and method name — no email. The email arg was reduced to emailHash
+        // (SHA-256) by HashEmail before any audit/log call in VerifySystemFirstFactorAsync.
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginSuccess,
-            null, "user", creds.Value.Id, "accepted",
-            new Dependably.Infrastructure.Audit.Events.AuthEvents.LoginSuccess("system", "forms").ToJson(), ct);
-        await _systemAdmins.UpdateLastLoginAsync(creds.Value.Id, _time.GetUtcNow(), ct);
+            null, "user", adminId, "accepted",
+            new Dependably.Infrastructure.Audit.Events.AuthEvents.LoginSuccess("system", method).ToJson(), ct);
+        await _systemAdmins.UpdateLastLoginAsync(adminId, _time.GetUtcNow(), ct);
 
         string jwtSecret = await _orgs.GetInstanceSettingAsync("jwt_secret", ct)
             ?? throw new InvalidOperationException("JWT secret not found in instance_settings.");
 
-        string token = IssueSystemJwt(creds.Value.Id, jwtSecret, _time);
-        return (token, null, null);
+        return IssueSystemJwt(adminId, jwtSecret, _time, tokenVersion);
+    }
+
+    /// <summary>
+    /// Verifies the second factor (TOTP or recovery code) for a system_admin MFA login. The
+    /// lockout budget is shared with the first factor so brute-forcing TOTP eats into the same
+    /// budget as brute-forcing the password.
+    /// </summary>
+    public async Task<SecondFactorResult> CompleteSystemSecondFactorAsync(
+        string adminId, string email, long tokenVersion,
+        SecondFactorContext context, CancellationToken ct = default)
+    {
+        var (lockoutKey, emailHash, code, sourceIp) = context;
+        var (failedCount, lockedUntil) = await _lockout.GetAsync(lockoutKey, ct);
+        if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
+        {
+            int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
+            await _audit.LogSystemAsync("lockout.triggered",
+                detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "system" }),
+                sourceIp: sourceIp, ct: ct);
+            await _auditEmitter.EmitAsync(
+                Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLockout,
+                null, "system", null, "rejected",
+                new Dependably.Infrastructure.Audit.Events.AuthEvents.Lockout("system", emailHash).ToJson(), ct);
+            return new SecondFactorResult(null, false, "Account locked due to too many failed attempts.", retryAfter);
+        }
+
+        bool totpOk = await _systemMfa.VerifyTotpAsync(adminId, code, ct);
+        bool recoveryOk = false;
+        if (!totpOk)
+        {
+            recoveryOk = await _systemMfa.RedeemRecoveryCodeAsync(adminId, code, ct);
+        }
+
+        if (!totpOk && !recoveryOk)
+        {
+            await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "system", null), failedCount, sourceIp, "mfa_invalid", ct);
+            await _audit.LogSystemAsync(
+                Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginFailure,
+                sourceIp: sourceIp, ct: ct);
+            return new SecondFactorResult(null, false, "Invalid credentials.", null);
+        }
+
+        await _lockout.ClearAsync(lockoutKey, ct);
+        string method = recoveryOk ? "forms+recovery" : "forms+totp";
+        string token = await CompleteSystemLoginAsync(adminId, tokenVersion, method, sourceIp, ct);
+        return new SecondFactorResult(token, recoveryOk, null, null);
+    }
+
+    /// <summary>
+    /// Mints a fresh system session JWT for an already-authenticated system_admin, resolving
+    /// the signing secret internally. Used to re-issue the caller's own session cookie after
+    /// MFA disable bumps <c>system_admins.token_version</c> and stales every outstanding JWT.
+    /// </summary>
+    public async Task<string> IssueSystemSessionAsync(
+        string adminId, long tokenVersion, CancellationToken ct = default)
+    {
+        string secret = await JwtSecretAsync(ct);
+        return IssueSystemJwt(adminId, secret, _time, tokenVersion);
+    }
+
+    /// <summary>
+    /// Issues a short-lived system MFA challenge JWT (<c>scope=mfa_challenge</c>,
+    /// <c>realm=system</c>). Does NOT carry tid/org_id/role — those are system-admin concepts
+    /// outside the tenant model. Validated by <see cref="TryReadMfaChallenge"/>.
+    /// </summary>
+    internal static string IssueSystemMfaChallengeJwt(
+        string adminId, string email, long tokenVersion, string secret, TimeProvider time)
+    {
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
+        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        var now = time.GetUtcNow().UtcDateTime;
+
+        var claims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Sub, adminId),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N")),
+            new("scope", "mfa_challenge"),
+            new("realm", "system"),
+            new("tver", tokenVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            new("eml", email.ToLowerInvariant()),
+        };
+
+        var token = new JwtSecurityToken(
+            claims: claims,
+            notBefore: now,
+            expires: now.AddMinutes(5),
+            signingCredentials: creds);
+
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    /// <summary>
+    /// Async wrapper for <see cref="IssueSystemMfaChallengeJwt"/> that resolves the JWT secret.
+    /// </summary>
+    public async Task<string> IssueSystemMfaChallengeAsync(
+        string adminId, string email, long tokenVersion, CancellationToken ct = default)
+    {
+        string secret = await JwtSecretAsync(ct);
+        return IssueSystemMfaChallengeJwt(adminId, email, tokenVersion, secret, _time);
+    }
+
+    /// <summary>
+    /// Authenticates a system_admin when MFA is not enrolled. Returns a system-scoped JWT on
+    /// success. MFA-enrolled admins must use <see cref="BeginSystemLoginAsync"/> and
+    /// <see cref="CompleteSystemSecondFactorAsync"/> for the two-step flow.
+    /// </summary>
+    public async Task<(string? Token, string? Error, int? RetryAfterSeconds)> LoginSystemAsync(
+        string email, string password, string? sourceIp = null, CancellationToken ct = default)
+    {
+        var ff = await BeginSystemLoginAsync(email, password, sourceIp, ct);
+        return (ff.Token, ff.Error, ff.RetryAfterSeconds);
     }
 
     /// <summary>
@@ -593,16 +1045,22 @@ public sealed class LoginService
     private string IssueJwt(string userId, string tenantId, string role, string secret, long tokenVersion) =>
         IssueTenantJwt(userId, tenantId, role, secret, tokenVersion, _time);
 
+    // Identifies the login attempt that failed: the realm-scoped lockout key, the audit email
+    // hash, the realm, and (for tenant failures) the org the failure is pinned to.
+    private readonly record struct LoginFailureTarget(
+        string LockoutKey, string EmailHash, string Realm, string? OrgIdForActivity);
+
     private async Task RecordFailureAsync(
-        string lockoutKey, string emailHash, int currentFailedCount, string realm, string? orgIdForActivity, string? sourceIp, CancellationToken ct)
+        LoginFailureTarget target, int currentFailedCount, string? sourceIp, string reason, CancellationToken ct)
     {
+        var (lockoutKey, emailHash, realm, orgIdForActivity) = target;
         int newCount = currentFailedCount + 1;
         DateTimeOffset? lockExpiry = newCount >= MaxFailedAttempts
             ? _time.GetUtcNow().AddMinutes(LockoutMinutes)
             : null;
         // lockoutKey is realm+tenant scoped; emailHash is the unsalted audit pseudonym.
         await _lockout.RecordFailureAsync(lockoutKey, newCount, lockExpiry, ct);
-        string failureDetail = System.Text.Json.JsonSerializer.Serialize(new { reason = "invalid_credentials", realm });
+        string failureDetail = System.Text.Json.JsonSerializer.Serialize(new { reason, realm });
         // Scope the audit row to the realm that rejected the login: a system/master failure is
         // visible only on the operator audit list (scope='system'); a tenant failure is pinned to
         // that one tenant's audit list (scope='tenant', org_id=<tenant>) so no other tenant — nor
@@ -660,7 +1118,7 @@ public sealed class LoginService
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
-    internal static string IssueSystemJwt(string systemAdminId, string secret, TimeProvider? time = null)
+    internal static string IssueSystemJwt(string systemAdminId, string secret, TimeProvider? time = null, long tokenVersion = 1)
     {
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
@@ -672,6 +1130,7 @@ public sealed class LoginService
             new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N")),
             new("role", "system_admin"),
             new("scope", "system"),
+            new("tver", tokenVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)),
         };
 
         var token = new JwtSecurityToken(
@@ -683,7 +1142,12 @@ public sealed class LoginService
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
-    private static string HashEmail(string email)
+    /// <summary>
+    /// Computes the unsalted SHA-256 audit pseudonym for an email address. This value appears
+    /// in audit and login-failure rows so cross-realm correlations are possible without
+    /// storing the plaintext email. It is intentionally NOT the lockout key — see HashLockoutKey.
+    /// </summary>
+    public static string HashEmail(string email)
     {
         byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(email.ToLowerInvariant()));
         return Convert.ToHexString(bytes).ToLowerInvariant();
@@ -700,7 +1164,7 @@ public sealed class LoginService
     /// This value is stored as the opaque PK in login_attempts; it is never used in audit
     /// payloads (use <see cref="HashEmail"/> for that so audit rows stay realm-joinable).
     /// </summary>
-    internal static string HashLockoutKey(string realm, string? tenantId, string email)
+    public static string HashLockoutKey(string realm, string? tenantId, string email)
     {
         string tid = tenantId ?? "";
         // Length-prefix the tenantId so the boundary between tenantId and email is always

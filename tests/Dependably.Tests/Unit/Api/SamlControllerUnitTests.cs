@@ -4,6 +4,7 @@ using Dapper;
 using Dependably.Api;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit;
+using Dependably.Infrastructure.Identity;
 using Dependably.Security;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -74,7 +75,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         var external = new ExternalIdentityRepository(_fixture.Store, _clock);
         var lockout = new SqliteLockoutStore(_fixture.Store, _clock);
         var guard = new OrgAccessGuard(_fixture.Store);
-        var login = new LoginService(new LoginService.Dependencies(_fixture.Store, orgs, systemAdmins, lockout, audit, external, _auditEmitter, _clock));
+        var login = new LoginService(new LoginService.Dependencies(_fixture.Store, orgs, systemAdmins, lockout, audit, external, _auditEmitter, _clock, Substitute.For<IMfaEnrollmentService>(), Substitute.For<ISystemMfaEnrollmentService>()));
         var urls = new RequestPublicUrlBuilder(new ConfigurationBuilder().Build());
 
         var http = new DefaultHttpContext();
@@ -127,7 +128,7 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         var external = new ExternalIdentityRepository(_fixture.Store, _clock);
         var lockout = new SqliteLockoutStore(_fixture.Store, _clock);
         var guard = new OrgAccessGuard(_fixture.Store);
-        var login = new LoginService(new LoginService.Dependencies(_fixture.Store, orgs, systemAdmins, lockout, audit, external, _auditEmitter, _clock));
+        var login = new LoginService(new LoginService.Dependencies(_fixture.Store, orgs, systemAdmins, lockout, audit, external, _auditEmitter, _clock, Substitute.For<IMfaEnrollmentService>(), Substitute.For<ISystemMfaEnrollmentService>()));
         var urls = new RequestPublicUrlBuilder(new ConfigurationBuilder().Build());
 
         var http = new DefaultHttpContext();

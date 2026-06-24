@@ -132,7 +132,21 @@ public sealed class OrgController : OrgScopedControllerBase
         var proxyLicenses = proxyIds.Count > 0
             ? await _licenses.GetSpdxForCacheArtifactsAsync(proxyIds, ct)
             : Enumerable.Empty<(string, string)>().ToLookup(r => r.Item1, r => r.Item2);
-        // Score map: merge uploaded (package_version_id) and proxy (cache_artifact_id) signals.
+        var scoreMap = await BuildVersionScoreMapAsync(uploadedIds, proxyIds, ct);
+        var settings = await _orgs.GetSettingsAsync(orgId, ct);
+        double tolerance = settings?.MaxOsvScoreTolerance ?? 10.0;
+        string blockDeprecatedMode = settings?.BlockDeprecated ?? "off";
+
+        var versionsWithLicenses = versions.Select(v =>
+            ProjectVersionView(v, scoreMap, tolerance, blockDeprecatedMode, uploadedLicenses, proxyLicenses, ociTagsByDigest));
+        return Ok(new { package = pkg, versions = versionsWithLicenses });
+    }
+
+    // Merges per-version OSV scores from uploaded versions (keyed by package_version_id) and proxy
+    // versions (keyed by cache_artifact_id) into a single id → max-CVSS map.
+    private async Task<Dictionary<string, double>> BuildVersionScoreMapAsync(
+        IReadOnlyList<string> uploadedIds, IReadOnlyList<string> proxyIds, CancellationToken ct)
+    {
         var uploadedScores = uploadedIds.Count > 0
             ? await _vulns.GetMaxScoresForVersionsAsync(uploadedIds, ct)
             : new Dictionary<string, double>();
@@ -147,51 +161,57 @@ public sealed class OrgController : OrgScopedControllerBase
                 scoreMap[id] = sig.MaxCvss.Value;
             }
         }
-        var settings = await _orgs.GetSettingsAsync(orgId, ct);
-        double tolerance = settings?.MaxOsvScoreTolerance ?? 10.0;
-        string blockDeprecatedMode = settings?.BlockDeprecated ?? "off";
+        return scoreMap;
+    }
 
-        var versionsWithLicenses = versions.Select(v =>
+    // Projects a package version into the API view model: merges its license lookup, OSV score,
+    // computed gate status, and (for OCI) the tags pointing at its digest.
+    private static object ProjectVersionView(
+        PackageVersion v,
+        IReadOnlyDictionary<string, double> scoreMap,
+        double tolerance,
+        string blockDeprecatedMode,
+        ILookup<string, string> uploadedLicenses,
+        ILookup<string, string> proxyLicenses,
+        ILookup<string, string>? ociTagsByDigest)
+    {
+        bool hasMax = scoreMap.TryGetValue(v.Id, out double maxScore);
+        string status = ComputeVersionStatus(v, hasMax ? maxScore : (double?)null, tolerance, blockDeprecatedMode);
+        return new
         {
-            scoreMap.TryGetValue(v.Id, out double maxScore);
-            bool hasMax = scoreMap.ContainsKey(v.Id);
-            string status = ComputeVersionStatus(v, hasMax ? maxScore : (double?)null, tolerance, blockDeprecatedMode);
-            return new
-            {
-                v.Id,
-                v.PackageId,
-                v.Version,
-                v.Purl,
-                v.BlobKey,
-                v.SizeBytes,
-                v.ChecksumSha256,
-                v.ChecksumSha1,
-                v.Yanked,
-                v.YankReason,
-                v.FirstFetch,
-                v.DownloadCount,
-                v.CreatedAt,
-                v.VulnCheckedAt,
-                v.PublishedAt,
-                v.ManualBlockState,
-                v.Deprecated,
-                v.Origin,
-                v.UpstreamIntegrityValue,
-                v.UpstreamIntegrityAlgorithm,
-                v.IsMalicious,
-                v.HasInstallScript,
-                v.InstallScriptKind,
-                v.ProvenanceStatus,
-                v.ProvenanceSigner,
-                MaxOsvScore = hasMax ? maxScore : (double?)null,
-                Status = status,
-                Licenses = (v.Origin == "proxy" ? proxyLicenses[v.Id] : uploadedLicenses[v.Id]).ToArray(),
-                Tags = ociTagsByDigest != null && ociTagsByDigest.Contains(v.Version)
-                    ? ociTagsByDigest[v.Version].ToArray()
-                    : Array.Empty<string>()
-            };
-        });
-        return Ok(new { package = pkg, versions = versionsWithLicenses });
+            v.Id,
+            v.PackageId,
+            v.Version,
+            v.Purl,
+            v.BlobKey,
+            v.Filename,
+            v.SizeBytes,
+            v.ChecksumSha256,
+            v.ChecksumSha1,
+            v.Yanked,
+            v.YankReason,
+            v.FirstFetch,
+            v.DownloadCount,
+            v.CreatedAt,
+            v.VulnCheckedAt,
+            v.PublishedAt,
+            v.ManualBlockState,
+            v.Deprecated,
+            v.Origin,
+            v.UpstreamIntegrityValue,
+            v.UpstreamIntegrityAlgorithm,
+            v.IsMalicious,
+            v.HasInstallScript,
+            v.InstallScriptKind,
+            v.ProvenanceStatus,
+            v.ProvenanceSigner,
+            MaxOsvScore = hasMax ? maxScore : (double?)null,
+            Status = status,
+            Licenses = (v.Origin == "proxy" ? proxyLicenses[v.Id] : uploadedLicenses[v.Id]).ToArray(),
+            Tags = ociTagsByDigest != null && ociTagsByDigest.Contains(v.Version)
+                ? ociTagsByDigest[v.Version].ToArray()
+                : Array.Empty<string>()
+        };
     }
 
     // Combines uploaded (package_versions) and global-plane proxy (cache_artifact) versions for
@@ -354,8 +374,11 @@ public sealed class OrgController : OrgScopedControllerBase
     }
 
     /// <summary>GET /api/v1/packages/{ecosystem}/{name}/{version}/download — stream one artifact to the UI</summary>
+    // The optional `file` query selects one artifact when a version maps to several files (Maven
+    // ships a .jar + .pom + sidecars under one coordinate; PyPI a wheel + sdist per release). When
+    // omitted, the first cached file for the version is served — preserving the single-file default.
     [HttpGet("api/v1/packages/{ecosystem}/{name}/{version}/download")]
-    public async Task<IActionResult> DownloadVersion(string ecosystem, string name, string version, CancellationToken ct)
+    public async Task<IActionResult> DownloadVersion(string ecosystem, string name, string version, CancellationToken ct, [FromQuery] string? file = null)
     {
         var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadArtifact, ct);
         if (result is not null)
@@ -399,7 +422,8 @@ public sealed class OrgController : OrgScopedControllerBase
         // scoping) and serve from the cache tier.
         var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, AsPurlName(name), ct);
         var facts = proxyEntries.FirstOrDefault(
-            e => string.Equals(e.Version, version, StringComparison.OrdinalIgnoreCase));
+            e => string.Equals(e.Version, version, StringComparison.OrdinalIgnoreCase)
+                 && (string.IsNullOrEmpty(file) || string.Equals(e.Filename, file, StringComparison.OrdinalIgnoreCase)));
         if (facts is null)
         {
             return NotFound();

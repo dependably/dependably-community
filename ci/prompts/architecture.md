@@ -4,7 +4,7 @@ provided**, reasoning about how these changes affect the system's design — not
 auditing the whole codebase.
 
 This project is a self-hosted private artifact repository (npm/PyPI/NuGet/Maven/RPM/OCI)
-on ASP.NET Core 9. Notable architectural rules: `BlobKeys` is the only place blob
+on ASP.NET Core 10. Notable architectural rules: `BlobKeys` is the only place blob
 keys are constructed; `IBlobStore` makes no naming decisions; `IMetadataStore`
 returns raw connections; all Dapper SQL is parameterized (no string interpolation);
 PURLs are the canonical package identity and `PurlNormalizer` is their single

@@ -132,6 +132,14 @@ public class OrgSettings
     /// </summary>
     public bool AirGapped { get; set; }
     /// <summary>
+    /// Per-tenant MFA enrollment requirement. When true, all authenticated users in this org
+    /// must complete MFA enrollment before accessing any API endpoints, enforced by
+    /// <see cref="Dependably.Security.MfaEnrollmentGuard"/>. Composes with the instance
+    /// <c>REQUIRE_MFA</c> env var (<see cref="IRequireMfaMode"/>): effective requirement =
+    /// instance OR tenant.
+    /// </summary>
+    public bool RequireMfa { get; set; }
+    /// <summary>
     /// Computed proxy-passthrough gate used by the protocol controllers: passthrough is allowed
     /// only when it is enabled AND the tenant is not air-gapped. The raw
     /// <see cref="ProxyPassthroughEnabled"/> value is still surfaced verbatim in the settings API.
@@ -397,6 +405,14 @@ public class User
     public DateTimeOffset? PasswordResetIssuedAt { get; set; }
     /// <summary>Per-user locale override. Null means inherit org_settings.default_language.</summary>
     public string? Language { get; set; }
+    /// <summary>Monotonic session-invalidation counter embedded in tenant JWTs as the <c>tver</c> claim.</summary>
+    public long TokenVersion { get; set; } = 1;
+    /// <summary>AES-GCM-encrypted TOTP authenticator key. Null until the user enrolls in MFA.</summary>
+    public string? MfaAuthenticatorKey { get; set; }
+    /// <summary>JSON array of SHA-256 hashes of one-time MFA recovery codes. Null until enrollment.</summary>
+    public string? MfaRecoveryCodes { get; set; }
+    /// <summary>Random stamp rotated on every credential change so concurrent mutations are detectable.</summary>
+    public string? SecurityStamp { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
 
@@ -413,6 +429,16 @@ public class SystemAdmin
     public string AccountStatus { get; set; } = "active";
     public DateTimeOffset? PasswordResetIssuedAt { get; set; }
     public string? Language { get; set; }
+    /// <summary>True when the operator has completed MFA enrollment.</summary>
+    public bool MfaEnabled { get; set; }
+    /// <summary>AES-GCM-encrypted TOTP authenticator key. Null until MFA enrollment.</summary>
+    public string? MfaAuthenticatorKey { get; set; }
+    /// <summary>JSON array of SHA-256 hashes of one-time MFA recovery codes. Null until enrollment.</summary>
+    public string? MfaRecoveryCodes { get; set; }
+    /// <summary>Random stamp rotated on every credential change so concurrent mutations are detectable.</summary>
+    public string? SecurityStamp { get; set; }
+    /// <summary>Monotonic session-invalidation counter. System JWTs embed this as the <c>tver</c> claim.</summary>
+    public long TokenVersion { get; set; } = 1;
     public DateTimeOffset CreatedAt { get; set; }
 }
 
@@ -443,6 +469,8 @@ public class OrgMemberView
     public string Role { get; set; } = "";
     public string AccountType { get; set; } = "forms";
     public DateTimeOffset JoinedAt { get; set; }
+    /// <summary>True when the member has completed MFA enrollment.</summary>
+    public bool MfaEnabled { get; set; }
 }
 
 /// <summary>

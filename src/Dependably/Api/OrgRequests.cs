@@ -29,7 +29,9 @@ public sealed record UpdateOrgSettingsRequest(
     bool? AirGapped = null,
     // Tri-state same-version-push org policy. null = leave unchanged.
     // 'block' | 'exception' | 'allow'. Validated by OrgSettingsController.
-    string? VersionOverwritePolicy = null);
+    string? VersionOverwritePolicy = null,
+    // Per-tenant MFA enrollment requirement. null = leave unchanged.
+    bool? RequireMfa = null);
 
 public sealed record UpdateRetentionRequest(
     int? KeepVersions,

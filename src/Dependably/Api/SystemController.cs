@@ -6,6 +6,7 @@ using Dependably.Infrastructure.Health;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Dependably.Api;
 
@@ -55,6 +56,7 @@ public sealed partial class SystemController : ControllerBase
     private readonly Dependably.Security.PasswordPolicy _passwordPolicy;
     private readonly TimeProvider _time;
     private readonly ITenantSlugCacheInvalidator? _tenantCache;
+    private readonly IRequireMfaMode? _requireMfa;
 
     // Static vocabulary surfaced on the background-jobs facets endpoint. Mirrors the
     // <c>dependably.background_job.duration</c> histogram outcome label values.
@@ -73,7 +75,8 @@ public sealed partial class SystemController : ControllerBase
         IConfiguration config,
         Dependably.Security.PasswordPolicy passwordPolicy,
         TimeProvider time,
-        ITenantSlugCacheInvalidator? tenantCache = null)
+        ITenantSlugCacheInvalidator? tenantCache = null,
+        IRequireMfaMode? requireMfa = null)
     {
         _orgs = orgs;
         _systemAdmins = systemAdmins;
@@ -84,6 +87,7 @@ public sealed partial class SystemController : ControllerBase
         _passwordPolicy = passwordPolicy;
         _time = time;
         _tenantCache = tenantCache;
+        _requireMfa = requireMfa;
     }
 
     /// <summary>GET /api/v1/system/tenants — list all tenants.</summary>
@@ -829,9 +833,12 @@ public sealed partial class SystemController : ControllerBase
     /// boot (must_change_password=1) and any time the operator wants to rotate.
     /// </summary>
     [HttpPost("me/password")]
-    [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> ChangeMyPassword(
-        [FromBody] ChangePasswordRequest req, CancellationToken ct)
+        [FromBody] ChangePasswordRequest req,
+        [FromServices] TrustedDeviceService trustedDevices,
+        [FromServices] LoginService login,
+        [FromServices] IPublicUrlBuilder urls,
+        CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.CurrentPassword))
         {
@@ -857,18 +864,31 @@ public sealed partial class SystemController : ControllerBase
         }
 
         string newHash = BCrypt.Net.BCrypt.HashPassword(req.NewPassword, workFactor: 12);
-        bool rotated = await _systemAdmins.RotatePasswordAsync(sub, req.CurrentPassword, newHash, ct);
-        if (!rotated)
+        long? newVersion = await _systemAdmins.RotatePasswordAsync(sub, req.CurrentPassword, newHash, ct);
+        if (newVersion is null)
         {
             return Unauthorized(new { detail = "Current password is incorrect." });
         }
+
+        // Evict the cached token_version so the next request re-reads the bumped value.
+        var tokenVersionStore = HttpContext.RequestServices
+            .GetRequiredService<Dependably.Infrastructure.Identity.SystemAdminTokenVersionStore>();
+        tokenVersionStore.Invalidate(sub);
+
+        // Revoke all trusted-device records so remembered devices no longer bypass TOTP.
+        await trustedDevices.DeleteAllForUserAsync(sub, "system", ct);
 
         await _audit.LogSystemAsync(
             action: "system_admin.password_changed",
             actorId: sub,
             ct: ct);
 
-        return NoContent();
+        // Re-issue the caller's own session at the new token_version so the admin who just
+        // changed their password stays logged in (all other sessions are now stale).
+        string fresh = await login.IssueSystemSessionAsync(sub, newVersion.Value, ct);
+        Response.Cookies.Append("dependably_session", fresh, urls.SessionCookieOptions(HttpContext));
+
+        return Ok(new { message = "Password changed." });
     }
 
     /// <summary>
@@ -893,6 +913,8 @@ public sealed partial class SystemController : ControllerBase
                 id = sa.Id,
                 email = sa.Email,
                 mustChangePassword = sa.MustChangePassword,
+                mfaEnabled = sa.MfaEnabled,
+                mfaEnrollmentRequired = (_requireMfa?.IsEnabled ?? false) && !sa.MfaEnabled,
                 lastLoginAt = sa.LastLoginAt,
                 language = string.IsNullOrEmpty(sa.Language) ? LanguageCodes.Default : sa.Language,
             });

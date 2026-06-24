@@ -74,6 +74,11 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- and deprecation-metadata scan passes skip this org. Composes with the instance AIR_GAPPED
     -- env var (effective air-gap = instance OR tenant).
     air_gapped                INTEGER NOT NULL DEFAULT 0,
+    -- Per-tenant MFA enrollment requirement. When 1, all authenticated users in this
+    -- org must complete MFA enrollment before accessing any API endpoints (enforced by
+    -- MfaEnrollmentGuard). Composes with the instance REQUIRE_MFA env var: effective
+    -- requirement = instance OR tenant.
+    require_mfa               INTEGER NOT NULL DEFAULT 0,
     -- Policy for upstream-deprecated/abandoned packages: 'off' (allow), 'warn' (surface in UI),
     -- 'block_new' (refuse a deprecated version on cache miss — never fetch/cache/serve it — but
     -- keep serving already-cached versions), 'block_all' (block_new plus deny already-cached
@@ -161,6 +166,13 @@ CREATE TABLE IF NOT EXISTS users (
     -- Monotonic session-invalidation counter. Embedded in tenant JWTs as the `tver` claim
     -- and bumped on password change so outstanding sessions go stale immediately.
     token_version INTEGER NOT NULL DEFAULT 1,
+    -- MFA fields used by the ASP.NET Core Identity UserStore. mfa_authenticator_key holds
+    -- the AES-GCM-encrypted TOTP key; mfa_recovery_codes holds a JSON array of SHA-256
+    -- hashes of the one-time recovery codes; security_stamp is a random value rotated on
+    -- every credential change so UserManager can detect concurrent mutations.
+    mfa_authenticator_key TEXT,
+    mfa_recovery_codes TEXT,
+    security_stamp TEXT,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     UNIQUE (tenant_id, email)
 );
@@ -180,6 +192,14 @@ CREATE TABLE IF NOT EXISTS system_admins (
     account_status TEXT NOT NULL DEFAULT 'active' CHECK (account_status IN ('active','locked','disabled')),
     password_reset_issued_at TEXT,
     language    TEXT,  -- NULL = fall back to 'en'
+    -- MFA fields used by the ASP.NET Core Identity UserStore. Mirrors the same set on users.
+    mfa_enabled INTEGER NOT NULL DEFAULT 0,
+    mfa_authenticator_key TEXT,
+    mfa_recovery_codes TEXT,
+    security_stamp TEXT,
+    -- Monotonic session-invalidation counter. Mirrors users.token_version; system JWTs
+    -- embed this as the `tver` claim and are rejected when the stored version advances.
+    token_version INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 
@@ -769,6 +789,26 @@ CREATE TABLE IF NOT EXISTS jwt_revocations (
     expires_at  TEXT NOT NULL  -- ISO 8601 UTC; row can be deleted after this time
 );
 CREATE INDEX IF NOT EXISTS idx_jwt_revocations_expires ON jwt_revocations(expires_at);
+
+-- Trusted-device tokens for MFA two-step login. A remembered device skips the TOTP step
+-- for the configured TTL. token_hash is the SHA-256 of the raw cookie value (stored hashed
+-- so the cookie bears the only copy of the preimage). user_id is not FK'd because system
+-- realm rows reference system_admins, which is the MR-4 concern; tenant rows reference users.
+-- Revoked on MFA disable and on password change.
+CREATE TABLE IF NOT EXISTS mfa_trusted_devices (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    realm       TEXT NOT NULL CHECK (realm IN ('tenant', 'system')),
+    tenant_id   TEXT REFERENCES orgs(id) ON DELETE CASCADE,
+    token_hash  TEXT NOT NULL UNIQUE,
+    user_agent  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    last_seen_at TEXT,
+    expires_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mfa_trusted_devices_token ON mfa_trusted_devices(token_hash);
+CREATE INDEX IF NOT EXISTS idx_mfa_trusted_devices_user ON mfa_trusted_devices(user_id, realm);
+CREATE INDEX IF NOT EXISTS idx_mfa_trusted_devices_tenant ON mfa_trusted_devices(tenant_id);
 
 -- Per-tenant SAML 2.0 SP configuration. Tenant admins upload IdP metadata XML and toggle
 -- forms/SAML login independently. forms_login_enabled=0 (SAML-only) is gated by a recent

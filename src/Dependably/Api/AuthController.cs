@@ -1,5 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Audit.Events;
+using Dependably.Infrastructure.Identity;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -12,30 +14,30 @@ namespace Dependably.Api;
 [Route("api/v1/auth")]
 public sealed class AuthController : ControllerBase
 {
+    // MFA challenge cookies and challenge JWTs live for this many minutes.
+    private const int MfaChallengeTtlMinutes = 5;
+
     private readonly LoginService _login;
     private readonly UserService _users;
-    private readonly InviteRepository _invites;
     private readonly JwtRevocationRepository _revocations;
     private readonly AuditRepository _audit;
-    private readonly SamlConfigRepository _samlConfig;
     private readonly IPublicUrlBuilder _urls;
+    private readonly TimeProvider _time;
 
     public AuthController(
         LoginService login,
         UserService users,
-        InviteRepository invites,
         JwtRevocationRepository revocations,
         AuditRepository audit,
-        SamlConfigRepository samlConfig,
-        IPublicUrlBuilder urls)
+        IPublicUrlBuilder urls,
+        TimeProvider time)
     {
         _login = login;
         _users = users;
-        _invites = invites;
         _revocations = revocations;
         _audit = audit;
-        _samlConfig = samlConfig;
         _urls = urls;
+        _time = time;
     }
 
     /// <summary>
@@ -46,7 +48,7 @@ public sealed class AuthController : ControllerBase
     [HttpGet("methods")]
     [AllowAnonymous]
     [EnableRateLimiting("anon")]
-    public async Task<IActionResult> Methods(CancellationToken ct)
+    public async Task<IActionResult> Methods([FromServices] SamlConfigRepository samlConfig, CancellationToken ct)
     {
         if (HttpContext.Items[TenantContext.HttpItemsKey] is not TenantContext ctx || ctx.IsUninitialized)
         {
@@ -58,7 +60,7 @@ public sealed class AuthController : ControllerBase
             return Ok(new { forms = true, saml = false, samlButtonLabel = (string?)null });
         }
 
-        var cfg = await _samlConfig.GetAsync(ctx.TenantId!, ct);
+        var cfg = await samlConfig.GetAsync(ctx.TenantId!, ct);
         bool samlReady = cfg is { Enabled: true }
             && !string.IsNullOrWhiteSpace(cfg.IdpSsoUrl)
             && !string.IsNullOrWhiteSpace(cfg.IdpEntityId)
@@ -77,7 +79,10 @@ public sealed class AuthController : ControllerBase
     [HttpPost("login")]
     [AllowAnonymous]
     [EnableRateLimiting("login")]
-    public async Task<IActionResult> Login([FromBody] LoginRequest req, CancellationToken ct)
+    public async Task<IActionResult> Login(
+        [FromBody] LoginRequest req,
+        [FromServices] TrustedDeviceService trustedDevices,
+        CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.Password))
         {
@@ -89,50 +94,322 @@ public sealed class AuthController : ControllerBase
         var ctx = HttpContext.Items[TenantContext.HttpItemsKey] as TenantContext;
         string? sourceIp = HttpContext.GetNormalizedRemoteIp();
 
-        (string? token, string? error, int? retryAfter) result;
         if (ctx is not null && ctx.IsApex)
         {
-            // deepcode ignore LogForging,PrivateInformationExposure: email reaches LoginService which
-            // SHA-256-hashes it (HashEmail) before any audit/log call; raw email never reaches the
-            // RenderedCompactJsonFormatter sink. CRLF in property values is JSON-encoded regardless.
-            result = await _login.LoginSystemAsync(req.Email, req.Password, sourceIp, ct);
-        }
-        else if (ctx is not null && ctx.IsTenant && ctx.TenantId is not null)
-        {
-            // deepcode ignore LogForging,PrivateInformationExposure: see comment above — HashEmail
-            // is applied before audit; raw email is not logged.
-            result = await _login.LoginTenantAsync(req.Email, req.Password, ctx.TenantId, sourceIp, ct);
-        }
-        else
-        {
-            // Uninitialized — first-boot has not run, or unknown subdomain in multi mode.
-            return NotFound();
+            return await HandleSystemLoginAsync(req, trustedDevices, sourceIp, ct);
         }
 
-        if (result.retryAfter.HasValue)
+        if (ctx is not null && ctx.IsTenant && ctx.TenantId is not null)
         {
-            Response.Headers.RetryAfter = result.retryAfter.Value.ToString();
-            return StatusCode(StatusCodes.Status429TooManyRequests, new { detail = result.error });
+            return await HandleTenantLoginAsync(req, trustedDevices, ctx.TenantId, sourceIp, ct);
         }
 
-        if (result.token is null)
+        // Uninitialized — first-boot has not run, or unknown subdomain in multi mode.
+        return NotFound();
+    }
+
+    // System-admin login (apex host, multi mode).
+    private async Task<IActionResult> HandleSystemLoginAsync(
+        LoginRequest req, TrustedDeviceService trustedDevices, string? sourceIp, CancellationToken ct)
+    {
+        // deepcode ignore LogForging,PrivateInformationExposure: email reaches LoginService which
+        // SHA-256-hashes it (HashEmail) before any audit/log call; raw email never reaches the
+        // RenderedCompactJsonFormatter sink. CRLF in property values is JSON-encoded regardless.
+        var ff = await _login.BeginSystemLoginAsync(req.Email, req.Password, sourceIp, ct);
+
+        if (ff.RetryAfterSeconds.HasValue)
+        {
+            Response.Headers.RetryAfter = ff.RetryAfterSeconds.Value.ToString();
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { detail = ff.Error });
+        }
+
+        if (ff.Error is not null)
         {
             return Unauthorized(new { detail = "Invalid credentials." });
         }
 
-        // Domain attribute intentionally omitted — host-only cookie scoping prevents
-        // tenant cookies leaking across subdomains in multi mode (RFC 6265).
-        Response.Cookies.Append("dependably_session", result.token, _urls.SessionCookieOptions(HttpContext));
+        if (!ff.MfaEnabled)
+        {
+            // Non-MFA path: session is complete.
+            Response.Cookies.Append("dependably_session", ff.Token!, _urls.SessionCookieOptions(HttpContext));
+            return Ok(new { message = "Logged in." });
+        }
+
+        // MFA path: a valid trusted-device cookie skips the TOTP step.
+        string? deviceCookie = Request.Cookies["dependably_device"];
+        if (deviceCookie is not null
+            && await trustedDevices.TryConsumeAsync(ff.AdminId!, "system", null, deviceCookie, ct))
+        {
+            string trustedToken = await _login.IssueSystemSessionAsync(ff.AdminId!, ff.TokenVersion, ct);
+            await _audit.LogSystemAsync(
+                action: MfaEvents.TypeTrustedDeviceUsed,
+                actorId: ff.AdminId,
+                detail: new MfaEvents.TrustedDeviceUsed("system").ToJson(),
+                sourceIp: sourceIp, ct: ct);
+            Response.Cookies.Append("dependably_session", trustedToken, _urls.SessionCookieOptions(HttpContext));
+            return Ok(new { message = "Logged in." });
+        }
+
+        // No trusted device — issue system challenge cookie and ask for TOTP.
+        string challenge = await _login.IssueSystemMfaChallengeAsync(ff.AdminId!, ff.Email!, ff.TokenVersion, ct);
+        var challengeOpts = _urls.SessionCookieOptions(HttpContext);
+        challengeOpts.Expires = _time.GetUtcNow().AddMinutes(MfaChallengeTtlMinutes);
+        Response.Cookies.Append("dependably_mfa", challenge, challengeOpts);
+        return Ok(new { mfaRequired = true });
+    }
+
+    // Tenant login (subdomain or single-mode host).
+    private async Task<IActionResult> HandleTenantLoginAsync(
+        LoginRequest req, TrustedDeviceService trustedDevices, string tenantId, string? sourceIp, CancellationToken ct)
+    {
+        // deepcode ignore LogForging,PrivateInformationExposure: see HandleSystemLoginAsync — HashEmail
+        // is applied before audit; raw email is not logged.
+        var ff = await _login.BeginTenantLoginAsync(req.Email, req.Password, tenantId, sourceIp, ct);
+
+        if (ff.RetryAfterSeconds.HasValue)
+        {
+            Response.Headers.RetryAfter = ff.RetryAfterSeconds.Value.ToString();
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { detail = ff.Error });
+        }
+
+        if (ff.Error is not null)
+        {
+            return Unauthorized(new { detail = "Invalid credentials." });
+        }
+
+        if (!ff.MfaEnabled)
+        {
+            // Non-MFA path: session is complete.
+            Response.Cookies.Append("dependably_session", ff.Token!, _urls.SessionCookieOptions(HttpContext));
+            return Ok(new { message = "Logged in." });
+        }
+
+        // MFA path: a valid trusted-device cookie skips the TOTP step.
+        string? deviceCookie = Request.Cookies["dependably_device"];
+        if (deviceCookie is not null
+            && await trustedDevices.TryConsumeAsync(ff.UserId!, "tenant", ff.TenantId, deviceCookie, ct))
+        {
+            string trustedToken = await _login.IssueTrustedDeviceSessionAsync(
+                ff.UserId!, ff.TenantId!, ff.Role!, ff.TokenVersion, "forms+trusted_device", sourceIp, ct);
+            await _audit.LogAsync(
+                action: MfaEvents.TypeTrustedDeviceUsed,
+                orgId: ff.TenantId,
+                actorId: ff.UserId,
+                detail: new MfaEvents.TrustedDeviceUsed("tenant").ToJson(),
+                sourceIp: sourceIp, ct: ct);
+            Response.Cookies.Append("dependably_session", trustedToken, _urls.SessionCookieOptions(HttpContext));
+            return Ok(new { message = "Logged in." });
+        }
+
+        // No trusted device — issue challenge cookie and ask for TOTP.
+        string challenge = await _login.IssueMfaChallengeAsync(
+            ff.UserId!, ff.TenantId!, ff.Role!, req.Email, ff.TokenVersion, ct);
+        var challengeOpts = _urls.SessionCookieOptions(HttpContext);
+        challengeOpts.Expires = _time.GetUtcNow().AddMinutes(MfaChallengeTtlMinutes);
+        Response.Cookies.Append("dependably_mfa", challenge, challengeOpts);
+        return Ok(new { mfaRequired = true });
+    }
+
+    /// <summary>POST /api/v1/auth/login/totp — step-2 TOTP or recovery-code submission</summary>
+    [HttpPost("login/totp")]
+    [AllowAnonymous]
+    [EnableRateLimiting("login")]
+    public async Task<IActionResult> LoginTotp(
+        [FromBody] LoginTotpRequest req,
+        [FromServices] IMfaEnrollmentService mfaService,
+        [FromServices] ISystemMfaEnrollmentService systemMfaService,
+        [FromServices] TrustedDeviceService trustedDevices,
+        CancellationToken ct)
+    {
+        string? challengeCookie = Request.Cookies["dependably_mfa"];
+        if (challengeCookie is null)
+        {
+            return Unauthorized(new { detail = "Invalid credentials." });
+        }
+
+        var (valid, sub, tid, role, eml, tver, jti, realm) = await _login.TryReadMfaChallengeAsync(challengeCookie, ct);
+        if (!valid)
+        {
+            return Unauthorized(new { detail = "Invalid credentials." });
+        }
+
+        // jti-revocation check: the challenge is single-use so a successfully-used cookie
+        // cannot be replayed even within the 5-minute window.
+        if (await _revocations.IsRevokedAsync(jti!, ct))
+        {
+            return Unauthorized(new { detail = "Invalid credentials." });
+        }
+
+        string? sourceIp = HttpContext.GetNormalizedRemoteIp();
+        var challenge = new VerifiedChallenge(challengeCookie, sub, tid, role, eml, tver, jti, sourceIp);
+
+        // Branch on the SIGNED realm claim from the HMAC-verified challenge — never the host.
+        // A tenant challenge must never mint a system session and vice-versa; the signed realm
+        // claim is the authoritative discriminator. The tenant path additionally requires a
+        // non-null tid so a system challenge (which carries no tid) cannot satisfy it.
+        if (realm == "system")
+        {
+            return await CompleteSystemTotpAsync(req, systemMfaService, trustedDevices, challenge, ct);
+        }
+
+        // Tenant second factor — tid is required; a system challenge (no tid) cannot satisfy this path.
+        return tid is null
+            ? Unauthorized(new { detail = "Invalid credentials." })
+            : await CompleteTenantTotpAsync(req, mfaService, trustedDevices, challenge, ct);
+    }
+
+    // Completes a system_admin second factor: verifies the code, mints the session, and
+    // optionally remembers the device.
+    private async Task<IActionResult> CompleteSystemTotpAsync(
+        LoginTotpRequest req, ISystemMfaEnrollmentService systemMfaService,
+        TrustedDeviceService trustedDevices, VerifiedChallenge ch, CancellationToken ct)
+    {
+        // System admin second factor. Lockout key scoped to system realm.
+        string sysLockoutKey = LoginService.HashLockoutKey("system", null, ch.Eml!);
+        string sysEmailHash = LoginService.HashEmail(ch.Eml!);
+
+        // deepcode ignore LogForging: ch.Eml/ch.Sub come from the HMAC-verified challenge and reach
+        // LoginService, which SHA-256-hashes the email (HashEmail) before any audit/log call; the raw
+        // value never reaches a log sink.
+        var sysResult = await _login.CompleteSystemSecondFactorAsync(
+            ch.Sub!, ch.Eml!, ch.Tver,
+            new LoginService.SecondFactorContext(sysLockoutKey, sysEmailHash, req.Code, ch.SourceIp), ct);
+
+        if (sysResult.RetryAfterSeconds.HasValue)
+        {
+            Response.Headers.RetryAfter = sysResult.RetryAfterSeconds.Value.ToString();
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { detail = sysResult.Error });
+        }
+
+        if (sysResult.Error is not null)
+        {
+            return Unauthorized(new { detail = "Invalid credentials." });
+        }
+
+        // Revoke the challenge jti (single-use), clear the challenge cookie, set the session.
+        await RevokeChallengeAsync(ch.Cookie, ch.Jti!, ct);
+        Response.Cookies.Delete("dependably_mfa");
+        Response.Cookies.Append("dependably_session", sysResult.Token!, _urls.SessionCookieOptions(HttpContext));
+
+        if (sysResult.RecoveryCodeUsed)
+        {
+            int remaining = await systemMfaService.CountRecoveryCodesAsync(ch.Sub!, ct);
+            await _audit.LogSystemAsync(
+                action: MfaEvents.TypeRecoveryCodeUsed,
+                actorId: ch.Sub,
+                detail: new MfaEvents.RecoveryCodeUsed(remaining).ToJson(),
+                sourceIp: ch.SourceIp, ct: ct);
+        }
+
+        if (req.RememberDevice)
+        {
+            string? userAgent = Request.Headers.UserAgent.ToString();
+            string rawDevice = await trustedDevices.CreateAsync(ch.Sub!, "system", null, userAgent, ct);
+            var deviceOpts = _urls.SessionCookieOptions(HttpContext);
+            deviceOpts.Expires = _time.GetUtcNow().AddDays(trustedDevices.TtlDays);
+            Response.Cookies.Append("dependably_device", rawDevice, deviceOpts);
+            await _audit.LogSystemAsync(
+                action: MfaEvents.TypeTrustedDeviceAdded,
+                actorId: ch.Sub,
+                detail: new MfaEvents.TrustedDeviceAdded("system").ToJson(),
+                sourceIp: ch.SourceIp, ct: ct);
+        }
 
         return Ok(new { message = "Logged in." });
     }
+
+    // Completes a tenant-user second factor: verifies the code, mints the session, and
+    // optionally remembers the device.
+    private async Task<IActionResult> CompleteTenantTotpAsync(
+        LoginTotpRequest req, IMfaEnrollmentService mfaService,
+        TrustedDeviceService trustedDevices, VerifiedChallenge ch, CancellationToken ct)
+    {
+        // Re-derive lockout key from the SIGNED claims (not client input) so the shared
+        // budget from step 1 continues accumulating failures on both factors.
+        string lockoutKey = LoginService.HashLockoutKey("tenant", ch.Tid!, ch.Eml!);
+        string emailHash = LoginService.HashEmail(ch.Eml!);
+
+        // deepcode ignore LogForging: ch.Eml/ch.Sub come from the HMAC-verified challenge and reach
+        // LoginService, which SHA-256-hashes the email (HashEmail) before any audit/log call; the raw
+        // value never reaches a log sink.
+        var result = await _login.CompleteTenantSecondFactorAsync(
+            ch.Sub!, ch.Tid!, ch.Role!, ch.Tver,
+            new LoginService.SecondFactorContext(lockoutKey, emailHash, req.Code, ch.SourceIp), ct);
+
+        if (result.RetryAfterSeconds.HasValue)
+        {
+            Response.Headers.RetryAfter = result.RetryAfterSeconds.Value.ToString();
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { detail = result.Error });
+        }
+
+        if (result.Error is not null)
+        {
+            return Unauthorized(new { detail = "Invalid credentials." });
+        }
+
+        // Revoke the challenge jti so it cannot be replayed, clear the cookie, set the session.
+        await RevokeChallengeAsync(ch.Cookie, ch.Jti!, ct);
+        Response.Cookies.Delete("dependably_mfa");
+        Response.Cookies.Append("dependably_session", result.Token!, _urls.SessionCookieOptions(HttpContext));
+
+        if (result.RecoveryCodeUsed)
+        {
+            int remaining = await mfaService.CountRecoveryCodesAsync(ch.Sub!, ct);
+            await _audit.LogAsync(
+                action: MfaEvents.TypeRecoveryCodeUsed,
+                orgId: ch.Tid,
+                actorId: ch.Sub,
+                detail: new MfaEvents.RecoveryCodeUsed(remaining).ToJson(),
+                sourceIp: ch.SourceIp, ct: ct);
+        }
+
+        if (req.RememberDevice)
+        {
+            string? userAgent = Request.Headers.UserAgent.ToString();
+            string rawDevice = await trustedDevices.CreateAsync(ch.Sub!, "tenant", ch.Tid, userAgent, ct);
+            var deviceOpts = _urls.SessionCookieOptions(HttpContext);
+            deviceOpts.Expires = _time.GetUtcNow().AddDays(trustedDevices.TtlDays);
+            Response.Cookies.Append("dependably_device", rawDevice, deviceOpts);
+            await _audit.LogAsync(
+                action: MfaEvents.TypeTrustedDeviceAdded,
+                orgId: ch.Tid,
+                actorId: ch.Sub,
+                detail: new MfaEvents.TrustedDeviceAdded("tenant").ToJson(),
+                sourceIp: ch.SourceIp, ct: ct);
+        }
+
+        return Ok(new { message = "Logged in." });
+    }
+
+    // Revokes a single-use MFA challenge by its jti. The revocation expiry tracks the challenge
+    // JWT's own lifetime (falling back to the standard TTL if the token is unreadable).
+    private async Task RevokeChallengeAsync(string challengeCookie, string jti, CancellationToken ct)
+    {
+        var handler = new JwtSecurityTokenHandler();
+        var expiry = handler.CanReadToken(challengeCookie)
+            ? handler.ReadJwtToken(challengeCookie).ValidTo
+            : _time.GetUtcNow().AddMinutes(MfaChallengeTtlMinutes).UtcDateTime;
+        await _revocations.RevokeAsync(jti, new DateTimeOffset(expiry, TimeSpan.Zero), ct);
+    }
+
+    // The HMAC-verified MFA challenge claims plus the request's source IP, threaded from
+    // LoginTotp into the per-realm second-factor completion helpers.
+    private readonly record struct VerifiedChallenge(
+        string Cookie,
+        string? Sub,
+        string? Tid,
+        string? Role,
+        string? Eml,
+        long Tver,
+        string? Jti,
+        string? SourceIp);
 
     /// <summary>POST /api/v1/invites/accept — set password and create account from an invite link</summary>
     [HttpPost("/api/v1/invites/accept")]
     [AllowAnonymous]
     [EnableRateLimiting("login")]
     public async Task<IActionResult> AcceptInvite([FromBody] AcceptInviteRequest req,
-        [FromServices] PasswordPolicy passwordPolicy, CancellationToken ct)
+        [FromServices] PasswordPolicy passwordPolicy, [FromServices] InviteRepository invites, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.Token))
         {
@@ -145,7 +422,7 @@ public sealed class AuthController : ControllerBase
             return BadRequest(new { detail = verdict.ToReason(), field = "password" });
         }
 
-        var invite = await _invites.AcceptAsync(req.Token, ct);
+        var invite = await invites.AcceptAsync(req.Token, ct);
         if (invite is null)
         {
             return StatusCode(StatusCodes.Status410Gone, new { detail = "Invite token is invalid, expired, or already used." });
@@ -156,8 +433,8 @@ public sealed class AuthController : ControllerBase
         await _users.CreateFromInviteAsync(invite, req.Password, ct);
 
         // Auto-login. Invite is tenant-scoped, so we know which tenant to authenticate against.
-        // deepcode ignore PrivateInformationExposure: invite.Email is hashed by LoginService.HashEmail
-        // before any audit/log call (same path as the manual login above).
+        // deepcode ignore LogForging,PrivateInformationExposure: invite.Email is hashed by
+        // LoginService.HashEmail before any audit/log call (same path as the manual login above).
         var (token, _, _) = await _login.LoginTenantAsync(invite.Email, req.Password, invite.OrgId,
             HttpContext.GetNormalizedRemoteIp(), ct);
         if (token is null)
@@ -285,6 +562,8 @@ public sealed class AuthController : ControllerBase
             orgId,
             role,
             mustChangePassword = ctx?.MustChangePassword ?? false,
+            mfaEnabled = ctx?.MfaEnabled ?? false,
+            mfaEnrollmentRequired = ctx?.MfaEnrollmentRequired ?? false,
             language = resolvedLanguage,
             tenantDefaultLanguage = tenantDefault,
         });
@@ -324,6 +603,7 @@ public sealed class AuthController : ControllerBase
 }
 
 public sealed record LoginRequest(string Email, string Password);
+public sealed record LoginTotpRequest(string Code, bool RememberDevice = false);
 public sealed record AcceptInviteRequest(string Token, string Password);
 public sealed record ChangePasswordRequest(string CurrentPassword, string NewPassword);
 public sealed record UpdateLanguageRequest(string Language);

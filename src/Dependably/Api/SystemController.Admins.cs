@@ -29,6 +29,7 @@ public sealed partial class SystemController
             lastLoginAt = a.LastLoginAt,
             passwordResetIssuedAt = a.PasswordResetIssuedAt,
             createdAt = a.CreatedAt,
+            mfaEnabled = a.MfaEnabled,
         }));
     }
 

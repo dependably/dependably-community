@@ -322,7 +322,86 @@ public sealed class OciPushTests : IClassFixture<DependablyFactory>, IAsyncLifet
         }
     }
 
+    // ── Delete by digest survives content-addressed dedup to proxy origin ────────────
+
+    [Fact]
+    public async Task DeleteManifest_ByDigest_WhenOriginIsProxy_StillDeletes()
+    {
+        // Regression: OCI blobs are content-addressed, so a pushed manifest whose digest was
+        // first seen via the proxy keeps origin='proxy' (the push upsert never rewrites
+        // origin). The digest-delete lookup must not filter on origin='uploaded' — doing so
+        // 404'd these fully round-trippable manifests. Here we push a manifest, flip its
+        // origin to 'proxy' to reproduce the dedup state, then assert delete-by-digest
+        // succeeds and the rows are gone.
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        byte[] configBytes = Encoding.UTF8.GetBytes("""{"architecture":"amd64","os":"linux","dedup":"proxy-origin"}""");
+        byte[] layerBytes = RandomBytes(512);
+        string configDigest = Digest(configBytes);
+        string layerDigest = Digest(layerBytes);
+        await PushBlobMonolithicAsync(client, configBytes, configDigest);
+        await PushBlobMonolithicAsync(client, layerBytes, layerDigest);
+
+        byte[] manifest = BuildImageManifest(configDigest, configBytes.Length, layerDigest, layerBytes.Length);
+        string manifestDigest = Digest(manifest);
+        using (var put = await PutManifestAsync(client, "proxydedup", manifest))
+        {
+            Assert.Equal(HttpStatusCode.Created, put.StatusCode);
+        }
+
+        // Reproduce the content-addressed dedup state: the manifest's blob row carries
+        // origin='proxy' as it would if the same bytes had been proxied before the push.
+        string orgId = await OrgIdAsync();
+        Assert.Equal(1, await SetOciBlobOriginAsync(orgId, manifestDigest, "proxy"));
+
+        // The manifest is still round-trippable by tag (GET resolves to the same digest).
+        using (var get = await client.GetAsync($"/v2/{Repo}/manifests/proxydedup"))
+        {
+            Assert.Equal(HttpStatusCode.OK, get.StatusCode);
+            Assert.Equal(manifestDigest, Assert.Single(get.Headers.GetValues("Docker-Content-Digest")));
+        }
+
+        // Delete by digest must succeed (was 404 before the fix).
+        using (var del = await client.SendAsync(
+            new HttpRequestMessage(HttpMethod.Delete, $"/v2/{Repo}/manifests/{manifestDigest}")))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, del.StatusCode);
+        }
+
+        // The blob record and every tag pointing to it are gone.
+        Assert.Equal(0, await CountOciBlobAsync(orgId, manifestDigest));
+        Assert.Equal(0, await CountOciTagsForDigestAsync(orgId, manifestDigest));
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────────
+
+    private async Task<int> SetOciBlobOriginAsync(string orgId, string digest, string origin)
+    {
+        var db = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await db.OpenAsync();
+        return await conn.ExecuteAsync(
+            "UPDATE oci_blobs SET origin = @origin WHERE org_id = @orgId AND digest = @digest",
+            new { origin, orgId, digest });
+    }
+
+    private async Task<int> CountOciBlobAsync(string orgId, string digest)
+    {
+        var db = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await db.OpenAsync();
+        return await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM oci_blobs WHERE org_id = @orgId AND digest = @digest",
+            new { orgId, digest });
+    }
+
+    private async Task<int> CountOciTagsForDigestAsync(string orgId, string digest)
+    {
+        var db = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await db.OpenAsync();
+        return await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM oci_tags WHERE org_id = @orgId AND digest = @digest",
+            new { orgId, digest });
+    }
 
     private static async Task<string> StartUploadAsync(HttpClient client)
     {

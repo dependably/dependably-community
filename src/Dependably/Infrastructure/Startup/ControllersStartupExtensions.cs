@@ -19,6 +19,8 @@ internal static class ControllersStartupExtensions
                 options.Filters.AddService<RouteScopeFilter>();
                 // After RouteScopeFilter (realm first), block flagged users until they rotate.
                 options.Filters.AddService<PasswordRotationGuard>();
+                // After PasswordRotationGuard (rotation wins), block unenrolled users when MFA is required.
+                options.Filters.AddService<MfaEnrollmentGuard>();
             })
             .AddApplicationPart(typeof(Program).Assembly)
             .AddDataAnnotationsLocalization()

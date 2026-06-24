@@ -226,6 +226,7 @@
   $: columns = [
     { key: 'email',         label: $t('system.admins.columns.email'),         sortable: true },
     { key: 'status',        label: $t('system.admins.columns.status'),        sortable: true, width: '160px' },
+    { key: 'mfa',           label: $t('system.admins.columns.mfa'),           sortable: true, width: '60px' },
     { key: 'lastLogin',     label: $t('system.admins.columns.lastLogin'),     sortable: true, width: '180px' },
     { key: 'passwordReset', label: $t('system.admins.columns.passwordReset'), sortable: true, width: '180px' },
     { key: 'created',       label: $t('system.admins.columns.created'),       sortable: true, width: '180px' },
@@ -241,6 +242,7 @@
   const comparators = {
     email:         (a, b) => (a.email ?? '').localeCompare(b.email ?? ''),
     status:        (a, b) => (a.accountStatus ?? '').localeCompare(b.accountStatus ?? ''),
+    mfa:           (a, b) => (a.mfaEnabled ? 1 : 0) - (b.mfaEnabled ? 1 : 0),
     lastLogin:     (a, b) => dateAsc(a.lastLoginAt, b.lastLoginAt),
     passwordReset: (a, b) => dateAsc(a.passwordResetIssuedAt, b.passwordResetIssuedAt),
     created:       (a, b) => dateAsc(a.createdAt, b.createdAt),
@@ -298,6 +300,13 @@
               </option>
             {/each}
           </select>
+        {/if}
+      </td>
+      <td class="mfa-cell">
+        {#if admin.mfaEnabled}
+          <svg class="mfa-check" width="14" height="14" role="img" aria-label={$t('system.admins.columns.mfa')}><use href="/icons.svg#icon-check"/></svg>
+        {:else}
+          <span class="text-muted" aria-hidden="true">—</span>
         {/if}
       </td>
       <td>{fmtDate(admin.lastLoginAt)}</td>
@@ -448,6 +457,8 @@
   /* Keep the email and YOU badge on one line — the badge is inline-only chrome,
      wrapping it below the address reads as a layout glitch. */
   td.email-cell { white-space: nowrap; }
+  .mfa-cell { text-align: center; }
+  .mfa-check { display: inline-block; color: var(--success); vertical-align: middle; }
   tr.disabled-row { color: var(--text2); }
   .row-actions { display: flex; gap: 6px; align-items: center; }
   .you-badge {

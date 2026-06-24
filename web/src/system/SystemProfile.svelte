@@ -7,6 +7,7 @@
   import ThemeToggle from '../lib/ThemeToggle.svelte'
   import { locales, switchLocale } from '../lib/locale.js'
   import PasswordStrength from '../lib/PasswordStrength.svelte'
+  import { qrSvg } from '../lib/qrcode.js'
 
   let me = null, loading = true, loadError = ''
   let currentPassword = '', newPassword = '', confirm = ''
@@ -24,9 +25,13 @@
   const systemFallbackLabel = locales.find(l => l.code === 'en')?.label || 'English'
 
   onMount(async () => {
-    try { me = await systemApi.me() }
-    catch (e) { loadError = extractErrorMessage(e) }
+    try {
+      me = await systemApi.me()
+      mfaEnabled = me.mfaEnabled ?? false
+    } catch (e) { loadError = extractErrorMessage(e) }
     finally { loading = false }
+    // Fetch live MFA status after me loads to get accurate recovery code count.
+    if (!loadError) loadMfaStatus()
   })
 
   function openModal() {
@@ -65,6 +70,156 @@
       },
     })
   }
+
+  // ── MFA state ────────────────────────────────────────────────────────────
+  // mfaModal: null | 'setup' | 'disable' | 'regen'
+  let mfaModal = null
+  let mfaEnabled = false
+  let mfaCodesRemaining = 0
+  let mfaLoading = false
+  let mfaError = ''
+
+  // Setup wizard state
+  let mfaOtpauthUri = ''
+  let mfaManualKey = ''
+  let mfaSetupCode = ''
+  let mfaRecoveryCodes = []
+  let mfaSetupDone = false
+
+  // Disable / regen state
+  let mfaCurrentPassword = ''
+  let mfaCode = ''
+  let mfaActionDone = false
+  let mfaActionMessage = ''
+
+  async function loadMfaStatus() {
+    try {
+      const s = await systemApi.mfaStatus()
+      mfaEnabled = s.enabled
+      mfaCodesRemaining = s.recoveryCodesRemaining
+    } catch {
+      // Non-fatal; status will be refreshed when me loads.
+    }
+  }
+
+  function openMfaSetup() {
+    mfaModal = 'setup'
+    mfaError = ''
+    mfaSetupCode = ''
+    mfaRecoveryCodes = []
+    mfaSetupDone = false
+    mfaOtpauthUri = ''
+    mfaManualKey = ''
+    beginSetup()
+  }
+
+  async function beginSetup() {
+    mfaLoading = true
+    mfaError = ''
+    try {
+      const r = await systemApi.mfaSetupBegin()
+      mfaOtpauthUri = r.otpauthUri
+      mfaManualKey = r.manualKey
+    } catch {
+      mfaError = $t('system.profile.mfa.errorFailed')
+    } finally {
+      mfaLoading = false
+    }
+  }
+
+  async function submitSetupVerify() {
+    mfaLoading = true
+    mfaError = ''
+    try {
+      const r = await systemApi.mfaSetupVerify(mfaSetupCode)
+      mfaRecoveryCodes = r.recoveryCodes
+      mfaSetupDone = true
+      mfaEnabled = true
+      mfaCodesRemaining = mfaRecoveryCodes.length
+      me = await systemApi.me()
+      user.set(me)
+    } catch (e) {
+      mfaError = e?.status === 422 ? $t('system.profile.mfa.errorInvalidCode') : $t('system.profile.mfa.errorFailed')
+    } finally {
+      mfaLoading = false
+    }
+  }
+
+  function closeMfaModal() {
+    mfaModal = null
+    mfaError = ''
+    mfaSetupCode = ''
+    mfaCurrentPassword = ''
+    mfaCode = ''
+    mfaActionDone = false
+    mfaActionMessage = ''
+  }
+
+  function openMfaDisable() {
+    mfaModal = 'disable'
+    mfaError = ''
+    mfaCurrentPassword = ''
+    mfaCode = ''
+    mfaActionDone = false
+  }
+
+  async function submitDisable() {
+    mfaLoading = true
+    mfaError = ''
+    try {
+      await systemApi.mfaDisable(mfaCurrentPassword, mfaCode)
+      mfaEnabled = false
+      mfaCodesRemaining = 0
+      mfaActionDone = true
+      mfaActionMessage = $t('system.profile.mfa.disableSuccess')
+      me = await systemApi.me()
+      user.set(me)
+    } catch (e) {
+      if (e?.status === 401) {
+        mfaError = $t('system.profile.mfa.errorWrongPassword')
+      } else if (e?.status === 400) {
+        mfaError = $t('system.profile.mfa.errorInvalidCode')
+      } else {
+        mfaError = $t('system.profile.mfa.errorFailed')
+      }
+    } finally {
+      mfaLoading = false
+    }
+  }
+
+  function openMfaRegen() {
+    mfaModal = 'regen'
+    mfaError = ''
+    mfaCode = ''
+    mfaRecoveryCodes = []
+    mfaActionDone = false
+  }
+
+  async function submitRegen() {
+    mfaLoading = true
+    mfaError = ''
+    try {
+      const r = await systemApi.mfaRegenerateRecoveryCodes(mfaCode)
+      mfaRecoveryCodes = r.recoveryCodes
+      mfaCodesRemaining = mfaRecoveryCodes.length
+      mfaActionDone = true
+      mfaActionMessage = $t('system.profile.mfa.regenSuccess')
+    } catch (e) {
+      mfaError = e?.status === 400 ? $t('system.profile.mfa.errorInvalidCode') : $t('system.profile.mfa.errorFailed')
+    } finally {
+      mfaLoading = false
+    }
+  }
+
+  async function copyRecoveryCodes() {
+    try {
+      await navigator.clipboard.writeText(mfaRecoveryCodes.join('\n'))
+    } catch {
+      // Silent — clipboard permission may be denied in some browsers.
+    }
+  }
+
+  $: mfaQrSvg = mfaOtpauthUri ? qrSvg(mfaOtpauthUri, { size: 180 }) : ''
 </script>
 
 <div class="page profile-page">
@@ -82,6 +237,7 @@
     {/if}
 
     <div class="card settings-panel">
+      <!-- Password row -->
       <div class="settings-row">
         <div class="settings-row-text">
           <div class="settings-row-title">{$t('profile.rows.passwordTitle')}</div>
@@ -95,6 +251,29 @@
         </div>
       </div>
 
+      <!-- MFA row -->
+      <div class="settings-row">
+        <div class="settings-row-text">
+          <div class="settings-row-title">{$t('system.profile.mfa.rowTitle')}</div>
+          <div class="settings-row-help">
+            {#if mfaEnabled}
+              {$t('system.profile.mfa.rowHelpOn', { values: { count: mfaCodesRemaining } })}
+            {:else}
+              {$t('system.profile.mfa.rowHelpOff')}
+            {/if}
+          </div>
+        </div>
+        <div class="settings-row-control">
+          {#if mfaEnabled}
+            <button on:click={openMfaRegen}>{$t('system.profile.mfa.regenButton')}</button>
+            <button class="danger-outline" on:click={openMfaDisable}>{$t('system.profile.mfa.disableButton')}</button>
+          {:else}
+            <button on:click={openMfaSetup}>{$t('system.profile.mfa.enableButton')}</button>
+          {/if}
+        </div>
+      </div>
+
+      <!-- Theme row -->
       <div class="settings-row">
         <div class="settings-row-text">
           <div class="settings-row-title">{$t('profile.rows.themeTitle')}</div>
@@ -105,6 +284,7 @@
         </div>
       </div>
 
+      <!-- Language row -->
       <div class="settings-row">
         <div class="settings-row-text">
           <div class="settings-row-title">{$t('profile.rows.languageTitle')}</div>
@@ -154,6 +334,142 @@
   </div>
 {/if}
 
+<!-- MFA setup modal -->
+{#if mfaModal === 'setup'}
+  <div class="modal-backdrop">
+    <div class="modal mfa-modal">
+      <h3>{$t('system.profile.mfa.setupTitle')}</h3>
+      {#if mfaError}<div class="error-msg">{mfaError}</div>{/if}
+
+      {#if mfaSetupDone}
+        <!-- Recovery codes display -->
+        <p class="mfa-success">{$t('system.profile.mfa.setupSuccess')}</p>
+        <div class="mfa-recovery-header">
+          <span class="settings-row-title">{$t('system.profile.mfa.recoveryCodesTitle')}</span>
+          <button type="button" class="btn-link" on:click={copyRecoveryCodes}>{$t('common.actions.copy')}</button>
+        </div>
+        <p class="mfa-hint">{$t('system.profile.mfa.recoveryCodesHelp')}</p>
+        <ul class="recovery-codes">
+          {#each mfaRecoveryCodes as code (code)}
+            <li>{code}</li>
+          {/each}
+        </ul>
+        <div class="modal-actions">
+          <button type="button" class="primary" on:click={closeMfaModal}>{$t('common.actions.dismiss')}</button>
+        </div>
+      {:else}
+        {#if mfaLoading && !mfaOtpauthUri}
+          <p class="mfa-hint">{$t('common.loading')}</p>
+        {:else}
+          <p class="mfa-hint">{$t('system.profile.mfa.setupStep1')}</p>
+          {#if mfaQrSvg}
+            <div class="mfa-qr">
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+              {@html mfaQrSvg}
+            </div>
+          {/if}
+          <div class="mfa-manual-key">
+            <span class="settings-row-help">{$t('system.profile.mfa.manualKey')}:</span>
+            <code>{mfaManualKey}</code>
+          </div>
+          <p class="mfa-hint">{$t('system.profile.mfa.setupStep2')}</p>
+          <form on:submit|preventDefault={submitSetupVerify}>
+            <div class="form-row">
+              <label>{$t('system.profile.mfa.setupCode')}</label>
+              <input
+                type="text"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                maxlength="6"
+                bind:value={mfaSetupCode}
+                required
+              />
+            </div>
+            <div class="modal-actions">
+              <button type="button" on:click={closeMfaModal}>{$t('common.actions.cancel')}</button>
+              <button type="submit" class="primary" disabled={mfaLoading}>
+                {mfaLoading ? $t('common.actions.saving') : $t('system.profile.mfa.setupSubmit')}
+              </button>
+            </div>
+          </form>
+        {/if}
+      {/if}
+    </div>
+  </div>
+{/if}
+
+<!-- MFA disable modal -->
+{#if mfaModal === 'disable'}
+  <div class="modal-backdrop">
+    <div class="modal">
+      <h3>{$t('system.profile.mfa.disableTitle')}</h3>
+      {#if mfaError}<div class="error-msg">{mfaError}</div>{/if}
+
+      {#if mfaActionDone}
+        <p class="mfa-success">{mfaActionMessage}</p>
+        <div class="modal-actions">
+          <button type="button" class="primary" on:click={closeMfaModal}>{$t('common.actions.dismiss')}</button>
+        </div>
+      {:else}
+        <p class="mfa-hint">{$t('system.profile.mfa.disableHelp')}</p>
+        <form on:submit|preventDefault={submitDisable}>
+          <div class="form-row">
+            <label>{$t('system.profile.mfa.currentPassword')}</label>
+            <input type="password" bind:value={mfaCurrentPassword} required autocomplete="current-password" />
+          </div>
+          <div class="form-row">
+            <label>{$t('system.profile.mfa.code')}</label>
+            <input type="text" inputmode="numeric" autocomplete="one-time-code" bind:value={mfaCode} required />
+          </div>
+          <div class="modal-actions">
+            <button type="button" on:click={closeMfaModal}>{$t('common.actions.cancel')}</button>
+            <button type="submit" class="danger" disabled={mfaLoading}>
+              {mfaLoading ? $t('common.actions.saving') : $t('system.profile.mfa.disableSubmit')}
+            </button>
+          </div>
+        </form>
+      {/if}
+    </div>
+  </div>
+{/if}
+
+<!-- MFA regenerate recovery codes modal -->
+{#if mfaModal === 'regen'}
+  <div class="modal-backdrop">
+    <div class="modal mfa-modal">
+      <h3>{$t('system.profile.mfa.regenTitle')}</h3>
+      {#if mfaError}<div class="error-msg">{mfaError}</div>{/if}
+
+      {#if mfaActionDone}
+        <p class="mfa-success">{mfaActionMessage}</p>
+        <ul class="recovery-codes">
+          {#each mfaRecoveryCodes as code (code)}
+            <li>{code}</li>
+          {/each}
+        </ul>
+        <div class="modal-actions">
+          <button type="button" on:click={copyRecoveryCodes}>{$t('common.actions.copy')}</button>
+          <button type="button" class="primary" on:click={closeMfaModal}>{$t('common.actions.dismiss')}</button>
+        </div>
+      {:else}
+        <p class="mfa-hint">{$t('system.profile.mfa.regenHelp')}</p>
+        <form on:submit|preventDefault={submitRegen}>
+          <div class="form-row">
+            <label>{$t('system.profile.mfa.code')}</label>
+            <input type="text" inputmode="numeric" autocomplete="one-time-code" bind:value={mfaCode} required />
+          </div>
+          <div class="modal-actions">
+            <button type="button" on:click={closeMfaModal}>{$t('common.actions.cancel')}</button>
+            <button type="submit" class="primary" disabled={mfaLoading}>
+              {mfaLoading ? $t('common.actions.saving') : $t('system.profile.mfa.regenSubmit')}
+            </button>
+          </div>
+        </form>
+      {/if}
+    </div>
+  </div>
+{/if}
+
 <style>
   .profile-page { max-width: 720px; }
   .warning-banner {
@@ -180,4 +496,50 @@
   .settings-row-success { font-size: 12px; color: var(--success); margin-top: 4px; }
   .settings-row-control { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
   .settings-row-control select { width: auto; font-size: 13px; }
+
+  /* MFA modal extras */
+  .mfa-modal { max-width: 480px; }
+  .mfa-qr { display: flex; justify-content: center; margin: 12px 0; }
+  .mfa-manual-key { font-size: 12px; color: var(--text2); margin-bottom: 12px; word-break: break-all; }
+  .mfa-manual-key code { font-family: var(--font-mono, monospace); font-size: 13px; color: var(--text); }
+  .mfa-hint { font-size: 13px; color: var(--text2); margin-bottom: 8px; }
+  .mfa-success { font-size: 13px; color: var(--success); margin-bottom: 12px; }
+  .mfa-recovery-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+  .recovery-codes {
+    list-style: none;
+    padding: 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    margin-bottom: 16px;
+  }
+  .recovery-codes li {
+    font-family: var(--font-mono, monospace);
+    font-size: 13px;
+    background: var(--surface2);
+    padding: 4px 8px;
+    border-radius: 4px;
+  }
+  .btn-link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 0;
+    min-height: 0;
+  }
+  .btn-link:hover { text-decoration: underline; }
+  button.danger-outline {
+    background: transparent;
+    border: 1px solid var(--danger);
+    color: var(--danger);
+  }
+  button.danger-outline:hover { background: color-mix(in srgb, var(--danger) 8%, transparent); }
+  button.danger {
+    background: var(--danger);
+    color: var(--on-accent);
+    border: none;
+  }
+  button.danger:hover { filter: brightness(0.9); }
 </style>

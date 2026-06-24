@@ -104,7 +104,7 @@
   async function setOverwrite(pkg, override) {
     openActionsId = null
     try {
-      await api.setPackageVersionOverwrite(pkg.ecosystem, pkg.name, override)
+      await api.setPackageVersionOverwrite(pkg.ecosystem, pkg.purlName, override)
       await load()
     } catch (e) {
       error = e.message

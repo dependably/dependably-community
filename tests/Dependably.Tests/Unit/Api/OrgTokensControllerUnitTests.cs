@@ -103,6 +103,79 @@ public sealed class OrgTokensControllerUnitTests
     }
 
     [Fact]
+    public async Task CreateToken_TokenNarrowedPrincipal_CannotMintAboveItsCaps_Returns422()
+    {
+        // A principal whose JWT carries explicit cap claims (token-narrowing) is bounded by
+        // those caps, not its full role grants. Here the owner role would grant publish:npm,
+        // but the narrowed caps are a strict subset that still includes tokens:manage_own (so
+        // the CreateToken authorization gate passes) — minting a publish:npm token must be
+        // rejected as privilege escalation across the narrowing boundary.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        RepointWithCaps(b, role: "owner", caps: new[] { "read:metadata", "tokens:manage_own" });
+
+        var result = await b.OrgTokensController.CreateToken(
+            new CreateTokenRequest(ExpiresAt: null, Capabilities: new[] { "publish:npm" }),
+            CancellationToken.None);
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task CreateToken_TokenNarrowedPrincipal_CanMintWithinItsCaps_Succeeds()
+    {
+        // The narrowed caps still authorize a request that stays within them.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        RepointWithCaps(b, role: "owner", caps: new[] { "read:metadata", "tokens:manage_own" });
+
+        var result = await b.OrgTokensController.CreateToken(
+            new CreateTokenRequest(ExpiresAt: null, Capabilities: new[] { "read:metadata" }),
+            CancellationToken.None);
+        Assert.IsType<OkObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task CreateToken_NonNarrowedPrincipal_StillGetsFullRoleCeiling_Succeeds()
+    {
+        // Without cap claims the role grants drive the ceiling unchanged: an owner can still
+        // mint a publish:npm token. Guards against the narrowing fix over-restricting the
+        // common (non-narrowed) path.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgTokensController.CreateToken(
+            new CreateTokenRequest(ExpiresAt: null, Capabilities: new[] { "publish:npm" }),
+            CancellationToken.None);
+        Assert.IsType<OkObjectResult>(result);
+    }
+
+    // Re-point the controller's principal at the same actor but with explicit cap claims,
+    // simulating a token-narrowed JWT. Mirrors the principal shape BuildAsync constructs.
+    private static void RepointWithCaps(ControllerScenarioResult b, string role, string[] caps)
+    {
+        var claims = new List<System.Security.Claims.Claim>
+        {
+            new(System.Security.Claims.ClaimTypes.NameIdentifier, b.ActorUserId!),
+            new("sub", b.ActorUserId!),
+            new("org_id", b.PrimaryOrgId),
+            new("tid", b.PrimaryOrgId),
+            new("role", role),
+            new("scope", "tenant"),
+        };
+        claims.AddRange(caps.Select(c => new System.Security.Claims.Claim("cap", c)));
+
+        b.OrgTokensController.ControllerContext.HttpContext.User =
+            new System.Security.Claims.ClaimsPrincipal(
+                new System.Security.Claims.ClaimsIdentity(claims, authenticationType: "test"));
+    }
+
+    [Fact]
     public async Task CreateToken_DescriptionExceedingLength_Returns422()
     {
         await using var s = await ControllerScenario.CreateAsync();

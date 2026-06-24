@@ -94,6 +94,7 @@ internal static class InfrastructureStartupExtensions
 
         builder.Services.AddSingleton<Dependably.Storage.UpstreamFetchCoordinator>();
         builder.Services.AddSingleton<IAirGapMode, AirGapMode>();
+        builder.Services.AddSingleton<IRequireMfaMode, RequireMfaMode>();
         builder.Services.AddHostedService<CacheEvictionService>();
 
         // Hosted-tier orphan reconciliation: closes the SIGKILL window in PackagePublishService

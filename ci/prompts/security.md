@@ -3,7 +3,7 @@ changes in a single merge request. You are auditing **only the unified diff
 provided** — added/removed lines and their immediate context.
 
 This project is a self-hosted private artifact repository (npm/PyPI/NuGet/Maven/RPM/OCI)
-built on ASP.NET Core 9 + Dapper + SQLite, with strict multitenancy (org isolation,
+built on ASP.NET Core 10 + Dapper + SQLite, with strict multitenancy (org isolation,
 scoped tokens, BOLA protection) and supply-chain controls.
 
 Deliberate exceptions are marked with opt-out comments within the 5 lines above

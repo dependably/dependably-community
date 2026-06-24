@@ -8,6 +8,12 @@
   let lockoutSeconds = 0
   let countdown
 
+  // Two-step state: 'credentials' shows the normal login form; 'totp' shows the MFA step.
+  let step = 'credentials'
+  let totpCode = ''
+  let rememberDevice = false
+  let useRecovery = false
+
   // Auth methods enabled for this tenant. Defaults to forms-only so the form renders even if
   // the discovery call fails for any reason.
   let methods = { forms: true, saml: false, samlButtonLabel: null }
@@ -19,33 +25,9 @@
     } catch { /* keep defaults — login page must always render */ }
   })
 
-  async function submit() {
-    error = ''
-    loading = true
-    try {
-      await api.login(email, password)
-      const me = await api.me()
-      user.set(me)
-      // currentOrg is derived from bootstrapInfo (host-implicit); no list call needed.
-      // mustChangePassword users go to profile; the pending route (if any) is consumed by
-      // Profile.svelte once rotation completes. Other users consume it now.
-      if (me.mustChangePassword) {
-        navigate('profile', {}, { replace: true })
-      } else {
-        const pending = takePendingRoute()
-        navigate(pending?.page ?? 'dashboard', pending?.params ?? {}, { replace: true })
-      }
-    } catch (e) {
-      if (e.status === 429 && e.retryAfter) {
-        lockoutSeconds = parseInt(e.retryAfter, 10)
-        startCountdown()
-        error = $t('auth.login.tooManyAttempts', { values: { seconds: lockoutSeconds } })
-      } else {
-        error = e.message || $t('auth.login.failed')
-      }
-    } finally {
-      loading = false
-    }
+  function resetLockout() {
+    clearInterval(countdown)
+    lockoutSeconds = 0
   }
 
   function startCountdown() {
@@ -60,6 +42,79 @@
       }
     }, 1000)
   }
+
+  function handleRateLimit(e) {
+    lockoutSeconds = parseInt(e.retryAfter, 10)
+    startCountdown()
+    error = $t('auth.login.tooManyAttempts', { values: { seconds: lockoutSeconds } })
+  }
+
+  function postLoginNavigate(me) {
+    // currentOrg is derived from bootstrapInfo (host-implicit); no list call needed.
+    // mustChangePassword users go to profile; the pending route (if any) is consumed by
+    // Profile.svelte once rotation completes. Other users consume it now.
+    if (me.mustChangePassword) {
+      navigate('profile', {}, { replace: true })
+    } else {
+      const pending = takePendingRoute()
+      navigate(pending?.page ?? 'dashboard', pending?.params ?? {}, { replace: true })
+    }
+  }
+
+  async function submit() {
+    error = ''
+    loading = true
+    try {
+      const r = await api.login(email, password)
+      if (r && r.mfaRequired) {
+        // MFA enrolled — swap to the TOTP step without fetching the session yet.
+        resetLockout()
+        step = 'totp'
+        return
+      }
+      const me = await api.me()
+      user.set(me)
+      postLoginNavigate(me)
+    } catch (e) {
+      if (e.status === 429 && e.retryAfter) {
+        handleRateLimit(e)
+      } else {
+        error = e.message || $t('auth.login.failed')
+      }
+    } finally {
+      loading = false
+    }
+  }
+
+  async function submitTotp() {
+    error = ''
+    loading = true
+    try {
+      await api.loginTotp(totpCode, rememberDevice)
+      const me = await api.me()
+      user.set(me)
+      postLoginNavigate(me)
+    } catch (e) {
+      if (e.status === 429 && e.retryAfter) {
+        handleRateLimit(e)
+      } else if (e.status === 401) {
+        error = $t('auth.login.totp.invalidCode')
+      } else {
+        error = e.message || $t('auth.login.failed')
+      }
+    } finally {
+      loading = false
+    }
+  }
+
+  function backToCredentials() {
+    step = 'credentials'
+    totpCode = ''
+    rememberDevice = false
+    useRecovery = false
+    error = ''
+    resetLockout()
+  }
 </script>
 
 <div class="login-wrap">
@@ -73,37 +128,99 @@
         <circle cx="32" cy="32" r="9" fill="var(--accent)"/>
       </svg>
     </div>
-    <h1>{$t('auth.login.title')}</h1>
-    <p class="login-subtitle">{$t('auth.login.subtitle')}</p>
 
-    {#if error}
-      <div class="error-msg">{error}</div>
-    {/if}
+    {#if step === 'credentials'}
+      <h1>{$t('auth.login.title')}</h1>
+      <p class="login-subtitle">{$t('auth.login.subtitle')}</p>
 
-    {#if methods.forms}
-      <form on:submit|preventDefault={submit}>
+      {#if error}
+        <div class="error-msg">{error}</div>
+      {/if}
+
+      {#if methods.forms}
+        <form on:submit|preventDefault={submit}>
+          <div class="form-row">
+            <label for="email">{$t('auth.login.email')}</label>
+            <input id="email" type="email" bind:value={email} autocomplete="username" required />
+          </div>
+          <div class="form-row">
+            <label for="password">{$t('auth.login.password')}</label>
+            <input id="password" type="password" bind:value={password} autocomplete="current-password" required />
+          </div>
+          <button type="submit" class="primary login-action" disabled={loading || lockoutSeconds > 0}>
+            {loading ? $t('auth.login.submitting') : $t('auth.login.submit')}
+          </button>
+        </form>
+      {/if}
+
+      {#if methods.saml}
+        {#if methods.forms}
+          <div class="login-divider"><span>{$t('auth.login.or')}</span></div>
+        {/if}
+        <!-- Top-level navigation, not fetch — SAML init is an HTTP redirect to the IdP. -->
+        <a class="primary login-action sso-action" href="/saml/login">
+          {methods.samlButtonLabel || $t('auth.login.signInWithSso')}
+        </a>
+      {/if}
+
+    {:else}
+      <h1>{$t('auth.login.totp.title')}</h1>
+      <p class="login-subtitle">
+        {useRecovery ? $t('auth.login.totp.recoveryHelp') : $t('auth.login.totp.help')}
+      </p>
+
+      {#if error}
+        <div class="error-msg">{error}</div>
+      {/if}
+
+      <form on:submit|preventDefault={submitTotp}>
         <div class="form-row">
-          <label for="email">{$t('auth.login.email')}</label>
-          <input id="email" type="email" bind:value={email} autocomplete="username" required />
+          <label for="totp-code">
+            {useRecovery ? $t('auth.login.totp.recoveryLabel') : $t('auth.login.totp.codeLabel')}
+          </label>
+          {#if useRecovery}
+            <input
+              id="totp-code"
+              type="text"
+              bind:value={totpCode}
+              autocomplete="one-time-code"
+              spellcheck="false"
+              required
+            />
+          {:else}
+            <input
+              id="totp-code"
+              type="text"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              maxlength="6"
+              bind:value={totpCode}
+              required
+            />
+          {/if}
         </div>
-        <div class="form-row">
-          <label for="password">{$t('auth.login.password')}</label>
-          <input id="password" type="password" bind:value={password} autocomplete="current-password" required />
+
+        <div class="form-row checkbox-row">
+          <label class="checkbox-label">
+            <input type="checkbox" bind:checked={rememberDevice} />
+            {$t('auth.login.totp.rememberDevice')}
+          </label>
         </div>
+
         <button type="submit" class="primary login-action" disabled={loading || lockoutSeconds > 0}>
-          {loading ? $t('auth.login.submitting') : $t('auth.login.submit')}
+          {loading ? $t('auth.login.totp.submitting') : $t('auth.login.totp.submit')}
         </button>
       </form>
-    {/if}
 
-    {#if methods.saml}
-      {#if methods.forms}
-        <div class="login-divider"><span>{$t('auth.login.or')}</span></div>
-      {/if}
-      <!-- Top-level navigation, not fetch — SAML init is an HTTP redirect to the IdP. -->
-      <a class="primary login-action sso-action" href="/saml/login">
-        {methods.samlButtonLabel || $t('auth.login.signInWithSso')}
-      </a>
+      <div class="totp-links">
+        <button type="button" class="link-btn" on:click={() => { useRecovery = !useRecovery; totpCode = ''; error = '' }}>
+          {useRecovery ? $t('auth.login.totp.useTotp') : $t('auth.login.totp.useRecovery')}
+        </button>
+        <button type="button" class="link-btn" on:click={backToCredentials}>
+          <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-chevron-down" class="chev-left"/></svg>
+          {$t('auth.login.totp.back')}
+        </button>
+      </div>
     {/if}
   </div>
 </div>
@@ -145,5 +262,47 @@
     content: '';
     flex: 1;
     border-top: 1px solid var(--border);
+  }
+  .checkbox-row {
+    margin-bottom: 4px;
+  }
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .checkbox-label input[type="checkbox"] {
+    margin: 0;
+    min-height: 0;
+    width: auto;
+    flex-shrink: 0;
+  }
+  .totp-links {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    margin-top: 16px;
+  }
+  .link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    font-size: 13px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 0;
+  }
+  .link-btn:hover {
+    text-decoration: underline;
+  }
+  .chev-left {
+    transform: rotate(90deg);
+    display: inline-block;
   }
 </style>

@@ -43,6 +43,7 @@
     { key: 'email',       label: $t('users.members.columns.email'),  sortable: true },
     { key: 'role',        label: $t('users.members.columns.role'),   sortable: true, width: '110px' },
     { key: 'accountType', label: $t('users.members.columns.type'),   sortable: true, width: '80px' },
+    { key: 'mfaEnabled',  label: $t('users.members.columns.mfa'),   sortable: true, width: '60px' },
     { key: 'joinedAt',    label: $t('users.members.columns.joined'), sortable: true, width: '110px' },
     { key: 'actions',     label: '',                                 sortable: false, width: '180px' },
   ]
@@ -178,6 +179,13 @@
           {/if}
         </td>
         <td>{accountTypeLabel(u.accountType)}</td>
+        <td class="mfa-cell">
+          {#if u.mfaEnabled}
+            <svg class="mfa-check" width="14" height="14" role="img" aria-label={$t('users.members.columns.mfa')}><use href="/icons.svg#icon-check"/></svg>
+          {:else}
+            <span class="text-muted" aria-hidden="true">—</span>
+          {/if}
+        </td>
         <td class="text-muted">{$formatDateShort(u.joinedAt)}</td>
         <td>
           <div class="row-actions">
@@ -227,6 +235,8 @@
 <style>
   .row-actions { display: flex; gap: 6px; align-items: center; }
   .role-select { padding: 2px 6px; }
+  .mfa-cell { text-align: center; }
+  .mfa-check { display: inline-block; color: var(--success); vertical-align: middle; }
 </style>
 
 {#if showInvite}

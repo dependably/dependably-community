@@ -120,6 +120,7 @@ public partial class Program
         builder.AddDependablyAuthServices();
         builder.AddDependablyTenantResolution();
         builder.AddDependablyJwt();
+        builder.AddDependablyIdentity();
         builder.AddDependablyRateLimiter();
         builder.AddDependablyCors();
         builder.AddDependablyHttpClients();

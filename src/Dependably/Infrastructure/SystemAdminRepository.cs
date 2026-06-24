@@ -35,6 +35,19 @@ public sealed class SystemAdminRepository
     }
 
     /// <summary>
+    /// Lean check used by <see cref="Dependably.Security.MfaEnrollmentGuard"/>: true when
+    /// the system admin has completed MFA enrollment. Read live from the database so enrollment
+    /// takes effect immediately. Missing row → false.
+    /// </summary>
+    public async Task<bool> IsMfaEnabledAsync(string adminId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        long? flag = await conn.ExecuteScalarAsync<long?>(
+            "SELECT mfa_enabled FROM system_admins WHERE id = @id", new { id = adminId });
+        return flag == 1;
+    }
+
+    /// <summary>
     /// Bucketed counts for the sysadmin dashboard. Single round-trip. Mirrors
     /// <c>OrgRepository.CountByStatusAsync</c>'s shape so the dashboard render is symmetric.
     /// </summary>
@@ -66,25 +79,45 @@ public sealed class SystemAdminRepository
 
     /// <summary>
     /// Looks up a system_admin by email. Returns the credentials needed for login verification,
-    /// including <c>account_status</c> so the login path can reject locked/disabled operators
-    /// after a constant-time hash check. Email match is case-insensitive.
+    /// including <c>account_status</c>, <c>mfa_enabled</c>, and <c>token_version</c> so the
+    /// login path can evaluate MFA enrollment and issue the correct tver claim. Email match
+    /// is case-insensitive.
     /// </summary>
-    public async Task<(string Id, string Email, string PasswordHash, bool MustChangePassword, string AccountStatus)?> GetCredentialsByEmailAsync(
+    public async Task<(string Id, string Email, string PasswordHash, bool MustChangePassword, string AccountStatus, bool MfaEnabled, long TokenVersion)?> GetCredentialsByEmailAsync(
         string email, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var (Id, Email, PasswordHash, MustChangePassword, AccountStatus) =
+        var (Id, Email, PasswordHash, MustChangePassword, AccountStatus, MfaEnabled, TokenVersion) =
             await conn.QuerySingleOrDefaultAsync<(string? Id, string? Email, string? PasswordHash,
-                int MustChangePassword, string? AccountStatus)>(
+                int MustChangePassword, string? AccountStatus, int MfaEnabled, long TokenVersion)>(
             """
-            SELECT id, email, password_hash, must_change_password, account_status
+            SELECT id, email, password_hash, must_change_password, account_status,
+                   mfa_enabled, token_version
             FROM system_admins
             WHERE lower(email) = lower(@email)
             LIMIT 1
             """,
             new { email });
 
-        return Id is null ? null : (Id, Email!, PasswordHash!, MustChangePassword == 1, AccountStatus ?? "active");
+        return Id is null ? null
+            : (Id, Email!, PasswordHash!, MustChangePassword == 1,
+               AccountStatus ?? "active", MfaEnabled == 1, TokenVersion);
+    }
+
+    /// <summary>
+    /// Atomically increments <c>token_version</c> for the given admin and returns the new value.
+    /// Invalidating the version immediately stales all outstanding system-scope JWTs for this
+    /// admin so MFA disable and credential rotations revoke all existing sessions.
+    /// </summary>
+    public async Task<long> BumpTokenVersionAsync(string adminId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE system_admins SET token_version = token_version + 1 WHERE id = @id",
+            new { id = adminId });
+        return await conn.ExecuteScalarAsync<long>(
+            "SELECT token_version FROM system_admins WHERE id = @id",
+            new { id = adminId });
     }
 
     public async Task<SystemAdmin?> GetByIdAsync(string id, CancellationToken ct = default)
@@ -98,7 +131,8 @@ public sealed class SystemAdminRepository
                    account_status AS AccountStatus,
                    password_reset_issued_at AS PasswordResetIssuedAt,
                    language AS Language,
-                   created_at AS CreatedAt
+                   created_at AS CreatedAt,
+                   mfa_enabled AS MfaEnabled
             FROM system_admins WHERE id = @id
             """,
             new { id });
@@ -119,7 +153,8 @@ public sealed class SystemAdminRepository
                    account_status AS AccountStatus,
                    password_reset_issued_at AS PasswordResetIssuedAt,
                    language AS Language,
-                   created_at AS CreatedAt
+                   created_at AS CreatedAt,
+                   mfa_enabled AS MfaEnabled
             FROM system_admins
             ORDER BY created_at
             """);
@@ -225,10 +260,11 @@ public sealed class SystemAdminRepository
 
     /// <summary>
     /// Verifies the current password and (on match) rotates to <paramref name="newPasswordHash"/>,
-    /// clearing <c>must_change_password</c>. Returns true on success, false if id is missing or
-    /// the current password doesn't match. Used by the system_admin self-rotate flow.
+    /// clearing <c>must_change_password</c> and incrementing <c>token_version</c> to invalidate
+    /// all outstanding session JWTs. Returns the new token_version on success, or null if the id
+    /// is missing or the current password doesn't match. Used by the system_admin self-rotate flow.
     /// </summary>
-    public async Task<bool> RotatePasswordAsync(
+    public async Task<long?> RotatePasswordAsync(
         string id, string currentPassword, string newPasswordHash, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
@@ -236,20 +272,22 @@ public sealed class SystemAdminRepository
             "SELECT password_hash FROM system_admins WHERE id = @id", new { id });
         if (existing is null)
         {
-            return false;
+            return null;
         }
 
         if (!BCrypt.Net.BCrypt.Verify(currentPassword, existing))
         {
-            return false;
+            return null;
         }
 
         await conn.ExecuteAsync(
             """
-            UPDATE system_admins SET password_hash = @hash, must_change_password = 0
+            UPDATE system_admins
+            SET password_hash = @hash, must_change_password = 0, token_version = token_version + 1
             WHERE id = @id
             """,
             new { id, hash = newPasswordHash });
-        return true;
+        return await conn.ExecuteScalarAsync<long>(
+            "SELECT token_version FROM system_admins WHERE id = @id", new { id });
     }
 }

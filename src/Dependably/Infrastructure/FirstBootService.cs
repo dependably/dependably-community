@@ -67,6 +67,18 @@ public sealed class FirstBootService
                 """,
                 new { value = jwtSecret });
 
+            // MFA encryption key seeds alongside the JWT secret so both are present from
+            // first boot. MfaEncryptionKeyProvider handles the generate-if-missing path for
+            // upgraded installs, making this DO UPDATE SET value safe (idempotent overwrite
+            // within the same first-boot transaction).
+            string mfaKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO instance_settings (key, value) VALUES ('mfa_encryption_key', @value)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                new { value = mfaKey });
+
             await SeedInstanceSettingsAsync(conn);
 
             string mode = (_config["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();

@@ -12,8 +12,9 @@ namespace Dependably.Api;
 /// <summary>
 /// User and service access tokens. Split out of <see cref="OrgController"/>: tokens are
 /// a single REST resource with member-scoped CRUD (user) and admin-scoped CRUD (service).
-/// Capability validation uses the caller's role grants as the ceiling — admins can mint
-/// tokens with capabilities they themselves hold, never above.
+/// Capability validation uses the caller's effective capabilities as the ceiling — admins can
+/// mint tokens with capabilities they themselves hold, never above, and a token-narrowed
+/// principal is bounded by its narrowed caps rather than its full role grants.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -282,15 +283,19 @@ public sealed class OrgTokensController : OrgScopedControllerBase
 
     // Validates and normalizes the capabilities + description fields shared by user-token and
     // service-token creation. Returns the normalized values on success, or an error IActionResult
-    // when either field is invalid. The caller's role grants form the capabilities ceiling.
+    // when either field is invalid. The caller's effective capability set forms the ceiling, so a
+    // token-narrowed principal cannot mint a token above its own caps.
     private IActionResult? TryNormalizeTokenRequest(
         IReadOnlyList<string>? capabilities, string? description,
         out string? canonicalJson, out string[]? caps, out string? normalizedDescription)
     {
         normalizedDescription = null;
 
-        string role = User.FindFirst("role")?.Value ?? "member";
-        var callerGrants = Capabilities.ForRole(role);
+        // Effective caps, not role alone: explicit cap claims (token-narrowed) win over the role
+        // grants. OrgAccessGuard.ResolveCallerCapabilities is the canonical resolution, shared so
+        // token minting honors the same narrowing the route guards enforce.
+        string? role = User.FindFirst("role")?.Value;
+        var callerGrants = OrgAccessGuard.ResolveCallerCapabilities(User, role);
 
         return !Capabilities.TryNormalizeAndAuthorize(
                 capabilities, callerGrants,

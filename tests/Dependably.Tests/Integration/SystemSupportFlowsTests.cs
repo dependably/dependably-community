@@ -185,7 +185,9 @@ public sealed class SystemSupportFlowsTests : IClassFixture<DependablyMultiFacto
             currentPassword = DependablyMultiFactory.SystemAdminPassword,
             newPassword = newPwd,
         });
-        Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
+        // The system password change returns 200 with a re-issued session cookie (the change
+        // bumps token_version, invalidating the prior session; the caller's cookie is refreshed).
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
         // Flag cleared.
         var meResp = await sys.GetAsync("/api/v1/system/me");

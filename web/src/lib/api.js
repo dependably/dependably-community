@@ -87,8 +87,10 @@ async function req(method, path, body) {
   if (res.status === 204) return null
   const data = await res.json().catch(() => null)
   if (!res.ok) {
-    // Bad credentials on /auth/login is also 401; let Login.svelte render that inline.
-    if (res.status === 401 && path !== '/auth/login') {
+    // Bad credentials on /auth/login, wrong TOTP on /auth/login/totp, and wrong-password on
+    // /mfa/disable and /system/mfa/disable are domain-level 401s that the caller surfaces inline
+    // — exclude them from the global session-expired redirect.
+    if (res.status === 401 && path !== '/auth/login' && path !== '/auth/login/totp' && path !== '/mfa/disable' && path !== '/system/mfa/disable') {
       user.set(null)
       // Stash where the user was so post-login returns them there.
       const current = get(route)
@@ -120,11 +122,24 @@ export const api = {
 
   // Auth
   login: (email, password) => req('POST', '/auth/login', { email, password }),
+  loginTotp: (code, rememberDevice) => req('POST', '/auth/login/totp', { code, rememberDevice }),
   logout: () => req('POST', '/auth/logout'),
   me: () => req('GET', '/auth/me'),
   changePassword: (currentPassword, newPassword) =>
     req('POST', '/users/me/password', { currentPassword, newPassword }),
   updateLanguage: (language) => req('POST', '/users/me/language', { language }),
+
+  // MFA enrollment and management. All routes require an authenticated tenant session.
+  // mfaStatus: { enabled: bool, recoveryCodesRemaining: int }
+  // mfaSetupBegin: { otpauthUri: string, manualKey: string }
+  // mfaSetupVerify: { recoveryCodes: string[] }
+  // mfaDisable: { message: string }
+  // mfaRegenerateRecoveryCodes: { recoveryCodes: string[] }
+  mfaStatus: () => req('GET', '/mfa/status'),
+  mfaSetupBegin: () => req('POST', '/mfa/setup/begin'),
+  mfaSetupVerify: (code) => req('POST', '/mfa/setup/verify', { code }),
+  mfaDisable: (currentPassword, code) => req('POST', '/mfa/disable', { currentPassword, code }),
+  mfaRegenerateRecoveryCodes: (code) => req('POST', '/mfa/recovery-codes/regenerate', { code }),
 
   // Auth method discovery — anonymous; tells the login page whether to render forms, SAML, or both.
   // Shape: { forms: bool, saml: bool, samlButtonLabel: string|null }
@@ -164,6 +179,7 @@ export const api = {
     allowVersionOverwrite: s.allowVersionOverwrite,
     versionOverwritePolicy: s.versionOverwritePolicy,
     airGapped: s.airGapped,
+    requireMfa: s.requireMfa,
   }),
   getRetention: () => req('GET', '/retention'),
   updateRetention: (r) => req('PUT', '/retention', r),
@@ -179,8 +195,10 @@ export const api = {
   deleteVersion: (eco, name, ver) => req('DELETE', `/packages/${eco}/${name.replaceAll('/', '%2F')}/${ver}`),
   // Download a single artifact. Cookie-authenticated; the server streams from the correct
   // storage tier and sets Content-Disposition, so the saved filename matches the artifact.
-  downloadVersion: (eco, name, ver) =>
-    downloadBlob(`/packages/${eco}/${name.replaceAll('/', '%2F')}/${ver}/download`, {}, `${name}-${ver}`),
+  // `file` selects one artifact when a version maps to several (Maven jar/pom, PyPI wheel/sdist);
+  // omitted for single-file versions, where the server serves the version's only artifact.
+  downloadVersion: (eco, name, ver, file) =>
+    downloadBlob(`/packages/${eco}/${name.replaceAll('/', '%2F')}/${ver}/download`, file ? { file } : {}, file || `${name}-${ver}`),
 
   // Activity
   getActivity: (params = {}) => {
@@ -411,6 +429,18 @@ export const systemApi = {
   changePassword: (currentPassword, newPassword) =>
     req('POST', '/system/me/password', { currentPassword, newPassword }),
   updateLanguage: (language) => req('POST', '/system/me/language', { language }),
+
+  // System-admin MFA enrollment and management. Routes mirror the tenant /mfa/* surface.
+  // mfaStatus: { enabled: bool, recoveryCodesRemaining: int }
+  // mfaSetupBegin: { otpauthUri: string, manualKey: string }
+  // mfaSetupVerify: { recoveryCodes: string[] }
+  // mfaDisable: { message: string }
+  // mfaRegenerateRecoveryCodes: { recoveryCodes: string[] }
+  mfaStatus: () => req('GET', '/system/mfa/status'),
+  mfaSetupBegin: () => req('POST', '/system/mfa/setup/begin'),
+  mfaSetupVerify: (code) => req('POST', '/system/mfa/setup/verify', { code }),
+  mfaDisable: (currentPassword, code) => req('POST', '/system/mfa/disable', { currentPassword, code }),
+  mfaRegenerateRecoveryCodes: (code) => req('POST', '/system/mfa/recovery-codes/regenerate', { code }),
 
   // system_admin CRUD — operators managing other operators.
   // Backend invariants (cannot_modify_self / last_active_admin / must_disable_first /

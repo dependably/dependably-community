@@ -996,6 +996,27 @@ public sealed partial class SchemaInitializer
             // Per-package same-version-push override. NULL = inherit org policy. 'allow' or 'block'.
             // Added without a CHECK for the same SQLite ALTER reason as above.
             "ALTER TABLE packages ADD COLUMN same_version_push_override TEXT",
+            // MFA fields for the ASP.NET Core Identity UserStore on tenant users. mfa_authenticator_key
+            // holds the AES-GCM-encrypted TOTP key; mfa_recovery_codes holds a JSON array of SHA-256
+            // hashes of the one-time recovery codes; security_stamp is a random value rotated on every
+            // credential change so UserManager detects concurrent mutations. All nullable; existing
+            // rows stay NULL and are populated when a user enrolls in MFA.
+            "ALTER TABLE users ADD COLUMN mfa_authenticator_key TEXT",
+            "ALTER TABLE users ADD COLUMN mfa_recovery_codes TEXT",
+            "ALTER TABLE users ADD COLUMN security_stamp TEXT",
+            // MFA fields and session-invalidation counter for system_admin accounts. Mirrors the users
+            // columns so operator accounts can enroll in MFA under the same Identity spine.
+            // token_version backfills to 1 (the column default), matching pre-existing session claim
+            // semantics so no operator is logged out by the migration.
+            "ALTER TABLE system_admins ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE system_admins ADD COLUMN mfa_authenticator_key TEXT",
+            "ALTER TABLE system_admins ADD COLUMN mfa_recovery_codes TEXT",
+            "ALTER TABLE system_admins ADD COLUMN security_stamp TEXT",
+            "ALTER TABLE system_admins ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1",
+            // Per-tenant MFA enrollment requirement. When 1, all authenticated users must
+            // complete MFA enrollment before accessing any API endpoints. Composes with the
+            // instance REQUIRE_MFA env var: effective requirement = instance OR tenant.
+            "ALTER TABLE org_settings ADD COLUMN require_mfa INTEGER NOT NULL DEFAULT 0",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)

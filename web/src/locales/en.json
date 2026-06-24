@@ -75,7 +75,21 @@
       "failed": "Login failed.",
       "tooManyAttempts": "Too many attempts. Try again in {seconds}s.",
       "or": "or",
-      "signInWithSso": "Sign in with SSO"
+      "signInWithSso": "Sign in with SSO",
+      "totp": {
+        "title": "Two-factor authentication",
+        "help": "Enter the 6-digit code from your authenticator app.",
+        "codeLabel": "Verification code",
+        "useRecovery": "Use a recovery code instead",
+        "useTotp": "Use authenticator app instead",
+        "recoveryLabel": "Recovery code",
+        "recoveryHelp": "Enter one of your saved recovery codes.",
+        "rememberDevice": "Remember this device for 30 days",
+        "submit": "Verify",
+        "submitting": "Verifying…",
+        "invalidCode": "Invalid code. Please try again.",
+        "back": "Back to sign in"
+      }
     },
     "join": {
       "title": "Accept Invite",
@@ -249,6 +263,12 @@
       "unknown": "No upstream version to compare"
     },
     "vulnNever": "Never",
+    "fileCount": "{count} files",
+    "multiFileHint": "Multiple files — expand to see per-file checksums",
+    "files": {
+      "name": "File",
+      "type": "Type"
+    },
     "rescan": "Rescan",
     "rescanning": "…",
     "rescanCooldown": "Cooldown: {minutes}m remaining",
@@ -267,6 +287,7 @@
     },
     "detail": {
       "purl": "PURL",
+      "files": "Files",
       "checksum": "SHA-256",
       "published": "Published",
       "vulnScan": "Last scan",
@@ -607,7 +628,10 @@
       "airGapped": "Air-gapped environment",
       "airGappedHint": "When on, Dependably makes no outbound network requests for this organization: upstream proxy fetches are disabled (uncached packages return 404), and vulnerability and deprecation-metadata scans skip this organization. Use for isolated / air-gapped deployments.",
       "airGappedEnforcedNote": "Enforced instance-wide by the operator (AIR_GAPPED); can't be changed here.",
-      "airGappedWarning": "Outbound requests are disabled for this organization: uncached upstream packages return 404, and vulnerability and deprecation scans skip it."
+      "airGappedWarning": "Outbound requests are disabled for this organization: uncached upstream packages return 404, and vulnerability and deprecation scans skip it.",
+      "requireMfa": "Require MFA enrollment",
+      "requireMfaHint": "When on, all users in this organization must complete MFA enrollment before accessing any API endpoints. The instance REQUIRE_MFA env var enforces this across every organization.",
+      "requireMfaEnforcedNote": "Enforced instance-wide by the operator (REQUIRE_MFA); can't be changed here."
     },
     "uploadLimits": {
       "instanceCeiling": "Instance ceiling: {mb} MB",
@@ -873,6 +897,7 @@
         "email": "Email",
         "role": "Role",
         "type": "Type",
+        "mfa": "MFA",
         "joined": "Joined"
       },
       "role": {
@@ -1111,7 +1136,38 @@
     },
     "changePasswordButton": "Change password",
     "changePasswordModalTitle": "Change password",
-    "openSourceNotices": "View notices"
+    "openSourceNotices": "View notices",
+    "mfa": {
+      "rowTitle": "Two-factor authentication",
+      "rowHelpOff": "Add an extra layer of security using an authenticator app.",
+      "rowHelpOn": "Two-factor authentication is active. {count} recovery code(s) remaining.",
+      "enableButton": "Set up",
+      "disableButton": "Disable",
+      "regenButton": "Regenerate recovery codes",
+      "setupTitle": "Set up two-factor authentication",
+      "setupStep1": "Scan the QR code with your authenticator app, or enter the key manually.",
+      "manualKey": "Manual entry key",
+      "setupStep2": "Enter the 6-digit code from your app to confirm.",
+      "setupCode": "Verification code",
+      "setupSubmit": "Enable two-factor authentication",
+      "setupSuccess": "Two-factor authentication enabled. Save your recovery codes — they are shown only once.",
+      "recoveryCodesTitle": "Recovery codes",
+      "recoveryCodesHelp": "Each code can be used once if you lose access to your authenticator app.",
+      "codeCopied": "Codes copied.",
+      "disableTitle": "Disable two-factor authentication",
+      "disableHelp": "Enter your current password and a TOTP code or recovery code to disable MFA.",
+      "disableSubmit": "Disable two-factor authentication",
+      "disableSuccess": "Two-factor authentication disabled.",
+      "regenTitle": "Regenerate recovery codes",
+      "regenHelp": "Enter a TOTP code or a current recovery code. Existing codes will be invalidated.",
+      "regenSubmit": "Regenerate",
+      "regenSuccess": "Recovery codes regenerated. Save them now — they are shown only once.",
+      "code": "Code (TOTP or recovery code)",
+      "currentPassword": "Current password",
+      "errorInvalidCode": "Invalid code.",
+      "errorWrongPassword": "Current password is incorrect.",
+      "errorFailed": "An error occurred. Please try again."
+    }
   },
   "system": {
     "badge": "system",
@@ -1367,6 +1423,7 @@
       "columns": {
         "email": "Email",
         "status": "Status",
+        "mfa": "MFA",
         "lastLogin": "Last login",
         "passwordReset": "Password reset",
         "created": "Created",
@@ -1551,7 +1608,37 @@
       }
     },
     "profile": {
-      "title": "Profile"
+      "title": "Profile",
+      "mfa": {
+        "rowTitle": "Two-factor authentication",
+        "rowHelpOff": "Add an extra layer of security using an authenticator app.",
+        "rowHelpOn": "Two-factor authentication is active. {count} recovery code(s) remaining.",
+        "enableButton": "Set up",
+        "disableButton": "Disable",
+        "regenButton": "Regenerate recovery codes",
+        "setupTitle": "Set up two-factor authentication",
+        "setupStep1": "Scan the QR code with your authenticator app, or enter the key manually.",
+        "setupStep2": "Enter the 6-digit code from your app to confirm.",
+        "setupCode": "Verification code",
+        "setupSubmit": "Enable two-factor authentication",
+        "setupSuccess": "Two-factor authentication enabled. Save your recovery codes — they are shown only once.",
+        "manualKey": "Manual entry key",
+        "recoveryCodesTitle": "Recovery codes",
+        "recoveryCodesHelp": "Each code can be used once if you lose access to your authenticator app.",
+        "disableTitle": "Disable two-factor authentication",
+        "disableHelp": "Enter your current password and a TOTP code or recovery code to disable MFA.",
+        "disableSubmit": "Disable two-factor authentication",
+        "disableSuccess": "Two-factor authentication disabled.",
+        "regenTitle": "Regenerate recovery codes",
+        "regenHelp": "Enter a TOTP code or a current recovery code. Existing codes will be invalidated.",
+        "regenSubmit": "Regenerate",
+        "regenSuccess": "Recovery codes regenerated. Save them now — they are shown only once.",
+        "currentPassword": "Current password",
+        "code": "Code (TOTP or recovery code)",
+        "errorFailed": "An error occurred. Please try again.",
+        "errorInvalidCode": "Invalid code.",
+        "errorWrongPassword": "Current password is incorrect."
+      }
     }
   }
 }

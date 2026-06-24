@@ -141,12 +141,14 @@ internal static class AuthStartupExtensions
         builder.Services.AddScoped<RouteScopeFilter>();
         // Forces a user holding a temporary password to rotate it before using the API.
         builder.Services.AddScoped<PasswordRotationGuard>();
+        // Forces a user to complete MFA enrollment when the policy requires it.
+        builder.Services.AddScoped<MfaEnrollmentGuard>();
     }
 
     // Validates a JWT after signature verification: checks the jti against the revocation
-    // store, then for tenant-scope sessions verifies the token_version claim hasn't been
-    // superseded by a password change. System-scope JWTs (scope != "tenant") skip the
-    // version check — they reference system_admins, not the per-tenant users table.
+    // store, then verifies the token_version claim for both tenant and system scope sessions
+    // so a password change immediately invalidates all outstanding sessions regardless of
+    // which surface issued them.
     private static async Task OnJwtTokenValidatedAsync(TokenValidatedContext ctx)
     {
         string? jti = ctx.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Jti)?.Value;
@@ -160,23 +162,32 @@ internal static class AuthStartupExtensions
             }
         }
 
-        // Tenant sessions snapshot users.token_version at issuance (`tver` claim,
-        // absent = 1 to match the column default). A password change bumps the stored
-        // version, staling every previously issued session.
-        if (ctx.Principal?.FindFirst("scope")?.Value != "tenant")
+        string? scope = ctx.Principal?.FindFirst("scope")?.Value;
+        string? sub = ctx.Principal?.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+
+        if (sub is null || (scope != "tenant" && scope != "system"))
         {
             return;
         }
 
-        string? sub = ctx.Principal.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
-        if (sub is null)
+        // Both tenant and system sessions snapshot the issuing user's token_version in the
+        // `tver` claim (absent → 1, matching the column default). A password change bumps the
+        // stored version, staling every previously issued session. System JWTs carry the tver
+        // claim too, defaulting to 1 when absent for back-compat with sessions minted before it existed.
+        long claimVersion = long.TryParse(ctx.Principal?.FindFirst("tver")?.Value, out long v) ? v : 1;
+
+        long? current;
+        if (scope == "tenant")
         {
-            return;
+            var versions = ctx.HttpContext.RequestServices.GetRequiredService<UserTokenVersionStore>();
+            current = await versions.GetCurrentVersionAsync(sub);
+        }
+        else
+        {
+            var versions = ctx.HttpContext.RequestServices.GetRequiredService<Dependably.Infrastructure.Identity.SystemAdminTokenVersionStore>();
+            current = await versions.GetCurrentVersionAsync(sub);
         }
 
-        long claimVersion = long.TryParse(ctx.Principal.FindFirst("tver")?.Value, out long v) ? v : 1;
-        var versions = ctx.HttpContext.RequestServices.GetRequiredService<UserTokenVersionStore>();
-        long? current = await versions.GetCurrentVersionAsync(sub);
         if (current is null || claimVersion < current.Value)
         {
             ctx.Fail("Session has been invalidated.");

@@ -364,6 +364,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             orgSettingsRepo, guard, audit, orgAuditEmitter,
             new ConfigurationBuilder().Build(), problems,
             new AirGapMode(new ConfigurationBuilder().Build()),
+            new RequireMfaMode(new ConfigurationBuilder().Build()),
             new Dependably.Protocol.Provenance.NpmSignatureKeyStore(
                 new ConfigurationBuilder().Build(),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.NpmSignatureKeyStore>.Instance),

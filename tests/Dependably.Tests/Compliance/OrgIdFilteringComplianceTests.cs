@@ -74,6 +74,8 @@ public sealed partial class OrgIdFilteringComplianceTests
         "package_versions",
         "package_version_vulns",
         "package_version_licenses",
+        // MFA trusted-device rows carry tenant_id and are tenant-scoped.
+        "mfa_trusted_devices",
     };
 
     [GeneratedRegex(@"""""""\s*(?<sql>.*?)\s*""""""", RegexOptions.Singleline)]

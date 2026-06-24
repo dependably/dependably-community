@@ -35,6 +35,6 @@ export default [
     },
   },
   {
-    ignores: ['dist/**', 'e2e/playwright-report/**'],
+    ignores: ['dist/**', 'e2e/playwright-report/**', 'src/lib/vendor/**'],
   },
 ]

@@ -339,6 +339,33 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
     }
 
     [Fact]
+    public async Task ListOrgMembersAsync_SurfacesMfaEnabled_MixedEnrolledAndNot()
+    {
+        // Mixed partial-state: two members in the same org — one MFA-enrolled, one not.
+        // Verifies the SELECT includes mfa_enabled and maps it to MfaEnabled correctly.
+        // This test fails on the OLD query (missing mfa_enabled column) and passes on the fix.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"mfa-{Guid.NewGuid():N}");
+        string enrolledId = await UserSeeder.InsertAsync(_fixture.Store, orgId, $"enrolled-{Guid.NewGuid():N}@x.test");
+        string notEnrolledId = await UserSeeder.InsertAsync(_fixture.Store, orgId, $"plain-{Guid.NewGuid():N}@x.test");
+
+        // Set mfa_enabled = 1 on the enrolled user directly, mirroring MfaEnrollmentService.
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE users SET mfa_enabled = 1 WHERE id = @id",
+                new { id = enrolledId });
+        }
+
+        var members = await _repo.ListOrgMembersAsync(orgId);
+        Assert.Equal(2, members.Count);
+
+        var enrolled = Assert.Single(members, m => m.UserId == enrolledId);
+        var notEnrolled = Assert.Single(members, m => m.UserId == notEnrolledId);
+        Assert.True(enrolled.MfaEnabled);
+        Assert.False(notEnrolled.MfaEnabled);
+    }
+
+    [Fact]
     public async Task CountOwnersAsync_IgnoresOtherRoles()
     {
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");

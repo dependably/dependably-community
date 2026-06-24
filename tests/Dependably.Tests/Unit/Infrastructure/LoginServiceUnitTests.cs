@@ -1,6 +1,7 @@
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit;
+using Dependably.Infrastructure.Identity;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Time.Testing;
@@ -34,7 +35,9 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
             new AuditRepository(_fixture.Store),
             new ExternalIdentityRepository(_fixture.Store, _clock),
             _emitter,
-            _clock));
+            _clock,
+            Substitute.For<IMfaEnrollmentService>(),
+            Substitute.For<ISystemMfaEnrollmentService>()));
     }
 
     private async Task EnsureJwtSecretAsync()

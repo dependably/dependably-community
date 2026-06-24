@@ -40,6 +40,7 @@
       finalPage = 'system-login'
     }
     else if (me.mustChangePassword) finalPage = 'system-profile'
+    else if (me.mfaEnrollmentRequired) finalPage = 'system-profile'
     else if (intended.page === 'system-login') finalPage = 'system-dashboard'
     else finalPage = intended.page
 
@@ -59,6 +60,15 @@
   // Belt-and-suspenders: if anyone navigates away while still on the must-rotate flag,
   // bounce back to the profile page. Replace so they can't back out of it.
   $: if ($user?.mustChangePassword
+        && $route.page !== 'system-profile'
+        && $route.page !== 'system-login') {
+    navigate('system-profile', {}, { replace: true })
+  }
+
+  // Guard: if an MFA-required system admin (who has already rotated their password)
+  // navigates away, bounce to profile so they can enroll. Rotation takes priority.
+  $: if ($user?.mfaEnrollmentRequired
+        && !$user?.mustChangePassword
         && $route.page !== 'system-profile'
         && $route.page !== 'system-login') {
     navigate('system-profile', {}, { replace: true })

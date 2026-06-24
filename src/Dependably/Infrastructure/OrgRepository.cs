@@ -74,6 +74,7 @@ public sealed class OrgRepository
                COALESCE(allow_version_overwrite, 0) as AllowVersionOverwrite,
                COALESCE(version_overwrite_policy, 'block') as VersionOverwritePolicy,
                COALESCE(air_gapped, 0) as AirGapped,
+               COALESCE(require_mfa, 0) as RequireMfa,
                COALESCE(block_deprecated, 'off') as BlockDeprecated,
                COALESCE(block_malicious, 'block') as BlockMalicious,
                COALESCE(block_kev, 'off') as BlockKev,
@@ -535,7 +536,8 @@ public sealed class OrgRepository
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<OrgMemberView>(
             """
-            SELECT id as UserId, email as Email, role as Role, account_type as AccountType, created_at as JoinedAt
+            SELECT id as UserId, email as Email, role as Role, account_type as AccountType,
+                   created_at as JoinedAt, mfa_enabled as MfaEnabled
             FROM users
             WHERE tenant_id = @orgId
             ORDER BY created_at ASC, id ASC
@@ -756,4 +758,6 @@ public sealed record OrgSettingsUpdate(
     // Per-tenant air-gap posture. null = leave unchanged.
     bool? AirGapped = null,
     // Tri-state same-version-push policy. null = leave unchanged. 'block' | 'exception' | 'allow'.
-    string? VersionOverwritePolicy = null);
+    string? VersionOverwritePolicy = null,
+    // Per-tenant MFA enrollment requirement. null = leave unchanged.
+    bool? RequireMfa = null);

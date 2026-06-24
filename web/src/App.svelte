@@ -40,6 +40,15 @@
     navigate('profile', {}, { replace: true })
   }
 
+  // Guard: if an MFA-required user (who has already rotated their password) navigates
+  // anywhere else, bounce to profile so they can enroll. Rotation takes priority.
+  $: if ($user?.mfaEnrollmentRequired
+        && !$user?.mustChangePassword
+        && !($bootstrapInfo?.mode === 'multi' && $bootstrapInfo?.isApex)
+        && $route.page !== 'profile' && $route.page !== 'login') {
+    navigate('profile', {}, { replace: true })
+  }
+
   onMount(async () => {
     if (typeof window !== 'undefined' && window.history && 'scrollRestoration' in window.history) {
       window.history.scrollRestoration = 'auto'
@@ -87,6 +96,8 @@
         finalPage = 'login'
       }
     } else if (me.mustChangePassword) {
+      finalPage = 'profile'
+    } else if (me.mfaEnrollmentRequired) {
       finalPage = 'profile'
     } else if (intended.page === 'login') {
       finalPage = 'dashboard'

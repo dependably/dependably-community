@@ -13,12 +13,21 @@ public sealed class UserService
     private readonly IMetadataStore _db;
     private readonly OrgRepository _orgs;
     private readonly UserTokenVersionStore? _tokenVersions;
+    private readonly TrustedDeviceService? _trustedDevices;
+    private readonly IRequireMfaMode? _requireMfa;
 
-    public UserService(IMetadataStore db, OrgRepository orgs, UserTokenVersionStore? tokenVersions = null)
+    public UserService(
+        IMetadataStore db,
+        OrgRepository orgs,
+        UserTokenVersionStore? tokenVersions = null,
+        TrustedDeviceService? trustedDevices = null,
+        IRequireMfaMode? requireMfa = null)
     {
         _db = db;
         _orgs = orgs;
         _tokenVersions = tokenVersions;
+        _trustedDevices = trustedDevices;
+        _requireMfa = requireMfa;
     }
 
     /// <summary>
@@ -89,6 +98,13 @@ public sealed class UserService
         int revokedApiTokens = await conn.ExecuteAsync(
             "DELETE FROM user_tokens WHERE user_id = @id", new { id = userId });
 
+        // Revoke trusted-device records so remembered devices no longer bypass TOTP after
+        // a password change. Optional dependency keeps existing test constructors working.
+        if (_trustedDevices is not null)
+        {
+            await _trustedDevices.DeleteAllForUserAsync(userId, "tenant", ct);
+        }
+
         _tokenVersions?.Invalidate(userId);
         return new PasswordChangeResult(PasswordChangeOutcome.Success, newVersion, revokedApiTokens);
     }
@@ -106,6 +122,19 @@ public sealed class UserService
     }
 
     /// <summary>
+    /// Lean check used by <see cref="Dependably.Security.MfaEnrollmentGuard"/>: true when
+    /// the user has completed MFA enrollment. Read live from the database (not from the JWT
+    /// claim) so enrollment takes effect immediately. Missing row → false.
+    /// </summary>
+    public async Task<bool> IsMfaEnabledAsync(string userId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        long? flag = await conn.ExecuteScalarAsync<long?>(
+            "SELECT mfa_enabled FROM users WHERE id = @id", new { id = userId });
+        return flag == 1;
+    }
+
+    /// <summary>
     /// "Me" projection: per-user must_change_password + language override + the tenant's
     /// default_language. Returns null when the user row doesn't exist.
     /// </summary>
@@ -113,23 +142,28 @@ public sealed class UserService
     {
         await using var conn = await _db.OpenAsync(ct);
         var row = await conn.QuerySingleOrDefaultAsync<UserRow>(
-            "SELECT must_change_password AS MustChangePassword, language AS Language FROM users WHERE id = @id",
+            "SELECT must_change_password AS MustChangePassword, language AS Language, mfa_enabled AS MfaEnabled FROM users WHERE id = @id",
             new { id = userId });
         if (row is null)
         {
             return null;
         }
 
-        string? tenantDefault = null;
+        OrgSettings? orgSettings = null;
         if (orgId is not null)
         {
-            tenantDefault = (await _orgs.GetSettingsAsync(orgId, ct))?.DefaultLanguage;
+            orgSettings = await _orgs.GetSettingsAsync(orgId, ct);
         }
+
+        bool mfaEnabled = row.MfaEnabled == 1;
+        bool requireMfa = (_requireMfa?.IsEnabled ?? false) || (orgSettings?.RequireMfa ?? false);
 
         return new UserContext(
             MustChangePassword: row.MustChangePassword == 1,
             Language: string.IsNullOrEmpty(row.Language) ? null : row.Language,
-            TenantDefaultLanguage: tenantDefault);
+            TenantDefaultLanguage: orgSettings?.DefaultLanguage,
+            MfaEnabled: mfaEnabled,
+            MfaEnrollmentRequired: requireMfa && !mfaEnabled);
     }
 
     public async Task UpdateLanguageAsync(string userId, string language, CancellationToken ct = default)
@@ -140,9 +174,33 @@ public sealed class UserService
             new { lang = language, id = userId });
     }
 
+    /// <summary>
+    /// Bumps <c>users.token_version</c> and revokes all API tokens for the user, then
+    /// invalidates the in-process token-version cache. Returns the new version so the caller
+    /// can re-issue its own session cookie. Mirrors <see cref="ChangePasswordAsync"/> but
+    /// without a credential check — the caller is responsible for verifying identity before
+    /// invoking this method.
+    /// </summary>
+    public async Task<long> BumpTokenVersionAndRevokeTokensAsync(string userId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE users SET token_version = token_version + 1 WHERE id = @id",
+            new { id = userId });
+        long newVersion = await conn.ExecuteScalarAsync<long>(
+            "SELECT token_version FROM users WHERE id = @id", new { id = userId });
+
+        // user_id is FK-bound to users.id, which is already tenant-scoped.
+        await conn.ExecuteAsync(
+            "DELETE FROM user_tokens WHERE user_id = @id", new { id = userId });
+
+        _tokenVersions?.Invalidate(userId);
+        return newVersion;
+    }
+
     // SQLite stores INTEGER as Int64; Dapper requires the positional record signature to
     // match exactly, so MustChangePassword is long here and converted to bool at the call site.
-    private sealed record UserRow(long MustChangePassword, string? Language);
+    private sealed record UserRow(long MustChangePassword, string? Language, long MfaEnabled);
 }
 
 public enum PasswordChangeOutcome
@@ -161,4 +219,9 @@ public enum PasswordChangeOutcome
 public sealed record PasswordChangeResult(
     PasswordChangeOutcome Outcome, long? NewTokenVersion = null, int RevokedApiTokens = 0);
 
-public sealed record UserContext(bool MustChangePassword, string? Language, string? TenantDefaultLanguage);
+public sealed record UserContext(
+    bool MustChangePassword,
+    string? Language,
+    string? TenantDefaultLanguage,
+    bool MfaEnabled = false,
+    bool MfaEnrollmentRequired = false);

@@ -41,6 +41,10 @@ public static class InstanceSettingDefaults
     /// two surfaces never drift. The per-ecosystem upload caps (maven/rpm/oci) are honoured by
     /// <c>OrgRepository.GetUploadLimitAsync</c> regardless of deployment mode, so they belong here
     /// even though they have no hard-coded default above.
+    ///
+    /// <c>jwt_secret</c> and <c>mfa_encryption_key</c> are deliberately absent: both are
+    /// operator-unwritable through the settings API (they are generated at first boot and
+    /// managed exclusively by the server).
     /// </summary>
     public static readonly IReadOnlySet<string> AllowedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {

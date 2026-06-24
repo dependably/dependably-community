@@ -83,5 +83,10 @@ public sealed class SecurityHeadersMiddleware
         path.StartsWith("/packages/", StringComparison.OrdinalIgnoreCase) ||
         path.StartsWith("/npm/", StringComparison.OrdinalIgnoreCase) ||
         path.StartsWith("/nuget/", StringComparison.OrdinalIgnoreCase) ||
-        path.StartsWith("/pypi/", StringComparison.OrdinalIgnoreCase);
+        path.StartsWith("/pypi/", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/v2/", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/maven/", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/rpm/", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/cargo/", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("/go/", StringComparison.OrdinalIgnoreCase);
 }

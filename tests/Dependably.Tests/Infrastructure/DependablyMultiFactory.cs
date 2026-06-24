@@ -130,6 +130,37 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     }
 
     /// <summary>
+    /// Issues a system-scoped JWT for the given system_admin id. Mirrors
+    /// <see cref="CreateSystemAdminJwt"/> but targets a specific admin rather than LIMIT 1.
+    /// </summary>
+    public async Task<string> CreateSystemAdminJwtForUser(string adminId)
+    {
+        await using var conn = await _metadataStore.OpenAsync();
+        string jwtSecret = await conn.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = 'jwt_secret'")
+            ?? throw new InvalidOperationException("jwt_secret missing");
+        long tokenVersion = await conn.ExecuteScalarAsync<long>(
+            "SELECT token_version FROM system_admins WHERE id = @adminId", new { adminId });
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
+        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        // now-ok: mints a JWT the host validates against its real clock.
+        var now = DateTime.UtcNow;
+        var token = new JwtSecurityToken(
+            claims: new[]
+            {
+                new Claim(JwtRegisteredClaimNames.Sub, adminId),
+                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N")),
+                new Claim("role", "system_admin"),
+                new Claim("scope", "system"),
+                new Claim("tver", tokenVersion.ToString()),
+            },
+            notBefore: now,
+            expires: now.AddHours(1),
+            signingCredentials: creds);
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    /// <summary>
     /// Issues a tenant-scoped JWT for an arbitrary user/tenant pair (used for cross-realm tests).
     /// </summary>
     public async Task<string> CreateTenantJwt(string userId, string tenantId, string role = "owner")

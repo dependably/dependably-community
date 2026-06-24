@@ -1,5 +1,6 @@
 using Dapper;
 using Dependably.Api;
+using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.AspNetCore.Http;
@@ -420,9 +421,11 @@ public sealed class SystemControllerUnitTests
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
+        var td = new TrustedDeviceService(s.Store, TestTime.Frozen(), new ConfigurationBuilder().Build());
 
         var req = new ChangePasswordRequest("OldPassword123", "short");
-        var result = await b.SystemController.ChangeMyPassword(req, CancellationToken.None);
+        // login/urls are only reached on success; null! is safe for these early-exit paths.
+        var result = await b.SystemController.ChangeMyPassword(req, td, null!, null!, CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -434,10 +437,12 @@ public sealed class SystemControllerUnitTests
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
+        var td = new TrustedDeviceService(s.Store, TestTime.Frozen(), new ConfigurationBuilder().Build());
 
         const string password = "SamePassword123!";
         var req = new ChangePasswordRequest(password, password);
-        var result = await b.SystemController.ChangeMyPassword(req, CancellationToken.None);
+        // login/urls are only reached on success; null! is safe for these early-exit paths.
+        var result = await b.SystemController.ChangeMyPassword(req, td, null!, null!, CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -479,6 +484,52 @@ public sealed class SystemControllerUnitTests
         Assert.DoesNotContain("password_hash", props);
         Assert.Contains("email", props);
         Assert.Contains("accountStatus", props);
+    }
+
+    [Fact]
+    public async Task ListAdmins_SurfacesMfaEnabledForEnrolledAndNonEnrolledAdmins()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+
+        // Seed two admins: one with MFA enrolled, one without.
+        string noMfaId = await SystemAdminSeeder.InsertAsync(s.Store, "no-mfa@example.test");
+        string withMfaId = await SystemAdminSeeder.InsertAsync(s.Store, "with-mfa@example.test");
+
+        // Directly set mfa_enabled=1 for the enrolled admin.
+        await using (var conn = await s.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE system_admins SET mfa_enabled = 1 WHERE id = @id",
+                new { id = withMfaId });
+        }
+
+        var b = await s.BuildAsync();
+        var ok = Assert.IsType<OkObjectResult>(await b.SystemController.ListAdmins(CancellationToken.None));
+        var items = ((System.Collections.IEnumerable)ok.Value!).Cast<object>().ToList();
+
+        // Both rows must include mfaEnabled.
+        Assert.All(items, item =>
+            Assert.Contains("mfaEnabled", item.GetType().GetProperties().Select(p => p.Name)));
+
+        // Non-enrolled admin: mfaEnabled = false.
+        object? noMfaRow = items.FirstOrDefault(item =>
+        {
+            var emailProp = item.GetType().GetProperty("email");
+            return emailProp?.GetValue(item) is string e && e == "no-mfa@example.test";
+        });
+        Assert.NotNull(noMfaRow);
+        Assert.False((bool)noMfaRow!.GetType().GetProperty("mfaEnabled")!.GetValue(noMfaRow)!);
+
+        // Enrolled admin: mfaEnabled = true.
+        object? withMfaRow = items.FirstOrDefault(item =>
+        {
+            var emailProp = item.GetType().GetProperty("email");
+            return emailProp?.GetValue(item) is string e && e == "with-mfa@example.test";
+        });
+        Assert.NotNull(withMfaRow);
+        Assert.True((bool)withMfaRow!.GetType().GetProperty("mfaEnabled")!.GetValue(withMfaRow)!);
     }
 
     [Fact]
@@ -907,8 +958,10 @@ public sealed class SystemControllerUnitTests
                 [new System.Security.Claims.Claim("scope", "system")],
                 authenticationType: "test"));
 
+        var td = new TrustedDeviceService(s.Store, TestTime.Frozen(), new ConfigurationBuilder().Build());
         var req = new ChangePasswordRequest("OldPassword123!", "BrandNewPassword456!");
-        var result = await b.SystemController.ChangeMyPassword(req, CancellationToken.None);
+        // login/urls are only reached on success; null! is safe for this early-exit path.
+        var result = await b.SystemController.ChangeMyPassword(req, td, null!, null!, CancellationToken.None);
         Assert.IsType<UnauthorizedResult>(result);
     }
 

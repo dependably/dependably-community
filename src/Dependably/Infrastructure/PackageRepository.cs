@@ -100,7 +100,11 @@ public sealed class PackageRepository
             new { id, orgId, ecosystem, name, purlName, isProxy = isProxy ? 1 : 0 });
 
         return (await conn.QuerySingleOrDefaultAsync<Package>(
-            "SELECT id, org_id as OrgId, ecosystem, name, purl_name as PurlName, is_proxy as IsProxy, created_at as CreatedAt, same_version_push_override as SameVersionPushOverride FROM packages WHERE id = @id",
+            """
+            SELECT id, org_id as OrgId, ecosystem, name, purl_name as PurlName, is_proxy as IsProxy,
+                   created_at as CreatedAt, same_version_push_override as SameVersionPushOverride
+            FROM packages WHERE id = @id
+            """,
             new { id }))!;
     }
 
@@ -194,6 +198,7 @@ public sealed class PackageRepository
         var rows = await conn.QueryAsync<PackageVersion>(
             """
             SELECT pv.id, pv.package_id as PackageId, pv.version, pv.purl, pv.blob_key as BlobKey,
+                   pv.filename as Filename,
                    pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
                    pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.download_count as DownloadCount, pv.created_at as CreatedAt,
                    pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
@@ -255,6 +260,7 @@ public sealed class PackageRepository
         return await conn.QuerySingleOrDefaultAsync<PackageVersion>(
             """
             SELECT pv.id, pv.package_id as PackageId, pv.version, pv.purl, pv.blob_key as BlobKey,
+                   pv.filename as Filename,
                    pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
                    pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.download_count as DownloadCount, pv.created_at as CreatedAt,
                    pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
@@ -628,6 +634,7 @@ public sealed class PackageRepository
         return await conn.QuerySingleOrDefaultAsync<PackageVersion>(
             """
             SELECT pv.id, pv.package_id as PackageId, pv.version, pv.purl, pv.blob_key as BlobKey,
+                   pv.filename as Filename,
                    pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
                    pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.download_count as DownloadCount, pv.created_at as CreatedAt,
                    pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,

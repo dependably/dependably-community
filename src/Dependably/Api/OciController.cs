@@ -843,9 +843,12 @@ public sealed class OciController : OrgScopedControllerBase
     /// DELETE /v2/{name}/manifests/{reference} — protocol-level manifest delete.
     ///
     /// Digest form: removes the manifest oci_blobs record and all oci_tags rows pointing
-    /// to that digest within this org, then deletes the blob from the Registry tier only.
-    /// Shared cache blobs are never deleted (other tenants may reference the same content-
-    /// addressed key; GC is the right mechanism for unreferenced cache blobs).
+    /// to that digest within this org, then deletes the blob from the Registry tier only
+    /// for uploaded manifests. The lookup matches the digest regardless of origin (a pushed
+    /// manifest can carry origin='proxy' through content-addressed dedup), so digest-
+    /// addressed delete works for any locally catalogued manifest. Shared cache blobs are
+    /// never deleted (other tenants may reference the same content-addressed key; GC is the
+    /// right mechanism for unreferenced cache blobs).
     ///
     /// Tag form: removes only the tag record (untag only — spec-compliant behaviour for
     /// tag deletion). The manifest blob and its digest-addressed record remain intact.
@@ -871,12 +874,15 @@ public sealed class OciController : OrgScopedControllerBase
 
         if (coords.IsDigest)
         {
-            // Digest delete: verify the blob exists in this org, remove all tags pointing
-            // to it, then remove the blob record. Registry-tier blob is deleted; cache-tier
-            // blob is intentionally left (shared across orgs by content-address).
+            // Digest delete: find the blob record for this org regardless of origin, remove
+            // all tags pointing to it, then remove the blob record. Origin is not filtered:
+            // OCI blobs are content-addressed, so a pushed manifest whose digest was first
+            // seen via the proxy keeps origin='proxy' (the upsert never rewrites origin) —
+            // filtering on origin='uploaded' here made delete-by-digest 404 for those
+            // round-trippable manifests. Physical deletion is still gated on origin below.
             // xtenant: (digest, org_id) PK ensures this is scoped to the caller's org.
-            string? blobKey = await conn.ExecuteScalarAsync<string?>(
-                "SELECT blob_key FROM oci_blobs WHERE digest = @digest AND org_id = @orgId AND origin = 'uploaded'",
+            var (blobKey, origin) = await conn.QuerySingleOrDefaultAsync<(string? BlobKey, string? Origin)>(
+                "SELECT blob_key AS BlobKey, origin AS Origin FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
                 new { digest = reference, orgId });
 
             if (blobKey is null)
@@ -897,20 +903,23 @@ public sealed class OciController : OrgScopedControllerBase
                 "DELETE FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
                 new { digest = reference, orgId });
 
-            // OCI blob keys are content-addressed with no org segment — two orgs pushing the
-            // same digest share one physical blob. Count remaining rows for this blob_key
-            // across all orgs before deleting the physical file.
-            // xtenant: refcount guard before physical delete of shared content-addressed blob
-            int remainingRefs = await conn.ExecuteScalarAsync<int>(
-                "SELECT COUNT(*) FROM oci_blobs WHERE blob_key = @key",
-                new { key = blobKey });
-
-            // Delete from Registry tier only when no other org row references this blob key.
-            // Cache blobs are content-addressed and may be referenced by other tenants —
-            // blob GC handles unreferenced cache entries.
-            if (remainingRefs == 0)
+            // Physical delete applies only to Registry-tier (uploaded) blobs. Proxy blobs
+            // live in the Cache tier and are content-addressed, shared across tenants — blob
+            // GC reclaims unreferenced cache entries, so we never delete them here.
+            if (origin == "uploaded")
             {
-                await _svc.BlobStore.Registry.DeleteAsync(blobKey, ct);
+                // OCI blob keys are content-addressed with no org segment — two orgs pushing
+                // the same digest share one physical blob. Count remaining rows for this
+                // blob_key across all orgs before deleting the physical file.
+                // xtenant: refcount guard before physical delete of shared content-addressed blob
+                int remainingRefs = await conn.ExecuteScalarAsync<int>(
+                    "SELECT COUNT(*) FROM oci_blobs WHERE blob_key = @key",
+                    new { key = blobKey });
+
+                if (remainingRefs == 0)
+                {
+                    await _svc.BlobStore.Registry.DeleteAsync(blobKey, ct);
+                }
             }
 
             await _svc.Audit.LogActivityAsync(orgId, "oci", $"pkg:oci/{name}@{reference}", "delete",

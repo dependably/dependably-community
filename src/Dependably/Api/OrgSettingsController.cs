@@ -28,6 +28,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     private readonly IConfiguration _config;
     private readonly ProblemResults _problems;
     private readonly IAirGapMode _airGap;
+    private readonly IRequireMfaMode _requireMfa;
     private readonly Dependably.Protocol.Provenance.NpmSignatureKeyStore _npmKeys;
     private readonly Dependably.Protocol.Provenance.NuGetSignatureTrustStore _nugetCerts;
     private readonly Dependably.Protocol.Provenance.PyPiSigstoreTrustStore _pypiRoots;
@@ -46,6 +47,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         IConfiguration config,
         ProblemResults problems,
         IAirGapMode airGap,
+        IRequireMfaMode requireMfa,
         Dependably.Protocol.Provenance.NpmSignatureKeyStore npmKeys,
         Dependably.Protocol.Provenance.NuGetSignatureTrustStore nugetCerts,
         Dependably.Protocol.Provenance.PyPiSigstoreTrustStore pypiRoots,
@@ -60,6 +62,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         _config = config;
         _problems = problems;
         _airGap = airGap;
+        _requireMfa = requireMfa;
         _npmKeys = npmKeys;
         _nugetCerts = nugetCerts;
         _pypiRoots = pypiRoots;
@@ -87,6 +90,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         var node = System.Text.Json.JsonSerializer.SerializeToNode(settings, SettingsJsonOptions)
                    ?? new System.Text.Json.Nodes.JsonObject();
         node["airGappedEnforced"] = _airGap.IsEnabled;
+        node["requireMfaEnforced"] = _requireMfa.IsEnabled;
         return new JsonResult(node);
     }
 
@@ -121,6 +125,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         // Capture prior values so the targeted tenant.setting.change events can carry before/after.
         var prior = await _settings.GetSettingsAsync(orgId, ct);
         bool priorAirGapped = prior?.AirGapped ?? false;
+        bool priorRequireMfa = prior?.RequireMfa ?? false;
         string priorPolicy = prior?.VersionOverwritePolicy ?? "block";
 
         await _settings.UpsertSettingsAsync(new OrgSettingsUpdate(
@@ -138,7 +143,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             MaxUploadBytesOci: req.MaxUploadBytesOci,
             MaxUploadBytesCargo: req.MaxUploadBytesCargo,
             AirGapped: req.AirGapped,
-            VersionOverwritePolicy: req.VersionOverwritePolicy), ct);
+            VersionOverwritePolicy: req.VersionOverwritePolicy,
+            RequireMfa: req.RequireMfa), ct);
 
         await _audit.LogAsync("org_settings_updated", orgId, GetUserId(),
             detail: System.Text.Json.JsonSerializer.Serialize(new
@@ -156,41 +162,46 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 default_language = req.DefaultLanguage,
                 version_overwrite_policy = req.VersionOverwritePolicy,
                 air_gapped = req.AirGapped,
+                require_mfa = req.RequireMfa,
             }), ct: ct);
 
         if (req.VersionOverwritePolicy is { } newPolicy && newPolicy != priorPolicy)
         {
-            await _audit.LogAsync("tenant.setting.change", orgId, GetUserId(),
-                detail: System.Text.Json.JsonSerializer.Serialize(new
-                {
-                    key = "version_overwrite_policy",
-                    prior_value = priorPolicy,
-                    new_value = newPolicy,
-                }), ct: ct);
-            await _auditEmitter.EmitAsync(
-                Dependably.Infrastructure.Audit.Events.TenantEvents.TypeSettingChange,
-                orgId, "user", GetUserId(), "accepted",
-                new Dependably.Infrastructure.Audit.Events.TenantEvents.SettingChange(
-                    "version_overwrite_policy", priorPolicy, newPolicy).ToJson(), ct);
+            await EmitSettingChangeAsync(orgId, "version_overwrite_policy", priorPolicy, newPolicy, ct);
         }
 
         if (req.AirGapped is { } newAirGapped && newAirGapped != priorAirGapped)
         {
-            await _audit.LogAsync("tenant.setting.change", orgId, GetUserId(),
-                detail: System.Text.Json.JsonSerializer.Serialize(new
-                {
-                    key = "air_gapped",
-                    prior_value = priorAirGapped,
-                    new_value = newAirGapped,
-                }), ct: ct);
-            await _auditEmitter.EmitAsync(
-                Dependably.Infrastructure.Audit.Events.TenantEvents.TypeSettingChange,
-                orgId, "user", GetUserId(), "accepted",
-                new Dependably.Infrastructure.Audit.Events.TenantEvents.SettingChange(
-                    "air_gapped", priorAirGapped, newAirGapped).ToJson(), ct);
+            await EmitSettingChangeAsync(orgId, "air_gapped", priorAirGapped, newAirGapped, ct);
+        }
+
+        if (req.RequireMfa is { } newRequireMfa && newRequireMfa != priorRequireMfa)
+        {
+            await EmitSettingChangeAsync(orgId, "require_mfa", priorRequireMfa, newRequireMfa, ct);
         }
 
         return NoContent();
+    }
+
+    // Records a single tenant setting change to both the audit log and the audit-event emitter,
+    // carrying the before/after values.
+    // deepcode ignore NoHardcodedCredentials: `key` is a tenant-setting name (e.g. "air_gapped"),
+    // not a credential — the literals flowing in are setting identifiers.
+    private async Task EmitSettingChangeAsync(
+        string orgId, string key, object? priorValue, object? newValue, CancellationToken ct)
+    {
+        string? userId = GetUserId();
+        await _audit.LogAsync("tenant.setting.change", orgId, userId,
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                key,
+                prior_value = priorValue,
+                new_value = newValue,
+            }), ct: ct);
+        await _auditEmitter.EmitAsync(
+            Dependably.Infrastructure.Audit.Events.TenantEvents.TypeSettingChange,
+            orgId, "user", userId, "accepted",
+            new Dependably.Infrastructure.Audit.Events.TenantEvents.SettingChange(key, priorValue, newValue).ToJson(), ct);
     }
 
     /// <summary>GET /api/v1/orgs/{org}/retention</summary>

@@ -80,6 +80,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ClaimResolver>();
         services.AddSingleton<NpmDistTagRepository>();
         services.AddSingleton<CargoMetadataRepository>();
+        services.AddSingleton<TrustedDeviceService>();
 
         return services;
     }

@@ -48,8 +48,14 @@
   function buildVulnMap(items) {
     const map = new SvelteMap()
     for (const r of items) {
+      if (!r.osvId) continue
       if (!map.has(r.purl)) map.set(r.purl, [])
-      if (r.osvId) map.get(r.purl).push({ osvId: r.osvId, severity: r.severity, summary: r.summary, cvssScore: r.cvssScore })
+      const list = map.get(r.purl)
+      // Multi-file versions (Maven jar/pom, PyPI wheel/sdist) map several files to one purl, so the
+      // vuln report returns the same advisory once per affected file. Collapse to one entry per
+      // osvId so the per-version advisory list neither double-counts nor trips Svelte's keyed each.
+      if (list.some(x => x.osvId === r.osvId)) continue
+      list.push({ osvId: r.osvId, severity: r.severity, summary: r.summary, cvssScore: r.cvssScore })
     }
     return map
   }
@@ -57,12 +63,16 @@
   async function deleteVersion(ver) {
     if (!confirm($t('versionDetail.deleteTitle', { values: { version: ver.version } }))) return
     await api.deleteVersion(params.ecosystem, params.name, ver.version)
-    versions = versions.filter(v => v.id !== ver.id)
+    // Delete acts on the whole release, so drop every file row sharing the version — a multi-file
+    // version (Maven jar/pom, PyPI wheel/sdist) otherwise leaves its siblings stranded in the list.
+    versions = versions.filter(v => v.version !== ver.version)
   }
 
+  // `ver.file` is set when the event comes from a per-file row in a multi-file version's expanded
+  // panel; absent for single-file versions, where the server serves the version's only artifact.
   async function downloadVersion(ver) {
     try {
-      await api.downloadVersion(params.ecosystem, params.name, ver.version)
+      await api.downloadVersion(params.ecosystem, params.name, ver.version, ver.file)
     } catch (e) { error = e.message }
   }
 

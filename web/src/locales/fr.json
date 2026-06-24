@@ -75,7 +75,21 @@
       "failed": "Échec de la connexion.",
       "tooManyAttempts": "Trop de tentatives. Réessayez dans {seconds} s.",
       "or": "ou",
-      "signInWithSso": "Se connecter avec SSO"
+      "signInWithSso": "Se connecter avec SSO",
+      "totp": {
+        "title": "Authentification à deux facteurs",
+        "help": "Saisissez le code à 6 chiffres de votre application d'authentification.",
+        "codeLabel": "Code de vérification",
+        "useRecovery": "Utiliser un code de récupération à la place",
+        "useTotp": "Utiliser l'application d'authentification à la place",
+        "recoveryLabel": "Code de récupération",
+        "recoveryHelp": "Saisissez l'un de vos codes de récupération enregistrés.",
+        "rememberDevice": "Se souvenir de cet appareil pendant 30 jours",
+        "submit": "Vérifier",
+        "submitting": "Vérification…",
+        "invalidCode": "Code invalide. Veuillez réessayer.",
+        "back": "Retour à la connexion"
+      }
     },
     "join": {
       "title": "Accepter l'invitation",
@@ -245,6 +259,12 @@
       "current": "À jour avec l'amont — la dernière version {version} est mise en cache."
     },
     "vulnNever": "Jamais",
+    "fileCount": "{count} fichiers",
+    "multiFileHint": "Plusieurs fichiers — développez pour voir les sommes de contrôle par fichier",
+    "files": {
+      "name": "Fichier",
+      "type": "Type"
+    },
     "rescan": "Relancer",
     "rescanning": "…",
     "rescanCooldown": "Délai : {minutes} min restantes",
@@ -265,6 +285,7 @@
     },
     "detail": {
       "purl": "PURL",
+      "files": "Fichiers",
       "checksum": "SHA-256",
       "published": "Publié le",
       "downloads": "Téléchargements",
@@ -606,7 +627,10 @@
       "airGapped": "Environnement isolé (air-gap)",
       "airGappedHint": "Lorsque activé, Dependably n'émet aucune requête réseau sortante pour cette organisation : les récupérations via le proxy amont sont désactivées (les paquets non mis en cache renvoient 404), et les analyses de vulnérabilités et de métadonnées d'obsolescence ignorent cette organisation. À utiliser pour les déploiements isolés / air-gap.",
       "airGappedEnforcedNote": "Imposé pour toute l'instance par l'opérateur (AIR_GAPPED) ; non modifiable ici.",
-      "airGappedWarning": "Les requêtes sortantes sont désactivées pour cette organisation : les paquets amont non mis en cache renvoient 404, et les analyses de vulnérabilités et d'obsolescence l'ignorent."
+      "airGappedWarning": "Les requêtes sortantes sont désactivées pour cette organisation : les paquets amont non mis en cache renvoient 404, et les analyses de vulnérabilités et d'obsolescence l'ignorent.",
+      "requireMfa": "Exiger l'inscription MFA",
+      "requireMfaHint": "Lorsque activé, tous les utilisateurs de cette organisation doivent compléter l'inscription MFA avant d'accéder aux points d'accès API. La variable d'environnement REQUIRE_MFA de l'instance applique cette règle à toutes les organisations.",
+      "requireMfaEnforcedNote": "Imposé pour toute l'instance par l'opérateur (REQUIRE_MFA) ; non modifiable ici."
     },
     "uploadLimits": {
       "instanceCeiling": "Plafond de l'instance : {mb} Mo",
@@ -872,6 +896,7 @@
         "email": "Courriel",
         "role": "Rôle",
         "type": "Type",
+        "mfa": "AFM",
         "joined": "Inscrit le"
       },
       "role": {
@@ -1110,7 +1135,38 @@
     },
     "changePasswordButton": "Changer le mot de passe",
     "changePasswordModalTitle": "Changer le mot de passe",
-    "openSourceNotices": "Voir les avis"
+    "openSourceNotices": "Voir les avis",
+    "mfa": {
+      "rowTitle": "Authentification à deux facteurs",
+      "rowHelpOff": "Ajoutez une couche de sécurité supplémentaire avec une application d'authentification.",
+      "rowHelpOn": "L'authentification à deux facteurs est active. {count} code(s) de récupération restant(s).",
+      "enableButton": "Configurer",
+      "disableButton": "Désactiver",
+      "regenButton": "Régénérer les codes de récupération",
+      "setupTitle": "Configurer l'authentification à deux facteurs",
+      "setupStep1": "Scannez le code QR avec votre application d'authentification ou saisissez la clé manuellement.",
+      "manualKey": "Clé de saisie manuelle",
+      "setupStep2": "Saisissez le code à 6 chiffres de votre application pour confirmer.",
+      "setupCode": "Code de vérification",
+      "setupSubmit": "Activer l'authentification à deux facteurs",
+      "setupSuccess": "Authentification à deux facteurs activée. Sauvegardez vos codes de récupération — ils ne sont affichés qu'une seule fois.",
+      "recoveryCodesTitle": "Codes de récupération",
+      "recoveryCodesHelp": "Chaque code peut être utilisé une fois si vous perdez accès à votre application.",
+      "codeCopied": "Codes copiés.",
+      "disableTitle": "Désactiver l'authentification à deux facteurs",
+      "disableHelp": "Saisissez votre mot de passe actuel et un code TOTP ou de récupération pour désactiver.",
+      "disableSubmit": "Désactiver l'authentification à deux facteurs",
+      "disableSuccess": "Authentification à deux facteurs désactivée.",
+      "regenTitle": "Régénérer les codes de récupération",
+      "regenHelp": "Saisissez un code TOTP ou un code de récupération actuel. Les codes existants seront invalidés.",
+      "regenSubmit": "Régénérer",
+      "regenSuccess": "Codes de récupération régénérés. Sauvegardez-les maintenant — ils ne sont affichés qu'une seule fois.",
+      "code": "Code (TOTP ou code de récupération)",
+      "currentPassword": "Mot de passe actuel",
+      "errorInvalidCode": "Code invalide.",
+      "errorWrongPassword": "Le mot de passe actuel est incorrect.",
+      "errorFailed": "Une erreur s'est produite. Veuillez réessayer."
+    }
   },
   "system": {
     "badge": "système",
@@ -1323,6 +1379,7 @@
       "columns": {
         "email": "Courriel",
         "status": "Statut",
+        "mfa": "AMF",
         "lastLogin": "Dernière connexion",
         "passwordReset": "Réinit. mot de passe",
         "created": "Créé",
@@ -1507,7 +1564,37 @@
       }
     },
     "profile": {
-      "title": "Profil"
+      "title": "Profil",
+      "mfa": {
+        "rowTitle": "Authentification à deux facteurs",
+        "rowHelpOff": "Ajoutez une couche de sécurité supplémentaire avec une application d'authentification.",
+        "rowHelpOn": "L'authentification à deux facteurs est active. {count} code(s) de récupération restant(s).",
+        "enableButton": "Configurer",
+        "disableButton": "Désactiver",
+        "regenButton": "Régénérer les codes de récupération",
+        "setupTitle": "Configurer l'authentification à deux facteurs",
+        "setupStep1": "Scannez le code QR avec votre application d'authentification ou saisissez la clé manuellement.",
+        "setupStep2": "Saisissez le code à 6 chiffres de votre application pour confirmer.",
+        "setupCode": "Code de vérification",
+        "setupSubmit": "Activer l'authentification à deux facteurs",
+        "setupSuccess": "Authentification à deux facteurs activée. Sauvegardez vos codes de récupération — ils ne sont affichés qu'une seule fois.",
+        "manualKey": "Clé de saisie manuelle",
+        "recoveryCodesTitle": "Codes de récupération",
+        "recoveryCodesHelp": "Chaque code peut être utilisé une fois si vous perdez accès à votre application.",
+        "disableTitle": "Désactiver l'authentification à deux facteurs",
+        "disableHelp": "Saisissez votre mot de passe actuel et un code TOTP ou de récupération pour désactiver.",
+        "disableSubmit": "Désactiver l'authentification à deux facteurs",
+        "disableSuccess": "Authentification à deux facteurs désactivée.",
+        "regenTitle": "Régénérer les codes de récupération",
+        "regenHelp": "Saisissez un code TOTP ou un code de récupération actuel. Les codes existants seront invalidés.",
+        "regenSubmit": "Régénérer",
+        "regenSuccess": "Codes de récupération régénérés. Sauvegardez-les maintenant — ils ne sont affichés qu'une seule fois.",
+        "currentPassword": "Mot de passe actuel",
+        "code": "Code (TOTP ou code de récupération)",
+        "errorFailed": "Une erreur s'est produite. Veuillez réessayer.",
+        "errorInvalidCode": "Code invalide.",
+        "errorWrongPassword": "Le mot de passe actuel est incorrect."
+      }
     }
   }
 }
