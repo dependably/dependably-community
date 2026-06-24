@@ -12,6 +12,9 @@ namespace Dependably.Background;
 /// org, etc.). Each successful hard-delete writes an <c>audit_log</c> entry with
 /// <c>scope='system'</c>, <c>action='tenant.hard_deleted'</c>.
 ///
+/// Also explicitly deletes tenant-scoped banners for the org because <c>banners.org_id</c>
+/// carries no FK to <c>orgs</c> (mirrors <c>audit_log.org_id</c>) and won't cascade on its own.
+///
 /// Schedule: <c>TENANT_HARD_DELETE_SCHEDULE</c> cron (default <c>0 4 * * *</c> — once daily,
 /// staggered 1h after the standard retention sweep).
 /// </summary>
@@ -20,6 +23,7 @@ public sealed class TenantHardDeleteService : BackgroundService
     private readonly OrgRepository _orgs;
     private readonly AuditRepository _audit;
     private readonly IMetadataStore _db;
+    private readonly BannerRepository _banners;
     private readonly IConfiguration _config;
     private readonly ILogger<TenantHardDeleteService> _logger;
     private readonly TimeProvider _time;
@@ -28,6 +32,7 @@ public sealed class TenantHardDeleteService : BackgroundService
         OrgRepository orgs,
         AuditRepository audit,
         IMetadataStore db,
+        BannerRepository banners,
         IConfiguration config,
         ILogger<TenantHardDeleteService> logger,
         TimeProvider time)
@@ -35,6 +40,7 @@ public sealed class TenantHardDeleteService : BackgroundService
         _orgs = orgs;
         _audit = audit;
         _db = db;
+        _banners = banners;
         _config = config;
         _logger = logger;
         _time = time;
@@ -86,6 +92,9 @@ public sealed class TenantHardDeleteService : BackgroundService
         await using var conn = await _db.OpenAsync(ct);
         foreach (string orgId in expired)
         {
+            // Banners carry no FK to orgs, so delete them explicitly before the org row goes.
+            await _banners.DeleteForOrgAsync(orgId, ct);
+
             // Single statement; FK cascades remove per-tenant data.
             await conn.ExecuteAsync("DELETE FROM orgs WHERE id = @id", new { id = orgId });
 

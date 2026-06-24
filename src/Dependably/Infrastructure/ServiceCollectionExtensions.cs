@@ -69,6 +69,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ExternalIdentityRepository>();
         services.AddSingleton<ProxyVersionRecorder>();
         services.AddSingleton<Dependably.Storage.ProxyFetchService>();
+        services.AddSingleton<BannerRepository>();
 
         // Two-tier storage formalisation
         services.AddSingleton<CacheArtifactRepository>();

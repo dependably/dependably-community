@@ -895,3 +895,37 @@ public class ExternalIdentity
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? LastLoginAt { get; set; }
 }
+
+/// <summary>
+/// Admin-authored banner shown to authenticated users. Two scopes:
+/// <c>scope='tenant'</c> rows are authored by tenant admins for their own org;
+/// <c>scope='system'</c> rows are authored by system_admin operators and shown across
+/// all tenants. Dismissed per-user via <see cref="BannerDismissal"/>.
+/// </summary>
+public class Banner
+{
+    public string Id { get; set; } = "";
+    public string Scope { get; set; } = "tenant";
+    public string? OrgId { get; set; }
+    public string Severity { get; set; } = "info";
+    public string Body { get; set; } = "";
+    public string? LinkUrl { get; set; }
+    public string? LinkLabel { get; set; }
+    public string TargetRole { get; set; } = "all";
+    public string StartsAt { get; set; } = "";
+    public string EndsAt { get; set; } = "";
+    public bool Enabled { get; set; } = true;
+    public string? CreatedBy { get; set; }
+    public string CreatedAt { get; set; } = "";
+}
+
+/// <summary>
+/// Records that a specific user dismissed a specific banner. Server-side so dismissal
+/// persists across devices. Cascade-deleted when the banner or user is removed.
+/// </summary>
+public class BannerDismissal
+{
+    public string BannerId { get; set; } = "";
+    public string UserId { get; set; } = "";
+    public string DismissedAt { get; set; } = "";
+}

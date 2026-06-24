@@ -39,6 +39,7 @@ const SYSTEM_STATIC = [
   ['system-profile',       '/profile'],
   ['system-admins',        '/admins'],
   ['system-tenants',       '/tenants'],
+  ['system-banners',       '/banners'],
 ]
 
 function staticTable() {

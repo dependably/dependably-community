@@ -86,9 +86,13 @@ public sealed class UserService
         }
 
         string newHash = BCrypt.Net.BCrypt.HashPassword(newPassword, workFactor: 12);
+        // Rotating the Identity security_stamp alongside token_version keeps the Identity model
+        // consistent with the credential change; token_version remains the canonical per-request
+        // session-invalidation signal.
+        string stamp = Guid.NewGuid().ToString();
         await conn.ExecuteAsync(
-            "UPDATE users SET password_hash = @hash, must_change_password = 0, token_version = token_version + 1 WHERE id = @id",
-            new { hash = newHash, id = userId });
+            "UPDATE users SET password_hash = @hash, must_change_password = 0, token_version = token_version + 1, security_stamp = @stamp WHERE id = @id",
+            new { hash = newHash, stamp, id = userId });
         long newVersion = await conn.ExecuteScalarAsync<long>(
             "SELECT token_version FROM users WHERE id = @id", new { id = userId });
 
@@ -184,9 +188,13 @@ public sealed class UserService
     public async Task<long> BumpTokenVersionAndRevokeTokensAsync(string userId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // Rotating the Identity security_stamp alongside token_version keeps the Identity model
+        // consistent with the credential change; token_version remains the canonical per-request
+        // session-invalidation signal.
+        string stamp = Guid.NewGuid().ToString();
         await conn.ExecuteAsync(
-            "UPDATE users SET token_version = token_version + 1 WHERE id = @id",
-            new { id = userId });
+            "UPDATE users SET token_version = token_version + 1, security_stamp = @stamp WHERE id = @id",
+            new { stamp, id = userId });
         long newVersion = await conn.ExecuteScalarAsync<long>(
             "SELECT token_version FROM users WHERE id = @id", new { id = userId });
 

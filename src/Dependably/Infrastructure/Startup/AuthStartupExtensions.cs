@@ -1,10 +1,13 @@
 using System.Threading.RateLimiting;
+using Dependably.Infrastructure.Identity;
 using Dependably.Infrastructure.Redis;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using StackExchange.Redis;
@@ -216,36 +219,52 @@ internal static class AuthStartupExtensions
 
         if (string.IsNullOrWhiteSpace(redisConnStr))
         {
+            // Standalone path: in-process distributed lock and SQLite-backed lockout store.
             builder.Services.AddSingleton<IDistributedLock, InProcessDistributedLock>();
             builder.Services.AddSingleton<ILockoutStore, SqliteLockoutStore>();
+        }
+        else
+        {
+            // HA path: Redis-backed distributed lock, rate-limit state, and lockout store.
+            // Capture the mux reference so Data Protection can use it without BuildServiceProvider().
+            ConnectionMultiplexer? capturedMux = null;
+            builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+            {
+                var opts = sp.GetRequiredService<IOptions<RedisOptions>>().Value;
+                var logger = sp.GetRequiredService<ILogger<IConnectionMultiplexer>>();
+                var mux = ConnectionMultiplexer.Connect(opts.BuildConfigurationOptions());
+                mux.ConnectionFailed += (_, e) =>
+                    logger.LogWarning("Redis connection failed: {Endpoint} {FailureType}", e.EndPoint, e.FailureType);
+                mux.ConnectionRestored += (_, e) =>
+                    logger.LogInformation("Redis connection restored: {Endpoint}", e.EndPoint);
+                capturedMux = mux;
+                return mux;
+            });
+            builder.Services.AddSingleton<IRedisClient, RedisClient>();
+            builder.Services.AddSingleton<IDistributedLock, RedisDistributedLock>();
+            builder.Services.AddSingleton<ILockoutStore, RedisLockoutStore>();
+
+            // Func<IDatabase> defers resolution until after DI is built.
+            builder.Services.AddDataProtection()
+                .SetApplicationName("dependably")
+                .PersistKeysToStackExchangeRedis(
+                    () => capturedMux?.GetDatabase()
+                        ?? throw new InvalidOperationException("Redis multiplexer not yet initialized."),
+                    "DataProtection-Keys");
             return;
         }
 
-        // Capture the mux reference so Data Protection can use it without BuildServiceProvider()
-        ConnectionMultiplexer? capturedMux = null;
-        builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
-        {
-            var opts = sp.GetRequiredService<IOptions<RedisOptions>>().Value;
-            var logger = sp.GetRequiredService<ILogger<IConnectionMultiplexer>>();
-            var mux = ConnectionMultiplexer.Connect(opts.BuildConfigurationOptions());
-            mux.ConnectionFailed += (_, e) =>
-                logger.LogWarning("Redis connection failed: {Endpoint} {FailureType}", e.EndPoint, e.FailureType);
-            mux.ConnectionRestored += (_, e) =>
-                logger.LogInformation("Redis connection restored: {Endpoint}", e.EndPoint);
-            capturedMux = mux;
-            return mux;
-        });
-        builder.Services.AddSingleton<IRedisClient, RedisClient>();
-        builder.Services.AddSingleton<IDistributedLock, RedisDistributedLock>();
-        builder.Services.AddSingleton<ILockoutStore, RedisLockoutStore>();
-
-        // Func<IDatabase> defers resolution until after DI is built.
+        // Always configure a durable DB-backed DataProtection key ring for standalone deployments
+        // so encrypted values (SAML test cookies, future uses) survive process restarts. The ring
+        // is cached in-memory by KeyRingProvider once loaded; the DB is written only on key rotation.
+        // Security posture: the XML key material is stored unencrypted in the SQLite DB — the same
+        // posture as the jwt_secret and mfa_encryption_key already stored in instance_settings.
+        builder.Services.AddSingleton<DbXmlRepository>();
         builder.Services.AddDataProtection()
-            .SetApplicationName("dependably")
-            .PersistKeysToStackExchangeRedis(
-                () => capturedMux?.GetDatabase()
-                    ?? throw new InvalidOperationException("Redis multiplexer not yet initialized."),
-                "DataProtection-Keys");
+            .SetApplicationName("dependably");
+        builder.Services.AddSingleton<IConfigureOptions<KeyManagementOptions>>(sp =>
+            new ConfigureOptions<KeyManagementOptions>(opts =>
+                opts.XmlRepository = sp.GetRequiredService<DbXmlRepository>()));
     }
 
     internal static void AddDependablyRateLimiter(this WebApplicationBuilder builder)

@@ -1,4 +1,7 @@
 {
+  "banner": {
+    "dismiss": "Fermer"
+  },
   "nav": {
     "brand": "Dependably",
     "packages": "Paquets",
@@ -488,8 +491,24 @@
       "proxy": "Proxy",
       "claims": "Revendications",
       "serviceTokens": "Jetons de service",
+      "banners": "Annonces",
       "instance": "Paramètres de l'instance",
       "metrics": "Accès aux métriques"
+    },
+    "banners": {
+      "severity": "Niveau",
+      "targetRole": "Rôle cible",
+      "enabled": "Activée",
+      "body": "Message",
+      "startsAt": "Début (UTC)",
+      "endsAt": "Fin (UTC)",
+      "linkUrl": "URL du lien",
+      "linkLabel": "Libellé du lien",
+      "create": "Créer l'annonce",
+      "empty": "Aucune annonce.",
+      "window": "Fenêtre",
+      "yes": "Oui",
+      "no": "Non"
     },
     "instance": {
       "intro": "Limites et planifications à l'échelle de l'instance pour ce déploiement. En mode mono-locataire, le propriétaire est aussi l'opérateur, donc ils sont gérés ici."
@@ -1176,6 +1195,7 @@
       "users": "Utilisateurs",
       "audit": "Audit",
       "settings": "Paramètres",
+      "banners": "Annonces",
       "profile": "Profil",
       "signOut": "Se déconnecter",
       "home": "Tableau de bord"
@@ -1562,6 +1582,32 @@
           "daysAgo": "{n}d ago"
         }
       }
+    },
+    "banners": {
+      "title": "Annonces système",
+      "subtitle": "Annonces affichées à tous les utilisateurs authentifiés, dans tous les locataires. Les annonces s'empilent dans l'en-tête de l'application et peuvent être fermées par utilisateur.",
+      "newBanner": "Nouvelle annonce",
+      "cancelCreate": "Annuler",
+      "createTitle": "Nouvelle annonce système",
+      "body": "Message",
+      "severity": "Niveau",
+      "targetRole": "Rôle cible",
+      "startsAt": "Début (UTC)",
+      "endsAt": "Fin (UTC)",
+      "linkUrl": "URL du lien",
+      "linkLabel": "Libellé du lien",
+      "enabled": "Activée",
+      "create": "Créer l'annonce",
+      "creating": "Création…",
+      "delete": "Supprimer",
+      "deleteConfirm": "Supprimer cette annonce système ?",
+      "window": "Fenêtre",
+      "yes": "Oui",
+      "no": "Non",
+      "empty": "Aucune annonce système.",
+      "loadError": "Échec du chargement des annonces.",
+      "createError": "Échec de la création de l'annonce.",
+      "deleteError": "Échec de la suppression de l'annonce."
     },
     "profile": {
       "title": "Profil",

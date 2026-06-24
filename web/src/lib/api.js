@@ -91,13 +91,21 @@ async function req(method, path, body) {
     // /mfa/disable and /system/mfa/disable are domain-level 401s that the caller surfaces inline
     // — exclude them from the global session-expired redirect.
     if (res.status === 401 && path !== '/auth/login' && path !== '/auth/login/totp' && path !== '/mfa/disable' && path !== '/system/mfa/disable') {
-      user.set(null)
-      // Stash where the user was so post-login returns them there.
-      const current = get(route)
-      if (current.page !== 'login' && current.page !== 'system-login' && current.page !== 'join') {
-        pendingRoute.set(current)
+      // The invite-accept flow lands unauthenticated invitees on /join?token=...; the bootstrap
+      // me() probe there returns 401 by design. Redirecting to login would replaceState the URL
+      // and strip the invite token before the join page reads it, so leave the join page in place
+      // and let the caller handle the 401. The route store isn't seeded yet during bootstrap, so
+      // read the live pathname rather than the route store.
+      const onJoin = typeof window !== 'undefined' && window.location.pathname === '/join'
+      if (!onJoin) {
+        user.set(null)
+        // Stash where the user was so post-login returns them there.
+        const current = get(route)
+        if (current.page !== 'login' && current.page !== 'system-login' && current.page !== 'join') {
+          pendingRoute.set(current)
+        }
+        navigate(path.startsWith('/system/') ? 'system-login' : 'login', {}, { replace: true })
       }
-      navigate(path.startsWith('/system/') ? 'system-login' : 'login', {}, { replace: true })
     }
     throw new ApiError(data?.detail || data?.title || res.statusText, {
       status: res.status,
@@ -349,6 +357,14 @@ export const api = {
 
   // Stats
   getStats: () => req('GET', '/stats'),
+
+  // Banners — tenant management (admin/owner) and active-banner fetch (all authenticated users).
+  listBanners: () => req('GET', '/banners'),
+  createBanner: (b) => req('POST', '/banners', b),
+  updateBanner: (id, b) => req('PUT', `/banners/${id}`, b),
+  deleteBanner: (id) => req('DELETE', `/banners/${id}`),
+  getActiveBanners: () => req('GET', '/banners/active'),
+  dismissBanner: (id) => req('POST', `/banners/${id}/dismiss`),
 }
 
 // System-admin surface (apex host, multi-mode only). All routes require scope=system JWT
@@ -454,4 +470,10 @@ export const systemApi = {
   resetAdminPassword: (id) =>
     req('POST', `/system/admins/${encodeURIComponent(id)}/password-reset`),
   deleteAdmin: (id) => req('DELETE', `/system/admins/${encodeURIComponent(id)}`),
+
+  // System banners — operator-authored banners shown across all tenants.
+  listSystemBanners: () => req('GET', '/system/banners'),
+  createSystemBanner: (b) => req('POST', '/system/banners', b),
+  updateSystemBanner: (id, b) => req('PUT', `/system/banners/${id}`, b),
+  deleteSystemBanner: (id) => req('DELETE', `/system/banners/${id}`),
 }

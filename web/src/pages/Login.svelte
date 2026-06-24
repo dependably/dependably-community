@@ -3,6 +3,7 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import { user, navigate, takePendingRoute } from '../lib/store.js'
+  import { loadActiveBanners } from '../lib/banners.js'
 
   let email = '', password = '', error = '', loading = false
   let lockoutSeconds = 0
@@ -74,6 +75,7 @@
       }
       const me = await api.me()
       user.set(me)
+      loadActiveBanners()
       postLoginNavigate(me)
     } catch (e) {
       if (e.status === 429 && e.retryAfter) {
@@ -93,6 +95,7 @@
       await api.loginTotp(totpCode, rememberDevice)
       const me = await api.me()
       user.set(me)
+      loadActiveBanners()
       postLoginNavigate(me)
     } catch (e) {
       if (e.status === 429 && e.retryAfter) {

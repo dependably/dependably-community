@@ -112,9 +112,13 @@ public sealed class SystemAdminRepository
     public async Task<long> BumpTokenVersionAsync(string adminId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // Rotating the Identity security_stamp alongside token_version keeps the Identity model
+        // consistent with the credential change; token_version remains the canonical per-request
+        // session-invalidation signal.
+        string stamp = Guid.NewGuid().ToString();
         await conn.ExecuteAsync(
-            "UPDATE system_admins SET token_version = token_version + 1 WHERE id = @id",
-            new { id = adminId });
+            "UPDATE system_admins SET token_version = token_version + 1, security_stamp = @stamp WHERE id = @id",
+            new { stamp, id = adminId });
         return await conn.ExecuteScalarAsync<long>(
             "SELECT token_version FROM system_admins WHERE id = @id",
             new { id = adminId });
@@ -280,13 +284,18 @@ public sealed class SystemAdminRepository
             return null;
         }
 
+        // Rotating the Identity security_stamp alongside token_version keeps the Identity model
+        // consistent with the credential change; token_version remains the canonical per-request
+        // session-invalidation signal.
+        string stamp = Guid.NewGuid().ToString();
         await conn.ExecuteAsync(
             """
             UPDATE system_admins
-            SET password_hash = @hash, must_change_password = 0, token_version = token_version + 1
+            SET password_hash = @hash, must_change_password = 0, token_version = token_version + 1,
+                security_stamp = @stamp
             WHERE id = @id
             """,
-            new { id, hash = newPasswordHash });
+            new { id, hash = newPasswordHash, stamp });
         return await conn.ExecuteScalarAsync<long>(
             "SELECT token_version FROM system_admins WHERE id = @id", new { id });
     }

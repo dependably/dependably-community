@@ -14,6 +14,7 @@
   import SystemSettings from './SystemSettings.svelte'
   import SystemProfile from './SystemProfile.svelte'
   import SystemAdmins from './SystemAdmins.svelte'
+  import SystemBanners from './SystemBanners.svelte'
 
   useRouter('system')
 
@@ -99,6 +100,7 @@
         <button class="nav-link" class:active={$route.page === 'system-admins'} on:click={() => navigate('system-admins')}>{$t('system.nav.admins')}</button>
         <button class="nav-link" class:active={$route.page === 'system-users'} on:click={() => navigate('system-users')}>{$t('system.nav.users')}</button>
         <button class="nav-link" class:active={$route.page === 'system-audit'} on:click={() => navigate('system-audit')}>{$t('system.nav.audit')}</button>
+        <button class="nav-link" class:active={$route.page === 'system-banners'} on:click={() => navigate('system-banners')}>{$t('system.nav.banners')}</button>
         <button class="nav-link" class:active={$route.page === 'system-settings'} on:click={() => navigate('system-settings')}>{$t('system.nav.settings')}</button>
       </div>
       <div class="nav-actions">
@@ -118,6 +120,8 @@
         <SystemUserLookup />
       {:else if $route.page === 'system-audit'}
         <SystemAudit />
+      {:else if $route.page === 'system-banners'}
+        <SystemBanners />
       {:else if $route.page === 'system-settings'}
         <SystemSettings />
       {:else if $route.page === 'system-profile'}

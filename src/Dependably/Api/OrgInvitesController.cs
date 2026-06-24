@@ -17,15 +17,10 @@ namespace Dependably.Api;
 [Authorize]
 public sealed class OrgInvitesController : OrgScopedControllerBase
 {
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S1075:URIs should not be hardcoded",
-        Justification = "Default for the BASE_URL env-var used in invite-link templates; only relevant when running locally without configuration.")]
-    private const string DefaultBaseUrl = "http://localhost:8080";
-
     private readonly InviteRepository _invites;
     private readonly OrgRepository _orgs;
     private readonly OrgAccessGuard _guard;
     private readonly AuditRepository _audit;
-    private readonly IConfiguration _config;
     private readonly ILogger<OrgInvitesController> _logger;
     private readonly IPublicUrlBuilder _urls;
     private readonly ProblemResults _problems;
@@ -34,24 +29,20 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
     // Dependency-injection constructor; the parameter list is the controller's declared
     // dependency set and grouping it into an aggregate would hide dependencies without
     // adding cohesion.
-#pragma warning disable S107
     public OrgInvitesController(
         InviteRepository invites,
         OrgRepository orgs,
         OrgAccessGuard guard,
         AuditRepository audit,
-        IConfiguration config,
         ILogger<OrgInvitesController> logger,
         IPublicUrlBuilder urls,
         ProblemResults problems,
         IInviteMailer? mailer = null)
-#pragma warning restore S107
     {
         _invites = invites;
         _orgs = orgs;
         _guard = guard;
         _audit = audit;
-        _config = config;
         _logger = logger;
         _urls = urls;
         _problems = problems;
@@ -132,10 +123,11 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
                 expires_at = record.ExpiresAt,
             }), ct: ct);
 
-        // Invite links go to the apex (system_admin/landing) for join flows. BASE_URL wins
-        // when set so links are stable across hosts; falls back to the request's base.
-        string baseUrl = _config.PublicBaseUrl() ?? _urls.BaseUrl(HttpContext);
-        string inviteLink = $"{baseUrl}/join?token={raw}";
+        // Join is served by the tenant SPA at the request host: single-mode → the bare host IS the
+        // tenant; multi-mode → the admin issuing the invite is already on the tenant subdomain
+        // (SubdomainTenantResolver), which is where /join resolves. The apex SystemApp has no join
+        // route, so BASE_URL must not win here.
+        string inviteLink = _urls.Absolute(HttpContext, $"/join?token={raw}");
 
         if (_mailer is null)
         {

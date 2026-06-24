@@ -1,6 +1,6 @@
 {
   "_comment": "Known Snyk Code false positives — each already triaged, with an inline // deepcode ignore at the site. The snyk CLI does not honour those inline markers, so this identity set keeps ci/snyk-code-scan.sh from re-flagging them. Each id is rule|file|<line-independent identity fingerprint>, so cosmetic line moves do not drift the baseline. Per-rule rationale: CONTRIBUTING.md > Static analysis (Snyk Code). Regenerate after re-triage: ci/snyk-code-scan.sh --update.",
-  "count": 81,
+  "count": 83,
   "fingerprints": [
     {
       "id": "javascript/PT|build/extract-notices.mjs|3900f8ff.4773f344.126beb45.d7919eeb.8d22f254.8020cfdf.83265159.19f852ea.6e283998.4773f344.a6c57d7b.152d4968.ac82cb7b.5fce695c.83265159.83183368",
@@ -560,6 +560,20 @@
       "rule": "csharp/NoHardcodedCredentials/test",
       "file": "tests/Dependably.Tests/Unit/Identity/BcryptPasswordHasherTests.cs",
       "line": 52,
+      "text": "Do not hardcode credentials in code. Found hardcoded credential used in password variable declaration."
+    },
+    {
+      "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Unit/Infrastructure/SecurityStampRotationTests.cs|b08a1ac2.39b8d118.68418e3d.f5757239.a758fffc.fbf50a5e.ce0185b2.8a6c0d71.b08a1ac2.39b8d118.68418e3d.f5757239.a758fffc.fbf50a5e.ce0185b2.8a6c0d71",
+      "rule": "csharp/NoHardcodedCredentials/test",
+      "file": "tests/Dependably.Tests/Unit/Infrastructure/SecurityStampRotationTests.cs",
+      "line": 28,
+      "text": "Do not hardcode credentials in code. Found hardcoded credential used in password variable declaration."
+    },
+    {
+      "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Unit/Infrastructure/SecurityStampRotationTests.cs|b08a1ac2.39b8d118.3f0f6416.f5757239.a758fffc.364115e0.ce0185b2.8a6c0d71.b08a1ac2.39b8d118.3f0f6416.f5757239.a758fffc.364115e0.ce0185b2.8a6c0d71",
+      "rule": "csharp/NoHardcodedCredentials/test",
+      "file": "tests/Dependably.Tests/Unit/Infrastructure/SecurityStampRotationTests.cs",
+      "line": 105,
       "text": "Do not hardcode credentials in code. Found hardcoded credential used in password variable declaration."
     },
     {

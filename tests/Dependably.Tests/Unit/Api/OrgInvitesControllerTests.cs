@@ -23,6 +23,35 @@ public sealed class OrgInvitesControllerTests
     private static readonly System.Text.Json.JsonSerializerOptions WebJsonOptions =
         new(System.Text.Json.JsonSerializerDefaults.Web);
 
+    // ── Invite link uses tenant subdomain host ────────────────────────────────
+
+    [Fact]
+    public async Task CreateInvite_LinkUsesTenantSubdomainHost_NotApex()
+    {
+        // ControllerScenario sets Request.Host = "{slug}.example.test" (https) to simulate
+        // a multi-mode request arriving on the tenant subdomain. The invite link must target
+        // that host, not a bare apex host.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgInvitesController.CreateInvite(
+            new CreateInviteRequest("invitee@example.test", "member"),
+            CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        string json = System.Text.Json.JsonSerializer.Serialize(ok.Value, WebJsonOptions);
+
+        // Extract invite_link value from the JSON response.
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        string inviteLink = doc.RootElement.GetProperty("invite_link").GetString()!;
+
+        // Must target the tenant subdomain host (acme.example.test), not a bare apex.
+        Assert.Contains("://acme.example.test/join?token=", inviteLink);
+        // Must not be rooted at a bare apex host (i.e. no "://example.test/").
+        Assert.DoesNotContain("://example.test/", inviteLink);
+    }
+
     // ── SMTP absent ──────────────────────────────────────────────────────────
 
     [Fact]

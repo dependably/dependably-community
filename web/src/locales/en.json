@@ -1,4 +1,7 @@
 {
+  "banner": {
+    "dismiss": "Dismiss"
+  },
   "nav": {
     "brand": "Dependably",
     "packages": "Packages",
@@ -489,8 +492,24 @@
       "proxy": "Proxy",
       "claims": "Claims",
       "serviceTokens": "Service tokens",
+      "banners": "Banners",
       "instance": "Instance settings",
       "metrics": "Metrics access"
+    },
+    "banners": {
+      "severity": "Severity",
+      "targetRole": "Target role",
+      "enabled": "Enabled",
+      "body": "Message",
+      "startsAt": "Starts at (UTC)",
+      "endsAt": "Ends at (UTC)",
+      "linkUrl": "Link URL",
+      "linkLabel": "Link label",
+      "create": "Create banner",
+      "empty": "No banners yet.",
+      "window": "Window",
+      "yes": "Yes",
+      "no": "No"
     },
     "instance": {
       "intro": "Instance-wide limits and schedules for this deployment. In single-tenant mode the owner is also the operator, so these are managed here."
@@ -1178,6 +1197,7 @@
       "audit": "Audit",
       "observability": "Observability",
       "settings": "Settings",
+      "banners": "Banners",
       "profile": "Profile",
       "signOut": "Sign out",
       "home": "Dashboard"
@@ -1606,6 +1626,32 @@
           "daysAgo": "{n}d ago"
         }
       }
+    },
+    "banners": {
+      "title": "System banners",
+      "subtitle": "Announcements shown to all authenticated users across every tenant. Banners stack in the app header and can be dismissed per user.",
+      "newBanner": "New banner",
+      "cancelCreate": "Cancel",
+      "createTitle": "New system banner",
+      "body": "Message",
+      "severity": "Severity",
+      "targetRole": "Target role",
+      "startsAt": "Starts at (UTC)",
+      "endsAt": "Ends at (UTC)",
+      "linkUrl": "Link URL",
+      "linkLabel": "Link label",
+      "enabled": "Enabled",
+      "create": "Create banner",
+      "creating": "Creating…",
+      "delete": "Delete",
+      "deleteConfirm": "Delete this system banner?",
+      "window": "Window",
+      "yes": "Yes",
+      "no": "No",
+      "empty": "No system banners.",
+      "loadError": "Failed to load banners.",
+      "createError": "Failed to create banner.",
+      "deleteError": "Failed to delete banner."
     },
     "profile": {
       "title": "Profile",

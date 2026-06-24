@@ -385,7 +385,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             tokens, orgs, guard, audit, orgAuditEmitter, problems)
         { ControllerContext = ctx };
         var orgInvites = new OrgInvitesController(
-            invites, orgs, guard, audit, new ConfigurationBuilder().Build(),
+            invites, orgs, guard, audit,
             NullLogger<OrgInvitesController>.Instance, publicUrl, problems,
             mailer: mailer)
         { ControllerContext = ctx };

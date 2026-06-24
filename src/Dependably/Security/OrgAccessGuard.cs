@@ -90,6 +90,38 @@ public sealed class OrgAccessGuard
         };
     }
 
+    /// <summary>
+    /// Membership-only authorization for controllers. Reads the resolved
+    /// <see cref="TenantContext"/>, verifies the caller is a member of the tenant (404 on
+    /// no-match), and returns <c>null</c> on success — no capability comparison is performed.
+    /// All four tenant roles (member/admin/owner/auditor) pass. Non-members get 404 so
+    /// the org slug is not enumerable.
+    /// </summary>
+    public async Task<IActionResult?> AuthorizeMemberAsync(
+        ClaimsPrincipal principal,
+        HttpContext httpContext,
+        CancellationToken ct = default)
+    {
+        if (httpContext.Items[TenantContext.HttpItemsKey] is not TenantContext ctx || !ctx.IsTenant || ctx.TenantId is null)
+        {
+            return new NotFoundResult();
+        }
+
+        string? userId = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
+            ?? principal.FindFirst("sub")?.Value;
+        if (userId is null)
+        {
+            return new UnauthorizedResult();
+        }
+
+        await using var conn = await _db.OpenAsync(ct);
+        string? tenantId = await conn.ExecuteScalarAsync<string?>(
+            "SELECT tenant_id FROM users WHERE id = @userId AND tenant_id = @orgId",
+            new { userId, orgId = ctx.TenantId });
+
+        return tenantId is null ? new NotFoundResult() : null;
+    }
+
     // Canonical effective-capability resolution, mirroring CapabilityHandler so every
     // authorization surface (route guards and management-API token minting alike) computes
     // the caller's privilege ceiling the same way: explicit cap claims (token-narrowed) win;

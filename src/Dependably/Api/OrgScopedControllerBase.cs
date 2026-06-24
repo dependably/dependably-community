@@ -22,4 +22,11 @@ public abstract class OrgScopedControllerBase : ControllerBase
     protected string? GetUserId() =>
         User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
         ?? User.FindFirst("sub")?.Value;
+
+    /// <summary>
+    /// Reads the caller's tenant role from the JWT <c>role</c> claim.
+    /// Defaults to <c>member</c> when the claim is absent.
+    /// </summary>
+    protected string CurrentRole() =>
+        User.FindFirst("role")?.Value ?? "member";
 }

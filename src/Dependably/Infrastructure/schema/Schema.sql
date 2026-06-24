@@ -147,6 +147,15 @@ CREATE TABLE IF NOT EXISTS instance_settings (
     value   TEXT NOT NULL
 );
 
+-- DataProtection key ring, persisted for durable encryption across restarts.
+-- Instance-global: not tenant-scoped (mirrors instance_settings). One row per
+-- key element; the ring is cached in-memory by KeyRingProvider and written here
+-- only when a new key is generated or an existing key is refreshed.
+CREATE TABLE IF NOT EXISTS data_protection_keys (
+    friendly_name TEXT PRIMARY KEY,
+    xml           TEXT NOT NULL
+);
+
 -- Tenant users. 1:1 with tenants — a user belongs to exactly one tenant. The same email may
 -- exist as separate accounts in different tenants (UNIQUE(tenant_id, email)) — by design,
 -- modeled on Slack/Auth0/Notion-style strict tenant isolation.
@@ -1219,6 +1228,39 @@ CREATE TABLE IF NOT EXISTS install_script_allowlist (
 CREATE INDEX IF NOT EXISTS idx_install_script_allowlist_org ON install_script_allowlist(org_id);
 -- FK-column index: cascade delete on users scans this table without it.
 CREATE INDEX IF NOT EXISTS idx_install_script_allowlist_created_by ON install_script_allowlist(created_by);
+
+-- Admin-authored banners (tenant-scoped or system-wide). Mirrors the scope-discriminated
+-- audit_log design: scope='tenant' rows carry a non-null org_id; scope='system' rows have
+-- org_id IS NULL. No FK on org_id (rows may outlive a tenant soft-delete;
+-- TenantHardDeleteService explicitly deletes scope='tenant' rows on hard-delete).
+CREATE TABLE IF NOT EXISTS banners (
+    id          TEXT PRIMARY KEY,
+    scope       TEXT NOT NULL DEFAULT 'tenant' CHECK (scope IN ('tenant','system')),
+    org_id      TEXT,                           -- non-null for scope='tenant'; NULL for scope='system'
+    severity    TEXT NOT NULL DEFAULT 'info' CHECK (severity IN ('info','warn','alert')),
+    body        TEXT NOT NULL,
+    link_url    TEXT,                           -- optional; must be http/https scheme
+    link_label  TEXT,                           -- optional; rendered as anchor text
+    target_role TEXT NOT NULL DEFAULT 'all' CHECK (target_role IN ('all','member','admin','owner','auditor')),
+    starts_at   TEXT NOT NULL,                  -- ISO-8601 UTC Z string
+    ends_at     TEXT NOT NULL,                  -- ISO-8601 UTC Z string; ends_at > starts_at
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_by  TEXT,                           -- actor id; no FK (mirrors audit_log.actor_id)
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+-- Serves the active-banner resolution query: both resolution arms (scope='system' and
+-- scope='tenant' AND org_id=@orgId) filter on enabled and ends_at.
+CREATE INDEX IF NOT EXISTS idx_banners_resolution ON banners(scope, org_id, enabled, ends_at);
+
+-- Per-user server-side dismissal records. Cascade-delete when the banner or user is deleted.
+CREATE TABLE IF NOT EXISTS banner_dismissals (
+    banner_id   TEXT NOT NULL REFERENCES banners(id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    dismissed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    PRIMARY KEY (banner_id, user_id)
+);
+-- FK-column index: cascade deletes on users scan this table without it.
+CREATE INDEX IF NOT EXISTS idx_banner_dismissals_user ON banner_dismissals(user_id);
 
 -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
 -- Those are no-ops on fresh installs (duplicate column error is swallowed / IF NOT EXISTS).

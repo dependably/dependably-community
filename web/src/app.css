@@ -16,6 +16,7 @@
   --info:      light-dark(#2563eb, #93c5fd);
   --info-text: light-dark(#2563eb, #93c5fd);
   --warning-text: light-dark(#b45309, #fcd34d);
+  --danger-text: light-dark(#b91c1c, #fca5a5);
   --on-accent: #ffffff;
   --overlay-scrim: rgba(0,0,0,0.5);
   /* Mixes reference vars that already swap, so they need declaring once. */

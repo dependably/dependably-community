@@ -7,6 +7,8 @@
   import { setupI18n } from './i18n/index.js'
   import { applyLocale } from './lib/locale.js'
   import { get } from 'svelte/store'
+  import { activeBanners, loadActiveBanners, dismissBanner } from './lib/banners.js'
+  import Banner from './lib/Banner.svelte'
 
   import Login from './pages/Login.svelte'
   import Join from './pages/Join.svelte'
@@ -80,6 +82,8 @@
       // Server resolves the effective locale (user override → tenant default → 'en'). If the
       // browser is currently rendering in a different locale, realign locally — no API echo.
       if (me.language && me.language !== get(locale)) applyLocale(me.language)
+      // Load active banners once after auth. One-shot — no polling.
+      loadActiveBanners()
     }
 
     // Decide final page based on intended × auth × mustChangePassword.
@@ -128,6 +132,7 @@
     await api.logout().catch(() => {})
     user.set(null)
     pendingRoute.set(null)
+    activeBanners.set([])
     navigate('login', {}, { replace: true })
   }
 
@@ -203,9 +208,20 @@
           <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>
           {$t('nav.insecureHttpHint')}
         </span>
-        <button class="http-banner-close" on:click={() => { httpBannerDismissed = true; localStorage.setItem('httpBannerDismissed', '1') }} aria-label="Dismiss">×</button>
+        <button class="http-banner-close" on:click={() => { httpBannerDismissed = true; localStorage.setItem('httpBannerDismissed', '1') }} aria-label="Dismiss">&#215;</button>
       </div>
     {/if}
+
+    {#each $activeBanners as b (b.id)}
+      <Banner
+        id={b.id}
+        severity={b.severity}
+        body={b.body}
+        linkUrl={b.linkUrl}
+        linkLabel={b.linkLabel}
+        on:dismiss={(e) => dismissBanner(e.detail.id)}
+      />
+    {/each}
 
     <main class="main-content">
       {#if $route.page === 'dashboard'}

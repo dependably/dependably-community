@@ -87,6 +87,15 @@ CREATE TABLE IF NOT EXISTS instance_settings (
     value   TEXT NOT NULL
 );
 
+-- DataProtection key ring, persisted for durable encryption across restarts.
+-- Instance-global: not tenant-scoped (mirrors instance_settings). One row per
+-- key element; the ring is cached in-memory by KeyRingProvider and written here
+-- only when a new key is generated or an existing key is refreshed.
+CREATE TABLE IF NOT EXISTS data_protection_keys (
+    friendly_name TEXT PRIMARY KEY,
+    xml           TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id          TEXT PRIMARY KEY,
     tenant_id   TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -1012,6 +1021,32 @@ CREATE TABLE IF NOT EXISTS install_script_allowlist (
 );
 CREATE INDEX IF NOT EXISTS idx_install_script_allowlist_org ON install_script_allowlist(org_id);
 CREATE INDEX IF NOT EXISTS idx_install_script_allowlist_created_by ON install_script_allowlist(created_by);
+
+-- Admin-authored banners (tenant-scoped or system-wide). See Schema.sql for the full rationale.
+CREATE TABLE IF NOT EXISTS banners (
+    id          TEXT PRIMARY KEY,
+    scope       TEXT NOT NULL DEFAULT 'tenant' CHECK (scope IN ('tenant','system')),
+    org_id      TEXT,
+    severity    TEXT NOT NULL DEFAULT 'info' CHECK (severity IN ('info','warn','alert')),
+    body        TEXT NOT NULL,
+    link_url    TEXT,
+    link_label  TEXT,
+    target_role TEXT NOT NULL DEFAULT 'all' CHECK (target_role IN ('all','member','admin','owner','auditor')),
+    starts_at   TEXT NOT NULL,
+    ends_at     TEXT NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_by  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+);
+CREATE INDEX IF NOT EXISTS idx_banners_resolution ON banners(scope, org_id, enabled, ends_at);
+
+CREATE TABLE IF NOT EXISTS banner_dismissals (
+    banner_id   TEXT NOT NULL REFERENCES banners(id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    dismissed_at TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    PRIMARY KEY (banner_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_banner_dismissals_user ON banner_dismissals(user_id);
 
 -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
 -- Those are no-ops on fresh installs (IF NOT EXISTS). They exist solely to add the

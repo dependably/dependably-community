@@ -270,6 +270,23 @@ docker inspect dependably:test \
 docker build --build-arg VERSION=0.x.y-rc1 -t dependably:rc .
 ```
 
+### Build provenance (SLSA L2)
+
+The `publish` job signs SLSA build provenance over the released GHCR image (keyless
+OIDC/sigstore — no stored key) and attaches it to the registry alongside the image. The
+provenance covers the exact image by digest, so consumers can confirm it was built by this
+repo's CI and not swapped after the fact:
+
+```bash
+# Requires `docker login ghcr.io` — the attestation lives in the registry.
+gh attestation verify oci://ghcr.io/<owner>/dependably:0.x.y \
+  -R <owner>/dependably \
+  --signer-workflow <owner>/dependably/.github/workflows/ci.yml
+```
+
+Binding `--signer-workflow` (rather than only "signed by someone in the org") is the
+meaningful check — it ties the image to the `publish` job that produced it.
+
 ---
 
 ## Environment variables
@@ -664,3 +681,7 @@ Full i18n architecture: see [i18n/README.md](i18n/README.md).
 ## Architecture notes
 
 See [CLAUDE.md](CLAUDE.md) for a full breakdown of the project structure, key architectural rules, and tech stack decisions.
+
+Architecture decision records live in [docs/adr/](docs/adr/). Key ADRs:
+
+- [0001 — Auth stack: Identity Core hybrid](docs/adr/0001-auth-identity-hybrid.md) — why the auth layer uses Identity Core for MFA/credential primitives but keeps bespoke first-factor login, lockout, JWT sessions, and per-request session invalidation.

@@ -97,6 +97,7 @@
       if (!installScriptAllowlistLoaded) loadInstallScriptAllowlist()
     }
     if (key === 'licenses' && !licensePolicyLoaded) await loadLicensePolicy()
+    if (key === 'banners') loadBanners()
   }
 
   // ── License policy handlers ────────────────────────────────────────────────
@@ -368,12 +369,57 @@
     { key: 'proxy',          label: 'settings.tabs.proxy' },
     { key: 'licenses',       label: 'settings.tabs.licenses' },
     { key: 'claims',         label: 'settings.tabs.claims' },
-    ...(viewerIsAdmin ? [{ key: 'service-tokens', label: 'settings.tabs.serviceTokens' }] : []),
+    ...(viewerIsAdmin ? [
+      { key: 'service-tokens', label: 'settings.tabs.serviceTokens' },
+      { key: 'banners',        label: 'settings.tabs.banners' },
+    ] : []),
     ...(showInstanceTabs ? [
       { key: 'instance', label: 'settings.tabs.instance' },
       { key: 'metrics',  label: 'settings.tabs.metrics' },
     ] : []),
   ]
+
+  let banners = [], bannersLoaded = false, bannerError = ''
+  let newBanner = { severity: 'info', body: '', linkUrl: '', linkLabel: '', targetRole: 'all', startsAt: '', endsAt: '', enabled: true }
+  let bannerSaving = false, bannerSuccess = ''
+
+  async function loadBanners() {
+    if (bannersLoaded) return
+    try {
+      banners = await api.listBanners()
+      bannersLoaded = true
+    } catch (e) { bannerError = extractErrorMessage(e) }
+  }
+
+  async function createBanner() {
+    bannerSaving = true
+    bannerError = ''
+    bannerSuccess = ''
+    try {
+      const payload = {
+        severity: newBanner.severity,
+        body: newBanner.body,
+        linkUrl: newBanner.linkUrl || null,
+        linkLabel: newBanner.linkLabel || null,
+        targetRole: newBanner.targetRole,
+        startsAt: newBanner.startsAt,
+        endsAt: newBanner.endsAt,
+        enabled: newBanner.enabled,
+      }
+      const created = await api.createBanner(payload)
+      banners = [created, ...banners]
+      newBanner = { severity: 'info', body: '', linkUrl: '', linkLabel: '', targetRole: 'all', startsAt: '', endsAt: '', enabled: true }
+      bannerSuccess = 'Banner created.'
+    } catch (e) { bannerError = extractErrorMessage(e) }
+    finally { bannerSaving = false }
+  }
+
+  async function deleteBanner(id) {
+    try {
+      await api.deleteBanner(id)
+      banners = banners.filter(b => b.id !== id)
+    } catch (e) { bannerError = extractErrorMessage(e) }
+  }
 
 </script>
 
@@ -564,6 +610,101 @@
     {:else if tab === 'claims'}
       <Claims />
 
+    {:else if tab === 'banners' && viewerIsAdmin}
+      {#if bannerError}<p class="banner-tab-error">{bannerError}</p>{/if}
+      {#if bannerSuccess}<p class="banner-tab-success">{bannerSuccess}</p>{/if}
+
+      <section class="banner-create-form">
+        <div class="form-grid">
+          <div class="form-row">
+            <label for="bn-severity">{$t('settings.banners.severity')}</label>
+            <select id="bn-severity" bind:value={newBanner.severity}>
+              <option value="info">info</option>
+              <option value="warn">warn</option>
+              <option value="alert">alert</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label for="bn-target">{$t('settings.banners.targetRole')}</label>
+            <select id="bn-target" bind:value={newBanner.targetRole}>
+              <option value="all">all</option>
+              <option value="member">member</option>
+              <option value="admin">admin</option>
+              <option value="owner">owner</option>
+              <option value="auditor">auditor</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <label for="bn-body">{$t('settings.banners.body')}</label>
+          <textarea id="bn-body" bind:value={newBanner.body} rows="3" maxlength="2000"></textarea>
+        </div>
+        <div class="form-grid">
+          <div class="form-row">
+            <label for="bn-starts">{$t('settings.banners.startsAt')}</label>
+            <input id="bn-starts" type="datetime-local" bind:value={newBanner.startsAt} />
+          </div>
+          <div class="form-row">
+            <label for="bn-ends">{$t('settings.banners.endsAt')}</label>
+            <input id="bn-ends" type="datetime-local" bind:value={newBanner.endsAt} />
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="form-row">
+            <label for="bn-link-url">{$t('settings.banners.linkUrl')}</label>
+            <input id="bn-link-url" type="url" bind:value={newBanner.linkUrl} placeholder="https://..." />
+          </div>
+          <div class="form-row">
+            <label for="bn-link-label">{$t('settings.banners.linkLabel')}</label>
+            <input id="bn-link-label" type="text" bind:value={newBanner.linkLabel} maxlength="200" />
+          </div>
+        </div>
+        <div class="form-row checkbox-row">
+          <label class="checkbox-label">
+            <input type="checkbox" bind:checked={newBanner.enabled} />
+            {$t('settings.banners.enabled')}
+          </label>
+        </div>
+        <button on:click={createBanner} disabled={bannerSaving}>{$t('settings.banners.create')}</button>
+      </section>
+
+      <section class="banner-list">
+        {#if !bannersLoaded}
+          <span class="spinner"></span>
+        {:else if banners.length === 0}
+          <p class="empty-state">{$t('settings.banners.empty')}</p>
+        {:else}
+          <table class="banner-table">
+            <thead>
+              <tr>
+                <th>{$t('settings.banners.severity')}</th>
+                <th>{$t('settings.banners.body')}</th>
+                <th>{$t('settings.banners.targetRole')}</th>
+                <th>{$t('settings.banners.window')}</th>
+                <th>{$t('settings.banners.enabled')}</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each banners as b (b.id)}
+                <tr>
+                  <td><span class="badge badge-{b.severity}">{b.severity}</span></td>
+                  <td class="banner-body-cell">{b.body}</td>
+                  <td>{b.targetRole}</td>
+                  <td class="banner-window-cell">{b.startsAt} &ndash; {b.endsAt}</td>
+                  <td>{b.enabled ? $t('settings.banners.yes') : $t('settings.banners.no')}</td>
+                  <td>
+                    <div class="row-actions">
+                      <button class="danger" on:click={() => deleteBanner(b.id)}>{$t('common.actions.delete')}</button>
+                    </div>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </section>
+
     {:else if tab === 'service-tokens' && viewerIsAdmin}
       <SettingsServiceTokens />
 
@@ -611,6 +752,26 @@
   .mode-table .mode-label { font-weight: 500; font-size: 13px; cursor: pointer; }
   .mode-table .mode-hint  { color: var(--text2); font-size: 12px; margin-top: 2px; }
   .mode-table input[type="radio"] { cursor: pointer; }
+
+  /* Banner create form — two-up rows for the paired fields, full-width for the message. */
+  .banner-create-form { max-width: 640px; margin-bottom: 24px; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  .checkbox-row { margin-bottom: 12px; }
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text2);
+    cursor: pointer;
+  }
+  .checkbox-label input[type="checkbox"] {
+    width: auto;
+    min-height: 0;
+    margin: 0;
+    flex-shrink: 0;
+  }
 </style>
 
 {#if showAddAllowlist}
