@@ -23,6 +23,6 @@ export class LoginPage {
 
   async expectNavVisible() {
     // App.svelte: <nav class="navbar"> (sticky, always present when logged in)
-    await expect(this.page.locator('nav.navbar')).toBeVisible({ timeout: 10_000 })
+    await expect(this.page.locator('nav.sidebar')).toBeVisible({ timeout: 10_000 })
   }
 }

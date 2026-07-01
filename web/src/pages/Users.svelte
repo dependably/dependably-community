@@ -129,7 +129,7 @@
   $: pendingCount = invites.filter(i => !i.acceptedAt).length
 </script>
 
-<div class="page">
+<div class="page page-fluid">
   <div class="page-header">
     <h1 class="page-title">{$t('users.title')}</h1>
     <button class="primary" on:click={() => showInvite = true}>{$t('users.inviteUser')}</button>

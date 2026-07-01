@@ -783,6 +783,155 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
         }
     }
 
+    // ── Proxy cache-hit: AnonymousPull disabled + no token → 401 ─────────────
+
+    /// <summary>
+    /// Seeds the proxy cache via an authenticated first fetch, then asserts that a subsequent
+    /// tokenless GET of the same tarball returns 401 with <c>Bearer</c> when the org has
+    /// <c>AnonymousPull = false</c>. Validates the cache-hit gate mirrors the HEAD behaviour.
+    /// </summary>
+    [Fact]
+    public async Task GetTarball_ProxyCacheHit_AnonymousPullOff_NoToken_Returns401()
+    {
+        string name = $"cahit401{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
+        var (bytes, _, _) = NpmFixtures.BuildTarball(name, version);
+        string filename = $"{name}-{version}.tgz";
+
+        _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}/-/{filename}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
+
+        // Prime the proxy cache with an authenticated request.
+        string token = await _factory.CreateToken("pull");
+        using var authClient = _factory.CreateClientWithBearer(token);
+        var primeResp = await authClient.GetAsync($"/npm/tarballs/{name}/{filename}");
+        Assert.Equal(HttpStatusCode.OK, primeResp.StatusCode);
+
+        // AnonymousPull is false by default; the tokenless cache-hit must return 401.
+        using var anon = _factory.CreateClient();
+        var resp = await anon.GetAsync($"/npm/tarballs/{name}/{filename}");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        Assert.Contains("Bearer", resp.Headers.WwwAuthenticate.ToString());
+    }
+
+    /// <summary>
+    /// Confirms that an org with <c>AnonymousPull = true</c> still serves a proxy cache-hit
+    /// to unauthenticated clients — no regression for the allowed-anonymous configuration.
+    /// </summary>
+    [Fact]
+    public async Task GetTarball_ProxyCacheHit_AnonymousPullOn_NoToken_Returns200()
+    {
+        string name = $"cahit200{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
+        var (bytes, _, _) = NpmFixtures.BuildTarball(name, version);
+        string filename = $"{name}-{version}.tgz";
+
+        _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}/-/{filename}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
+
+        // Prime the proxy cache with an authenticated request.
+        string token = await _factory.CreateToken("pull");
+        using var authClient = _factory.CreateClientWithBearer(token);
+        var primeResp = await authClient.GetAsync($"/npm/tarballs/{name}/{filename}");
+        Assert.Equal(HttpStatusCode.OK, primeResp.StatusCode);
+
+        await SetAnonymousPullAsync(true);
+        try
+        {
+            // AnonymousPull enabled: the cache-hit must be served to unauthenticated clients.
+            using var anon = _factory.CreateClient();
+            var resp = await anon.GetAsync($"/npm/tarballs/{name}/{filename}");
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        }
+        finally
+        {
+            await SetAnonymousPullAsync(false);
+        }
+    }
+
+    // ── Hosted tarball: AnonymousPull gate for uploaded-origin tarballs ────────
+
+    /// <summary>
+    /// Pushed (uploaded-origin) tarball is served to an anonymous client when
+    /// <c>AnonymousPull = true</c>. Verifies the hosted-read path respects the org setting.
+    /// </summary>
+    [Fact]
+    public async Task GetTarball_HostedUploaded_AnonymousPullOn_NoToken_Returns200()
+    {
+        string name = $"hostaon{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
+        await _factory.PushNpmPackage(name, version);
+        string filename = $"{name}-{version}.tgz";
+
+        await SetAnonymousPullAsync(true);
+        try
+        {
+            using var anon = _factory.CreateClient();
+            var resp = await anon.GetAsync($"/npm/tarballs/{name}/{filename}");
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        }
+        finally
+        {
+            await SetAnonymousPullAsync(false);
+        }
+    }
+
+    /// <summary>
+    /// Pushed (uploaded-origin) tarball requires a token when <c>AnonymousPull = false</c>.
+    /// The default setting; validates the gate holds.
+    /// </summary>
+    [Fact]
+    public async Task GetTarball_HostedUploaded_AnonymousPullOff_NoToken_Returns401()
+    {
+        string name = $"hostoff{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string version = "1.0.0";
+        await _factory.PushNpmPackage(name, version);
+        string filename = $"{name}-{version}.tgz";
+
+        // AnonymousPull is false by default.
+        using var anon = _factory.CreateClient();
+        var resp = await anon.GetAsync($"/npm/tarballs/{name}/{filename}");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        Assert.Contains("Bearer", resp.Headers.WwwAuthenticate.ToString());
+    }
+
+    /// <summary>
+    /// A token present but lacking <c>read:artifact</c> is still forbidden on a hosted tarball
+    /// even when <c>AnonymousPull = true</c> — capability enforcement applies to real tokens.
+    /// </summary>
+    [Fact]
+    public async Task GetTarball_HostedUploaded_AnonymousPullOn_TokenWithoutReadArtifact_Returns403()
+    {
+        string name = $"hostaocap{Guid.NewGuid():N}"[..14].ToLowerInvariant();
+        string version = "1.0.0";
+        await _factory.PushNpmPackage(name, version);
+        string filename = $"{name}-{version}.tgz";
+
+        // Token with read:metadata only — no read:artifact.
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await DefaultOrgIdAsync();
+        var tokens = _factory.Services.GetRequiredService<TokenRepository>();
+        var (rawToken, _) = await tokens.CreateServiceTokenAsync(
+            orgId, "test-meta-only", """["read:metadata"]""", expiresAt: null);
+
+        await SetAnonymousPullAsync(true);
+        try
+        {
+            using var client = _factory.CreateClientWithBearer(rawToken);
+            var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
+            Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+        }
+        finally
+        {
+            await SetAnonymousPullAsync(false);
+        }
+    }
+
     // ── Publish — 4xx rejection body carries an npm-readable `error` member ───
 
     /// <summary>

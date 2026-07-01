@@ -75,6 +75,36 @@ function downloadCsv(path, params, fallbackBaseName) {
   return downloadBlob(path, params, `${fallbackBaseName}-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`)
 }
 
+/**
+ * Triggers the global session-expired redirect for a 401 response, unless `path` is a
+ * domain-level auth endpoint (bad credentials on /auth/login, wrong TOTP on /auth/login/totp,
+ * wrong-password on /mfa/disable or /system/mfa/disable) that the caller surfaces inline, or the
+ * unauthenticated invite-accept bootstrap probe on /join.
+ */
+function handleUnauthorized(path) {
+  if (path === '/auth/login' || path === '/auth/login/totp' || path === '/mfa/disable' || path === '/system/mfa/disable') {
+    return
+  }
+
+  // The invite-accept flow lands unauthenticated invitees on /join?token=...; the bootstrap
+  // me() probe there returns 401 by design. Redirecting to login would replaceState the URL
+  // and strip the invite token before the join page reads it, so leave the join page in place
+  // and let the caller handle the 401. The route store isn't seeded yet during bootstrap, so
+  // read the live pathname rather than the route store.
+  const onJoin = typeof window !== 'undefined' && window.location.pathname === '/join'
+  if (onJoin) {
+    return
+  }
+
+  user.set(null)
+  // Stash where the user was so post-login returns them there.
+  const current = get(route)
+  if (current.page !== 'login' && current.page !== 'system-login' && current.page !== 'join') {
+    pendingRoute.set(current)
+  }
+  navigate(path.startsWith('/system/') ? 'system-login' : 'login', {}, { replace: true })
+}
+
 async function req(method, path, body) {
   /** @type {RequestInit} */
   const opts = {
@@ -87,25 +117,8 @@ async function req(method, path, body) {
   if (res.status === 204) return null
   const data = await res.json().catch(() => null)
   if (!res.ok) {
-    // Bad credentials on /auth/login, wrong TOTP on /auth/login/totp, and wrong-password on
-    // /mfa/disable and /system/mfa/disable are domain-level 401s that the caller surfaces inline
-    // — exclude them from the global session-expired redirect.
-    if (res.status === 401 && path !== '/auth/login' && path !== '/auth/login/totp' && path !== '/mfa/disable' && path !== '/system/mfa/disable') {
-      // The invite-accept flow lands unauthenticated invitees on /join?token=...; the bootstrap
-      // me() probe there returns 401 by design. Redirecting to login would replaceState the URL
-      // and strip the invite token before the join page reads it, so leave the join page in place
-      // and let the caller handle the 401. The route store isn't seeded yet during bootstrap, so
-      // read the live pathname rather than the route store.
-      const onJoin = typeof window !== 'undefined' && window.location.pathname === '/join'
-      if (!onJoin) {
-        user.set(null)
-        // Stash where the user was so post-login returns them there.
-        const current = get(route)
-        if (current.page !== 'login' && current.page !== 'system-login' && current.page !== 'join') {
-          pendingRoute.set(current)
-        }
-        navigate(path.startsWith('/system/') ? 'system-login' : 'login', {}, { replace: true })
-      }
+    if (res.status === 401) {
+      handleUnauthorized(path)
     }
     throw new ApiError(data?.detail || data?.title || res.statusText, {
       status: res.status,
@@ -193,6 +206,10 @@ export const api = {
   updateRetention: (r) => req('PUT', '/retention', r),
   getProxySettings: () => req('GET', '/proxy-settings'),
   updateProxySettings: (s) => req('PUT', '/proxy-settings', s),
+
+  // Global search (cross-entity by design; packages-only for now).
+  // Returns { query, groups: [{ kind, results: [...] }] }.
+  search: (q, limit = 8) => req('GET', `/search?${qs({ q, limit })}`),
 
   // Packages
   listPackages: (params = {}) => {
@@ -295,6 +312,12 @@ export const api = {
     req('POST', '/upstream-registries', { ecosystem: 'oci', url, name: name || null, authType, username: username || null, secret: secret || null, tokenEndpoint: tokenEndpoint || null, prefixes }),
   deleteUpstreamRegistry: (id) => req('DELETE', `/upstream-registries/${id}`),
   reorderUpstreamRegistries: (ecosystem, ids) => req('PUT', `/upstream-registries/${ecosystem}/order`, { ids }),
+
+  // Signature trust anchors — per-org public key material for signature verification.
+  getTrustAnchors: () => req('GET', '/trust-anchors'),
+  addTrustAnchor: ({ ecosystem, anchorKind, material, label, keyId }) =>
+    req('POST', '/trust-anchors', { ecosystem, anchorKind, material, label: label || null, keyId: keyId || null }),
+  deleteTrustAnchor: (id) => req('DELETE', `/trust-anchors/${id}`),
 
   // User tokens. capabilities is an array like ["read:metadata", "publish:*"];
   // the server rejects the retired `scope` field with a 400.

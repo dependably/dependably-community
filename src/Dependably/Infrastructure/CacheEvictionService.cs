@@ -1,3 +1,4 @@
+using Dependably.Infrastructure.Observability;
 using Dependably.Storage;
 
 namespace Dependably.Infrastructure;
@@ -7,8 +8,12 @@ namespace Dependably.Infrastructure;
 /// <list type="bullet">
 ///   <item><c>CACHE_MAX_AGE_DAYS</c> — evict artifacts not accessed in N days</item>
 ///   <item><c>CACHE_MAX_SIZE_BYTES</c> — evict oldest-accessed until under cap</item>
-///   <item><c>CACHE_MAX_ARTIFACTS</c> — evict oldest-accessed until row count is under cap</item>
+///   <c>CACHE_MAX_ARTIFACTS</c> — evict oldest-accessed until row count is under cap</item>
 /// </list>
+/// When none of the three caps are configured, a default age cap of 30 days applies so the
+/// proxy cache does not grow unbounded. Set any cap explicitly to take full control; setting
+/// any one cap suppresses the default.
+///
 /// Schedule via <c>CACHE_EVICT_SCHEDULE</c> (cron, default hourly). The job is idempotent and
 /// holds no state across runs; the leader election in <see cref="LeaderElectedScheduler"/>
 /// is what prevents two replicas evicting the same row twice.
@@ -60,10 +65,15 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
         long? maxSizeBytes = ParseLong("CACHE_MAX_SIZE_BYTES");
         int? maxArtifacts = ParseInt("CACHE_MAX_ARTIFACTS");
 
-        if (maxAgeDays is null && maxSizeBytes is null && maxArtifacts is null)
+        bool usingDefault = maxAgeDays is null && maxSizeBytes is null && maxArtifacts is null;
+        if (usingDefault)
         {
-            // Nothing configured; skip silently.
-            return new EvictionSummary(0, 0);
+            maxAgeDays = DefaultMaxAgeDays;
+            _logger.LogInformation(
+                "No cache caps configured; applying default CACHE_MAX_AGE_DAYS={Default}. " +
+                "Proxy-cache artefacts not accessed within {Default} days are evicted. Set " +
+                "CACHE_MAX_SIZE_BYTES or CACHE_MAX_ARTIFACTS to bound the cache by disk size or count.",
+                DefaultMaxAgeDays, DefaultMaxAgeDays);
         }
 
         _logger.LogInformation(
@@ -85,9 +95,17 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
 
         _logger.LogInformation("Cache eviction done (evicted={Evicted}, bytesFreed={BytesFreed}).",
             evicted, bytesFreed);
+
+        if (evicted > 0)
+        {
+            DependablyMeter.CacheEvictions.Add(evicted);
+            DependablyMeter.CacheEvictedBytes.Add(bytesFreed);
+        }
+
         return new EvictionSummary(evicted, bytesFreed);
     }
 
+    private const int DefaultMaxAgeDays = 30;
     private const int Batch = 256;
 
     /// <summary>

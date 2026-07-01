@@ -1,3 +1,4 @@
+using Dependably.Infrastructure;
 using Dependably.Infrastructure.Observability;
 using Org.BouncyCastle.Bcpg.OpenPgp;
 
@@ -5,37 +6,49 @@ namespace Dependably.Protocol.Provenance;
 
 /// <summary>
 /// Verifies a detached OpenPGP <c>.asc</c> signature over a proxied Maven artefact against
-/// operator-pinned trust anchors.
+/// per-org trust anchors stored in <c>signature_trust_anchor</c>.
 ///
 /// A Maven artefact on Central and most hosted repos is accompanied by a detached ASCII-armored
 /// OpenPGP signature (<c>{artifact}.asc</c>). When the Maven proxy path fetches the artefact it
 /// also fetches the <c>.asc</c> sidecar; this verifier checks the sidecar over the artefact bytes
-/// against the keys loaded from <see cref="MavenSignatureKeyStore"/>.
+/// against the per-org key ring resolved from <see cref="IPerOrgTrustAnchorStore"/>.
 ///
-/// The trust root is always operator-configured (<c>Maven:SignatureKeys</c>), never the
-/// upstream-served key, mirroring the RPM <c>Rpm:GpgKey</c> and npm
-/// <see cref="NpmSignatureKeyStore"/> postures.
+/// The trust root is always the per-org operator-pinned ring, never the upstream-served key —
+/// fetching the verifier's own trust root from the thing it is verifying would defeat the check.
 ///
-/// Result mapping: a valid detached signature whose keyid is in the operator-pinned ring →
+/// Result mapping: a valid detached signature whose keyid is in the pinned ring →
 /// <see cref="ProvenanceStatus.Verified"/> (signer = key fingerprint); present-but-invalid
 /// signature, wrong key, or malformed signature → <see cref="ProvenanceStatus.Failed"/>; absent
-/// <c>.asc</c> → <see cref="ProvenanceStatus.Unsigned"/>; not configured →
+/// <c>.asc</c> → <see cref="ProvenanceStatus.Unsigned"/>; no per-org anchor configured →
 /// <see cref="ProvenanceStatus.NotApplicable"/>. Never throws on bad input.
 /// </summary>
 public sealed class MavenProvenanceVerifier : IArtifactProvenanceVerifier
 {
-    private readonly MavenSignatureKeyStore _keys;
+    private readonly IPerOrgTrustAnchorStore _trustStore;
     private readonly ILogger<MavenProvenanceVerifier> _logger;
 
-    public MavenProvenanceVerifier(MavenSignatureKeyStore keys, ILogger<MavenProvenanceVerifier> logger)
+    public MavenProvenanceVerifier(IPerOrgTrustAnchorStore trustStore, ILogger<MavenProvenanceVerifier> logger)
     {
-        _keys = keys;
+        _trustStore = trustStore;
         _logger = logger;
     }
 
     public string Ecosystem => "maven";
 
-    public bool IsConfigured => _keys.IsConfigured;
+    /// <summary>
+    /// Always false at the instance level — Maven trust anchors are per-org, not instance-wide.
+    /// Use <see cref="IsConfiguredForAsync"/> to test whether a specific org has anchors.
+    /// This property exists only to satisfy the <see cref="IArtifactProvenanceVerifier"/> interface
+    /// contract; code that needs the per-org gate must call <see cref="IsConfiguredForAsync"/>.
+    /// </summary>
+    public bool IsConfigured => false;
+
+    /// <summary>
+    /// Returns true when at least one Maven PGP trust anchor is configured for <paramref name="orgId"/>.
+    /// Fail-closed: an org with no anchors cannot enable signature verification.
+    /// </summary>
+    public Task<bool> IsConfiguredForAsync(string orgId, CancellationToken ct = default)
+        => _trustStore.IsConfiguredForAsync(orgId, "maven", ct);
 
     /// <summary>
     /// Metadata-driven verification does not apply to Maven: the signature is a detached file
@@ -49,14 +62,17 @@ public sealed class MavenProvenanceVerifier : IArtifactProvenanceVerifier
 
     /// <summary>
     /// Verifies the detached <c>.asc</c> OpenPGP signature in <paramref name="ascBytes"/>
-    /// over <paramref name="artifactBytes"/> against the operator-pinned key ring.
+    /// over <paramref name="artifactBytes"/> against the per-org trust anchor ring for
+    /// <paramref name="orgId"/>.
     ///
     /// <paramref name="ascBytes"/> null or empty maps to <see cref="ProvenanceStatus.Unsigned"/>.
-    /// Not configured maps to <see cref="ProvenanceStatus.NotApplicable"/>. Never throws.
+    /// No per-org anchor configured maps to <see cref="ProvenanceStatus.NotApplicable"/>. Never throws.
     /// </summary>
-    public ProvenanceResult VerifyArtifact(byte[] artifactBytes, byte[]? ascBytes)
+    public async Task<ProvenanceResult> VerifyArtifactAsync(
+        string orgId, byte[] artifactBytes, byte[]? ascBytes, CancellationToken ct = default)
     {
-        if (!_keys.IsConfigured)
+        var keyRing = await _trustStore.GetMavenKeyRingAsync(orgId, ct);
+        if (keyRing is null)
         {
             return Record(ProvenanceResult.NotApplicable);
         }
@@ -64,13 +80,6 @@ public sealed class MavenProvenanceVerifier : IArtifactProvenanceVerifier
         if (ascBytes is null || ascBytes.Length == 0)
         {
             return Record(ProvenanceResult.Unsigned);
-        }
-
-        var keyRing = _keys.GetKeyRing();
-        if (keyRing is null)
-        {
-            // IsConfigured returned true but the ring is gone — fail closed.
-            return Record(ProvenanceResult.Failed);
         }
 
         try

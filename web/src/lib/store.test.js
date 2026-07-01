@@ -84,6 +84,27 @@ describe('theme store', () => {
   })
 })
 
+describe('sidebarCollapsed store', () => {
+  it('defaults to false (expanded) when localStorage has nothing', async () => {
+    const { sidebarCollapsed } = await import('./store.js')
+    expect(get(sidebarCollapsed)).toBe(false)
+  })
+
+  it('reads persisted "1" from localStorage as collapsed', async () => {
+    localStorage.setItem('sidebarCollapsed', '1')
+    const { sidebarCollapsed } = await import('./store.js')
+    expect(get(sidebarCollapsed)).toBe(true)
+  })
+
+  it('persists "1"/"0" to localStorage when toggled', async () => {
+    const { sidebarCollapsed } = await import('./store.js')
+    sidebarCollapsed.set(true)
+    expect(localStorage.getItem('sidebarCollapsed')).toBe('1')
+    sidebarCollapsed.set(false)
+    expect(localStorage.getItem('sidebarCollapsed')).toBe('0')
+  })
+})
+
 describe('navigate + takePendingRoute', () => {
   it('pushState increments idx and updates route store', async () => {
     const { navigate, route } = await import('./store.js')

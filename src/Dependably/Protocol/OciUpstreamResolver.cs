@@ -73,8 +73,8 @@ public sealed class OciUpstreamResolver
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification =
-            "Resolver aggregates 8 independent DI-resolved services (HTTP client factory, auth service, " +
-            "options, tiered blob storage, metadata store, air-gap mode, logger, clock). " +
+            "Resolver aggregates 9 independent DI-resolved services (HTTP client factory, auth service, " +
+            "options, tiered blob storage, metadata store, air-gap mode, logger, clock, secret protector). " +
             "Bundling into a wrapper record would obscure the DI graph.")]
     public OciUpstreamResolver(
         IHttpClientFactory http,
@@ -84,7 +84,8 @@ public sealed class OciUpstreamResolver
         IMetadataStore db,
         IAirGapMode airGap,
         ILogger<OciUpstreamResolver> logger,
-        TimeProvider time)
+        TimeProvider time,
+        Dependably.Infrastructure.Identity.EnvelopeProtector envelope)
     {
         _http = http;
         _auth = auth;
@@ -94,7 +95,7 @@ public sealed class OciUpstreamResolver
         // Repository wrappers are stateless Dapper helpers over the shared IMetadataStore.
         // Built here rather than injected to avoid capturing Scoped services in this Singleton.
         _packages = new PackageRepository(db, time: time);
-        _upstreamRepo = new UpstreamRegistryRepository(db, time);
+        _upstreamRepo = new UpstreamRegistryRepository(db, time, envelope);
         _airGap = airGap;
         _logger = logger;
         _time = time;

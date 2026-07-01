@@ -61,14 +61,13 @@ public sealed class PyPiDownloadHandler(
                 httpContext, orgId, parsedPurlName!, parsedVersion!, file, token, settings!, ct);
     }
 
-    // Returns HEAD headers for an uploaded-origin PyPI artifact. Requires a valid token;
-    // runs the block gate; returns 401/403/404 when denied or absent.
+    // Returns HEAD headers for an uploaded-origin PyPI artifact. When AnonymousPull is
+    // disabled, a token is required; when a token is present, ReadMetadata is required.
     private async Task<IActionResult> HeadUploadedPackageAsync(
         HttpContext httpContext, string orgId, PackageVersion v,
         TokenRecord? token, OrgSettings? settings, CancellationToken ct)
     {
-        // Uploaded version found — auth required.
-        var authErr = RequireUploadedAuth(httpContext, token);
+        var authErr = RequireUploadedAuth(httpContext, token, settings);
         if (authErr is not null)
         {
             return authErr;
@@ -218,8 +217,7 @@ public sealed class PyPiDownloadHandler(
         TokenRecord? token, OrgSettings? settings, string? sourceIp, CancellationToken ct)
 #pragma warning restore S107
     {
-        // Uploaded version found — auth required.
-        var authErr = RequireUploadedAuth(httpContext, token);
+        var authErr = RequireUploadedAuth(httpContext, token, settings);
         if (authErr is not null)
         {
             return authErr;
@@ -305,20 +303,21 @@ public sealed class PyPiDownloadHandler(
             ? new NotFoundResult()
             : await proxyFetcher.FetchAndCacheUpstreamAsync(
                 httpContext,
-                new PyPiProxyDownload(file, resolved.Value.Url, resolved.Value.Sha256Hex, parsed, pkgVersions),
+                new PyPiProxyDownload(file, resolved.Value.Url, resolved.Value.Sha256Hex, parsed, pkgVersions, resolved.Value.AuthorizationHeader),
                 new ProxyContext(orgId, token?.UserId, token?.ActorKind, settings, sourceIp),
                 ct);
     }
 
-    // Auth gate for uploaded-origin versions: token required, ReadMetadata capability required.
-    private static IActionResult? RequireUploadedAuth(HttpContext httpContext, TokenRecord? token)
+    // Auth gate for uploaded-origin versions: when AnonymousPull is disabled (or settings is
+    // null, fail-closed), a token is required. When a token is present, ReadMetadata is required.
+    private static IActionResult? RequireUploadedAuth(HttpContext httpContext, TokenRecord? token, OrgSettings? settings)
     {
-        if (token is null)
+        if ((settings is null || !settings.AnonymousPull) && token is null)
         {
             httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
             return new UnauthorizedResult();
         }
-        return !token.HasCapability(Capabilities.ReadMetadata) ? new ForbidResult() : (IActionResult?)null;
+        return token is not null && !token.HasCapability(Capabilities.ReadMetadata) ? new ForbidResult() : (IActionResult?)null;
     }
 
     // Builds a BlockGateRequest for a proxy artifact from global-plane serve facts.
@@ -333,6 +332,8 @@ public sealed class PyPiDownloadHandler(
             ActorKind: token?.ActorKind,
             Deprecated: caFacts.Deprecated,
             BlockDeprecatedMode: settings.BlockDeprecated,
+            RevokedAt: caFacts.RevokedAt,
+            BlockRevokedMode: settings.BlockRevoked,
             BlockMaliciousMode: settings.BlockMalicious,
             BlockKevMode: settings.BlockKev,
             MaxEpssTolerance: settings.MaxEpssTolerance,

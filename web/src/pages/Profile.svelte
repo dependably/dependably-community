@@ -6,22 +6,23 @@
   import { submitForm } from '../lib/form.js'
   import { locales, switchLocale } from '../lib/locale.js'
   import PasswordStrength from '../lib/PasswordStrength.svelte'
-  import Licenses from './Licenses.svelte'
   import { qrSvg } from '../lib/qrcode.js'
 
   let currentPassword = '', newPassword = '', confirm = ''
   let modalError = '', loading = false
   let passwordSavedAt = null
   let showModal = false
-  let noticesOpen = false
   let passwordValid = false
 
   $: passwordContext = { email: $user?.email }
 
   $: forced = $user?.mustChangePassword === true
+  $: mfaForced = $user?.mfaEnrollmentRequired === true && !mfaEnabled
   // Auto-open the password modal when the user is mid-rotation. Modal cancel is hidden in
   // that mode so they can't dismiss without changing.
   $: if (forced && !showModal) showModal = true
+  // Auto-open the MFA setup modal when enrollment is mandatory and password rotation is done.
+  $: if (mfaForced && !forced && mfaModal === null && !mfaSetupDone) openMfaSetup()
 
   $: tenantDefaultCode = $user?.tenantDefaultLanguage || 'en'
   $: tenantDefaultLabel = locales.find(l => l.code === tenantDefaultCode)?.label || tenantDefaultCode
@@ -48,16 +49,20 @@
       setError:  v => modalError = v,
       onSuccess: async () => {
         // Refresh user info so the must-rotate guard releases.
-        try { user.set(await api.me()) } catch { /* keep stale; user can still log out */ }
+        let refreshed = null
+        try { refreshed = await api.me(); user.set(refreshed) } catch { /* keep stale; user can still log out */ }
         passwordSavedAt = new Date()
         currentPassword = ''; newPassword = ''; confirm = ''
         showModal = false
-        // Forced flow: bounce out of /profile once rotation completes. Replace so back doesn't
-        // return to the forced /profile entry. Consume any pending deep link the user was
-        // originally trying to reach, falling back to the dashboard.
+        // Forced flow: after rotation, chain straight into MFA setup if required instead of
+        // navigating away — avoids the double-navigation bounce via the App.svelte guard.
         if (forced) {
-          const pending = takePendingRoute()
-          navigate(pending?.page ?? 'dashboard', pending?.params ?? {}, { replace: true })
+          if (refreshed?.mfaEnrollmentRequired) {
+            openMfaSetup()
+          } else {
+            const pending = takePendingRoute()
+            navigate(pending?.page ?? 'dashboard', pending?.params ?? {}, { replace: true })
+          }
         }
       },
     })
@@ -77,6 +82,10 @@
   let mfaSetupCode = ''
   let mfaRecoveryCodes = []
   let mfaSetupDone = false
+  // Snapshot of mfaForced taken when the setup modal opens. By the time recovery codes render,
+  // mfaEnabled is true and $user.mfaEnrollmentRequired is false, so the live reactive is no
+  // longer reliable for driving the forced-dismiss navigation.
+  let enrollmentWasForced = false
 
   // Disable / regen state
   let mfaCurrentPassword = ''
@@ -98,6 +107,9 @@
   loadMfaStatus()
 
   function openMfaSetup() {
+    // Capture whether enrollment is forced now, before the async verify sets mfaEnabled=true
+    // and user.set() clears mfaEnrollmentRequired — the live reactive won't be reliable after.
+    enrollmentWasForced = mfaForced
     mfaModal = 'setup'
     mfaError = ''
     mfaSetupCode = ''
@@ -223,6 +235,9 @@
   {#if forced}
     <div class="warning-banner">{$t('profile.forcedReason')}</div>
   {/if}
+  {#if mfaForced && !forced}
+    <div class="warning-banner">{$t('profile.mfaForcedReason')}</div>
+  {/if}
 
   <div class="card settings-panel">
     <!-- Password row -->
@@ -286,23 +301,8 @@
         </select>
       </div>
     </div>
-
-    <!-- About row -->
-    <div class="settings-row">
-      <div class="settings-row-text">
-        <div class="settings-row-title">{$t('profile.rows.aboutTitle')}</div>
-        <div class="settings-row-help">{$t('profile.rows.aboutHelp')}</div>
-      </div>
-      <div class="settings-row-control">
-        <button on:click={() => (noticesOpen = true)}>{$t('profile.openSourceNotices')}</button>
-      </div>
-    </div>
   </div>
 </div>
-
-{#if noticesOpen}
-  <Licenses on:close={() => (noticesOpen = false)} />
-{/if}
 
 {#if showModal}
   <div class="modal-backdrop">
@@ -357,7 +357,14 @@
           {/each}
         </ul>
         <div class="modal-actions">
-          <button type="button" class="primary" on:click={closeMfaModal}>{$t('common.actions.dismiss')}</button>
+          <button type="button" class="primary" on:click={() => {
+            const wasForced = enrollmentWasForced
+            closeMfaModal()
+            if (wasForced) {
+              const pending = takePendingRoute()
+              navigate(pending?.page ?? 'dashboard', pending?.params ?? {}, { replace: true })
+            }
+          }}>{$t('common.actions.dismiss')}</button>
         </div>
       {:else}
         {#if mfaLoading && !mfaOtpauthUri}
@@ -388,7 +395,9 @@
               />
             </div>
             <div class="modal-actions">
-              <button type="button" on:click={closeMfaModal}>{$t('common.actions.cancel')}</button>
+              {#if !enrollmentWasForced}
+                <button type="button" on:click={closeMfaModal}>{$t('common.actions.cancel')}</button>
+              {/if}
               <button type="submit" class="primary" disabled={mfaLoading}>
                 {mfaLoading ? $t('common.actions.saving') : $t('profile.mfa.setupSubmit')}
               </button>

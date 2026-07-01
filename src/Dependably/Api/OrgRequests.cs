@@ -36,7 +36,8 @@ public sealed record UpdateOrgSettingsRequest(
 public sealed record UpdateRetentionRequest(
     int? KeepVersions,
     int? KeepDays,
-    int? ActivityRetentionDays);
+    int? ActivityRetentionDays,
+    int? PurgeUnlistedAfterDays = null);
 
 public sealed record UpdateProxySettingsRequest(
     bool ProxyPassthroughEnabled,
@@ -51,7 +52,8 @@ public sealed record UpdateProxySettingsRequest(
     string? VerifyNuGetSignatures = null,
     string? VerifyPyPiAttestations = null,
     string? VerifyRpmSignatures = null,
-    string? VerifyMavenSignatures = null);
+    string? VerifyMavenSignatures = null,
+    string? BlockRevoked = null);
 
 // Scope is retained as a nullable field purely so the controller can detect callers still
 // sending the retired field and return a clear 400. The repository never sees it.

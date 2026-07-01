@@ -12,18 +12,30 @@
 
   // Table state lives in the URL query string so it survives route changes,
   // reloads, and copied links.
-  const DEFAULTS = { q: '', eco: '', page: 1, limit: 50, sort: 'severity', dir: 'desc' }
+  const DEFAULTS = { q: '', eco: '', sev: '', page: 1, limit: 50, sort: 'severity', dir: 'desc' }
   const init = readQuery(DEFAULTS)
+
+  // Severity filter chips. '' = all. Matches the lockfile/advisory vocabulary
+  // (critical/high/medium/low) — note it's "medium", not "moderate".
+  const SEVERITIES = ['critical', 'high', 'medium', 'low']
 
   let items = [], loading = true, error = ''
   let ecosystem = init.eco
   let search = init.q
+  let severityFilter = init.sev
+  // Client-side lifecycle filter over the loaded page. Revoked is a distinct lifecycle signal
+  // (the version was removed upstream), not a vulnerability severity — so it filters the report
+  // rather than scoring it.
+  let revokedOnly = false
   let page = init.page, limit = init.limit, total = 0
   let sortCol = init.sort, sortDir = init.dir
 
   function sync() {
-    writeQuery({ q: search, eco: ecosystem, page, limit, sort: sortCol, dir: sortDir }, DEFAULTS)
+    writeQuery({ q: search, eco: ecosystem, sev: severityFilter, page, limit, sort: sortCol, dir: sortDir }, DEFAULTS)
   }
+
+  // Severity is filtered client-side over the loaded page (like search + revoked), so no reload.
+  function setSeverity(s) { severityFilter = s; sync() }
 
   // Which row is expanded, keyed by `${purl}::${osvId}` so the same advisory under two
   // versions expands independently. The open row's detail lives in `expandedDetail`, a plain
@@ -83,6 +95,8 @@
   const SEVERITY_RANK = { critical: 4, high: 3, medium: 2, low: 1 }
 
   $: filtered = items.filter(r => {
+    if (revokedOnly && !r.revokedAt) return false
+    if (severityFilter && r.severity?.toLowerCase() !== severityFilter) return false
     if (!search) return true
     const q = search.toLowerCase()
     return r.packageName?.toLowerCase().includes(q)
@@ -112,19 +126,33 @@
   }
 </script>
 
-<div class="page page-wide">
+<div class="page page-fluid">
   <div class="page-header">
     <h1 class="page-title">{$t('vulnerabilities.title')}</h1>
-    <SearchInput placeholder="Search package, OSV ID, summary…" bind:value={search} on:search={sync} class="header-search" />
   </div>
 
-  <div class="search-bar">
+  <div class="page-toolbar">
+    <SearchInput placeholder="Search package, OSV ID, summary…" bind:value={search} on:search={sync} class="toolbar-search" />
     <select bind:value={ecosystem} on:change={handleEcoChange} class="eco-select">
       <option value="">{$t('common.allEcosystems')}</option>
       {#each ECOSYSTEMS as eco (eco)}
         <option value={eco}>{ECO_LABEL[eco]}</option>
       {/each}
     </select>
+    <div class="sev-filter" role="group" aria-label={$t('vulnerabilities.severityFilter.label')}>
+      <button class="sev-chip" class:active={severityFilter === ''} on:click={() => setSeverity('')}>
+        {$t('vulnerabilities.severityFilter.all')}
+      </button>
+      {#each SEVERITIES as s (s)}
+        <button class="sev-chip" class:active={severityFilter === s} on:click={() => setSeverity(s)}>
+          <span class="sev-dot sev-{s}" aria-hidden="true"></span>{$t(`vulnerabilities.severityFilter.${s}`)}
+        </button>
+      {/each}
+    </div>
+    <label class="revoked-filter">
+      <input type="checkbox" bind:checked={revokedOnly} />
+      {$t('vulnerabilities.revokedOnly')}
+    </label>
   </div>
 
   <ErrorBanner message={error} />
@@ -151,7 +179,10 @@
           <span class="mono pkg-name" title={r.packageName}>{r.packageName}</span>
         </div>
       </td>
-      <td class="mono nowrap" title={r.purl}>{r.version}</td>
+      <td class="mono nowrap" title={r.purl}>
+        {r.version}
+        {#if r.revokedAt}<span class="badge revoked ml-1" title={$t('vulnerabilities.revokedHelp', { values: { at: $formatDate(r.revokedAt) } })}><svg width="10" height="10" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>{$t('vulnerabilities.revoked')}</span>{/if}
+      </td>
       <td class="nowrap">
         {#if r.osvId?.startsWith('MAL-')}
           <!-- Malicious-package advisories are a verdict, not a score — surfaced ahead of any
@@ -322,13 +353,6 @@
     overflow: hidden;
     overflow-wrap: anywhere;
   }
-  .page-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .page-header :global(.header-search) { width: 260px; }
-  .eco-select { width: auto; }
   .summary-cell { font-size: 13px; }
 
   /* Expandable detail row — mirrors the VersionTable.svelte pattern. */

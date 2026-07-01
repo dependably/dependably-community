@@ -31,7 +31,7 @@ public sealed class BannerHardDeleteTests : IClassFixture<InMemoryDbFixture>
             KnownNow.AddDays(+30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
             true);
 
-    private TenantHardDeleteService BuildService(IMetadataStore db)
+    private static TenantHardDeleteService BuildService(IMetadataStore db)
     {
         var clock = TestTime.Frozen(KnownNow);
         var orgs = new OrgRepository(db, null, clock);

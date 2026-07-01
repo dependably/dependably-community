@@ -752,6 +752,16 @@
         }
       }
     },
+    "/api/v1/search": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/service-tokens": {
       "operations": {
         "get": {
@@ -1253,6 +1263,34 @@
       }
     },
     "/api/v1/tokens/{id}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "204"
+          ]
+        }
+      }
+    },
+    "/api/v1/trust-anchors": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "201"
+          ]
+        }
+      }
+    },
+    "/api/v1/trust-anchors/{id}": {
       "operations": {
         "delete": {
           "requiredParams": [

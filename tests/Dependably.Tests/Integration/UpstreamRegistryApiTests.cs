@@ -135,7 +135,16 @@ public sealed class UpstreamRegistryApiTests : IClassFixture<DependablyFactory>
     [Fact]
     public async Task AddOci_Basic_SecretIsWriteOnly_HasSecretTrue()
     {
-        using var c = await AdminClient();
+        // OCI secrets are encrypted at rest (D275-1), which requires a configured master key.
+        // The shared factory is keyless (so the many jwt_secret-reading tests keep their plaintext
+        // assumption), so this test runs its own master-key-enabled host.
+        string masterKey = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+        await using var keyedFactory = new DependablyFactory { MasterKey = masterKey };
+        // CreateClient starts the host (schema init + first-boot) before CreateAdminJwt reads the DB.
+        using var c = keyedFactory.CreateClient();
+        string jwt = await keyedFactory.CreateAdminJwt();
+        c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+
         string host = $"registry-{Guid.NewGuid():N}.example.com";
 
         var addResp = await c.PostAsJsonAsync("/api/v1/upstream-registries", new
@@ -163,6 +172,50 @@ public sealed class UpstreamRegistryApiTests : IClassFixture<DependablyFactory>
 
         // Cleanup
         await c.DeleteAsync($"/api/v1/upstream-registries/{id}");
+    }
+
+    [Fact]
+    public async Task AddNonOci_Bearer_SecretIsWriteOnly_HasSecretTrue()
+    {
+        // Authenticated non-OCI upstream (the chain-to-a-private-dependably use case): bearer secret
+        // is stored encrypted at rest and never echoed back.
+        string masterKey = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+        await using var keyedFactory = new DependablyFactory { MasterKey = masterKey };
+        using var c = keyedFactory.CreateClient();
+        string jwt = await keyedFactory.CreateAdminJwt();
+        c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+
+        var addResp = await c.PostAsJsonAsync("/api/v1/upstream-registries", new
+        {
+            ecosystem = "npm",
+            url = $"https://cache-{Guid.NewGuid():N}.example.com/npm",
+            authType = "bearer",
+            secret = "cache-pull-token",
+        });
+        Assert.Equal(HttpStatusCode.Created, addResp.StatusCode);
+
+        var added = (await JsonDocument.ParseAsync(await addResp.Content.ReadAsStreamAsync())).RootElement;
+        Assert.Equal("bearer", added.GetProperty("authType").GetString());
+        Assert.True(added.GetProperty("hasSecret").GetBoolean());
+        Assert.False(added.TryGetProperty("secret", out _), "Secret field must not appear in the response.");
+    }
+
+    [Fact]
+    public async Task AddOci_Basic_Secret_NoMasterKey_FailsClosed422()
+    {
+        // D275-1: storing any upstream secret requires DEPENDABLY_MASTER_KEY. The default test
+        // host configures none, so a secret-bearing OCI add is refused rather than stored plaintext.
+        using var c = await AdminClient();
+        var resp = await c.PostAsJsonAsync("/api/v1/upstream-registries", new
+        {
+            ecosystem = "oci",
+            url = $"registry-{Guid.NewGuid():N}.example.com",
+            authType = "basic",
+            username = "robot",
+            secret = "my-super-secret-password",
+            prefixes = new[] { "myrepo/" },
+        });
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
     }
 
     [Fact]

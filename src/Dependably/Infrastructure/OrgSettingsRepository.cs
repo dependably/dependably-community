@@ -7,10 +7,10 @@ namespace Dependably.Infrastructure;
 /// the org entity lifecycle: list / soft-delete / restore / membership) so the two concerns
 /// can evolve independently — settings change frequently, the entity rarely.
 ///
-/// Also owns <c>instance_settings</c> reads and writes: those rows are tenancy-independent
-/// but conceptually configuration, so they sit alongside the per-tenant settings rather
-/// than alongside the org entity. Note: <c>jwt_secret</c> is intentionally excluded from
-/// <see cref="ListInstanceSettingsAsync"/> — read it only through the dedicated path.
+/// Also owns <c>instance_settings</c> listing: <c>jwt_secret</c> and <c>mfa_encryption_key</c>
+/// are intentionally excluded from <see cref="ListInstanceSettingsAsync"/> — reads and writes
+/// of those secrets go through <see cref="OrgRepository"/>, which routes them through
+/// <see cref="EnvelopeProtector"/> for at-rest encryption.
 /// </summary>
 public sealed class OrgSettingsRepository
 {
@@ -113,19 +113,20 @@ public sealed class OrgSettingsRepository
 
     public async Task UpsertRetentionAsync(
         string orgId, int? keepVersions, int? keepDays, int? activityRetentionDays,
-        CancellationToken ct = default)
+        int? purgeUnlistedAfterDays, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             """
-            INSERT INTO org_settings (org_id, keep_versions, keep_days, activity_retention_days)
-            VALUES (@orgId, @keepVersions, @keepDays, @activityDays)
+            INSERT INTO org_settings (org_id, keep_versions, keep_days, activity_retention_days, purge_unlisted_after_days)
+            VALUES (@orgId, @keepVersions, @keepDays, @activityDays, @purgeUnlistedAfterDays)
             ON CONFLICT(org_id) DO UPDATE SET
-                keep_versions           = @keepVersions,
-                keep_days               = @keepDays,
-                activity_retention_days = @activityDays
+                keep_versions             = @keepVersions,
+                keep_days                 = @keepDays,
+                activity_retention_days   = @activityDays,
+                purge_unlisted_after_days = @purgeUnlistedAfterDays
             """,
-            new { orgId, keepVersions, keepDays, activityDays = activityRetentionDays });
+            new { orgId, keepVersions, keepDays, activityDays = activityRetentionDays, purgeUnlistedAfterDays });
         _orgs?.InvalidateSettingsCache(orgId);
     }
 
@@ -140,17 +141,20 @@ public sealed class OrgSettingsRepository
                 org_id, proxy_passthrough_enabled, max_osv_score_tolerance, min_release_age_hours,
                 block_deprecated, block_malicious, block_kev, max_epss_tolerance,
                 block_install_scripts, verify_npm_signatures, verify_nuget_signatures,
-                verify_pypi_attestations, verify_rpm_signatures, verify_maven_signatures)
+                verify_pypi_attestations, verify_rpm_signatures, verify_maven_signatures,
+                block_revoked)
             VALUES (
                 @orgId, @proxyEnabled, @maxScore, @minAgeHours,
                 @blockDeprecated, @blockMalicious, @blockKev, @maxEpss,
                 @blockInstallScripts, @verifyNpmSignatures, @verifyNuGetSignatures,
-                @verifyPyPiAttestations, @verifyRpmSignatures, @verifyMavenSignatures)
+                @verifyPyPiAttestations, @verifyRpmSignatures, @verifyMavenSignatures,
+                @blockRevoked)
             ON CONFLICT(org_id) DO UPDATE SET
                 proxy_passthrough_enabled = @proxyEnabled,
                 max_osv_score_tolerance   = @maxScore,
                 min_release_age_hours     = @minAgeHours,
                 block_deprecated          = @blockDeprecated,
+                block_revoked             = @blockRevoked,
                 block_malicious           = @blockMalicious,
                 block_kev                 = @blockKev,
                 max_epss_tolerance        = @maxEpss,
@@ -168,6 +172,7 @@ public sealed class OrgSettingsRepository
                 maxScore = policy.MaxOsvScoreTolerance,
                 minAgeHours = policy.MinReleaseAgeHours,
                 blockDeprecated = policy.BlockDeprecated,
+                blockRevoked = policy.BlockRevoked,
                 blockMalicious = policy.BlockMalicious,
                 blockKev = policy.BlockKev,
                 maxEpss = policy.MaxEpssTolerance,
@@ -195,29 +200,14 @@ public sealed class OrgSettingsRepository
         _orgs?.InvalidateSettingsCache(orgId);
     }
 
-    public async Task<string?> GetInstanceSettingAsync(string key, CancellationToken ct = default)
-    {
-        await using var conn = await _db.OpenAsync(ct);
-        return await conn.ExecuteScalarAsync<string?>(
-            "SELECT value FROM instance_settings WHERE key = @key",
-            new { key });
-    }
-
     public async Task<IReadOnlyDictionary<string, string>> ListInstanceSettingsAsync(CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<(string Key, string Value)>(
-            "SELECT key as Key, value as Value FROM instance_settings WHERE key != 'jwt_secret'");
+            "SELECT key as Key, value as Value FROM instance_settings WHERE key NOT IN ('jwt_secret', 'mfa_encryption_key')");
         return rows.ToDictionary(r => r.Key, r => r.Value);
     }
 
-    public async Task SetInstanceSettingAsync(string key, string value, CancellationToken ct = default)
-    {
-        await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
-            "INSERT INTO instance_settings (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value = @value",
-            new { key, value });
-    }
 }
 
 /// <summary>
@@ -237,4 +227,5 @@ public sealed record ProxyPolicySettings(
     string VerifyNuGetSignatures = "off",
     string VerifyPyPiAttestations = "off",
     string VerifyRpmSignatures = "off",
-    string VerifyMavenSignatures = "off");
+    string VerifyMavenSignatures = "off",
+    string BlockRevoked = "warn");

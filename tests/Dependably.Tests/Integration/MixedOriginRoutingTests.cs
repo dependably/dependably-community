@@ -213,10 +213,9 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
     [Fact]
     public async Task NuGet_MixedOrigin_PrivateAndProxiedVersionsCoexistOnSameName()
     {
-        // Scenario from the failure report: a tenant uploaded a private version of a name
-        // (origin='uploaded'), then later wants to proxy-fetch a different upstream version.
-        // The proxy-fetched version is anonymously readable; the uploaded one still requires
-        // auth. Both live under the same packages.id row.
+        // Scenario: a tenant uploaded a private version of a name (origin='uploaded'), then
+        // later wants to proxy-fetch a different upstream version. With AnonymousPull=true,
+        // both versions are anonymously readable. Both live under the same packages.id row.
         string id = $"coexist{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNuGetPackage(id, "99.0.0");
         await _factory.SeedMixedClaim("nuget", id);
@@ -243,6 +242,9 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         // - 1.0.0 is in the global plane (cache_artifact + tenant_artifact_access) with NO package_versions row
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
+        string orgId = await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
+            ?? throw new InvalidOperationException("Default org not found.");
 
         // Uploaded version lives in package_versions.
         string? uploadedOrigin = await conn.ExecuteScalarAsync<string>(
@@ -277,14 +279,30 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
             new { id });
         Assert.Equal(1, proxyInGlobalPlane);
 
-        // Now: anon request for the proxy version should succeed (cache hit, no auth required).
-        using var anonClient = _factory.CreateClient();
-        var anonProxyResp = await anonClient.GetAsync($"/nuget/flatcontainer/{id}/1.0.0/{id}.1.0.0.nupkg");
-        Assert.Equal(HttpStatusCode.OK, anonProxyResp.StatusCode);
+        // Enable AnonymousPull — when on, both proxy and uploaded versions are served anonymously.
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId",
+            new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        try
+        {
+            using var anonClient = _factory.CreateClient();
 
-        // Anon request for the private version on the same name should still 401.
-        var anonPrivateResp = await anonClient.GetAsync($"/nuget/flatcontainer/{id}/99.0.0/{id}.99.0.0.nupkg");
-        Assert.Equal(HttpStatusCode.Unauthorized, anonPrivateResp.StatusCode);
+            // Proxy version → 200 when AnonymousPull is enabled.
+            var anonProxyResp = await anonClient.GetAsync($"/nuget/flatcontainer/{id}/1.0.0/{id}.1.0.0.nupkg");
+            Assert.Equal(HttpStatusCode.OK, anonProxyResp.StatusCode);
+
+            // Uploaded version → 200 when AnonymousPull is on (org-level gate governs all origins).
+            var anonPrivateResp = await anonClient.GetAsync($"/nuget/flatcontainer/{id}/99.0.0/{id}.99.0.0.nupkg");
+            Assert.Equal(HttpStatusCode.OK, anonPrivateResp.StatusCode);
+        }
+        finally
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET anonymous_pull = 0 WHERE org_id = @orgId",
+                new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        }
     }
 
     // ── PyPi: download routes by per-version origin ────────────────────────────
@@ -296,11 +314,10 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         await _factory.PushPyPiPackage(name, "99.0.0");
         await _factory.SeedMixedClaim("pypi", name);
 
-        // Default test org has AnonymousPull=false. Turn it on for this test so anon access
-        // to the proxy-cached version is allowed by tenant policy. The point being tested is
-        // that uploaded versions still gate even when anon access is permitted; not the
-        // tenant-wide anon toggle itself. The DependablyFactory is shared across tests in
-        // this class (IClassFixture), so we restore the setting in a finally block below.
+        // Default test org has AnonymousPull=false. Turn it on for this test so anonymous
+        // access is permitted by tenant policy. With AnonymousPull=true, both proxy and
+        // uploaded versions are served anonymously. The DependablyFactory is shared across
+        // tests (IClassFixture), so we restore the setting in a finally block below.
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn0 = await store.OpenAsync();
         string orgId = await conn0.ExecuteScalarAsync<string>(
@@ -344,15 +361,16 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
             var primeResp = await authClient.GetAsync($"/packages/{publicFilename}");
             Assert.Equal(HttpStatusCode.OK, primeResp.StatusCode);
 
-            // Anon request for the proxy version → 200 (no auth required for proxy-cached).
             using var anonClient = _factory.CreateClient();
+
+            // Anon request for the proxy version → 200 (no auth required for proxy-cached).
             var anonProxyResp = await anonClient.GetAsync($"/packages/{publicFilename}");
             Assert.Equal(HttpStatusCode.OK, anonProxyResp.StatusCode);
 
-            // Anon request for the privately uploaded version → 401.
+            // Anon request for the uploaded version → 200 when AnonymousPull is on.
             string privateFilename = $"{underscored}-99.0.0-py3-none-any.whl";
             var anonPrivateResp = await anonClient.GetAsync($"/packages/{privateFilename}");
-            Assert.Equal(HttpStatusCode.Unauthorized, anonPrivateResp.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, anonPrivateResp.StatusCode);
         }
         finally
         {
@@ -366,7 +384,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
     // ── Npm: tarball routes by per-version origin ─────────────────────────────
 
     [Fact]
-    public async Task Npm_Tarball_RoutesByVersionOrigin_PrivateRequiresAuth_ProxyDoesNot()
+    public async Task Npm_Tarball_RoutesByVersionOrigin_AnonymousPullOnServesAll()
     {
         string name = $"npmroute{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushNpmPackage(name, "99.0.0");
@@ -408,21 +426,42 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         var primeResp = await authClient.GetAsync($"/npm/tarballs/{name}/{publicTarball}");
         Assert.Equal(HttpStatusCode.OK, primeResp.StatusCode);
 
-        // Anon request for the proxy version → 200.
-        using var anonClient = _factory.CreateClient();
-        var anonProxyResp = await anonClient.GetAsync($"/npm/tarballs/{name}/{publicTarball}");
-        Assert.Equal(HttpStatusCode.OK, anonProxyResp.StatusCode);
+        // Enable AnonymousPull — when on, both proxy and uploaded versions are served anonymously.
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
+            ?? throw new InvalidOperationException("Default org not found.");
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId",
+            new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        try
+        {
+            using var anonClient = _factory.CreateClient();
 
-        // Anon request for the private version → 401.
-        string privateTarball = $"{name}-99.0.0.tgz";
-        var anonPrivateResp = await anonClient.GetAsync($"/npm/tarballs/{name}/{privateTarball}");
-        Assert.Equal(HttpStatusCode.Unauthorized, anonPrivateResp.StatusCode);
+            // Proxy version → 200 when AnonymousPull is enabled.
+            var anonProxyResp = await anonClient.GetAsync($"/npm/tarballs/{name}/{publicTarball}");
+            Assert.Equal(HttpStatusCode.OK, anonProxyResp.StatusCode);
+
+            // Uploaded version → 200 when AnonymousPull is on (org-level gate governs all origins).
+            string privateTarball = $"{name}-99.0.0.tgz";
+            var anonPrivateResp = await anonClient.GetAsync($"/npm/tarballs/{name}/{privateTarball}");
+            Assert.Equal(HttpStatusCode.OK, anonPrivateResp.StatusCode);
+        }
+        finally
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET anonymous_pull = 0 WHERE org_id = @orgId",
+                new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        }
     }
 
     // ── Maven: download routes by per-version origin ──────────────────────────
 
     [Fact]
-    public async Task Maven_Download_UploadedArtifact_AnonRequest_Returns401_EvenWithAnonymousPullOn()
+    public async Task Maven_Download_UploadedArtifact_AnonRequest_Returns200_WhenAnonymousPullOn()
     {
         string groupId = "com.example";
         string artifactId = $"mvnpriv{Guid.NewGuid():N}"[..12].ToLowerInvariant();
@@ -432,7 +471,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         string filename = await _factory.PushMavenArtifact(groupId, artifactId, version);
         string path = $"/maven/{groupId.Replace('.', '/')}/{artifactId}/{version}/{filename}";
 
-        // Enable AnonymousPull so the tenant-level gate does not block the request.
+        // Enable AnonymousPull — the org-level gate governs all origins including uploaded.
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn0 = await store.OpenAsync();
         string orgId = await conn0.ExecuteScalarAsync<string>(
@@ -444,10 +483,10 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
         try
         {
-            // Anonymous request for the uploaded artifact → 401 even though AnonymousPull is on.
+            // Anonymous request for the uploaded artifact → 200 when AnonymousPull is on.
             using var anonClient = _factory.CreateClient();
             var anonResp = await anonClient.GetAsync(path);
-            Assert.Equal(HttpStatusCode.Unauthorized, anonResp.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, anonResp.StatusCode);
         }
         finally
         {
@@ -476,12 +515,12 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
     }
 
     [Fact]
-    public async Task Maven_Download_MixedOrigin_UploadedDenied_ProxyCachedAllowed_InSameFlow()
+    public async Task Maven_Download_MixedOrigin_BothOriginsServedAnonymously_WhenAnonymousPullOn()
     {
-        // House-rule mixed/partial-failure scenario: an uploaded artifact is denied to an
-        // anonymous caller while a proxy-cached artifact from the same package namespace
-        // is served without auth — both handled in a single flow, same org, same AnonymousPull
-        // setting. Validates that the origin gate is per-version, not per-package.
+        // Mixed/partial-failure scenario: an uploaded artifact and a proxy-cached artifact
+        // from the same package namespace are both served to an anonymous caller when
+        // AnonymousPull is enabled. Validates that the org-level gate applies uniformly
+        // to all origins in one flow, same org, same AnonymousPull setting.
         string groupId = "com.example";
         string artifactId = $"mvnmixed{Guid.NewGuid():N}"[..12].ToLowerInvariant();
 
@@ -534,7 +573,7 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
             """,
             new { id = proxyFileId, pvId = proxyVersionId, filename = proxyFilename, blobKey = proxyDbKey, sha256 = proxySha256, sha1 = proxySha1, md5 = proxyMd5 });
 
-        // Enable AnonymousPull to confirm the per-version gate fires independently.
+        // Enable AnonymousPull — both uploaded and proxy-cached artifacts are served anonymously.
         await conn.ExecuteAsync(
             "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId",
             new { orgId });
@@ -543,9 +582,9 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         {
             using var anonClient = _factory.CreateClient();
 
-            // Uploaded version → 401 despite AnonymousPull.
+            // Uploaded version → 200 when AnonymousPull is on.
             var anonUploadedResp = await anonClient.GetAsync(uploadedPath);
-            Assert.Equal(HttpStatusCode.Unauthorized, anonUploadedResp.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, anonUploadedResp.StatusCode);
 
             // Proxy-cached version → 200 (cache hit, anon-OK under AnonymousPull).
             string proxyPath = $"/maven/{groupId.Replace('.', '/')}/{artifactId}/1.0.0/{proxyFilename}";
@@ -604,6 +643,94 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
             await conn.ExecuteAsync(
                 "UPDATE org_settings SET proxy_passthrough_enabled = 1 WHERE org_id = @orgId",
                 new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        }
+    }
+
+    // ── Maven: AnonymousPull gate for uploaded-origin artifacts ───────────────
+
+    /// <summary>
+    /// Pushed (uploaded-origin) Maven artifact is served to an anonymous client when
+    /// <c>AnonymousPull = true</c>. Verifies the hosted-download path in ServeCachedArtifactAsync
+    /// respects the org setting for the uploaded branch.
+    /// </summary>
+    [Fact]
+    public async Task Maven_HostedArtifact_AnonymousPullOn_NoToken_Returns200()
+    {
+        string filename = await _factory.PushMavenArtifact("com.example.anonpull", "anonpull", "1.0");
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = (await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1"))!;
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId", new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        try
+        {
+            using var anon = _factory.CreateClient();
+            var resp = await anon.GetAsync($"/maven/com/example/anonpull/anonpull/1.0/{filename}");
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        }
+        finally
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET anonymous_pull = 0 WHERE org_id = @orgId", new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        }
+    }
+
+    /// <summary>
+    /// Pushed (uploaded-origin) Maven artifact requires auth when <c>AnonymousPull = false</c>.
+    /// </summary>
+    [Fact]
+    public async Task Maven_HostedArtifact_AnonymousPullOff_NoToken_Returns401()
+    {
+        string filename = await _factory.PushMavenArtifact("com.example.anonpulloff", "anonpulloff", "1.0");
+
+        // AnonymousPull is false by default.
+        using var anon = _factory.CreateClient();
+        var resp = await anon.GetAsync($"/maven/com/example/anonpulloff/anonpulloff/1.0/{filename}");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        Assert.Contains("Basic", resp.Headers.WwwAuthenticate.ToString());
+    }
+
+    /// <summary>
+    /// Mixed partial-failure scenario: uploaded and proxy Maven artifacts in the same namespace
+    /// both respect AnonymousPull. When AnonymousPull is on, both are served anonymously;
+    /// when off, both require auth.
+    /// </summary>
+    [Fact]
+    public async Task Maven_MixedOrigin_AnonymousPull_BothOriginsRespectSetting()
+    {
+        string filename = await _factory.PushMavenArtifact("com.example.mixed", "mixedartsap", "2.0");
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string orgId = (await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1"))!;
+
+        // AnonymousPull off: uploaded artifact → 401.
+        using var anonOff = _factory.CreateClient();
+        var respOff = await anonOff.GetAsync($"/maven/com/example/mixed/mixedartsap/2.0/{filename}");
+        Assert.Equal(HttpStatusCode.Unauthorized, respOff.StatusCode);
+
+        // Enable AnonymousPull.
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId", new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        try
+        {
+            // AnonymousPull on: uploaded artifact → 200.
+            using var anonOn = _factory.CreateClient();
+            var respOn = await anonOn.GetAsync($"/maven/com/example/mixed/mixedartsap/2.0/{filename}");
+            Assert.Equal(HttpStatusCode.OK, respOn.StatusCode);
+        }
+        finally
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET anonymous_pull = 0 WHERE org_id = @orgId", new { orgId });
             _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
         }
     }

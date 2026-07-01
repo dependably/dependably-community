@@ -263,6 +263,168 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         Assert.Equal("3.1.4", latest);
     }
 
+    // ── Revocation (upstream-removal) tests ─────────────────────────────────────
+
+    [Fact]
+    public async Task NpmPackage_VersionRemovedUpstream_SetsRevokedAtAndLogsActivity()
+    {
+        var (orgId, _, caId, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "gone-pkg", version: "1.0.0", origin: "proxy", deprecated: null);
+
+        // Upstream still publishes the package, but no longer lists 1.0.0 (only 2.0.0).
+        string packument = NpmPackument("gone-pkg", new Dictionary<string, string?> { ["2.0.0"] = null });
+        var service = BuildService(packument);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? revokedAt = await conn.QuerySingleAsync<string?>(
+            "SELECT revoked_at FROM cache_artifact WHERE id = @id", new { id = caId });
+        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), revokedAt);
+
+        var (eventCount, purl) = await conn.QuerySingleAsync<(int, string?)>(
+            "SELECT COUNT(*), MAX(purl) FROM activity WHERE event_type = 'version_revoked' AND org_id = @orgId",
+            new { orgId });
+        Assert.Equal(1, eventCount);
+        Assert.Equal("pkg:npm/gone-pkg@1.0.0", purl);
+    }
+
+    [Fact]
+    public async Task NpmPackage_VersionPresentUpstream_LeavesRevokedNull()
+    {
+        var (_, _, caId, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "live-pkg", version: "1.0.0", origin: "proxy", deprecated: null);
+
+        string packument = NpmPackument("live-pkg", new Dictionary<string, string?> { ["1.0.0"] = null });
+        var service = BuildService(packument);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? revokedAt = await conn.QuerySingleAsync<string?>(
+            "SELECT revoked_at FROM cache_artifact WHERE id = @id", new { id = caId });
+        Assert.Null(revokedAt);
+    }
+
+    [Fact]
+    public async Task NpmPackage_EmptyUpstreamSet_DoesNotRevoke()
+    {
+        // An empty upstream version set models a 404 / transient outage / whole-package removal.
+        // The false-positive guard must NOT revoke any locally-cached version in that case.
+        var (orgId, _, caId, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "flaky-pkg", version: "1.0.0", origin: "proxy", deprecated: null);
+
+        string packument = NpmPackument("flaky-pkg", new Dictionary<string, string?>());
+        var service = BuildService(packument);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? revokedAt = await conn.QuerySingleAsync<string?>(
+            "SELECT revoked_at FROM cache_artifact WHERE id = @id", new { id = caId });
+        Assert.Null(revokedAt);
+        int eventCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM activity WHERE event_type = 'version_revoked' AND org_id = @orgId",
+            new { orgId });
+        Assert.Equal(0, eventCount);
+    }
+
+    [Fact]
+    public async Task NpmPackage_RevokedVersionReappears_ClearsRevokedAt()
+    {
+        var (_, _, caId, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "back-pkg", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SetRevokedAtAsync(caId, "2020-01-01T00:00:00Z");
+
+        string packument = NpmPackument("back-pkg", new Dictionary<string, string?> { ["1.0.0"] = null });
+        var service = BuildService(packument);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? revokedAt = await conn.QuerySingleAsync<string?>(
+            "SELECT revoked_at FROM cache_artifact WHERE id = @id", new { id = caId });
+        Assert.Null(revokedAt);
+    }
+
+    [Fact]
+    public async Task NpmPackage_AlreadyRevoked_DoesNotReLogActivity()
+    {
+        // A version that is already marked revoked and is still absent upstream must not emit a
+        // second version_revoked event — the activity row records first-observation only.
+        var (orgId, _, caId, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "stale-gone", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SetRevokedAtAsync(caId, "2020-01-01T00:00:00Z");
+
+        string packument = NpmPackument("stale-gone", new Dictionary<string, string?> { ["2.0.0"] = null });
+        var service = BuildService(packument);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        int eventCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM activity WHERE event_type = 'version_revoked' AND org_id = @orgId",
+            new { orgId });
+        Assert.Equal(0, eventCount);
+    }
+
+    [Fact]
+    public async Task NpmPackage_MixedPass_RevokesOnlyAbsentVersions()
+    {
+        // One refresh group, two cached versions: 1.0.0 is gone upstream, 2.0.0 still listed.
+        var (orgId, _, caV1, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "multi-pkg", version: "1.0.0", origin: "proxy", deprecated: null);
+        string caV2 = await SeedCacheVersionAsync(orgId, "npm", "multi-pkg", "2.0.0");
+
+        string packument = NpmPackument("multi-pkg", new Dictionary<string, string?> { ["2.0.0"] = null });
+        var service = BuildService(packument);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? revokedV1 = await conn.QuerySingleAsync<string?>(
+            "SELECT revoked_at FROM cache_artifact WHERE id = @id", new { id = caV1 });
+        string? revokedV2 = await conn.QuerySingleAsync<string?>(
+            "SELECT revoked_at FROM cache_artifact WHERE id = @id", new { id = caV2 });
+        Assert.NotNull(revokedV1);
+        Assert.Null(revokedV2);
+
+        int eventCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM activity WHERE event_type = 'version_revoked' AND org_id = @orgId",
+            new { orgId });
+        Assert.Equal(1, eventCount);
+    }
+
+    [Fact]
+    public async Task PyPiPackage_VersionRemovedUpstream_SetsRevokedAt()
+    {
+        var (_, _, caId, _) = await SeedVersionAsync(
+            ecosystem: "pypi", name: "removed-lib", version: "0.1.0", origin: "proxy", deprecated: null);
+
+        // Upstream lists 0.2.0 only — 0.1.0 has been deleted.
+        string pypiJson = PyPiJson("removed-lib",
+            new Dictionary<string, (bool Yanked, string? Reason)> { ["0.2.0"] = (false, null) });
+        var service = BuildService(pypiJson);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? revokedAt = await conn.QuerySingleAsync<string?>(
+            "SELECT revoked_at FROM cache_artifact WHERE id = @id", new { id = caId });
+        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), revokedAt);
+    }
+
+    [Fact]
+    public async Task NuGetPackage_VersionAbsentUpstream_NotRevoked()
+    {
+        // NuGet/Maven resolve only a latest-scalar (empty per-version Deprecated set), so revocation
+        // detection is out of scope and must never fire for them.
+        var (orgId, _, caId, _) = await SeedVersionAsync(
+            ecosystem: "nuget", name: "newtonsoft.json", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "nuget", "http://nuget.test/v3");
+
+        var service = BuildService("""{"versions":["2.0.0","3.0.0"]}""");
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        string? revokedAt = await conn.QuerySingleAsync<string?>(
+            "SELECT revoked_at FROM cache_artifact WHERE id = @id", new { id = caId });
+        Assert.Null(revokedAt);
+    }
+
     // ── Unsupported ecosystem tests ────────────────────────────────────────────
 
     [Theory]
@@ -485,7 +647,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             NullLogger<UpstreamClient>.Instance);
         var packages = new PackageRepository(_db, time: _clock);
         var cacheArtifacts = new CacheArtifactRepository(_db);
-        var registries = new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock));
+        var registries = new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured()));
         var latestResolver = new UpstreamLatestVersionResolver(upstream, registries, config);
         return new DeprecationRefreshService(
             packages, cacheArtifacts, audit, upstream, latestResolver, airGap, config,
@@ -553,10 +715,46 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         return (orgId, packageId, versionId, purl);
     }
 
+    /// <summary>
+    /// Seeds an additional <c>cache_artifact</c> + <c>tenant_artifact_access</c> row for an
+    /// existing (org, ecosystem, name) so a single refresh group spans multiple versions.
+    /// Returns the new cache_artifact id.
+    /// </summary>
+    private async Task<string> SeedCacheVersionAsync(
+        string orgId, string ecosystem, string name, string version,
+        string? deprecated = null, string? revokedAt = null)
+    {
+        await using var conn = await _db.OpenAsync();
+        string caId = Guid.NewGuid().ToString("N");
+        string purl = $"pkg:{ecosystem}/{name}@{version}";
+        string blobKey = $"proxy/{caId}/{name}-{version}.tgz";
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO cache_artifact
+                (id, ecosystem, name, version, filename, blob_key, content_hash, purl,
+                 deprecated, revoked_at)
+            VALUES (@id, @ecosystem, @name, @version, @filename, @blobKey, 'h', @purl,
+                    @deprecated, @revokedAt)
+            """,
+            new { id = caId, ecosystem, name, version, filename = $"{name}-{version}.tgz", blobKey, purl, deprecated, revokedAt });
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
+            new { orgId, caId });
+        return caId;
+    }
+
+    private async Task SetRevokedAtAsync(string caId, string revokedAt)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE cache_artifact SET revoked_at = @revokedAt WHERE id = @id",
+            new { id = caId, revokedAt });
+    }
+
     private async Task SeedUpstreamRegistryAsync(string orgId, string ecosystem, string url)
     {
-        var repo = new UpstreamRegistryRepository(_db, _clock);
-        await repo.AddAsync(orgId, ecosystem, url, name: null);
+        var repo = new UpstreamRegistryRepository(_db, _clock, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+        await repo.AddAsync(orgId, new NewUpstreamRegistry(ecosystem, url));
     }
 
     private async Task SetAirGappedAsync(string orgId, bool airGapped)

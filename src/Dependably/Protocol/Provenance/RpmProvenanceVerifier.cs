@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
+using Dependably.Infrastructure;
 using Dependably.Infrastructure.Observability;
 using Org.BouncyCastle.Bcpg.OpenPgp;
 
@@ -7,7 +8,7 @@ namespace Dependably.Protocol.Provenance;
 
 /// <summary>
 /// Verifies the per-package GPG/OpenPGP signature embedded in an RPM package's signature
-/// header against the operator-pinned <c>Rpm:GpgKey</c>.
+/// header against the per-org trust anchors stored in <c>signature_trust_anchor</c>.
 ///
 /// RPM package layout:
 /// <code>
@@ -28,19 +29,19 @@ namespace Dependably.Protocol.Provenance;
 ///
 /// The verifier extracts the first available signature blob (preference order: GPG, then
 /// PGP/RSA), decodes it as a detached OpenPGP signature via BouncyCastle, locates the
-/// signing key in the operator-pinned <c>Rpm:GpgKey</c> ring, and verifies the signature
-/// against the header+payload region of the RPM bytes. The bytes covered depend on the tag:
+/// signing key in the per-org trust ring, and verifies the signature against the
+/// header+payload region of the RPM bytes. The bytes covered depend on the tag:
 /// GPG/PGP cover the full header+payload digest; RSA covers the main header digest.
 ///
-/// The trust root is always <c>Rpm:GpgKey</c> (operator-pinned), never the upstream-fetched
-/// GPG key from the repo (which would be circular against a MITM — the same posture the
-/// <c>RpmUpstreamProxy</c> repomd path uses).
+/// The trust root is always the per-org operator-pinned ring (never the upstream-fetched
+/// GPG key from the repo — using an upstream-fetched key would be circular against a MITM,
+/// the same posture <see cref="RpmUpstreamProxy"/> uses for repomd verification).
 ///
 /// Result mapping: valid OpenPGP signature whose keyid is in the pinned ring →
 /// <see cref="ProvenanceStatus.Verified"/> (signer = key fingerprint); present-but-invalid
 /// signature, wrong key, or malformed tag → <see cref="ProvenanceStatus.Failed"/>; no
 /// OpenPGP signature tag in the signature header → <see cref="ProvenanceStatus.Unsigned"/>;
-/// <c>Rpm:GpgKey</c> not configured → <see cref="ProvenanceStatus.NotApplicable"/>. Never throws.
+/// no per-org trust anchor configured → <see cref="ProvenanceStatus.NotApplicable"/>. Never throws.
 /// </summary>
 public sealed class RpmProvenanceVerifier : IArtifactProvenanceVerifier
 {
@@ -78,19 +79,31 @@ public sealed class RpmProvenanceVerifier : IArtifactProvenanceVerifier
     // TypeBin (7) is the only valid type for OpenPGP binary blobs in the signature header.
     private const int TypeBin = 7;
 
-    private readonly PgpPublicKeyRingBundle? _keyRing;
+    private readonly IPerOrgTrustAnchorStore _trustStore;
     private readonly ILogger<RpmProvenanceVerifier> _logger;
 
-    public RpmProvenanceVerifier(IConfiguration configuration, ILogger<RpmProvenanceVerifier> logger)
+    public RpmProvenanceVerifier(IPerOrgTrustAnchorStore trustStore, ILogger<RpmProvenanceVerifier> logger)
     {
+        _trustStore = trustStore;
         _logger = logger;
-        _keyRing = LoadKeyRingOrNull(configuration["Rpm:GpgKey"]);
     }
 
     public string Ecosystem => "rpm";
 
-    /// <summary>True when the operator-pinned <c>Rpm:GpgKey</c> parsed successfully.</summary>
-    public bool IsConfigured => _keyRing is not null;
+    /// <summary>
+    /// Always false at the instance level — RPM trust anchors are per-org, not instance-wide.
+    /// Use <see cref="IsConfiguredForAsync"/> to test whether a specific org has anchors.
+    /// This property exists only to satisfy the <see cref="IArtifactProvenanceVerifier"/> interface
+    /// contract; code that needs the per-org gate must call <see cref="IsConfiguredForAsync"/>.
+    /// </summary>
+    public bool IsConfigured => false;
+
+    /// <summary>
+    /// Returns true when at least one RPM PGP trust anchor is configured for <paramref name="orgId"/>.
+    /// Fail-closed: an org with no anchors cannot enable signature verification.
+    /// </summary>
+    public Task<bool> IsConfiguredForAsync(string orgId, CancellationToken ct = default)
+        => _trustStore.IsConfiguredForAsync(orgId, "rpm", ct);
 
     /// <summary>
     /// Metadata-driven verification does not apply to RPM: the signature lives inside the RPM
@@ -103,15 +116,18 @@ public sealed class RpmProvenanceVerifier : IArtifactProvenanceVerifier
         => Task.FromResult(ProvenanceResult.NotApplicable);
 
     /// <summary>
-    /// Verifies the OpenPGP signature in the RPM signature header against the operator-pinned
-    /// key ring. Reads <paramref name="maxBytes"/> from <paramref name="rpm"/> (an RPM of that
-    /// size is too big to verify — returns <see cref="ProvenanceStatus.Failed"/> rather than
-    /// allocating without bound). Never throws.
+    /// Verifies the OpenPGP signature in the RPM signature header against the per-org
+    /// trust ring for <paramref name="orgId"/>. Reads <paramref name="maxBytes"/> from
+    /// <paramref name="rpm"/> (an RPM exceeding that size returns
+    /// <see cref="ProvenanceStatus.Failed"/> rather than allocating without bound).
+    /// Returns <see cref="ProvenanceStatus.NotApplicable"/> when no anchors are configured
+    /// for the org. Never throws.
     /// </summary>
     public async Task<ProvenanceResult> VerifyPackageAsync(
-        Stream rpm, long maxBytes, CancellationToken ct = default)
+        string orgId, Stream rpm, long maxBytes, CancellationToken ct = default)
     {
-        if (!IsConfigured)
+        var keyRing = await _trustStore.GetRpmKeyRingAsync(orgId, ct);
+        if (keyRing is null)
         {
             return Record(ProvenanceResult.NotApplicable);
         }
@@ -131,7 +147,7 @@ public sealed class RpmProvenanceVerifier : IArtifactProvenanceVerifier
 
         try
         {
-            return Record(VerifyBytes(data, _keyRing!));
+            return Record(VerifyBytes(data, keyRing));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -336,43 +352,6 @@ public sealed class RpmProvenanceVerifier : IArtifactProvenanceVerifier
         }
 
         return ms.ToArray();
-    }
-
-    // Loads the Rpm:GpgKey configuration into a BouncyCastle key-ring bundle.
-    // Mirrors RpmUpstreamProxy.LoadKeyRingOrNull.
-    private PgpPublicKeyRingBundle? LoadKeyRingOrNull(string? keyConfig)
-    {
-        if (string.IsNullOrWhiteSpace(keyConfig))
-        {
-            return null;
-        }
-
-        try
-        {
-            byte[] armored;
-            if (keyConfig.Contains("-----BEGIN PGP", StringComparison.Ordinal))
-            {
-                armored = System.Text.Encoding.UTF8.GetBytes(keyConfig);
-            }
-            else
-            {
-                string keyPath = keyConfig.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
-                    ? new Uri(keyConfig).LocalPath
-                    : keyConfig;
-                armored = File.ReadAllBytes(keyPath);
-            }
-
-            using var keyIn = PgpUtilities.GetDecoderStream(new MemoryStream(armored));
-            return new PgpPublicKeyRingBundle(keyIn);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(
-                "Rpm:GpgKey could not be parsed as an OpenPGP public key ({ExceptionType}); " +
-                "RPM package signature verification cannot be performed with this value.",
-                ex.GetType().Name);
-            return null;
-        }
     }
 
     private static string ToHexFingerprint(byte[] fingerprint)

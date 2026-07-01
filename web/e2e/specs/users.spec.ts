@@ -8,7 +8,7 @@ import { test, expect } from '../fixtures/index.js'
 test.describe('Users / Members', () => {
   test('users page is accessible to admin', async ({ adminPage }) => {
     // App.svelte: users nav link only shown for admin/instance_admin
-    const usersBtn = adminPage.locator('nav.navbar button.nav-link', { hasText: 'Users' })
+    const usersBtn = adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Users' })
     await expect(usersBtn).toBeVisible({ timeout: 5_000 })
     await usersBtn.click()
     await expect(adminPage.locator('main.main-content')).toBeVisible()
@@ -17,7 +17,7 @@ test.describe('Users / Members', () => {
   })
 
   test('admin sees member management controls', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Users' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Users' }).click()
     const main = adminPage.locator('main.main-content')
     await expect(main).toBeVisible({ timeout: 5_000 })
 
@@ -30,7 +30,7 @@ test.describe('Users / Members', () => {
   })
 
   test('members table is visible by default', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Users' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Users' }).click()
     const main = adminPage.locator('main.main-content')
     await expect(main).toBeVisible()
     // Default tab is 'members', wait for spinner to clear
@@ -40,7 +40,7 @@ test.describe('Users / Members', () => {
   })
 
   test('can switch to pending invites tab', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Users' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Users' }).click()
     const main = adminPage.locator('main.main-content')
     await expect(main.locator('.spinner')).toHaveCount(0, { timeout: 10_000 })
     // en.json users.tabs.pendingInvites = "Pending Invites ({count})"

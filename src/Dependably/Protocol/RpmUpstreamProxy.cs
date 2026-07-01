@@ -6,6 +6,7 @@ using System.Xml.Linq;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Observability;
+using Dependably.Protocol.Provenance;
 using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.Extensions.Caching.Memory;
@@ -66,25 +67,26 @@ public interface IRpmUpstreamProxy
     bool IsPassthroughModeSelected { get; }
     bool IsMergedModeSelected { get; }
     Task<RepodataResult?> GetRepodataAsync(string upstreamBase, string filename, string? ifNoneMatch, string? ifModifiedSince, CancellationToken ct);
-    Task<PackageResolution?> ResolvePackageUrlAsync(string upstreamBase, string filename, CancellationToken ct);
+    Task<PackageResolution?> ResolvePackageUrlAsync(string orgId, string upstreamBase, string filename, CancellationToken ct);
     /// <summary>
     /// Returns the upstream <c>primary.xml.gz</c> bytes (checksum-verified, blob-cached), or null
-    /// when the upstream repomd / primary cannot be fetched or verified. Merged mode unions this
-    /// upstream package set with locally published RPMs. Throws <see cref="AirGappedException"/>
-    /// in air-gapped deployments.
+    /// when the upstream repomd / primary cannot be fetched or verified. When the org has a trust
+    /// anchor configured, repomd.xml's detached OpenPGP signature is verified before parsing;
+    /// a failed signature rejects the response. Merged mode unions this upstream package set with
+    /// locally published RPMs. Throws <see cref="AirGappedException"/> in air-gapped deployments.
     /// </summary>
-    Task<byte[]?> GetUpstreamPrimaryXmlGzAsync(string upstreamBase, CancellationToken ct);
+    Task<byte[]?> GetUpstreamPrimaryXmlGzAsync(string orgId, string upstreamBase, CancellationToken ct);
     /// <summary>
     /// Returns the upstream <c>filelists.xml.gz</c> bytes (blob-cached), or null when the
     /// upstream repomd has no filelists entry or the file cannot be fetched.
     /// </summary>
-    Task<byte[]?> GetUpstreamFilelistsXmlGzAsync(string upstreamBase, CancellationToken ct);
+    Task<byte[]?> GetUpstreamFilelistsXmlGzAsync(string orgId, string upstreamBase, CancellationToken ct);
     /// <summary>
     /// Parses the upstream <c>repomd.xml</c> and returns the non-primary <c>&lt;data&gt;</c>
     /// elements verbatim (filelists, other, group, modules, updateinfo, …) so the merged
     /// repomd can pass them through. Returns an empty list when repomd cannot be fetched.
     /// </summary>
-    Task<IReadOnlyList<System.Xml.Linq.XElement>> GetUpstreamNonPrimaryRepomdEntriesAsync(string upstreamBase, CancellationToken ct);
+    Task<IReadOnlyList<System.Xml.Linq.XElement>> GetUpstreamNonPrimaryRepomdEntriesAsync(string orgId, string upstreamBase, CancellationToken ct);
     Task<byte[]?> GetGpgKeyAsync(string upstreamBase, CancellationToken ct);
     Task<bool> IsNegativelyCachedAsync(string upstreamPath, CancellationToken ct);
     Task RecordNegativeAsync(string upstreamPath, CancellationToken ct);
@@ -115,19 +117,18 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     private readonly IUpstreamUrlValidator _urlValidator;
     private readonly ILogger<RpmUpstreamProxy> _logger;
     private readonly TimeProvider _time;
+    private readonly IPerOrgTrustAnchorStore _trustStore;
 
     private readonly string _upstreamMode;  // "passthrough" | "merged"
     private readonly TimeSpan _repomdTtl;
     private readonly TimeSpan _gpgKeyTtl;
     private readonly TimeSpan _negativeCacheTtl;
 
-    // Operator-pinned trust anchor for repomd.xml signature verification. When a key is
-    // configured the proxy verifies repomd.xml's detached OpenPGP signature (repomd.xml.asc)
-    // before trusting/parsing it; when unset, verification is skipped (back-compat) and a
-    // startup warning is logged. The trust anchor must be operator-provided — never the
-    // upstream-fetched GPG key, which would be circular against a MITM.
-    private readonly PgpPublicKeyRingBundle? _repomdGpgKeyRing;
-    private readonly bool _verifyRepomdSignature;
+    // When true, repomd.xml signature verification is enforced regardless of whether the org
+    // has a trust anchor. Setting Rpm:VerifyRepomdSignature=true with no per-org anchor
+    // fails every resolution closed. When unset, verification is enabled iff the org has an
+    // anchor at fetch time.
+    private readonly bool? _verifyRepomdSignatureOverride;
 
     // Dedup concurrent repomd.xml fetches — only one HTTP round-trip per (base URL, file) at a time.
     private readonly ConcurrentDictionary<string, Lazy<Task<(byte[] Body, string? ETag, string? LastModified)>>> _repomdInflight = new();
@@ -157,6 +158,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         _urlValidator = svc.UrlValidator;
         _logger = svc.Logger;
         _time = svc.Time;
+        _trustStore = svc.TrustStore;
 
         var configuration = svc.Configuration;
         _upstreamMode = configuration["Rpm:UpstreamMode"] ?? "passthrough";
@@ -165,50 +167,11 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         _gpgKeyTtl = TimeSpan.TryParse(configuration["Rpm:GpgKeyTtl"], out var g) ? g : TimeSpan.FromDays(1);
         _negativeCacheTtl = TimeSpan.TryParse(configuration["Rpm:NegativeCacheTtl"], out var n) ? n : TimeSpan.FromMinutes(5);
 
-        _repomdGpgKeyRing = LoadKeyRingOrNull(configuration["Rpm:GpgKey"]);
-        // Enforce when explicitly set; otherwise enforce iff a trust anchor was provided.
-        _verifyRepomdSignature = bool.TryParse(configuration["Rpm:VerifyRepomdSignature"], out bool vf)
+        // Rpm:VerifyRepomdSignature overrides the per-org default when explicitly set.
+        // When unset, verification is enabled iff the org has a configured trust anchor.
+        _verifyRepomdSignatureOverride = bool.TryParse(configuration["Rpm:VerifyRepomdSignature"], out bool vf)
             ? vf
-            : _repomdGpgKeyRing is not null;
-    }
-
-    /// <summary>
-    /// Parses the operator-provided <c>Rpm:GpgKey</c> (an inline ASCII-armored public key block,
-    /// or a file path / file: URL the operator trusts out of band) into a key-ring bundle.
-    /// Returns null when unset or unparseable (a parse failure is logged; with verification
-    /// forced on but no key, every resolution then fails closed).
-    /// </summary>
-    private PgpPublicKeyRingBundle? LoadKeyRingOrNull(string? keyConfig)
-    {
-        if (string.IsNullOrWhiteSpace(keyConfig))
-        {
-            return null;
-        }
-
-        try
-        {
-            byte[] armored;
-            if (keyConfig.Contains("-----BEGIN PGP", StringComparison.Ordinal))
-            {
-                armored = Encoding.UTF8.GetBytes(keyConfig);
-            }
-            else
-            {
-                string keyPath = keyConfig.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
-                    ? new Uri(keyConfig).LocalPath
-                    : keyConfig;
-                armored = File.ReadAllBytes(keyPath);
-            }
-            using var keyIn = PgpUtilities.GetDecoderStream(new MemoryStream(armored));
-            return new PgpPublicKeyRingBundle(keyIn);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(
-                "Rpm:GpgKey could not be parsed as an OpenPGP public key ({ExceptionType}); RPM repomd " +
-                "signature verification cannot be performed with this value.", ex.GetType().Name);
-            return null;
-        }
+            : null;
     }
 
     // ── Repodata ───────────────────────────────────────────────────────────────
@@ -253,14 +216,14 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// is the org's top-priority rpm registry base (trailing-slash-trimmed).
     /// Throws <see cref="AirGappedException"/> in air-gapped deployments.
     /// </summary>
-    public async Task<PackageResolution?> ResolvePackageUrlAsync(string upstreamBase, string filename, CancellationToken ct)
+    public async Task<PackageResolution?> ResolvePackageUrlAsync(string orgId, string upstreamBase, string filename, CancellationToken ct)
     {
         if (_airGap.IsEnabled)
         {
             throw new AirGappedException($"rpm:resolve:{filename}");
         }
 
-        var primary = await GetUpstreamPrimaryGzAsync(upstreamBase, ct);
+        var primary = await GetUpstreamPrimaryGzAsync(orgId, upstreamBase, ct);
         if (primary is null)
         {
             return null;
@@ -286,26 +249,26 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     }
 
     /// <inheritdoc />
-    public async Task<byte[]?> GetUpstreamPrimaryXmlGzAsync(string upstreamBase, CancellationToken ct)
+    public async Task<byte[]?> GetUpstreamPrimaryXmlGzAsync(string orgId, string upstreamBase, CancellationToken ct)
     {
         if (_airGap.IsEnabled)
         {
             throw new AirGappedException("rpm:primary");
         }
 
-        var primary = await GetUpstreamPrimaryGzAsync(upstreamBase, ct);
+        var primary = await GetUpstreamPrimaryGzAsync(orgId, upstreamBase, ct);
         return primary?.Bytes;
     }
 
     /// <inheritdoc />
-    public async Task<byte[]?> GetUpstreamFilelistsXmlGzAsync(string upstreamBase, CancellationToken ct)
+    public async Task<byte[]?> GetUpstreamFilelistsXmlGzAsync(string orgId, string upstreamBase, CancellationToken ct)
     {
         if (_airGap.IsEnabled)
         {
             throw new AirGappedException("rpm:filelists");
         }
 
-        byte[]? repomdBytes = await GetRepomdBodyAsync(upstreamBase, ct);
+        byte[]? repomdBytes = await GetRepomdBodyAsync(orgId, upstreamBase, ct);
         if (repomdBytes is null)
         {
             return null;
@@ -318,14 +281,14 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     }
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<XElement>> GetUpstreamNonPrimaryRepomdEntriesAsync(string upstreamBase, CancellationToken ct)
+    public async Task<IReadOnlyList<XElement>> GetUpstreamNonPrimaryRepomdEntriesAsync(string orgId, string upstreamBase, CancellationToken ct)
     {
         if (_airGap.IsEnabled)
         {
             throw new AirGappedException("rpm:repomd-entries");
         }
 
-        byte[]? repomdBytes = await GetRepomdBodyAsync(upstreamBase, ct);
+        byte[]? repomdBytes = await GetRepomdBodyAsync(orgId, upstreamBase, ct);
         return repomdBytes is null
             ? Array.Empty<XElement>()
             : ParseNonPrimaryRepomdEntries(repomdBytes);
@@ -333,14 +296,14 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
 
     /// <summary>
     /// Fetches the current upstream <c>primary.xml.gz</c>: read <c>repomd.xml</c> (memory cache
-    /// or upstream, signature-verified when a trust anchor is pinned), locate the primary href +
-    /// checksum, then fetch the content-addressed primary blob (blob cache or upstream,
+    /// or upstream, signature-verified when the org has a trust anchor pinned), locate the primary
+    /// href + checksum, then fetch the content-addressed primary blob (blob cache or upstream,
     /// checksum-verified). Returns the bytes together with the primary's SHA-256 (used as a
     /// cache key by callers), or null on any fetch/verification failure.
     /// </summary>
-    private async Task<(byte[] Bytes, string Sha256)?> GetUpstreamPrimaryGzAsync(string upstreamBase, CancellationToken ct)
+    private async Task<(byte[] Bytes, string Sha256)?> GetUpstreamPrimaryGzAsync(string orgId, string upstreamBase, CancellationToken ct)
     {
-        byte[]? repomdBytes = await GetRepomdBodyAsync(upstreamBase, ct);
+        byte[]? repomdBytes = await GetRepomdBodyAsync(orgId, upstreamBase, ct);
         if (repomdBytes is null)
         {
             return null;
@@ -565,9 +528,14 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
 
     /// <summary>
     /// Returns the raw bytes of the current <c>repomd.xml</c> (from memory cache if present,
-    /// fetching from upstream otherwise). Used internally by <see cref="ResolvePackageUrlAsync"/>.
+    /// fetching from upstream otherwise). When the org has a per-org RPM trust anchor configured
+    /// (or when <c>Rpm:VerifyRepomdSignature=true</c> is forced), the detached OpenPGP signature
+    /// (<c>repomd.xml.asc</c>) is verified against the per-org key ring before these bytes are
+    /// parsed into the package-checksum map. A failed verification returns null so tampered upstream
+    /// metadata is never trusted. The raw <c>repomd.xml</c>/<c>repomd.xml.asc</c> passthrough GET
+    /// is intentionally not gated — dnf clients re-verify the signature themselves.
     /// </summary>
-    private async Task<byte[]?> GetRepomdBodyAsync(string upstreamBase, CancellationToken ct)
+    private async Task<byte[]?> GetRepomdBodyAsync(string orgId, string upstreamBase, CancellationToken ct)
     {
         string cacheKey = $"rpm:repomd:{upstreamBase}:repomd.xml";
         byte[]? body;
@@ -585,14 +553,17 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
             return null;
         }
 
-        // Gate the proxy's OWN trust: when a trust anchor is pinned, verify repomd.xml's detached
-        // OpenPGP signature before these bytes are parsed into the package-checksum map. A failure
-        // returns null → resolution fails → the controller serves unavailable, so tampered upstream
-        // metadata is never trusted. (The raw repomd.xml/.asc passthrough GET is intentionally not
-        // gated — dnf clients re-verify the signature themselves against their pinned gpgkey.)
-        if (_verifyRepomdSignature)
+        // Resolve per-org key ring from the trust store; null means no anchors for this org.
+        var keyRing = await _trustStore.GetRpmKeyRingAsync(orgId, ct);
+
+        // Determine whether signature verification is required:
+        // - Rpm:VerifyRepomdSignature override wins when explicitly set.
+        // - Otherwise, verify iff the org has a trust anchor (per-org default).
+        bool shouldVerify = _verifyRepomdSignatureOverride ?? keyRing is not null;
+
+        if (shouldVerify)
         {
-            if (_repomdGpgKeyRing is null)
+            if (keyRing is null)
             {
                 RecordRepomdSignatureFailure("no_trusted_key", upstreamBase);
                 return null;
@@ -603,7 +574,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
                 RecordRepomdSignatureFailure("missing_signature", upstreamBase);
                 return null;
             }
-            if (!VerifyRepomdSignature(body, asc, _repomdGpgKeyRing))
+            if (!VerifyRepomdSignature(body, asc, keyRing))
             {
                 RecordRepomdSignatureFailure("bad_signature", upstreamBase);
                 return null;
@@ -1040,4 +1011,5 @@ public sealed record RpmUpstreamProxyServices(
     IAirGapMode AirGap,
     IUpstreamUrlValidator UrlValidator,
     ILogger<RpmUpstreamProxy> Logger,
-    TimeProvider Time);
+    TimeProvider Time,
+    IPerOrgTrustAnchorStore TrustStore);

@@ -9,7 +9,7 @@ import { test, expect } from '../fixtures/index.js'
 test.describe('Tokens', () => {
   test('tokens page is accessible from nav', async ({ adminPage }) => {
     // App.svelte nav-links: <button class="nav-link"> with text from en.json nav.tokens = "Tokens"
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Tokens' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Tokens' }).click()
     const main = adminPage.locator('main.main-content')
     await expect(main).toBeVisible()
     // Tokens.svelte page-title
@@ -17,7 +17,7 @@ test.describe('Tokens', () => {
   })
 
   test('can open create token modal', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Tokens' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Tokens' }).click()
     // Tokens.svelte: <button class="primary" on:click={() => showCreate = true}>{$t('tokens.newToken')}</button>
     // en.json tokens.newToken = "New token"
     await adminPage.locator('.page-header button.primary', { hasText: 'New token' }).click()
@@ -27,7 +27,7 @@ test.describe('Tokens', () => {
   })
 
   test('can create a personal access token', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Tokens' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Tokens' }).click()
     await adminPage.locator('.page-header button.primary', { hasText: 'New token' }).click()
     await expect(adminPage.locator('.modal-backdrop .modal')).toBeVisible()
 
@@ -43,7 +43,7 @@ test.describe('Tokens', () => {
   })
 
   test('tokens table is shown or empty state displayed', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Tokens' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Tokens' }).click()
     const main = adminPage.locator('main.main-content')
     await expect(main).toBeVisible()
     // Wait for spinner to clear (loading = false)
@@ -58,7 +58,7 @@ test.describe('Tokens', () => {
   // template effect never re-ran. The fix passes sortCol/sortDir into a shared
   // helper from the template so the compiler tracks them.
   test('sort indicator arrow moves when a different column header is clicked', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Tokens' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Tokens' }).click()
     const main = adminPage.locator('main.main-content')
     await expect(main.locator('.spinner')).toHaveCount(0, { timeout: 10_000 })
 

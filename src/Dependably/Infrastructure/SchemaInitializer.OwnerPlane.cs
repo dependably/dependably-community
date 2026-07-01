@@ -49,7 +49,7 @@ public sealed partial class SchemaInitializer
                    pv.upstream_integrity_algorithm, pv.has_install_script, pv.install_script_kind,
                    pv.provenance_status, pv.provenance_signer,
                    pv.manual_block_state, pv.yanked, pv.yank_reason, pv.last_used,
-                   pv.download_count, p.org_id, p.ecosystem, p.name
+                   pv.download_count, p.org_id, p.ecosystem, p.purl_name
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE pv.origin = 'proxy' AND pv.blob_key NOT LIKE 'hosted/%'

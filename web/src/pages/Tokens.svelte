@@ -75,7 +75,7 @@
   }
 </script>
 
-<div class="page">
+<div class="page page-fluid">
   <div class="page-header">
     <h1 class="page-title">{$t('tokens.title')}</h1>
     <button class="primary" on:click={() => showCreate = true}>{$t('tokens.newToken')}</button>

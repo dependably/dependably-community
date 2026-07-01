@@ -1,7 +1,8 @@
 using System.Buffers.Binary;
 using System.Text;
+using Dependably.Infrastructure;
 using Dependably.Protocol.Provenance;
-using Microsoft.Extensions.Configuration;
+using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using Org.BouncyCastle.Bcpg;
 using Org.BouncyCastle.Bcpg.OpenPgp;
@@ -12,7 +13,8 @@ namespace Dependably.Tests.Unit.Protocol;
 
 /// <summary>
 /// Exercises <see cref="RpmProvenanceVerifier"/> end-to-end with self-generated OpenPGP keys
-/// and hand-crafted RPM binary fixtures. The verifier confirms key-pinning on the extracted
+/// and hand-crafted RPM binary fixtures. The verifier resolves the per-org trust ring from
+/// <see cref="StubPerOrgTrustAnchorStore"/> and confirms key-pinning on the extracted
 /// OpenPGP blob; the test constructs minimal RPM lead + signature header structures with the
 /// <c>RPMSIGTAG_GPG</c> (1005) tag.
 ///
@@ -26,6 +28,9 @@ public sealed class RpmProvenanceVerifierTests
     // Minimal payload — actual content doesn't affect key-pinning verification.
     private static readonly byte[] SamplePayload = Encoding.UTF8.GetBytes("rpm-header-payload-stub");
 
+    // Org ID used in per-org tests.
+    private const string TestOrgId = "test-org";
+
     // ── happy path ──────────────────────────────────────────────────────────────
 
     [Fact]
@@ -36,7 +41,7 @@ public sealed class RpmProvenanceVerifierTests
         byte[] rpmBytes = BuildRpmWithSigTag(SigTagGpg, rpbBlob);
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
         Assert.NotNull(result.Signer);
@@ -51,7 +56,7 @@ public sealed class RpmProvenanceVerifierTests
         byte[] rpmBytes = BuildRpmWithSigTag(SigTagPgp, sigBlob);
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
@@ -68,7 +73,7 @@ public sealed class RpmProvenanceVerifierTests
         var (_, differentPublicKey) = GeneratePgpKeyPair();
         var verifier = VerifierWithKey(differentPublicKey);
 
-        var result = await verifier.VerifyPackageAsync(new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
         Assert.Null(result.Signer);
@@ -82,7 +87,7 @@ public sealed class RpmProvenanceVerifierTests
         var (_, publicKey) = GeneratePgpKeyPair();
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.Unsigned, result.Status);
     }
@@ -95,7 +100,7 @@ public sealed class RpmProvenanceVerifierTests
         var (_, publicKey) = GeneratePgpKeyPair();
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(new MemoryStream(notRpm), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(notRpm), maxBytes: 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -111,7 +116,7 @@ public sealed class RpmProvenanceVerifierTests
         byte[] truncated = rpmBytes[..(LeadSize + 8)];
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(new MemoryStream(truncated), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(truncated), maxBytes: 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -125,7 +130,7 @@ public sealed class RpmProvenanceVerifierTests
         var (_, publicKey) = GeneratePgpKeyPair();
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -133,16 +138,16 @@ public sealed class RpmProvenanceVerifierTests
     [Fact]
     public async Task NotConfigured_ReturnsNotApplicable()
     {
-        // Empty config → no key → IsConfigured=false.
+        // No anchors in the store → org has no trust ring → NotApplicable.
         var verifier = new RpmProvenanceVerifier(
-            new ConfigurationBuilder().Build(),
+            new StubPerOrgTrustAnchorStore(),
             NullLogger<RpmProvenanceVerifier>.Instance);
 
         var (secretKey, _) = GeneratePgpKeyPair();
         byte[] sigBlob = BuildRawPgpSignaturePacket(SamplePayload, secretKey);
         byte[] rpmBytes = BuildRpmWithSigTag(SigTagGpg, sigBlob);
 
-        var result = await verifier.VerifyPackageAsync(new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), maxBytes: 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.NotApplicable, result.Status);
     }
@@ -164,8 +169,8 @@ public sealed class RpmProvenanceVerifierTests
         // Pin only key A.
         var verifier = VerifierWithKey(publicKeyA);
 
-        var resultA = await verifier.VerifyPackageAsync(new MemoryStream(rpmA), maxBytes: 10 * 1024 * 1024);
-        var resultB = await verifier.VerifyPackageAsync(new MemoryStream(rpmB), maxBytes: 10 * 1024 * 1024);
+        var resultA = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmA), maxBytes: 10 * 1024 * 1024);
+        var resultB = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmB), maxBytes: 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.Verified, resultA.Status);
         Assert.Equal(ProvenanceStatus.Failed, resultB.Status);
@@ -188,9 +193,9 @@ public sealed class RpmProvenanceVerifierTests
 
         var verifier = VerifierWithKey(publicKeyPinned);
 
-        var verified = await verifier.VerifyPackageAsync(new MemoryStream(rpmVerified), 10 * 1024 * 1024);
-        var failed = await verifier.VerifyPackageAsync(new MemoryStream(rpmFailed), 10 * 1024 * 1024);
-        var unsigned = await verifier.VerifyPackageAsync(new MemoryStream(rpmUnsigned), 10 * 1024 * 1024);
+        var verified = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmVerified), 10 * 1024 * 1024);
+        var failed = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmFailed), 10 * 1024 * 1024);
+        var unsigned = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmUnsigned), 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.Verified, verified.Status);
         Assert.Equal(ProvenanceStatus.Failed, failed.Status);
@@ -235,7 +240,7 @@ public sealed class RpmProvenanceVerifierTests
         byte[] rpmBytes = BuildRpmWithEntries((SigTagRsa, sigBlob));
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(new MemoryStream(rpmBytes), 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
@@ -250,7 +255,7 @@ public sealed class RpmProvenanceVerifierTests
         byte[] rpmBytes = BuildRpmWithEntries((NonSigTag, filler), (SigTagGpg, sigBlob));
         var verifier = VerifierWithKey(publicKey);
 
-        var result = await verifier.VerifyPackageAsync(new MemoryStream(rpmBytes), 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
@@ -268,7 +273,7 @@ public sealed class RpmProvenanceVerifierTests
         byte[] rpmBytes = BuildRpmWithEntries((SigTagPgp, firstPgp), (SigTagGpg, secondGpg));
         var verifier = VerifierWithKey(publicPinned);
 
-        var result = await verifier.VerifyPackageAsync(new MemoryStream(rpmBytes), 10 * 1024 * 1024);
+        var result = await verifier.VerifyPackageAsync(TestOrgId, new MemoryStream(rpmBytes), 10 * 1024 * 1024);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -455,7 +460,8 @@ public sealed class RpmProvenanceVerifierTests
     private static PgpPublicKeyRingBundle KeyRingFor(PgpPublicKey publicKey)
         => new([new PgpPublicKeyRing(publicKey.GetEncoded())]);
 
-    // Constructs an RpmProvenanceVerifier with the given public key pinned via config.
+    // Constructs an RpmProvenanceVerifier with the given public key seeded as a per-org
+    // trust anchor in the stub store under TestOrgId.
     private static RpmProvenanceVerifier VerifierWithKey(PgpPublicKey publicKey)
     {
         using var armoredMs = new MemoryStream();
@@ -465,12 +471,100 @@ public sealed class RpmProvenanceVerifierTests
         }
         string armoredKey = Encoding.ASCII.GetString(armoredMs.ToArray());
 
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection([
-                new KeyValuePair<string, string?>("Rpm:GpgKey", armoredKey),
-            ])
-            .Build();
+        var store = new StubPerOrgTrustAnchorStore();
+        store.AddAnchor(TestOrgId, "rpm", new TrustAnchorMaterial
+        {
+            Id = "test-anchor",
+            AnchorKind = "pgp",
+            Material = armoredKey,
+        });
 
-        return new RpmProvenanceVerifier(config, NullLogger<RpmProvenanceVerifier>.Instance);
+        return new RpmProvenanceVerifier(store, NullLogger<RpmProvenanceVerifier>.Instance);
+    }
+
+    // ── per-org isolation ────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task PerOrgIsolation_OrgWithAnchor_BlocksUnsigned_OrgWithoutAnchor_IsNotApplicable()
+    {
+        // Org A has a trust anchor → unsigned RPM returns Unsigned (verification active).
+        // Org B has no anchor → same RPM returns NotApplicable (verification not active).
+        // Both observations from the same shared verifier instance, proving per-org scoping
+        // with no restart between them.
+        const string orgA = "org-with-anchor";
+        const string orgB = "org-without-anchor";
+
+        var (_, publicKey) = GeneratePgpKeyPair();
+        byte[] unsignedRpm = BuildRpmWithNoSigTag();
+
+        using var armoredMs = new MemoryStream();
+        using (var ao = new ArmoredOutputStream(armoredMs))
+        {
+            publicKey.Encode(ao);
+        }
+        string armoredKey = Encoding.ASCII.GetString(armoredMs.ToArray());
+
+        var store = new StubPerOrgTrustAnchorStore();
+        store.AddAnchor(orgA, "rpm", new TrustAnchorMaterial
+        {
+            Id = "anchor-a",
+            AnchorKind = "pgp",
+            Material = armoredKey,
+        });
+        // orgB intentionally has no anchor seeded.
+
+        var verifier = new RpmProvenanceVerifier(store, NullLogger<RpmProvenanceVerifier>.Instance);
+
+        var resultA = await verifier.VerifyPackageAsync(orgA, new MemoryStream(unsignedRpm), 10 * 1024 * 1024);
+        var resultB = await verifier.VerifyPackageAsync(orgB, new MemoryStream(unsignedRpm), 10 * 1024 * 1024);
+
+        // Org A has a trust anchor: verification is active and the unsigned package is flagged.
+        Assert.Equal(ProvenanceStatus.Unsigned, resultA.Status);
+        // Org B has no anchor: verification is not configured and result is not-applicable.
+        Assert.Equal(ProvenanceStatus.NotApplicable, resultB.Status);
+    }
+
+    [Fact]
+    public async Task PerOrgIsolation_OrgWithAnchor_AcceptsSigned_OrgWithDifferentAnchor_RejectsSamePackage()
+    {
+        // Org A trusts key A. Org B trusts key B. A package signed by key A:
+        //   - Verifies for org A (key A matches anchor).
+        //   - Fails for org B (key A not in org B's anchor ring).
+        // Validates that each org's trust ring is independent.
+        const string orgA = "org-a";
+        const string orgB = "org-b";
+
+        var (secretKeyA, publicKeyA) = GeneratePgpKeyPair();
+        var (_, publicKeyB) = GeneratePgpKeyPair();
+
+        byte[] sigBlob = BuildRawPgpSignaturePacket(SamplePayload, secretKeyA);
+        byte[] rpmBytes = BuildRpmWithSigTag(SigTagGpg, sigBlob);
+
+        var store = new StubPerOrgTrustAnchorStore();
+        store.AddAnchor(orgA, "rpm", AnchorFor(publicKeyA, "anchor-a"));
+        store.AddAnchor(orgB, "rpm", AnchorFor(publicKeyB, "anchor-b"));
+
+        var verifier = new RpmProvenanceVerifier(store, NullLogger<RpmProvenanceVerifier>.Instance);
+
+        var resultA = await verifier.VerifyPackageAsync(orgA, new MemoryStream(rpmBytes), 10 * 1024 * 1024);
+        var resultB = await verifier.VerifyPackageAsync(orgB, new MemoryStream(rpmBytes), 10 * 1024 * 1024);
+
+        Assert.Equal(ProvenanceStatus.Verified, resultA.Status);
+        Assert.Equal(ProvenanceStatus.Failed, resultB.Status);
+    }
+
+    private static TrustAnchorMaterial AnchorFor(PgpPublicKey publicKey, string id)
+    {
+        using var ms = new MemoryStream();
+        using (var ao = new ArmoredOutputStream(ms))
+        {
+            publicKey.Encode(ao);
+        }
+        return new TrustAnchorMaterial
+        {
+            Id = id,
+            AnchorKind = "pgp",
+            Material = Encoding.ASCII.GetString(ms.ToArray()),
+        };
     }
 }

@@ -58,5 +58,5 @@
 </DataTable>
 
 <style>
-  .list-header { margin-bottom: 12px; }
+  /* .list-header margin-bottom is global — see app.css */
 </style>

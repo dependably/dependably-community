@@ -91,7 +91,6 @@ variables:
   - { job: csp-inline-style-guard, artifacts: false }
   - { job: chrome-emoji-guard,     artifacts: false }
   - { job: secret-scan,            artifacts: false }
-  - { job: secret-scan-deep,       artifacts: false }
   - { job: unit-tests,             artifacts: false }
   - { job: api-contract,           artifacts: false }
   - { job: integration-tests,      artifacts: false }
@@ -101,7 +100,6 @@ variables:
   - { job: sbom-backend,           artifacts: false }
   - { job: sbom-frontend,          artifacts: false }
   - { job: dt-publish,             artifacts: false }
-  - { job: zap-baseline,           artifacts: false }
   - { job: zap-full,               artifacts: false }
   - { job: zap-api-management,     artifacts: false }
   - { job: zap-api-protocol,       artifacts: false }
@@ -439,22 +437,13 @@ chrome-emoji-guard:
         exit 1
       fi
 
+# Full-history, all-detectors sweep over the entire repository: no --since-commit
+# (every commit), no --only-verified (unverified findings count too). Completes in
+# seconds even across full history, so it gates every MR and the release as the
+# single secret signal — an incremental verified-only pass would only ever be a
+# subset of this. A known false positive is silenced via .trufflehog-exclude;
+# any real finding fails the pipeline.
 secret-scan:
-  stage: test
-  extends: [.runs-on-ci, .release-required]
-  image:
-    name: ${DEP_IMAGE_REGISTRY}/trufflesecurity/trufflehog:3.95.3@sha256:9cc33bb080cac0efbbf228a17667172875b529eeeab01efcc4697adfb55f568a
-    entrypoint: [""]
-  variables:
-    GIT_DEPTH: 0
-  script:
-    - trufflehog git file://. --since-commit "${CI_COMMIT_BEFORE_SHA:-HEAD~1}" --only-verified --fail
-
-# Full-history, all-detectors sweep (no --since-commit, no --only-verified) —
-# the thorough counterpart to secret-scan's fast incremental verified-only gate.
-# Runs on every MR (it is fast here) and gates the release. A false positive in
-# history is silenced via .trufflehog-exclude; a real finding fails the pipeline.
-secret-scan-deep:
   stage: test
   extends: [.runs-on-ci, .release-required]
   image:
@@ -1014,12 +1003,14 @@ ai-review-docs:
   done
   curl -fsS http://localhost:8080/ready || { echo "App not ready after 60s — log follows:" >&2; cat app.log >&2; exit 1; }
 
-# Passive-only baseline scan — fast enough to gate every MR, and the one DAST
-# job in the release contract (.release-required). Accepted passive noise is
-# enumerated in .zap/baseline.conf; -I is NOT passed, so a new, unaccepted
-# finding (a dropped security header, a real passive vuln) turns the pipeline
-# red. Triage a genuine new finding into .zap/baseline.conf to re-green.
-zap-baseline:
+# Full active attack scan of the unauthenticated surface — gates every MR and the
+# release. -I is dropped and accepted noise lives in .zap/full.conf, so a new
+# active finding (a real injection/XSS an agent introduces) reds the pipeline and
+# blocks the merge. The active scan runs every passive rule too, so it subsumes a
+# separate passive baseline over the same spider surface. interruptible so a
+# re-push cancels an in-flight scan instead of stacking work on the single amd64
+# runner it shares with the other gating jobs.
+zap-full:
   stage: dast
   extends: [.runs-on-ci, .release-required]
   image:
@@ -1030,42 +1021,28 @@ zap-baseline:
   # and the x64 Dependably binary fails with "Exec format error". Pin to amd64
   # runners so the published binary executes natively.
   tags: [amd64]
+  interruptible: true
   script:
     - *app_boot
+    # Authenticate the crawl: ci/zap-dast-auth.sh logs in and emits a session cookie
+    # that the replacer add-on injects on every request (browser included), so the AJAX
+    # spider can crawl the JS-rendered SPA past the login wall instead of stopping at the
+    # handful of unauthenticated static URLs a traditional spider finds.
+    - sh ci/zap-dast-auth.sh
+    - . ./zap-creds.env
     # ZAP scripts hardcode base_dir='/zap/wrk/' for report output, but the image
     # ships without that directory (it's the conventional bind-mount target).
     # Symlink it to $PWD so .zap/*.conf is in place and -J/-r land in the build
     # dir where GitLab picks them up as artifacts.
     - ln -sfn "$PWD" /zap/wrk
-    - zap-baseline.py -t http://localhost:8080 -c .zap/baseline.conf -J zap-baseline.json -r zap-baseline.html
-  after_script:
-    - echo "=== dependably app log ==="; cat app.log || true
-  artifacts:
-    when: always
-    expire_in: 30 days
-    paths:
-      - zap-baseline.html
-      - zap-baseline.json
-      - app.log
-
-# Full active attack scan — gates every MR and the release. -I is dropped and
-# accepted noise lives in .zap/full.conf, so a new active finding (a real
-# injection/XSS an agent introduces) reds the pipeline and blocks the merge.
-# interruptible so a re-push cancels an in-flight scan instead of stacking work
-# on the single amd64 runner it shares with the other gating jobs.
-zap-full:
-  stage: dast
-  extends: [.runs-on-ci, .release-required]
-  image:
-    name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
-    entrypoint: [""]
-  needs: [build]
-  tags: [amd64]
-  interruptible: true
-  script:
-    - *app_boot
-    - ln -sfn "$PWD" /zap/wrk
-    - zap-full-scan.py -t http://localhost:8080 -c .zap/full.conf -J zap-full.json -r zap-full.html
+    # -j runs the AJAX (browser) spider to crawl the SPA; the hook excludes the
+    # logout/password/MFA endpoints so the authenticated browser crawl does not revoke
+    # its own session mid-scan (the same self-logout trap the management API scan avoids).
+    - >
+      ZAP_AUTH_HEADER=Cookie ZAP_AUTH_HEADER_VALUE="$ZAP_SESSION_COOKIE"
+      zap-full-scan.py -t http://localhost:8080 -c .zap/full.conf
+      -j --hook=ci/zap-full-hooks.py
+      -J zap-full.json -r zap-full.html
   after_script:
     - echo "=== dependably app log ==="; cat app.log || true
   artifacts:
@@ -1087,6 +1064,13 @@ zap-full:
 # gets fixed in-context. interruptible so a re-push cancels it rather than
 # queueing on the single amd64 runner. Management routes accept only the session
 # JWT, not a dpd_ token.
+#
+# The management and protocol surfaces scan in separate jobs, not one job running
+# two scans: zap-api-scan.py boots a ZAP daemon and is built to own its container
+# (it relies on the image's pre-warmed ~/.ZAP and leaves a session lock on exit),
+# so a second scan in the same container can't bring up its own daemon. Each
+# surface also needs a different credential the other rejects (session-JWT Cookie
+# here, dpd_ Bearer for protocol), so the two cannot collapse into a single scan.
 zap-api-management:
   stage: dast
   extends: [.runs-on-ci, .release-required]
@@ -1101,9 +1085,15 @@ zap-api-management:
     - sh ci/zap-dast-auth.sh
     - . ./zap-creds.env
     - ln -sfn "$PWD" /zap/wrk
+    # ZAP's OpenAPI import sends one request per documented operation with the live
+    # session cookie injected, so it hits POST /api/v1/auth/logout and revokes the
+    # session mid-scan — the rest of the management surface then scans unauthenticated
+    # (a flood of "Token has been revoked" 401s). Strip the session-destroying
+    # operations from the spec first so the session survives. See ci/zap-filter-openapi.py.
+    - python3 ci/zap-filter-openapi.py http://localhost:8080/openapi/management.json > /zap/wrk/management-scan.json
     - >
       ZAP_AUTH_HEADER=Cookie ZAP_AUTH_HEADER_VALUE="$ZAP_SESSION_COOKIE"
-      zap-api-scan.py -t http://localhost:8080/openapi/management.json
+      zap-api-scan.py -t /zap/wrk/management-scan.json
       -f openapi -O http://localhost:8080
       -c .zap/api-management.conf
       -J zap-api-management.json -r zap-api-management.html

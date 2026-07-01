@@ -28,6 +28,7 @@ public sealed class NuGetPublishHandler(
     LicenseRepository licenses,
     RenderedResponseCache<NuGetRegistrationKey> cache,
     ILogger<NuGetPublishHandler> logger,
+    TimeProvider time,
     string stagingPath)
 {
     public Task<IActionResult> PushAsync(HttpContext httpContext, string orgId, CancellationToken ct)
@@ -103,9 +104,12 @@ public sealed class NuGetPublishHandler(
         }
 
         await using var conn = await db.OpenAsync(ct);
+        // Stamp yanked_at so the unlist-age retention gate (purge_unlisted_after_days) can
+        // measure time since this unlist rather than since the version was published.
+        string yankedAt = time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         await conn.ExecuteAsync(
-            "UPDATE package_versions SET yanked = 1 WHERE id = @id",
-            new { id = pkgVersion.Id });
+            "UPDATE package_versions SET yanked = 1, yanked_at = @yankedAt WHERE id = @id",
+            new { id = pkgVersion.Id, yankedAt });
 
         // Evict all four registration cache entries (semver1/2 × local/proxy) so the
         // unlisted version disappears from registration index responses immediately.
@@ -143,16 +147,6 @@ public sealed class NuGetPublishHandler(
         if (match is null)
         {
             return new NotFoundResult();
-        }
-
-        // Privately-uploaded symbols require a token regardless of AnonymousPull, mirroring the
-        // .nupkg path (ServeHostedVersionAsync). Symbols are always uploaded-origin (there is no
-        // proxy path for .snupkg), and their PDBs/debug info are at least as sensitive as the
-        // package itself, so anonymous read must not leak them even when AnonymousPull is on.
-        if (match.Origin == "uploaded" && token is null)
-        {
-            httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
-            return new UnauthorizedResult();
         }
 
         var stream = await blobs.GetAsync(BlobKeys.StoreKey(match.BlobKey), ct);

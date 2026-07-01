@@ -103,6 +103,7 @@ public sealed class UpstreamClient
         string ecosystem,
         string? orgId = null,
         string? purl = null,
+        string? authorizationHeader = null,
         CancellationToken ct = default)
     {
         var cached = await _blobs.GetAsync(blobKey, ct);
@@ -137,7 +138,9 @@ public sealed class UpstreamClient
         // CancellationToken.None so a disconnect by the first caller doesn't fault the
         // shared Lazy and cancel all other waiters. The cache write is idempotent.
         var lazy = _inflight.GetOrAdd(blobKey, _ => new Lazy<Task<UpstreamFetchResult>>(
-            () => FetchAndStageAsync(upstreamUrl, checksumSpec, blobKey, ecosystem, orgId, purl, CancellationToken.None)));
+            () => FetchAndStageAsync(
+                new UpstreamFetchRequest(upstreamUrl, checksumSpec, blobKey, ecosystem, orgId, purl, authorizationHeader),
+                CancellationToken.None)));
 
         return await FetchWithTelemetryAsync(lazy, blobKey, ecosystem, upstreamUrl, checksumSpec, purl, ct);
     }
@@ -238,7 +241,7 @@ public sealed class UpstreamClient
     /// <summary>
     /// Hard cap for upstream artifact bodies (streamed or buffered). Applied by the
     /// hash-and-stage path and passed explicitly by callers that buffer artifact bytes
-    /// through <see cref="GetOrFetchMetadataAsync(string, long, CancellationToken)"/>.
+    /// through <see cref="GetOrFetchMetadataAsync(string, long, string, CancellationToken)"/>.
     /// </summary>
     public const long MaxUpstreamResponseBytes = 600L * 1024 * 1024; // 600 MB
 
@@ -266,15 +269,18 @@ public sealed class UpstreamClient
     private const double RetryBackoffExponent = 2.0;
     private const int MaxUpstreamFetchAttempts = 3;
 
-    private async Task<UpstreamFetchResult> FetchAndStageAsync(
-        string url,
-        ChecksumSpec? spec,
-        string blobKey,
-        string ecosystem,
-        string? orgId,
-        string? purl,
-        CancellationToken ct)
+    // Bundles the fetch coordinate + tenant/PURL context passed to FetchAndStageAsync, keeping
+    // it within the parameter-count threshold (S107).
+    private sealed record UpstreamFetchRequest(
+        string Url, ChecksumSpec? Spec, string BlobKey, string Ecosystem,
+        string? OrgId, string? Purl, string? AuthorizationHeader);
+
+    private async Task<UpstreamFetchResult> FetchAndStageAsync(UpstreamFetchRequest req, CancellationToken ct)
     {
+        string url = req.Url;
+        string? orgId = req.OrgId;
+        string? authorizationHeader = req.AuthorizationHeader;
+
         if (!await _urlValidator.IsAllowedAsync(url, orgId, ct))
         {
             throw new SsrfBlockedException(url);
@@ -319,7 +325,7 @@ public sealed class UpstreamClient
 
         var client = _httpClientFactory.CreateClient("upstream");
         // Retry loop for transient upstream failures; exits on first success or throws.
-        using var successResponse = await FetchWithRetryAsync(client, url, orgId, fetchCt);
+        using var successResponse = await FetchWithRetryAsync(client, url, orgId, authorizationHeader, fetchCt);
 
         // Phase 2 — dynamic floor based on Content-Length, checked after response headers arrive.
         EnsureStagingDiskFloorForContentLength(successResponse.Content.Headers.ContentLength);
@@ -328,13 +334,13 @@ public sealed class UpstreamClient
         // The HashingFileStream below still enforces the cap for chunked transfers.
         if (successResponse.Content.Headers.ContentLength > MaxUpstreamResponseBytes)
         {
-            await _audit.LogAsync("upstream_response_too_large", orgId: orgId, ecosystem: ecosystem, purl: purl,
+            await _audit.LogAsync("upstream_response_too_large", orgId: orgId, ecosystem: req.Ecosystem, purl: req.Purl,
                 detail: $"{{\"url\":\"{url}\",\"content_length\":{successResponse.Content.Headers.ContentLength}}}", ct: fetchCt);
             throw new UpstreamResponseTooLargeException(url, MaxUpstreamResponseBytes);
         }
 
         return await StreamVerifyAndStoreAsync(
-            new UpstreamStagingContext(successResponse, blobKey, spec, url, ecosystem, orgId, purl), fetchCt);
+            new UpstreamStagingContext(successResponse, req.BlobKey, req.Spec, url, req.Ecosystem, orgId, req.Purl), fetchCt);
     }
 
     // Sends a GET request to url with transient-failure retries (429, 403, 5xx).
@@ -343,7 +349,7 @@ public sealed class UpstreamClient
     // transient retries, HttpRequestException on non-transient failures (404/410/…) so the
     // caller's multi-base loop can try the next upstream registry.
     private async Task<HttpResponseMessage> FetchWithRetryAsync(
-        HttpClient client, string url, string? orgId, CancellationToken ct)
+        HttpClient client, string url, string? orgId, string? authorizationHeader, CancellationToken ct)
     {
         for (int attempt = 0; attempt < MaxUpstreamFetchAttempts; attempt++)
         {
@@ -353,6 +359,14 @@ public sealed class UpstreamClient
             if (orgId is not null)
             {
                 fetchRequest.Options.Set(SsrfAwareRedirectHandler.OrgIdOption, orgId);
+            }
+
+            // Attach the per-upstream Authorization header (Bearer/Basic) when configured. Built
+            // once at resolve time; null for anonymous upstreams. TryAddWithoutValidation mirrors
+            // the OCI attach path and avoids HttpClient's header-format validation.
+            if (authorizationHeader is not null)
+            {
+                fetchRequest.Headers.TryAddWithoutValidation("Authorization", authorizationHeader);
             }
 
             var response = await UnwrapSsrfAsync(
@@ -636,6 +650,7 @@ public sealed class UpstreamClient
         ChecksumSpec? checksumSpec,
         string ecosystem,
         string? orgId = null,
+        string? authorizationHeader = null,
         CancellationToken ct = default)
     {
         if (_airGap.IsEnabled)
@@ -648,7 +663,7 @@ public sealed class UpstreamClient
         // can independently open the cached blob. CancellationToken.None prevents a single
         // caller disconnect from faulting the shared Lazy and cancelling all other waiters.
         var lazy = _urlInflight.GetOrAdd(upstreamUrl, _ => new Lazy<Task<UpstreamFetchResult>>(
-            () => FetchAndStageToContentKeyAsync(upstreamUrl, checksumSpec, ecosystem, orgId, CancellationToken.None)));
+            () => FetchAndStageToContentKeyAsync(upstreamUrl, checksumSpec, ecosystem, orgId, authorizationHeader, CancellationToken.None)));
 
         using var activity = DependablyActivitySource.Source.StartActivity(
             "proxy.fetch", ActivityKind.Client);
@@ -725,7 +740,7 @@ public sealed class UpstreamClient
     /// to the same artifact content).
     /// </summary>
     private async Task<UpstreamFetchResult> FetchAndStageToContentKeyAsync(
-        string url, ChecksumSpec? spec, string ecosystem, string? orgId, CancellationToken ct)
+        string url, ChecksumSpec? spec, string ecosystem, string? orgId, string? authorizationHeader, CancellationToken ct)
     {
         if (!await _urlValidator.IsAllowedAsync(url, orgId, ct))
         {
@@ -736,7 +751,7 @@ public sealed class UpstreamClient
         // Retry loop for transient upstream failures; same contract as FetchAndStageAsync.
         // Non-transient failures (e.g. 404) propagate as HttpRequestException so the
         // controller's multi-base loop can try the next upstream registry.
-        using var response = await FetchWithRetryAsync(client, url, orgId, ct);
+        using var response = await FetchWithRetryAsync(client, url, orgId, authorizationHeader, ct);
 
         if (response.Content.Headers.ContentLength > MaxUpstreamResponseBytes)
         {
@@ -829,7 +844,8 @@ public sealed class UpstreamClient
     /// <summary>
     /// Fetches metadata without caching (simple index, registration JSON, etc.).
     /// </summary>
-    public async Task<HttpResponseMessage> GetMetadataAsync(string url, CancellationToken ct = default)
+    public async Task<HttpResponseMessage> GetMetadataAsync(
+        string url, string? authorizationHeader = null, CancellationToken ct = default)
     {
         // Air-gapped: also block uncached metadata fetches. Simple-index pages and npm
         // packuments are derived locally from the registry's own state in air-gap mode.
@@ -844,7 +860,23 @@ public sealed class UpstreamClient
         }
 
         var client = _httpClientFactory.CreateClient("upstream");
-        return await UnwrapSsrfAsync(() => client.GetAsync(url, ct));
+        return await UnwrapSsrfAsync(() => SendMetadataRequestAsync(client, url, authorizationHeader, ct, HttpCompletionOption.ResponseContentRead));
+    }
+
+    // Builds and sends a GET for a metadata document, attaching the per-upstream Authorization
+    // header (Bearer/Basic) when configured. A fresh HttpRequestMessage is required because a
+    // header on the shared "upstream" HttpClient would leak across tenants.
+    private static async Task<HttpResponseMessage> SendMetadataRequestAsync(
+        HttpClient client, string url, string? authorizationHeader, CancellationToken ct,
+        HttpCompletionOption completionOption = HttpCompletionOption.ResponseHeadersRead)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        if (authorizationHeader is not null)
+        {
+            request.Headers.TryAddWithoutValidation("Authorization", authorizationHeader);
+        }
+
+        return await client.SendAsync(request, completionOption, ct);
     }
 
     /// <summary>
@@ -856,18 +888,19 @@ public sealed class UpstreamClient
     /// returned an <see cref="HttpResponseMessage"/> whose stream could only be consumed
     /// once, which is why the controllers couldn't share fetches).
     /// </summary>
-    public Task<UpstreamMetadataResponse> GetOrFetchMetadataAsync(string url, CancellationToken ct = default)
-        => GetOrFetchMetadataAsync(url, MaxMetadataResponseBytes, ct);
+    public Task<UpstreamMetadataResponse> GetOrFetchMetadataAsync(
+        string url, string? authorizationHeader = null, CancellationToken ct = default)
+        => GetOrFetchMetadataAsync(url, MaxMetadataResponseBytes, authorizationHeader, ct);
 
     /// <summary>
-    /// Variant of <see cref="GetOrFetchMetadataAsync(string, CancellationToken)"/> with an
+    /// Variant of <see cref="GetOrFetchMetadataAsync(string, string, CancellationToken)"/> with an
     /// explicit body cap. Callers that buffer artifact bytes through this path (npm tarballs,
     /// NuGet flatcontainer, Maven fetch-then-hash, PyPI unknown-sha cold start) pass
     /// <see cref="MaxUpstreamResponseBytes"/>; metadata callers use the default overload.
     /// Throws <see cref="UpstreamResponseTooLargeException"/> when the body exceeds the cap.
     /// </summary>
     public async Task<UpstreamMetadataResponse> GetOrFetchMetadataAsync(
-        string url, long maxBytes, CancellationToken ct = default)
+        string url, long maxBytes, string? authorizationHeader = null, CancellationToken ct = default)
     {
         if (_airGap.IsEnabled)
         {
@@ -882,7 +915,7 @@ public sealed class UpstreamClient
         // CancellationToken.None: a disconnect from the first caller must not fault the
         // shared Lazy and cancel every other waiter (mirrors the blob-fetch convention).
         var lazy = _metadataInflight.GetOrAdd(url, _ => new Lazy<Task<UpstreamMetadataResponse>>(
-            () => FetchMetadataBufferedAsync(url, maxBytes, CancellationToken.None)));
+            () => FetchMetadataBufferedAsync(url, maxBytes, authorizationHeader, CancellationToken.None)));
 
         try
         {
@@ -894,13 +927,14 @@ public sealed class UpstreamClient
         }
     }
 
-    private async Task<UpstreamMetadataResponse> FetchMetadataBufferedAsync(string url, long maxBytes, CancellationToken ct)
+    private async Task<UpstreamMetadataResponse> FetchMetadataBufferedAsync(
+        string url, long maxBytes, string? authorizationHeader, CancellationToken ct)
     {
         var client = _httpClientFactory.CreateClient("upstream");
         // ResponseHeadersRead is load-bearing: the default (ResponseContentRead) would have
         // HttpClient buffer the whole body before the cap check, defeating it.
         using var response = await UnwrapSsrfAsync(
-            () => client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct));
+            () => SendMetadataRequestAsync(client, url, authorizationHeader, ct));
         byte[] body = await ReadBodyCappedAsync(response, maxBytes, url, ct);
         string? contentType = response.Content.Headers.ContentType?.ToString();
         return new UpstreamMetadataResponse(

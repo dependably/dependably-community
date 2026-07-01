@@ -25,13 +25,13 @@ public sealed partial class MavenController
     // coords unchanged when metadata is unreachable or no timestamped name resolves.
     [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Descriptive documentation comment, not commented-out code.")]
     private async Task<MavenCoordinates> ResolveSnapshotCoordsAsync(
-        MavenCoordinates coords, string groupPath, IReadOnlyList<string> bases, CancellationToken ct)
+        MavenCoordinates coords, string groupPath, IReadOnlyList<UpstreamSource> bases, CancellationToken ct)
     {
         MavenSnapshotMetadata? snapMeta = null;
-        foreach (string upstreamBase in bases)
+        foreach (var source in bases)
         {
             snapMeta = await _svc.Upstream!.FetchSnapshotMetadataAsync(
-                upstreamBase, groupPath, coords.ArtifactId, coords.Version!, ct);
+                source.Url, groupPath, coords.ArtifactId, coords.Version!, ct, source.AuthorizationHeader);
             if (snapMeta is not null)
             {
                 break;
@@ -82,10 +82,10 @@ public sealed partial class MavenController
 
         string groupPath = coords.GroupId.Replace('.', '/');
         MavenSnapshotMetadata? snapMeta = null;
-        foreach (string upstreamBase in bases)
+        foreach (var source in bases)
         {
             snapMeta = await _svc.Upstream.FetchSnapshotMetadataAsync(
-                upstreamBase, groupPath, coords.ArtifactId, coords.Version!, ct);
+                source.Url, groupPath, coords.ArtifactId, coords.Version!, ct, source.AuthorizationHeader);
             if (snapMeta is not null)
             {
                 break;
@@ -176,7 +176,7 @@ public sealed partial class MavenController
     // Returns null when the version list is empty (caller surfaces as 404).
     // Used as the GetOrRebuildAsync factory inside ServeMetadataAsync.
     private async Task<byte[]?> BuildMavenMetadataBytesAsync(
-        string orgId, MavenCoordinates coords, IReadOnlyList<string> bases,
+        string orgId, MavenCoordinates coords, IReadOnlyList<UpstreamSource> bases,
         bool useUpstream, CancellationToken ct)
     {
         await using var conn = await _svc.Db.OpenAsync(ct);
@@ -209,9 +209,9 @@ public sealed partial class MavenController
             string artifactPath = $"{groupPath}/{coords.ArtifactId}";
 
             // Walk upstreams in priority order; the first that returns versions wins.
-            foreach (string upstreamBase in bases)
+            foreach (var source in bases)
             {
-                var upstreamVersions = await _svc.Upstream!.FetchUpstreamVersionsAsync(upstreamBase, artifactPath, ct);
+                var upstreamVersions = await _svc.Upstream!.FetchUpstreamVersionsAsync(source.Url, artifactPath, ct, source.AuthorizationHeader);
                 if (upstreamVersions is { Count: > 0 })
                 {
                     // Union: local wins on collision; preserve order (local first, then upstream-only additions).

@@ -25,7 +25,7 @@ test.describe('Authentication', () => {
   test('sign out returns to login page', async ({ adminPage }) => {
     // App.svelte: <button on:click={logout}>{$t('nav.signOut')}</button>  => "Sign out"
     // The sign-out button is in .nav-actions, not a .nav-link, so use a broader selector
-    await adminPage.locator('nav.navbar .nav-actions button', { hasText: /sign out/i }).click()
+    await adminPage.locator('.topbar .nav-actions button', { hasText: /sign out/i }).click()
     // After logout, navigate('login') is called, showing the login form
     await expect(adminPage.locator('input[type="email"]')).toBeVisible({ timeout: 5_000 })
   })

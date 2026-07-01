@@ -62,6 +62,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<Dependably.Protocol.InstallScriptAllowlistService>();
         services.AddSingleton<QuarantineRepository>();
         services.AddSingleton<UpstreamRegistryRepository>();
+        services.AddSingleton<TrustAnchorRepository>();
+        services.AddSingleton<IPerOrgTrustAnchorStore, PerOrgTrustAnchorStore>();
         services.AddSingleton<LicenseRepository>();
         services.AddSingleton<SpdxLicenseRepository>();
         services.AddSingleton<SpdxLicenseSeeder>();

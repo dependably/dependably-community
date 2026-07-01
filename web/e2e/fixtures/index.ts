@@ -11,7 +11,7 @@ async function loginAs(page: Page, email: string, password: string) {
   await page.fill('input[type="password"]', password)
   await page.click('button[type="submit"]')
   // Wait for the sticky navbar to appear (successful login routes to dashboard)
-  await page.waitForSelector('nav.navbar', { timeout: 10_000 })
+  await page.waitForSelector('nav.sidebar', { timeout: 10_000 })
 }
 
 export const test = base.extend<{

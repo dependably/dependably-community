@@ -44,12 +44,12 @@
   }
 </script>
 
-<div class="page">
+<div class="page page-fluid">
   <header class="page-header">
     <h1>{$t('licensePolicy.title')}</h1>
     <div class="mode-line">
       <span class="mode-label">{$t('licensePolicy.mode')}:</span>
-      <span class="mode-pill mode-{mode}">{$t(`licensePolicy.modes.${mode}`)}</span>
+      <span class="badge mode-{mode}">{$t(`licensePolicy.modes.${mode}`)}</span>
     </div>
   </header>
 
@@ -94,7 +94,7 @@
                   {#if d?.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
                   {#if d?.isFsfLibre}<span class="badge fsf" title="FSF Free/Libre">FSF</span>{/if}
                   {#if d?.copyleft && d.copyleft !== 'unclassified'}
-                    <span class="badge cl cl-{d.copyleft}">{copyleftLabel(d.copyleft)}</span>
+                    <span class="badge cl-{d.copyleft}">{copyleftLabel(d.copyleft)}</span>
                   {/if}
                   {#if d?.isDeprecated}<span class="badge dep">deprecated</span>{/if}
                 </td>
@@ -139,7 +139,7 @@
                   {#if d?.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
                   {#if d?.isFsfLibre}<span class="badge fsf" title="FSF Free/Libre">FSF</span>{/if}
                   {#if d?.copyleft && d.copyleft !== 'unclassified'}
-                    <span class="badge cl cl-{d.copyleft}">{copyleftLabel(d.copyleft)}</span>
+                    <span class="badge cl-{d.copyleft}">{copyleftLabel(d.copyleft)}</span>
                   {/if}
                   {#if d?.isDeprecated}<span class="badge dep">deprecated</span>{/if}
                 </td>
@@ -153,7 +153,9 @@
 </div>
 
 <style>
-  .page { padding: 20px 24px; max-width: 1100px; margin: 0 auto; }
+  /* Keep the tighter vertical padding, but let the global .page-fluid control width
+     (this scoped rule would otherwise out-specify it and re-cap the page at 1100px). */
+  .page { padding: 20px 24px; }
   .page-header {
     display: flex;
     align-items: baseline;
@@ -164,37 +166,11 @@
   h1 { margin: 0; font-size: 20px; font-weight: 600; }
   .mode-line { font-size: 13px; color: var(--text2); }
   .mode-label { margin-right: 6px; }
-  .mode-pill {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    font-weight: 600;
-  }
-  .mode-off   { background: var(--bg3);          color: var(--text2); }
-  .mode-warn  { background: var(--warning-soft); color: var(--warning); }
-  .mode-block { background: var(--danger-soft);  color: var(--danger); }
   .intro { color: var(--text2); font-size: 13px; margin: 0 0 20px; max-width: 780px; }
   .section-h { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
   .empty { font-size: 13px; }
   .mt-4 { margin-top: 24px; }
   .badges { display: flex; gap: 4px; flex-wrap: wrap; }
-  .badge {
-    font-size: 10px;
-    padding: 1px 6px;
-    border-radius: 9px;
-    line-height: 1.6;
-    white-space: nowrap;
-  }
-  .badge.osi { background: var(--badge-sky-bg);    color: var(--badge-sky-text); }
-  .badge.fsf { background: var(--badge-hosted-bg); color: var(--badge-hosted-text); }
-  .badge.dep { background: var(--badge-red-bg);    color: var(--badge-red-text); }
-  .badge.cl-permissive       { background: var(--success-soft);     color: var(--success); }
-  .badge.cl-weak-copyleft    { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
-  .badge.cl-strong-copyleft  { background: var(--warning-soft);     color: var(--warning); }
-  .badge.cl-network-copyleft { background: var(--danger-soft);      color: var(--danger); }
-  .badge.cl-public-domain    { background: var(--badge-purple-bg);  color: var(--badge-purple-text); }
   .col-spdx { width: 200px; }
   .col-badges { width: 220px; }
 </style>

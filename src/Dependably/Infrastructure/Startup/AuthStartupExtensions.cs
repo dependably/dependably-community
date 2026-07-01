@@ -251,20 +251,48 @@ internal static class AuthStartupExtensions
                     () => capturedMux?.GetDatabase()
                         ?? throw new InvalidOperationException("Redis multiplexer not yet initialized."),
                     "DataProtection-Keys");
+
+            // Encrypt newly generated key-ring elements at rest when a KEK is configured.
+            // Pre-existing plaintext elements load unchanged (DataProtection mixed-ring support).
+            // EnvelopeXmlDecryptor is registered in DI so the DataProtection DI-backed activator
+            // can resolve it by type when loading encrypted key elements from the ring.
+            builder.Services.AddTransient<EnvelopeXmlDecryptor>();
+            builder.Services.AddSingleton<IConfigureOptions<KeyManagementOptions>>(sp =>
+                new ConfigureOptions<KeyManagementOptions>(opts =>
+                {
+                    var kek = sp.GetRequiredService<IMasterKeyProvider>();
+                    if (kek.IsConfigured)
+                    {
+                        opts.XmlEncryptor = new EnvelopeXmlEncryptor(kek);
+                    }
+                }));
             return;
         }
 
         // Always configure a durable DB-backed DataProtection key ring for standalone deployments
         // so encrypted values (SAML test cookies, future uses) survive process restarts. The ring
         // is cached in-memory by KeyRingProvider once loaded; the DB is written only on key rotation.
-        // Security posture: the XML key material is stored unencrypted in the SQLite DB — the same
-        // posture as the jwt_secret and mfa_encryption_key already stored in instance_settings.
+        // Security posture: when DEPENDABLY_MASTER_KEY is configured, newly generated key elements
+        // are AES-256-GCM-encrypted by EnvelopeXmlEncryptor before storage; pre-existing plaintext
+        // elements load unchanged (DataProtection mixed-ring support). Without a KEK the ring is
+        // stored as plaintext XML.
+        //
+        // EnvelopeXmlDecryptor is registered in DI so the DataProtection DI-backed activator
+        // can resolve it by type when loading encrypted key elements from the ring.
         builder.Services.AddSingleton<DbXmlRepository>();
+        builder.Services.AddTransient<EnvelopeXmlDecryptor>();
         builder.Services.AddDataProtection()
             .SetApplicationName("dependably");
         builder.Services.AddSingleton<IConfigureOptions<KeyManagementOptions>>(sp =>
             new ConfigureOptions<KeyManagementOptions>(opts =>
-                opts.XmlRepository = sp.GetRequiredService<DbXmlRepository>()));
+            {
+                opts.XmlRepository = sp.GetRequiredService<DbXmlRepository>();
+                var kek = sp.GetRequiredService<IMasterKeyProvider>();
+                if (kek.IsConfigured)
+                {
+                    opts.XmlEncryptor = new EnvelopeXmlEncryptor(kek);
+                }
+            }));
     }
 
     internal static void AddDependablyRateLimiter(this WebApplicationBuilder builder)

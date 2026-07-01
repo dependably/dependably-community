@@ -70,14 +70,14 @@ public sealed class OciStagingJanitorService : ScheduledBackgroundService
         var cutoff = _time.GetUtcNow().AddMinutes(-ttlMinutes);
         string cutoffStr = cutoff.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-        _logger.LogInformation(
+        _logger.LogDebug(
             "OCI staging janitor starting (ttlMinutes={TtlMinutes}, cutoff={Cutoff}).",
             ttlMinutes, cutoffStr);
 
         int sessionsSwept = await SweepStaleSessionsAsync(cutoffStr, ct);
         int orphansSwept = await SweepOrphanFilesAsync(cutoff, ct);
 
-        _logger.LogInformation(
+        _logger.LogDebug(
             "OCI staging janitor done (sessionsSwept={SessionsSwept}, orphansSwept={OrphansSwept}).",
             sessionsSwept, orphansSwept);
 

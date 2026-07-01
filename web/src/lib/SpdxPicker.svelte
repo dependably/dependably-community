@@ -126,7 +126,7 @@
             <span class="badges">
               {#if r.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
               {#if r.isFsfLibre}<span class="badge fsf" title="FSF Free/Libre">FSF</span>{/if}
-              {#if r.copyleft !== 'unclassified'}<span class="badge cl cl-{r.copyleft}">{copyleftLabel(r.copyleft)}</span>{/if}
+              {#if r.copyleft !== 'unclassified'}<span class="badge cl-{r.copyleft}">{copyleftLabel(r.copyleft)}</span>{/if}
               {#if r.isDeprecated}<span class="badge dep" title="Deprecated SPDX identifier">deprecated</span>{/if}
               {#if excludeSet.has(r.identifier)}<span class="badge already" title="Already on a list">added</span>{/if}
             </span>
@@ -190,6 +190,8 @@
   .ident { font-family: var(--font-mono, monospace); font-weight: 600; }
   .name { color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .badges { display: flex; gap: 4px; flex-wrap: nowrap; }
+  /* .badge base and .badge.{osi,fsf,dep,cl-*} are global — see app.css.
+     .badge.already is picker-local (not in global palette). */
   .badge {
     font-size: 10px;
     padding: 1px 6px;
@@ -197,13 +199,5 @@
     line-height: 1.6;
     white-space: nowrap;
   }
-  .badge.osi { background: var(--badge-sky-bg);    color: var(--badge-sky-text); }
-  .badge.fsf { background: var(--badge-hosted-bg); color: var(--badge-hosted-text); }
-  .badge.dep { background: var(--badge-red-bg);    color: var(--badge-red-text); }
   .badge.already { background: var(--bg3); color: var(--text2); }
-  .badge.cl-permissive       { background: var(--success-soft);     color: var(--success); }
-  .badge.cl-weak-copyleft    { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
-  .badge.cl-strong-copyleft  { background: var(--warning-soft);     color: var(--warning); }
-  .badge.cl-network-copyleft { background: var(--danger-soft);      color: var(--danger); }
-  .badge.cl-public-domain    { background: var(--badge-purple-bg);  color: var(--badge-purple-text); }
 </style>

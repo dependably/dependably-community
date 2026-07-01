@@ -18,6 +18,10 @@ namespace Dependably.Protocol;
 ///      <see cref="EvaluateFirstFetchDeprecationAsync"/>, which blocks both <c>block_new</c> and
 ///      <c>block_all</c> so a brand-new deprecated version is never cached or served. "warn" and
 ///      "off" let the version through. (Legacy <c>block</c> is treated as <c>block_all</c>.)
+///   3b. Revoked gate — keyed on <c>RevokedAt</c> (the version was removed upstream) and the
+///      tenant's <c>BlockRevokedMode</c>. Only 'block' denies the serve/listing path; 'warn'/'off'
+///      surface the badge but keep serving. A revoked version cannot be first-fetched, so this is
+///      serve-path only (no first-fetch analog).
 ///   4. Release-age gate — blocks versions younger than the tenant's
 ///      <c>MinReleaseAgeHours</c> hold, measured against the upstream publish timestamp.
 ///      Fail-open when the timestamp is missing (some upstream metadata omits it).
@@ -133,7 +137,8 @@ public sealed class BlockGateService
             Origin: request.Origin,
             HasInstallScript: request.HasInstallScript,
             ProvenanceStatus: request.ProvenanceStatus,
-            InstallScriptAllowlisted: installScriptAllowlisted);
+            InstallScriptAllowlisted: installScriptAllowlisted,
+            RevokedAt: request.RevokedAt);
 
         var policy = new BlockPolicy(
             MinReleaseAgeHours: request.MinReleaseAgeHours,
@@ -143,7 +148,8 @@ public sealed class BlockGateService
             MaxEpssTolerance: request.MaxEpssTolerance,
             MaxOsvScoreTolerance: request.MaxOsvScoreTolerance,
             BlockInstallScriptsMode: request.BlockInstallScriptsMode,
-            VerifyProvenanceMode: request.VerifyProvenanceMode);
+            VerifyProvenanceMode: request.VerifyProvenanceMode,
+            BlockRevokedMode: request.BlockRevokedMode);
 
         var verdict = Evaluate(facts, policy, _time.GetUtcNow());
 
@@ -174,6 +180,10 @@ public sealed class BlockGateService
 
             case BlockArm.Deprecated:
                 await RecordDeprecatedBlockAsync(request, ct);
+                break;
+
+            case BlockArm.Revoked:
+                await RecordRevokedBlockAsync(request, ct);
                 break;
 
             case BlockArm.ReleaseAge:
@@ -388,6 +398,23 @@ public sealed class BlockGateService
         return BlockDecision.Blocked;
     }
 
+    // Side effects for the revoked arm: meter + per-version activity row + review-queue row,
+    // mirroring the deprecated arm. The version was removed upstream, so the detail carries the
+    // first-observed removal timestamp.
+    private async Task RecordRevokedBlockAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        DependablyMeter.RevokedBlocks.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
+        string detail = System.Text.Json.JsonSerializer.Serialize(
+            new { revoked_at = request.RevokedAt?.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_revoked", request.UserId, actorKind: request.ActorKind,
+            detail: detail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "revoked", detail, ct);
+    }
+
     // 'block_all' denies on every request (cache hit or miss). Legacy 'block' predates the
     // new/all split and had identical deny-everything semantics, so it maps to block_all.
     private static bool IsBlockAll(string? mode) => mode is "block_all" or "block";
@@ -443,7 +470,8 @@ public sealed class BlockGateService
             Origin: v.Origin,
             HasInstallScript: v.HasInstallScript,
             ProvenanceStatus: v.ProvenanceStatus,
-            InstallScriptAllowlisted: installScriptAllowlisted);
+            InstallScriptAllowlisted: installScriptAllowlisted,
+            RevokedAt: v.RevokedAt);
 
         var policy = new BlockPolicy(
             MinReleaseAgeHours: settings.MinReleaseAgeHours,
@@ -456,7 +484,8 @@ public sealed class BlockGateService
             // The provenance policy is per-ecosystem (npm vs nuget have independent toggles), so
             // pick the right one from the version's PURL — the stored provenance_status column is
             // ecosystem-agnostic but the gate that interprets it is not.
-            VerifyProvenanceMode: settings.VerifyProvenanceMode(EcosystemFromPurl(v.Purl)));
+            VerifyProvenanceMode: settings.VerifyProvenanceMode(EcosystemFromPurl(v.Purl)),
+            BlockRevokedMode: settings.BlockRevoked);
 
         return !Evaluate(facts, policy, now).Servable;
     }
@@ -486,7 +515,8 @@ public sealed class BlockGateService
             Origin: "proxy",
             HasInstallScript: entry.HasInstallScript,
             ProvenanceStatus: entry.ProvenanceStatus,
-            InstallScriptAllowlisted: installScriptAllowlisted);
+            InstallScriptAllowlisted: installScriptAllowlisted,
+            RevokedAt: entry.RevokedAt);
 
         var policy = new BlockPolicy(
             MinReleaseAgeHours: settings.MinReleaseAgeHours,
@@ -496,7 +526,8 @@ public sealed class BlockGateService
             MaxEpssTolerance: settings.MaxEpssTolerance,
             MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
             BlockInstallScriptsMode: settings.BlockInstallScripts,
-            VerifyProvenanceMode: settings.VerifyProvenanceMode(EcosystemFromPurl(entry.Purl ?? string.Empty)));
+            VerifyProvenanceMode: settings.VerifyProvenanceMode(EcosystemFromPurl(entry.Purl ?? string.Empty)),
+            BlockRevokedMode: settings.BlockRevoked);
 
         return !Evaluate(facts, policy, now).Servable;
     }
@@ -518,8 +549,9 @@ public sealed class BlockGateService
 
     /// <summary>
     /// Pure policy core: maps <see cref="VersionFacts"/> + <see cref="BlockPolicy"/> to a
-    /// <see cref="BlockVerdict"/> with no I/O or side effects. Applies the nine arms in priority
-    /// order (Manual > Deprecated > ReleaseAge > Malicious > Kev > Epss > VulnScore > InstallScript).
+    /// <see cref="BlockVerdict"/> with no I/O or side effects. Applies the arms in priority
+    /// order (Manual > Deprecated > Revoked > ReleaseAge > Malicious > Provenance > Kev > Epss >
+    /// VulnScore > InstallScript).
     /// Both <see cref="EvaluateAsync"/> and <see cref="IsHardBlockedByStoredState"/> project
     /// their inputs into these types and delegate here so the policy logic has one home.
     /// </summary>
@@ -545,17 +577,21 @@ public sealed class BlockGateService
             return new BlockVerdict(Servable: false, Arm: BlockArm.Deprecated);
         }
 
+        // Arm 2b: revoked — the version was removed from the upstream registry (a takedown can
+        // signal a compromised release). Only 'block' denies; 'warn'/'off'/null surface the badge
+        // but keep serving. A revoked version cannot be first-fetched (it is gone upstream), so
+        // this is a serve-path / listing gate only.
+        if (facts.RevokedAt is not null && policy.BlockRevokedMode == "block")
+        {
+            return new BlockVerdict(Servable: false, Arm: BlockArm.Revoked);
+        }
+
         // Arm 3: release-age hold. Applies only to upstream-derived origins so locally-hosted
         // packages are not self-blocked by a cooldown measured against their own push timestamp.
         // Fail-open when PublishedAt is absent.
-        if (IsCooldownEligible(facts.Origin) &&
-            policy.MinReleaseAgeHours is { } minHours && minHours > 0 && facts.PublishedAt is { } publishedAt)
+        if (IsReleaseAgeBlocked(facts, policy, now))
         {
-            double ageHours = (now - publishedAt).TotalHours;
-            if (ageHours < minHours)
-            {
-                return new BlockVerdict(Servable: false, Arm: BlockArm.ReleaseAge);
-            }
+            return new BlockVerdict(Servable: false, Arm: BlockArm.ReleaseAge);
         }
 
         // Arms 4–7 require vuln data. Scanned false means not yet scanned — fail-open.
@@ -587,6 +623,21 @@ public sealed class BlockGateService
                && !facts.InstallScriptAllowlisted
             ? new BlockVerdict(Servable: false, Arm: BlockArm.InstallScript)
             : vulnVerdict;
+    }
+
+    // Arm 3 predicate: true when the version is upstream-derived, a positive cooldown is
+    // configured, PublishedAt is known, and that timestamp is still within the cooldown window.
+    private static bool IsReleaseAgeBlocked(VersionFacts facts, BlockPolicy policy, DateTimeOffset now)
+    {
+        if (!IsCooldownEligible(facts.Origin) ||
+            policy.MinReleaseAgeHours is not { } minHours || minHours <= 0 ||
+            facts.PublishedAt is not { } publishedAt)
+        {
+            return false;
+        }
+
+        double ageHours = (now - publishedAt).TotalHours;
+        return ageHours < minHours;
     }
 
     // Arms 4–7: malicious, KEV, EPSS, and CVSS score gates. All require a scanned version row;
@@ -636,7 +687,7 @@ public sealed class BlockGateService
 /// Identifies which policy arm triggered a block verdict. <see cref="None"/> means the
 /// version is servable (no arm fired).
 /// </summary>
-public enum BlockArm { None, Manual, Deprecated, ReleaseAge, Malicious, Provenance, Kev, Epss, VulnScore, InstallScript }
+public enum BlockArm { None, Manual, Deprecated, Revoked, ReleaseAge, Malicious, Provenance, Kev, Epss, VulnScore, InstallScript }
 
 /// <summary>
 /// Outcome of the pure policy core: whether the version is servable and, if not, which arm
@@ -672,7 +723,12 @@ public readonly record struct VersionFacts(
     /// Computed at the call site by <see cref="InstallScriptAllowlistService.IsAllowlistedAsync"/>
     /// on the download path; always false on the listing path (callers pass the default).
     /// </summary>
-    bool InstallScriptAllowlisted = false);
+    bool InstallScriptAllowlisted = false,
+    /// <summary>
+    /// Upstream-removal timestamp from <c>revoked_at</c>. Non-null = the version was removed from
+    /// the upstream registry. Drives the revoked arm under a 'block' policy.
+    /// </summary>
+    DateTimeOffset? RevokedAt = null);
 
 /// <summary>
 /// Immutable projection of the tenant policy knobs that every arm reads. Built from
@@ -693,7 +749,13 @@ public readonly record struct BlockPolicy(
     /// proxy ingest path is responsible for actually running verification and persisting the
     /// status; this gate only acts on the persisted result.
     /// </summary>
-    string? VerifyProvenanceMode = null);
+    string? VerifyProvenanceMode = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.block_revoked</c>: 'off' | 'warn' | 'block'. Only
+    /// 'block' denies a version removed upstream; 'warn'/'off'/null surface the badge but keep
+    /// serving. Three values (no <c>block_new</c> analog — revocation is always a full removal).
+    /// </summary>
+    string? BlockRevokedMode = null);
 
 public enum BlockDecision
 {
@@ -784,7 +846,17 @@ public sealed record BlockGateRequest(
     /// for all current call sites (behaviour-equivalent to the pre-P2 path). P3 will set this
     /// on the proxy serve path once the global plane is authoritative.
     /// </summary>
-    string? CacheArtifactId = null)
+    string? CacheArtifactId = null,
+    /// <summary>
+    /// Upstream-removal timestamp from <c>revoked_at</c>. Non-null = removed upstream. Drives the
+    /// revoked arm. NULL for NuGet/Maven (no per-version revocation detection) and uploaded versions.
+    /// </summary>
+    DateTimeOffset? RevokedAt = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.block_revoked</c>: 'off' | 'warn' | 'block'. Only 'block'
+    /// denies a revoked version. Null behaves as 'off'.
+    /// </summary>
+    string? BlockRevokedMode = null)
 {
     /// <summary>
     /// Constructs a <see cref="BlockGateRequest"/> from the standard download-path inputs shared
@@ -818,5 +890,7 @@ public sealed record BlockGateRequest(
             Origin: version.Origin,
             HasInstallScript: version.HasInstallScript,
             InstallScriptKind: version.InstallScriptKind,
-            BlockInstallScriptsMode: settings?.BlockInstallScripts);
+            BlockInstallScriptsMode: settings?.BlockInstallScripts,
+            RevokedAt: version.RevokedAt,
+            BlockRevokedMode: settings?.BlockRevoked);
 }

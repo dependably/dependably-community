@@ -31,6 +31,8 @@
   --success-border: color-mix(in oklch, var(--success) 35%, var(--border));
   --info-bg:        color-mix(in oklch, var(--info) 12%, var(--bg2));
   --info-border:    color-mix(in oklch, var(--info) 35%, var(--border));
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   --radius: 6px;
   --shadow: 0 1px 3px rgba(0,0,0,0.1);
 
@@ -215,6 +217,18 @@ tr:hover td { background: var(--bg2); }
 .badge.first-fetch { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
 .badge.yanked  { background: var(--badge-red-bg);     color: var(--badge-red-text); }
 .badge.deprecated { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
+/* Revoked: the version was removed from the upstream registry (a takedown can signal a
+   compromised release). A red-tint pill with an inline alert glyph so it reads as a distinct
+   security/operational risk beside the muted lifecycle badges, without claiming the filled-red
+   "malicious" signal. */
+.badge.revoked {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  vertical-align: middle;
+  background: var(--badge-red-bg);
+  color: var(--badge-red-text);
+}
 .badge.install-script { background: var(--badge-purple-bg); color: var(--badge-purple-text); }
 .badge.prov-verified { background: var(--success-soft);     color: var(--success); }
 .badge.prov-failed   { background: var(--badge-red-bg);     color: var(--badge-red-text); }
@@ -224,6 +238,34 @@ tr:hover td { background: var(--bg2); }
 .badge.warning { background: var(--badge-warning-bg);   color: var(--badge-warning-text); }
 .badge.expired { background: var(--badge-red-bg);     color: var(--badge-red-text); }
 .badge.success { background: var(--success-soft);     color: var(--success); }
+.badge.danger  { background: var(--danger-bg);        color: var(--danger);  border: 1px solid var(--danger-border); }
+/* Claims state badges — shared between Claims.svelte and VersionDetail.svelte */
+.badge.state-unclaimed  { background: var(--bg2);        color: var(--text2);          border: 1px solid var(--border); }
+.badge.state-local_only { background: var(--success-bg); color: var(--success);        border: 1px solid var(--success-border); }
+.badge.state-mixed      { background: var(--warning-bg); color: var(--warning-text);   border: 1px solid var(--warning-border); }
+/* Quarantine state badges */
+.badge.state-approved { background: var(--badge-hosted-bg); color: var(--badge-hosted-text); }
+.badge.state-denied   { background: var(--badge-red-bg);    color: var(--badge-red-text); }
+/* License policy mode pills */
+.badge.mode-off   { background: var(--bg3);          color: var(--text2); }
+.badge.mode-warn  { background: var(--warning-soft); color: var(--warning); }
+.badge.mode-block { background: var(--danger-soft);  color: var(--danger); }
+/* License attribute badges */
+.badge.osi { background: var(--badge-sky-bg);    color: var(--badge-sky-text); }
+.badge.fsf { background: var(--badge-hosted-bg); color: var(--badge-hosted-text); }
+.badge.dep { background: var(--badge-red-bg);    color: var(--badge-red-text); }
+.badge.cl-permissive       { background: var(--success-soft);     color: var(--success); }
+.badge.cl-weak-copyleft    { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
+.badge.cl-strong-copyleft  { background: var(--warning-soft);     color: var(--warning); }
+.badge.cl-network-copyleft { background: var(--danger-soft);      color: var(--danger); }
+.badge.cl-public-domain    { background: var(--badge-purple-bg);  color: var(--badge-purple-text); }
+/* Upload outcome badges */
+.badge.outcome-accepted,
+.badge.outcome-would_accept { background: var(--success-bg); color: var(--success); border: 1px solid var(--success-border); }
+.badge.outcome-rejected,
+.badge.outcome-would_reject { background: var(--danger-bg);  color: var(--danger);  border: 1px solid var(--danger-border); }
+/* Badge with inline icon gap (e.g. claim state badges with lock/exchange icons) */
+.badge.has-icon { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
 /* Known-malicious (OSV MAL- advisory). A filled-red pill — the strongest danger signal in
    the tables — so it stands apart from the muted severity-tint badges around it. */
 .badge.malicious {
@@ -265,8 +307,16 @@ tr:hover td { background: var(--bg2); }
   margin-bottom: 10px;
 }
 
+/* Page width rule (one rule, applied everywhere). Pick exactly one per page;
+   do not mix or invent a fourth width.
+     .page        forms / narrow reading    max 1100px, centered
+     .page-wide   detail + dashboard well   max 1320px, centered
+     .page-fluid  list / data-table pages   full-bleed, 24px gutters
+   The dashboard and version-detail use the centered well on purpose; every list
+   page is full-bleed. That centered-well → full-bleed transition is intentional. */
 .page { padding: 24px; max-width: 1100px; margin: 0 auto; }
 .page-wide { max-width: 1320px; }
+.page-fluid { max-width: none; }
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 .page-title { font-size: 20px; font-weight: 700; margin: 0; }
 
@@ -284,14 +334,59 @@ tr:hover td { background: var(--bg2); }
 .tab:hover { color: var(--text); background: var(--bg2); }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-.search-bar {
+/* Page toolbar: the canonical "search + filters above a table" row. Use on every
+   list page (Packages, Vulnerabilities, Claims, …) instead of re-scoping per page.
+   These narrow the loaded report client-side; they are NOT global/top-bar controls —
+   the filter search is visually distinct from the top-bar global search and always
+   lives here, never in .page-header. */
+.page-toolbar {
   display: flex;
-  gap: 8px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
   align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
 }
-.search-bar input { max-width: 280px; }
+.page-toolbar :global(.toolbar-search) { width: 240px; }
+.eco-select { width: auto; }
+
+/* Section sub-header used above per-section lists in settings panels.
+   Files that need a different margin may scope-override. */
+.list-header { margin-bottom: 12px; }
+
+.sev-filter { display: inline-flex; gap: 4px; }
+.sev-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text2);
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.sev-chip:hover { background: var(--bg3); color: var(--text); }
+.sev-chip.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.sev-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.sev-dot.sev-critical { background: var(--sev-critical-bg); }
+.sev-dot.sev-high     { background: var(--sev-high-bg); }
+.sev-dot.sev-medium   { background: var(--sev-medium-bg); }
+.sev-dot.sev-low      { background: var(--sev-low-bg); }
+.revoked-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text2);
+  cursor: pointer;
+}
 
 .spinner {
   display: inline-block;
@@ -370,6 +465,36 @@ tr:hover td { background: var(--bg2); }
 }
 .modal h3 { margin: 0 0 16px; font-size: 16px; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.modal.scrollable { max-height: 85vh; overflow-y: auto; }
+
+/* Modal layout variant — width + flex-column layout used in Claims and Upload modals.
+   Applied as class="modal scrollable modal-flex". */
+.modal-flex {
+  width: min(520px, 90vw);
+  display: flex; flex-direction: column; gap: 12px;
+}
+.modal-flex h2 { margin: 0; font-size: 16px; }
+.modal-flex label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.modal-flex .modal-actions { margin-top: 8px; }
+
+/* Inline card variants used inside modal-flex bodies */
+.warning-card {
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.warning-card p { margin: 0 0 6px 0; }
+
+.info-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.info-card p { margin: 0; }
 
 /* Brand */
 .brand { display: inline-flex; align-items: center; gap: 8px; color: var(--text); }
@@ -446,6 +571,11 @@ table td, .copy-block { font-variant-numeric: tabular-nums; }
   background: var(--danger-soft);
 }
 .alert-card.hot .stat-value { color: var(--danger); }
+.alert-card.warn {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+}
+.alert-card.warn .stat-value { color: var(--warning); }
 .stat-card .eyebrow, .alert-card .eyebrow { margin: 0; }
 
 /* Page-title row that hosts inline status ribbons */

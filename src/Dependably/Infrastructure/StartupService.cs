@@ -1,5 +1,7 @@
 using System.Reflection;
 using System.Text;
+using Dapper;
+using Dependably.Infrastructure.Identity;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -10,7 +12,8 @@ namespace Dependably.Infrastructure;
 /// Runs mandatory startup work before the server begins accepting requests:
 /// 1. Apply database schema (idempotent)
 /// 2. First-boot initialization (default org, JWT secret, admin password)
-/// 3. Load the JWT signing key from the database into the JWT options
+/// 3. Envelope-encrypt instance secrets that are still stored as plaintext (idempotent migration)
+/// 4. Load the JWT signing key from the database into the JWT options
 /// </summary>
 public sealed class StartupService : IHostedService
 {
@@ -21,6 +24,8 @@ public sealed class StartupService : IHostedService
     private readonly IConfiguration _config;
     private readonly StagingOptions _staging;
     private readonly ILogger<StartupService> _logger;
+    private readonly EnvelopeProtector _envelope;
+    private readonly IMetadataStore _db;
 
     public StartupService(
         SchemaInitializer schema,
@@ -29,7 +34,9 @@ public sealed class StartupService : IHostedService
         IOptionsMonitor<JwtBearerOptions> jwtOptions,
         IConfiguration config,
         StagingOptions staging,
-        ILogger<StartupService> logger)
+        ILogger<StartupService> logger,
+        EnvelopeProtector envelope,
+        IMetadataStore db)
     {
         _schema = schema;
         _firstBoot = firstBoot;
@@ -38,6 +45,8 @@ public sealed class StartupService : IHostedService
         _config = config;
         _staging = staging;
         _logger = logger;
+        _envelope = envelope;
+        _db = db;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -55,6 +64,7 @@ public sealed class StartupService : IHostedService
 
         await _schema.InitializeAsync(cancellationToken);
         await _firstBoot.RunAsync(cancellationToken);
+        await MigrateSecretsToEnvelopeAsync(cancellationToken);
 
         LogEnvironmentWarnings();
         string? baseUrl = _config["BASE_URL"];
@@ -90,6 +100,94 @@ public sealed class StartupService : IHostedService
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <summary>
+    /// Idempotent startup migration: when a master key is configured, wraps any plaintext
+    /// instance secrets with the envelope so they are encrypted at rest going forward. Secrets
+    /// that already carry the <c>enc:v1:</c> prefix are skipped. Runs inside BEGIN IMMEDIATE
+    /// so concurrent replica restarts cannot produce partial states.
+    ///
+    /// When no master key is configured, probes the raw stored values and THROWS if either
+    /// secret is already prefixed (lost-key scenario) — the operator must supply the key used
+    /// during encryption or restore an unencrypted database before the server can start.
+    /// </summary>
+    private async Task MigrateSecretsToEnvelopeAsync(CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+
+        if (_envelope.IsConfigured)
+        {
+            await EncryptPlaintextInstanceSecretsAsync(conn);
+        }
+        else
+        {
+            await VerifyNoOrphanedEncryptedSecretsAsync(conn);
+        }
+    }
+
+    // Wraps any plaintext instance secrets with the envelope so they are encrypted at rest going
+    // forward. Secrets that already carry the enc:v1: prefix are skipped. Runs inside
+    // BEGIN IMMEDIATE so concurrent replica restarts cannot produce partial states.
+    private async Task EncryptPlaintextInstanceSecretsAsync(System.Data.Common.DbConnection conn)
+    {
+        await conn.ExecuteAsync("BEGIN IMMEDIATE");
+        try
+        {
+            foreach (string key in OrgRepository.SecretKeys)
+            {
+                // xtenant: instance-global secret, not tenant-scoped.
+                string? raw = await conn.ExecuteScalarAsync<string?>(
+                    "SELECT value FROM instance_settings WHERE key = @key",
+                    new { key });
+
+                if (raw is null || _envelope.IsEncrypted(raw))
+                {
+                    continue;
+                }
+
+                string encrypted = _envelope.Protect(raw);
+                // xtenant: instance-global secret, not tenant-scoped.
+                await conn.ExecuteAsync(
+                    "UPDATE instance_settings SET value = @value WHERE key = @key",
+                    new { value = encrypted, key });
+                _logger.LogInformation(
+                    "Envelope-encrypted instance secret {Key} at rest", key);
+            }
+
+            await conn.ExecuteAsync("COMMIT");
+        }
+        catch
+        {
+            await conn.ExecuteAsync("ROLLBACK");
+            throw;
+        }
+    }
+
+    // Fail closed: if either secret was written by an envelope-configured instance, starting
+    // without the master key would yield an unusable JWT signing key.
+    private async Task VerifyNoOrphanedEncryptedSecretsAsync(System.Data.Common.DbConnection conn)
+    {
+        foreach (string key in OrgRepository.SecretKeys)
+        {
+            // xtenant: instance-global secret, not tenant-scoped.
+            string? raw = await conn.ExecuteScalarAsync<string?>(
+                "SELECT value FROM instance_settings WHERE key = @key",
+                new { key });
+
+            if (raw is not null && _envelope.IsEncrypted(raw))
+            {
+                throw new InvalidOperationException(
+                    $"Instance secrets are envelope-encrypted at rest but DEPENDABLY_MASTER_KEY is not configured. " +
+                    $"Set the master key to the value used when they were encrypted, or restore the " +
+                    $"unencrypted DB. Refusing to start.");
+            }
+        }
+
+        _logger.LogWarning(
+            "Instance secrets (jwt_secret, mfa_encryption_key) are stored unencrypted. " +
+            "Set DEPENDABLY_MASTER_KEY to envelope-encrypt them at rest, or ensure the " +
+            "database is on an OS-encrypted volume.");
+    }
 
     // Logs operator-facing warnings for missing or misconfigured environment variables.
     // None of these abort startup — they surface as LogWarning so the operator can act
@@ -146,16 +244,6 @@ public sealed class StartupService : IHostedService
                 "PATCH requests for an active upload session must reach the same replica that " +
                 "issued the session UUID. Configure session affinity on your load balancer keyed " +
                 "on the upload UUID path segment before routing OCI push traffic.");
-        }
-
-        if (!string.IsNullOrWhiteSpace(_config["Rpm:Upstream"])
-            && string.IsNullOrWhiteSpace(_config["Rpm:GpgKey"]))
-        {
-            _logger.LogWarning(
-                "Rpm:GpgKey is not set. The RPM proxy fetches repomd.xml from upstream but does NOT " +
-                "verify its detached OpenPGP signature (repomd.xml.asc), so a hostile or MITM upstream " +
-                "can serve tampered metadata that poisons the package-checksum chain. Set Rpm:GpgKey to " +
-                "your repo's pinned public key to enforce signature verification.");
         }
 
         if (_staging.FloorBytes == 0)

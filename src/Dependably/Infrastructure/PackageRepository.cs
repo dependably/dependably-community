@@ -81,7 +81,8 @@ public sealed class PackageRepository
         var existing = await conn.QuerySingleOrDefaultAsync<Package>(
             """
             SELECT id, org_id as OrgId, ecosystem, name, purl_name as PurlName,
-                   is_proxy as IsProxy, created_at as CreatedAt
+                   is_proxy as IsProxy, created_at as CreatedAt,
+                   same_version_push_override as SameVersionPushOverride
             FROM packages WHERE org_id = @orgId AND ecosystem = @ecosystem AND purl_name = @purlName
             """,
             new { orgId, ecosystem, purlName });
@@ -202,7 +203,7 @@ public sealed class PackageRepository
                    pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
                    pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.download_count as DownloadCount, pv.created_at as CreatedAt,
                    pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
-                   pv.deprecated as Deprecated, pv.origin as Origin, pv.published_at as PublishedAt,
+                   pv.deprecated as Deprecated, pv.revoked_at as RevokedAt, pv.origin as Origin, pv.published_at as PublishedAt,
                    pv.checksum_sha1 as ChecksumSha1,
                    pv.upstream_integrity_value as UpstreamIntegrityValue,
                    pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm,
@@ -234,7 +235,7 @@ public sealed class PackageRepository
                    size_bytes as SizeBytes, checksum_sha256 as ChecksumSha256,
                    yanked, yank_reason as YankReason, first_fetch as FirstFetch, download_count as DownloadCount, created_at as CreatedAt,
                    vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState,
-                   deprecated as Deprecated, origin as Origin, published_at as PublishedAt,
+                   deprecated as Deprecated, revoked_at as RevokedAt, origin as Origin, published_at as PublishedAt,
                    checksum_sha1 as ChecksumSha1,
                    upstream_integrity_value as UpstreamIntegrityValue,
                    upstream_integrity_algorithm as UpstreamIntegrityAlgorithm,
@@ -264,7 +265,7 @@ public sealed class PackageRepository
                    pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
                    pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.download_count as DownloadCount, pv.created_at as CreatedAt,
                    pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
-                   pv.deprecated as Deprecated, pv.origin as Origin, pv.published_at as PublishedAt,
+                   pv.deprecated as Deprecated, pv.revoked_at as RevokedAt, pv.origin as Origin, pv.published_at as PublishedAt,
                    pv.checksum_sha1 as ChecksumSha1,
                    pv.upstream_integrity_value as UpstreamIntegrityValue,
                    pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm,
@@ -325,7 +326,7 @@ public sealed class PackageRepository
                    yanked, yank_reason as YankReason, first_fetch as FirstFetch,
                    download_count as DownloadCount, created_at as CreatedAt,
                    vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState,
-                   deprecated as Deprecated, origin as Origin, published_at as PublishedAt,
+                   deprecated as Deprecated, revoked_at as RevokedAt, origin as Origin, published_at as PublishedAt,
                    checksum_sha1 as ChecksumSha1,
                    upstream_integrity_value as UpstreamIntegrityValue,
                    upstream_integrity_algorithm as UpstreamIntegrityAlgorithm,
@@ -638,7 +639,7 @@ public sealed class PackageRepository
                    pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
                    pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.download_count as DownloadCount, pv.created_at as CreatedAt,
                    pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
-                   pv.deprecated as Deprecated, pv.origin as Origin, pv.published_at as PublishedAt,
+                   pv.deprecated as Deprecated, pv.revoked_at as RevokedAt, pv.origin as Origin, pv.published_at as PublishedAt,
                    pv.checksum_sha1 as ChecksumSha1,
                    pv.upstream_integrity_value as UpstreamIntegrityValue,
                    pv.upstream_integrity_algorithm as UpstreamIntegrityAlgorithm,
@@ -841,9 +842,12 @@ public sealed class PackageRepository
     public async Task SetYankedAsync(string versionId, bool yanked, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        // Stamp yanked_at on yank, clear it on un-yank, so the unlist-age retention gate
+        // measures time since the most recent unlist rather than since publish.
+        string? yankedAt = yanked ? _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") : null;
         await conn.ExecuteAsync(
-            "UPDATE package_versions SET yanked = @yanked, yank_reason = NULL WHERE id = @id",
-            new { id = versionId, yanked = yanked ? 1 : 0 });
+            "UPDATE package_versions SET yanked = @yanked, yank_reason = NULL, yanked_at = @yankedAt WHERE id = @id",
+            new { id = versionId, yanked = yanked ? 1 : 0, yankedAt });
     }
 
     /// <summary>

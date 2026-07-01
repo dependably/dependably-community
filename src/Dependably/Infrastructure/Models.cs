@@ -97,6 +97,7 @@ public class OrgSettings
     public int? KeepVersions { get; set; }
     public int? KeepDays { get; set; }
     public int? ActivityRetentionDays { get; set; }
+    public int? PurgeUnlistedAfterDays { get; set; }
     /// <summary>'off' | 'warn' | 'block'</summary>
     public string LicenseEnforcementMode { get; set; } = "off";
     public bool ProxyPassthroughEnabled { get; set; } = true;
@@ -154,6 +155,14 @@ public class OrgSettings
     /// </summary>
     public string BlockDeprecated { get; set; } = "off";
     /// <summary>
+    /// Proxy gate for versions removed from the upstream registry (keyed on
+    /// <c>package_versions.revoked_at</c> / <c>cache_artifact.revoked_at</c>). 'off' = allow
+    /// through; 'warn' (default) = surface the revoked badge without blocking; 'block' = deny the
+    /// serve/listing path and quarantine for review. Three values (no <c>block_new</c> analog —
+    /// revocation is always a full upstream removal). A manual per-version allow override still wins.
+    /// </summary>
+    public string BlockRevoked { get; set; } = "warn";
+    /// <summary>
     /// Proxy gate for versions carrying a malicious-package advisory (OSV <c>MAL-</c> ids from
     /// the OpenSSF malicious-packages feed). Those advisories usually have no CVSS score, so
     /// <see cref="MaxOsvScoreTolerance"/> never sees them — this gate keys on the advisory id
@@ -183,9 +192,9 @@ public class OrgSettings
     /// Proxy gate for npm registry signature verification of proxy-origin versions
     /// (<c>package_versions.provenance_status</c>). 'off' (default) = do not verify; 'warn' =
     /// verify and surface in UI only; 'block' = fail closed (a version that fails verification or
-    /// is unsigned is refused, not cached or served). Enabling 'warn'/'block' requires
-    /// operator-pinned <c>Npm:SignatureKeys</c>; without them the verifier reports
-    /// not-applicable and nothing blocks. A manual per-version allow override still wins.
+    /// is unsigned is refused, not cached or served). Enabling 'warn'/'block' requires at least
+    /// one npm SPKI trust anchor in <c>signature_trust_anchor</c>; without one the verifier
+    /// reports not-applicable and nothing blocks. A manual per-version allow override still wins.
     /// </summary>
     public string VerifyNpmSignatures { get; set; } = "off";
     /// <summary>
@@ -193,8 +202,9 @@ public class OrgSettings
     /// (<c>package_versions.provenance_status</c>). 'off' (default) = do not verify; 'warn' =
     /// verify and surface in UI only; 'block' = fail closed (a version whose signature fails
     /// verification or is unsigned is refused, not cached or served). Enabling 'warn'/'block'
-    /// requires operator-pinned <c>NuGet:SignatureCertificates</c>; without them the verifier
-    /// reports not-applicable and nothing blocks. A manual per-version allow override still wins.
+    /// requires at least one NuGet X.509 trust anchor in <c>signature_trust_anchor</c>; without
+    /// one the verifier reports not-applicable and nothing blocks. A manual per-version allow
+    /// override still wins.
     /// </summary>
     public string VerifyNuGetSignatures { get; set; } = "off";
     /// <summary>
@@ -202,7 +212,8 @@ public class OrgSettings
     /// (<c>package_versions.provenance_status</c>). 'off' (default) = do not verify; 'warn' =
     /// verify and surface in UI only; 'block' = fail closed (a version whose attestation fails
     /// verification or that carries none is refused, not cached or served). Enabling 'warn'/'block'
-    /// requires operator-pinned <c>PyPI:SigstoreRoots</c> and <c>PyPI:TrustedPublishers</c>; without
+    /// requires at least one per-org <c>sigstore_root</c> trust anchor and at least one
+    /// <c>trusted_publisher</c> trust anchor configured via Settings → Trust Anchors; without
     /// them the verifier reports not-applicable and nothing blocks. A manual per-version allow
     /// override still wins.
     /// </summary>
@@ -212,8 +223,9 @@ public class OrgSettings
     /// (<c>cache_artifact.provenance_status</c>). 'off' (default) = do not verify; 'warn' = verify
     /// and surface in UI only; 'block' = fail closed (a version whose header signature fails
     /// verification or carries none is refused, not cached or served). Enabling 'warn'/'block'
-    /// requires operator-pinned <c>Rpm:GpgKey</c>; without it the verifier reports not-applicable
-    /// and nothing blocks. A manual per-version allow override still wins.
+    /// requires at least one RPM PGP trust anchor in <c>signature_trust_anchor</c>; without one
+    /// the verifier reports not-applicable and nothing blocks. A manual per-version allow override
+    /// still wins.
     /// </summary>
     public string VerifyRpmSignatures { get; set; } = "off";
     /// <summary>
@@ -221,8 +233,9 @@ public class OrgSettings
     /// versions (<c>cache_artifact.provenance_status</c>). 'off' (default) = do not verify; 'warn' =
     /// verify and surface in UI only; 'block' = fail closed (a version whose <c>.asc</c> signature
     /// fails verification or is absent is refused, not cached or served). Enabling 'warn'/'block'
-    /// requires operator-pinned <c>Maven:SignatureKeys</c>; without them the verifier reports
-    /// not-applicable and nothing blocks. A manual per-version allow override still wins.
+    /// requires at least one per-org Maven PGP trust anchor in <c>signature_trust_anchor</c>;
+    /// without one the verifier reports not-applicable and nothing blocks. A manual per-version
+    /// allow override still wins.
     /// </summary>
     public string VerifyMavenSignatures { get; set; } = "off";
     /// <summary>
@@ -336,6 +349,13 @@ public class PackageVersion
     public string? UpstreamIntegrityAlgorithm { get; set; }
     /// <summary>ISO 8601 UTC; set by <c>DeprecationRefreshService</c> after each upstream metadata check. NULL = never checked.</summary>
     public DateTimeOffset? DeprecationCheckedAt { get; set; }
+    /// <summary>
+    /// ISO 8601 UTC; first time this version was observed REMOVED from the upstream registry
+    /// (npm unpublish, PyPI delete, registry takedown). NULL = still published upstream. Distinct
+    /// from <see cref="Deprecated"/> (still published, advised against): revoked = gone entirely.
+    /// Set by <c>DeprecationRefreshService</c>; reset to NULL if the version reappears upstream.
+    /// </summary>
+    public DateTimeOffset? RevokedAt { get; set; }
     /// <summary>
     /// True when the artefact ships an install/lifecycle script that runs automatically on
     /// install — an npm preinstall/install/postinstall hook, a PyPI sdist <c>setup.py</c>, or a
@@ -670,6 +690,28 @@ public class UpstreamRegistryEntry
     public bool HasSecret { get; set; }
 }
 
+/// <summary>
+/// A per-org signature trust anchor row from <c>signature_trust_anchor</c>. One row per key
+/// material block; an org may have multiple anchors for the same ecosystem (e.g. Maven has
+/// both a project key and a mirror key). <c>material</c> is PUBLIC key material stored
+/// plaintext — never returned by the list API, only on add confirmation.
+/// </summary>
+public class TrustAnchorEntry
+{
+    public string Id { get; set; } = "";
+    public string OrgId { get; set; } = "";
+    public string Ecosystem { get; set; } = "";
+    /// <summary>Discriminates the key material format: 'pgp' | 'spki' | 'x509' | 'sigstore_root' | 'trusted_publisher' | 'rekor_key'.</summary>
+    public string AnchorKind { get; set; } = "";
+    /// <summary>Optional fingerprint or subject for display — never used for trust decisions.</summary>
+    public string? KeyId { get; set; }
+    /// <summary>Operator-supplied display label (optional).</summary>
+    public string? Label { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    /// <summary>User id of the operator who added this anchor.</summary>
+    public string? CreatedBy { get; set; }
+}
+
 public class AuditEntry
 {
     public string Id { get; set; } = "";
@@ -717,6 +759,11 @@ public class AffectedVersionRecord
     public string? VulnCheckedAt { get; set; }
     public string OrgSlug { get; set; } = "";
     public string Ecosystem { get; set; } = "";
+    /// <summary>
+    /// ISO 8601 UTC; set when the affected version has been observed removed from upstream.
+    /// NULL = still published. A distinct lifecycle signal — not a vulnerability/severity.
+    /// </summary>
+    public string? RevokedAt { get; set; }
 }
 
 // ── Rich OSV advisory detail (lazy detail endpoint) ───────────────────────────

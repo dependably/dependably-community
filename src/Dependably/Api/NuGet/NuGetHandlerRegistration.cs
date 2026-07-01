@@ -37,6 +37,7 @@ internal static class NuGetHandlerRegistration
                 licenses: sp.GetRequiredService<LicenseRepository>(),
                 cache: sp.GetRequiredService<RenderedResponseCache<NuGetRegistrationKey>>(),
                 logger: sp.GetRequiredService<ILogger<NuGetPublishHandler>>(),
+                time: sp.GetRequiredService<TimeProvider>(),
                 stagingPath: stagingPath);
         });
         services.AddScoped<NuGetControllerServices>();

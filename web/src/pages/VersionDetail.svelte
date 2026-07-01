@@ -140,9 +140,9 @@
           {pkg.name}
           {#if claim && (claim.state === 'local_only' || claim.state === 'mixed')}
             <span
-              class="claim-badge claim-{claim.state}"
+              class="badge has-icon state-{claim.state}"
               title={$t(`claims.states.${claim.state}`) + (claim.isImplicit ? ' (implicit)' : '')}
-              aria-label={claim.state}>
+              aria-label={$t(`claims.states.${claim.state}`) + (claim.isImplicit ? ' (implicit)' : '')}>
               {#if claim.state === 'local_only'}
                 <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-lock"/></svg>
               {:else}
@@ -181,20 +181,6 @@
 </div>
 
 <style>
-  /* Claim badge: surfaces the resolved claim state on the package header. Visual
-     hierarchy matches Claims.svelte's state-badge so the two views feel consistent. */
-  .claim-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 10px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    margin-left: 8px;
-    vertical-align: middle;
-  }
-  .claim-local_only { background: var(--success-bg);  color: var(--success); border: 1px solid var(--success-border); }
-  .claim-mixed      { background: var(--warning-bg); color: var(--warning-text); border: 1px solid var(--warning-border); }
+  /* Claim state badge needs a left margin to separate it from the package name in the H1. */
+  .badge.has-icon { margin-left: 8px; }
 </style>

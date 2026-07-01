@@ -240,6 +240,117 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         Assert.Contains("legacy package", detail);
     }
 
+    // ── revoked (upstream-removed) gate ───────────────────────────────────────
+
+    [Fact]
+    public async Task Revoked_BlockMode_Blocks_AndLogsActivity()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"rev-block-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            RevokedAt = _clock.GetUtcNow().AddDays(-1),
+            BlockRevokedMode = "block",
+        };
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+        Assert.Equal(1, await CountActivityAsync(orgId, "blocked_revoked"));
+    }
+
+    [Theory]
+    [InlineData("warn")]
+    [InlineData("off")]
+    [InlineData(null)]
+    public async Task Revoked_NonBlockingModes_AllowThrough(string? mode)
+    {
+        // 'warn'/'off'/null surface the badge but keep serving the cached copy.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"rev-allow-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            RevokedAt = _clock.GetUtcNow().AddDays(-1),
+            BlockRevokedMode = mode,
+        };
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_revoked"));
+    }
+
+    [Fact]
+    public async Task Revoked_BlockMode_NullRevokedAt_AllowsThrough()
+    {
+        // The gate only fires when the version is actually revoked.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"rev-null-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            RevokedAt = null,
+            BlockRevokedMode = "block",
+        };
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_revoked"));
+    }
+
+    [Fact]
+    public async Task Revoked_Block_LogsRevokedAtInDetail_AndQueuesRevokedGate()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"rev-detail-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            // Empty VersionId maps to a NULL review-row FK (the serve-path shape used by the
+            // quarantine assertion below — a random non-existent id would violate the FK).
+            VersionId = string.Empty,
+            RevokedAt = _clock.GetUtcNow().AddDays(-1),
+            BlockRevokedMode = "block",
+        };
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+
+        await using var conn = await _fixture.Store.OpenAsync();
+        string? detail = await conn.ExecuteScalarAsync<string>(
+            "SELECT detail FROM activity WHERE event_type = 'blocked_revoked' AND org_id = @orgId",
+            new { orgId });
+        Assert.Contains("\"revoked_at\":", detail);
+
+        var quarantine = new QuarantineRepository(_fixture.Store, _clock);
+        var (items, total) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
+        Assert.Equal(1, total);
+        Assert.Equal("revoked", items[0].Gate);
+    }
+
+    [Fact]
+    public async Task ManualAllow_ShortCircuits_PastRevokedGate()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"rev-ma-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            ManualState = "allowed",
+            RevokedAt = _clock.GetUtcNow().AddDays(-1),
+            BlockRevokedMode = "block",
+        };
+
+        Assert.Equal(BlockDecision.Allowed, await _sut.EvaluateAsync(req));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_revoked"));
+    }
+
+    [Fact]
+    public async Task Revoked_OutranksReleaseAge_SingleEvent()
+    {
+        // A revoked version still within a release-age hold records exactly one blocked_revoked
+        // event — the revoked arm sits above release-age in priority order.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"rev-prio-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with
+        {
+            RevokedAt = _clock.GetUtcNow().AddDays(-1),
+            BlockRevokedMode = "block",
+            MinReleaseAgeHours = 48,
+            PublishedAt = _clock.GetUtcNow().AddHours(-1),
+            Origin = "proxy",
+        };
+
+        Assert.Equal(BlockDecision.Blocked, await _sut.EvaluateAsync(req));
+        Assert.Equal(1, await CountActivityAsync(orgId, "blocked_revoked"));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_release_age"));
+    }
+
     // ── release-age branch ────────────────────────────────────────────────────
 
     [Fact]

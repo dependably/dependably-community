@@ -97,14 +97,21 @@
   }
 </script>
 
-<div class="page-header list-header">
-    <span></span>
+<div class="page page-fluid">
+  <div class="page-header">
+    <h1 class="page-title">{$t('claims.title')}</h1>
     <button class="primary" on:click={openCreate}>{$t('claims.newClaim')}</button>
   </div>
 
   <p class="text-muted desc">{$t('claims.description')}</p>
 
-  <div class="search-bar">
+  <div class="page-toolbar">
+    <SearchInput
+      placeholder={$t('claims.filters.search')}
+      bind:value={search}
+      on:search={onSearch}
+      class="toolbar-search"
+    />
     <select bind:value={filterEco} on:change={onFilterChange} class="eco-select">
       <option value="">{$t('claims.filters.ecosystem')}</option>
       {#each ECOSYSTEMS as eco (eco)}
@@ -116,12 +123,6 @@
       <option value="local_only">{$t('claims.states.local_only')}</option>
       <option value="mixed">{$t('claims.states.mixed')}</option>
     </select>
-    <SearchInput
-      placeholder={$t('claims.filters.search')}
-      bind:value={search}
-      on:search={onSearch}
-      class="search-input"
-    />
   </div>
 
   <ErrorBanner message={error} />
@@ -144,7 +145,7 @@
           <tr>
             <td><span class="badge {c.ecosystem}">{ECO_LABEL[c.ecosystem] ?? c.ecosystem}</span></td>
             <td class="mono">{c.name}</td>
-            <td><span class="state-badge state-{c.state}">{$t(`claims.states.${c.state}`)}</span></td>
+            <td><span class="badge state-{c.state}">{$t(`claims.states.${c.state}`)}</span></td>
             <td class="reason-cell text-muted" title={c.reason}>{c.reason}</td>
             <td class="actions-col">
               <button class="action-btn" on:click={() => openTransition(c)}>{$t('claims.transition')}</button>
@@ -158,6 +159,7 @@
       </tbody>
     </table>
   {/if}
+</div>
 
 {#if modal}
   <div
@@ -168,7 +170,7 @@
     on:click|self={closeModal}
     on:keydown={(e) => { if (e.key === 'Escape') closeModal() }}
   >
-    <div class="modal">
+    <div class="modal scrollable modal-flex">
       {#if modal === 'create'}
         <h2>{$t('claims.modal.createTitle')}</h2>
         <label>
@@ -249,65 +251,14 @@
 {/if}
 
 <style>
-  .page-header { display: flex; align-items: center; justify-content: space-between; }
   .desc { max-width: 720px; }
-  .search-bar { display: flex; gap: 8px; margin-bottom: 12px; }
-  .search-bar :global(.search-input) { flex: 1; max-width: 320px; }
-  .eco-select, .state-select { width: auto; }
+  .state-select { width: auto; }
   .reason-cell { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .actions-col { width: 200px; white-space: nowrap; }
   .action-btn { padding: 3px 8px; font-size: 12px; min-height: 28px; margin-right: 4px; }
 
-  .state-badge {
-    display: inline-block;
-    padding: 1px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-  }
-  .state-unclaimed  { background: var(--bg2); color: var(--text2); border: 1px solid var(--border); }
-  .state-local_only { background: var(--success-bg); color: var(--success); border: 1px solid var(--success-border); }
-  .state-mixed      { background: var(--warning-bg); color: var(--warning-text); border: 1px solid var(--warning-border); }
-
-  .modal-backdrop {
-    position: fixed; inset: 0;
-    background: var(--overlay-scrim);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 1000;
-  }
-  .modal {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 24px;
-    width: min(520px, 90vw);
-    max-height: 85vh;
-    overflow-y: auto;
-    display: flex; flex-direction: column; gap: 12px;
-  }
-  .modal h2 { margin: 0; font-size: 16px; }
-  .modal label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
-
-  .warning-card {
-    background: var(--warning-bg);
-    border: 1px solid var(--warning-border);
-    border-radius: 4px;
-    padding: 8px 12px;
-    font-size: 12px;
-  }
-  .warning-card p { margin: 0 0 6px 0; }
+  /* .modal-flex, .warning-card, .info-card are global — see app.css */
   .ack { flex-direction: row !important; align-items: center; gap: 6px !important; cursor: pointer; }
   .ack input { width: auto; margin: 0; }
-
-  .info-card {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 8px 12px;
-    font-size: 12px;
-  }
-  .info-card p { margin: 0; }
   .mono { font-family: var(--mono, monospace); }
 </style>

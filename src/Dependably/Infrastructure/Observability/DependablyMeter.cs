@@ -83,6 +83,17 @@ public static class DependablyMeter
             "dependably.cache.lookups",
             description: "Proxy-cache lookups. Attributes: ecosystem, outcome (hit|miss).");
 
+    public static readonly Counter<long> CacheEvictions =
+        Meter.CreateCounter<long>(
+            "dependably.cache.evictions",
+            description: "Proxy-cache artefacts evicted by the cache eviction pass.");
+
+    public static readonly Counter<long> CacheEvictedBytes =
+        Meter.CreateCounter<long>(
+            "dependably.cache.evicted_bytes",
+            unit: "By",
+            description: "Bytes freed from the proxy cache by the eviction pass.");
+
     public static readonly Histogram<double> UpstreamFetchDuration =
         Meter.CreateHistogram<double>(
             "dependably.upstream.fetch.duration",
@@ -169,6 +180,15 @@ public static class DependablyMeter
             description: "Package versions checked during a deprecation refresh pass. Attributes: ecosystem.");
 
     /// <summary>
+    /// Cached versions newly observed REMOVED from upstream (revoked) during a refresh pass.
+    /// Attributes: <c>ecosystem</c>.
+    /// </summary>
+    public static readonly Counter<long> VersionsRevoked =
+        Meter.CreateCounter<long>(
+            "dependably.deprecation_refresh.revoked",
+            description: "Cached versions newly observed removed from upstream during a refresh pass. Attributes: ecosystem.");
+
+    /// <summary>
     /// Downloads blocked because the version is upstream-deprecated and the tenant's
     /// <c>block_deprecated</c> policy is set to 'block'. Attributes: <c>ecosystem</c>.
     /// </summary>
@@ -176,6 +196,15 @@ public static class DependablyMeter
         Meter.CreateCounter<long>(
             "dependably.security.deprecated_blocks",
             description: "Downloads blocked by the block_deprecated proxy policy. Attributes: ecosystem.");
+
+    /// <summary>
+    /// Downloads blocked because the version was removed from upstream (revoked) and the tenant's
+    /// <c>block_revoked</c> policy is set to 'block'. Attributes: <c>ecosystem</c>.
+    /// </summary>
+    public static readonly Counter<long> RevokedBlocks =
+        Meter.CreateCounter<long>(
+            "dependably.security.revoked_blocks",
+            description: "Downloads blocked by the block_revoked proxy policy. Attributes: ecosystem.");
 
     /// <summary>
     /// Downloads blocked because the version carries an OSV malicious-package advisory

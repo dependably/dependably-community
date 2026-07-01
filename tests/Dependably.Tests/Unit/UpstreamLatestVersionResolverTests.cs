@@ -102,8 +102,8 @@ public sealed class UpstreamLatestVersionResolverTests : IAsyncLifetime
 
     private async Task SeedRegistryAsync(string orgId, string ecosystem, string url)
     {
-        var repo = new UpstreamRegistryRepository(_db, TimeProvider.System);
-        await repo.AddAsync(orgId, ecosystem, url, name: null);
+        var repo = new UpstreamRegistryRepository(_db, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+        await repo.AddAsync(orgId, new NewUpstreamRegistry(ecosystem, url));
     }
 
     private UpstreamLatestVersionResolver BuildResolver(string responseBody)
@@ -126,7 +126,7 @@ public sealed class UpstreamLatestVersionResolverTests : IAsyncLifetime
             new DriveInfoStagingDiskInfo(Path.GetTempPath()),
             StagingOptions.Resolve(config),
             NullLogger<UpstreamClient>.Instance);
-        var registries = new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System));
+        var registries = new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured()));
         return new UpstreamLatestVersionResolver(upstream, registries, config);
     }
 

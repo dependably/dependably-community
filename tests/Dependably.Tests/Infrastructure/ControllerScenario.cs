@@ -52,6 +52,7 @@ public sealed class ControllerScenario : IAsyncDisposable
     private string _actorRole = "owner";
     private bool _actorIsAnonymous;
     private string? _actorOrgOverride;
+    private bool _masterKeyConfigured;
     private bool _built;
 
     private ControllerScenario() { }
@@ -81,6 +82,18 @@ public sealed class ControllerScenario : IAsyncDisposable
             throw new InvalidOperationException(
             "ControllerScenario is immutable after BuildAsync. Add seeding before BuildAsync.");
         }
+    }
+
+    /// <summary>
+    /// Configures a master key so the built controllers' <see cref="Dependably.Infrastructure.Identity.EnvelopeProtector"/>
+    /// can encrypt secrets at rest. Without this, the protector is unconfigured and secret-bearing
+    /// writes fail closed (422).
+    /// </summary>
+    public ControllerScenario WithMasterKey()
+    {
+        EnsureNotBuilt();
+        _masterKeyConfigured = true;
+        return this;
     }
 
     /// <summary>Inserts a tenant. The first call sets the "primary" org the controller's TenantContext binds to.</summary>
@@ -332,9 +345,13 @@ public sealed class ControllerScenario : IAsyncDisposable
             new QuarantineRepository(db, Clock), guard,
             NullLogger<VulnerabilityController>.Instance, Clock))
         { ControllerContext = ctx };
+        var envelope = _masterKeyConfigured ? TestEnvelope.Configured() : TestEnvelope.Unconfigured();
         var system = new SystemController(orgs, systemAdmins, db, audit, problems,
             new ConfigurationBuilder().Build(),
-            new Dependably.Security.PasswordPolicy(), Clock)
+            new Dependably.Security.PasswordPolicy(), Clock, envelope)
+        { ControllerContext = ctx };
+        var upstreamRegistries = new UpstreamRegistryController(
+            new UpstreamRegistryRepository(db, Clock, envelope), guard, audit, problems, envelope)
         { ControllerContext = ctx };
 
         var packageAnalytics = new PackageAnalyticsRepository(db);
@@ -360,26 +377,27 @@ public sealed class ControllerScenario : IAsyncDisposable
             Time: Clock);
         var org = new OrgController(orgSvc) { ControllerContext = ctx };
         var orgSettingsRepo = new OrgSettingsRepository(db);
+        var scenarioTrustStore = new StubPerOrgTrustAnchorStore();
+        var npmKeyStore = new Dependably.Protocol.Provenance.NpmSignatureKeyStore(scenarioTrustStore);
+        var nugetTrustStore = new Dependably.Protocol.Provenance.NuGetSignatureTrustStore(scenarioTrustStore);
         var orgSettings = new OrgSettingsController(
             orgSettingsRepo, guard, audit, orgAuditEmitter,
             new ConfigurationBuilder().Build(), problems,
             new AirGapMode(new ConfigurationBuilder().Build()),
             new RequireMfaMode(new ConfigurationBuilder().Build()),
-            new Dependably.Protocol.Provenance.NpmSignatureKeyStore(
-                new ConfigurationBuilder().Build(),
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.NpmSignatureKeyStore>.Instance),
-            new Dependably.Protocol.Provenance.NuGetSignatureTrustStore(
-                new ConfigurationBuilder().Build(),
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.NuGetSignatureTrustStore>.Instance),
-            new Dependably.Protocol.Provenance.PyPiSigstoreTrustStore(
-                new ConfigurationBuilder().Build(),
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.PyPiSigstoreTrustStore>.Instance),
+            new Dependably.Protocol.Provenance.NpmProvenanceVerifier(npmKeyStore),
+            new Dependably.Protocol.Provenance.NuGetProvenanceVerifier(
+                nugetTrustStore,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.NuGetProvenanceVerifier>.Instance),
+            new Dependably.Protocol.Provenance.PyPiProvenanceVerifier(
+                scenarioTrustStore,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.PyPiProvenanceVerifier>.Instance),
             new Dependably.Protocol.Provenance.RpmProvenanceVerifier(
-                new ConfigurationBuilder().Build(),
+                scenarioTrustStore,
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.RpmProvenanceVerifier>.Instance),
-            new Dependably.Protocol.Provenance.MavenSignatureKeyStore(
-                new ConfigurationBuilder().Build(),
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenSignatureKeyStore>.Instance))
+            new Dependably.Protocol.Provenance.MavenProvenanceVerifier(
+                scenarioTrustStore,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance))
         { ControllerContext = ctx };
         var orgTokens = new OrgTokensController(
             tokens, orgs, guard, audit, orgAuditEmitter, problems)
@@ -434,6 +452,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             StagingPath: Path.GetTempPath(),
             Cache: new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()));
         var import = new ImportController(importSvc) { ControllerContext = ctx };
+        var search = new SearchController(packages, guard) { ControllerContext = ctx };
 
         _built = true;
         return new ControllerScenarioResult(
@@ -454,7 +473,9 @@ public sealed class ControllerScenario : IAsyncDisposable
             orgAuthConfig,
             claims,
             siem,
-            import);
+            import,
+            upstreamRegistries,
+            search);
     }
 
     /// <summary>NSubstitute mock for the publish pipeline. Override return values on a test to exercise rejection paths.</summary>
@@ -495,7 +516,9 @@ public sealed record ControllerScenarioResult(
     OrgAuthConfigController OrgAuthConfigController,
     ClaimsController ClaimsController,
     SiemController SiemController,
-    ImportController ImportController) : IAsyncDisposable
+    ImportController ImportController,
+    UpstreamRegistryController UpstreamRegistryController,
+    SearchController SearchController) : IAsyncDisposable
 {
     public IMetadataStore Db => Fixture.Store;
 

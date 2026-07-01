@@ -1,6 +1,6 @@
 # Newline-separated regexes for file paths to exclude from secret scanning.
-# Used by the scheduled deep scan (without --only-verified). The PR-time scan
-# uses --only-verified and does not consult this file.
+# Consulted by the secret-scan job (full history, all detectors, unverified
+# included) to silence known false positives.
 
 # Connection-string placeholder examples (Password=..., Password=<secret>) in a
 # deleted enterprise infra doc. SQLServer detector flags these as unverified.

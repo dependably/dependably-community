@@ -210,7 +210,7 @@ public sealed class OrgAuthConfigControllerTests
         var result = await b.OrgAuthConfigController.Put(
             new UpdateAuthConfigRequest(
                 Enabled: false, FormsLoginEnabled: true,
-                SpEntityId: "  ", NameIdFormat: "fmt",
+                SpEntityId: "  ", NameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
                 EmailAttribute: "", ButtonLabel: null,
                 RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
@@ -232,7 +232,7 @@ public sealed class OrgAuthConfigControllerTests
         var b = await s.BuildAsync();
 
         var result = await b.OrgAuthConfigController.Put(
-            new UpdateAuthConfigRequest(false, true, null, "fmt", null, null, null, null, "member"),
+            new UpdateAuthConfigRequest(false, true, null, "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress", null, null, null, null, "member"),
             CancellationToken.None);
         Assert.False(result is NoContentResult);
     }
@@ -251,7 +251,7 @@ public sealed class OrgAuthConfigControllerTests
         var result = await b.OrgAuthConfigController.Put(
             new UpdateAuthConfigRequest(
                 Enabled: false, FormsLoginEnabled: false,
-                SpEntityId: null, NameIdFormat: "fmt",
+                SpEntityId: null, NameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
                 EmailAttribute: null, ButtonLabel: null,
                 RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
@@ -279,7 +279,7 @@ public sealed class OrgAuthConfigControllerTests
         var result = await b.OrgAuthConfigController.Put(
             new UpdateAuthConfigRequest(
                 Enabled: true, FormsLoginEnabled: false,
-                SpEntityId: null, NameIdFormat: "fmt",
+                SpEntityId: null, NameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
                 EmailAttribute: null, ButtonLabel: null,
                 RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
@@ -308,7 +308,7 @@ public sealed class OrgAuthConfigControllerTests
         var result = await b.OrgAuthConfigController.Put(
             new UpdateAuthConfigRequest(
                 Enabled: true, FormsLoginEnabled: false,
-                SpEntityId: null, NameIdFormat: "fmt",
+                SpEntityId: null, NameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
                 EmailAttribute: null, ButtonLabel: null,
                 RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
@@ -339,7 +339,7 @@ public sealed class OrgAuthConfigControllerTests
         var result = await b.OrgAuthConfigController.Put(
             new UpdateAuthConfigRequest(
                 Enabled: true, FormsLoginEnabled: false,
-                SpEntityId: null, NameIdFormat: "fmt",
+                SpEntityId: null, NameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
                 EmailAttribute: null, ButtonLabel: null,
                 RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
@@ -489,7 +489,7 @@ public sealed class OrgAuthConfigControllerTests
         var result = await b.OrgAuthConfigController.Put(
             new UpdateAuthConfigRequest(
                 Enabled: false, FormsLoginEnabled: false,
-                SpEntityId: null, NameIdFormat: "fmt",
+                SpEntityId: null, NameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
                 EmailAttribute: null, ButtonLabel: null,
                 RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);
@@ -520,7 +520,7 @@ public sealed class OrgAuthConfigControllerTests
         var result = await b.OrgAuthConfigController.Put(
             new UpdateAuthConfigRequest(
                 Enabled: true, FormsLoginEnabled: true,
-                SpEntityId: null, NameIdFormat: "fmt",
+                SpEntityId: null, NameIdFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
                 EmailAttribute: null, ButtonLabel: null,
                 RoleAttribute: null, RoleMapping: null, DefaultRole: "member"),
             CancellationToken.None);

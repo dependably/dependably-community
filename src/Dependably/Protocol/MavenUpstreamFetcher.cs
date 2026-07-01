@@ -133,7 +133,8 @@ public sealed class MavenUpstreamFetcher
         string upstreamPath,
         CancellationToken ct,
         string? orgId = null,
-        string? purl = null)
+        string? purl = null,
+        string? authorizationHeader = null)
     {
         if (await IsNegativelyCachedAsync(upstreamPath, ct))
         {
@@ -147,7 +148,7 @@ public sealed class MavenUpstreamFetcher
         string? expectedSha256 = null;
         if (VerifyWithUpstreamSha256)
         {
-            expectedSha256 = await TryFetchSidecarAsync(upstreamBase, upstreamPath, "sha256", ct);
+            expectedSha256 = await TryFetchSidecarAsync(upstreamBase, upstreamPath, "sha256", ct, authorizationHeader);
         }
 
         // No .sha256 sidecar. This is the COMMON case, not an edge case: Maven Central
@@ -162,7 +163,7 @@ public sealed class MavenUpstreamFetcher
             Dependably.Infrastructure.Observability.DependablyMeter.MavenSidecarMissing.Add(1,
                 new KeyValuePair<string, object?>(
                     "reason", VerifyWithUpstreamSha256 ? "no_sha256_sidecar" : "verify_disabled"));
-            return await FetchThenHashAsync(upstreamBase, upstreamPath, upstreamUrl, ct);
+            return await FetchThenHashAsync(upstreamBase, upstreamPath, upstreamUrl, authorizationHeader, ct);
         }
 
         string blobKey = BlobKeys.Proxy(expectedSha256);
@@ -176,7 +177,8 @@ public sealed class MavenUpstreamFetcher
                 ecosystem: "maven",
                 orgId: null,
                 purl: null,
-                ct: ct);
+                ct: ct,
+                authorizationHeader: authorizationHeader);
 
             byte[] bytes;
             await using (body.ConfigureAwait(false))
@@ -234,7 +236,7 @@ public sealed class MavenUpstreamFetcher
     /// a <c>.sha1</c> mismatch and <see cref="AirGappedException"/> in air-gap mode.
     /// </summary>
     private async Task<MavenArtifactFetchResult?> FetchThenHashAsync(
-        string upstreamBase, string upstreamPath, string upstreamUrl, CancellationToken ct)
+        string upstreamBase, string upstreamPath, string upstreamUrl, string? authorizationHeader, CancellationToken ct)
     {
         byte[] bytes;
         try
@@ -259,7 +261,7 @@ public sealed class MavenUpstreamFetcher
             while (true)
             {
                 resp = await _upstream.GetOrFetchMetadataAsync(
-                    upstreamUrl, UpstreamClient.MaxUpstreamResponseBytes, ct);
+                    upstreamUrl, UpstreamClient.MaxUpstreamResponseBytes, authorizationHeader, ct);
                 if (resp.IsSuccessStatusCode)
                 {
                     break;
@@ -317,7 +319,7 @@ public sealed class MavenUpstreamFetcher
         // provenance via the computed columns (computed == advertised once verified).
         if (VerifyWithUpstreamSha256)
         {
-            await VerifyAgainstSidecarsAsync(upstreamBase, upstreamPath, upstreamUrl, sha1, md5, ct);
+            await VerifyAgainstSidecarsAsync(upstreamBase, upstreamPath, upstreamUrl, sha1, md5, authorizationHeader, ct);
         }
 
         string blobKey = BlobKeys.Proxy(sha256);
@@ -337,9 +339,9 @@ public sealed class MavenUpstreamFetcher
     /// </summary>
     private async Task VerifyAgainstSidecarsAsync(
         string upstreamBase, string upstreamPath, string upstreamUrl,
-        string sha1, string md5, CancellationToken ct)
+        string sha1, string md5, string? authorizationHeader, CancellationToken ct)
     {
-        string? upstreamSha1 = await TryFetchSidecarAsync(upstreamBase, upstreamPath, "sha1", ct);
+        string? upstreamSha1 = await TryFetchSidecarAsync(upstreamBase, upstreamPath, "sha1", ct, authorizationHeader);
         if (upstreamSha1 is not null)
         {
             if (!string.Equals(upstreamSha1, sha1, StringComparison.OrdinalIgnoreCase))
@@ -351,7 +353,7 @@ public sealed class MavenUpstreamFetcher
             return;
         }
 
-        string? upstreamMd5 = await TryFetchSidecarAsync(upstreamBase, upstreamPath, "md5", ct);
+        string? upstreamMd5 = await TryFetchSidecarAsync(upstreamBase, upstreamPath, "md5", ct, authorizationHeader);
         if (upstreamMd5 is not null)
         {
             if (!string.Equals(upstreamMd5, md5, StringComparison.OrdinalIgnoreCase))
@@ -379,13 +381,14 @@ public sealed class MavenUpstreamFetcher
     public async Task<List<string>?> FetchUpstreamVersionsAsync(
         string upstreamBase,
         string artifactPath,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? authorizationHeader = null)
     {
         string upstreamUrl = $"{upstreamBase.TrimEnd('/')}/{artifactPath.TrimStart('/')}/maven-metadata.xml";
 
         try
         {
-            var response = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, ct);
+            var response = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, authorizationHeader, ct);
             if (!response.IsSuccessStatusCode)
             {
                 return null;
@@ -420,14 +423,15 @@ public sealed class MavenUpstreamFetcher
         string groupPath,
         string artifactId,
         string snapshotVersion,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? authorizationHeader = null)
     {
         string metaPath = $"{groupPath}/{artifactId}/{snapshotVersion}/maven-metadata.xml";
         string upstreamUrl = $"{upstreamBase.TrimEnd('/')}/{metaPath.TrimStart('/')}";
 
         try
         {
-            var response = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, ct);
+            var response = await _upstream.GetOrFetchMetadataAsync(upstreamUrl, authorizationHeader, ct);
             if (!response.IsSuccessStatusCode)
             {
                 return null;
@@ -506,13 +510,14 @@ public sealed class MavenUpstreamFetcher
     public async Task<byte[]?> TryFetchAscSidecarAsync(
         string upstreamBase,
         string upstreamPath,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? authorizationHeader = null)
     {
         string sidecarPath = $"{upstreamPath}.asc";
         string sidecarUrl = $"{upstreamBase.TrimEnd('/')}/{sidecarPath.TrimStart('/')}";
         try
         {
-            using var response = await _upstream.GetMetadataAsync(sidecarUrl, ct);
+            using var response = await _upstream.GetMetadataAsync(sidecarUrl, authorizationHeader, ct);
             return !response.IsSuccessStatusCode
                 ? null
                 : await UpstreamClient.ReadBodyCappedAsync(
@@ -531,7 +536,8 @@ public sealed class MavenUpstreamFetcher
         string upstreamBase,
         string upstreamPath,
         string algorithm,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? authorizationHeader = null)
     {
         string sidecarPath = $"{upstreamPath}.{algorithm}";
         string sidecarUrl = $"{upstreamBase.TrimEnd('/')}/{sidecarPath.TrimStart('/')}";
@@ -542,7 +548,7 @@ public sealed class MavenUpstreamFetcher
             // keeps the call path consistent with the other ecosystems. AirGappedException
             // intentionally propagates so callers get a clean 503 from the middleware
             // rather than a silent null-then-404.
-            using var response = await _upstream.GetMetadataAsync(sidecarUrl, ct);
+            using var response = await _upstream.GetMetadataAsync(sidecarUrl, authorizationHeader, ct);
             if (!response.IsSuccessStatusCode)
             {
                 return null;

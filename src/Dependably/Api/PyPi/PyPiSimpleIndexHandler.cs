@@ -169,13 +169,13 @@ public sealed class PyPiSimpleIndexHandler(
         // local-only below.
         var bases = await registries.ResolveAsync(orgId, "pypi", ct);
         string? upstreamHtml = null;
-        foreach (string upstreamBase in bases)
+        foreach (var source in bases)
         {
             try
             {
                 // Single-flight simple-index fetch — collapses N concurrent pip-install
                 // requests onto a single upstream call when a coordinate first warms up.
-                var response = await upstream.GetOrFetchMetadataAsync($"{upstreamBase}/simple/{purlName}/", ct);
+                var response = await upstream.GetOrFetchMetadataAsync($"{source.Url}/simple/{purlName}/", source.AuthorizationHeader, ct);
                 if (!response.IsSuccessStatusCode)
                 {
                     continue;

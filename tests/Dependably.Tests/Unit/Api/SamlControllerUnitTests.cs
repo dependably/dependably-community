@@ -255,6 +255,30 @@ public sealed class SamlControllerUnitTests : IClassFixture<InMemoryDbFixture>
         Assert.Contains("nameid-format:transient", content.Content);
     }
 
+    /// <summary>
+    /// Regression: a stored NameIdFormat that is not a valid absolute URI (e.g. injected via
+    /// PUT /api/v1/auth-config before the URI-validation gate was added) must not surface as
+    /// an unhandled UriFormatException / 500. The endpoint falls back to the standard Email
+    /// NameID format and returns valid SP metadata XML.
+    /// </summary>
+    [Fact]
+    public async Task Metadata_InvalidStoredNameIdFormat_FallsBackToEmailFormat_ReturnsXml()
+    {
+        string orgId = await SeedTenantAsync("acme");
+        // Store a non-URI name_id_format directly (bypasses Put validation, simulating a
+        // value stored before the URI validation was added or via direct DB manipulation).
+        await SeedSamlConfigAsync(orgId, nameIdFormat: "not-a-valid-uri");
+        var sut = NewControllerForTenant(orgId, "acme");
+
+        var result = await sut.Metadata(CancellationToken.None);
+        // Must return SP metadata XML, not a 500 error from UriFormatException.
+        var content = Assert.IsType<ContentResult>(result);
+        Assert.Equal("application/samlmetadata+xml", content.ContentType);
+        Assert.Contains("EntityDescriptor", content.Content);
+        // Falls back to the standard Email NameID format.
+        Assert.Contains("nameid-format:emailAddress", content.Content);
+    }
+
     // ── Login: query-string parsing ───────────────────────────────────────────
 
     [Theory]

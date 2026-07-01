@@ -803,10 +803,11 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
     }
 
     [Fact]
-    public async Task GetSymbols_UploadedOrigin_AnonymousPullEnabled_NoToken_Returns401()
+    public async Task GetSymbols_UploadedOrigin_AnonymousPullEnabled_NoToken_Returns200()
     {
-        // Privately-uploaded symbols (PDBs) must require a token even when AnonymousPull is on —
-        // the .nupkg path enforces this, and the symbol path must match.
+        // Symbols follow AnonymousPull just like .nupkg: when the org enables anonymous pull,
+        // uploaded symbols are served without a token. The first-gate (AnonymousPull=false check)
+        // is the only enforced gate; the second uploaded-origin guard has been removed.
         string id = $"PrivSym{Guid.NewGuid():N}"[..14];
         byte[] snupkg = BuildSnupkg(id, "1.0.0");
         string pushToken = await _factory.CreateToken("push");
@@ -833,10 +834,10 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         string path = $"/nuget/symbols/{lowerId}/1.0.0/{lowerId}.1.0.0.snupkg";
         try
         {
-            // Anonymous: blocked despite AnonymousPull, because the symbol is uploaded-origin.
+            // Anonymous: served when AnonymousPull is on (symbols follow the same gate as .nupkg).
             using var anon = _factory.CreateClient();
             var anonResp = await anon.GetAsync(path);
-            Assert.Equal(HttpStatusCode.Unauthorized, anonResp.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, anonResp.StatusCode);
 
             // Authenticated: still served.
             string pullToken = await _factory.CreateToken("pull");
@@ -962,6 +963,182 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
             .SelectMany(p => p.GetProperty("items").EnumerateArray())
             .Select(e => e.GetProperty("catalogEntry").GetProperty("version").GetString()!)
             .ToHashSet();
+    }
+
+    // ── Flatcontainer download: proxy cache-hit, AnonymousPull disabled → 401 ──
+
+    /// <summary>
+    /// Seeds the proxy cache via an authenticated first fetch, then asserts that a subsequent
+    /// tokenless GET of the same .nupkg returns 401 with <c>Basic</c> when the org has
+    /// <c>AnonymousPull = false</c>. Validates the cache-hit gate mirrors the HEAD behaviour.
+    /// </summary>
+    [Fact]
+    public async Task Flatcontainer_Download_ProxyCacheHit_AnonymousPullOff_NoToken_Returns401()
+    {
+        string id = $"cahit401{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string file = $"{id}.1.0.0.nupkg";
+
+        var (nupkgBytes, _) = NuGetFixtures.BuildNupkg(id, "1.0.0");
+        _factory.MockUpstream.Given(
+                Request.Create().WithPath($"/flatcontainer/{id}/1.0.0/{file}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/octet-stream").WithBody(nupkgBytes));
+
+        // Prime the proxy cache with an authenticated request.
+        string token = await _factory.CreateToken("pull");
+        using var authClient = _factory.CreateClientWithBasic(token);
+        var primeResp = await authClient.GetAsync($"/nuget/flatcontainer/{id}/1.0.0/{file}");
+        Assert.Equal(HttpStatusCode.OK, primeResp.StatusCode);
+
+        // AnonymousPull is false by default; the tokenless cache-hit must return 401.
+        using var anon = _factory.CreateClient();
+        var resp = await anon.GetAsync($"/nuget/flatcontainer/{id}/1.0.0/{file}");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        Assert.Contains("Basic", resp.Headers.WwwAuthenticate.ToString());
+    }
+
+    /// <summary>
+    /// Confirms that an org with <c>AnonymousPull = true</c> still serves a proxy cache-hit
+    /// to unauthenticated clients — no regression for the allowed-anonymous configuration.
+    /// </summary>
+    [Fact]
+    public async Task Flatcontainer_Download_ProxyCacheHit_AnonymousPullOn_NoToken_Returns200()
+    {
+        string id = $"cahit200{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string file = $"{id}.1.0.0.nupkg";
+
+        var (nupkgBytes, _) = NuGetFixtures.BuildNupkg(id, "1.0.0");
+        _factory.MockUpstream.Given(
+                Request.Create().WithPath($"/flatcontainer/{id}/1.0.0/{file}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/octet-stream").WithBody(nupkgBytes));
+
+        // Prime the proxy cache with an authenticated request.
+        string token = await _factory.CreateToken("pull");
+        using var authClient = _factory.CreateClientWithBasic(token);
+        var primeResp = await authClient.GetAsync($"/nuget/flatcontainer/{id}/1.0.0/{file}");
+        Assert.Equal(HttpStatusCode.OK, primeResp.StatusCode);
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string? orgId = await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")!;
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId",
+            new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
+        try
+        {
+            // AnonymousPull enabled: the cache-hit must be served to unauthenticated clients.
+            using var anon = _factory.CreateClient();
+            var resp = await anon.GetAsync($"/nuget/flatcontainer/{id}/1.0.0/{file}");
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        }
+        finally
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET anonymous_pull = 0 WHERE org_id = @orgId",
+                new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
+        }
+    }
+
+    // ── Hosted nupkg: AnonymousPull gate for uploaded-origin packages ──────────
+
+    /// <summary>
+    /// Pushed (uploaded-origin) .nupkg is served to an anonymous client when
+    /// <c>AnonymousPull = true</c>. Verifies the hosted flatcontainer download path respects
+    /// the org setting.
+    /// </summary>
+    [Fact]
+    public async Task Flatcontainer_Download_HostedUploaded_AnonymousPullOn_NoToken_Returns200()
+    {
+        string id = $"hostaon{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        await _factory.PushNuGetPackage(id, "1.0.0");
+        string file = $"{id}.1.0.0.nupkg";
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string? orgId = await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")!;
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId", new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
+        try
+        {
+            using var anon = _factory.CreateClient();
+            var resp = await anon.GetAsync($"/nuget/flatcontainer/{id}/1.0.0/{file}");
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        }
+        finally
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET anonymous_pull = 0 WHERE org_id = @orgId", new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
+        }
+    }
+
+    /// <summary>
+    /// Pushed (uploaded-origin) .nupkg requires auth when <c>AnonymousPull = false</c>.
+    /// </summary>
+    [Fact]
+    public async Task Flatcontainer_Download_HostedUploaded_AnonymousPullOff_NoToken_Returns401()
+    {
+        string id = $"hostoff{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        await _factory.PushNuGetPackage(id, "1.0.0");
+        string file = $"{id}.1.0.0.nupkg";
+
+        // AnonymousPull is false by default.
+        using var anon = _factory.CreateClient();
+        var resp = await anon.GetAsync($"/nuget/flatcontainer/{id}/1.0.0/{file}");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        Assert.Contains("Basic", resp.Headers.WwwAuthenticate.ToString());
+    }
+
+    /// <summary>
+    /// Pushed (uploaded-origin) .snupkg (symbols) is served anonymously when
+    /// <c>AnonymousPull = true</c>. Symbols follow the same gate as the .nupkg.
+    /// </summary>
+    [Fact]
+    public async Task GetSymbols_UploadedOrigin_AnonymousPullOn_NoToken_Returns200()
+    {
+        string id = $"symaon{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        byte[] snupkg = BuildSnupkg(id, "1.0.0");
+        string pushToken = await _factory.CreateToken("push");
+        using (var pushClient = _factory.CreateClient())
+        {
+            pushClient.DefaultRequestHeaders.Add("X-NuGet-ApiKey", pushToken);
+            using var pushContent = new MultipartFormDataContent();
+            var fc = new ByteArrayContent(snupkg);
+            fc.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            pushContent.Add(fc, "package", $"{id}.1.0.0.snupkg");
+            var pushResp = await pushClient.PutAsync("/nuget/symbols", pushContent);
+            Assert.Equal(HttpStatusCode.Created, pushResp.StatusCode);
+        }
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string? orgId = await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")!;
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET anonymous_pull = 1 WHERE org_id = @orgId", new { orgId });
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
+
+        string path = $"/nuget/symbols/{id}/1.0.0/{id}.1.0.0.snupkg";
+        try
+        {
+            using var anon = _factory.CreateClient();
+            var anonResp = await anon.GetAsync(path);
+            Assert.Equal(HttpStatusCode.OK, anonResp.StatusCode);
+        }
+        finally
+        {
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET anonymous_pull = 0 WHERE org_id = @orgId", new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
+        }
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

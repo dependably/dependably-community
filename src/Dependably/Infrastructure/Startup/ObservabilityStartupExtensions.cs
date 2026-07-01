@@ -1,10 +1,10 @@
 using Dependably.Infrastructure.Observability;
 using Dependably.Security;
+using Elastic.CommonSchema.Serilog;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Serilog;
-using Serilog.Formatting.Compact;
 
 namespace Dependably.Infrastructure.Startup;
 
@@ -14,20 +14,36 @@ namespace Dependably.Infrastructure.Startup;
 /// </summary>
 internal static class ObservabilityStartupExtensions
 {
-    // Serilog — structured JSON logging with sensitive field redaction.
+    // Serilog — structured logging with sensitive field redaction. Console output format is
+    // selected by LOG_FORMAT (default "json"): "json" emits ECS (Elastic Common Schema)
+    // structured JSON via EcsTextFormatter — one object per line, log.level always present,
+    // suitable for Elastic Stack, AWS CloudWatch, Datadog, and Loki ingestion; "text" emits
+    // human-readable Serilog console output suitable for interactive tailing.
+    // See docs/observability/logs.md.
     // Optional OTel logs bridge (Serilog.Sinks.OpenTelemetry) ships log records via
     // OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set. Air-gap deployments leave it unset
-    // and keep the console sink only. See docs/observability/logs.md.
+    // and keep the console sink only.
     internal static void AddDependablyLogging(this WebApplicationBuilder builder)
     {
         builder.Host.UseSerilog((ctx, services, cfg) =>
         {
+            bool textMode = string.Equals(ctx.Configuration["LOG_FORMAT"], "text", StringComparison.OrdinalIgnoreCase);
+
             cfg.ReadFrom.Configuration(ctx.Configuration)
                .ReadFrom.Services(services)
                .Enrich.FromLogContext()
                .Enrich.With<SensitivePropertyEnricher>()
-               .Destructure.With<LogSanitizingDestructuringPolicy>()
-               .WriteTo.Console(new RenderedCompactJsonFormatter());
+               .Destructure.With<LogSanitizingDestructuringPolicy>();
+
+            if (textMode)
+            {
+                cfg.WriteTo.Console(outputTemplate:
+                    "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff} {Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}");
+            }
+            else
+            {
+                cfg.WriteTo.Console(new EcsTextFormatter());
+            }
 
             string? otlpEndpoint = ctx.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
             if (!string.IsNullOrWhiteSpace(otlpEndpoint))

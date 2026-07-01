@@ -1,7 +1,10 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Text;
 using System.Text.Json;
 using Dapper;
 using Dependably.Configuration;
+using Dependably.Infrastructure.Identity;
+using Dependably.Protocol;
 
 namespace Dependably.Infrastructure;
 
@@ -15,11 +18,13 @@ public sealed class UpstreamRegistryRepository
 {
     private readonly IMetadataStore _db;
     private readonly TimeProvider _time;
+    private readonly EnvelopeProtector _envelope;
 
-    public UpstreamRegistryRepository(IMetadataStore db, TimeProvider time)
+    public UpstreamRegistryRepository(IMetadataStore db, TimeProvider time, EnvelopeProtector envelope)
     {
         _db = db;
         _time = time;
+        _envelope = envelope;
     }
 
     /// <summary>
@@ -52,21 +57,48 @@ public sealed class UpstreamRegistryRepository
         return rows.Select(MapRow).ToList();
     }
 
-    /// <summary>The configured registry URLs for one (org, ecosystem) in priority order.</summary>
-    public async Task<IReadOnlyList<string>> ListUrlsForEcosystemAsync(
+    /// <summary>
+    /// The configured upstream sources for one (org, ecosystem) in priority order, each carrying a
+    /// pre-built <c>Authorization</c> header (null for anonymous). The stored secret is decrypted
+    /// here via <see cref="EnvelopeProtector"/> (legacy plaintext passes through unchanged); the
+    /// API-facing read path never selects the secret column. This is the resolver bridge — not the
+    /// API read path.
+    /// </summary>
+    public async Task<IReadOnlyList<UpstreamSource>> ListSourcesForEcosystemAsync(
         string orgId, string ecosystem, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.QueryAsync<string>(
+        var rows = await conn.QueryAsync<RawRegistryRow>(
             """
-            SELECT url
+            SELECT url AS Url, auth_type AS AuthType, username AS Username, secret AS Secret
             FROM upstream_registry
             WHERE org_id = @orgId AND ecosystem = @ecosystem
             ORDER BY position, created_at
             """,
             new { orgId, ecosystem });
-        return rows.ToList();
+
+        return rows.Select(r => new UpstreamSource(
+            r.Url ?? "",
+            BuildUpstreamAuthHeader(
+                r.AuthType, r.Username, r.Secret is null ? null : _envelope.Unprotect(r.Secret))))
+            .ToList();
     }
+
+    /// <summary>
+    /// Builds the <c>Authorization</c> header value for a non-OCI upstream from its stored auth
+    /// fields, or null for anonymous (and any unrecognised scheme). <paramref name="secret"/> is
+    /// the already-decrypted plaintext: <c>bearer</c> carries it verbatim, <c>basic</c>
+    /// base64-encodes <c>username:secret</c>. OCI rows resolve through a separate path
+    /// (<see cref="BuildOciUpstreamsForOrgAsync"/>) and never reach here.
+    /// </summary>
+    internal static string? BuildUpstreamAuthHeader(string? authType, string? username, string? secret) =>
+        authType switch
+        {
+            "bearer" => string.IsNullOrEmpty(secret) ? null : "Bearer " + secret,
+            "basic" => "Basic " + Convert.ToBase64String(
+                Encoding.UTF8.GetBytes($"{username}:{secret}")),
+            _ => null,
+        };
 
     /// <summary>
     /// Appends a non-OCI registry at the bottom of the (org, ecosystem) priority list.
@@ -74,9 +106,19 @@ public sealed class UpstreamRegistryRepository
     /// For OCI registries use <see cref="AddOciAsync"/>.
     /// </summary>
     public async Task<UpstreamRegistryEntry> AddAsync(
-        string orgId, string ecosystem, string url, string? name, CancellationToken ct = default)
+        string orgId, NewUpstreamRegistry req, CancellationToken ct = default)
     {
         string id = Guid.NewGuid().ToString("N");
+        string ecosystem = req.Ecosystem;
+        string url = req.Url;
+        string? name = req.Name;
+        string authType = req.AuthType ?? "anonymous";
+        string? username = req.Username;
+        // Encrypt the secret at rest. This is fail-closed because the encryptor throws when no
+        // master key is configured, so the controller pre-checks IsConfigured and returns 422
+        // before reaching here. Legacy rows stay plaintext and pass through the discriminator
+        // prefix on read.
+        string? storedSecret = req.Secret is null ? null : _envelope.Protect(req.Secret);
         await using var conn = await _db.OpenAsync(ct);
         int nextPosition = await conn.ExecuteScalarAsync<int>(
             """
@@ -88,11 +130,11 @@ public sealed class UpstreamRegistryRepository
 
         await conn.ExecuteAsync(
             """
-            INSERT INTO upstream_registry (id, org_id, ecosystem, name, url, position)
-            VALUES (@id, @orgId, @ecosystem, @name, @url, @position)
+            INSERT INTO upstream_registry (id, org_id, ecosystem, name, url, position, auth_type, username, secret)
+            VALUES (@id, @orgId, @ecosystem, @name, @url, @position, @authType, @username, @secret)
             ON CONFLICT DO NOTHING
             """,
-            new { id, orgId, ecosystem, name, url, position = nextPosition });
+            new { id, orgId, ecosystem, name, url, position = nextPosition, authType, username, secret = storedSecret });
 
         return new UpstreamRegistryEntry
         {
@@ -103,6 +145,9 @@ public sealed class UpstreamRegistryRepository
             Url = url,
             Position = nextPosition,
             CreatedAt = _time.GetUtcNow(),
+            AuthType = authType,
+            Username = username,
+            HasSecret = storedSecret is not null,
         };
     }
 
@@ -116,6 +161,9 @@ public sealed class UpstreamRegistryRepository
         string id = Guid.NewGuid().ToString("N");
         string prefixesJson = JsonSerializer.Serialize(req.Prefixes);
         string authTypeStr = OciAuthTypeToString(req.AuthType);
+        // Encrypt the secret at rest (fail-closed via EnvelopeProtector.Protect); the controller
+        // pre-checks IsConfigured and returns 422 before reaching here.
+        string? storedSecret = req.Secret is null ? null : _envelope.Protect(req.Secret);
 
         await using var conn = await _db.OpenAsync(ct);
         int nextPosition = await conn.ExecuteScalarAsync<int>(
@@ -143,7 +191,7 @@ public sealed class UpstreamRegistryRepository
                 position = nextPosition,
                 authType = authTypeStr,
                 username = req.Username,
-                secret = req.Secret,
+                secret = storedSecret,
                 tokenEndpoint = req.TokenEndpoint,
                 prefixes = prefixesJson,
             });
@@ -236,7 +284,8 @@ public sealed class UpstreamRegistryRepository
             Host = r.Url ?? "",
             AuthType = StringToOciAuthType(r.AuthType),
             Username = r.Username,
-            Password = r.Secret,
+            // Decrypt the secret at rest; legacy plaintext rows pass through the enc:v1: discriminator.
+            Password = r.Secret is null ? null : _envelope.Unprotect(r.Secret),
             TokenEndpoint = r.TokenEndpoint,
             Prefixes = ParsePrefixes(r.PrefixesJson),
         }).ToList();
@@ -326,3 +375,12 @@ public sealed record NewOciUpstreamRegistry(
     string? Username = null,
     string? Secret = null,
     string? TokenEndpoint = null);
+
+/// <summary>Input record for adding a new non-OCI upstream registry.</summary>
+public sealed record NewUpstreamRegistry(
+    string Ecosystem,
+    string Url,
+    string? Name = null,
+    string? AuthType = null,
+    string? Username = null,
+    string? Secret = null);

@@ -1,5 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Identity;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Configuration;
@@ -25,8 +26,11 @@ public sealed class FirstBootServiceTests
         return fx;
     }
 
-    private static FirstBootService NewSut(InMemoryDbFixture fx, IConfiguration config) =>
-        new(fx.Store, config, NullLogger<FirstBootService>.Instance);
+    private static EnvelopeProtector UnconfiguredEnvelope() =>
+        new(new EnvFileMasterKeyProvider(new ConfigurationBuilder().Build()));
+
+    private static FirstBootService NewSut(InMemoryDbFixture fx, IConfiguration config, EnvelopeProtector? envelope = null) =>
+        new(fx.Store, config, NullLogger<FirstBootService>.Instance, envelope ?? UnconfiguredEnvelope());
 
     private static IConfiguration Cfg(params (string K, string? V)[] entries) =>
         new ConfigurationBuilder().AddInMemoryCollection(

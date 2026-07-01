@@ -10,7 +10,9 @@ namespace Dependably.Protocol.Provenance;
 
 /// <summary>
 /// Verifies a PyPI PEP 740 digital attestation for a proxied distribution file, offline, using
-/// only <see cref="System.Security.Cryptography"/> and JSON parsing.
+/// only <see cref="System.Security.Cryptography"/> and JSON parsing. Stateless: trust material
+/// (<see cref="PyPiTrustMaterial"/>) is resolved per-org by the caller and passed in, keeping
+/// the verifier free of any repository dependency.
 ///
 /// PEP 740 publishes <b>attestations</b> for files: the PEP 691 JSON Simple index exposes
 /// <c>files[].provenance</c> (a URL to a provenance file) and/or inline <c>files[].attestations</c>.
@@ -33,21 +35,20 @@ namespace Dependably.Protocol.Provenance;
 ///   <item><b>DSSE signature</b> — the envelope signature verifies over the DSSE PAE using the
 ///         ECDSA P-256 public key extracted from the bundle's Fulcio leaf certificate.</item>
 ///   <item><b>Certificate chain</b> — the leaf chains to an operator-pinned Sigstore/Fulcio root
-///         (<see cref="PyPiSigstoreTrustStore"/>, <see cref="X509ChainTrustMode.CustomRootTrust"/>,
+///         (<see cref="PyPiTrustMaterial"/>, <see cref="X509ChainTrustMode.CustomRootTrust"/>,
 ///         never OS roots). Revocation is not checked and time validity is ignored for the chain build
 ///         because Fulcio certificates are deliberately short-lived. When Rekor keys are configured,
 ///         the <c>integratedTime</c> from the tlog entry is the authoritative signing-time bound.</item>
 ///   <item><b>Identity</b> — the leaf SAN identity + OIDC-issuer extension match an expected
-///         Trusted Publisher (<see cref="PyPiSigstoreTrustStore.Publishers"/>). No match →
+///         Trusted Publisher (<see cref="PyPiTrustMaterial.Publishers"/>). No match →
 ///         <see cref="ProvenanceStatus.Failed"/>.</item>
-///   <item><b>Rekor inclusion proof + SET + valid-at-signing</b> — enforced when
-///         <c>PyPI:RekorPublicKeys</c> is configured
-///         (<see cref="PyPiSigstoreTrustStore.HasRekorKeys"/> is true). The tlog entry must carry
-///         a valid RFC 6962 Merkle inclusion proof, a Signed Entry Timestamp (ECDSA over the
+///   <item><b>Rekor inclusion proof + SET + valid-at-signing</b> — enforced when the trust material
+///         has Rekor keys (<see cref="PyPiTrustMaterial.HasRekorKeys"/> is true). The tlog entry must
+///         carry a valid RFC 6962 Merkle inclusion proof, a Signed Entry Timestamp (ECDSA over the
 ///         canonical entry JSON) that verifies against the configured log key, and an
 ///         <c>integratedTime</c> that falls within the Fulcio leaf's validity window. When this
-///         check is active, a bundle without a valid tlog entry is rejected. When
-///         <c>PyPI:RekorPublicKeys</c> is not configured, this check is skipped.</item>
+///         check is active, a bundle without a valid tlog entry is rejected. When no Rekor keys are
+///         configured, this check is skipped.</item>
 /// </list>
 ///
 /// Result mapping: all checks pass → <see cref="ProvenanceStatus.Verified"/> (signer = the SAN
@@ -77,33 +78,63 @@ public sealed class PyPiProvenanceVerifier : IArtifactProvenanceVerifier
         "https://docs.pypi.org/attestations/publish/v1",
     };
 
-    private readonly PyPiSigstoreTrustStore _trust;
+    private readonly Dependably.Infrastructure.IPerOrgTrustAnchorStore _trustStore;
     private readonly ILogger<PyPiProvenanceVerifier> _logger;
 
-    public PyPiProvenanceVerifier(PyPiSigstoreTrustStore trust, ILogger<PyPiProvenanceVerifier> logger)
+    public PyPiProvenanceVerifier(
+        Dependably.Infrastructure.IPerOrgTrustAnchorStore trustStore,
+        ILogger<PyPiProvenanceVerifier> logger)
     {
-        _trust = trust;
+        _trustStore = trustStore;
         _logger = logger;
     }
 
     public string Ecosystem => "pypi";
 
-    public bool IsConfigured => _trust.IsConfigured;
+    /// <summary>
+    /// Always false at the instance level — PyPI trust is per-org. Use
+    /// <see cref="IsConfiguredForAsync"/> to test whether a specific org has both a
+    /// sigstore_root and a trusted_publisher anchor configured. This property satisfies the
+    /// <see cref="IArtifactProvenanceVerifier"/> contract; code that needs the per-org gate must
+    /// call <see cref="IsConfiguredForAsync"/>.
+    /// </summary>
+    public bool IsConfigured => false;
+
+    /// <summary>
+    /// Returns true when the org has at least one <c>sigstore_root</c> anchor AND at least one
+    /// <c>trusted_publisher</c> anchor. Rekor keys are optional. The built-in
+    /// <see cref="IsConfigured"/> property always returns false; this is the correct per-org gate.
+    /// </summary>
+    public async Task<bool> IsConfiguredForAsync(string orgId, CancellationToken ct = default)
+    {
+        var material = await _trustStore.GetPyPiTrustAsync(orgId, ct);
+        return material.IsConfigured;
+    }
+
+    /// <summary>
+    /// Resolves the per-org <see cref="PyPiTrustMaterial"/> for the given org. Used by the proxy
+    /// fetch path to check configuration and pass material to <see cref="VerifyAttestation"/>
+    /// in a single call without needing a direct reference to the underlying trust anchor store.
+    /// </summary>
+    public Task<PyPiTrustMaterial> GetTrustMaterialAsync(string orgId, CancellationToken ct = default)
+        => _trustStore.GetPyPiTrustAsync(orgId, ct);
 
     /// <summary>
     /// Metadata-driven verification does not apply to PyPI through the generic
     /// <see cref="ProvenanceInput"/> shape: the attestation is fetched as a separate provenance
     /// document, not carried in the registry metadata signature list. The PyPI ingest path calls
-    /// <see cref="VerifyAttestation"/> with the downloaded file's name + sha256 and the provenance
-    /// JSON instead. Returning <see cref="ProvenanceResult.NotApplicable"/> keeps the uniform
-    /// interface usable for generic resolution without implying an unsigned/failed verdict.
+    /// <see cref="VerifyAttestation"/> with the downloaded file's name + sha256, the provenance
+    /// JSON, and the resolved per-org trust material. Returning
+    /// <see cref="ProvenanceResult.NotApplicable"/> keeps the uniform interface usable for generic
+    /// resolution without implying an unsigned/failed verdict.
     /// </summary>
     public Task<ProvenanceResult> VerifyAsync(ProvenanceInput input, CancellationToken ct = default)
         => Task.FromResult(ProvenanceResult.NotApplicable);
 
     /// <summary>
-    /// Verifies the PEP 740 provenance/attestation JSON for a distribution file. The file's sha256
-    /// is the value dependably already verified the downloaded bytes against. Never throws.
+    /// Verifies the PEP 740 provenance/attestation JSON for a distribution file using the
+    /// caller-supplied per-org trust material. The file's sha256 is the value dependably already
+    /// verified the downloaded bytes against. Never throws.
     /// </summary>
     /// <param name="fileName">The distribution filename (the in-toto subject name must match it).</param>
     /// <param name="fileSha256Hex">The lowercase hex sha256 of the downloaded bytes.</param>
@@ -111,7 +142,9 @@ public sealed class PyPiProvenanceVerifier : IArtifactProvenanceVerifier
     /// The PEP 740 provenance document, or a single inline attestation object. Null/empty when the
     /// file carries no attestation → <see cref="ProvenanceStatus.Unsigned"/>.
     /// </param>
-    public ProvenanceResult VerifyAttestation(string fileName, string fileSha256Hex, string? provenanceJson)
+    /// <param name="trust">The per-org trust material resolved by the caller.</param>
+    public ProvenanceResult VerifyAttestation(
+        string fileName, string fileSha256Hex, string? provenanceJson, PyPiTrustMaterial trust)
     {
         if (string.IsNullOrWhiteSpace(provenanceJson))
         {
@@ -139,7 +172,7 @@ public sealed class PyPiProvenanceVerifier : IArtifactProvenanceVerifier
         // multiple attestations (multiple publishers) verifies on the first that holds.
         foreach (var attestation in attestations)
         {
-            var result = VerifyOne(attestation, fileName, fileSha256Hex);
+            var result = VerifyOne(attestation, fileName, fileSha256Hex, trust);
             if (result.Status == ProvenanceStatus.Verified)
             {
                 return Record(result);
@@ -189,9 +222,10 @@ public sealed class PyPiProvenanceVerifier : IArtifactProvenanceVerifier
         return result;
     }
 
-    // Runs the offline checks on one attestation. Returns Verified only when all hold; any
-    // structural or crypto failure returns Failed (never throws).
-    private ProvenanceResult VerifyOne(JsonElement attestation, string fileName, string fileSha256Hex)
+    // Runs the offline checks on one attestation using the supplied per-org trust material.
+    // Returns Verified only when all hold; any structural or crypto failure returns Failed (never throws).
+    private ProvenanceResult VerifyOne(
+        JsonElement attestation, string fileName, string fileSha256Hex, PyPiTrustMaterial trust)
     {
         try
         {
@@ -227,23 +261,23 @@ public sealed class PyPiProvenanceVerifier : IArtifactProvenanceVerifier
                 }
 
                 // ── check 3: leaf chains to a pinned Sigstore/Fulcio root ────────────
-                if (!ChainsToPinnedRoot(leaf))
+                if (!ChainsToPinnedRoot(leaf, trust))
                 {
                     return ProvenanceResult.Failed;
                 }
 
                 // ── check 4: SAN identity + OIDC issuer match a Trusted Publisher ────
-                string? identity = MatchTrustedPublisher(leaf);
+                string? identity = MatchTrustedPublisher(leaf, trust);
                 if (identity is null)
                 {
                     return ProvenanceResult.Failed;
                 }
 
                 // ── check 5: Rekor inclusion proof + SET + valid-at-signing ──────────
-                // Enforced only when the operator has configured Rekor log public keys.
+                // Enforced only when the org has configured Rekor log public keys.
                 // When no keys are configured the check is skipped (opt-in, fail-closed
                 // when enabled — same pattern as the other anchors).
-                return _trust.HasRekorKeys && !VerifyRekorEntry(attestation, leaf)
+                return trust.HasRekorKeys && !VerifyRekorEntry(attestation, leaf, trust)
                     ? ProvenanceResult.Failed
                     : ProvenanceResult.Verified(identity);
             }
@@ -262,7 +296,7 @@ public sealed class PyPiProvenanceVerifier : IArtifactProvenanceVerifier
     // Parses tlog_entries[0] from verification_material, verifies the RFC 6962 inclusion proof,
     // verifies the Signed Entry Timestamp, and checks that integratedTime is within the leaf's
     // validity window. Returns false on any parse or crypto failure.
-    private bool VerifyRekorEntry(JsonElement attestation, X509Certificate2 leaf)
+    private bool VerifyRekorEntry(JsonElement attestation, X509Certificate2 leaf, PyPiTrustMaterial trust)
     {
         if (!TryLocateTlogEntry(attestation, out var entry))
         {
@@ -275,12 +309,12 @@ public sealed class PyPiProvenanceVerifier : IArtifactProvenanceVerifier
             return false;
         }
 
-        var rekorKey = _trust.GetRekorKey(logIdBytes!);
+        var rekorKey = trust.GetRekorKey(logIdBytes!);
         if (rekorKey is null)
         {
             // No configured key for this log id — fail closed when Rekor enforcement is active.
             _logger.LogWarning(
-                "PyPI attestation references a Rekor log id not in PyPI:RekorPublicKeys; "
+                "PyPI attestation references a Rekor log id not in the org's rekor_key anchors; "
                 + "treating the file as unverifiable.");
             return false;
         }
@@ -662,9 +696,9 @@ public sealed class PyPiProvenanceVerifier : IArtifactProvenanceVerifier
     // on an unreachable OCSP/CRL endpoint. When Rekor keys are configured, the proven
     // integratedTime (check 5c) is the authoritative signing-time bound; the chain build keeps
     // IgnoreNotTimeValid regardless so expired short-lived leaves still chain.
-    private bool ChainsToPinnedRoot(X509Certificate2 leaf)
+    private static bool ChainsToPinnedRoot(X509Certificate2 leaf, PyPiTrustMaterial trust)
     {
-        var roots = _trust.GetRoots();
+        var roots = trust.GetRoots();
         using var chain = new X509Chain
         {
             ChainPolicy =
@@ -686,12 +720,12 @@ public sealed class PyPiProvenanceVerifier : IArtifactProvenanceVerifier
     // Check 4: the leaf's SAN identity and OIDC-issuer extension must match a configured Trusted
     // Publisher. Returns the matched SAN identity (the persisted signer) or null when no publisher
     // matches.
-    private string? MatchTrustedPublisher(X509Certificate2 leaf)
+    private static string? MatchTrustedPublisher(X509Certificate2 leaf, PyPiTrustMaterial trust)
     {
         string? issuer = ReadFulcioIssuer(leaf);
         string? identity = ReadSanIdentity(leaf);
         return issuer is not null && identity is not null
-            && _trust.Publishers.Any(p => p.Matches(issuer, identity))
+            && trust.Publishers.Any(p => p.Matches(issuer, identity))
             ? identity
             : null;
     }

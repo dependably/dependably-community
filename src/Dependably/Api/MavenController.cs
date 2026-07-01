@@ -340,18 +340,17 @@ public sealed partial class MavenController : OrgScopedControllerBase
         string orgId, MavenCoordinates coords, OrgSettings? settings, TokenRecord? token,
         MavenFileRow row, CancellationToken ct)
     {
-        // Per-version origin gate: uploaded artifacts require a token carrying
-        // ReadArtifact even when AnonymousPull is enabled. Proxy-cached artifacts
-        // remain anonymously servable under AnonymousPull. Mirrors the per-origin
-        // routing PyPI/npm/NuGet apply on their cache-hit paths.
+        // Per-version origin gate: when AnonymousPull is disabled, a token is required for
+        // all origins. When a token is present and the artifact is uploaded-origin, ReadArtifact
+        // is required. Proxy-cached artifacts are not capability-gated beyond the AnonymousPull check.
         if (row.Origin == "uploaded")
         {
-            if (token is null)
+            if (settings is not null && !settings.AnonymousPull && token is null)
             {
                 Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
                 return Unauthorized();
             }
-            if (!token.HasCapability(Capabilities.ReadArtifact))
+            if (token is not null && !token.HasCapability(Capabilities.ReadArtifact))
             {
                 return Forbid();
             }
@@ -614,12 +613,13 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // Walk the configured upstreams in priority order; the first that yields the
         // artifact wins. A single configured registry behaves identically to before.
         MavenArtifactFetchResult? result = null;
-        foreach (string upstreamBase in bases)
+        foreach (var source in bases)
         {
             try
             {
                 result = await _svc.Upstream.FetchArtifactAsync(
-                    upstreamBase, upstreamPath, ct, orgId: orgId, purl: purlForLog);
+                    source.Url, upstreamPath, ct, orgId: orgId, purl: purlForLog,
+                    authorizationHeader: source.AuthorizationHeader);
             }
             catch (ChecksumException)
             {
@@ -647,43 +647,44 @@ public sealed partial class MavenController : OrgScopedControllerBase
         }
 
         // Verify detached OpenPGP signature when the tenant has Maven signature verification
-        // enabled and the verifier is configured with operator-pinned keys. The .asc sidecar
-        // is fetched from the same upstream that produced the artifact; the trust root is
-        // always Maven:SignatureKeys, never the upstream-served key. NotApplicable
-        // (off or not configured) leaves provenance_status NULL (no gate effect).
+        // enabled and this org has at least one Maven PGP trust anchor configured. The .asc
+        // sidecar is fetched from the same upstream that produced the artifact; the trust root is
+        // always the per-org operator-pinned anchor ring, never the upstream-served key.
+        // NotApplicable (off or no anchor) leaves provenance_status NULL (no gate effect).
         string? mavenVerifyMode = settings?.VerifyMavenSignatures;
         (string? mavenProvenanceStatus, string? mavenProvenanceSigner) =
-            await VerifyMavenSignatureAsync(mavenVerifyMode, bases, upstreamPath, result.Bytes, ct);
+            await VerifyMavenSignatureAsync(orgId, mavenVerifyMode, bases, upstreamPath, result.Bytes, ct);
 
         return await RecordScanAndServeAsync(orgId, resolvedCoords, result, settings, token,
             snapshotLiteralFilename, mavenProvenanceStatus, mavenProvenanceSigner, mavenVerifyMode, ct);
     }
 
     // Verifies the detached OpenPGP (.asc) signature for a freshly-fetched Maven artifact when the
-    // tenant has signature verification enabled and the verifier is configured with operator-pinned
-    // keys. The .asc sidecar is fetched from the same upstreams that produced the artifact; the trust
-    // root is always Maven:SignatureKeys, never the upstream-served key. Returns (null, null) when
-    // verification is off or not configured, leaving provenance_status NULL (no gate effect).
+    // tenant has signature verification enabled and the org has at least one Maven PGP trust
+    // anchor configured. The sidecar signature file is fetched from the same upstreams that
+    // produced the artifact, and the trust root is always the per-org operator-pinned anchor
+    // ring, never the upstream-served key. Returns (null, null) when verification is off or no
+    // anchor is configured, leaving the provenance status column unset with no gate effect.
     private async Task<(string? Status, string? Signer)> VerifyMavenSignatureAsync(
-        string? verifyMode, IReadOnlyList<string> bases, string upstreamPath, byte[] artifactBytes,
-        CancellationToken ct)
+        string orgId, string? verifyMode, IReadOnlyList<UpstreamSource> bases, string upstreamPath,
+        byte[] artifactBytes, CancellationToken ct)
     {
-        if (verifyMode == "off" || !_svc.MavenProvenance.IsConfigured)
+        if (verifyMode == "off" || !await _svc.MavenProvenance.IsConfiguredForAsync(orgId, ct))
         {
             return (null, null);
         }
 
         byte[]? ascBytes = null;
-        foreach (string upstreamBase in bases)
+        foreach (var source in bases)
         {
-            ascBytes = await _svc.Upstream.TryFetchAscSidecarAsync(upstreamBase, upstreamPath, ct);
+            ascBytes = await _svc.Upstream.TryFetchAscSidecarAsync(source.Url, upstreamPath, ct, source.AuthorizationHeader);
             if (ascBytes is not null)
             {
                 break;
             }
         }
 
-        var provResult = _svc.MavenProvenance.VerifyArtifact(artifactBytes, ascBytes);
+        var provResult = await _svc.MavenProvenance.VerifyArtifactAsync(orgId, artifactBytes, ascBytes, ct);
         return (ProvenanceStatuses.ToColumn(provResult.Status), provResult.Signer);
     }
 

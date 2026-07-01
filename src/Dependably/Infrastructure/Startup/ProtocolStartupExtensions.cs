@@ -37,17 +37,15 @@ internal static class ProtocolStartupExtensions
         builder.Services.AddSingleton<AllowlistService>();
         builder.Services.AddSingleton<BlockGateService>();
 
-        // Artefact-provenance verifiers. The trust anchors are operator-pinned (Npm:SignatureKeys,
-        // NuGet:SignatureCertificates, PyPI:SigstoreRoots + PyPI:TrustedPublishers), never the
-        // upstream-fetched registry key/package/bundle. Resolved per-ecosystem at the proxy ingest path.
+        // Artefact-provenance verifiers. All ecosystems resolve trust anchors per-org at
+        // request time via IPerOrgTrustAnchorStore. The trust root is never the upstream-fetched
+        // key; operators pin trust material through Settings → Trust Anchors.
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.NpmSignatureKeyStore>();
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.NpmProvenanceVerifier>();
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.NuGetSignatureTrustStore>();
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.NuGetProvenanceVerifier>();
-        builder.Services.AddSingleton<Dependably.Protocol.Provenance.PyPiSigstoreTrustStore>();
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.PyPiProvenanceVerifier>();
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.RpmProvenanceVerifier>();
-        builder.Services.AddSingleton<Dependably.Protocol.Provenance.MavenSignatureKeyStore>();
         builder.Services.AddSingleton<Dependably.Protocol.Provenance.MavenProvenanceVerifier>();
 
         // Maven upstream proxy

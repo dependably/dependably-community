@@ -3,8 +3,9 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using Dependably.Infrastructure;
 using Dependably.Protocol.Provenance;
-using Microsoft.Extensions.Configuration;
+using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Tests.Unit.Protocol;
@@ -57,10 +58,10 @@ public sealed class PyPiRekorVerifierTests
         string json = ProvenanceDocumentWithRekor(
             leaf, FileName, FileSha256, rekorKey, integratedTime, tamperProof: false, tamperSet: false);
 
-        var verifier = VerifierTrustingWithRekor(new[] { root }, rekorKey,
+        var (verifier, trust) = VerifierTrustingWithRekor(new[] { root }, rekorKey,
             (Issuer, "https://github.com/example/mylib/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
         Assert.Equal(Identity, result.Signer);
@@ -84,12 +85,12 @@ public sealed class PyPiRekorVerifierTests
         string json = ProvenanceDocumentWithRekor(
             leaf, FileName, FileSha256, rekorKey, integratedTime, tamperProof: false, tamperSet: false);
 
-        var verifier = VerifierTrustingWithRekor(new[] { root }, rekorKey,
+        var (verifier, trust) = VerifierTrustingWithRekor(new[] { root }, rekorKey,
             (Issuer, "https://github.com/example/mylib/"));
 
         // The leaf is expired at wall-clock time but the Rekor-proven integratedTime is within
         // the validity window — the result must be Verified.
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
         Assert.Equal(Identity, result.Signer);
@@ -107,10 +108,10 @@ public sealed class PyPiRekorVerifierTests
         string json = ProvenanceDocumentWithRekor(
             leaf, FileName, FileSha256, rekorKey, integratedTime, tamperProof: true, tamperSet: false);
 
-        var verifier = VerifierTrustingWithRekor(new[] { root }, rekorKey,
+        var (verifier, trust) = VerifierTrustingWithRekor(new[] { root }, rekorKey,
             (Issuer, "https://github.com/example/mylib/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -127,10 +128,10 @@ public sealed class PyPiRekorVerifierTests
         string json = ProvenanceDocumentWithRekor(
             leaf, FileName, FileSha256, rekorKey, integratedTime, tamperProof: false, tamperSet: true);
 
-        var verifier = VerifierTrustingWithRekor(new[] { root }, rekorKey,
+        var (verifier, trust) = VerifierTrustingWithRekor(new[] { root }, rekorKey,
             (Issuer, "https://github.com/example/mylib/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -149,10 +150,10 @@ public sealed class PyPiRekorVerifierTests
         string json = ProvenanceDocumentWithRekor(
             leaf, FileName, FileSha256, rekorKey, integratedTime, tamperProof: false, tamperSet: false);
 
-        var verifier = VerifierTrustingWithRekor(new[] { root }, rekorKey,
+        var (verifier, trust) = VerifierTrustingWithRekor(new[] { root }, rekorKey,
             (Issuer, "https://github.com/example/mylib/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -171,10 +172,10 @@ public sealed class PyPiRekorVerifierTests
         string json = ProvenanceDocumentWithRekor(
             leaf, FileName, FileSha256, rekorKey, integratedTime, tamperProof: false, tamperSet: false);
 
-        var verifier = VerifierTrustingWithRekor(new[] { root }, rekorKey,
+        var (verifier, trust) = VerifierTrustingWithRekor(new[] { root }, rekorKey,
             (Issuer, "https://github.com/example/mylib/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -192,10 +193,10 @@ public sealed class PyPiRekorVerifierTests
         // Build a bundle WITHOUT any tlog_entries (the original ProvenanceDocument shape).
         string json = ProvenanceDocumentNoRekor(leaf, FileName, FileSha256);
 
-        // Trust store with no Rekor keys configured.
-        var verifier = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/mylib/"));
+        // Trust material with no Rekor keys configured.
+        var (verifier, trust) = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/mylib/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
         Assert.Equal(Identity, result.Signer);
@@ -213,10 +214,10 @@ public sealed class PyPiRekorVerifierTests
         string json = ProvenanceDocumentWithRekor(
             leaf, FileName, FileSha256, rekorKey, integratedTime, tamperProof: false, tamperSet: false);
 
-        // Trust store with NO Rekor keys — Rekor check is disabled.
-        var verifier = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/mylib/"));
+        // Trust material with NO Rekor keys — Rekor check is disabled.
+        var (verifier, trust) = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/mylib/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
@@ -233,29 +234,29 @@ public sealed class PyPiRekorVerifierTests
         // Bundle has no tlog_entries.
         string json = ProvenanceDocumentNoRekor(leaf, FileName, FileSha256);
 
-        var verifier = VerifierTrustingWithRekor(new[] { root }, rekorKey,
+        var (verifier, trust) = VerifierTrustingWithRekor(new[] { root }, rekorKey,
             (Issuer, "https://github.com/example/mylib/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
 
-    // ── HasRekorKeys configured + HasRekorKeys check passes → rekorKey in store ─
+    // ── HasRekorKeys configured + HasRekorKeys check passes → rekorKey in material ─
 
     [Fact]
-    public void TrustStore_HasRekorKeys_TrueWhenKeyConfigured()
+    public void TrustMaterial_HasRekorKeys_TrueWhenKeyConfigured()
     {
         using var rekorKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var store = BuildTrustStoreWithRekor([], rekorKey, []);
-        Assert.True(store.HasRekorKeys);
+        var material = BuildTrustMaterialWithRekor([], rekorKey, []);
+        Assert.True(material.HasRekorKeys);
     }
 
     [Fact]
-    public void TrustStore_HasRekorKeys_FalseWhenNoKeyConfigured()
+    public void TrustMaterial_HasRekorKeys_FalseWhenNoKeyConfigured()
     {
-        var store = BuildTrustStoreNoRekor([], []);
-        Assert.False(store.HasRekorKeys);
+        var material = BuildTrustMaterialNoRekor([], []);
+        Assert.False(material.HasRekorKeys);
     }
 
     // ── GetRekorKey lookup ────────────────────────────────────────────────────
@@ -267,9 +268,9 @@ public sealed class PyPiRekorVerifierTests
         byte[] spki = rekorKey.ExportSubjectPublicKeyInfo();
         byte[] logId = SHA256.HashData(spki);
 
-        var store = BuildTrustStoreWithRekor([], rekorKey, []);
+        var material = BuildTrustMaterialWithRekor([], rekorKey, []);
 
-        var found = store.GetRekorKey(logId);
+        var found = material.GetRekorKey(logId);
         Assert.NotNull(found);
     }
 
@@ -277,10 +278,10 @@ public sealed class PyPiRekorVerifierTests
     public void GetRekorKey_WrongLogId_ReturnsNull()
     {
         using var rekorKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var store = BuildTrustStoreWithRekor([], rekorKey, []);
+        var material = BuildTrustMaterialWithRekor([], rekorKey, []);
 
         byte[] wrongId = new byte[32]; // all zeros
-        var found = store.GetRekorKey(wrongId);
+        var found = material.GetRekorKey(wrongId);
         Assert.Null(found);
     }
 
@@ -307,10 +308,10 @@ public sealed class PyPiRekorVerifierTests
         // attestations. Parse each into JsonElement and combine.
         string json = BuildMultiAttestationDocument(badBundle, goodBundle);
 
-        var verifier = VerifierTrustingWithRekor(new[] { root }, rekorKey,
+        var (verifier, trust) = VerifierTrustingWithRekor(new[] { root }, rekorKey,
             (Issuer, "https://github.com/example/mylib/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
@@ -567,83 +568,98 @@ public sealed class PyPiRekorVerifierTests
         return pae;
     }
 
-    // ── trust-store factory helpers ────────────────────────────────────────────
+    // ── trust-material factory helpers ────────────────────────────────────────
 
-    private static PyPiProvenanceVerifier VerifierTrusting(
+    // Returns a verifier backed by an empty stub store, plus trust material built from anchors.
+    private static (PyPiProvenanceVerifier Verifier, PyPiTrustMaterial Trust) VerifierTrusting(
         X509Certificate2[] roots, params (string Issuer, string Subject)[] publishers)
-        => new(BuildTrustStoreNoRekor(roots, publishers), NullLogger<PyPiProvenanceVerifier>.Instance);
+    {
+        var trust = BuildTrustMaterialNoRekor(roots, publishers);
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
+        return (verifier, trust);
+    }
 
-    private static PyPiProvenanceVerifier VerifierTrustingWithRekor(
+    private static (PyPiProvenanceVerifier Verifier, PyPiTrustMaterial Trust) VerifierTrustingWithRekor(
         X509Certificate2[] roots,
         ECDsa rekorKey,
         params (string Issuer, string Subject)[] publishers)
-        => new(BuildTrustStoreWithRekor(roots, rekorKey, publishers), NullLogger<PyPiProvenanceVerifier>.Instance);
+    {
+        var trust = BuildTrustMaterialWithRekor(roots, rekorKey, publishers);
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
+        return (verifier, trust);
+    }
 
-    // Builds a trust store with no Rekor keys.
-    private static PyPiSigstoreTrustStore BuildTrustStoreNoRekor(
+    // Builds trust material from cert roots and publishers, with no Rekor keys.
+    private static PyPiTrustMaterial BuildTrustMaterialNoRekor(
         X509Certificate2[] roots,
         (string Issuer, string Subject)[] publishers)
     {
-        string[] rootEntries = roots.Select(c => Convert.ToBase64String(c.Export(X509ContentType.Cert))).ToArray();
-        var publisherEntries = publishers.Select(p => new Dictionary<string, string>
-        {
-            ["issuer"] = p.Issuer,
-            ["subject"] = p.Subject,
-        }).ToArray();
+        var anchors = new List<TrustAnchorMaterial>();
 
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
+        foreach (var cert in roots)
         {
-            ["PyPI"] = new Dictionary<string, object>
+            anchors.Add(new TrustAnchorMaterial
             {
-                ["SigstoreRoots"] = rootEntries,
-                ["TrustedPublishers"] = publisherEntries,
-            },
-        });
+                Id = Guid.NewGuid().ToString(),
+                AnchorKind = "sigstore_root",
+                Material = Convert.ToBase64String(cert.Export(X509ContentType.Cert)),
+            });
+        }
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        return new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        foreach (var (issuer, subject) in publishers)
+        {
+            anchors.Add(new TrustAnchorMaterial
+            {
+                Id = Guid.NewGuid().ToString(),
+                AnchorKind = "trusted_publisher",
+                Material = JsonSerializer.Serialize(new { issuer, subject, match = "prefix" }),
+            });
+        }
+
+        return PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
     }
 
-    // Builds a trust store with one Rekor log key and optional roots/publishers.
-    internal static PyPiSigstoreTrustStore BuildTrustStoreWithRekor(
+    // Builds trust material with one Rekor log key and optional roots/publishers.
+    internal static PyPiTrustMaterial BuildTrustMaterialWithRekor(
         X509Certificate2[] roots,
         ECDsa rekorKey,
         (string Issuer, string Subject)[] publishers)
     {
-        string[] rootEntries = roots.Select(c => Convert.ToBase64String(c.Export(X509ContentType.Cert))).ToArray();
-        var publisherEntries = publishers.Select(p => new Dictionary<string, string>
+        var anchors = new List<TrustAnchorMaterial>();
+
+        foreach (var cert in roots)
         {
-            ["issuer"] = p.Issuer,
-            ["subject"] = p.Subject,
-        }).ToArray();
+            anchors.Add(new TrustAnchorMaterial
+            {
+                Id = Guid.NewGuid().ToString(),
+                AnchorKind = "sigstore_root",
+                Material = Convert.ToBase64String(cert.Export(X509ContentType.Cert)),
+            });
+        }
+
+        foreach (var (issuer, subject) in publishers)
+        {
+            anchors.Add(new TrustAnchorMaterial
+            {
+                Id = Guid.NewGuid().ToString(),
+                AnchorKind = "trusted_publisher",
+                Material = JsonSerializer.Serialize(new { issuer, subject, match = "prefix" }),
+            });
+        }
 
         // Compute the log id as SHA-256(SPKI DER) and encode as base64.
         byte[] spki = rekorKey.ExportSubjectPublicKeyInfo();
         string logIdB64 = Convert.ToBase64String(SHA256.HashData(spki));
         string keyB64 = Convert.ToBase64String(spki);
 
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
+        anchors.Add(new TrustAnchorMaterial
         {
-            ["PyPI"] = new Dictionary<string, object>
-            {
-                ["SigstoreRoots"] = rootEntries,
-                ["TrustedPublishers"] = publisherEntries,
-                ["RekorPublicKeys"] = new[]
-                {
-                    new Dictionary<string, string>
-                    {
-                        ["keyId"] = logIdB64,
-                        ["key"] = keyB64,
-                    },
-                },
-            },
+            Id = Guid.NewGuid().ToString(),
+            AnchorKind = "rekor_key",
+            KeyId = logIdB64,
+            Material = keyB64,
         });
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        return new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        return PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
     }
 }

@@ -4,7 +4,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using Dependably.Protocol.Provenance;
-using Microsoft.Extensions.Configuration;
+using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Tests.Unit.Protocol;
@@ -41,9 +41,9 @@ public sealed class PyPiProvenanceVerifierTests
     {
         var (root, leaf) = BuildChain();
         string json = ProvenanceDocument(leaf, FileName, FileSha256);
-        var verifier = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
+        var (verifier, trust) = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
         Assert.Equal(Identity, result.Signer);
@@ -58,9 +58,9 @@ public sealed class PyPiProvenanceVerifierTests
         // The attestation binds a DIFFERENT digest than the file dependably verified.
         string otherSha = new('a', 64);
         string json = ProvenanceDocument(leaf, FileName, otherSha);
-        var verifier = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
+        var (verifier, trust) = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
         Assert.Null(result.Signer);
@@ -71,9 +71,9 @@ public sealed class PyPiProvenanceVerifierTests
     {
         var (root, leaf) = BuildChain();
         string json = ProvenanceDocument(leaf, FileName, FileSha256, tamperSignature: true);
-        var verifier = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
+        var (verifier, trust) = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -85,9 +85,9 @@ public sealed class PyPiProvenanceVerifierTests
         string json = ProvenanceDocument(leaf, FileName, FileSha256);
         // Pin a DIFFERENT root: the signature is valid but the leaf chains to an anchor we did not pin.
         var (otherRoot, _) = BuildChain();
-        var verifier = VerifierTrusting(new[] { otherRoot }, (Issuer, "https://github.com/example/example/"));
+        var (verifier, trust) = VerifierTrusting(new[] { otherRoot }, (Issuer, "https://github.com/example/example/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -98,9 +98,9 @@ public sealed class PyPiProvenanceVerifierTests
         var (root, leaf) = BuildChain();
         string json = ProvenanceDocument(leaf, FileName, FileSha256);
         // Right root, but the Trusted Publisher allowlist names a different repo.
-        var verifier = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/someone-else/repo/"));
+        var (verifier, trust) = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/someone-else/repo/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -111,9 +111,9 @@ public sealed class PyPiProvenanceVerifierTests
         var (root, leaf) = BuildChain();
         string json = ProvenanceDocument(leaf, FileName, FileSha256);
         // Right subject prefix, but a different OIDC issuer than the cert carries.
-        var verifier = VerifierTrusting(new[] { root }, ("https://gitlab.com", "https://github.com/example/example/"));
+        var (verifier, trust) = VerifierTrusting(new[] { root }, ("https://gitlab.com", "https://github.com/example/example/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -124,9 +124,9 @@ public sealed class PyPiProvenanceVerifierTests
         var (root, leaf) = BuildChain();
         // The in-toto subject names a different file than the one being served.
         string json = ProvenanceDocument(leaf, "some-other-file-2.0.0.tar.gz", FileSha256);
-        var verifier = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
+        var (verifier, trust) = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -137,9 +137,9 @@ public sealed class PyPiProvenanceVerifierTests
     public void NoAttestation_NullDocument_Unsigned()
     {
         var (root, _) = BuildChain();
-        var verifier = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
+        var (verifier, trust) = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, provenanceJson: null);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, provenanceJson: null, trust);
 
         Assert.Equal(ProvenanceStatus.Unsigned, result.Status);
         Assert.Null(result.Signer);
@@ -149,10 +149,10 @@ public sealed class PyPiProvenanceVerifierTests
     public void EmptyBundleList_Unsigned()
     {
         var (root, _) = BuildChain();
-        var verifier = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
+        var (verifier, trust) = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
 
         var result = verifier.VerifyAttestation(
-            FileName, FileSha256, """{ "version": 1, "attestation_bundles": [] }""");
+            FileName, FileSha256, """{ "version": 1, "attestation_bundles": [] }""", trust);
 
         Assert.Equal(ProvenanceStatus.Unsigned, result.Status);
     }
@@ -163,9 +163,9 @@ public sealed class PyPiProvenanceVerifierTests
     public void MalformedJson_Fails_DoesNotThrow()
     {
         var (root, _) = BuildChain();
-        var verifier = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
+        var (verifier, trust) = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, "{ this is not valid json");
+        var result = verifier.VerifyAttestation(FileName, FileSha256, "{ this is not valid json", trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -174,44 +174,44 @@ public sealed class PyPiProvenanceVerifierTests
     public void BundleMissingEnvelope_Fails()
     {
         var (root, _) = BuildChain();
-        var verifier = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
+        var (verifier, trust) = VerifierTrusting(new[] { root }, (Issuer, "https://github.com/example/example/"));
 
         var result = verifier.VerifyAttestation(
-            FileName, FileSha256, """{ "attestation_bundles": [ { "attestations": [ { } ] } ] }""");
+            FileName, FileSha256, """{ "attestation_bundles": [ { "attestations": [ { } ] } ] }""", trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
 
-    // ── configuration ─────────────────────────────────────────────────────────
+    // ── configuration (PyPiTrustMaterial.IsConfigured) ────────────────────────
 
     [Fact]
     public void RootButNoPublishers_NotConfigured()
     {
         var (root, _) = BuildChain();
-        var store = TrustStoreWith(new[] { root }, Array.Empty<(string, string)>());
-        Assert.False(store.IsConfigured);
+        var material = TrustStoreWith(new[] { root }, Array.Empty<(string, string)>());
+        Assert.False(material.IsConfigured);
     }
 
     [Fact]
     public void PublishersButNoRoot_NotConfigured()
     {
-        var store = TrustStoreWith(Array.Empty<X509Certificate2>(), new[] { (Issuer, "x") });
-        Assert.False(store.IsConfigured);
+        var material = TrustStoreWith(Array.Empty<X509Certificate2>(), new[] { (Issuer, "x") });
+        Assert.False(material.IsConfigured);
     }
 
     [Fact]
     public void BothRootAndPublisher_Configured()
     {
         var (root, _) = BuildChain();
-        var store = TrustStoreWith(new[] { root }, new[] { (Issuer, "x") });
-        Assert.True(store.IsConfigured);
+        var material = TrustStoreWith(new[] { root }, new[] { (Issuer, "x") });
+        Assert.True(material.IsConfigured);
     }
 
     [Fact]
     public async Task MetadataDrivenVerify_IsNotApplicableForPyPi()
     {
         var (root, _) = BuildChain();
-        var verifier = VerifierTrusting(new[] { root }, (Issuer, "x"));
+        var (verifier, _) = VerifierTrusting(new[] { root }, (Issuer, "x"));
 
         // PyPI attestations are fetched as a separate provenance document, not from the registry
         // metadata signature list; the ProvenanceInput entry point must report NotApplicable.
@@ -330,6 +330,96 @@ public sealed class PyPiProvenanceVerifierTests
         return JsonSerializer.Serialize(bundle);
     }
 
+    // ── per-org enforcement ───────────────────────────────────────────────────
+
+    [Fact]
+    public async Task PerOrg_OrgAWithAnchors_OrgBWithout_IndependentResults()
+    {
+        // Org A has a root + publisher anchor in the stub; org B has none.
+        // IsConfiguredForAsync(orgA) must be true; IsConfiguredForAsync(orgB) must be false.
+        // GetPyPiTrustAsync(orgA) must return IsConfigured=true; orgB returns Empty.
+        var (root, _) = BuildChain();
+        string rootB64 = Convert.ToBase64String(root.Export(X509ContentType.Cert));
+        const string OrgA = "org-a";
+        const string OrgB = "org-b";
+
+        var stub = new StubPerOrgTrustAnchorStore();
+        stub.AddAnchor(OrgA, "pypi", new Dependably.Infrastructure.TrustAnchorMaterial
+        {
+            Id = "r1",
+            AnchorKind = "sigstore_root",
+            Material = rootB64,
+        });
+        stub.AddAnchor(OrgA, "pypi", new Dependably.Infrastructure.TrustAnchorMaterial
+        {
+            Id = "p1",
+            AnchorKind = "trusted_publisher",
+            Material = JsonSerializer.Serialize(new { issuer = Issuer, subject = "https://github.com/example/example/", match = "prefix" }),
+        });
+
+        var verifier = new PyPiProvenanceVerifier(stub, NullLogger<PyPiProvenanceVerifier>.Instance);
+
+        Assert.True(await verifier.IsConfiguredForAsync(OrgA));
+        Assert.False(await verifier.IsConfiguredForAsync(OrgB));
+
+        var trustA = await verifier.GetTrustMaterialAsync(OrgA);
+        var trustB = await verifier.GetTrustMaterialAsync(OrgB);
+
+        Assert.True(trustA.IsConfigured);
+        Assert.False(trustB.IsConfigured);
+        Assert.Same(PyPiTrustMaterial.Empty, trustB);
+    }
+
+    // ── row → PyPiTrustMaterial loader ──────────────────────────────────────
+
+    [Fact]
+    public void BuildFromAnchors_BothHalves_IsConfiguredTrue()
+    {
+        // IsConfigured requires at least one root AND at least one publisher.
+        var (root, _) = BuildChain();
+        string rootB64 = Convert.ToBase64String(root.Export(X509ContentType.Cert));
+
+        var anchors = new List<Dependably.Infrastructure.TrustAnchorMaterial>
+        {
+            new() { Id = "r1", AnchorKind = "sigstore_root", Material = rootB64 },
+            new() { Id = "p1", AnchorKind = "trusted_publisher",
+                Material = JsonSerializer.Serialize(new { issuer = Issuer, subject = "https://github.com/example/", match = "prefix" }) },
+        };
+
+        var material = PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
+        Assert.True(material.IsConfigured);
+    }
+
+    [Fact]
+    public void BuildFromAnchors_RootOnly_IsConfiguredFalse()
+    {
+        // A root without any publisher cannot have IsConfigured = true.
+        var (root, _) = BuildChain();
+        string rootB64 = Convert.ToBase64String(root.Export(X509ContentType.Cert));
+
+        var anchors = new List<Dependably.Infrastructure.TrustAnchorMaterial>
+        {
+            new() { Id = "r1", AnchorKind = "sigstore_root", Material = rootB64 },
+        };
+
+        var material = PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
+        Assert.False(material.IsConfigured);
+    }
+
+    [Fact]
+    public void BuildFromAnchors_PublisherOnly_IsConfiguredFalse()
+    {
+        // A publisher without a root cannot have IsConfigured = true.
+        var anchors = new List<Dependably.Infrastructure.TrustAnchorMaterial>
+        {
+            new() { Id = "p1", AnchorKind = "trusted_publisher",
+                Material = JsonSerializer.Serialize(new { issuer = Issuer, subject = "https://github.com/example/", match = "prefix" }) },
+        };
+
+        var material = PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
+        Assert.False(material.IsConfigured);
+    }
+
     private static byte[] BuildDssePae(string payloadType, byte[] payload)
     {
         byte[] typeBytes = Encoding.ASCII.GetBytes(payloadType);
@@ -341,35 +431,36 @@ public sealed class PyPiProvenanceVerifierTests
         return pae;
     }
 
-    private static PyPiProvenanceVerifier VerifierTrusting(
+    // Returns a verifier backed by a per-org stub store and the corresponding PyPiTrustMaterial.
+    // The material must be passed to VerifyAttestation at call sites.
+    private static (PyPiProvenanceVerifier Verifier, PyPiTrustMaterial Trust) VerifierTrusting(
         X509Certificate2[] roots, params (string Issuer, string Subject)[] publishers)
-        => new(TrustStoreWith(roots, publishers), NullLogger<PyPiProvenanceVerifier>.Instance);
+    {
+        var trust = BuildMaterial(roots, publishers);
+        var stub = new StubPerOrgTrustAnchorStore();
+        var verifier = new PyPiProvenanceVerifier(stub, NullLogger<PyPiProvenanceVerifier>.Instance);
+        return (verifier, trust);
+    }
 
-    // Builds the trust store from a JSON config stream shaped like appsettings.json:
-    // PyPI:SigstoreRoots is a string ARRAY of base64-DER certs; PyPI:TrustedPublishers an array of
-    // { issuer, subject } objects.
-    private static PyPiSigstoreTrustStore TrustStoreWith(
+    // Builds PyPiTrustMaterial directly from certificates and publisher tuples — no config needed.
+    internal static PyPiTrustMaterial BuildMaterial(
         X509Certificate2[] roots, (string Issuer, string Subject)[] publishers)
     {
-        string[] rootEntries = roots.Select(c => Convert.ToBase64String(c.Export(X509ContentType.Cert))).ToArray();
-        var publisherEntries = publishers.Select(p => new Dictionary<string, string>
+        var rootColl = new X509Certificate2Collection();
+        foreach (var root in roots)
         {
-            ["issuer"] = p.Issuer,
-            ["subject"] = p.Subject,
-        }).ToArray();
+            rootColl.Add(root);
+        }
 
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
-        {
-            ["PyPI"] = new Dictionary<string, object>
-            {
-                ["SigstoreRoots"] = rootEntries,
-                ["TrustedPublishers"] = publisherEntries,
-            },
-        });
+        var pubList = publishers
+            .Select(p => new TrustedPublisher(p.Issuer, p.Subject, TrustedPublisherMatchMode.Prefix))
+            .ToList();
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        return new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        return new PyPiTrustMaterial(rootColl, pubList, new List<RekorLogKey>());
     }
+
+    // TrustStoreWith builds PyPiTrustMaterial to check IsConfigured in the configuration tests.
+    private static PyPiTrustMaterial TrustStoreWith(
+        X509Certificate2[] roots, (string Issuer, string Subject)[] publishers)
+        => BuildMaterial(roots, publishers);
 }

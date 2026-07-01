@@ -12,7 +12,12 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
 
     public UpstreamRegistryRepositoryTests(InMemoryDbFixture fixture) => _fixture = fixture;
 
-    private UpstreamRegistryRepository NewRepo() => new(_fixture.Store, TimeProvider.System);
+    // Configured envelope so secret-bearing OCI writes encrypt/decrypt round-trip.
+    private UpstreamRegistryRepository NewRepo() => new(_fixture.Store, TimeProvider.System, TestEnvelope.Configured());
+
+    private static async Task<IReadOnlyList<string>> Urls(
+        UpstreamRegistryRepository repo, string org, string ecosystem) =>
+        (await repo.ListSourcesForEcosystemAsync(org, ecosystem)).Select(s => s.Url).ToList();
 
     [Fact]
     public async Task Add_AppendsInPriorityOrder_AndListFiltersByOrg()
@@ -21,11 +26,11 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
         string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
         var repo = NewRepo();
 
-        var first = await repo.AddAsync(orgA, "pypi", "https://pypi.org", null);
-        var second = await repo.AddAsync(orgA, "pypi", "https://mirror.example/pypi", "mirror");
-        await repo.AddAsync(orgB, "pypi", "https://should-not-leak.example", null);
+        var first = await repo.AddAsync(orgA, new NewUpstreamRegistry("pypi", "https://pypi.org", null));
+        var second = await repo.AddAsync(orgA, new NewUpstreamRegistry("pypi", "https://mirror.example/pypi", "mirror"));
+        await repo.AddAsync(orgB, new NewUpstreamRegistry("pypi", "https://should-not-leak.example", null));
 
-        var urls = await repo.ListUrlsForEcosystemAsync(orgA, "pypi");
+        var urls = await Urls(repo, orgA, "pypi");
         Assert.Equal(["https://pypi.org", "https://mirror.example/pypi"], urls);
         Assert.True(first.Position < second.Position);
 
@@ -39,12 +44,12 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
     {
         string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         var repo = NewRepo();
-        await repo.AddAsync(org, "pypi", "https://pypi.org", null);
-        await repo.AddAsync(org, "npm", "https://registry.npmjs.org", null);
+        await repo.AddAsync(org, new NewUpstreamRegistry("pypi", "https://pypi.org", null));
+        await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://registry.npmjs.org", null));
 
-        Assert.Equal(["https://pypi.org"], await repo.ListUrlsForEcosystemAsync(org, "pypi"));
-        Assert.Equal(["https://registry.npmjs.org"], await repo.ListUrlsForEcosystemAsync(org, "npm"));
-        Assert.Empty(await repo.ListUrlsForEcosystemAsync(org, "nuget"));
+        Assert.Equal(["https://pypi.org"], await Urls(repo, org, "pypi"));
+        Assert.Equal(["https://registry.npmjs.org"], await Urls(repo, org, "npm"));
+        Assert.Empty(await Urls(repo, org, "nuget"));
     }
 
     [Fact]
@@ -52,15 +57,15 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
     {
         string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         var repo = NewRepo();
-        var a = await repo.AddAsync(org, "npm", "https://a.example", null);
-        var b = await repo.AddAsync(org, "npm", "https://b.example", null);
-        var c = await repo.AddAsync(org, "npm", "https://c.example", null);
+        var a = await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://a.example", null));
+        var b = await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://b.example", null));
+        var c = await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://c.example", null));
 
         await repo.ReorderAsync(org, "npm", [c.Id, a.Id, b.Id]);
 
         Assert.Equal(
             ["https://c.example", "https://a.example", "https://b.example"],
-            await repo.ListUrlsForEcosystemAsync(org, "npm"));
+            await Urls(repo, org, "npm"));
     }
 
     [Fact]
@@ -68,14 +73,14 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
     {
         string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         var repo = NewRepo();
-        _ = await repo.AddAsync(org, "npm", "https://a.example", null);
-        _ = await repo.AddAsync(org, "npm", "https://b.example", null);
-        var c = await repo.AddAsync(org, "npm", "https://c.example", null);
+        _ = await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://a.example", null));
+        _ = await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://b.example", null));
+        var c = await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://c.example", null));
 
         // Only name c — a and b should retain their relative order after c.
         await repo.ReorderAsync(org, "npm", [c.Id]);
 
-        var urls = await repo.ListUrlsForEcosystemAsync(org, "npm");
+        var urls = await Urls(repo, org, "npm");
         Assert.Equal("https://c.example", urls[0]);
         Assert.Contains("https://a.example", urls);
         Assert.Contains("https://b.example", urls);
@@ -88,16 +93,16 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
         string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"a-{Guid.NewGuid():N}");
         string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
         var repo = NewRepo();
-        var entry = await repo.AddAsync(orgA, "maven", "https://repo1.maven.org/maven2", null);
+        var entry = await repo.AddAsync(orgA, new NewUpstreamRegistry("maven", "https://repo1.maven.org/maven2", null));
 
         // orgB attempting to delete orgA's entry must not remove it (BOLA-safe).
         await repo.DeleteAsync(orgB, entry.Id);
-        Assert.Single(await repo.ListUrlsForEcosystemAsync(orgA, "maven"));
+        Assert.Single(await Urls(repo, orgA, "maven"));
 
         // Correct owner deletes successfully; repeat is a safe no-op.
         await repo.DeleteAsync(orgA, entry.Id);
         await repo.DeleteAsync(orgA, entry.Id);
-        Assert.Empty(await repo.ListUrlsForEcosystemAsync(orgA, "maven"));
+        Assert.Empty(await Urls(repo, orgA, "maven"));
     }
 
     [Fact]
@@ -105,10 +110,10 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
     {
         string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         var repo = NewRepo();
-        await repo.AddAsync(org, "pypi", "https://pypi.org", null);
-        await repo.AddAsync(org, "pypi", "https://pypi.org", "dup");
+        await repo.AddAsync(org, new NewUpstreamRegistry("pypi", "https://pypi.org", null));
+        await repo.AddAsync(org, new NewUpstreamRegistry("pypi", "https://pypi.org", "dup"));
 
-        Assert.Single(await repo.ListUrlsForEcosystemAsync(org, "pypi"));
+        Assert.Single(await Urls(repo, org, "pypi"));
     }
 
     // ── OCI-specific: AddOciAsync, BuildOciUpstreamsForOrgAsync ────────────────

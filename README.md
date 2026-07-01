@@ -9,7 +9,7 @@ Every package your team pulls from the internet is a supply chain risk. Dependab
 ## Features
 
 - **Proxy cache** — pull-through cache for npm, PyPI, NuGet, Maven, RPM, and OCI; verified by SHA-256 before storage, served locally on every subsequent request
-- **Supply chain tracking** — first-fetch detection, per-version checksum verification, CycloneDX 1.5 SBOM generation
+- **Supply chain tracking** — first-fetch detection, per-version checksum verification, CycloneDX 1.6 SBOM generation
 - **Allowlisting** — per-org PURL pattern allowlists to restrict which packages can be fetched or pushed
 - **Multitenancy** — multiple orgs, scoped tokens, role-based access, full org isolation
 - **Retention policies** — configurable keep-versions and keep-days per org

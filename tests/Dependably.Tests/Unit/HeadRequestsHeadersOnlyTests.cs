@@ -429,7 +429,7 @@ public sealed class HeadRequestsHeadersOnlyTests : IAsyncLifetime
         var blobs = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
         return new OciUpstreamResolver(
             http, authSvc, options, blobs, _db,
-            new DisabledAirGap(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
+            new DisabledAirGap(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
     }
 
     // ── Test stubs ────────────────────────────────────────────────────────────

@@ -87,4 +87,8 @@ public sealed record PyPiProxyDownload(
     string UpstreamUrl,
     string? UpstreamSha256,
     PyPiFilename Parsed,
-    (Package Package, PackageVersion Version)? PkgVersions);
+    (Package Package, PackageVersion Version)? PkgVersions,
+    // Pre-built Authorization header for the upstream that resolved this URL (null for
+    // anonymous, and always null on the files.pythonhosted.org CDN shortcut so a private
+    // upstream token never leaks to the public CDN).
+    string? AuthorizationHeader = null);

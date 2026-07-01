@@ -16,6 +16,7 @@
   import SettingsServiceTokens from '../lib/settings/SettingsServiceTokens.svelte'
   import SettingsInstance from '../lib/settings/SettingsInstance.svelte'
   import SettingsMetrics from '../lib/settings/SettingsMetrics.svelte'
+  import SettingsTrustAnchors from '../lib/settings/SettingsTrustAnchors.svelte'
 
   let tab = 'general'
   let settings = null, retention = null, instanceMax = null, proxySettings = null
@@ -60,10 +61,14 @@
 
   onMount(async () => {
     try {
+      // Instance settings are a single-mode-only surface; in multi/header mode the backend
+      // 404s /api/v1/instance/* (control-plane concern, owned by the system_admin SPA), so
+      // skip the doomed request rather than fire one that always fails.
+      const isSingle = ($bootstrapInfo?.mode ?? 'single') === 'single'
       const [s, r, inst, ps] = await Promise.all([
         api.getOrgSettings(),
         api.getRetention(),
-        api.getInstanceSettings().catch(() => ({})),
+        isSingle ? api.getInstanceSettings().catch(() => ({})) : Promise.resolve({}),
         api.getProxySettings(),
       ])
       settings = { ...s }
@@ -226,6 +231,7 @@
         maxOsvScoreTolerance:    Number(proxySettings.max_osv_score_tolerance),
         minReleaseAgeHours,
         blockDeprecated:         proxySettings.block_deprecated,
+        blockRevoked:            proxySettings.block_revoked,
         blockMalicious:          proxySettings.block_malicious,
         blockKev:                proxySettings.block_kev,
         maxEpssTolerance,
@@ -367,6 +373,7 @@
     { key: 'upload-limits',  label: 'settings.tabs.uploadLimits' },
     { key: 'retention',      label: 'settings.tabs.retention' },
     { key: 'proxy',          label: 'settings.tabs.proxy' },
+    { key: 'security',       label: 'settings.tabs.security' },
     { key: 'licenses',       label: 'settings.tabs.licenses' },
     { key: 'claims',         label: 'settings.tabs.claims' },
     ...(viewerIsAdmin ? [
@@ -423,7 +430,7 @@
 
 </script>
 
-<div class="page">
+<div class="page page-fluid">
   <div class="page-header"><h1 class="page-title">{$t('settings.title')}</h1></div>
 
   {#if loading}<span class="spinner"></span>
@@ -470,6 +477,9 @@
         onRemoveInstallScriptAllowlist={removeInstallScriptAllowlist}
         {saving}
         onSave={saveProxySettings} />
+
+    {:else if tab === 'security'}
+      <SettingsTrustAnchors />
 
     {:else if tab === 'licenses'}
       <p class="tab-intro">{$t('settings.licenses.intro')}</p>
@@ -732,7 +742,7 @@
     max-width: 540px;
   }
 
-  .list-header { margin-bottom: 12px; }
+  /* .list-header margin-bottom is global — see app.css */
   .list-table .col-added   { width: 110px; }
   .list-table .col-actions { width: 90px; }
   .list-table .col-review-actions { width: 160px; }

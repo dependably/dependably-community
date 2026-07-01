@@ -82,6 +82,16 @@ public sealed class SamlController : ControllerBase
         var cfg = await _samlConfig.GetAsync(tenant.TenantId!, ct);
         var saml2Config = BuildSaml2Configuration(cfg, requireIdp: false);
 
+        // Fall back to the standard Email NameID format when the configured value is absent
+        // or is not a valid absolute URI (e.g. a value stored before input validation was
+        // added). new Uri() throws UriFormatException on non-absolute-URI strings, so use
+        // TryCreate to handle any previously stored invalid values gracefully.
+        string nameIdFormatStr =
+            cfg?.NameIdFormat is { } rawFmt
+            && Uri.TryCreate(rawFmt, UriKind.Absolute, out _)
+                ? rawFmt
+                : NameIdentifierFormats.Email.OriginalString;
+
         var entityDescriptor = new EntityDescriptor(saml2Config)
         {
             ValidUntil = 365,
@@ -89,7 +99,7 @@ public sealed class SamlController : ControllerBase
             {
                 AuthnRequestsSigned = false,
                 WantAssertionsSigned = true,
-                NameIDFormats = new[] { new Uri(cfg?.NameIdFormat ?? NameIdentifierFormats.Email.OriginalString) },
+                NameIDFormats = new[] { new Uri(nameIdFormatStr) },
                 SingleLogoutServices = Array.Empty<SingleLogoutService>(),
                 AssertionConsumerServices = new[]
                 {

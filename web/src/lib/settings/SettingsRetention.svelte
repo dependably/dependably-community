@@ -1,6 +1,6 @@
 <!--
-  Retention tab — keep_versions, keep_days, activity_retention_days. Empty input = unlimited
-  (the server stores null and the GC skips that dimension).
+  Retention tab — keep_versions, keep_days, activity_retention_days, purge_unlisted_after_days.
+  Empty input = unlimited (the server stores null and the GC skips that dimension).
 -->
 <script>
   import { t } from 'svelte-i18n'
@@ -22,6 +22,10 @@
   <div class="form-row">
     <label>{$t('settings.retention.activityDays')}</label>
     <input type="number" bind:value={retention.activity_retention_days} placeholder={$t('settings.retention.unlimited')} min="1" />
+  </div>
+  <div class="form-row">
+    <label>{$t('settings.retention.purgeUnlistedDays')}</label>
+    <input type="number" bind:value={retention.purge_unlisted_after_days} placeholder={$t('settings.retention.unlimited')} min="1" />
   </div>
   <button class="primary" on:click={onSave} disabled={saving}>
     {saving ? $t('common.actions.saving') : $t('common.actions.save')}

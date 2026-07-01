@@ -173,14 +173,15 @@ public sealed class CacheArtifactRepository
     /// columns updated.
     /// </summary>
     // xtenant: cache_artifact is global (no org_id); scoped by (ecosystem, name) coordinate.
-    public async Task<IReadOnlyList<(string Id, string Version, string? Deprecated, string? DeprecationCheckedAt)>>
+    public async Task<IReadOnlyList<(string Id, string Version, string? Deprecated, string? DeprecationCheckedAt, string? RevokedAt, string? Purl)>>
         ListVersionsForNameAsync(string ecosystem, string name, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.QueryAsync<(string Id, string Version, string? Deprecated, string? DeprecationCheckedAt)>(
+        var rows = await conn.QueryAsync<(string Id, string Version, string? Deprecated, string? DeprecationCheckedAt, string? RevokedAt, string? Purl)>(
             """
             SELECT id AS Id, version AS Version, deprecated AS Deprecated,
-                   deprecation_checked_at AS DeprecationCheckedAt
+                   deprecation_checked_at AS DeprecationCheckedAt, revoked_at AS RevokedAt,
+                   purl AS Purl
             FROM cache_artifact
             WHERE ecosystem = @ecosystem AND name = @name
             """,
@@ -218,6 +219,33 @@ public sealed class CacheArtifactRepository
     }
 
     /// <summary>
+    /// Stamps <c>revoked_at</c> on a <c>cache_artifact</c> row the first time the version is
+    /// observed removed from upstream. Caller guards on the NULL→set transition so the
+    /// timestamp records first-observation, not the latest refresh pass.
+    /// </summary>
+    // xtenant: UPDATE keyed by cache_artifact PK (global); no org_id needed.
+    public async Task SetRevokedAtAsync(string id, TimeProvider time, CancellationToken ct = default)
+    {
+        string now = time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE cache_artifact SET revoked_at = @now WHERE id = @id",
+            new { id, now });
+    }
+
+    /// <summary>
+    /// Clears <c>revoked_at</c> when a previously-revoked version reappears upstream.
+    /// </summary>
+    // xtenant: UPDATE keyed by cache_artifact PK (global); no org_id needed.
+    public async Task ClearRevokedAtAsync(string id, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE cache_artifact SET revoked_at = NULL WHERE id = @id",
+            new { id });
+    }
+
+    /// <summary>
     /// Returns the serve facts for a proxy artifact at the given coordinate, joining
     /// <c>cache_artifact</c> (global) and <c>tenant_artifact_access</c> (org-scoped). Used by
     /// ecosystem download handlers as the cache-hit lookup on the proxy serve path. Returns null
@@ -238,6 +266,7 @@ public sealed class CacheArtifactRepository
                 ca.purl             AS Purl,
                 ca.published_at     AS PublishedAt,
                 ca.deprecated       AS Deprecated,
+                ca.revoked_at       AS RevokedAt,
                 ca.vuln_checked_at  AS VulnCheckedAt,
                 ca.has_install_script      AS HasInstallScript,
                 ca.install_script_kind     AS InstallScriptKind,
@@ -282,6 +311,7 @@ public sealed class CacheArtifactRepository
                 ca.published_at         AS PublishedAt,
                 ca.first_cached_at      AS CreatedAt,
                 ca.deprecated           AS Deprecated,
+                ca.revoked_at           AS RevokedAt,
                 ca.vuln_checked_at      AS VulnCheckedAt,
                 ca.checksum_sha1        AS ChecksumSha1,
                 ca.has_install_script   AS HasInstallScript,
@@ -393,6 +423,8 @@ public sealed class CacheArtifactServeFacts
     public string? Purl { get; init; }
     public DateTimeOffset? PublishedAt { get; init; }
     public string? Deprecated { get; init; }
+    /// <summary>ISO 8601 UTC; set when the version was observed removed from upstream. NULL = still published.</summary>
+    public DateTimeOffset? RevokedAt { get; init; }
     public DateTimeOffset? VulnCheckedAt { get; init; }
     public bool HasInstallScript { get; init; }
     public string? InstallScriptKind { get; init; }
@@ -426,6 +458,8 @@ public sealed class CacheArtifactIndexFacts
     /// <summary>Timestamp of the global-plane first fetch, sourced from <c>cache_artifact.first_cached_at</c>.</summary>
     public DateTimeOffset CreatedAt { get; init; }
     public string? Deprecated { get; init; }
+    /// <summary>ISO 8601 UTC; set when the version was observed removed from upstream. NULL = still published.</summary>
+    public DateTimeOffset? RevokedAt { get; init; }
     public DateTimeOffset? VulnCheckedAt { get; init; }
     /// <summary>Hex SHA-1, present for npm artifacts captured at first-fetch.</summary>
     public string? ChecksumSha1 { get; init; }
@@ -474,6 +508,7 @@ public sealed class CacheArtifactIndexFacts
             YankReason = YankReason,
             ManualBlockState = ManualBlockState,
             Deprecated = Deprecated,
+            RevokedAt = RevokedAt,
             PublishedAt = PublishedAt,
             CreatedAt = CreatedAt,
             VulnCheckedAt = VulnCheckedAt,

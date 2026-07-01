@@ -46,7 +46,7 @@ jobs:
 
       - name: Upload unit coverage
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: unit-coverage
           path: '**/TestResults/**/coverage.cobertura.xml'
@@ -127,7 +127,7 @@ jobs:
 
       - name: Upload integration coverage
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: integration-coverage
           path: '**/TestResults/**/coverage.cobertura.xml'
@@ -159,16 +159,31 @@ jobs:
         run: npm ci
         working-directory: web
 
-      - name: Generate frontend SBOM
-        run: npm run sbom
+      - name: Generate frontend SBOM (production deps only)
+        run: npm run sbom:prod
         working-directory: web
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      # Merge the backend (NuGet) and frontend (npm) CycloneDX docs into one
+      # hierarchical SBOM for the released image. Both inputs are production-only
+      # (backend: --exclude-dev, frontend: --omit dev) and lockfile-derived, so the
+      # result reflects the deps actually shipped. cyclonedx-cli is pinned by digest
+      # (linux/amd64 — the GitHub-hosted runner is amd64).
+      - name: Merge SBOMs
+        run: |
+          docker run --rm -v "$PWD":/work -w /work \
+            cyclonedx/cyclonedx-cli@sha256:9a858a15e7b0843606efc0ff19d5f7575011a5428d7f3d343b4f6cf09d8f0d4e \
+            merge --hierarchical \
+            --input-files sbom-backend.json web/sbom-frontend-prod.json \
+            --output-file sbom.json --output-format json --output-version v1_6 \
+            --name "Dependably Community" --version "${GITHUB_REF_NAME#v}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: sboms
+          name: sbom
           path: |
+            sbom.json
             sbom-backend.json
-            web/sbom-frontend.json
+            web/sbom-frontend-prod.json
 
   publish:
     name: Publish Docker Image
@@ -176,7 +191,7 @@ jobs:
     needs: [unit-and-compliance, integration, frontend-lint, sbom]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
-      contents: read
+      contents: write # create the GitHub release and upload the SBOM asset
       packages: write # push image to ghcr.io
       id-token: write # OIDC token for keyless sigstore signing
       attestations: write # store the build-provenance attestation on the repo
@@ -224,3 +239,52 @@ jobs:
           subject-name: ghcr.io/${{ github.repository_owner }}/dependably
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+      # Pull in the combined, prod-only CycloneDX SBOM built by the `sbom` job in this run.
+      - name: Download SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom
+          path: .
+
+      # Signed SBOM attestation bound to the same image digest (keyless OIDC/sigstore —
+      # no stored key), pushed to the registry alongside the SLSA L2 build provenance
+      # above. The action auto-detects CycloneDX (predicate type https://cyclonedx.org/bom).
+      # Verify with:
+      #   gh attestation verify oci://ghcr.io/<owner>/dependably:<tag> -R <owner>/dependably \
+      #     --predicate-type https://cyclonedx.org/bom
+      - name: Attest SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/dependably
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: sbom.json
+          push-to-registry: true
+
+      # Second, file-subject attestation so the SBOM is verifiable as a standalone
+      # release download (subject = sbom.json's own digest, not the image's). This is
+      # what makes `gh attestation verify sbom.json -R <owner>/dependably` resolve. The
+      # emitted sigstore bundle travels with the release alongside the SBOM itself.
+      - name: Attest SBOM file (release asset)
+        id: attest_sbom_file
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: sbom.json
+
+      # Publish the signed, prod-only CycloneDX SBOM as a GitHub release asset so it is
+      # downloadable by anyone who can read the public release. Idempotent: a tag re-run
+      # uploads onto the existing release instead of failing. Uses the preinstalled gh
+      # CLI rather than a third-party action to keep the dependency surface minimal.
+      - name: Create GitHub release with signed SBOM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cp "${{ steps.attest_sbom_file.outputs.bundle-path }}" sbom.json.sigstore.json
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" sbom.json sbom.json.sigstore.json --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" sbom.json sbom.json.sigstore.json \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Signed production-dependency CycloneDX 1.6 SBOM for this release. Verify: \`gh attestation verify sbom.json -R ${GITHUB_REPOSITORY}\`"
+          fi

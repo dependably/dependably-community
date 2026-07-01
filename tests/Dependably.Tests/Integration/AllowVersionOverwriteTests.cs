@@ -136,4 +136,56 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
         Assert.Contains("prior_artifact_hash", replaceRows[0].Detail);
         Assert.Contains("artifact_hash", replaceRows[0].Detail);
     }
+
+    [Fact]
+    public async Task PublishDuplicate_ExceptionPolicy_PerPackageAllow_AcceptsAndAuditsPackageReplace()
+    {
+        // Org policy = 'exception': republish blocked by default, but a per-package 'allow'
+        // override must grant it. This exercises the existing-row GetOrCreateAsync projection
+        // that previously dropped same_version_push_override, forcing a spurious 409 on republish.
+        using (var admin = await AdminJwtClient())
+        {
+            var settingsResp = await admin.PutAsJsonAsync("/api/v1/settings", new
+            {
+                anonymousPull = false,
+                allowlistMode = false,
+                versionOverwritePolicy = "exception",
+            });
+            settingsResp.EnsureSuccessStatusCode();
+        }
+
+        // First publish creates the package + version under org policy 'exception'.
+        await _factory.PushNpmPackage("acme-overwrite-exception", "1.0.0");
+
+        // Grant the per-package override via the management API.
+        using (var admin = await AdminJwtClient())
+        {
+            var overrideResp = await admin.PatchAsJsonAsync(
+                "/api/v1/packages/npm/acme-overwrite-exception/version-overwrite",
+                new { @override = "allow" });
+            overrideResp.EnsureSuccessStatusCode();
+        }
+
+        // Republish the same coordinate — must succeed because the per-package override is 'allow'.
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        string body = NpmFixtures.BuildPublishBody("acme-overwrite-exception", "1.0.0");
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+        var resp = await client.PutAsync("/npm/acme-overwrite-exception", content);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        // package.replace audit row exists for the coordinate.
+        var db = _factory.Services.GetRequiredService<Dependably.Infrastructure.IMetadataStore>();
+        await using var conn = await db.OpenAsync();
+        var replaceRows = (await conn.QueryAsync<(string Detail, string Purl)>(
+            """
+            SELECT detail, purl FROM audit_log
+            WHERE action = 'package.replace' AND purl LIKE '%acme-overwrite-exception@1.0.0%'
+            """))
+            .ToList();
+        Assert.NotEmpty(replaceRows);
+        Assert.Contains("prior_artifact_hash", replaceRows[0].Detail);
+        Assert.Contains("artifact_hash", replaceRows[0].Detail);
+    }
 }

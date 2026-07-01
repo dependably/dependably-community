@@ -214,7 +214,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGzBytes));
 
         var proxy = BuildProxy();
-        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+        var result = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
 
         Assert.NotNull(result);
         Assert.Equal(packageSha256, result!.Sha256);
@@ -318,7 +318,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGzBytes));
 
         var proxy = BuildProxy();
-        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+        var result = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
 
         Assert.NotNull(result);
         Assert.Equal($"{_upstream}/Packages/c/curl-8.6.0-1.fc40.x86_64.rpm", result!.PackageUrl);
@@ -341,7 +341,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGzBytes));
 
         var proxy = BuildProxy();
-        var result = await proxy.ResolvePackageUrlAsync(_upstream, "nonexistent-1.0-1.fc40.x86_64.rpm", default);
+        var result = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "nonexistent-1.0-1.fc40.x86_64.rpm", default);
 
         Assert.Null(result);
     }
@@ -385,7 +385,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     {
         var proxy = BuildProxy(airGapped: true);
         await Assert.ThrowsAsync<AirGappedException>(
-            () => proxy.ResolvePackageUrlAsync(_upstream, "tree-2.1.1-1.fc40.x86_64.rpm", default));
+            () => proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "tree-2.1.1-1.fc40.x86_64.rpm", default));
     }
 
     [Fact]
@@ -452,7 +452,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         StubRepo(repomdBytes, asc, primaryFilename, primaryGz);
 
         var proxy = BuildProxy(gpgKey: Encoding.UTF8.GetString(pubArmored));
-        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+        var result = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
 
         Assert.NotNull(result);
         Assert.Equal("curl", result!.Name);
@@ -470,7 +470,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         StubRepo(tampered, asc, primaryFilename, primaryGz);
 
         var proxy = BuildProxy(gpgKey: Encoding.UTF8.GetString(pubArmored));
-        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+        var result = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
 
         Assert.Null(result);
         // Fail-before-parse: the primary.xml.gz must never be fetched once repomd fails verification.
@@ -488,7 +488,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         StubRepo(repomdBytes, asc, primaryFilename, primaryGz);
 
         var proxy = BuildProxy(gpgKey: Encoding.UTF8.GetString(trustedPubArmored));
-        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+        var result = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
 
         Assert.Null(result);
     }
@@ -505,7 +505,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGz));
 
         var proxy = BuildProxy(gpgKey: Encoding.UTF8.GetString(pubArmored));
-        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+        var result = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
 
         Assert.Null(result);
     }
@@ -522,7 +522,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
                .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGz));
 
         var proxy = BuildProxy();   // no Rpm:GpgKey
-        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+        var result = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
 
         Assert.NotNull(result);
     }
@@ -535,7 +535,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
         // Operator demanded enforcement but provided no parseable key → fail closed.
         var proxy = BuildProxy(verifyFlag: "true");
-        var result = await proxy.ResolvePackageUrlAsync(_upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+        var result = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
 
         Assert.Null(result);
     }
@@ -649,10 +649,6 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
             ["Rpm:GpgKeyTtl"] = "1.00:00:00",
             ["Rpm:NegativeCacheTtl"] = "00:05:00",
         };
-        if (gpgKey is not null)
-        {
-            settings["Rpm:GpgKey"] = gpgKey;
-        }
 
         if (verifyFlag is not null)
         {
@@ -666,6 +662,19 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         var airGapMode = new StubAirGapMode(airGapped);
         var urlValidator = new AllowAllValidator();
 
+        var trustStore = new StubPerOrgTrustAnchorStore();
+        if (gpgKey is not null)
+        {
+            trustStore.AddAnchor(TestOrgId, "rpm", new TrustAnchorMaterial
+            {
+                Id = "test-anchor",
+                AnchorKind = "pgp",
+                Material = gpgKey,
+                Label = "test-key",
+                KeyId = null,
+            });
+        }
+
         return new RpmUpstreamProxy(new RpmUpstreamProxyServices(
             httpFactory,
             new TieredBlobStorage(blobs, blobs),
@@ -674,8 +683,12 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
             config,
             airGapMode,
             urlValidator,
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<RpmUpstreamProxy>.Instance, TimeProvider.System));
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<RpmUpstreamProxy>.Instance,
+            TimeProvider.System,
+            trustStore));
     }
+
+    private const string TestOrgId = "test-org";
 
     // ── XML builders ─────────────────────────────────────────────────────────
 

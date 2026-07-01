@@ -103,15 +103,15 @@ internal static class NuGetNupkgProxyHelper
     /// misleading timestamp.
     /// </summary>
     internal static async Task<NuGetFirstFetchMetadata> TryFetchNuGetFirstFetchMetadataAsync(
-        UpstreamClient upstream, string upstreamBase, string normalizedId, string normalizedVersion, CancellationToken ct)
+        UpstreamClient upstream, UpstreamSource upstreamSource, string normalizedId, string normalizedVersion, CancellationToken ct)
     {
         try
         {
-            string leafUrl = $"{upstreamBase}/registration5-semver1/{normalizedId}/{normalizedVersion}.json";
+            string leafUrl = $"{upstreamSource.Url}/registration5-semver1/{normalizedId}/{normalizedVersion}.json";
             // Route through single-flight — this leaf fetch is called inline with
             // every NuGet first-fetch download, so concurrent fan-out would otherwise
             // stampede the registration URL too.
-            var resp = await upstream.GetOrFetchMetadataAsync(leafUrl, ct);
+            var resp = await upstream.GetOrFetchMetadataAsync(leafUrl, upstreamSource.AuthorizationHeader, ct);
             if (!resp.IsSuccessStatusCode)
             {
                 return NuGetFirstFetchMetadata.Empty;

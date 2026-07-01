@@ -723,4 +723,160 @@ public sealed class OrgControllerUnitTests
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status409Conflict, obj.StatusCode);
     }
+
+    // ── UpdateProxySettings: RPM signature gate requires trust anchor ─────────
+
+    [Theory]
+    [InlineData("warn")]
+    [InlineData("block")]
+    public async Task UpdateProxySettings_VerifyRpmSignatures_NonOff_WithoutAnchor_Returns422(string mode)
+    {
+        // ControllerScenario wires RpmProvenanceVerifier with an empty StubPerOrgTrustAnchorStore,
+        // so IsConfiguredForAsync returns false. Enabling verification without an anchor must be
+        // rejected with a 422 to prevent a permanently non-functional setting.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true,
+                MaxOsvScoreTolerance: 10.0, VerifyRpmSignatures: mode),
+            CancellationToken.None);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task UpdateProxySettings_VerifyRpmSignatures_Off_WithoutAnchor_Succeeds()
+    {
+        // Turning RPM verification off is always allowed even with no anchor.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true,
+                MaxOsvScoreTolerance: 10.0, VerifyRpmSignatures: "off"),
+            CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+    }
+
+    // ── UpdateProxySettings: npm signature gate requires per-org trust anchor ─
+
+    [Theory]
+    [InlineData("warn")]
+    [InlineData("block")]
+    public async Task UpdateProxySettings_VerifyNpmSignatures_NonOff_WithoutAnchor_Returns422(string mode)
+    {
+        // ControllerScenario wires NpmProvenanceVerifier with an empty StubPerOrgTrustAnchorStore,
+        // so IsConfiguredForAsync returns false. Enabling verification without a per-org npm anchor
+        // must be rejected with a 422 to prevent a permanently non-functional setting.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true,
+                MaxOsvScoreTolerance: 10.0, VerifyNpmSignatures: mode),
+            CancellationToken.None);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task UpdateProxySettings_VerifyNpmSignatures_Off_WithoutAnchor_Succeeds()
+    {
+        // Turning npm verification off is always allowed even with no per-org anchor.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true,
+                MaxOsvScoreTolerance: 10.0, VerifyNpmSignatures: "off"),
+            CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+    }
+
+    // ── UpdateProxySettings: NuGet signature gate requires per-org trust anchor ─
+
+    [Theory]
+    [InlineData("warn")]
+    [InlineData("block")]
+    public async Task UpdateProxySettings_VerifyNuGetSignatures_NonOff_WithoutAnchor_Returns422(string mode)
+    {
+        // ControllerScenario wires NuGetProvenanceVerifier with an empty StubPerOrgTrustAnchorStore,
+        // so IsConfiguredForAsync returns false. Enabling verification without a per-org NuGet X.509
+        // anchor must be rejected with a 422 to prevent a permanently non-functional setting.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true,
+                MaxOsvScoreTolerance: 10.0, VerifyNuGetSignatures: mode),
+            CancellationToken.None);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task UpdateProxySettings_VerifyNuGetSignatures_Off_WithoutAnchor_Succeeds()
+    {
+        // Turning NuGet verification off is always allowed even with no per-org anchor.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true,
+                MaxOsvScoreTolerance: 10.0, VerifyNuGetSignatures: "off"),
+            CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+    }
+
+    // ── UpdateProxySettings: Maven signature gate requires per-org trust anchor ─
+
+    [Theory]
+    [InlineData("warn")]
+    [InlineData("block")]
+    public async Task UpdateProxySettings_VerifyMavenSignatures_NonOff_WithoutAnchor_Returns422(string mode)
+    {
+        // ControllerScenario wires MavenProvenanceVerifier with an empty StubPerOrgTrustAnchorStore,
+        // so IsConfiguredForAsync returns false. Enabling verification without a per-org Maven PGP
+        // anchor must be rejected with a 422 to prevent a permanently non-functional setting.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true,
+                MaxOsvScoreTolerance: 10.0, VerifyMavenSignatures: mode),
+            CancellationToken.None);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task UpdateProxySettings_VerifyMavenSignatures_Off_WithoutAnchor_Succeeds()
+    {
+        // Turning Maven verification off is always allowed even with no per-org anchor.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgSettingsController.UpdateProxySettings(
+            new UpdateProxySettingsRequest(ProxyPassthroughEnabled: true,
+                MaxOsvScoreTolerance: 10.0, VerifyMavenSignatures: "off"),
+            CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+    }
 }

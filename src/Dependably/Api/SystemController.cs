@@ -57,15 +57,16 @@ public sealed partial class SystemController : ControllerBase
     private readonly TimeProvider _time;
     private readonly ITenantSlugCacheInvalidator? _tenantCache;
     private readonly IRequireMfaMode? _requireMfa;
+    private readonly Dependably.Infrastructure.Identity.EnvelopeProtector _envelope;
 
     // Static vocabulary surfaced on the background-jobs facets endpoint. Mirrors the
     // <c>dependably.background_job.duration</c> histogram outcome label values.
     private static readonly string[] BackgroundJobOutcomes = ["success", "server_error", "cancelled"];
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
-        Justification = "Controller aggregates 9 independent DI-resolved services (3 repos, metadata store, problem-results helper, " +
-            "configuration, password policy, clock, optional cache invalidator). Bundling into a wrapper record would obscure the DI " +
-            "graph and force every test setup to materialise the wrapper for unrelated callers.")]
+        Justification = "Controller aggregates 10 independent DI-resolved services (3 repos, metadata store, problem-results helper, " +
+            "configuration, password policy, clock, secret protector, optional cache invalidator). Bundling into a wrapper record would " +
+            "obscure the DI graph and force every test setup to materialise the wrapper for unrelated callers.")]
     public SystemController(
         OrgRepository orgs,
         SystemAdminRepository systemAdmins,
@@ -75,6 +76,7 @@ public sealed partial class SystemController : ControllerBase
         IConfiguration config,
         Dependably.Security.PasswordPolicy passwordPolicy,
         TimeProvider time,
+        Dependably.Infrastructure.Identity.EnvelopeProtector envelope,
         ITenantSlugCacheInvalidator? tenantCache = null,
         IRequireMfaMode? requireMfa = null)
     {
@@ -86,6 +88,7 @@ public sealed partial class SystemController : ControllerBase
         _config = config;
         _passwordPolicy = passwordPolicy;
         _time = time;
+        _envelope = envelope;
         _tenantCache = tenantCache;
         _requireMfa = requireMfa;
     }
@@ -182,8 +185,9 @@ public sealed partial class SystemController : ControllerBase
                 await conn.ExecuteAsync(
                     "INSERT INTO org_settings (org_id) VALUES (@id)",
                     new { id = orgId });
-                // Seed the standard public upstreams so the new tenant proxies out of the box.
-                await Dependably.Infrastructure.UpstreamRegistrySeeder.SeedForOrgAsync(conn, orgId, _config, ct: ct);
+                // Seed the standard public upstreams (plus any configured upstream auth) so the
+                // new tenant proxies out of the box.
+                await Dependably.Infrastructure.UpstreamRegistrySeeder.SeedForOrgAsync(conn, orgId, _config, _envelope, ct: ct);
 
                 ownerPassword = Convert.ToBase64String(
                     System.Security.Cryptography.RandomNumberGenerator.GetBytes(GeneratedPasswordByteLength));
@@ -917,6 +921,10 @@ public sealed partial class SystemController : ControllerBase
                 mfaEnrollmentRequired = (_requireMfa?.IsEnabled ?? false) && !sa.MfaEnabled,
                 lastLoginAt = sa.LastLoginAt,
                 language = string.IsNullOrEmpty(sa.Language) ? LanguageCodes.Default : sa.Language,
+                sessionExpiresAt = User.FindFirst("exp")?.Value is string expUnix
+                    && long.TryParse(expUnix, out long exp)
+                    ? DateTimeOffset.FromUnixTimeSeconds(exp).ToString("O")
+                    : null,
             });
     }
 

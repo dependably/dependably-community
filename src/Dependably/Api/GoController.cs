@@ -246,7 +246,7 @@ public sealed class GoController : OrgScopedControllerBase
             // Verbatim proxy via the shared metadata path: it caches (tiles are immutable),
             // dedups concurrent fetches, and size-caps. Status, bytes, and Content-Type pass
             // through untouched so the client verifies the transparency-log signatures itself.
-            var resp = await _svc.Upstream.GetOrFetchMetadataAsync(upstreamUrl, ct);
+            var resp = await _svc.Upstream.GetOrFetchMetadataAsync(upstreamUrl, ct: ct);
             string contentType = resp.ContentType ?? "text/plain; charset=utf-8";
             // Verbatim passthrough: the upstream status and bytes are returned untouched so the
             // client verifies the transparency-log signatures itself. Writing the body directly
@@ -360,9 +360,9 @@ public sealed class GoController : OrgScopedControllerBase
         string encodedVersion = EncodeBangEncoding(version);
         string upstreamPath = $"{encodedModule}/@v/{encodedVersion}.{ext}";
 
-        foreach (string upstreamBase in upstreamBases)
+        foreach (var source in upstreamBases)
         {
-            string upstreamUrl = $"{upstreamBase}/{upstreamPath}";
+            string upstreamUrl = $"{source.Url}/{upstreamPath}";
             try
             {
                 var (stream, isHit) = await _svc.Upstream.GetOrFetchStreamAsync(
@@ -372,7 +372,8 @@ public sealed class GoController : OrgScopedControllerBase
                     ecosystem: "golang",
                     orgId: orgId,
                     purl: PurlNormalizer.Golang(module, version),
-                    ct: ct);
+                    ct: ct,
+                    authorizationHeader: source.AuthorizationHeader);
 
                 _ = isHit; // cache-hit is already handled above; this is always a miss path
 
@@ -399,14 +400,14 @@ public sealed class GoController : OrgScopedControllerBase
             {
                 _svc.Logger.LogWarning(
                     "Checksum mismatch fetching golang {Module}@{Version}.{Ext} from {UpstreamBase}",
-                    module, version, ext, upstreamBase);
+                    module, version, ext, source.Url);
                 return StatusCode(StatusCodes.Status502BadGateway, "Upstream checksum verification failed.");
             }
             catch (UpstreamResponseTooLargeException)
             {
                 _svc.Logger.LogWarning(
                     "Upstream response too large fetching golang {Module}@{Version}.{Ext} from {UpstreamBase}",
-                    module, version, ext, upstreamBase);
+                    module, version, ext, source.Url);
                 return StatusCode(StatusCodes.Status502BadGateway, "Upstream response exceeded size limit.");
             }
             catch (HttpRequestException ex)
@@ -420,7 +421,7 @@ public sealed class GoController : OrgScopedControllerBase
                 _svc.Logger.LogWarning(
                     ex,
                     "HTTP error fetching golang {Module}@{Version}.{Ext} from {UpstreamBase}: {ExceptionType}",
-                    module, version, ext, upstreamBase, ex.GetType().Name);
+                    module, version, ext, source.Url, ex.GetType().Name);
                 return StatusCode(StatusCodes.Status502BadGateway, "Upstream fetch failed.");
             }
         }
@@ -506,9 +507,9 @@ public sealed class GoController : OrgScopedControllerBase
         }
 
         string encodedModule = EncodeBangEncoding(module);
-        foreach (string upstreamBase in upstreamBases)
+        foreach (var source in upstreamBases)
         {
-            string? json = await FetchLatestFromUpstreamAsync(orgId, module, encodedModule, upstreamBase, ct);
+            string? json = await FetchLatestFromUpstreamAsync(orgId, module, encodedModule, source.Url, ct, source.AuthorizationHeader);
             if (json is not null)
             {
                 return Content(json, "application/json");
@@ -522,7 +523,8 @@ public sealed class GoController : OrgScopedControllerBase
     // null when the upstream returns 404 or a too-large body, and logs + returns null on
     // HttpRequestException so the caller continues to the next upstream.
     private async Task<string?> FetchLatestFromUpstreamAsync(
-        string orgId, string module, string encodedModule, string upstreamBase, CancellationToken ct)
+        string orgId, string module, string encodedModule, string upstreamBase, CancellationToken ct,
+        string? authorizationHeader = null)
     {
         string upstreamUrl = $"{upstreamBase}/{encodedModule}/@latest";
         string inflightKey = $"{orgId}:{module}:{upstreamBase}";
@@ -534,7 +536,7 @@ public sealed class GoController : OrgScopedControllerBase
             var lazy = _svc.LatestCoordinator.InFlight.GetOrAdd(
                 inflightKey,
                 _ => new Lazy<Task<string?>>(
-                    () => FetchLatestJsonAsync(upstreamUrl, _svc.HttpClientFactory, _svc.Logger, module, upstreamBase, CancellationToken.None)));
+                    () => FetchLatestJsonAsync(upstreamUrl, _svc.HttpClientFactory, _svc.Logger, module, upstreamBase, authorizationHeader, CancellationToken.None)));
             try
             {
                 return await lazy.Value.WaitAsync(ct);
@@ -564,10 +566,17 @@ public sealed class GoController : OrgScopedControllerBase
         ILogger<GoController> logger,
         string module,
         string upstreamBase,
+        string? authorizationHeader,
         CancellationToken ct)
     {
         using var httpClient = httpClientFactory.CreateClient("upstream");
-        using var resp = await httpClient.GetAsync(upstreamUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+        using var request = new HttpRequestMessage(HttpMethod.Get, upstreamUrl);
+        if (authorizationHeader is not null)
+        {
+            request.Headers.TryAddWithoutValidation("Authorization", authorizationHeader);
+        }
+
+        using var resp = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (!resp.IsSuccessStatusCode)
         {
             return resp.StatusCode == System.Net.HttpStatusCode.NotFound

@@ -1,5 +1,6 @@
 using System.Data;
 using Dapper;
+using Dependably.Infrastructure.Identity;
 
 namespace Dependably.Infrastructure;
 
@@ -30,36 +31,90 @@ public static class UpstreamRegistrySeeder
         ("cargo",  "Cargo:Upstream", "https://index.crates.io"),
     ];
 
+    /// <summary>
+    /// A default upstream to seed: ecosystem, URL, and optional auth (configured alongside
+    /// <c>&lt;Eco&gt;:Upstream</c> as <c>&lt;Eco&gt;:UpstreamAuthType</c> / <c>:UpstreamUsername</c> /
+    /// <c>:UpstreamSecret</c>). Anonymous when <see cref="AuthType"/> is null.
+    /// </summary>
+    public sealed record UpstreamDefault(
+        string Ecosystem, string Url, string? AuthType, string? Username, string? Secret);
+
     /// <summary>The (ecosystem, url) defaults to seed, honouring config overrides; skips ecosystems
-    /// with no configured/default URL (i.e. RPM unless <c>Rpm:Upstream</c> is set).</summary>
-    public static IReadOnlyList<(string Ecosystem, string Url)> ResolveDefaults(IConfiguration? config)
+    /// with no configured/default URL (i.e. RPM unless <c>Rpm:Upstream</c> is set). URL-only view
+    /// used by the on-upgrade backfill, which deliberately seeds anonymous public defaults.</summary>
+    public static IReadOnlyList<(string Ecosystem, string Url)> ResolveDefaults(IConfiguration? config) =>
+        ResolveDefaultsWithAuth(config).Select(d => (d.Ecosystem, d.Url)).ToList();
+
+    /// <summary>
+    /// The defaults to seed including any per-ecosystem auth configured alongside the URL. RPM is
+    /// always anonymous (RPM mirrors are public distro repos and the RPM proxy threads no
+    /// credentials), so its auth keys are ignored.
+    /// </summary>
+    public static IReadOnlyList<UpstreamDefault> ResolveDefaultsWithAuth(IConfiguration? config)
     {
-        var list = new List<(string, string)>();
+        var list = new List<UpstreamDefault>();
         foreach (var (eco, key, def) in DefaultSources)
         {
             string? url = config?[key] ?? def;
-            if (!string.IsNullOrWhiteSpace(url))
+            if (string.IsNullOrWhiteSpace(url))
             {
-                list.Add((eco, url.Trim()));
+                continue;
             }
+
+            string? Read(string suffix) =>
+                string.IsNullOrWhiteSpace(config?[$"{key}{suffix}"]) ? null : config[$"{key}{suffix}"];
+
+            bool authCapable = eco != "rpm";
+            string? authType = authCapable ? Read("AuthType")?.Trim().ToLowerInvariant() : null;
+            string? username = authCapable ? Read("Username")?.Trim() : null;
+            string? secret = authCapable ? Read("Secret") : null;
+            list.Add(new UpstreamDefault(eco, url.Trim(), authType, username, secret));
         }
         return list;
     }
 
-    /// <summary>Inserts the default registries for a single new org. Idempotent via the
-    /// <c>(org_id, ecosystem, url)</c> unique constraint, so re-running is harmless.</summary>
+    /// <summary>
+    /// Inserts the default registries for a single new org, including any per-ecosystem upstream
+    /// auth configured alongside the URL. Idempotent via the <c>(org_id, ecosystem, url)</c> unique
+    /// constraint, so re-running is harmless. A configured secret is encrypted at rest via
+    /// <paramref name="envelope"/>; when a secret is configured but the master key is not, seeding
+    /// fails closed (no plaintext secret is ever written).
+    /// </summary>
     public static async Task SeedForOrgAsync(
-        IDbConnection conn, string orgId, IConfiguration? config, IDbTransaction? tx = null, CancellationToken ct = default)
+        IDbConnection conn, string orgId, IConfiguration? config,
+        EnvelopeProtector? envelope = null, IDbTransaction? tx = null, CancellationToken ct = default)
     {
-        foreach (var (eco, url) in ResolveDefaults(config))
+        foreach (var d in ResolveDefaultsWithAuth(config))
         {
+            string? storedSecret = null;
+            if (d.Secret is not null)
+            {
+                if (envelope is null || !envelope.IsConfigured)
+                {
+                    throw new InvalidOperationException(
+                        $"Upstream secret configured for '{d.Ecosystem}' but DEPENDABLY_MASTER_KEY is not set; " +
+                        "refusing to seed a plaintext secret.");
+                }
+
+                storedSecret = envelope.Protect(d.Secret);
+            }
+
             await conn.ExecuteAsync(new CommandDefinition(
                 """
-                INSERT INTO upstream_registry (id, org_id, ecosystem, url, position)
-                VALUES (@id, @orgId, @eco, @url, 0)
+                INSERT INTO upstream_registry (id, org_id, ecosystem, url, position, auth_type, username, secret)
+                VALUES (@id, @orgId, @eco, @url, 0, @authType, @username, @secret)
                 ON CONFLICT (org_id, ecosystem, url) DO NOTHING
                 """,
-                new { id = Guid.NewGuid().ToString("N"), orgId, eco, url },
+                new
+                {
+                    id = Guid.NewGuid().ToString("N"),
+                    orgId,
+                    eco = d.Ecosystem,
+                    url = d.Url,
+                    authType = d.AuthType ?? "anonymous",
+                    username = d.Username,
+                    secret = storedSecret,
+                },
                 transaction: tx, cancellationToken: ct));
         }
 

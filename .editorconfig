@@ -211,3 +211,10 @@ dotnet_naming_rule.private_fields_underscore.severity = warning
 # routinely build expected arrays inline (Assert.Equal(new[] { ... }, actual)).
 # The allocations are per-test, not in a hot path; suppress for test code only.
 dotnet_diagnostic.CA1861.severity = none
+
+[**/FirstBootService.cs]
+# SAST002 "Console output left in production": first-boot credentials are printed
+# to the operator console ON PURPOSE — they are read once from `docker logs`.
+# Routing them through Serilog would leak the bootstrap secret into structured
+# logs / SIEM, which is strictly worse. Console output is intentional here only.
+dotnet_diagnostic.SAST002.severity = none

@@ -10,13 +10,13 @@ import { loginAsAdmin, auth, fixturesRoot } from '../helpers/api-client.js'
 test.describe('Packages page', () => {
   test('packages page renders after login', async ({ adminPage }) => {
     // App.svelte: default post-login route is 'packages', inside <main class="main-content">
-    await expect(adminPage.locator('nav.navbar')).toBeVisible()
+    await expect(adminPage.locator('nav.sidebar')).toBeVisible()
     await expect(adminPage.locator('main.main-content')).toBeVisible()
   })
 
   test('packages page shows page title', async ({ adminPage }) => {
     // Post-login lands on Dashboard; click the Packages nav link to reach Packages.svelte
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Packages' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Packages' }).click()
     const main = adminPage.locator('main.main-content')
     await expect(main).toBeVisible({ timeout: 5_000 })
     // en.json: packages.title = "Packages"
@@ -24,7 +24,7 @@ test.describe('Packages page', () => {
   })
 
   test('packages page shows ecosystem filters or empty state', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Packages' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Packages' }).click()
     const main = adminPage.locator('main.main-content')
     await expect(main).toBeVisible({ timeout: 5_000 })
     // Either a table row, the empty-state message, or filter controls should be present
@@ -91,7 +91,7 @@ test.describe('Packages table state persistence', () => {
   })
 
   test('search persists across detail navigation and back', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Packages' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Packages' }).click()
     const main = adminPage.locator('main.main-content')
     const searchBox = main.getByPlaceholder('Search by name…')
     await searchBox.fill(PKG_NAME)
@@ -112,7 +112,7 @@ test.describe('Packages table state persistence', () => {
   })
 
   test('clear button empties the search and the URL', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Packages' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Packages' }).click()
     const main = adminPage.locator('main.main-content')
     const searchBox = main.getByPlaceholder('Search by name…')
     await searchBox.fill(PKG_NAME)

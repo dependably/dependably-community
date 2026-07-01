@@ -8,18 +8,18 @@ import { test, expect } from '../fixtures/index.js'
 test.describe('RBAC visibility', () => {
   test('owner sees Users nav link', async ({ adminPage }) => {
     // en.json nav.users = "Users" — shown for admin + owner
-    const usersLink = adminPage.locator('nav.navbar .nav-links button.nav-link', { hasText: 'Users' })
+    const usersLink = adminPage.locator('nav.sidebar .nav-links button.nav-link', { hasText: 'Users' })
     await expect(usersLink).toBeVisible({ timeout: 5_000 })
   })
 
   test('owner sees Settings nav link', async ({ adminPage }) => {
     // en.json nav.settings = "Settings" — shown for admin + owner
-    const settingsLink = adminPage.locator('nav.navbar .nav-links button.nav-link', { hasText: 'Settings' })
+    const settingsLink = adminPage.locator('nav.sidebar .nav-links button.nav-link', { hasText: 'Settings' })
     await expect(settingsLink).toBeVisible({ timeout: 5_000 })
   })
 
   test('settings page is accessible to owner', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Settings' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Settings' }).click()
     await expect(adminPage.locator('main.main-content')).toBeVisible()
     // en.json settings.title = "Settings"
     await expect(adminPage.locator('h1.page-title')).toContainText('Settings')

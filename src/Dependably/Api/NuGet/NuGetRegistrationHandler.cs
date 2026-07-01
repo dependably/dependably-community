@@ -132,14 +132,14 @@ public sealed class NuGetRegistrationHandler(
         // No configured upstream ⇒ proxying is disabled for nuget, so the loop is skipped and
         // the leaf 404s.
         var bases = await registries.ResolveAsync(orgId, "nuget", ct);
-        foreach (string upstreamBase in bases)
+        foreach (var source in bases)
         {
-            string upstreamUrl = $"{upstreamBase}/{variant}/{normalizedId}/{version.ToLowerInvariant()}.json";
+            string upstreamUrl = $"{source.Url}/{variant}/{normalizedId}/{version.ToLowerInvariant()}.json";
             try
             {
                 using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-                var resp = await upstream.GetOrFetchMetadataAsync(upstreamUrl, linkedCts.Token);
+                var resp = await upstream.GetOrFetchMetadataAsync(upstreamUrl, source.AuthorizationHeader, linkedCts.Token);
                 if (resp.IsSuccessStatusCode)
                 {
                     string rewritten = NuGetRegistrationHelpers.RewriteRegistrationLeafUrls(
@@ -479,15 +479,15 @@ public sealed class NuGetRegistrationHandler(
         string orgId, string variant, string normalizedId, CancellationToken ct)
     {
         var bases = await registries.ResolveAsync(orgId, "nuget", ct);
-        foreach (string upstreamBase in bases)
+        foreach (var source in bases)
         {
-            string upstreamUrl = $"{upstreamBase}/{variant}/{normalizedId}/index.json";
+            string upstreamUrl = $"{source.Url}/{variant}/{normalizedId}/index.json";
             try
             {
                 using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
                 // Single-flight registration fetch.
-                var resp = await upstream.GetOrFetchMetadataAsync(upstreamUrl, linkedCts.Token);
+                var resp = await upstream.GetOrFetchMetadataAsync(upstreamUrl, source.AuthorizationHeader, linkedCts.Token);
                 if (resp.IsSuccessStatusCode)
                 {
                     return resp.BodyAsString();

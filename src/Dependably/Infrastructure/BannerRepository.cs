@@ -287,11 +287,21 @@ public sealed class BannerRepository
 
     /// <summary>
     /// Records that the user dismissed the given banner. Idempotent via ON CONFLICT DO NOTHING.
+    /// Returns <c>true</c> when the banner exists (the dismissal was recorded or was already
+    /// present); <c>false</c> when no banner with the given id exists (caller should 404).
     /// </summary>
-    public async Task DismissAsync(string bannerId, string userId, CancellationToken ct = default)
+    public async Task<bool> DismissAsync(string bannerId, string userId, CancellationToken ct = default)
     {
         string now = NowZ();
         await using var conn = await _db.OpenAsync(ct);
+        int bannerCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM banners WHERE id = @bannerId",
+            new { bannerId });
+        if (bannerCount == 0)
+        {
+            return false;
+        }
+
         await conn.ExecuteAsync(
             """
             INSERT INTO banner_dismissals (banner_id, user_id, dismissed_at)
@@ -299,6 +309,7 @@ public sealed class BannerRepository
             ON CONFLICT DO NOTHING
             """,
             new { bannerId, userId, now });
+        return true;
     }
 
     // ── Active-count gate ────────────────────────────────────────────────────────────────────

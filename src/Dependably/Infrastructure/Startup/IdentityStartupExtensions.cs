@@ -1,6 +1,7 @@
 using Dependably.Infrastructure.Identity;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Dependably.Infrastructure.Startup;
 
@@ -15,8 +16,12 @@ internal static class IdentityStartupExtensions
     {
         // Stores and hashers are registered BEFORE AddIdentityCore so our implementations
         // win via the TryAdd semantics that AddIdentityCore uses internally. Registration
-        // order is: singletons first (protector, key provider, system token version store),
-        // then scoped stores, then per-TUser hashers, then AddIdentityCore for each TUser type.
+        // order is: master-key provider and envelope protector first, then MFA singletons
+        // (protector, key provider, system token version store), then scoped stores, then
+        // per-TUser hashers, then AddIdentityCore for each TUser type.
+
+        builder.Services.TryAddSingleton<IMasterKeyProvider, EnvFileMasterKeyProvider>();
+        builder.Services.AddSingleton<EnvelopeProtector>();
 
         builder.Services.AddSingleton<IMfaSecretProtector>(sp =>
         {

@@ -209,13 +209,13 @@
               <td class="file-name mono">{o.filename}</td>
               <td>
                 {#if o.ecosystem}
-                  <span class="eco-badge">{o.ecosystem}</span>
+                  <span class="badge {o.ecosystem}">{o.ecosystem}</span>
                 {:else}
                   <span class="text-muted">—</span>
                 {/if}
               </td>
               <td>
-                <span class="outcome-badge outcome-{o.status}">{$t(`upload.outcome.${o.status}`)}</span>
+                <span class="badge outcome-{o.status}">{$t(`upload.outcome.${o.status}`)}</span>
               </td>
               <td class="text-muted">
                 {o.code ? `${o.code} — ${o.message}` : o.purl ?? ''}
@@ -242,7 +242,7 @@
     on:click|self={closeClaimModal}
     on:keydown={(e) => { if (e.key === 'Escape') closeClaimModal() }}
   >
-    <div class="modal">
+    <div class="modal scrollable modal-flex">
       <h2>{$t('upload.claimModal.title')}</h2>
       <p class="text-muted">
         {claimModal.ecosystem} / <span class="mono">{claimModal.name}</span>
@@ -290,7 +290,7 @@
     display: block;
     cursor: pointer;
     border: 2px dashed var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius);
     padding: 36px 18px;
     text-align: center;
     background: var(--bg2);
@@ -298,8 +298,8 @@
     max-width: 720px;
   }
   .dropzone:hover, .dropzone.dragOver {
-    border-color: var(--info);
-    background: var(--info-bg);
+    border-color: var(--accent);
+    background: var(--accent-soft);
   }
   .dropzone-text { font-weight: 500; }
   .dropzone-count { margin-top: 4px; font-size: 12px; color: var(--text2); }
@@ -348,7 +348,7 @@
   .preview-card {
     background: var(--bg2);
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius);
     padding: 12px 16px;
     margin: 12px 0;
     max-width: 720px;
@@ -383,77 +383,18 @@
     font-weight: 500;
   }
   .outcome-table { font-size: 13px; }
-  .eco-badge {
-    display: inline-block;
-    padding: 1px 8px;
-    border-radius: 3px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    font-size: 11px;
-    font-family: var(--mono, monospace);
-    text-transform: lowercase;
-  }
-  .outcome-badge {
-    display: inline-block;
-    padding: 1px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-  }
-  .outcome-badge.outcome-accepted,
-  .outcome-badge.outcome-would_accept {
-    background: var(--success-bg);
-    color: var(--success);
-    border: 1px solid var(--success-border);
-  }
-  .outcome-badge.outcome-rejected,
-  .outcome-badge.outcome-would_reject {
-    background: var(--danger-bg);
-    color: var(--danger);
-    border: 1px solid var(--danger-border);
-  }
   .mono { font-family: var(--mono, monospace); }
 
   .action-btn { padding: 3px 8px; font-size: 11px; min-height: 26px; margin-left: 6px; }
-  .claim-btn { background: var(--info); color: var(--on-accent); border-color: var(--info); }
-  .claim-btn:hover { background: var(--info); filter: brightness(0.9); }
+  /* claim-btn uses teal accent — matches primary button pattern */
+  .claim-btn {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+  }
+  .claim-btn:hover { background: var(--accent-hover); }
 
-  .modal-backdrop {
-    position: fixed; inset: 0;
-    background: var(--overlay-scrim);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 1000;
-  }
-  .modal {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 24px;
-    width: min(520px, 90vw);
-    max-height: 85vh;
-    overflow-y: auto;
-    display: flex; flex-direction: column; gap: 12px;
-  }
-  .modal h2 { margin: 0; font-size: 16px; }
-  .modal label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
-  .warning-card {
-    background: var(--warning-bg);
-    border: 1px solid var(--warning-border);
-    border-radius: 4px;
-    padding: 8px 12px;
-    font-size: 12px;
-  }
-  .warning-card p { margin: 0 0 6px 0; }
+  /* .modal-flex, .warning-card, .info-card are global — see app.css */
   .ack { flex-direction: row !important; align-items: center; gap: 6px !important; cursor: pointer; }
   .ack input { width: auto; margin: 0; }
-  .info-card {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 8px 12px;
-    font-size: 12px;
-  }
-  .info-card p { margin: 0; }
 </style>

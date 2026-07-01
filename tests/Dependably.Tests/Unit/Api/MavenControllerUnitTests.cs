@@ -119,7 +119,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock),
             // Real resolver over an empty registry list — these tests exercise publish/auth
             // paths, not proxy fetches.
-            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock)),
+            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
             MetadataCache: new Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.MavenMetadataKey>(
                 new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions { SizeLimit = 8 * 1024 * 1024 }),
@@ -133,11 +133,9 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
                 new TenantArtifactAccessRepository(_db),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<CacheAccessRecorder>.Instance,
                 _clock),
-            // No Maven:SignatureKeys configured — IsConfigured=false, provenance skipped.
+            // No Maven trust anchors configured — IsConfiguredForAsync returns false, provenance skipped.
             MavenProvenance: new Dependably.Protocol.Provenance.MavenProvenanceVerifier(
-                new Dependably.Protocol.Provenance.MavenSignatureKeyStore(
-                    new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
-                    Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenSignatureKeyStore>.Instance),
+                new Dependably.Tests.Infrastructure.StubPerOrgTrustAnchorStore(),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance));
 
         return new MavenController(svc)
@@ -371,19 +369,32 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         Assert.Contains("Basic", ctl.Response.Headers.WWWAuthenticate.ToString());
     }
 
-    // ── Origin-based download auth (uploaded artifacts require token) ───────
+    // ── Origin-based download auth (uploaded artifacts respect AnonymousPull) ──
 
     [Fact]
-    public async Task Download_UploadedArtifact_AnonymousPullOn_AnonRequest_Returns401()
+    public async Task Download_UploadedArtifact_AnonymousPullOn_AnonRequest_Returns200()
     {
-        // Uploaded artifacts require a token carrying read:artifact even when AnonymousPull
-        // is enabled — anonymous callers must not receive privately-published artifacts.
+        // AnonymousPull=true: anonymous callers may download uploaded artifacts, mirroring
+        // proxy-cached artifact behavior. Gate on token capability only when a token is present.
         await SetAnonymousPullAsync(true);
         byte[] bytes = Encoding.UTF8.GetBytes("private-jar");
-        await SeedMavenArtifactAsync("com.example", "private", "1.0", bytes);
+        await SeedMavenArtifactAsync("com.example", "anonpull", "1.0", bytes);
 
         var ctl = BuildController(authenticated: false);
-        var result = await ctl.Download("com/example/private/1.0/private-1.0.jar", CancellationToken.None);
+        var result = await ctl.Download("com/example/anonpull/1.0/anonpull-1.0.jar", CancellationToken.None);
+
+        Assert.IsType<FileStreamResult>(result).FileStream.Dispose();
+    }
+
+    [Fact]
+    public async Task Download_UploadedArtifact_AnonymousPullOff_AnonRequest_Returns401()
+    {
+        // AnonymousPull=false (default): anonymous callers must not receive uploaded artifacts.
+        byte[] bytes = Encoding.UTF8.GetBytes("private-jar-off");
+        await SeedMavenArtifactAsync("com.example", "anonpulloff", "1.0", bytes);
+
+        var ctl = BuildController(authenticated: false);
+        var result = await ctl.Download("com/example/anonpulloff/1.0/anonpulloff-1.0.jar", CancellationToken.None);
 
         Assert.IsType<UnauthorizedResult>(result);
         Assert.Contains("Basic", ctl.Response.Headers.WWWAuthenticate.ToString());
@@ -407,7 +418,8 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
     [Fact]
     public async Task Download_UploadedArtifact_TokenWithoutReadArtifact_Returns403()
     {
-        // A token missing read:artifact hits the Forbid branch of the origin gate.
+        // A token missing read:artifact hits the Forbid branch of the origin gate, even when
+        // AnonymousPull is on — capability is still enforced for authenticated callers.
         await SetAnonymousPullAsync(true);
         byte[] bytes = Encoding.UTF8.GetBytes("private-jar-no-cap");
         await SeedMavenArtifactAsync("com.example", "private2", "1.0", bytes);

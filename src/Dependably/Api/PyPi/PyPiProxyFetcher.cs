@@ -61,7 +61,7 @@ public sealed class PyPiProxyFetcher(
             // Both are SHA-256; we pass whichever we have into UpstreamClient so it can verify
             // before caching and throw ChecksumException → 502 on mismatch.
             string? knownSha = pkgVersions?.Version.ChecksumSha256 ?? upstreamSha256;
-            var fetched = await DownloadAndCacheAsync(upstreamUrl, knownSha, gate.OrgId, ct);
+            var fetched = await DownloadAndCacheAsync(upstreamUrl, knownSha, gate.OrgId, download.AuthorizationHeader, ct);
             if (fetched is null)
             {
                 return new NotFoundResult();
@@ -127,10 +127,10 @@ public sealed class PyPiProxyFetcher(
     /// directly. Otherwise, the configured upstreams' simple indices are queried in
     /// priority order.
     /// </summary>
-    public async Task<(string Url, string? Sha256Hex)?> ResolveProxyUpstreamUrlAsync(
+    public async Task<(string Url, string? Sha256Hex, string? AuthorizationHeader)?> ResolveProxyUpstreamUrlAsync(
         string file, PyPiFilename parsed,
         (Package Package, PackageVersion Version)? pkgVersions,
-        IReadOnlyList<string> bases, CancellationToken ct)
+        IReadOnlyList<UpstreamSource> bases, CancellationToken ct)
     {
         // No configured upstream ⇒ proxying disabled for pypi; resolve nothing.
         if (bases.Count == 0)
@@ -145,16 +145,20 @@ public sealed class PyPiProxyFetcher(
                 $"/{sha256[..PyPiConstants.CdnPrefixLength]}" +
                 $"/{sha256[PyPiConstants.CdnSecondSegmentStart..PyPiConstants.CdnSecondSegmentEnd]}" +
                 $"/{sha256}/{file}";
-            return (cdnUrl, sha256);
+            // CDN shortcut hits files.pythonhosted.org directly — never attach an upstream's auth
+            // header here, or a private upstream token would leak to a different (public) host.
+            return (cdnUrl, sha256, null);
         }
 
         // Walk upstreams in priority order; the first whose simple index resolves the file wins.
-        foreach (string upstreamBase in bases)
+        // The matched upstream's auth header rides along so the artefact fetch authenticates to
+        // the same host the simple index resolved the (possibly relative) href against.
+        foreach (var source in bases)
         {
-            var resolved = await ResolveUpstreamPyPiUrlAsync(upstreamBase, parsed.PurlName, file, ct);
+            var resolved = await ResolveUpstreamPyPiUrlAsync(source, parsed.PurlName, file, ct);
             if (resolved is not null)
             {
-                return (resolved.Value.Url, resolved.Value.Sha256Hex);
+                return (resolved.Value.Url, resolved.Value.Sha256Hex, source.AuthorizationHeader);
             }
         }
         return null;
@@ -177,7 +181,7 @@ public sealed class PyPiProxyFetcher(
     // deepcode ignore PT,LogForging: blob put uses BlobKeys.Proxy(sha) which validates
     // 64-char lowercase hex; Serilog uses RenderedCompactJsonFormatter (CRLF-safe).
     private async Task<PyPiFetchOutcome?> DownloadAndCacheAsync(
-        string upstreamUrl, string? knownSha256, string orgId, CancellationToken ct)
+        string upstreamUrl, string? knownSha256, string orgId, string? authorizationHeader, CancellationToken ct)
     {
         if (knownSha256 is not null)
         {
@@ -192,7 +196,7 @@ public sealed class PyPiProxyFetcher(
             // deepcode ignore LogForging: blobKey is BlobKeys.Proxy of a 64-char hex SHA-256 (no user input); upstreamUrl is operator-configured; Serilog structured rendering prevents log injection.
             var (stream, isHit) = await upstream.GetOrFetchStreamAsync(
                 blobKey, upstreamUrl, new ChecksumSpec(ChecksumAlgorithm.Sha256, knownSha256),
-                "pypi", orgId, ct: ct);
+                "pypi", orgId, ct: ct, authorizationHeader: authorizationHeader);
             long size = 0;
             await using (stream.ConfigureAwait(false))
             {
@@ -219,7 +223,7 @@ public sealed class PyPiProxyFetcher(
         // Artifact bytes flow through the buffered path here, so the cap is the artifact
         // limit, not the (much smaller) default metadata limit.
         var resp = await upstream.GetOrFetchMetadataAsync(
-            upstreamUrl, UpstreamClient.MaxUpstreamResponseBytes, ct);
+            upstreamUrl, UpstreamClient.MaxUpstreamResponseBytes, authorizationHeader, ct);
         if (!resp.IsSuccessStatusCode)
         {
             return null;
@@ -296,20 +300,28 @@ public sealed class PyPiProxyFetcher(
     }
 
     // Runs PEP 740 attestation verification for a proxy-origin PyPI file when the tenant enabled it
-    // and the verifier is configured (pinned Sigstore roots + Trusted Publishers). Fetches the file's
-    // provenance document from the URL the JSON API surfaced; an off policy, an unconfigured verifier,
-    // or a missing provenance URL short-circuits to NotApplicable / Unsigned without throwing. The
-    // verifier never throws — a malformed bundle maps to Failed so the gate can fail closed.
+    // and the org has per-org sigstore_root + trusted_publisher anchors configured. Fetches the
+    // file's provenance document from the URL the JSON API surfaced; an off policy, an unconfigured
+    // org, or a missing provenance URL short-circuits to NotApplicable / Unsigned without throwing.
+    // The verifier never throws — a malformed bundle maps to Failed so the gate can fail closed.
     private async Task<Dependably.Protocol.Provenance.ProvenanceResult> ResolveProvenanceAsync(
         string file, string fileSha256Hex, PyPiJsonMetadata jsonMeta, ProxyContext gate, CancellationToken ct)
     {
-        if (gate.Settings.VerifyPyPiAttestations == "off" || !provenance.IsConfigured)
+        if (gate.Settings.VerifyPyPiAttestations == "off")
+        {
+            return Dependably.Protocol.Provenance.ProvenanceResult.NotApplicable;
+        }
+
+        // Resolve per-org trust material. If not configured (no sigstore_root + trusted_publisher),
+        // short-circuit to NotApplicable — fail-closed: the verify policy requires anchors.
+        var trust = await provenance.GetTrustMaterialAsync(gate.OrgId, ct);
+        if (!trust.IsConfigured)
         {
             return Dependably.Protocol.Provenance.ProvenanceResult.NotApplicable;
         }
 
         string? provenanceJson = await TryFetchProvenanceDocumentAsync(jsonMeta.ProvenanceUrl, ct);
-        return provenance.VerifyAttestation(file, fileSha256Hex, provenanceJson);
+        return provenance.VerifyAttestation(file, fileSha256Hex, provenanceJson, trust);
     }
 
     // Fetches the PEP 740 provenance document from the upstream-supplied URL. Routed through the
@@ -326,7 +338,7 @@ public sealed class PyPiProxyFetcher(
 
         try
         {
-            var resp = await upstream.GetOrFetchMetadataAsync(provenanceUrl, ct);
+            var resp = await upstream.GetOrFetchMetadataAsync(provenanceUrl, ct: ct);
             return resp.IsSuccessStatusCode ? resp.BodyAsString() : null;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
@@ -348,14 +360,14 @@ public sealed class PyPiProxyFetcher(
     /// never blocks the underlying artefact fetch.
     /// </summary>
     private async Task<PyPiJsonMetadata> TryFetchPyPiJsonMetadataAsync(
-        string upstreamBase, string purlName, string version, string file, CancellationToken ct)
+        UpstreamSource source, string purlName, string version, string file, CancellationToken ct)
     {
         try
         {
-            string url = $"{upstreamBase}/pypi/{purlName}/{version}/json";
+            string url = $"{source.Url}/pypi/{purlName}/{version}/json";
             // Routes through single-flighted metadata fetch so an artefact stampede
             // doesn't also stampede this endpoint.
-            var resp = await upstream.GetOrFetchMetadataAsync(url, ct);
+            var resp = await upstream.GetOrFetchMetadataAsync(url, source.AuthorizationHeader, ct);
             return resp.IsSuccessStatusCode
                 ? PyPiUpstreamJsonParser.ParseUrlsArrayForFile(resp.Body, file)
                 : PyPiJsonMetadata.Empty;
@@ -367,40 +379,26 @@ public sealed class PyPiProxyFetcher(
     /// Fetches the upstream simple index for a package and extracts the actual download URL for a
     /// specific file, plus the <c>#sha256=</c> fragment if PEP 503 supplied one. The fragment
     /// drives fail-fast verification on first fetch — passed through as <c>knownSha256</c> to
-    /// <see cref="UpstreamClient.GetOrFetchAsync"/> which throws <see cref="ChecksumException"/>
+    /// <see cref="UpstreamClient.GetOrFetchStreamAsync"/> which throws <see cref="ChecksumException"/>
     /// on mismatch before any blob is cached. Returns null when the file isn't in the index.
+    ///
+    /// Hrefs may be absolute (public PyPI: <c>https://files.pythonhosted.org/...</c>) or
+    /// root-relative (another dependably upstream emits <c>/packages/{file}</c>); both forms are
+    /// resolved against the simple-index request URI so chaining through a private dependably works.
     /// </summary>
     private async Task<(string Url, string? Sha256Hex)?> ResolveUpstreamPyPiUrlAsync(
-        string upstreamBase, string pkgName, string filename, CancellationToken ct)
+        UpstreamSource source, string pkgName, string filename, CancellationToken ct)
     {
+        string simpleIndexUrl = $"{source.Url}/simple/{pkgName}/";
         try
         {
             // This simple-index fetch fires inline with every PyPI file-download path,
             // so concurrent CI fan-out would otherwise stampede here too. Route through
             // single-flight.
-            var resp = await upstream.GetOrFetchMetadataAsync($"{upstreamBase}/simple/{pkgName}/", ct);
-            if (!resp.IsSuccessStatusCode)
-            {
-                return null;
-            }
-
-            string html = resp.BodyAsString();
-            // Group 1 = URL up to but not including the fragment; group 3 = the hex SHA-256
-            // when a #sha256=... fragment is present. Older mirrors / non-PEP-503 indices
-            // may omit the fragment; in that case group 3 is empty and we fall through with
-            // a null hash (the request still succeeds, just without first-fetch verification).
-            var match = Regex.Match(
-                html,
-                $@"href=""(https?://[^""#]*/{Regex.Escape(filename)})(#sha256=([0-9a-fA-F]{{64}}))?""",
-                RegexOptions.None, PyPiConstants.RegexTimeout);
-            if (!match.Success)
-            {
-                return null;
-            }
-
-            string url = match.Groups[1].Value;
-            string? sha = match.Groups[3].Success ? match.Groups[3].Value.ToLowerInvariant() : null;
-            return (url, sha);
+            var resp = await upstream.GetOrFetchMetadataAsync(simpleIndexUrl, source.AuthorizationHeader, ct);
+            return resp.IsSuccessStatusCode
+                ? ResolvePyPiHref(simpleIndexUrl, resp.BodyAsString(), filename)
+                : null;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException or RegexMatchTimeoutException)
         {
@@ -412,6 +410,36 @@ public sealed class PyPiProxyFetcher(
                 System.Diagnostics.Activity.Current?.TraceId.ToString());
             return null;
         }
+    }
+
+    /// <summary>
+    /// Extracts the download URL (and optional <c>#sha256=</c> fragment) for <paramref name="filename"/>
+    /// from a PEP 503 simple-index document, resolving the href against
+    /// <paramref name="simpleIndexUrl"/>. Hrefs may be absolute (public PyPI →
+    /// <c>https://files.pythonhosted.org/...</c>) or root-relative (another dependably upstream →
+    /// <c>/packages/{file}</c>); both resolve to an absolute URL. Returns null when the file isn't
+    /// in the index or the href can't be resolved.
+    /// </summary>
+    internal static (string Url, string? Sha256Hex)? ResolvePyPiHref(
+        string simpleIndexUrl, string html, string filename)
+    {
+        // Group 1 captures the href (absolute or root-relative) up to but not including the
+        // fragment, and group 3 captures the hex SHA-256 when a #sha256=... fragment is
+        // present. Older mirrors and non-PEP-503 indices may omit the fragment, in which case
+        // group 3 is empty and this falls through with a null hash. The href is matched
+        // loosely, anything ending in /{filename}, and then resolved against the simple-index
+        // URI, so a private dependably upstream emitting root-relative hrefs chains correctly.
+        var match = Regex.Match(
+            html,
+            $@"href=""([^""#]*/{Regex.Escape(filename)})(#sha256=([0-9a-fA-F]{{64}}))?""",
+            RegexOptions.None, PyPiConstants.RegexTimeout);
+        if (!match.Success || !Uri.TryCreate(new Uri(simpleIndexUrl), match.Groups[1].Value, out var absolute))
+        {
+            return null;
+        }
+
+        string? sha = match.Groups[3].Success ? match.Groups[3].Value.ToLowerInvariant() : null;
+        return (absolute.ToString(), sha);
     }
 
     private static string SanitizeHeader(string value)

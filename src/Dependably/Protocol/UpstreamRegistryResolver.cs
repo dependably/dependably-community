@@ -20,13 +20,16 @@ public sealed class UpstreamRegistryResolver
     public UpstreamRegistryResolver(UpstreamRegistryRepository repo) => _repo = repo;
 
     /// <summary>
-    /// The configured upstream base URLs for an ecosystem, highest priority first, with any
-    /// trailing slash trimmed so callers can append ecosystem-specific paths uniformly.
+    /// The configured upstream sources for an ecosystem, highest priority first. Each carries the
+    /// base URL (any trailing slash trimmed so callers can append ecosystem-specific paths
+    /// uniformly) and a pre-built <c>Authorization</c> header (null for anonymous).
     /// </summary>
-    public async Task<IReadOnlyList<string>> ResolveAsync(
+    public async Task<IReadOnlyList<UpstreamSource>> ResolveAsync(
         string orgId, string ecosystem, CancellationToken ct = default)
     {
-        var urls = await _repo.ListUrlsForEcosystemAsync(orgId, ecosystem, ct);
-        return urls.Count == 0 ? urls : urls.Select(u => u.TrimEnd('/')).ToList();
+        var sources = await _repo.ListSourcesForEcosystemAsync(orgId, ecosystem, ct);
+        return sources.Count == 0
+            ? sources
+            : sources.Select(s => s with { Url = s.Url.TrimEnd('/') }).ToList();
     }
 }

@@ -246,12 +246,24 @@ redefine them in component `<style>` blocks.
 | §5.4    | `.login-card`                                              | Auth page card                                  | Login.svelte                    |
 | §5.5    | `.sev`, `.sev-critical/high/medium/low`                    | Vulnerability severity chip                     | Packages, VersionDetail, Dashboard |
 | §5.6    | `.stat-card`, `.alert-card`, `.stat-grid`, `.stat-value`   | Dashboard KPI and alert surfaces                | Dashboard.svelte                |
+| §5.6    | `.alert-card.hot`, `.alert-card.warn`                      | Danger / warning alert card variants            | Dashboard.svelte                |
 | §5.6    | `.title-row`, `.ribbon`, `.ribbon.hot`                     | Page-title row with inline status ribbon        | Dashboard.svelte                |
 | §5.6    | `.eco-name-cell`, `.eco-bar.{eco}`                         | Ecosystem table name cell (donut legend proxy)  | Dashboard.svelte                |
 | §5.7    | `.detail-panel`, `.detail-section`, `.detail-label`, `.detail-value` | Expanded-row receipts drawer      | VersionDetail.svelte            |
 | §5.8    | `th.sortable`                                                          | Sortable column header (cursor + indicator) | All data tables        |
 | —       | `.card`                                                    | Generic surface card                            | Multiple                        |
 | —       | `.badge` + ecosystem modifiers                             | Ecosystem and status labels                     | Multiple                        |
+| —       | `.badge.state-{unclaimed,local_only,mixed}`                | Claims state badges                             | Claims.svelte, VersionDetail.svelte |
+| —       | `.badge.state-{approved,denied}`                           | Quarantine decision badges                      | Quarantine.svelte               |
+| —       | `.badge.mode-{off,warn,block}`                             | License policy mode pills                       | LicensePolicy.svelte            |
+| —       | `.badge.{osi,fsf,dep,cl-*}`                                | License attribute badges                        | LicensePolicy.svelte            |
+| —       | `.badge.outcome-{accepted,rejected,would_accept,would_reject}` | Upload outcome badges                       | Upload.svelte                   |
+| —       | `.badge.has-icon`                                          | Badge with inline icon gap                      | VersionDetail.svelte            |
+| —       | `.modal.scrollable`                                        | Scrollable modal variant                        | Claims.svelte, Upload.svelte    |
+| —       | `.modal-flex`                                              | Width + flex-column modal body layout           | Claims.svelte, Upload.svelte    |
+| —       | `.warning-card`, `.info-card`                              | Inline tinted note cards inside modal bodies    | Claims.svelte, Upload.svelte    |
+| —       | `.list-header`                                             | Section sub-header above per-section lists      | Settings panels, OrgSettings    |
+| —       | `.page-toolbar`                                            | Search + filter row above tables                | All list pages                  |
 | —       | `.tabs` / `.tab`                                           | Tab navigation                                  | Multiple                        |
 | —       | `.form-row` / `.form-hint`                                 | Form layout                                     | Multiple                        |
 | —       | `button`, `button.primary`, `button.danger`                | Actions                                         | Multiple                        |
@@ -261,7 +273,6 @@ redefine them in component `<style>` blocks.
 | —       | `.modal`, `.modal-backdrop`, `.modal-actions`              | Modal dialogs                                   | Multiple                        |
 | —       | `.spinner`                                                 | Loading state (mid-flight actions, modal submit)| Multiple                        |
 | —       | `.skeleton`                                                | Shimmer placeholder for initial table fetch     | Tables (Packages, VersionDetail, Vulnerabilities) |
-| —       | `.search-bar`                                              | Search input                                    | Packages.svelte                 |
 | —       | `.error-msg`                                               | Inline form-field validation error              | Forms                           |
 | —       | `.page-error`                                              | Top-of-page fetch failure banner                | All data pages                  |
 | —       | `.page-header`, `.page-title`                              | Page chrome                                     | All pages                       |

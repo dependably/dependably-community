@@ -207,6 +207,30 @@ public sealed class VersionOverwritePolicyTests
         Assert.Null(pkgCleared?.SameVersionPushOverride);
     }
 
+    // ── GetOrCreateAsync existing-row path projects SameVersionPushOverride ────
+
+    [Fact]
+    public async Task GetOrCreateAsync_ExistingRow_ProjectsSameVersionPushOverride()
+    {
+        await using var db = new TestMetadataStore();
+        await new SchemaInitializer(db).InitializeAsync();
+
+        string orgId = await OrgSeeder.InsertAsync(db, "getorcreate-override-" + Guid.NewGuid().ToString("N")[..8]);
+        var pkgRepo = new PackageRepository(db);
+
+        // First call creates the row (newly-created-row projection).
+        var created = await pkgRepo.GetOrCreateAsync(orgId, "npm", "republished-lib", "republished-lib", isProxy: false);
+        Assert.Null(created.SameVersionPushOverride);
+
+        await pkgRepo.SetSameVersionPushOverrideAsync(created.Id, orgId, "allow");
+
+        // Second call hits the existing-row branch — the override must survive the projection.
+        // Before the fix this branch omitted same_version_push_override and returned null,
+        // which made same-version republish fail with 409 under org policy 'exception'.
+        var existing = await pkgRepo.GetOrCreateAsync(orgId, "npm", "republished-lib", "republished-lib", isProxy: false);
+        Assert.Equal("allow", existing.SameVersionPushOverride);
+    }
+
     // ── Cross-org BOLA guard: SetSameVersionPushOverrideAsync ignores wrong orgId ──
 
     [Fact]

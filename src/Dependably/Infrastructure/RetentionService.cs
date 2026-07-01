@@ -64,16 +64,17 @@ public sealed class RetentionService : ScheduledBackgroundService
 
         // Fetch active orgs with retention settings (skip soft-deleted — TenantHardDeleteService
         // owns those, and retention work on a tenant pending hard-delete is wasted I/O).
-        var orgs = await conn.QueryAsync<(string OrgId, int? KeepVersions, int? KeepDays, int? ActivityRetentionDays)>(
+        var orgs = await conn.QueryAsync<(string OrgId, int? KeepVersions, int? KeepDays, int? ActivityRetentionDays, int? PurgeUnlistedAfterDays)>(
             """
-            SELECT o.id, s.keep_versions, s.keep_days, s.activity_retention_days
+            SELECT o.id, s.keep_versions, s.keep_days, s.activity_retention_days, s.purge_unlisted_after_days
             FROM orgs o
             JOIN org_settings s ON s.org_id = o.id
             WHERE o.deleted_at IS NULL
-              AND (s.keep_versions IS NOT NULL OR s.keep_days IS NOT NULL OR s.activity_retention_days IS NOT NULL)
+              AND (s.keep_versions IS NOT NULL OR s.keep_days IS NOT NULL
+                   OR s.activity_retention_days IS NOT NULL OR s.purge_unlisted_after_days IS NOT NULL)
             """);
 
-        foreach (var (OrgId, KeepVersions, KeepDays, ActivityRetentionDays) in orgs)
+        foreach (var (OrgId, KeepVersions, KeepDays, ActivityRetentionDays, PurgeUnlistedAfterDays) in orgs)
         {
             if (ct.IsCancellationRequested)
             {
@@ -93,6 +94,11 @@ public sealed class RetentionService : ScheduledBackgroundService
             if (ActivityRetentionDays.HasValue)
             {
                 await PruneActivityAsync(conn, OrgId, ActivityRetentionDays.Value, _time.GetUtcNow(), ct);
+            }
+
+            if (PurgeUnlistedAfterDays.HasValue)
+            {
+                await PurgeUnlistedAsync(conn, OrgId, PurgeUnlistedAfterDays.Value, ct);
             }
         }
 
@@ -263,6 +269,39 @@ public sealed class RetentionService : ScheduledBackgroundService
                 await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
                 await conn.ExecuteAsync("DELETE FROM cache_artifact WHERE id = @id", new { id = CacheArtifactId });
             }
+        }
+    }
+
+    /// <summary>
+    /// Hard-deletes hosted (origin='uploaded') versions that have stayed unlisted longer than
+    /// the org's purge_unlisted_after_days policy, reclaiming the row and its registry-tier blob.
+    /// The age is measured from yanked_at — rows whose unlist pre-dates that column (NULL
+    /// yanked_at) are never age-purgeable, so an operator can re-unlist to restart the clock.
+    /// Proxy rows are excluded by the origin discriminator; cache-tier eviction is owned by
+    /// CacheEvictionService.
+    /// </summary>
+    internal async Task PurgeUnlistedAsync(
+        System.Data.Common.DbConnection conn, string orgId, int afterDays, CancellationToken ct)
+    {
+        string cutoff = _time.GetUtcNow().AddDays(-afterDays).ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+        var toPurge = await conn.QueryAsync<(string VersionId, string BlobKey)>(
+            """
+            SELECT pv.id as VersionId, pv.blob_key as BlobKey
+            FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.org_id = @orgId AND pv.origin = 'uploaded'
+              AND pv.yanked = 1
+              AND pv.yanked_at IS NOT NULL AND pv.yanked_at < @cutoff
+            """,
+            new { orgId, cutoff });
+
+        foreach (var (VersionId, BlobKey) in toPurge)
+        {
+            if (ct.IsCancellationRequested) { break; }
+            await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), ct);
+            await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = VersionId });
+            _logger.LogDebug("GC: purged unlisted version {Id} (blob {Key})", VersionId, BlobKey);
         }
     }
 

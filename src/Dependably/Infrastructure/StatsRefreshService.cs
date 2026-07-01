@@ -115,7 +115,7 @@ public sealed class StatsRefreshService : BackgroundService
         }
 
         sw.Stop();
-        _logger.LogInformation(
+        _logger.LogDebug(
             "Stats refresh pass complete. Refreshed {Refreshed}/{Total} org(s) in {ElapsedMs}ms.",
             refreshed, orgIds.Count, sw.ElapsedMilliseconds);
     }

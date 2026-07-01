@@ -1,4 +1,5 @@
 using Dapper;
+using Dependably.Infrastructure.Identity;
 using Microsoft.Extensions.Caching.Memory;
 
 namespace Dependably.Infrastructure;
@@ -13,17 +14,24 @@ public sealed class OrgRepository
     // changes via the admin UI take effect within a CI run.
     private static readonly TimeSpan SettingsCacheTtl = TimeSpan.FromSeconds(1);
 
+    // Keys whose values are encrypted at rest when a master key is configured. Only
+    // these keys are wrapped on write; quota integers and other settings pass through.
+    internal static readonly HashSet<string> SecretKeys =
+        ["jwt_secret", "mfa_encryption_key"];
+
     private readonly IMetadataStore _db;
     private readonly IMemoryCache? _cache;
     private readonly TimeProvider _time;
     private readonly UserTokenVersionStore? _tokenVersions;
+    private readonly EnvelopeProtector? _envelope;
 
-    public OrgRepository(IMetadataStore db, IMemoryCache? cache = null, TimeProvider? time = null, UserTokenVersionStore? tokenVersions = null)
+    public OrgRepository(IMetadataStore db, IMemoryCache? cache = null, TimeProvider? time = null, UserTokenVersionStore? tokenVersions = null, EnvelopeProtector? envelope = null)
     {
         _db = db;
         _cache = cache;
         _time = time ?? TimeProvider.System;
         _tokenVersions = tokenVersions;
+        _envelope = envelope;
     }
 
     private static string SettingsCacheKey(string orgId) => "org-settings:" + orgId;
@@ -66,6 +74,7 @@ public sealed class OrgRepository
                max_upload_bytes_cargo as MaxUploadBytesCargo,
                keep_versions as KeepVersions, keep_days as KeepDays,
                activity_retention_days as ActivityRetentionDays,
+               purge_unlisted_after_days as PurgeUnlistedAfterDays,
                COALESCE(license_enforcement_mode, 'off') as LicenseEnforcementMode,
                COALESCE(proxy_passthrough_enabled, 1) as ProxyPassthroughEnabled,
                COALESCE(max_osv_score_tolerance, 10.0) as MaxOsvScoreTolerance,
@@ -76,6 +85,7 @@ public sealed class OrgRepository
                COALESCE(air_gapped, 0) as AirGapped,
                COALESCE(require_mfa, 0) as RequireMfa,
                COALESCE(block_deprecated, 'off') as BlockDeprecated,
+               COALESCE(block_revoked, 'warn') as BlockRevoked,
                COALESCE(block_malicious, 'block') as BlockMalicious,
                COALESCE(block_kev, 'off') as BlockKev,
                max_epss_tolerance as MaxEpssTolerance,
@@ -315,9 +325,10 @@ public sealed class OrgRepository
     public async Task<string?> GetInstanceSettingAsync(string key, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        return await conn.ExecuteScalarAsync<string?>(
+        string? raw = await conn.ExecuteScalarAsync<string?>(
             "SELECT value FROM instance_settings WHERE key = @key",
             new { key });
+        return raw is null ? null : (_envelope?.Unprotect(raw) ?? raw);
     }
 
     /// <summary>
@@ -379,16 +390,21 @@ public sealed class OrgRepository
     {
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<(string Key, string Value)>(
-            "SELECT key as Key, value as Value FROM instance_settings WHERE key != 'jwt_secret'");
+            "SELECT key as Key, value as Value FROM instance_settings WHERE key NOT IN ('jwt_secret', 'mfa_encryption_key')");
         return rows.ToDictionary(r => r.Key, r => r.Value);
     }
 
     public async Task SetInstanceSettingAsync(string key, string value, CancellationToken ct = default)
     {
+        string stored = value;
+        if (_envelope is not null && _envelope.IsConfigured && SecretKeys.Contains(key) && !_envelope.IsEncrypted(value))
+        {
+            stored = _envelope.Protect(value);
+        }
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
             "INSERT INTO instance_settings (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value = @value",
-            new { key, value });
+            new { key, value = stored });
     }
 
     /// <summary>

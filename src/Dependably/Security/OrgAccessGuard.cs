@@ -124,10 +124,10 @@ public sealed class OrgAccessGuard
 
     // Canonical effective-capability resolution, mirroring CapabilityHandler so every
     // authorization surface (route guards and management-API token minting alike) computes
-    // the caller's privilege ceiling the same way: explicit cap claims (token-narrowed) win;
-    // otherwise the user's current DB role drives. system_admin isn't handled here because
-    // RouteScopeFilter already blocks operator tokens from tenant routes before they reach
-    // this guard.
+    // the caller's privilege ceiling the same way. Explicit token-narrowed capability claims
+    // win when present, otherwise the user's current DB role drives the resolution.
+    // system_admin isn't handled here because RouteScopeFilter already blocks operator tokens
+    // from tenant routes before they reach this guard.
     internal static IReadOnlySet<string> ResolveCallerCapabilities(ClaimsPrincipal principal, string? dbRole)
     {
         var explicitCaps = principal.FindAll("cap")

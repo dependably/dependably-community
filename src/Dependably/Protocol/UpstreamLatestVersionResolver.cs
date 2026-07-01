@@ -71,7 +71,7 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
         string upstream = (_config["Npm:Upstream"] ?? "https://registry.npmjs.org").TrimEnd('/');
         // Scoped packages arrive percent-encoded (%40scope%2Fpkg); the packument URL uses @scope/pkg.
         string packageName = Uri.UnescapeDataString(purlName).Replace("%40", "@").Replace("%2F", "/");
-        var resp = await _upstream.GetOrFetchMetadataAsync($"{upstream}/{packageName}", ct);
+        var resp = await _upstream.GetOrFetchMetadataAsync($"{upstream}/{packageName}", ct: ct);
         if (!resp.IsSuccessStatusCode)
         {
             return null;
@@ -88,7 +88,7 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
     private async Task<string?> ResolvePyPiAsync(string purlName, CancellationToken ct)
     {
         string upstream = (_config["PyPI:Upstream"] ?? "https://pypi.org").TrimEnd('/');
-        var resp = await _upstream.GetOrFetchMetadataAsync($"{upstream}/pypi/{purlName}/json", ct);
+        var resp = await _upstream.GetOrFetchMetadataAsync($"{upstream}/pypi/{purlName}/json", ct: ct);
         if (!resp.IsSuccessStatusCode)
         {
             return null;
@@ -112,10 +112,10 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
             return null;
         }
 
-        foreach (string baseUrl in await _registries.ResolveAsync(orgId, "nuget", ct))
+        foreach (var source in await _registries.ResolveAsync(orgId, "nuget", ct))
         {
             var resp = await _upstream.GetOrFetchMetadataAsync(
-                $"{baseUrl}/flatcontainer/{id.ToLowerInvariant()}/index.json", ct);
+                $"{source.Url}/flatcontainer/{id.ToLowerInvariant()}/index.json", source.AuthorizationHeader, ct);
             if (!resp.IsSuccessStatusCode)
             {
                 continue;
@@ -169,10 +169,10 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
         }
 
         string groupPath = groupId.Replace('.', '/');
-        foreach (string baseUrl in await _registries.ResolveAsync(orgId, "maven", ct))
+        foreach (var source in await _registries.ResolveAsync(orgId, "maven", ct))
         {
             var resp = await _upstream.GetOrFetchMetadataAsync(
-                $"{baseUrl}/{groupPath}/{artifact}/maven-metadata.xml", ct);
+                $"{source.Url}/{groupPath}/{artifact}/maven-metadata.xml", source.AuthorizationHeader, ct);
             if (!resp.IsSuccessStatusCode)
             {
                 continue;

@@ -1,13 +1,14 @@
 <script>
   import { onMount } from 'svelte'
   import { t, isLoading, locale } from 'svelte-i18n'
-  import { route, user, navigate, currentOrg, bootstrapInfo, pendingRoute } from './lib/store.js'
-  import { useRouter, routeFor } from './lib/routes.js'
+  import { route, user, navigate, bootstrapInfo, pendingRoute, noticesOpen } from './lib/store.js'
+  import { useRouter, routeFor, ADMIN_ONLY_PAGES } from './lib/routes.js'
   import { api } from './lib/api.js'
   import { setupI18n } from './i18n/index.js'
   import { applyLocale } from './lib/locale.js'
   import { get } from 'svelte/store'
   import { activeBanners, loadActiveBanners, dismissBanner } from './lib/banners.js'
+  import { armSessionWatch, disarmSessionWatch } from './lib/session.js'
   import Banner from './lib/Banner.svelte'
 
   import Login from './pages/Login.svelte'
@@ -27,6 +28,9 @@
   import Profile from './pages/Profile.svelte'
   import SamlTestResult from './pages/SamlTestResult.svelte'
   import SystemApp from './system/SystemApp.svelte'
+  import Sidebar from './lib/Sidebar.svelte'
+  import TopBar from './lib/TopBar.svelte'
+  import Licenses from './pages/Licenses.svelte'
 
   setupI18n()
   useRouter('tenant')
@@ -49,6 +53,19 @@
         && !($bootstrapInfo?.mode === 'multi' && $bootstrapInfo?.isApex)
         && $route.page !== 'profile' && $route.page !== 'login') {
     navigate('profile', {}, { replace: true })
+  }
+
+  // Guard: admin/owner-only pages must not render for other roles. The sidebar hides these
+  // links, but a non-admin can still deep-link or bookmark the URL — without this bounce the
+  // page mounts, fires its API call, and surfaces a raw backend 403. Send them to the dashboard
+  // instead. Runs after the rotation/MFA guards so those keep priority; the backend remains the
+  // real authority (this is UX, not the security boundary). Apex mode is exempt: SystemApp owns
+  // its own page names and never uses these.
+  $: if ($user
+        && !($user.role === 'admin' || $user.role === 'owner')
+        && !($bootstrapInfo?.mode === 'multi' && $bootstrapInfo?.isApex)
+        && ADMIN_ONLY_PAGES.has($route.page)) {
+    navigate('dashboard', {}, { replace: true })
   }
 
   onMount(async () => {
@@ -84,6 +101,8 @@
       if (me.language && me.language !== get(locale)) applyLocale(me.language)
       // Load active banners once after auth. One-shot — no polling.
       loadActiveBanners()
+      // Arm the proactive session-expiry watcher with the exp claim surfaced by me().
+      armSessionWatch(me.sessionExpiresAt, api.me)
     }
 
     // Decide final page based on intended × auth × mustChangePassword.
@@ -104,6 +123,11 @@
     } else if (me.mfaEnrollmentRequired) {
       finalPage = 'profile'
     } else if (intended.page === 'login') {
+      finalPage = 'dashboard'
+    } else if (ADMIN_ONLY_PAGES.has(intended.page)
+        && !(me.role === 'admin' || me.role === 'owner')) {
+      // Non-admin deep-linked/bookmarked an admin-only page — land on the dashboard so the
+      // admin page never mounts. The reactive guard above covers runtime navigations.
       finalPage = 'dashboard'
     } else {
       finalPage = intended.page
@@ -130,6 +154,7 @@
 
   async function logout() {
     await api.logout().catch(() => {})
+    disarmSessionWatch()
     user.set(null)
     pendingRoute.set(null)
     activeBanners.set([])
@@ -151,56 +176,9 @@
   <Join />
 {:else}
   <div class="layout">
-    <nav class="navbar">
-      <button class="nav-brand brand brand-btn" on:click={() => navigate('dashboard')}>
-        <svg viewBox="0 0 64 64" width="18" height="18" fill="none" aria-hidden="true">
-          <path d="M32 32L14 14M32 32L50 14M32 32L32 54" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
-          <circle cx="14" cy="14" r="5" fill="currentColor"/>
-          <circle cx="50" cy="14" r="5" fill="currentColor"/>
-          <circle cx="32" cy="54" r="5" fill="currentColor"/>
-          <circle cx="32" cy="32" r="9" fill="var(--accent)"/>
-        </svg>
-        <span class="brand-text">{$t('nav.brand')}</span>
-      </button>
-
-      {#if $user && $currentOrg && $bootstrapInfo?.mode === 'multi'}
-        <div class="nav-org">
-          <span class="nav-org-label">{$currentOrg.slug}</span>
-        </div>
-      {/if}
-
-      {#if $bootstrapInfo?.airGapped}
-        <div class="air-gap-badge" title={$t('nav.airGappedHint')} aria-label="air-gapped">
-          <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-plane"/></svg>
-          {$t('nav.airGapped')}
-        </div>
-      {/if}
-
-      {#if $currentOrg && !$user?.mustChangePassword}
-        <div class="nav-links">
-          <button class="nav-link" class:active={$route.page === 'packages'} on:click={() => navigate('packages')}>{$t('nav.packages')}</button>
-          <button class="nav-link" class:active={$route.page === 'vulnerabilities'} on:click={() => navigate('vulnerabilities')}>{$t('nav.vulnerabilities')}</button>
-          <button class="nav-link" class:active={$route.page === 'license-policy'} on:click={() => navigate('license-policy')}>{$t('nav.licensePolicy')}</button>
-          <button class="nav-link" class:active={$route.page === 'tokens'} on:click={() => navigate('tokens')}>{$t('nav.tokens')}</button>
-          {#if $user?.role === 'admin' || $user?.role === 'owner'}
-            <button class="nav-link" class:active={$route.page === 'quarantine'} on:click={() => navigate('quarantine')}>{$t('nav.quarantine')}</button>
-            <button class="nav-link" class:active={$route.page === 'users'} on:click={() => navigate('users')}>{$t('nav.users')}</button>
-            <button class="nav-link" class:active={$route.page === 'audit'} on:click={() => navigate('audit')}>{$t('nav.audit')}</button>
-            <button class="nav-link" class:active={$route.page === 'upload'} on:click={() => navigate('upload')}>{$t('nav.upload')}</button>
-            <button class="nav-link" class:active={$route.page === 'settings'} on:click={() => navigate('settings')}>{$t('nav.settings')}</button>
-          {/if}
-          <button class="nav-link" class:active={$route.page === 'setup'} on:click={() => navigate('setup')}>{$t('nav.setup')}</button>
-        </div>
-      {/if}
-
-      <div class="nav-actions">
-        <!-- Locale + theme moved to the Profile page; system_admin lives at the apex SPA. -->
-        {#if $user}
-          <button class="nav-link" class:active={$route.page === 'profile'} on:click={() => navigate('profile')} title={$t('nav.profile')}>{$t('nav.profile')}</button>
-        {/if}
-        <button on:click={logout}>{$t('nav.signOut')}</button>
-      </div>
-    </nav>
+    <Sidebar />
+    <div class="content-area">
+    <TopBar on:logout={logout} />
 
     {#if $bootstrapInfo?.insecureHttp && !httpBannerDismissed}
       <div class="http-banner" role="alert">
@@ -254,8 +232,12 @@
         <SamlTestResult />
       {/if}
     </main>
-
+    </div>
   </div>
+{/if}
+
+{#if $noticesOpen}
+  <Licenses on:close={() => noticesOpen.set(false)} />
 {/if}
 
 <style>
@@ -266,70 +248,24 @@
     height: 100vh;
   }
 
-  .layout { display: flex; flex-direction: column; min-height: 100vh; }
+  /* Sidebar (left rail) + content column. The nav/brand/badge styles now live in
+     Sidebar.svelte and TopBar.svelte. */
+  .layout { display: flex; flex-direction: row; min-height: 100vh; }
 
-  .navbar {
+  .content-area {
+    flex: 1;
+    min-width: 0;
     display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 16px;
-    height: 48px;
-    background: var(--bg2);
-    border-bottom: 1px solid var(--border);
-    position: sticky;
-    top: 0;
-    z-index: 50;
+    flex-direction: column;
   }
-
-  .nav-org-label {
-    padding: 4px 8px;
-    font-size: 13px;
-    color: var(--text2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-  }
-
-  /* Air-gap badge: surfaces AIR_GAPPED=true so operators always see the deployment
-     mode without checking config. Amber to signal "the proxy fetch path is disabled" */
-  .air-gap-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    font-size: 12px;
-    font-weight: 600;
-    background: var(--warning-bg);
-    color: var(--warning-text);
-    border: 1px solid var(--warning-border);
-    border-radius: var(--radius);
-    cursor: help;
-  }
-
-  .nav-links { display: flex; gap: 2px; flex: 1; }
-
-  .nav-link {
-    border: none;
-    background: none;
-    color: var(--text2);
-    padding: 4px 10px;
-    font-size: 13px;
-    border-radius: var(--radius);
-  }
-  .nav-link:hover { background: var(--bg3); color: var(--text); }
-  .nav-link.active { color: var(--accent); background: var(--bg); }
-
-  .brand-btn {
-    border: none;
-    background: none;
-    padding: 4px 8px;
-    border-radius: var(--radius);
-    cursor: pointer;
-  }
-  .brand-btn:hover { background: var(--bg3); }
-
-  .nav-actions { display: flex; gap: 6px; margin-left: auto; align-items: center; }
 
   .main-content { flex: 1; }
+
+  /* Mobile: the sidebar collapses to a horizontal bar (see Sidebar.svelte) and the
+     content column stacks beneath it. */
+  @media (max-width: 720px) {
+    .layout { flex-direction: column; }
+  }
 
   .http-banner {
     display: flex;

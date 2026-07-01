@@ -201,6 +201,14 @@ public sealed partial class SchemaInitializer
         // cache_artifact.name rows never matched and their proxy versions showed a 0 version count.
         // Idempotent: the WHERE name <> lower(name) predicate is a no-op on already-normalized rows.
         await RunOnceAsync(conn, "normalize_rpm_cache_artifact_names", NormalizeRpmCacheArtifactNamesAsync);
+        // Normalize existing NuGet cache_artifact rows whose name was stored in canonical case (e.g.
+        // 'Newtonsoft.Json' instead of 'newtonsoft.json'). The same cross-plane join mismatch as RPM:
+        // packages.purl_name is lowercased but the backfill wrote p.name (display case). Two-step:
+        // delete colliding mixed-case rows that already have a lowercase twin at the same coordinate
+        // (FK cascade drops their tenant_artifact_access), then lowercase the rest. Idempotent.
+        // xtenant: cache_artifact is the global plane; DELETE and UPDATE key only on ecosystem and
+        // the case-mismatch predicate, leaving rows from other ecosystems unchanged.
+        await RunOnceAsync(conn, "normalize_nuget_cache_artifact_names", NormalizeNuGetCacheArtifactNamesAsync);
         // Backfill version_overwrite_policy from the legacy allow_version_overwrite boolean for
         // orgs that had it set to 1. The tri-state policy supersedes the boolean; the boolean
         // column is kept but dual-written going forward. Idempotent via the applied-migrations ledger.
@@ -913,30 +921,31 @@ public sealed partial class SchemaInitializer
             "ALTER TABLE package_versions ADD COLUMN provenance_status TEXT",
             "ALTER TABLE package_versions ADD COLUMN provenance_signer TEXT",
             // Per-tenant npm signature-verification gate: 'off' (default) / 'warn' / 'block'.
-            // Opt-in; existing orgs see no behaviour change until an operator enables it and pins
-            // Npm:SignatureKeys. Added without a CHECK (SQLite ALTER can't add one); upgraded DBs
-            // rely on controller validation, fresh installs get the CHECK from Schema.sql.
+            // Opt-in; existing orgs see no behaviour change until an operator enables it and adds
+            // a per-org npm SPKI trust anchor. Added without a CHECK (SQLite ALTER can't add one);
+            // upgraded DBs rely on controller validation, fresh installs get the CHECK from Schema.sql.
             "ALTER TABLE org_settings ADD COLUMN verify_npm_signatures TEXT NOT NULL DEFAULT 'off'",
             // Per-tenant NuGet signature-verification gate: 'off' (default) / 'warn' / 'block'.
-            // Opt-in; existing orgs see no behaviour change until an operator enables it and pins
-            // NuGet:SignatureCertificates. Added without a CHECK (SQLite ALTER can't add one);
-            // upgraded DBs rely on controller validation, fresh installs get the CHECK from Schema.sql.
+            // Opt-in; existing orgs see no behaviour change until an operator enables it and adds
+            // a per-org NuGet X.509 trust anchor. Added without a CHECK (SQLite ALTER can't add
+            // one); upgraded DBs rely on controller validation, fresh installs get the CHECK.
             "ALTER TABLE org_settings ADD COLUMN verify_nuget_signatures TEXT NOT NULL DEFAULT 'off'",
             // Per-tenant PyPI PEP 740 attestation-verification gate: 'off' (default) / 'warn' /
             // 'block'. Opt-in; existing orgs see no behaviour change until an operator enables it and
-            // pins PyPI:SigstoreRoots + PyPI:TrustedPublishers. Added without a CHECK (SQLite ALTER
-            // can't add one); upgraded DBs rely on controller validation, fresh installs get the
-            // CHECK from Schema.sql.
+            // configures per-org sigstore_root + trusted_publisher anchors via Settings → Trust Anchors.
+            // Added without a CHECK (SQLite ALTER can't add one); upgraded DBs rely on controller
+            // validation, fresh installs get the CHECK from Schema.sql.
             "ALTER TABLE org_settings ADD COLUMN verify_pypi_attestations TEXT NOT NULL DEFAULT 'off'",
             // Per-tenant RPM per-package GPG header signature-verification gate: 'off' (default) /
-            // 'warn' / 'block'. Enabling requires operator-pinned Rpm:GpgKey; without it the verifier
-            // reports not-applicable and nothing blocks. Added without a CHECK (SQLite ALTER can't add
-            // one); upgraded DBs rely on controller validation, fresh installs get the CHECK from Schema.sql.
+            // 'warn' / 'block'. Enabling requires at least one RPM PGP anchor in signature_trust_anchor;
+            // without one the verifier reports not-applicable and nothing blocks. Added without a CHECK
+            // (SQLite ALTER can't add one); upgraded DBs rely on controller validation.
             "ALTER TABLE org_settings ADD COLUMN verify_rpm_signatures TEXT NOT NULL DEFAULT 'off'",
             // Per-tenant Maven detached .asc OpenPGP signature-verification gate: 'off' (default) /
-            // 'warn' / 'block'. Enabling requires operator-pinned Maven:SignatureKeys; without them the
-            // verifier reports not-applicable and nothing blocks. Added without a CHECK (SQLite ALTER
-            // can't add one); upgraded DBs rely on controller validation, fresh installs get the CHECK.
+            // 'warn' / 'block'. Enabling requires at least one per-org Maven PGP anchor in
+            // signature_trust_anchor; without one the verifier reports not-applicable and nothing
+            // blocks. Added without a CHECK (SQLite ALTER can't add one); upgraded DBs rely on
+            // controller validation, fresh installs get the CHECK.
             "ALTER TABLE org_settings ADD COLUMN verify_maven_signatures TEXT NOT NULL DEFAULT 'off'",
             // Global proxy-cache artifact enrichment. These columns extend cache_artifact with the
             // same supply-chain signals package_versions already carries so ingest can populate them
@@ -1017,6 +1026,22 @@ public sealed partial class SchemaInitializer
             // complete MFA enrollment before accessing any API endpoints. Composes with the
             // instance REQUIRE_MFA env var: effective requirement = instance OR tenant.
             "ALTER TABLE org_settings ADD COLUMN require_mfa INTEGER NOT NULL DEFAULT 0",
+            // Unlist-age timestamp on package_versions: stamped when yanked flips to 1, cleared
+            // on un-yank. Legacy yanked rows backfill to NULL and stay non-age-purgeable.
+            "ALTER TABLE package_versions ADD COLUMN yanked_at TEXT",
+            // Opt-in hosted-retention policy: hard-delete uploaded versions unlisted longer than
+            // N days. NULL (default) leaves unlisted hosted versions in place indefinitely.
+            "ALTER TABLE org_settings ADD COLUMN purge_unlisted_after_days INTEGER",
+            // Upstream-removal (revocation) timestamp on both planes: stamped the first time a
+            // cached version is observed gone from the upstream registry, cleared if it reappears.
+            // Legacy rows backfill to NULL (= still published / never checked).
+            "ALTER TABLE package_versions ADD COLUMN revoked_at TEXT",
+            "ALTER TABLE cache_artifact ADD COLUMN revoked_at TEXT",
+            // Upstream-removal policy gate. Defaults to 'warn' so existing orgs surface the badge
+            // without breaking their cached serves; no CHECK on the ALTER (SQLite can't add one) —
+            // fresh installs get it from the CREATE TABLE block, upgraded DBs rely on controller
+            // validation.
+            "ALTER TABLE org_settings ADD COLUMN block_revoked TEXT NOT NULL DEFAULT 'warn'",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)
@@ -1075,6 +1100,35 @@ public sealed partial class SchemaInitializer
     {
         await conn.ExecuteAsync(
             "UPDATE cache_artifact SET name = lower(name) WHERE ecosystem = 'rpm' AND name <> lower(name)");
+    }
+
+    // Normalizes NuGet cache_artifact.name to lowercase. The backfill migration wrote p.name
+    // (canonical display case, e.g. 'Newtonsoft.Json') instead of p.purl_name (lowercased join key).
+    // The cross-plane join uses ca.name = p.purl_name, so mixed-case rows never matched. Unlike the
+    // RPM equivalent, a blind UPDATE would violate the UNIQUE(ecosystem, name, version, filename)
+    // constraint for coordinates where both a mixed-case backfill row and a lowercase live-path row
+    // exist. Step A deletes those colliding mixed-case rows first (FK cascade drops their
+    // tenant_artifact_access); step B lowercases the remaining rows. Both steps use standard SQL
+    // that works on SQLite and Postgres. Idempotent: rows already lowercase satisfy name <> lower(name)
+    // = false and are not touched.
+    // xtenant: cache_artifact is the global plane (no tenant column); the WHERE clause keys only on
+    // ecosystem and the case-mismatch predicate, leaving rows from other ecosystems unchanged.
+    private static async Task NormalizeNuGetCacheArtifactNamesAsync(DbConnection conn)
+    {
+        // Step A: delete mixed-case rows that already have a lowercase twin at the same coordinate.
+        await conn.ExecuteAsync(
+            """
+            DELETE FROM cache_artifact
+            WHERE ecosystem = 'nuget' AND name <> lower(name)
+              AND EXISTS (SELECT 1 FROM cache_artifact t
+                          WHERE t.ecosystem = cache_artifact.ecosystem
+                            AND t.name = lower(cache_artifact.name)
+                            AND t.version = cache_artifact.version
+                            AND t.filename = cache_artifact.filename)
+            """);
+        // Step B: lowercase the remaining mixed-case rows (no collision possible after step A).
+        await conn.ExecuteAsync(
+            "UPDATE cache_artifact SET name = lower(name) WHERE ecosystem = 'nuget' AND name <> lower(name)");
     }
 
     // Promotes the legacy allow_version_overwrite boolean to the tri-state version_overwrite_policy

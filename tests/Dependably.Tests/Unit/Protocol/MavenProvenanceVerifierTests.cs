@@ -1,6 +1,7 @@
 using System.Text;
+using Dependably.Infrastructure;
 using Dependably.Protocol.Provenance;
-using Microsoft.Extensions.Configuration;
+using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using Org.BouncyCastle.Bcpg;
 using Org.BouncyCastle.Bcpg.OpenPgp;
@@ -13,24 +14,28 @@ namespace Dependably.Tests.Unit.Protocol;
 /// Exercises <see cref="MavenProvenanceVerifier"/> end-to-end with a self-generated RSA-2048
 /// keypair (never a real Maven Central key). Maven artifacts are accompanied by a detached
 /// ASCII-armored OpenPGP signature (<c>.asc</c>); the verifier must accept a valid signature
-/// from a pinned key and reject everything else without throwing — tampered signatures, wrong
-/// keys, unpinned keys, missing .asc sidecars, and malformed input.
+/// from a per-org pinned key and reject everything else without throwing — tampered signatures,
+/// wrong keys, unpinned keys, missing .asc sidecars, and malformed input.
+/// Per-org isolation is enforced: org A with an anchor verifies; org B with no anchor gets
+/// NotApplicable without requiring a restart.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class MavenProvenanceVerifierTests
 {
     private static readonly byte[] SampleArtifact = Encoding.UTF8.GetBytes("com.example:lib:1.0.0:jar");
+    private const string OrgA = "org-a";
+    private const string OrgB = "org-b";
 
     // ── happy path ──────────────────────────────────────────────────────────────
 
     [Fact]
-    public void ValidSignature_FromPinnedKey_Verifies()
+    public async Task ValidSignature_FromPinnedKey_Verifies()
     {
         var (secretKey, publicKey) = GenerateRsaKeyPair();
         byte[] asc = SignDetached(SampleArtifact, secretKey);
-        var verifier = VerifierWithKey(publicKey);
+        var verifier = VerifierWithKey(OrgA, publicKey);
 
-        var result = verifier.VerifyArtifact(SampleArtifact, asc);
+        var result = await verifier.VerifyArtifactAsync(OrgA, SampleArtifact, asc);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
         Assert.NotNull(result.Signer);
@@ -38,96 +43,159 @@ public sealed class MavenProvenanceVerifierTests
         Assert.Matches("^[0-9a-f]+$", result.Signer);
     }
 
-    // ── failure paths ───────────────────────────────────────────────────────────
+    // ── per-org isolation ────────────────────────────────────────────────────────
 
     [Fact]
-    public void TamperedArtifact_Fails()
+    public async Task OrgA_WithAnchor_Verifies_OrgB_WithNoAnchor_IsNotApplicable()
     {
         var (secretKey, publicKey) = GenerateRsaKeyPair();
         byte[] asc = SignDetached(SampleArtifact, secretKey);
-        var verifier = VerifierWithKey(publicKey);
+
+        // Seed an anchor for OrgA only; OrgB has none.
+        var store = new StubPerOrgTrustAnchorStore();
+        SeedPgpAnchor(store, OrgA, publicKey);
+        var verifier = new MavenProvenanceVerifier(store, NullLogger<MavenProvenanceVerifier>.Instance);
+
+        var resultA = await verifier.VerifyArtifactAsync(OrgA, SampleArtifact, asc);
+        var resultB = await verifier.VerifyArtifactAsync(OrgB, SampleArtifact, asc);
+
+        Assert.Equal(ProvenanceStatus.Verified, resultA.Status);
+        Assert.NotNull(resultA.Signer);
+        Assert.Equal(ProvenanceStatus.NotApplicable, resultB.Status);
+    }
+
+    [Fact]
+    public async Task TwoOrgs_DifferentKeys_EachVerifiesOwnArtifact_CrossOrgFails()
+    {
+        var (secretA, publicA) = GenerateRsaKeyPair();
+        var (secretB, publicB) = GenerateRsaKeyPair();
+        byte[] artifactA = Encoding.UTF8.GetBytes("com.example:lib-a:1.0:jar");
+        byte[] artifactB = Encoding.UTF8.GetBytes("com.example:lib-b:1.0:jar");
+        byte[] ascA = SignDetached(artifactA, secretA);
+        byte[] ascB = SignDetached(artifactB, secretB);
+
+        var store = new StubPerOrgTrustAnchorStore();
+        SeedPgpAnchor(store, OrgA, publicA);
+        SeedPgpAnchor(store, OrgB, publicB);
+        var verifier = new MavenProvenanceVerifier(store, NullLogger<MavenProvenanceVerifier>.Instance);
+
+        // Each org's artifact verifies under its own key.
+        Assert.Equal(ProvenanceStatus.Verified, (await verifier.VerifyArtifactAsync(OrgA, artifactA, ascA)).Status);
+        Assert.Equal(ProvenanceStatus.Verified, (await verifier.VerifyArtifactAsync(OrgB, artifactB, ascB)).Status);
+
+        // Cross-org: OrgA verifying artifact signed by OrgB's key → Failed (key not in OrgA's ring).
+        Assert.Equal(ProvenanceStatus.Failed, (await verifier.VerifyArtifactAsync(OrgA, artifactA, ascB)).Status);
+        Assert.Equal(ProvenanceStatus.Failed, (await verifier.VerifyArtifactAsync(OrgB, artifactB, ascA)).Status);
+    }
+
+    // ── failure paths ───────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task TamperedArtifact_Fails()
+    {
+        var (secretKey, publicKey) = GenerateRsaKeyPair();
+        byte[] asc = SignDetached(SampleArtifact, secretKey);
+        var verifier = VerifierWithKey(OrgA, publicKey);
 
         // Flip one byte in the artifact — the signature no longer verifies.
         byte[] tampered = (byte[])SampleArtifact.Clone();
         tampered[0] ^= 0xFF;
 
-        var result = verifier.VerifyArtifact(tampered, asc);
+        var result = await verifier.VerifyArtifactAsync(OrgA, tampered, asc);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
         Assert.Null(result.Signer);
     }
 
     [Fact]
-    public void WrongKey_SignatureValidButKeyNotPinned_Fails()
+    public async Task WrongKey_SignatureValidButKeyNotPinned_Fails()
     {
         var (secretKey, _) = GenerateRsaKeyPair();
         byte[] asc = SignDetached(SampleArtifact, secretKey);
         // Pin a DIFFERENT key: signature is cryptographically valid but the signing key is not trusted.
         var (_, differentPublicKey) = GenerateRsaKeyPair();
-        var verifier = VerifierWithKey(differentPublicKey);
+        var verifier = VerifierWithKey(OrgA, differentPublicKey);
 
-        var result = verifier.VerifyArtifact(SampleArtifact, asc);
+        var result = await verifier.VerifyArtifactAsync(OrgA, SampleArtifact, asc);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
 
     [Fact]
-    public void MissingAscSidecar_NullBytes_IsUnsigned()
+    public async Task MissingAscSidecar_NullBytes_IsUnsigned()
     {
         var (_, publicKey) = GenerateRsaKeyPair();
-        var verifier = VerifierWithKey(publicKey);
+        var verifier = VerifierWithKey(OrgA, publicKey);
 
-        var result = verifier.VerifyArtifact(SampleArtifact, ascBytes: null);
+        var result = await verifier.VerifyArtifactAsync(OrgA, SampleArtifact, ascBytes: null);
 
         Assert.Equal(ProvenanceStatus.Unsigned, result.Status);
         Assert.Null(result.Signer);
     }
 
     [Fact]
-    public void MissingAscSidecar_EmptyBytes_IsUnsigned()
+    public async Task MissingAscSidecar_EmptyBytes_IsUnsigned()
     {
         var (_, publicKey) = GenerateRsaKeyPair();
-        var verifier = VerifierWithKey(publicKey);
+        var verifier = VerifierWithKey(OrgA, publicKey);
 
-        var result = verifier.VerifyArtifact(SampleArtifact, ascBytes: []);
+        var result = await verifier.VerifyArtifactAsync(OrgA, SampleArtifact, ascBytes: []);
 
         Assert.Equal(ProvenanceStatus.Unsigned, result.Status);
     }
 
     [Fact]
-    public void MalformedAsc_NotPgpData_Fails()
+    public async Task MalformedAsc_NotPgpData_Fails()
     {
         var (_, publicKey) = GenerateRsaKeyPair();
-        var verifier = VerifierWithKey(publicKey);
+        var verifier = VerifierWithKey(OrgA, publicKey);
 
-        var result = verifier.VerifyArtifact(SampleArtifact,
+        var result = await verifier.VerifyArtifactAsync(OrgA, SampleArtifact,
             ascBytes: Encoding.UTF8.GetBytes("this is not a pgp signature"));
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
 
     [Fact]
-    public void NotConfigured_ReturnsNotApplicable()
+    public async Task NotConfigured_OrgWithNoAnchors_ReturnsNotApplicable()
     {
-        // Empty config → no keys → IsConfigured=false.
-        var keyStore = new MavenSignatureKeyStore(
-            new ConfigurationBuilder().Build(),
-            NullLogger<MavenSignatureKeyStore>.Instance);
-        var verifier = new MavenProvenanceVerifier(keyStore, NullLogger<MavenProvenanceVerifier>.Instance);
+        // Empty store → no anchors for OrgA → NotApplicable.
+        var store = new StubPerOrgTrustAnchorStore();
+        var verifier = new MavenProvenanceVerifier(store, NullLogger<MavenProvenanceVerifier>.Instance);
 
         var (secretKey, _) = GenerateRsaKeyPair();
         byte[] asc = SignDetached(SampleArtifact, secretKey);
 
-        var result = verifier.VerifyArtifact(SampleArtifact, asc);
+        var result = await verifier.VerifyArtifactAsync(OrgA, SampleArtifact, asc);
 
         Assert.Equal(ProvenanceStatus.NotApplicable, result.Status);
         Assert.Null(result.Signer);
     }
 
+    // ── IsConfiguredForAsync gate ────────────────────────────────────────────────
+
+    [Fact]
+    public async Task IsConfiguredForAsync_OrgWithAnchor_ReturnsTrue()
+    {
+        var (_, publicKey) = GenerateRsaKeyPair();
+        var verifier = VerifierWithKey(OrgA, publicKey);
+
+        Assert.True(await verifier.IsConfiguredForAsync(OrgA));
+    }
+
+    [Fact]
+    public async Task IsConfiguredForAsync_OrgWithNoAnchor_ReturnsFalse()
+    {
+        var store = new StubPerOrgTrustAnchorStore();
+        var verifier = new MavenProvenanceVerifier(store, NullLogger<MavenProvenanceVerifier>.Instance);
+
+        Assert.False(await verifier.IsConfiguredForAsync(OrgA));
+    }
+
     // ── mixed / partial-failure scenario ────────────────────────────────────────
 
     [Fact]
-    public void Mixed_OneArtifactVerified_AnotherTamperedFails_IndependentOutcomes()
+    public async Task Mixed_OneArtifactVerified_AnotherTamperedFails_IndependentOutcomes()
     {
         // Two artifacts signed by the same pinned key; one is intact, one is tampered.
         // Verifier must return Verified and Failed independently — no shared state.
@@ -142,10 +210,10 @@ public sealed class MavenProvenanceVerifierTests
         byte[] tamperedA = (byte[])artifactA.Clone();
         tamperedA[0] ^= 0x01;
 
-        var verifier = VerifierWithKey(publicKey);
+        var verifier = VerifierWithKey(OrgA, publicKey);
 
-        var resultA = verifier.VerifyArtifact(tamperedA, ascA);
-        var resultB = verifier.VerifyArtifact(artifactB, ascB);
+        var resultA = await verifier.VerifyArtifactAsync(OrgA, tamperedA, ascA);
+        var resultB = await verifier.VerifyArtifactAsync(OrgA, artifactB, ascB);
 
         Assert.Equal(ProvenanceStatus.Failed, resultA.Status);
         Assert.Equal(ProvenanceStatus.Verified, resultB.Status);
@@ -153,7 +221,7 @@ public sealed class MavenProvenanceVerifierTests
     }
 
     [Fact]
-    public void Mixed_SomeArtifactsUnsigned_SomeVerified_IndependentOutcomes()
+    public async Task Mixed_SomeArtifactsUnsigned_SomeVerified_IndependentOutcomes()
     {
         // Some artifacts have no .asc (Unsigned); others are validly signed (Verified).
         var (secretKey, publicKey) = GenerateRsaKeyPair();
@@ -161,13 +229,36 @@ public sealed class MavenProvenanceVerifierTests
         byte[] unsigned = Encoding.UTF8.GetBytes("com.example:unsigned-lib:1.0:jar");
 
         byte[] asc = SignDetached(signed, secretKey);
-        var verifier = VerifierWithKey(publicKey);
+        var verifier = VerifierWithKey(OrgA, publicKey);
 
-        var signedResult = verifier.VerifyArtifact(signed, asc);
-        var unsignedResult = verifier.VerifyArtifact(unsigned, ascBytes: null);
+        var signedResult = await verifier.VerifyArtifactAsync(OrgA, signed, asc);
+        var unsignedResult = await verifier.VerifyArtifactAsync(OrgA, unsigned, ascBytes: null);
 
         Assert.Equal(ProvenanceStatus.Verified, signedResult.Status);
         Assert.Equal(ProvenanceStatus.Unsigned, unsignedResult.Status);
+    }
+
+    [Fact]
+    public async Task Mixed_OneValidOneUnparseableAnchor_RingBuiltFromGoodOne()
+    {
+        // Two anchors: one valid PGP key, one garbage. The ring should be built from the
+        // good one (per-entry isolation in PgpKeyRingBuilder); the garbage is logged and skipped.
+        var (secretKey, publicKey) = GenerateRsaKeyPair();
+        byte[] asc = SignDetached(SampleArtifact, secretKey);
+
+        string armoredKey = ToArmoredPublicKey(publicKey);
+        string garbage = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nnot-valid-base64!!!\n-----END PGP PUBLIC KEY BLOCK-----\n";
+
+        var store = new StubPerOrgTrustAnchorStore();
+        store.AddAnchor(OrgA, "maven", new TrustAnchorMaterial { Id = "id-good", AnchorKind = "pgp", Material = armoredKey, KeyId = "key-1" });
+        store.AddAnchor(OrgA, "maven", new TrustAnchorMaterial { Id = "id-bad", AnchorKind = "pgp", Material = garbage, KeyId = "key-2" });
+        var verifier = new MavenProvenanceVerifier(store, NullLogger<MavenProvenanceVerifier>.Instance);
+
+        // Should still verify against the good key — the bad anchor is skipped.
+        var result = await verifier.VerifyArtifactAsync(OrgA, SampleArtifact, asc);
+
+        Assert.Equal(ProvenanceStatus.Verified, result.Status);
+        Assert.NotNull(result.Signer);
     }
 
     // ── internal static method parity (VerifyDetachedSignature) ─────────────────
@@ -256,24 +347,36 @@ public sealed class MavenProvenanceVerifierTests
         return new PgpPublicKeyRingBundle([new PgpPublicKeyRing(publicKey.GetEncoded())]);
     }
 
-    // Constructs a MavenProvenanceVerifier with a single pinned key.
-    private static MavenProvenanceVerifier VerifierWithKey(PgpPublicKey publicKey)
+    // Exports a PGP public key as an ASCII-armored string.
+    private static string ToArmoredPublicKey(PgpPublicKey publicKey)
     {
-        // Armored-export the public key for the config.
-        using var armoredMs = new MemoryStream();
-        using (var armoredOut = new ArmoredOutputStream(armoredMs))
+        using var ms = new MemoryStream();
+        using (var armoredOut = new ArmoredOutputStream(ms))
         {
             publicKey.Encode(armoredOut);
         }
-        string armoredKey = Encoding.ASCII.GetString(armoredMs.ToArray());
+        return Encoding.ASCII.GetString(ms.ToArray());
+    }
 
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection([
-                new KeyValuePair<string, string?>("Maven:SignatureKeys:0", armoredKey),
-            ])
-            .Build();
+    // Seeds a single PGP anchor for (orgId, "maven") in the stub store.
+    private static void SeedPgpAnchor(StubPerOrgTrustAnchorStore store, string orgId, PgpPublicKey publicKey)
+    {
+        string material = ToArmoredPublicKey(publicKey);
+        string fingerprint = Convert.ToHexString(publicKey.GetFingerprint()).ToLowerInvariant();
+        store.AddAnchor(orgId, "maven", new TrustAnchorMaterial
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            AnchorKind = "pgp",
+            Material = material,
+            KeyId = fingerprint,
+        });
+    }
 
-        var keyStore = new MavenSignatureKeyStore(config, NullLogger<MavenSignatureKeyStore>.Instance);
-        return new MavenProvenanceVerifier(keyStore, NullLogger<MavenProvenanceVerifier>.Instance);
+    // Constructs a MavenProvenanceVerifier with a single pinned key for the given org.
+    private static MavenProvenanceVerifier VerifierWithKey(string orgId, PgpPublicKey publicKey)
+    {
+        var store = new StubPerOrgTrustAnchorStore();
+        SeedPgpAnchor(store, orgId, publicKey);
+        return new MavenProvenanceVerifier(store, NullLogger<MavenProvenanceVerifier>.Instance);
     }
 }

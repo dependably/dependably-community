@@ -164,8 +164,33 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         }
 
         var versions = await _cacheArtifacts.ListVersionsForNameAsync(ecosystem, name, ct);
+        var (checked_, updated, newlyRevoked) = await ProcessVersionsAsync(ecosystem, versions, upstreamDeprecated, ct);
+
+        await LogRevokedActivitiesAsync(orgId, ecosystem, name, newlyRevoked, ct);
+        await LogRefreshSummaryAsync(orgId, ecosystem, name, checked_, updated, ct);
+
+        return (checked_, updated);
+    }
+
+    // Applies the upstream deprecation value to each cache_artifact row for the group and, for
+    // ecosystems whose upstream metadata enumerates the full per-version set, detects/clears
+    // revocations. Returns the per-version counters plus the versions newly revoked this pass.
+    private async Task<(int Checked, int Updated, List<(string Version, string? Purl)> NewlyRevoked)> ProcessVersionsAsync(
+        string ecosystem,
+        IReadOnlyList<(string Id, string Version, string? Deprecated, string? DeprecationCheckedAt, string? RevokedAt, string? Purl)> versions,
+        Dictionary<string, string?> upstreamDeprecated,
+        CancellationToken ct)
+    {
         int checked_ = 0;
         int updated = 0;
+
+        // Revocation detection runs only for ecosystems whose upstream metadata enumerates the
+        // full per-version set (npm `versions`, PyPI `releases`) AND only when that fetch returned
+        // a non-empty set. An empty set means a 404 / transient outage / whole-package removal (or
+        // a NuGet/Maven group, which carries no per-version metadata) — never a per-version removal,
+        // so it must not produce a false revocation.
+        bool detectRevocations = ecosystem is "npm" or "pypi" && upstreamDeprecated.Count > 0;
+        var newlyRevoked = new List<(string Version, string? Purl)>();
 
         foreach (var ver in versions)
         {
@@ -193,30 +218,104 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             {
                 await _cacheArtifacts.TouchDeprecationCheckedAtAsync(ver.Id, _time, ct);
             }
+
+            if (detectRevocations)
+            {
+                await ApplyRevocationAsync(ecosystem, ver, upstreamDeprecated, newlyRevoked, ct);
+            }
         }
 
-        if (checked_ > 0)
+        return (checked_, updated, newlyRevoked);
+    }
+
+    // Sets or clears the revocation marker for one version based on whether it is still present
+    // in the upstream-declared set: an absent version is newly revoked and recorded once for the
+    // activity log, while a reappeared version clears a previously-set marker.
+    private async Task ApplyRevocationAsync(
+        string ecosystem,
+        (string Id, string Version, string? Deprecated, string? DeprecationCheckedAt, string? RevokedAt, string? Purl) ver,
+        Dictionary<string, string?> upstreamDeprecated,
+        List<(string Version, string? Purl)> newlyRevoked,
+        CancellationToken ct)
+    {
+        // ContainsKey (not TryGetValue): an absent key is the revocation signal, whereas a
+        // present-but-null value is a published, non-deprecated version.
+        bool presentUpstream = upstreamDeprecated.ContainsKey(ver.Version);
+        if (!presentUpstream && ver.RevokedAt is null)
+        {
+            await _cacheArtifacts.SetRevokedAtAsync(ver.Id, _time, ct);
+            DependablyMeter.VersionsRevoked.Add(1,
+                new KeyValuePair<string, object?>("ecosystem", ecosystem));
+            if (!newlyRevoked.Any(r => r.Version == ver.Version))
+            {
+                newlyRevoked.Add((ver.Version, ver.Purl));
+            }
+        }
+        else if (presentUpstream && ver.RevokedAt is not null)
+        {
+            // Reappeared upstream — clear the revocation marker.
+            await _cacheArtifacts.ClearRevokedAtAsync(ver.Id, ct);
+        }
+    }
+
+    // One forensic activity row per newly-revoked version (not per file row), since a
+    // disappearance upstream can signal an upstream takedown of a compromised release.
+    private async Task LogRevokedActivitiesAsync(
+        string orgId, string ecosystem, string name,
+        List<(string Version, string? Purl)> newlyRevoked, CancellationToken ct)
+    {
+        foreach (var (version, purl) in newlyRevoked)
         {
             try
             {
+                string detail = System.Text.Json.JsonSerializer.Serialize(
+                    new { version, revoked_at = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") });
                 await _audit.LogActivityAsync(
                     orgId,
                     ecosystem: ecosystem,
-                    purl: null,
-                    eventType: "deprecation_refresh",
+                    purl: purl,
+                    eventType: "version_revoked",
                     actorId: null,
-                    detail: $"Checked {checked_} version(s) for {name}, {updated} updated",
+                    actorKind: "system",
+                    detail: detail,
                     ct: ct);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
-                    "Failed to log deprecation_refresh activity for {OrgId}/{Package}: {ExceptionType}",
-                    orgId, name, ex.GetType().Name);
+                    "Failed to log version_revoked activity for {OrgId}/{Package}@{Version}: {ExceptionType}",
+                    orgId, name, version, ex.GetType().Name);
             }
         }
+    }
 
-        return (checked_, updated);
+    // Logs a single summary activity row for the group's refresh pass, when at least one version
+    // was checked.
+    private async Task LogRefreshSummaryAsync(
+        string orgId, string ecosystem, string name, int checked_, int updated, CancellationToken ct)
+    {
+        if (checked_ <= 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await _audit.LogActivityAsync(
+                orgId,
+                ecosystem: ecosystem,
+                purl: null,
+                eventType: "deprecation_refresh",
+                actorId: null,
+                detail: $"Checked {checked_} version(s) for {name}, {updated} updated",
+                ct: ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to log deprecation_refresh activity for {OrgId}/{Package}: {ExceptionType}",
+                orgId, name, ex.GetType().Name);
+        }
     }
 
     private static bool IsSupportedEcosystem(string ecosystem) =>
@@ -250,7 +349,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         string packageName = Uri.UnescapeDataString(purlName).Replace("%40", "@").Replace("%2F", "/");
         string url = $"{upstream.TrimEnd('/')}/{packageName}";
 
-        var response = await _upstream.GetOrFetchMetadataAsync(url, ct);
+        var response = await _upstream.GetOrFetchMetadataAsync(url, ct: ct);
         if (!response.IsSuccessStatusCode)
         {
             _logger.LogWarning("npm packument fetch returned {StatusCode} for {Package}.", response.StatusCode, packageName);
@@ -302,7 +401,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         string upstream = _config["PyPI:Upstream"] ?? "https://pypi.org";
         string url = $"{upstream.TrimEnd('/')}/pypi/{purlName}/json";
 
-        var response = await _upstream.GetOrFetchMetadataAsync(url, ct);
+        var response = await _upstream.GetOrFetchMetadataAsync(url, ct: ct);
         if (!response.IsSuccessStatusCode)
         {
             _logger.LogWarning("PyPI project JSON fetch returned {StatusCode} for {Package}.", response.StatusCode, purlName);

@@ -321,8 +321,10 @@ public sealed class RpmController : OrgScopedControllerBase
         }
 
         // Per-org upstream: top-priority configured rpm registry. Empty ⇒ proxying disabled.
+        // RPM upstreams are anonymous-only (the per-upstream auth feature covers the language
+        // ecosystems; RPM mirrors are public distro repos), so only the base URL is threaded.
         var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
-        return bases.Count == 0 ? NotFound() : await ProxyDownloadAsync(orgId, bases[0], file, token, settings, ct);
+        return bases.Count == 0 ? NotFound() : await ProxyDownloadAsync(orgId, bases[0].Url, file, token, settings, ct);
     }
 
     private async Task<IActionResult> ServePackageFromCacheAsync(
@@ -394,7 +396,7 @@ public sealed class RpmController : OrgScopedControllerBase
         }
 
         // 2. Resolve package URL from primary.xml.gz
-        var resolution = await TryResolveUpstreamPackageAsync(upstreamBase, file, ct);
+        var resolution = await TryResolveUpstreamPackageAsync(orgId, upstreamBase, file, ct);
         if (resolution is null)
         {
             await _svc.Proxy.RecordNegativeAsync(file, ct);
@@ -421,19 +423,20 @@ public sealed class RpmController : OrgScopedControllerBase
             (body, isHit) = await _svc.UpstreamClient!.GetOrFetchStreamAsync(
                 blobStoreKey, resolution.PackageUrl,
                 new ChecksumSpec(ChecksumAlgorithm.Sha256, resolution.Sha256),
-                "rpm", orgId, purl, ct);
+                "rpm", orgId, purl, ct: ct);
         }
         catch (ChecksumException)
         {
             return StatusCode(StatusCodes.Status502BadGateway, "Upstream checksum mismatch; package not served.");
         }
 
-        // 5. Verify per-package RPM signature against the operator-pinned Rpm:GpgKey when the
-        // tenant has verification enabled. The blob was already staged by GetOrFetchStreamAsync
-        // above, so we open a fresh stream from the cache tier rather than buffering twice.
+        // 5. Verify per-package RPM signature against the per-org trust ring when the tenant has
+        // verification enabled. The blob was already staged by GetOrFetchStreamAsync above, so we
+        // open a fresh stream from the cache tier rather than buffering twice.
         // NotApplicable (off/not-configured) leaves the status NULL (never blocks).
         Dependably.Protocol.Provenance.ProvenanceResult provResult;
-        if (settings?.VerifyRpmSignatures != "off" && _svc.RpmProvenance.IsConfigured)
+        if (settings?.VerifyRpmSignatures != "off"
+            && await _svc.RpmProvenance.IsConfiguredForAsync(orgId, ct))
         {
             var blobStream = await _svc.BlobStore.Cache.GetAsync(blobStoreKey, ct);
             if (blobStream is not null)
@@ -441,7 +444,7 @@ public sealed class RpmController : OrgScopedControllerBase
                 await using (blobStream.ConfigureAwait(false))
                 {
                     provResult = await _svc.RpmProvenance.VerifyPackageAsync(
-                        blobStream, RpmSignatureVerifyCapBytes, ct);
+                        orgId, blobStream, RpmSignatureVerifyCapBytes, ct);
                 }
             }
             else
@@ -470,11 +473,11 @@ public sealed class RpmController : OrgScopedControllerBase
         return File(body, "application/x-rpm", file);
     }
 
-    private async Task<PackageResolution?> TryResolveUpstreamPackageAsync(string upstreamBase, string file, CancellationToken ct)
+    private async Task<PackageResolution?> TryResolveUpstreamPackageAsync(string orgId, string upstreamBase, string file, CancellationToken ct)
     {
         try
         {
-            return await _svc.Proxy!.ResolvePackageUrlAsync(upstreamBase, file, ct);
+            return await _svc.Proxy!.ResolvePackageUrlAsync(orgId, upstreamBase, file, ct);
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {
@@ -554,13 +557,13 @@ public sealed class RpmController : OrgScopedControllerBase
         if (_svc.Proxy is { IsPassthroughModeSelected: true })
         {
             var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
-            return bases.Count > 0 ? await TryServeRepodataFromUpstreamAsync(bases[0], file, ct) : null;
+            return bases.Count > 0 ? await TryServeRepodataFromUpstreamAsync(bases[0].Url, file, ct) : null;
         }
 
         if (_svc.Proxy is { IsMergedModeSelected: true })
         {
             var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
-            return bases.Count > 0 ? await TryServeMergedRepodataAsync(orgId, bases[0], file, ct) : null;
+            return bases.Count > 0 ? await TryServeMergedRepodataAsync(orgId, bases[0].Url, file, ct) : null;
         }
 
         return null;
@@ -657,7 +660,7 @@ public sealed class RpmController : OrgScopedControllerBase
         byte[]? upstreamPrimaryGz;
         try
         {
-            upstreamPrimaryGz = await _svc.Proxy!.GetUpstreamPrimaryXmlGzAsync(upstreamBase, ct);
+            upstreamPrimaryGz = await _svc.Proxy!.GetUpstreamPrimaryXmlGzAsync(orgId, upstreamBase, ct);
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {
@@ -676,7 +679,7 @@ public sealed class RpmController : OrgScopedControllerBase
         byte[]? upstreamFilelistsGz = null;
         try
         {
-            upstreamFilelistsGz = await _svc.Proxy!.GetUpstreamFilelistsXmlGzAsync(upstreamBase, ct);
+            upstreamFilelistsGz = await _svc.Proxy!.GetUpstreamFilelistsXmlGzAsync(orgId, upstreamBase, ct);
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {
@@ -689,7 +692,7 @@ public sealed class RpmController : OrgScopedControllerBase
         IReadOnlyList<System.Xml.Linq.XElement> upstreamExtras = Array.Empty<System.Xml.Linq.XElement>();
         try
         {
-            upstreamExtras = await _svc.Proxy!.GetUpstreamNonPrimaryRepomdEntriesAsync(upstreamBase, ct);
+            upstreamExtras = await _svc.Proxy!.GetUpstreamNonPrimaryRepomdEntriesAsync(orgId, upstreamBase, ct);
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {
@@ -937,7 +940,7 @@ public sealed class RpmController : OrgScopedControllerBase
         byte[]? key;
         try
         {
-            key = await _svc.Proxy.GetGpgKeyAsync(bases[0], ct);
+            key = await _svc.Proxy.GetGpgKeyAsync(bases[0].Url, ct);
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {

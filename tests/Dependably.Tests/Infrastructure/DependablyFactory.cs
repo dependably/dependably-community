@@ -62,6 +62,13 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// </summary>
     public string DeploymentMode { get; init; } = "single";
 
+    /// <summary>
+    /// When set (base64 32-byte key), configures <c>DEPENDABLY_MASTER_KEY</c> so instance and
+    /// upstream secrets are envelope-encrypted at rest. Null (default) leaves the protector
+    /// unconfigured — the standard keyless test host.
+    /// </summary>
+    public string? MasterKey { get; init; }
+
     protected override IHost CreateHost(IHostBuilder _)
     {
         var builder = WebApplication.CreateBuilder();
@@ -77,6 +84,9 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["DEPLOYMENT_MODE"] = DeploymentMode,
+            // Null entry is treated as absent by IConfiguration, so the protector stays
+            // unconfigured unless a test opts in by setting MasterKey.
+            ["DEPENDABLY_MASTER_KEY"] = MasterKey,
         });
 
         Program.ConfigureBuilder(builder);
@@ -288,9 +298,14 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         await conn.ExecuteAsync(
             "UPDATE users SET must_change_password = 0 WHERE id = @adminId", new { adminId });
 
-        string jwtSecret = await conn.ExecuteScalarAsync<string>(
+        string jwtSecretStored = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret' LIMIT 1")
             ?? throw new InvalidOperationException("JWT secret not found.");
+        // With a master key configured the secret is envelope-encrypted at rest; decrypt it so the
+        // signing key matches what the host validates with. Unprotect passes plaintext through.
+        string jwtSecret = MasterKey is null
+            ? jwtSecretStored
+            : TestEnvelope.Configured(Convert.FromBase64String(MasterKey)).Unprotect(jwtSecretStored);
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
@@ -328,9 +343,14 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
             new { userId })
             ?? throw new InvalidOperationException($"User '{userId}' not found.");
 
-        string jwtSecret = await conn.ExecuteScalarAsync<string>(
+        string jwtSecretStored = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret' LIMIT 1")
             ?? throw new InvalidOperationException("JWT secret not found.");
+        // With a master key configured the secret is envelope-encrypted at rest; decrypt it so the
+        // signing key matches what the host validates with. Unprotect passes plaintext through.
+        string jwtSecret = MasterKey is null
+            ? jwtSecretStored
+            : TestEnvelope.Configured(Convert.FromBase64String(MasterKey)).Unprotect(jwtSecretStored);
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);

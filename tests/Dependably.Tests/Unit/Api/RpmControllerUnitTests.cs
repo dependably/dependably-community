@@ -54,12 +54,12 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var cacheRecorder = new CacheAccessRecorder(cacheArtifacts, tenantAccess,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<CacheAccessRecorder>.Instance, _clock);
-        // No Rpm:GpgKey configured — IsConfigured=false, provenance skipped.
+        // No trust anchors seeded — IsConfiguredForAsync returns false, provenance skipped.
         var rpmProvenance = new Dependably.Protocol.Provenance.RpmProvenanceVerifier(
-            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+            new StubPerOrgTrustAnchorStore(),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.RpmProvenanceVerifier>.Instance);
         var svc = new RpmControllerServices(packages, _tokens, audit, orgs, new TieredBlobStorage(_blobs, _blobs), _db, repodata,
-            new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock)),
+            new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
             new MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache>(
                 new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmMergedRepodata),
             new RenderedResponseCache<RpmLocalRepodataKey>(

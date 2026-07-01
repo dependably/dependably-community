@@ -255,15 +255,15 @@ public sealed class PyPiJsonApiHandler(
             return new NotFoundResult();
         }
 
-        foreach (string upstreamBase in bases)
+        foreach (var source in bases)
         {
             try
             {
                 string path = version is not null
-                    ? $"{upstreamBase}/pypi/{purlName}/{version}/json"
-                    : $"{upstreamBase}/pypi/{purlName}/json";
+                    ? $"{source.Url}/pypi/{purlName}/{version}/json"
+                    : $"{source.Url}/pypi/{purlName}/json";
 
-                var resp = await upstream.GetOrFetchMetadataAsync(path, ct);
+                var resp = await upstream.GetOrFetchMetadataAsync(path, source.AuthorizationHeader, ct);
                 if (!resp.IsSuccessStatusCode)
                 {
                     continue;

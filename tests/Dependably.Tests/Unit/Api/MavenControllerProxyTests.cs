@@ -232,18 +232,16 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             ReservedNamespaces: new ReservedNamespaceService(
                 _db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System),
-            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System)),
+            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
             MetadataCache: _metadataCache,
             Log: NullLogger<MavenController>.Instance,
             CacheArtifacts: cacheArtifact,
             TenantAccess: tenantAccess,
             Time: TimeProvider.System,
             CacheRecorder: cacheRecorder,
-            // No Maven:SignatureKeys configured — IsConfigured=false, provenance skipped.
+            // No Maven trust anchors configured — IsConfiguredForAsync returns false, provenance skipped.
             MavenProvenance: new Dependably.Protocol.Provenance.MavenProvenanceVerifier(
-                new Dependably.Protocol.Provenance.MavenSignatureKeyStore(
-                    new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
-                    Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenSignatureKeyStore>.Instance),
+                new Dependably.Tests.Infrastructure.StubPerOrgTrustAnchorStore(),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance));
 
         return new MavenController(svc)

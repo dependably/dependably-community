@@ -8,8 +8,8 @@ using Dependably.Infrastructure.Observability;
 namespace Dependably.Protocol.Provenance;
 
 /// <summary>
-/// Verifies the signature embedded in a proxied <c>.nupkg</c> against operator-pinned trust
-/// anchors.
+/// Verifies the signature embedded in a proxied <c>.nupkg</c> against per-org trust
+/// anchors resolved at request time from <see cref="NuGetSignatureTrustStore"/>.
 ///
 /// A signed NuGet package (the <c>.nupkg</c> is a ZIP) carries a <c>.signature.p7s</c> entry at
 /// the archive root: a PKCS#7/CMS <see cref="SignedCms"/>. nuget.org applies a repository
@@ -20,9 +20,10 @@ namespace Dependably.Protocol.Provenance;
 ///   <item>The CMS signature must validate over its own signed content
 ///         (<see cref="SignedCms.CheckSignature"/> with <c>verifySignatureOnly: true</c>) — this
 ///         catches a tampered signature blob or a signer whose private key did not produce it.</item>
-///   <item>At least one signer certificate must chain to an operator-pinned anchor
-///         (<see cref="NuGetSignatureTrustStore"/>), evaluated with a custom root-trust
-///         <see cref="X509Chain"/> so the OS/system roots are never implicitly trusted.</item>
+///   <item>At least one signer certificate must chain to a per-org pinned anchor evaluated
+///         with a custom root-trust <see cref="X509Chain"/> so the OS/system roots are never
+///         implicitly trusted. Any signer — author or repository countersigner — chaining to a
+///         pinned anchor satisfies this half.</item>
 /// </list>
 ///
 /// The package-content binding (that the bytes match what was signed) is enforced separately and
@@ -36,9 +37,8 @@ namespace Dependably.Protocol.Provenance;
 /// <see cref="ProvenanceStatus.Failed"/>. Never throws on bad input — a parse/crypto failure maps
 /// to <see cref="ProvenanceStatus.Failed"/> so the proxy ingest path can fail closed.
 ///
-/// The trust anchors are operator-pinned (<c>NuGet:SignatureCertificates</c>), never the
-/// upstream-fetched package or the system certificate stores, mirroring the npm
-/// <see cref="NpmProvenanceVerifier"/> and RPM GpgKey posture.
+/// Trust anchors are per-org and DB-backed, resolved at request time via
+/// <see cref="NuGetSignatureTrustStore"/>. The OS certificate store is never consulted.
 /// </summary>
 public sealed class NuGetProvenanceVerifier : IArtifactProvenanceVerifier
 {
@@ -60,12 +60,23 @@ public sealed class NuGetProvenanceVerifier : IArtifactProvenanceVerifier
 
     public string Ecosystem => "nuget";
 
-    public bool IsConfigured => _trust.IsConfigured;
+    /// <summary>
+    /// Always false at the instance level — NuGet trust anchors are per-org, not instance-wide.
+    /// Use <see cref="IsConfiguredForAsync"/> to test whether a specific org has anchors.
+    /// </summary>
+    public bool IsConfigured => false;
+
+    /// <summary>
+    /// Returns true when at least one NuGet X.509 trust anchor is configured for
+    /// <paramref name="orgId"/>.
+    /// </summary>
+    public Task<bool> IsConfiguredForAsync(string orgId, CancellationToken ct = default)
+        => _trust.IsConfiguredForAsync(orgId, ct);
 
     /// <summary>
     /// Metadata-driven verification does not apply to NuGet: the signature lives inside the
     /// <c>.nupkg</c> bytes, not the registration metadata. The NuGet ingest path calls
-    /// <see cref="VerifyPackageAsync"/> with the staged package stream instead. Returning
+    /// <see cref="VerifyForOrgAsync"/> with the staged package stream instead. Returning
     /// <see cref="ProvenanceResult.NotApplicable"/> keeps the uniform interface usable for
     /// generic resolution without implying an unsigned/failed verdict.
     /// </summary>
@@ -73,15 +84,24 @@ public sealed class NuGetProvenanceVerifier : IArtifactProvenanceVerifier
         => Task.FromResult(ProvenanceResult.NotApplicable);
 
     /// <summary>
-    /// Verifies the signature embedded in the <c>.nupkg</c> stream. The stream is buffered to a
-    /// seekable copy (ZIP central-directory reads require seeking) bounded by
-    /// <paramref name="maxBytes"/>; a package larger than the cap maps to
-    /// <see cref="ProvenanceStatus.Failed"/> rather than allocating without bound. Never throws.
+    /// Verifies the signature embedded in the <c>.nupkg</c> stream against the per-org trust
+    /// anchors for <paramref name="orgId"/>. Returns <see cref="ProvenanceResult.NotApplicable"/>
+    /// when the org has no configured anchors so a package that cannot be verified is never
+    /// silently blocked. The stream is buffered to a seekable copy (ZIP central-directory reads
+    /// require seeking) bounded by <paramref name="maxBytes"/>; a package larger than the cap maps
+    /// to <see cref="ProvenanceStatus.Failed"/> rather than allocating without bound. Never throws.
     /// </summary>
     [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out",
         Justification = "Prose comment explaining the unsigned/signed branch; not commented-out code.")]
-    public async Task<ProvenanceResult> VerifyPackageAsync(Stream nupkg, long maxBytes, CancellationToken ct = default)
+    public async Task<ProvenanceResult> VerifyForOrgAsync(
+        string orgId, Stream nupkg, long maxBytes, CancellationToken ct = default)
     {
+        var anchors = await _trust.GetNuGetAnchorsAsync(orgId, ct);
+        if (anchors.Count == 0)
+        {
+            return ProvenanceResult.NotApplicable;
+        }
+
         byte[]? signatureBytes;
         try
         {
@@ -97,11 +117,20 @@ public sealed class NuGetProvenanceVerifier : IArtifactProvenanceVerifier
         }
 
         // No .signature.p7s entry → the package is unsigned (older packages predate signing);
-        // otherwise verify the CMS.
+        // otherwise verify the CMS against the org's pinned anchors.
         return signatureBytes is null
             ? Record(ProvenanceResult.Unsigned)
-            : Record(VerifyCms(signatureBytes));
+            : Record(VerifyCms(signatureBytes, anchors));
     }
+
+    /// <summary>
+    /// Verifies the signature embedded in the <c>.nupkg</c> stream. Delegates to
+    /// <see cref="VerifyForOrgAsync"/> with an empty org context, returning
+    /// <see cref="ProvenanceResult.NotApplicable"/> (no org anchors at this level).
+    /// Kept for interface compatibility; the NuGet ingest path uses <see cref="VerifyForOrgAsync"/>.
+    /// </summary>
+    public Task<ProvenanceResult> VerifyPackageAsync(Stream nupkg, long maxBytes, CancellationToken ct = default)
+        => Task.FromResult(ProvenanceResult.NotApplicable);
 
     // Reads the root-level .signature.p7s entry into memory, or null when the entry is absent.
     // Buffers the incoming stream to a MemoryStream first because ZipArchive needs to seek the
@@ -144,8 +173,8 @@ public sealed class NuGetProvenanceVerifier : IArtifactProvenanceVerifier
     }
 
     // Decodes the CMS, validates the signature over its embedded content, then confirms a signer
-    // chains to a pinned anchor. Returns Failed (never throws) on any decode/crypto failure.
-    private ProvenanceResult VerifyCms(byte[] signatureBytes)
+    // chains to a per-org pinned anchor. Returns Failed (never throws) on any decode/crypto failure.
+    private static ProvenanceResult VerifyCms(byte[] signatureBytes, X509Certificate2Collection anchors)
     {
         SignedCms cms;
         try
@@ -162,7 +191,7 @@ public sealed class NuGetProvenanceVerifier : IArtifactProvenanceVerifier
         {
             // verifySignatureOnly: true validates the signature math over the embedded signed
             // content without performing .NET's own chain build (we pin the chain ourselves
-            // below against the operator anchors, never the OS trust store).
+            // below against the org's anchors, never the OS trust store).
             cms.CheckSignature(verifySignatureOnly: true);
         }
         catch (CryptographicException)
@@ -174,7 +203,6 @@ public sealed class NuGetProvenanceVerifier : IArtifactProvenanceVerifier
         // A signed package carries at least one signer; both the author signature and the
         // repository countersignature (NuGet nests the repository signature as a countersigner)
         // are candidates. Any signer that chains to a pinned anchor establishes trust.
-        var anchors = _trust.GetAnchors();
         var trustedSigner = EnumerateSignerCertificates(cms)
             .FirstOrDefault(cert => ChainsToPinnedAnchor(cert, anchors));
 
@@ -206,7 +234,7 @@ public sealed class NuGetProvenanceVerifier : IArtifactProvenanceVerifier
         }
     }
 
-    // Builds a chain that trusts ONLY the operator-pinned anchors (CustomRootTrust), so a
+    // Builds a chain that trusts ONLY the org-pinned anchors (CustomRootTrust), so a
     // certificate that chains to a public CA but not to a pinned anchor is rejected. Revocation
     // is not checked: the trust decision is the pinned anchor, and an air-gapped or offline
     // deployment must not fail-open or hang on an unreachable OCSP/CRL endpoint.
@@ -248,7 +276,7 @@ public sealed class NuGetProvenanceVerifier : IArtifactProvenanceVerifier
 
     // Emits the OTel result counter (ecosystem + result only — no per-package labels, to stay
     // inside the cardinality budget). NotApplicable is never recorded here (it is returned only
-    // by the metadata-shaped VerifyAsync, which the NuGet ingest path does not call).
+    // by VerifyAsync or when the org has no anchors).
     private static ProvenanceResult Record(ProvenanceResult result)
     {
         DependablyMeter.ProvenanceVerified.Add(1,

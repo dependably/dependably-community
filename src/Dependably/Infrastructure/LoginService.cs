@@ -410,8 +410,8 @@ public sealed class LoginService
             // Absent realm claim defaults to "tenant" for back-compat with existing challenge JWTs.
             string realm = principal.FindFirst("realm")?.Value ?? "tenant";
 
-            // System challenge carries no tid/role — validate only the fields that are present;
-            // a tenant challenge additionally requires tid and role.
+            // A system challenge carries no tenant id or role, so only the fields that are
+            // present are validated, while a tenant challenge additionally requires both.
             bool valid = realm == "system"
                 ? sub is not null && eml is not null && jti is not null
                 : sub is not null && tid is not null && role is not null && eml is not null && jti is not null;

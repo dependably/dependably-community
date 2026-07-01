@@ -100,19 +100,18 @@ public sealed class NpmTarballHandler(
             : await HeadProxyCachedTarballAsync(httpContext, orgId, fullName, shortName, file, token, settings!, ct);
     }
 
-    // Returns HEAD headers for an uploaded-origin npm tarball. Requires a valid token with
-    // ReadArtifact; runs the block gate; returns 401/403/404 when denied or absent.
+    // Returns HEAD headers for an uploaded-origin npm tarball. When AnonymousPull is disabled,
+    // a token is required; when a token is present, ReadArtifact is always required.
     private async Task<IActionResult> HeadUploadedTarballAsync(
         HttpContext httpContext, string orgId, PackageVersion pkgVersion, string file,
         TokenRecord? token, OrgSettings? settings, CancellationToken ct)
     {
-        // Uploaded version found — auth required for HEAD.
-        if (token is null)
+        if (settings is null || (!settings.AnonymousPull && token is null))
         {
             httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
             return new UnauthorizedResult();
         }
-        if (!token.HasCapability(Capabilities.ReadArtifact))
+        if (token is not null && !token.HasCapability(Capabilities.ReadArtifact))
         {
             return new ForbidResult();
         }
@@ -232,33 +231,16 @@ public sealed class NpmTarballHandler(
         }
 
         // Proxy cache-hit: an already-cached proxy artifact is served from the global plane
-        // before the proxy-fetch gates. A cached proxy version is public per the per-version
-        // origin routing (uploaded requires auth, proxy does not), so it must not be blocked by
-        // the AnonymousPull gate — that gate guards triggering an upstream FETCH on a miss, which
-        // is handled by CheckProxyGatesAsync below. The per-version policy block-gate is still
-        // re-evaluated on every hit.
-        string? versionFromFilename = NpmSharedHelpers.ExtractVersionFromTarballFilename(shortName, file);
-        if (versionFromFilename is not null)
+        // before the proxy-fetch gates. The AnonymousPull gate applies here — anonymous clients
+        // must authenticate to access proxy cache hits when the org requires it, exactly as for
+        // a cache miss. The Proxy-tab passthrough settings govern whether anonymous clients may
+        // trigger an upstream fetch on a miss (see CheckProxyGatesAsync below). The per-version
+        // policy block-gate is still re-evaluated on every hit.
+        var cacheHitResult = await TryServeCacheHitTarballAsync(
+            httpContext, new NpmTarballKey(orgId, fullName, shortName, file), token, settings!, ct);
+        if (cacheHitResult is not null)
         {
-            var caFacts = await cacheArtifacts.GetServeFactsByCoordinateAsync(
-                orgId, "npm", fullName, versionFromFilename, file, ct);
-
-            if (caFacts is not null)
-            {
-                string? sourceIpProxy = httpContext.GetNormalizedRemoteIp();
-                if (await blockGate.EvaluateAsync(
-                        BuildProxyBlockGateRequest(orgId, caFacts, token, settings!, sourceIpProxy), ct)
-                    == BlockDecision.Blocked)
-                {
-                    return new StatusCodeResult(StatusCodes.Status403Forbidden);
-                }
-
-                var proxyCached = await TryServeProxyCachedTarballAsync(httpContext, caFacts, file, orgId, token, sourceIpProxy, ct);
-                if (proxyCached is not null)
-                {
-                    return proxyCached;
-                }
-            }
+            return cacheHitResult;
         }
 
         // Miss → upstream fetch path. The anonymous-pull / allowlist / blocklist / passthrough
@@ -275,6 +257,41 @@ public sealed class NpmTarballHandler(
             || !await claimResolver.IsProxyFetchAllowedAsync(orgId, "npm", fullName, ct)
             ? new NotFoundResult()
             : await ProxyFetchAndCacheAsync(httpContext, new NpmTarballKey(orgId, fullName, shortName, file), token, settings!, ct);
+    }
+
+    // Serves an already-cached proxy artifact from the global plane, applying the AnonymousPull
+    // and per-version block gates on every hit. Returns null when there is no cache hit for this
+    // coordinate (or the blob has since been evicted), signalling the caller to fall through to
+    // the upstream proxy-fetch path.
+    private async Task<IActionResult?> TryServeCacheHitTarballAsync(
+        HttpContext httpContext, NpmTarballKey key,
+        TokenRecord? token, OrgSettings settings, CancellationToken ct)
+    {
+        string? versionFromFilename = NpmSharedHelpers.ExtractVersionFromTarballFilename(key.ShortName, key.File);
+        if (versionFromFilename is null)
+        {
+            return null;
+        }
+
+        var caFacts = await cacheArtifacts.GetServeFactsByCoordinateAsync(
+            key.OrgId, "npm", key.FullName, versionFromFilename, key.File, ct);
+        if (caFacts is null)
+        {
+            return null;
+        }
+
+        if (!settings.AnonymousPull && token is null)
+        {
+            httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
+            return new UnauthorizedResult();
+        }
+
+        string? sourceIpProxy = httpContext.GetNormalizedRemoteIp();
+        return await blockGate.EvaluateAsync(
+                BuildProxyBlockGateRequest(key.OrgId, caFacts, token, settings, sourceIpProxy), ct)
+            == BlockDecision.Blocked
+            ? new StatusCodeResult(StatusCodes.Status403Forbidden)
+            : await TryServeProxyCachedTarballAsync(httpContext, caFacts, key.File, key.OrgId, token, sourceIpProxy, ct);
     }
 
     // Looks up an uploaded-origin package version record whose tarball filename matches the
@@ -306,6 +323,8 @@ public sealed class NpmTarballHandler(
             ActorKind: token?.ActorKind,
             Deprecated: caFacts.Deprecated,
             BlockDeprecatedMode: settings.BlockDeprecated,
+            RevokedAt: caFacts.RevokedAt,
+            BlockRevokedMode: settings.BlockRevoked,
             BlockMaliciousMode: settings.BlockMalicious,
             BlockKevMode: settings.BlockKev,
             MaxEpssTolerance: settings.MaxEpssTolerance,
@@ -382,12 +401,12 @@ public sealed class NpmTarballHandler(
         HttpContext httpContext, string orgId, PackageVersion pkgVersion, string file,
         TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
-        if (token is null)
+        if (!settings.AnonymousPull && token is null)
         {
             httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
             return new UnauthorizedResult();
         }
-        if (!token.HasCapability(Capabilities.ReadArtifact))
+        if (token is not null && !token.HasCapability(Capabilities.ReadArtifact))
         {
             return new ForbidResult();
         }
@@ -418,14 +437,15 @@ public sealed class NpmTarballHandler(
             httpContext.Response.Headers.ETag = $"\"sha256:{pkgVersion.ChecksumSha256}\"";
             httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
-        await audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token.UserId,
-            actorKind: token.ActorKind, sourceIp: sourceIp, ct: ct);
+        await audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token?.UserId,
+            actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         await packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
         return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
     }
 
     // Identifies a proxied npm tarball request: org scope, full package name, short name,
-    // and filename. Bundled to keep ProxyFetchAndCacheAsync under S107.
+    // and filename. Bundled so cache-hit and cache-miss handlers each take one parameter
+    // object instead of four separate identity params, keeping their signatures under S107.
     private sealed record NpmTarballKey(
         string OrgId, string FullName, string ShortName, string File);
 
@@ -451,19 +471,19 @@ public sealed class NpmTarballHandler(
                 return new NotFoundResult();
             }
 
-            var (fetchResult, upstreamBase, upstreamUrl) = fetched.Value;
+            var (fetchResult, upstreamSource, upstreamUrl) = fetched.Value;
 
             string baseName = key.File.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase) ? key.File[..^4] : key.File;
             string version = baseName.Length > key.ShortName.Length + 1 ? baseName[(key.ShortName.Length + 1)..] : "unknown";
             string purl = PurlNormalizer.Npm(key.FullName, version);
 
-            var meta = await TryFetchNpmFirstFetchMetadataAsync(upstreamBase, key.FullName, version, ct);
+            var meta = await TryFetchNpmFirstFetchMetadataAsync(upstreamSource, key.FullName, version, ct);
 
-            // Verify the upstream registry signature against operator-pinned trust anchors when the
-            // tenant enabled it and the verifier has pinned keys. Runs only for proxy-origin
+            // Verify the upstream registry signature against per-org trust anchors when the
+            // tenant enabled it and the org has anchors configured. Runs only for proxy-origin
             // versions (this is the proxy fetch path). NotApplicable when the policy is off or no
-            // keys are configured — the status stays NULL and nothing blocks.
-            var prov = await ResolveProvenanceAsync(settings, key.FullName, version, meta, ct);
+            // anchors are configured for this org — the status stays NULL and nothing blocks.
+            var prov = await ResolveProvenanceAsync(settings, key.OrgId, key.FullName, version, meta, ct);
 
             // The streaming MISS path already wrote the blob and computed the SHA-256 inline —
             // no large byte[] allocation needed. Wrap the result in a BlobHandle so
@@ -523,12 +543,12 @@ public sealed class NpmTarballHandler(
     // artifact size. Returns (UpstreamFetchResult, upstreamBase, upstreamUrl) on success,
     // or null when no upstream returns a success response. Single-flight: concurrent
     // first-fetches of the same tarball coordinate share one upstream call.
-    private async Task<(UpstreamFetchResult FetchResult, string UpstreamBase, string UpstreamUrl)?> FetchTarballFromUpstreamsAsync(
-        IReadOnlyList<string> bases, string fullName, string file, string orgId, CancellationToken ct)
+    private async Task<(UpstreamFetchResult FetchResult, UpstreamSource Source, string UpstreamUrl)?> FetchTarballFromUpstreamsAsync(
+        IReadOnlyList<UpstreamSource> bases, string fullName, string file, string orgId, CancellationToken ct)
     {
-        foreach (string candidateBase in bases)
+        foreach (var candidate in bases)
         {
-            string candidateUrl = $"{candidateBase}/{fullName}/-/{file}";
+            string candidateUrl = $"{candidate.Url}/{fullName}/-/{file}";
             try
             {
                 // Streams upstream → staging file (hashing inline) → blob store.
@@ -536,8 +556,8 @@ public sealed class NpmTarballHandler(
                 // computed inline is the canonical reference and is verified by the
                 // upstream-declared hash in ProxyFetchService after staging.
                 var fetchResult = await upstream.FetchAndCacheByUrlAsync(
-                    candidateUrl, null, "npm", orgId, ct);
-                return (fetchResult, candidateBase, candidateUrl);
+                    candidateUrl, null, "npm", orgId, candidate.AuthorizationHeader, ct);
+                return (fetchResult, candidate, candidateUrl);
             }
             catch (HttpRequestException)
             {
@@ -595,18 +615,16 @@ public sealed class NpmTarballHandler(
     }
 
     // Runs npm registry-signature verification for a proxy-origin version when the tenant enabled
-    // it. Off-policy or an unconfigured verifier short-circuits to NotApplicable (NULL status,
+    // it. Off-policy or an org with no trust anchors short-circuits to NotApplicable (NULL status,
     // never blocks). The signed payload is "{name}@{version}:{integrity}", so the integrity SRI
     // and the registry-published signatures both come from the packument dist node.
-    private async Task<ProvenanceResult> ResolveProvenanceAsync(
-        OrgSettings settings, string fullName, string version,
+    private Task<ProvenanceResult> ResolveProvenanceAsync(
+        OrgSettings settings, string orgId, string fullName, string version,
         NpmFirstFetchMetadata meta, CancellationToken ct)
-    {
-        return settings.VerifyNpmSignatures == "off" || !provenance.IsConfigured
-            ? ProvenanceResult.NotApplicable
-            : await provenance.VerifyAsync(
-                new ProvenanceInput("npm", fullName, version, meta.RawIntegrity, meta.Signatures), ct);
-    }
+        => settings.VerifyNpmSignatures == "off"
+            ? Task.FromResult(ProvenanceResult.NotApplicable)
+            : provenance.VerifyForOrgAsync(
+                orgId, new ProvenanceInput("npm", fullName, version, meta.RawIntegrity, meta.Signatures), ct);
 
     /// <summary>
     /// Fetches the npm packument once on proxy first-fetch and extracts everything we care
@@ -618,14 +636,15 @@ public sealed class NpmTarballHandler(
     /// or capture.
     /// </summary>
     private async Task<NpmFirstFetchMetadata> TryFetchNpmFirstFetchMetadataAsync(
-        string upstreamBase, string fullName, string version, CancellationToken ct)
+        UpstreamSource upstreamSource, string fullName, string version, CancellationToken ct)
     {
         try
         {
             // Route through single-flighted metadata fetch — TryFetchNpmFirstFetchMetadataAsync
             // is called inline with the tarball-fetch handler, so a stampede on the tarball
             // path otherwise drives a duplicate stampede on the packument URL too.
-            var resp = await upstream.GetOrFetchMetadataAsync($"{upstreamBase}/{fullName}", ct);
+            var resp = await upstream.GetOrFetchMetadataAsync(
+                $"{upstreamSource.Url}/{fullName}", upstreamSource.AuthorizationHeader, ct);
             if (!resp.IsSuccessStatusCode)
             {
                 return NpmFirstFetchMetadata.Empty;

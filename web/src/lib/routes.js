@@ -30,6 +30,12 @@ const TENANT_STATIC = [
   ['dashboard',         '/dashboard'], // alias — canonical is '/'
 ]
 
+// Pages whose nav links the sidebar exposes only to admin/owner (Sidebar.svelte adminItems).
+// App.svelte consults this to bounce other roles that deep-link or bookmark one of these URLs,
+// so an admin-only page never mounts and surfaces a raw backend 403. Keep in sync with the
+// sidebar's adminItems list. (setup is intentionally excluded — it is shown to every user.)
+export const ADMIN_ONLY_PAGES = new Set(['quarantine', 'users', 'audit', 'upload', 'settings'])
+
 const SYSTEM_STATIC = [
   ['system-dashboard',     '/'],
   ['system-login',         '/login'],

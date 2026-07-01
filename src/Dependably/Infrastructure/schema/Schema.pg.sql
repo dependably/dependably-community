@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS org_settings (
     keep_versions       INTEGER,            -- GC: max versions to retain per package per ecosystem
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
     activity_retention_days INTEGER,        -- GC: delete activity rows older than this
+    purge_unlisted_after_days INTEGER,      -- GC: hard-delete uploaded versions unlisted longer than this (opt-in; NULL = off)
     license_enforcement_mode  TEXT    NOT NULL DEFAULT 'off',
     proxy_passthrough_enabled INTEGER NOT NULL DEFAULT 1,
     max_osv_score_tolerance   REAL    NOT NULL DEFAULT 10.0,
@@ -59,6 +60,8 @@ CREATE TABLE IF NOT EXISTS org_settings (
     require_mfa               INTEGER NOT NULL DEFAULT 0,
     -- Policy for upstream-deprecated/abandoned packages. See Schema.sql for the full rationale.
     block_deprecated          TEXT    NOT NULL DEFAULT 'off' CHECK (block_deprecated IN ('off', 'warn', 'block_new', 'block_all')),
+    -- Upstream-removal (revocation) gate. Three values; defaults to 'warn'. See Schema.sql.
+    block_revoked             TEXT    NOT NULL DEFAULT 'warn' CHECK (block_revoked IN ('off', 'warn', 'block')),
     -- Policy for versions carrying a malicious-package advisory (OSV MAL- ids). See Schema.sql.
     block_malicious           TEXT    NOT NULL DEFAULT 'block' CHECK (block_malicious IN ('off', 'warn', 'block')),
     -- Policy for CISA-KEV-listed (exploited-in-the-wild) advisories. See Schema.sql.
@@ -171,6 +174,10 @@ CREATE TABLE IF NOT EXISTS package_versions (
     checksum_sha256 TEXT,
     yanked      INTEGER NOT NULL DEFAULT 0,
     yank_reason TEXT,
+    -- ISO 8601 UTC; stamped when yanked is set to 1, cleared to NULL on un-yank. NULL for
+    -- never-yanked rows and for legacy rows pre-dating the column. Drives the org
+    -- purge_unlisted_after_days retention gate — a NULL yanked_at is never age-purgeable.
+    yanked_at   TEXT,
     first_fetch INTEGER NOT NULL DEFAULT 0,  -- 1 if this was a cache-miss proxy fetch
     last_used   TEXT,                         -- ISO 8601 UTC; updated on each download
     -- Cumulative count of served downloads (download + first_fetch events). See Schema.sql.
@@ -194,6 +201,8 @@ CREATE TABLE IF NOT EXISTS package_versions (
     filename    TEXT,
     -- ISO 8601 UTC; set after the last upstream deprecation metadata refresh. See Schema.sql.
     deprecation_checked_at TEXT,
+    -- ISO 8601 UTC; first time this version was observed removed from upstream. See Schema.sql.
+    revoked_at TEXT,
     -- Install/lifecycle-script supply-chain signal + kind discriminator. See Schema.sql.
     has_install_script INTEGER NOT NULL DEFAULT 0,
     install_script_kind TEXT,
@@ -328,6 +337,8 @@ CREATE TABLE IF NOT EXISTS cache_artifact (
     deprecated          TEXT,
     -- ISO 8601 UTC; last time the deprecation state was refreshed from upstream.
     deprecation_checked_at TEXT,
+    -- ISO 8601 UTC; first time this version was observed removed from upstream. See Schema.sql.
+    revoked_at          TEXT,
     -- Supply-chain signal: 1 when the artifact ships an install/lifecycle script.
     has_install_script  INTEGER NOT NULL DEFAULT 0,
     -- Discriminator for which kind of install script fired (e.g. 'npm:postinstall').
@@ -475,7 +486,7 @@ CREATE TABLE IF NOT EXISTS quarantine (
     package_version_id  TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
     ecosystem           TEXT NOT NULL,
     purl                TEXT NOT NULL,
-    gate                TEXT NOT NULL,  -- 'deprecated' | 'release_age' | 'malicious' | 'kev' | 'epss' | 'vuln_score'
+    gate                TEXT NOT NULL,  -- 'deprecated' | 'revoked' | 'release_age' | 'malicious' | 'kev' | 'epss' | 'vuln_score'
     detail              TEXT,           -- same JSON the blocked_* activity row carries
     state               TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'approved', 'denied')),
     decided_by          TEXT REFERENCES users(id),
@@ -492,8 +503,10 @@ CREATE INDEX IF NOT EXISTS idx_quarantine_decided_by ON quarantine(decided_by);
 
 -- Per-org upstream proxy registries. One ordered list per ecosystem; `position` ascending is
 -- priority (lowest tried first, falling through on miss/unreachable). An ecosystem with zero
--- rows has proxying effectively disabled for that org. For non-OCI ecosystems auth_type,
--- username, and secret are reserved capacity (unused in community). For OCI rows: auth_type
+-- rows has proxying effectively disabled for that org. For non-OCI ecosystems auth_type is
+-- 'anonymous' (default), 'bearer' (Authorization: Bearer <secret>), or 'basic'
+-- (base64(username:secret)) — used to chain to a private upstream that refuses anonymous pull;
+-- secret is encrypted at rest (enc:v1: prefix). For OCI rows: auth_type
 -- drives the pull auth mechanism ('anonymous'|'basic'|'dockerhub_token_exchange'); url holds
 -- the registry host (e.g. 'registry-1.docker.io'); token_endpoint is the operator-pinned
 -- auth realm for DockerHubTokenExchange; prefixes is a JSON TEXT array (e.g. '["library/",""]')
@@ -515,6 +528,32 @@ CREATE TABLE IF NOT EXISTS upstream_registry (
 );
 CREATE INDEX IF NOT EXISTS idx_upstream_registry_org_eco
     ON upstream_registry(org_id, ecosystem, position);
+
+-- Per-org operator-pinned signature trust anchors. Each row is one trust anchor
+-- (PGP public key, X.509 cert, npm SPKI key, Sigstore root, Rekor key, or publisher
+-- identity) for one (org, ecosystem) combination. List semantics — multiple anchors
+-- per ecosystem are supported (no UNIQUE on org_id + ecosystem). The verifier resolves
+-- all rows for an (org, ecosystem) pair at request time and accepts a signature
+-- verified by any of them. anchor_kind discriminates the material format:
+-- 'pgp' | 'x509' | 'spki' | 'sigstore_root' | 'trusted_publisher' | 'rekor_key'.
+-- material is PUBLIC key material stored plaintext (PGP public keys, X.509 certs,
+-- SPKI DER base64, Sigstore bundle JSON, etc.) — no envelope encryption.
+-- created_by holds the user id of the operator who added the anchor.
+CREATE TABLE IF NOT EXISTS signature_trust_anchor (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem   TEXT NOT NULL,   -- 'rpm' | 'npm' | 'nuget' | 'pypi' | 'maven'
+    anchor_kind TEXT NOT NULL,   -- 'pgp' | 'spki' | 'x509' | 'sigstore_root' | 'trusted_publisher' | 'rekor_key'
+    key_id      TEXT,            -- optional key fingerprint / subject for display
+    material    TEXT NOT NULL,   -- public key material: armored PGP / base64 DER / PEM / JSON
+    label       TEXT,            -- operator-supplied display label
+    created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    created_by  TEXT             -- user id of the operator who added this anchor
+);
+-- FK-column index: cascade deletes on orgs scan this table without it.
+-- Also the hot read path: resolve all anchors for (org, ecosystem) at verify time.
+CREATE INDEX IF NOT EXISTS idx_signature_trust_anchor_org_eco
+    ON signature_trust_anchor(org_id, ecosystem);
 
 -- License governance
 CREATE TABLE IF NOT EXISTS package_version_licenses (

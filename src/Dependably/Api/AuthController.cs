@@ -24,13 +24,20 @@ public sealed class AuthController : ControllerBase
     private readonly IPublicUrlBuilder _urls;
     private readonly TimeProvider _time;
 
+    private readonly OrgRepository _orgs;
+    private readonly IRequireMfaMode _requireMfa;
+    private readonly SystemAdminRepository _admins;
+
     public AuthController(
         LoginService login,
         UserService users,
         JwtRevocationRepository revocations,
         AuditRepository audit,
         IPublicUrlBuilder urls,
-        TimeProvider time)
+        TimeProvider time,
+        OrgRepository orgs,
+        IRequireMfaMode requireMfa,
+        SystemAdminRepository admins)
     {
         _login = login;
         _users = users;
@@ -38,6 +45,9 @@ public sealed class AuthController : ControllerBase
         _audit = audit;
         _urls = urls;
         _time = time;
+        _orgs = orgs;
+        _requireMfa = requireMfa;
+        _admins = admins;
     }
 
     /// <summary>
@@ -130,9 +140,12 @@ public sealed class AuthController : ControllerBase
 
         if (!ff.MfaEnabled)
         {
-            // Non-MFA path: session is complete.
+            // Non-MFA path: session is complete. Compute whether MFA enrollment is required so
+            // the SPA can open the enrollment flow immediately without a guard bounce.
+            bool enrollmentRequired = _requireMfa.IsEnabled
+                && !await _admins.IsMfaEnabledAsync(ff.AdminId!, ct);
             Response.Cookies.Append("dependably_session", ff.Token!, _urls.SessionCookieOptions(HttpContext));
-            return Ok(new { message = "Logged in." });
+            return Ok(new { message = "Logged in.", enrollmentRequired });
         }
 
         // MFA path: a valid trusted-device cookie skips the TOTP step.
@@ -147,7 +160,7 @@ public sealed class AuthController : ControllerBase
                 detail: new MfaEvents.TrustedDeviceUsed("system").ToJson(),
                 sourceIp: sourceIp, ct: ct);
             Response.Cookies.Append("dependably_session", trustedToken, _urls.SessionCookieOptions(HttpContext));
-            return Ok(new { message = "Logged in." });
+            return Ok(new { message = "Logged in.", enrollmentRequired = false });
         }
 
         // No trusted device — issue system challenge cookie and ask for TOTP.
@@ -179,9 +192,13 @@ public sealed class AuthController : ControllerBase
 
         if (!ff.MfaEnabled)
         {
-            // Non-MFA path: session is complete.
+            // Non-MFA path: session is complete. Compute whether MFA enrollment is required so
+            // the SPA can open the enrollment flow immediately without a guard bounce.
+            var settings = await _orgs.GetSettingsAsync(ff.TenantId!, ct);
+            bool enrollmentRequired = (_requireMfa.IsEnabled || (settings?.RequireMfa ?? false))
+                && !await _users.IsMfaEnabledAsync(ff.UserId!, ct);
             Response.Cookies.Append("dependably_session", ff.Token!, _urls.SessionCookieOptions(HttpContext));
-            return Ok(new { message = "Logged in." });
+            return Ok(new { message = "Logged in.", enrollmentRequired });
         }
 
         // MFA path: a valid trusted-device cookie skips the TOTP step.
@@ -198,7 +215,7 @@ public sealed class AuthController : ControllerBase
                 detail: new MfaEvents.TrustedDeviceUsed("tenant").ToJson(),
                 sourceIp: sourceIp, ct: ct);
             Response.Cookies.Append("dependably_session", trustedToken, _urls.SessionCookieOptions(HttpContext));
-            return Ok(new { message = "Logged in." });
+            return Ok(new { message = "Logged in.", enrollmentRequired = false });
         }
 
         // No trusted device — issue challenge cookie and ask for TOTP.
@@ -445,7 +462,12 @@ public sealed class AuthController : ControllerBase
 
         Response.Cookies.Append("dependably_session", token, _urls.SessionCookieOptions(HttpContext));
 
-        return Ok(new { message = "Account created." });
+        // Compute whether MFA enrollment is required so a freshly-invited user is guided into
+        // setup without a guard bounce. Invited users never have MFA enrolled at account creation.
+        var inviteSettings = await _orgs.GetSettingsAsync(invite.OrgId, ct);
+        bool enrollmentRequired = _requireMfa.IsEnabled || (inviteSettings?.RequireMfa ?? false);
+
+        return Ok(new { message = "Account created.", enrollmentRequired });
     }
 
     /// <summary>POST /api/v1/users/me/password — change password for the authenticated user</summary>
@@ -566,6 +588,10 @@ public sealed class AuthController : ControllerBase
             mfaEnrollmentRequired = ctx?.MfaEnrollmentRequired ?? false,
             language = resolvedLanguage,
             tenantDefaultLanguage = tenantDefault,
+            sessionExpiresAt = User.FindFirst("exp")?.Value is string expUnix
+                && long.TryParse(expUnix, out long exp)
+                ? DateTimeOffset.FromUnixTimeSeconds(exp).ToString("O")
+                : null,
         });
     }
 

@@ -99,6 +99,14 @@ public sealed class OrgAuthConfigController : ControllerBase
             return _problems.ValidationErrorAction("nameIdFormat", "nameIdFormat is required.");
         }
 
+        // NameID format must be a valid absolute URI — the SAML 2.0 spec mandates
+        // URI-format identifiers for NameID format values.
+        if (!Uri.TryCreate(req.NameIdFormat, UriKind.Absolute, out _))
+        {
+            return _problems.ValidationErrorAction("nameIdFormat",
+                "nameIdFormat must be a valid absolute URI (e.g. urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress).");
+        }
+
         string orgId = CurrentTenantId();
         var existing = await _samlConfig.GetAsync(orgId, ct);
 

@@ -408,7 +408,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
     [Fact]
     public async Task DownloadPackage_UploadedVersionAnonymous_Returns401WithWwwAuthenticate()
     {
-        // CheckDownloadAuth branch: per-version origin='uploaded' + no token → 401.
+        // CheckDownloadAuth branch: per-version origin='uploaded' + no token + AnonymousPull=false → 401.
         string name = $"upauth{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         await _factory.PushPyPiPackage(name, "1.0.0");
         string underscored = name.Replace('-', '_');
@@ -418,6 +418,62 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         var resp = await client.GetAsync($"/packages/{filename}");
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
         Assert.Contains("Basic", resp.Headers.WwwAuthenticate.ToString());
+    }
+
+    /// <summary>
+    /// Pushed (uploaded-origin) wheel is served to an anonymous client when
+    /// <c>AnonymousPull = true</c>. Verifies the hosted-download path respects the org setting.
+    /// </summary>
+    [Fact]
+    public async Task DownloadPackage_UploadedVersion_AnonymousPullOn_NoToken_Returns200()
+    {
+        string name = $"upanonpull{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        await _factory.PushPyPiPackage(name, "1.0.0");
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+
+        await SetAnonymousPull(true);
+        try
+        {
+            using var client = _factory.CreateClient();
+            var resp = await client.GetAsync($"/packages/{filename}");
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        }
+        finally
+        {
+            await SetAnonymousPull(false);
+        }
+    }
+
+    /// <summary>
+    /// A token present but lacking <c>read:metadata</c> is still forbidden on an uploaded PyPI
+    /// artifact even when <c>AnonymousPull = true</c>.
+    /// </summary>
+    [Fact]
+    public async Task DownloadPackage_UploadedVersion_AnonymousPullOn_TokenWithoutReadMetadata_Returns403()
+    {
+        string name = $"upauthcap{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        await _factory.PushPyPiPackage(name, "1.0.0");
+        string underscored = name.Replace('-', '_');
+        string filename = $"{underscored}-1.0.0-py3-none-any.whl";
+
+        // Token with publish:* only — no read:metadata.
+        string orgId = await DefaultOrgId();
+        var tokens = _factory.Services.GetRequiredService<TokenRepository>();
+        var (rawToken, _) = await tokens.CreateServiceTokenAsync(
+            orgId, "test-pubonly", """["publish:pypi"]""", expiresAt: null);
+
+        await SetAnonymousPull(true);
+        try
+        {
+            using var client = _factory.CreateClientWithBasic(rawToken);
+            var resp = await client.GetAsync($"/packages/{filename}");
+            Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+        }
+        finally
+        {
+            await SetAnonymousPull(false);
+        }
     }
 
     [Fact]

@@ -224,18 +224,16 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
             ReservedNamespaces: new ReservedNamespaceService(
                 _db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System),
-            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System)),
+            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
             MetadataCache: _metadataCache,
             Log: NullLogger<MavenController>.Instance,
             CacheArtifacts: cacheArtifact,
             TenantAccess: tenantAccess,
             Time: TimeProvider.System,
             CacheRecorder: cacheRecorder,
-            // No Maven:SignatureKeys configured — IsConfigured=false, provenance skipped.
+            // No Maven trust anchors configured — IsConfiguredForAsync returns false, provenance skipped.
             MavenProvenance: new Dependably.Protocol.Provenance.MavenProvenanceVerifier(
-                new Dependably.Protocol.Provenance.MavenSignatureKeyStore(
-                    new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
-                    Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenSignatureKeyStore>.Instance),
+                new Dependably.Tests.Infrastructure.StubPerOrgTrustAnchorStore(),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance));
 
         return new MavenController(svc)
@@ -840,17 +838,12 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Requesting an uploaded SNAPSHOT without a token returns 401 — the uploaded-origin
-    /// auth gate must fire even when AnonymousPull is enabled, and even though the
-    /// freshness block is no longer entered for uploaded rows.
-    ///
-    /// This test FAILS on the pre-fix code because the freshness block enters, resolves
-    /// an upstream timestamped name, finds it uncached, and ProxyFetchAndCacheAsync
-    /// bypasses the uploaded-origin auth gate (it calls the proxy pipeline, which has
-    /// no per-origin token requirement).
+    /// Requesting an uploaded SNAPSHOT without a token returns 200 when AnonymousPull is
+    /// enabled — the org-level AnonymousPull gate governs access for all origins including
+    /// uploaded; the uploaded row is served locally and upstream is not consulted.
     /// </summary>
     [Fact]
-    public async Task UploadedSnapshot_WithoutToken_Returns401()
+    public async Task UploadedSnapshot_WithoutToken_AnonymousPullOn_Returns200()
     {
         byte[] localBytes = System.Text.Encoding.UTF8.GetBytes("uploaded-snapshot-auth-gate-payload");
         byte[] upstreamBytes = System.Text.Encoding.UTF8.GetBytes("upstream-snapshot-auth-gate-payload");
@@ -873,31 +866,24 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
         StubArtifact($"{groupPath}/{artifactId}/{version}/{tsFilename}", upstreamBytes);
         StubSha256Sidecar($"{groupPath}/{artifactId}/{version}/{tsFilename}", upstreamSha256);
 
-        // No token — even with AnonymousPull enabled, uploaded artifacts require ReadArtifact.
+        // AnonymousPull=true (set in InitializeAsync) — no token should yield 200 from local bytes.
         var ctl = BuildController(CleanOsv());
         var result = await ctl.Download($"{groupPath}/{artifactId}/{version}/{literalFilename}", CancellationToken.None);
 
-        // Must be 401, not 200 (from either the local uploaded bytes or upstream bytes).
-        Assert.Equal(401, (result as UnauthorizedResult)?.StatusCode
-            ?? (result as StatusCodeResult)?.StatusCode
-            ?? (result as ObjectResult)?.StatusCode
-            ?? 0);
+        var file = Assert.IsType<FileStreamResult>(result);
+        file.FileStream.Dispose();
 
-        // Upstream must NOT have been fetched.
+        // Upstream must NOT have been fetched — local uploaded bytes win.
         Assert.DoesNotContain(_server.LogEntries,
             e => e.RequestMessage?.Path?.EndsWith(tsFilename) == true);
     }
 
     /// <summary>
     /// Requesting the sidecar (<c>.sha1</c>) of an uploaded SNAPSHOT without a token
-    /// returns 401 — the uploaded-origin auth gate must also fire on the sidecar path.
-    ///
-    /// On the pre-fix code the sidecar path is isLiteralSnapshot=true, the uploaded row
-    /// is found, the freshness block enters, resolves upstream timestamped name, finds it
-    /// uncached, and ProxyFetchAndCacheAsync serves the upstream sidecar — bypassing auth.
+    /// returns 200 when AnonymousPull is enabled — the org-level gate governs all origins.
     /// </summary>
     [Fact]
-    public async Task UploadedSnapshot_Sidecar_WithoutToken_Returns401_NoUpstreamFetch()
+    public async Task UploadedSnapshot_Sidecar_WithoutToken_AnonymousPullOn_Returns200_NoUpstreamFetch()
     {
         byte[] localBytes = System.Text.Encoding.UTF8.GetBytes("uploaded-snapshot-sidecar-auth-payload");
         byte[] upstreamBytes = System.Text.Encoding.UTF8.GetBytes("upstream-snapshot-sidecar-payload");
@@ -919,14 +905,12 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
         StubArtifact($"{groupPath}/{artifactId}/{version}/{tsFilename}", upstreamBytes);
         StubSha256Sidecar($"{groupPath}/{artifactId}/{version}/{tsFilename}", upstreamSha256);
 
-        // No token — sidecar must also be gated by the uploaded-origin auth check.
+        // AnonymousPull=true (set in InitializeAsync) — no token, sidecar served from local bytes.
         var ctl = BuildController(CleanOsv());
         var result = await ctl.Download($"{groupPath}/{artifactId}/{version}/{literalFilename}.sha1", CancellationToken.None);
 
-        Assert.Equal(401, (result as UnauthorizedResult)?.StatusCode
-            ?? (result as StatusCodeResult)?.StatusCode
-            ?? (result as ObjectResult)?.StatusCode
-            ?? 0);
+        // Checksum sidecars are served as ContentResult (text/plain), not FileContentResult.
+        Assert.IsType<ContentResult>(result);
 
         // Upstream must NOT have been fetched.
         Assert.DoesNotContain(_server.LogEntries,
@@ -934,15 +918,14 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Mixed partial-failure: one uploaded SNAPSHOT (dep-confusion protection) and one
-    /// proxy SNAPSHOT (normal freshness-check path) coexist correctly.
+    /// Mixed partial-failure: one uploaded SNAPSHOT and one proxy SNAPSHOT coexist correctly
+    /// (AnonymousPull=true, set in InitializeAsync, applies to both origins).
     ///
-    /// - The uploaded SNAPSHOT serves local bytes and enforces the auth gate.
+    /// - The uploaded SNAPSHOT serves local bytes — local beats upstream even without a token.
+    /// - The same uploaded SNAPSHOT served anonymously returns 200 (not 401), because
+    ///   AnonymousPull is on.
     /// - The proxy SNAPSHOT exercises the normal freshness path and falls through to upstream
     ///   when the build is not cached.
-    ///
-    /// Fails on pre-fix code because the uploaded SNAPSHOT enters the freshness block and
-    /// the proxy fetch replaces the local artifact with upstream bytes.
     /// </summary>
     [Fact]
     public async Task Mixed_UploadedAndProxySnapshot_UploadedWins_ProxyFetchesUpstream()
@@ -1000,13 +983,11 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
         Assert.DoesNotContain(_server.LogEntries,          // upstream artifact NOT fetched
             e => e.RequestMessage?.Path?.EndsWith(tsFilenameU) == true);
 
-        // Step 2: Uploaded SNAPSHOT without a token must return 401.
+        // Step 2: Uploaded SNAPSHOT without a token returns 200 — AnonymousPull is on, so
+        // the org-level gate allows anonymous access regardless of origin.
         var ctlUNoAuth = BuildController(CleanOsv());
         var resultUNoAuth = await ctlUNoAuth.Download($"{groupPathU}/{artifactIdU}/{versionU}/{literalFilenameU}", CancellationToken.None);
-        Assert.Equal(401, (resultUNoAuth as UnauthorizedResult)?.StatusCode
-            ?? (resultUNoAuth as StatusCodeResult)?.StatusCode
-            ?? (resultUNoAuth as ObjectResult)?.StatusCode
-            ?? 0);
+        Assert.IsType<FileStreamResult>(resultUNoAuth).FileStream.Dispose();
 
         // Step 3: Proxy SNAPSHOT (normal path) fetches from upstream.
         var ctlP = BuildController(CleanOsv());

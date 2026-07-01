@@ -4,6 +4,7 @@
   import { get } from 'svelte/store'
   import { api, systemApi } from '../lib/api.js'
   import { user, route, navigate, pendingRoute } from '../lib/store.js'
+  import { armSessionWatch, disarmSessionWatch } from '../lib/session.js'
   import { useRouter, routeFor } from '../lib/routes.js'
   import { applyLocale } from '../lib/locale.js'
   import SystemLogin from './SystemLogin.svelte'
@@ -32,6 +33,8 @@
     if (me) {
       user.set(me)
       if (me.language && me.language !== get(locale)) applyLocale(me.language)
+      // Arm the proactive session-expiry watcher with the exp claim surfaced by me().
+      armSessionWatch(me.sessionExpiresAt, systemApi.me)
     }
 
     let finalPage
@@ -77,6 +80,7 @@
 
   async function logout() {
     await api.logout().catch(() => {})
+    disarmSessionWatch()
     user.set(null)
     pendingRoute.set(null)
     navigate('system-login', {}, { replace: true })

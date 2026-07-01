@@ -77,9 +77,11 @@
   onMount(load)
 </script>
 
-<div class="page">
+<div class="page page-fluid">
   <div class="page-header">
     <h1 class="page-title">{$t('quarantine.title')}</h1>
+  </div>
+  <div class="page-toolbar">
     <select bind:value={stateFilter} on:change={load} class="w-auto">
       <option value="pending">{$t('quarantine.filters.pending')}</option>
       <option value="approved">{$t('quarantine.filters.approved')}</option>
@@ -242,9 +244,6 @@
   .detail-text { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chev { flex-shrink: 0; color: var(--text2); transition: transform 0.15s; }
   .chev.open { transform: rotate(180deg); }
-
-  .state-approved { background: var(--badge-hosted-bg); color: var(--badge-hosted-text); }
-  .state-denied { background: var(--badge-red-bg, var(--badge-warning-bg)); color: var(--badge-red-text); }
 
   /* Expandable detail row — mirrors the Vulnerabilities.svelte pattern. */
   .expanded-row td { background: var(--surface2); }

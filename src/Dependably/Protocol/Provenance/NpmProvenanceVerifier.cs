@@ -13,7 +13,7 @@ namespace Dependably.Protocol.Provenance;
 /// <c>"{name}@{version}:{integrity}"</c>. The signature is DER-encoded
 /// (<see cref="DSASignatureFormat.Rfc3279DerSequence"/>).
 ///
-/// The trust anchor is the operator-pinned SPKI public key resolved by keyid from
+/// The trust anchor is the per-org operator-pinned SPKI public key resolved by keyid from
 /// <see cref="NpmSignatureKeyStore"/> — never the key the upstream registry serves at
 /// <c>/-/npm/v1/keys</c>.
 ///
@@ -29,24 +29,55 @@ public sealed class NpmProvenanceVerifier : IArtifactProvenanceVerifier
 
     public string Ecosystem => "npm";
 
-    public bool IsConfigured => _keys.IsConfigured;
+    /// <summary>
+    /// Always false at the instance level — npm trust anchors are per-org.
+    /// Use <see cref="IsConfiguredForAsync"/> to test whether a specific org has anchors.
+    /// </summary>
+    public bool IsConfigured => false;
 
+    /// <summary>
+    /// Returns true when at least one npm SPKI trust anchor is configured for <paramref name="orgId"/>.
+    /// Fail-closed: an org with no anchors cannot enable signature verification.
+    /// </summary>
+    public Task<bool> IsConfiguredForAsync(string orgId, CancellationToken ct = default)
+        => _keys.IsConfiguredForAsync(orgId, ct);
+
+    /// <summary>
+    /// Resolves per-org keys for <paramref name="orgId"/>, then verifies the signatures
+    /// in <paramref name="input"/> against the pinned anchors. Returns
+    /// <see cref="ProvenanceResult.NotApplicable"/> when no anchors are configured for the org.
+    /// </summary>
+    public async Task<ProvenanceResult> VerifyForOrgAsync(
+        string orgId, ProvenanceInput input, CancellationToken ct = default)
+    {
+        var spkiMap = await _keys.GetSpkiMapAsync(orgId, ct);
+        return spkiMap.Count == 0
+            ? Record(input.Ecosystem, ProvenanceResult.NotApplicable)
+            : Record(input.Ecosystem, Verify(input, spkiMap));
+    }
+
+    /// <summary>
+    /// Instance-level verify: does not resolve per-org keys. Returns
+    /// <see cref="ProvenanceResult.NotApplicable"/> because no org context is available.
+    /// Callers on the proxy ingest path must use <see cref="VerifyForOrgAsync"/>.
+    /// </summary>
     public Task<ProvenanceResult> VerifyAsync(ProvenanceInput input, CancellationToken ct = default)
-        => Task.FromResult(Verify(input));
+        => Task.FromResult(ProvenanceResult.NotApplicable);
 
-    private ProvenanceResult Verify(ProvenanceInput input)
+    private static ProvenanceResult Verify(
+        ProvenanceInput input, IReadOnlyDictionary<string, byte[]> spkiMap)
     {
         // No signatures published for this version (older packages predate registry signing).
         if (input.Signatures.Count == 0)
         {
-            return Record(input.Ecosystem, ProvenanceResult.Unsigned);
+            return ProvenanceResult.Unsigned;
         }
 
         // The signed payload requires the integrity reference; without it there is nothing the
         // registry could have signed over, so a present-but-unverifiable signature fails closed.
         if (string.IsNullOrEmpty(input.Integrity))
         {
-            return Record(input.Ecosystem, ProvenanceResult.Failed);
+            return ProvenanceResult.Failed;
         }
 
         byte[] message = Encoding.UTF8.GetBytes(
@@ -55,8 +86,7 @@ public sealed class NpmProvenanceVerifier : IArtifactProvenanceVerifier
         // npm publishes a signature list; a single valid signature from a pinned key verifies.
         foreach (var sig in input.Signatures)
         {
-            byte[]? spki = _keys.GetSpki(sig.KeyId);
-            if (spki is null)
+            if (!spkiMap.TryGetValue(sig.KeyId, out byte[]? spki))
             {
                 // No pinned anchor for this keyid — cannot establish trust for this entry.
                 continue;
@@ -64,12 +94,12 @@ public sealed class NpmProvenanceVerifier : IArtifactProvenanceVerifier
 
             if (TryVerifyOne(spki, message, sig.Signature))
             {
-                return Record(input.Ecosystem, ProvenanceResult.Verified(sig.KeyId));
+                return ProvenanceResult.Verified(sig.KeyId);
             }
         }
 
         // A signature was present but none chained to a pinned key with a valid signature.
-        return Record(input.Ecosystem, ProvenanceResult.Failed);
+        return ProvenanceResult.Failed;
     }
 
     // Verifies one base64 DER signature against the pinned SPKI. Returns false (never throws) on
@@ -105,6 +135,11 @@ public sealed class NpmProvenanceVerifier : IArtifactProvenanceVerifier
     // verifier is actually invoked).
     private static ProvenanceResult Record(string ecosystem, ProvenanceResult result)
     {
+        if (result.Status == ProvenanceStatus.NotApplicable)
+        {
+            return result;
+        }
+
         DependablyMeter.ProvenanceVerified.Add(1,
             new KeyValuePair<string, object?>("ecosystem", ecosystem),
             new KeyValuePair<string, object?>("result", ResultLabel(result.Status)));

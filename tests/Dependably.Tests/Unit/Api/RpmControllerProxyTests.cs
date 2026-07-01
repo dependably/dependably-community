@@ -951,7 +951,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             BlobStore: new TieredBlobStorage(_blobs, _blobs),
             Db: _db,
             Repodata: new RpmRepodataService(_db, NullLogger<RpmRepodataService>.Instance, TimeProvider.System),
-            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System)),
+            Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
             MergedRepodataCache: new MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache>(
                 new MemoryCache(new MemoryCacheOptions()), MetadataCacheKeys.RpmMergedRepodata),
             LocalRepodataCache: new RenderedResponseCache<RpmLocalRepodataKey>(
@@ -960,9 +960,9 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             CacheRecorder: cacheRecorder,
             CacheArtifacts: cacheArtifacts,
             TenantAccess: tenantAccess,
-            // No Rpm:GpgKey configured — IsConfigured=false, provenance skipped.
+            // No trust anchors seeded — IsConfiguredForAsync returns false, provenance skipped.
             RpmProvenance: new Dependably.Protocol.Provenance.RpmProvenanceVerifier(
-                new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+                new StubPerOrgTrustAnchorStore(),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.RpmProvenanceVerifier>.Instance),
             UpstreamClient: upstreamClient,
             Proxy: proxy);
@@ -1045,19 +1045,19 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         public bool IsPassthroughModeSelected { get; }
         public bool IsMergedModeSelected { get; }
 
-        public Task<byte[]?> GetUpstreamPrimaryXmlGzAsync(string upstreamBase, CancellationToken ct)
+        public Task<byte[]?> GetUpstreamPrimaryXmlGzAsync(string orgId, string upstreamBase, CancellationToken ct)
         {
             LastUpstreamBase = upstreamBase;
             return Task.FromResult(_upstreamPrimaryGz);
         }
 
-        public Task<byte[]?> GetUpstreamFilelistsXmlGzAsync(string upstreamBase, CancellationToken ct)
+        public Task<byte[]?> GetUpstreamFilelistsXmlGzAsync(string orgId, string upstreamBase, CancellationToken ct)
             => Task.FromResult<byte[]?>(null);
 
-        public Task<IReadOnlyList<XElement>> GetUpstreamNonPrimaryRepomdEntriesAsync(string upstreamBase, CancellationToken ct)
+        public Task<IReadOnlyList<XElement>> GetUpstreamNonPrimaryRepomdEntriesAsync(string orgId, string upstreamBase, CancellationToken ct)
             => Task.FromResult(_upstreamNonPrimaryEntries);
 
-        public Task<PackageResolution?> ResolvePackageUrlAsync(string upstreamBase, string filename, CancellationToken ct)
+        public Task<PackageResolution?> ResolvePackageUrlAsync(string orgId, string upstreamBase, string filename, CancellationToken ct)
         {
             if (_assertNotCalled)
             {

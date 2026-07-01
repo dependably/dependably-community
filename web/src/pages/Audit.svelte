@@ -162,7 +162,7 @@
   }
 </script>
 
-<div class="page page-wide">
+<div class="page page-fluid">
   <div class="page-header">
     <h1 class="page-title">{$t('audit.title')}</h1>
   </div>
@@ -177,8 +177,8 @@
   </div>
 
   {#if activeTab === 'lifecycle'}
-    <div class="tab-toolbar">
-      <SearchInput class="audit-search" placeholder={$t('activity.searchPlaceholder')}
+    <div class="page-toolbar">
+      <SearchInput class="toolbar-search" placeholder={$t('activity.searchPlaceholder')}
         bind:value={lcSearch} on:search={lcOnSearch} />
       <select bind:value={lcFilterType} on:change={lcOnFilterChange} class="event-select">
         <option value="">{$t('activity.allEvents')}</option>
@@ -204,7 +204,7 @@
         <option value="login.failure">{$t('activity.events.loginFailure')}</option>
         <option value="login.locked">{$t('activity.events.loginLocked')}</option>
       </select>
-      <button type="button" class="btn btn-secondary" on:click={lcExport}>{$t('activity.export')}</button>
+      <button type="button" class="btn-sm" on:click={lcExport}>{$t('activity.export')}</button>
     </div>
 
     <ErrorBanner message={lcError} />
@@ -237,8 +237,8 @@
         on:limitchange={lcOnLimitChange} />
     {/if}
   {:else}
-    <div class="tab-toolbar">
-      <SearchInput class="audit-search" placeholder={$t('audit.searchPlaceholder')}
+    <div class="page-toolbar">
+      <SearchInput class="toolbar-search" placeholder={$t('audit.searchPlaceholder')}
         bind:value={adSearch} on:search={adOnSearch} />
       <select bind:value={adFilterAction} on:change={adOnFilterChange} class="event-select">
         <option value="">{$t('audit.allActions')}</option>
@@ -250,7 +250,7 @@
           </optgroup>
         {/each}
       </select>
-      <button type="button" class="btn btn-secondary" on:click={adExport}>{$t('audit.export')}</button>
+      <button type="button" class="btn-sm" on:click={adExport}>{$t('audit.export')}</button>
     </div>
 
     <ErrorBanner message={adError} />
@@ -293,9 +293,6 @@
   }
   .tab:hover { color: var(--text); }
   .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-
-  .tab-toolbar { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px; }
-  .tab-toolbar :global(.audit-search) { margin-right: auto; width: 260px; }
 
   .first-fetch-row td { background: var(--badge-warning-bg) !important; color: var(--badge-warning-text); }
   .nowrap { white-space: nowrap; }

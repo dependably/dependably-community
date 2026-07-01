@@ -19,7 +19,10 @@
   $: passwordContext = { email: me?.email }
 
   $: forced = me?.mustChangePassword === true
+  $: mfaForced = me?.mfaEnrollmentRequired === true && !mfaEnabled
   $: if (forced && !showModal) showModal = true
+  // Auto-open the MFA setup modal when enrollment is mandatory and password rotation is done.
+  $: if (mfaForced && !forced && mfaModal === null && !mfaSetupDone) openMfaSetup()
 
   // System area has no tenant default — fall back to 'en'.
   const systemFallbackLabel = locales.find(l => l.code === 'en')?.label || 'English'
@@ -57,15 +60,19 @@
       setError:  v => modalError = v,
       onSuccess: async () => {
         me = await systemApi.me()
-        user.set({ ...$user, mustChangePassword: false })
+        user.set(me)
         passwordSavedAt = new Date()
         currentPassword = ''; newPassword = ''; confirm = ''
         showModal = false
         if (wasForced) {
-          // Forced flow: bounce out of /profile once rotation completes. Consume any pending
-          // deep link, falling back to the tenants list.
-          const pending = takePendingRoute()
-          navigate(pending?.page ?? 'system-tenants', pending?.params ?? {}, { replace: true })
+          // Forced flow: chain into MFA setup when required rather than navigating away —
+          // avoids the double-navigation bounce via SystemApp.svelte guard.
+          if (me?.mfaEnrollmentRequired) {
+            openMfaSetup()
+          } else {
+            const pending = takePendingRoute()
+            navigate(pending?.page ?? 'system-tenants', pending?.params ?? {}, { replace: true })
+          }
         }
       },
     })
@@ -85,6 +92,10 @@
   let mfaSetupCode = ''
   let mfaRecoveryCodes = []
   let mfaSetupDone = false
+  // Snapshot of mfaForced taken when the setup modal opens. By the time recovery codes render,
+  // mfaEnabled is true and me.mfaEnrollmentRequired is false, so the live reactive is no
+  // longer reliable for driving the forced-dismiss navigation.
+  let enrollmentWasForced = false
 
   // Disable / regen state
   let mfaCurrentPassword = ''
@@ -103,6 +114,9 @@
   }
 
   function openMfaSetup() {
+    // Capture whether enrollment is forced now, before the async verify sets mfaEnabled=true
+    // and user refresh clears mfaEnrollmentRequired — the live reactive won't be reliable after.
+    enrollmentWasForced = mfaForced
     mfaModal = 'setup'
     mfaError = ''
     mfaSetupCode = ''
@@ -235,6 +249,9 @@
     {#if forced}
       <div class="warning-banner">{$t('profile.forcedReason')}</div>
     {/if}
+    {#if mfaForced && !forced}
+      <div class="warning-banner">{$t('profile.mfaForcedReason')}</div>
+    {/if}
 
     <div class="card settings-panel">
       <!-- Password row -->
@@ -355,7 +372,14 @@
           {/each}
         </ul>
         <div class="modal-actions">
-          <button type="button" class="primary" on:click={closeMfaModal}>{$t('common.actions.dismiss')}</button>
+          <button type="button" class="primary" on:click={() => {
+            const wasForced = enrollmentWasForced
+            closeMfaModal()
+            if (wasForced) {
+              const pending = takePendingRoute()
+              navigate(pending?.page ?? 'system-tenants', pending?.params ?? {}, { replace: true })
+            }
+          }}>{$t('common.actions.dismiss')}</button>
         </div>
       {:else}
         {#if mfaLoading && !mfaOtpauthUri}
@@ -386,7 +410,9 @@
               />
             </div>
             <div class="modal-actions">
-              <button type="button" on:click={closeMfaModal}>{$t('common.actions.cancel')}</button>
+              {#if !enrollmentWasForced}
+                <button type="button" on:click={closeMfaModal}>{$t('common.actions.cancel')}</button>
+              {/if}
               <button type="submit" class="primary" disabled={mfaLoading}>
                 {mfaLoading ? $t('common.actions.saving') : $t('system.profile.mfa.setupSubmit')}
               </button>

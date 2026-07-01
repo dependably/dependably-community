@@ -95,6 +95,7 @@
       firstFetch: files.some(f => f.firstFetch),
       yanked: files.some(f => f.yanked),
       deprecated: files.find(f => f.deprecated)?.deprecated ?? null,
+      revokedAt: files.find(f => f.revokedAt)?.revokedAt ?? null,
       hasInstallScript: files.some(f => f.hasInstallScript),
       installScriptKind: files.find(f => f.hasInstallScript)?.installScriptKind ?? null,
       provenanceStatus,
@@ -275,6 +276,7 @@
           {#if !g.single}<span class="badge files-badge ml-1">{$t('versionDetail.fileCount', { values: { count: g.fileCount } })}</span>{/if}
           {#if g.yanked}<span class="badge yanked ml-1">{$t('versionDetail.badges.yanked')}</span>{/if}
           {#if g.deprecated}<span class="badge deprecated ml-1" title={g.deprecated}>{$t('versionDetail.badges.deprecated')}</span>{/if}
+          {#if g.revokedAt}<span class="badge revoked ml-1" title={$t('versionDetail.badges.revokedHelp')}><svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>{$t('versionDetail.badges.revoked')}</span>{/if}
           {#if g.hasInstallScript}<span class="badge install-script ml-1" title={$t('versionDetail.badges.installScriptHelp', { values: { kind: g.installScriptKind || '' } })}>{$t('versionDetail.badges.installScript')}</span>{/if}
           {#if g.provenanceStatus === 'verified'}<span class="badge prov-verified ml-1" title={$t('versionDetail.badges.provenanceVerifiedHelp', { values: { signer: g.provenanceSigner || '' } })}>{$t('versionDetail.badges.provenanceVerified')}</span>{/if}
           {#if g.provenanceStatus === 'failed'}<span class="badge prov-failed ml-1" title={$t('versionDetail.badges.provenanceFailedHelp')}>{$t('versionDetail.badges.provenanceFailed')}</span>{/if}

@@ -2,7 +2,7 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
-  import { currentOrg, navigate } from '../lib/store.js'
+  import { currentOrg, navigate, user } from '../lib/store.js'
   import { formatBytes } from '../lib/format.js'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
 
@@ -78,6 +78,9 @@
     .map(g => `${$t('dashboard.gates.' + g.gate)}: ${g.count}`)
     .join(' · ')
   $: quarantinePending = stats?.quarantinePending ?? 0
+  // Quarantine is an admin/owner-only surface (see Sidebar). Non-admins see the count
+  // as a read-only stat, but the card is not a link into the review queue.
+  $: isAdmin = $user?.role === 'admin' || $user?.role === 'owner'
   $: hostedPackages = stats?.hostedPackages ?? 0
   $: proxiedPackages = stats?.proxiedPackages ?? 0
   $: storageQuotaBytes = stats?.storageQuotaBytes ?? null
@@ -197,7 +200,7 @@
 
     <!-- ── SAML cert-expiry alert card (admins/owners only; hot when ≤7d or expired) ── -->
     {#if samlCertHot}
-      <div class="saml-cert-alert" class:expired={samlCertExpiry.status === 'expired'} role="alert">
+      <div class="alert-card mb-4" class:hot={samlCertExpiry.status === 'expired'} class:warn={samlCertExpiry.status !== 'expired'} role="alert">
         <strong>
           {samlCertExpiry.status === 'expired'
             ? $t('dashboard.samlCertExpiredCard')
@@ -243,15 +246,22 @@
         <div class="eyebrow">{$t('dashboard.blockedMalicious')}</div>
         <div class="stat-value" class:danger={maliciousBlocked > 0}>{maliciousBlocked.toLocaleString()}</div>
       </div>
-      <button
-        class="stat-card stat-link"
-        class:hot={quarantinePending > 0}
-        on:click={() => navigate('quarantine')}
-        aria-label={$t('dashboard.quarantinePending')}
-      >
-        <div class="eyebrow">{$t('dashboard.quarantinePending')}</div>
-        <div class="stat-value" class:warn={quarantinePending > 0}>{quarantinePending.toLocaleString()}</div>
-      </button>
+      {#if isAdmin}
+        <button
+          class="stat-card stat-link"
+          class:hot={quarantinePending > 0}
+          on:click={() => navigate('quarantine')}
+          aria-label={$t('dashboard.quarantinePending')}
+        >
+          <div class="eyebrow">{$t('dashboard.quarantinePending')}</div>
+          <div class="stat-value" class:warn={quarantinePending > 0}>{quarantinePending.toLocaleString()}</div>
+        </button>
+      {:else}
+        <div class="stat-card">
+          <div class="eyebrow">{$t('dashboard.quarantinePending')}</div>
+          <div class="stat-value" class:warn={quarantinePending > 0}>{quarantinePending.toLocaleString()}</div>
+        </div>
+      {/if}
     </div>
 
     <!-- ── Package breakdown: pie + table ────────────────────────────────────── -->
@@ -361,23 +371,7 @@
 </div>
 
 <style>
-  /* SAML cert-expiry alert card */
-  .saml-cert-alert {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 16px;
-    margin-bottom: 20px;
-    border-left: 4px solid var(--warning-border);
-    background: var(--warning-bg);
-    border-radius: 4px;
-    font-size: 14px;
-  }
-  .saml-cert-alert.expired {
-    border-left-color: var(--danger-border);
-    background: var(--danger-bg);
-  }
-  .saml-cert-alert strong { font-weight: 600; }
+  /* SAML cert-expiry detail line */
   .saml-cert-detail { color: var(--text2); font-size: 13px; }
 
   /* Stat grid bottom margin */

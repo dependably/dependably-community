@@ -8,12 +8,12 @@ import { test, expect } from '../fixtures/index.js'
 test.describe('Vulnerabilities', () => {
   test('vulnerabilities nav link is visible to authenticated users', async ({ adminPage }) => {
     // en.json nav.vulnerabilities = "Vulnerabilities"
-    const vulnBtn = adminPage.locator('nav.navbar button.nav-link', { hasText: 'Vulnerabilities' })
+    const vulnBtn = adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Vulnerabilities' })
     await expect(vulnBtn).toBeVisible({ timeout: 5_000 })
   })
 
   test('vulnerabilities page is accessible from nav', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Vulnerabilities' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Vulnerabilities' }).click()
     const main = adminPage.locator('main.main-content')
     await expect(main).toBeVisible()
     // en.json vulnerabilities.title = "Vulnerabilities"
@@ -21,7 +21,7 @@ test.describe('Vulnerabilities', () => {
   })
 
   test('vulnerabilities page shows table and ecosystem filter', async ({ adminPage }) => {
-    await adminPage.locator('nav.navbar button.nav-link', { hasText: 'Vulnerabilities' }).click()
+    await adminPage.locator('nav.sidebar button.nav-link', { hasText: 'Vulnerabilities' }).click()
     const main = adminPage.locator('main.main-content')
     await expect(main).toBeVisible({ timeout: 5_000 })
     // The advisory catalog and org report were merged into a single page

@@ -225,6 +225,101 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
         Assert.DoesNotContain(activeList, b => b.Id == dismissedBanner.Id);
     }
 
+    // ── Dismiss: non-existent banner id returns 404 (FK-safe) ─────────────────────────────
+
+    /// <summary>
+    /// Regression: a made-up banner id must return 404, not 500 (previously the INSERT into
+    /// banner_dismissals triggered an FK violation against the banners table).
+    /// </summary>
+    [Fact]
+    public async Task Dismiss_NonExistentBannerId_Returns404()
+    {
+        var ctrl = BuildController(_userIds["member"], "member");
+        string nonExistentId = Guid.NewGuid().ToString("N");
+        var result = await ctrl.Dismiss(nonExistentId, CancellationToken.None);
+        Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Fact]
+    public async Task Dismiss_ExistingBanner_FirstCall_Returns204()
+    {
+        // Seeds a fresh banner so this test is independent of _sharedBannerId dismissal state.
+        var repo = new BannerRepository(_db, TestTime.Frozen(KnownNow));
+        string userId = _userIds["member"];
+        var banner = await repo.CreateTenantAsync(_orgId, userId, new BannerCreateRequest(
+            Severity: "info",
+            Body: "Fresh dismiss test banner",
+            LinkUrl: null,
+            LinkLabel: null,
+            TargetRole: "all",
+            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            Enabled: true), CancellationToken.None);
+
+        var ctrl = BuildController(userId, "member");
+        var result = await ctrl.Dismiss(banner.Id, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+    }
+
+    [Fact]
+    public async Task Dismiss_ExistingBanner_ReDismiss_Returns204_Idempotent()
+    {
+        // First dismiss then re-dismiss — both should return 204.
+        var repo = new BannerRepository(_db, TestTime.Frozen(KnownNow));
+        string userId = _userIds["admin"];
+        var banner = await repo.CreateTenantAsync(_orgId, userId, new BannerCreateRequest(
+            Severity: "warn",
+            Body: "Idempotent dismiss test banner",
+            LinkUrl: null,
+            LinkLabel: null,
+            TargetRole: "all",
+            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            Enabled: true), CancellationToken.None);
+
+        var ctrl = BuildController(userId, "admin");
+        // First call: banner exists and is not yet dismissed.
+        var firstResult = await ctrl.Dismiss(banner.Id, CancellationToken.None);
+        Assert.IsType<NoContentResult>(firstResult);
+
+        // Second call: ON CONFLICT DO NOTHING makes the dismissal idempotent.
+        var secondResult = await ctrl.Dismiss(banner.Id, CancellationToken.None);
+        Assert.IsType<NoContentResult>(secondResult);
+    }
+
+    // ── Dismiss: mixed partial — some banners exist, some do not ──────────────────────────
+
+    /// <summary>
+    /// Mixed partial-failure: in a batch of dismiss attempts, some banners exist (204) and
+    /// some do not (404), confirming each is evaluated independently.
+    /// </summary>
+    [Fact]
+    public async Task Dismiss_MixedExistentAndNonExistent_IndependentResults()
+    {
+        var repo = new BannerRepository(_db, TestTime.Frozen(KnownNow));
+        string userId = _userIds["owner"];
+        var realBanner = await repo.CreateTenantAsync(_orgId, userId, new BannerCreateRequest(
+            Severity: "info",
+            Body: "Mixed-partial real banner",
+            LinkUrl: null,
+            LinkLabel: null,
+            TargetRole: "all",
+            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            Enabled: true), CancellationToken.None);
+
+        string fakeBannerId = Guid.NewGuid().ToString("N");
+        var ctrl = BuildController(userId, "owner");
+
+        // Existing banner → 204.
+        var existResult = await ctrl.Dismiss(realBanner.Id, CancellationToken.None);
+        Assert.IsType<NoContentResult>(existResult);
+
+        // Non-existent banner → 404 (not 500).
+        var notFoundResult = await ctrl.Dismiss(fakeBannerId, CancellationToken.None);
+        Assert.IsType<NotFoundResult>(notFoundResult);
+    }
+
     // ── CRUD guards are unchanged: List requires ReadTenant, not membership-only ───────────
 
     [Fact]
@@ -246,6 +341,143 @@ public sealed class BannerControllerAuthTests : IAsyncLifetime
             StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
             EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
             Enabled: true), CancellationToken.None);
+        Assert.IsType<ForbidResult>(result);
+    }
+
+    // ── Create: owner can create, invalid payloads are rejected ────────────────────────────
+
+    private static BannerCreateRequest ValidCreateRequest(string severity = "info", string targetRole = "all") => new(
+        Severity: severity,
+        Body: "Tenant banner body",
+        LinkUrl: null,
+        LinkLabel: null,
+        TargetRole: targetRole,
+        StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+        EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+        Enabled: true);
+
+    [Fact]
+    public async Task Create_Owner_Valid_Returns201WithTenantScope()
+    {
+        var ctrl = BuildController(_userIds["owner"], "owner");
+        var result = Assert.IsType<CreatedResult>(await ctrl.Create(ValidCreateRequest(), CancellationToken.None));
+        var banner = Assert.IsType<Banner>(result.Value);
+        Assert.Equal("tenant", banner.Scope);
+        Assert.Equal(_orgId, banner.OrgId);
+    }
+
+    [Fact]
+    public async Task Create_InvalidSeverity_Returns422()
+    {
+        var ctrl = BuildController(_userIds["owner"], "owner");
+        var req = ValidCreateRequest(severity: "critical");
+        var result = await ctrl.Create(req, CancellationToken.None);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, ((ObjectResult)result).StatusCode);
+    }
+
+    [Fact]
+    public async Task Create_EmptyBody_Returns422()
+    {
+        var ctrl = BuildController(_userIds["owner"], "owner");
+        var req = ValidCreateRequest() with { Body = "" };
+        var result = await ctrl.Create(req, CancellationToken.None);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, ((ObjectResult)result).StatusCode);
+    }
+
+    [Fact]
+    public async Task Create_AtMaxActiveBanners_Returns422()
+    {
+        var ctrl = BuildController(_userIds["owner"], "owner");
+        // The shared banner seeded in InitializeAsync already counts toward the tenant's active
+        // total, so top up to the max from there.
+        for (int i = 1; i < BannerRepository.MaxActiveBannersPerScope; i++)
+        {
+            var created = await ctrl.Create(ValidCreateRequest(), CancellationToken.None);
+            Assert.IsType<CreatedResult>(created);
+        }
+
+        var overflow = await ctrl.Create(ValidCreateRequest(), CancellationToken.None);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, ((ObjectResult)overflow).StatusCode);
+    }
+
+    // ── Update: owner can update an existing tenant banner ─────────────────────────────────
+
+    [Fact]
+    public async Task Update_Existing_Returns204AndPersists()
+    {
+        var repo = new BannerRepository(_db, TestTime.Frozen(KnownNow));
+        string userId = _userIds["owner"];
+        var banner = await repo.CreateTenantAsync(_orgId, userId, ValidCreateRequest(), CancellationToken.None);
+
+        var ctrl = BuildController(userId, "owner");
+        var updateReq = new BannerUpdateRequest(
+            Severity: "warn",
+            Body: "Updated tenant banner body",
+            LinkUrl: null,
+            LinkLabel: null,
+            TargetRole: "all",
+            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            Enabled: true);
+
+        var result = await ctrl.Update(banner.Id, updateReq, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        var list = await repo.ListTenantAsync(_orgId, CancellationToken.None);
+        Assert.Equal("warn", list.Single(b => b.Id == banner.Id).Severity);
+    }
+
+    [Fact]
+    public async Task Update_NonExistent_Returns404()
+    {
+        var ctrl = BuildController(_userIds["owner"], "owner");
+        var result = await ctrl.Update(Guid.NewGuid().ToString("N"), new BannerUpdateRequest(
+            Severity: "warn", Body: "x", LinkUrl: null, LinkLabel: null, TargetRole: "all",
+            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            Enabled: true), CancellationToken.None);
+        Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Fact]
+    public async Task Update_Auditor_Forbidden_TenantConfigureRequired()
+    {
+        var ctrl = BuildController(_userIds["auditor"], "auditor");
+        var result = await ctrl.Update(_sharedBannerId, new BannerUpdateRequest(
+            Severity: "warn", Body: "x", LinkUrl: null, LinkLabel: null, TargetRole: "all",
+            StartsAt: KnownNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            EndsAt: KnownNow.AddDays(30).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            Enabled: true), CancellationToken.None);
+        Assert.IsType<ForbidResult>(result);
+    }
+
+    // ── Delete: owner can delete an existing tenant banner ─────────────────────────────────
+
+    [Fact]
+    public async Task Delete_Existing_Returns204()
+    {
+        var repo = new BannerRepository(_db, TestTime.Frozen(KnownNow));
+        string userId = _userIds["owner"];
+        var banner = await repo.CreateTenantAsync(_orgId, userId, ValidCreateRequest(), CancellationToken.None);
+
+        var ctrl = BuildController(userId, "owner");
+        var result = await ctrl.Delete(banner.Id, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+    }
+
+    [Fact]
+    public async Task Delete_NonExistent_Returns404()
+    {
+        var ctrl = BuildController(_userIds["owner"], "owner");
+        var result = await ctrl.Delete(Guid.NewGuid().ToString("N"), CancellationToken.None);
+        Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Fact]
+    public async Task Delete_Auditor_Forbidden_TenantConfigureRequired()
+    {
+        var ctrl = BuildController(_userIds["auditor"], "auditor");
+        var result = await ctrl.Delete(_sharedBannerId, CancellationToken.None);
         Assert.IsType<ForbidResult>(result);
     }
 

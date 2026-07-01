@@ -1,6 +1,6 @@
 {
   "_comment": "Known Snyk Code false positives — each already triaged, with an inline // deepcode ignore at the site. The snyk CLI does not honour those inline markers, so this identity set keeps ci/snyk-code-scan.sh from re-flagging them. Each id is rule|file|<line-independent identity fingerprint>, so cosmetic line moves do not drift the baseline. Per-rule rationale: CONTRIBUTING.md > Static analysis (Snyk Code). Regenerate after re-triage: ci/snyk-code-scan.sh --update.",
-  "count": 83,
+  "count": 92,
   "fingerprints": [
     {
       "id": "javascript/PT|build/extract-notices.mjs|3900f8ff.4773f344.126beb45.d7919eeb.8d22f254.8020cfdf.83265159.19f852ea.6e283998.4773f344.a6c57d7b.152d4968.ac82cb7b.5fce695c.83265159.83183368",
@@ -13,21 +13,21 @@
       "id": "csharp/LogForging|src/Dependably/Api/AuthController.cs|c493a004.5894468a.c1fd0f3b.f5757239.4a5c8084.2f4e1548.5f1fa597.acfbb434.91808881.8c06c0b2.c9330245.f5757239.1ebf615a.7e971bc1.ce0185b2.83797af5",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/AuthController.cs",
-      "line": 274,
+      "line": 291,
       "text": "Unsanitized input from a session value flows into LogError, where it is used as log input. This may result in a Logs Forging vulne"
     },
     {
       "id": "csharp/LogForging|src/Dependably/Api/AuthController.cs|c493a004.5894468a.c1fd0f3b.f5757239.4a5c8084.2f4e1548.5f1fa597.acfbb434.91808881.8c06c0b2.c9330245.f5757239.1ebf615a.07492af9.ce0185b2.fc471c2d",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/AuthController.cs",
-      "line": 335,
+      "line": 352,
       "text": "Unsanitized input from a session value flows into LogError, where it is used as log input. This may result in a Logs Forging vulne"
     },
     {
       "id": "csharp/LogForging|src/Dependably/Api/AuthController.cs|c493a004.277c621c.7be03776.f5757239.b7620c65.3fb4ff5d.f853d443.b4427b4a.18efeb0a.8c06c0b2.36e05486.f5757239.b6fb0911.9e43e5e8.5a990ae8.7d7ec2d8",
       "rule": "csharp/LogForging",
       "file": "src/Dependably/Api/AuthController.cs",
-      "line": 438,
+      "line": 455,
       "text": "Unsanitized input from an HTTP parameter flows into LogError, where it is used as log input. This may result in a Logs Forging vul"
     },
     {
@@ -349,7 +349,7 @@
       "id": "csharp/PrivateInformationExposure|src/Dependably/Api/OrgInvitesController.cs|e9069284.5894468a.fd16a742.f5757239.4a5c8084.4b49d3d2.5f1fa597.bc0fc660.e9069284.69639c37.c9330245.f5757239.4a5c8084.4b49d3d2.ce0185b2.bc0fc660",
       "rule": "csharp/PrivateInformationExposure",
       "file": "src/Dependably/Api/OrgInvitesController.cs",
-      "line": 159,
+      "line": 151,
       "text": "Private information from sensitive data source flows into LogInformation. This may disclose private information to an attacker."
     },
     {
@@ -461,7 +461,7 @@
       "id": "csharp/NoHardcodedCredentials|src/Dependably/Infrastructure/OrgRepository.cs|160a319b.39b8d118.41e7817d.f5757239.a427b94e.f67e3b64.c9ff8074.24b1e0e2.160a319b.39b8d118.41e7817d.f5757239.a427b94e.f67e3b64.c9ff8074.24b1e0e2",
       "rule": "csharp/NoHardcodedCredentials",
       "file": "src/Dependably/Infrastructure/OrgRepository.cs",
-      "line": 315,
+      "line": 323,
       "text": "Do not hardcode credentials in code. Found hardcoded credential used in secret key variable declaration."
     },
     {
@@ -483,6 +483,27 @@
       "rule": "csharp/NoHardcodedCredentials/test",
       "file": "tests/Dependably.Tests/Integration/InviteAcceptRaceTests.cs",
       "line": 76,
+      "text": "Do not hardcode credentials in code. Found hardcoded credential used in password variable declaration."
+    },
+    {
+      "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Integration/LoginEnrollmentRequiredTests.cs|12f9a9e6.ea997a4b.3746f86c.de031890.10a56356.ce109560.99d5eadf.633b8e81.12f9a9e6.ea997a4b.3746f86c.de031890.10a56356.ce109560.99d5eadf.633b8e81",
+      "rule": "csharp/NoHardcodedCredentials/test",
+      "file": "tests/Dependably.Tests/Integration/LoginEnrollmentRequiredTests.cs",
+      "line": 39,
+      "text": "Do not hardcode credentials in code. Found hardcoded credential used in password variable declaration."
+    },
+    {
+      "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Integration/LoginEnrollmentRequiredTests.cs|12845fc6.902d43c4.50a61bf3.de031890.a4aa105f.ce109560.63e0002b.594208d3.12845fc6.902d43c4.50a61bf3.de031890.a4aa105f.ce109560.63e0002b.594208d3",
+      "rule": "csharp/NoHardcodedCredentials/test",
+      "file": "tests/Dependably.Tests/Integration/LoginEnrollmentRequiredTests.cs",
+      "line": 373,
+      "text": "Do not hardcode credentials in code. Found hardcoded credential used in password variable declaration."
+    },
+    {
+      "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Integration/LoginEnrollmentRequiredTests.cs|12845fc6.902d43c4.50a61bf3.de031890.a4aa105f.ce109560.63e0002b.894050cb.12845fc6.902d43c4.50a61bf3.de031890.a4aa105f.ce109560.63e0002b.894050cb",
+      "rule": "csharp/NoHardcodedCredentials/test",
+      "file": "tests/Dependably.Tests/Integration/LoginEnrollmentRequiredTests.cs",
+      "line": 375,
       "text": "Do not hardcode credentials in code. Found hardcoded credential used in password variable declaration."
     },
     {
@@ -563,6 +584,41 @@
       "text": "Do not hardcode credentials in code. Found hardcoded credential used in password variable declaration."
     },
     {
+      "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Unit/Identity/MasterKeyProviderTests.cs|28d3dbb1.690aa9ff.93f9d0ee.f5757239.8e57eb0c.98ad4dc3.3886cd99.24b1e0e2.28d3dbb1.690aa9ff.93f9d0ee.f5757239.8e57eb0c.98ad4dc3.3886cd99.24b1e0e2",
+      "rule": "csharp/NoHardcodedCredentials/test",
+      "file": "tests/Dependably.Tests/Unit/Identity/MasterKeyProviderTests.cs",
+      "line": 22,
+      "text": "Do not hardcode credentials in code. Found hardcoded credential used in secret key variable declaration."
+    },
+    {
+      "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Unit/Identity/MasterKeyProviderTests.cs|28d3dbb1.b4074dda.93f9d0ee.f5757239.8e57eb0c.32eaf465.3886cd99.c5659686.28d3dbb1.b4074dda.93f9d0ee.f5757239.8e57eb0c.98ad4dc3.3886cd99.24b1e0e2",
+      "rule": "csharp/NoHardcodedCredentials/test",
+      "file": "tests/Dependably.Tests/Unit/Identity/MasterKeyProviderTests.cs",
+      "line": 24,
+      "text": "Do not hardcode credentials in code. Found hardcoded credential used in field assignment with hardcoded key."
+    },
+    {
+      "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Unit/Identity/MasterKeyProviderTests.cs|ed4ea89c.39b8d118.68418e3d.f5757239.9387efb4.b4bbb3ab.ce0185b2.70e8b489.ed4ea89c.39b8d118.68418e3d.f5757239.9387efb4.b4bbb3ab.ce0185b2.70e8b489",
+      "rule": "csharp/NoHardcodedCredentials/test",
+      "file": "tests/Dependably.Tests/Unit/Identity/MasterKeyProviderTests.cs",
+      "line": 263,
+      "text": "Do not hardcode credentials in code. Found hardcoded credential used in secret key variable declaration."
+    },
+    {
+      "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Unit/Infrastructure/EnvelopeEncryptionTests.cs|01d8d61a.931351ec.9a6b4e71.f5757239.a427b94e.fdb1e8cc.7ef81ea2.24b1e0e2.01d8d61a.931351ec.9a6b4e71.f5757239.a427b94e.fdb1e8cc.7ef81ea2.24b1e0e2",
+      "rule": "csharp/NoHardcodedCredentials/test",
+      "file": "tests/Dependably.Tests/Unit/Infrastructure/EnvelopeEncryptionTests.cs",
+      "line": 47,
+      "text": "Do not hardcode credentials in code. Found hardcoded credential used in secret key variable declaration."
+    },
+    {
+      "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Unit/Infrastructure/EnvelopeEncryptionTests.cs|01d8d61a.b4074dda.c9330245.f5757239.a427b94e.fdb1e8cc.53836407.24b1e0e2.01d8d61a.b4074dda.c9330245.f5757239.a427b94e.fdb1e8cc.53836407.24b1e0e2",
+      "rule": "csharp/NoHardcodedCredentials/test",
+      "file": "tests/Dependably.Tests/Unit/Infrastructure/EnvelopeEncryptionTests.cs",
+      "line": 57,
+      "text": "Do not hardcode credentials in code. Found hardcoded credential used in secret key variable declaration."
+    },
+    {
       "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Unit/Infrastructure/SecurityStampRotationTests.cs|b08a1ac2.39b8d118.68418e3d.f5757239.a758fffc.fbf50a5e.ce0185b2.8a6c0d71.b08a1ac2.39b8d118.68418e3d.f5757239.a758fffc.fbf50a5e.ce0185b2.8a6c0d71",
       "rule": "csharp/NoHardcodedCredentials/test",
       "file": "tests/Dependably.Tests/Unit/Infrastructure/SecurityStampRotationTests.cs",
@@ -575,6 +631,13 @@
       "file": "tests/Dependably.Tests/Unit/Infrastructure/SecurityStampRotationTests.cs",
       "line": 105,
       "text": "Do not hardcode credentials in code. Found hardcoded credential used in password variable declaration."
+    },
+    {
+      "id": "csharp/NoHardcodedCredentials/test|tests/Dependably.Tests/Unit/Infrastructure/StartupServiceTests.cs|ec141d13.931351ec.9a6b4e71.f5757239.a427b94e.fdb1e8cc.7ef81ea2.24b1e0e2.ec141d13.931351ec.9a6b4e71.f5757239.a427b94e.fdb1e8cc.7ef81ea2.24b1e0e2",
+      "rule": "csharp/NoHardcodedCredentials/test",
+      "file": "tests/Dependably.Tests/Unit/Infrastructure/StartupServiceTests.cs",
+      "line": 58,
+      "text": "Do not hardcode credentials in code. Found hardcoded credential used in secret key variable declaration."
     },
     {
       "id": "javascript/DOMXSS|web/src/lib/api.js|facab985.4773f344.b6cad12c.2015d42e.b263280c.b8f3855a.cd61fc56.cde67692.dbded6d3.4773f344.c9330245.08906714.79a7d027.114273fb.cd61fc56.3ebb6b93",

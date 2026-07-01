@@ -94,7 +94,7 @@ public sealed class NpmPackumentHandler(
 
         return passthroughAllowed
             ? await ServePassthroughPackumentAsync(httpContext, orgId, fullName, pkg, settings, token, ct)
-            : await ServeLocalPackumentAsync(httpContext, orgId, fullName, pkg, token, ct);
+            : await ServeLocalPackumentAsync(httpContext, orgId, fullName, pkg, token, settings!, ct);
     }
 
     // Passthrough packument path: anonymous-pull gate, then cached bytes, then a
@@ -147,17 +147,17 @@ public sealed class NpmPackumentHandler(
             return result is FileContentResult fcr ? fcr.FileContents : null;
         }, ct);
 
-    // Local-only packument path (passthrough disabled or claim-local): authenticated reads
-    // over hosted versions plus globally-cached proxy versions, served from cache when fresh.
+    // Local-only packument path (passthrough disabled or claim-local): when AnonymousPull is
+    // disabled, a token is required; otherwise anonymous reads are permitted.
     private async Task<IActionResult> ServeLocalPackumentAsync(
-        HttpContext httpContext, string orgId, string fullName, Package? pkg, TokenRecord? token, CancellationToken ct)
+        HttpContext httpContext, string orgId, string fullName, Package? pkg, TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
         if (pkg is null)
         {
             return new NotFoundResult();
         }
 
-        if (token is null)
+        if (!settings.AnonymousPull && token is null)
         {
             httpContext.Response.Headers.WWWAuthenticate = "Bearer realm=\"dependably\"";
             return new UnauthorizedResult();
@@ -169,12 +169,11 @@ public sealed class NpmPackumentHandler(
             return ServePackumentBytes(httpContext, localCached, "private, max-age=300");
         }
 
-        var settings = await orgs.GetSettingsAsync(orgId, ct);
         var versions = await LoadCombinedVersionsAsync(orgId, pkg.Id, fullName, ct);
         var signals = await LoadVulnSignalsAsync(versions, ct);
         var tags = await distTags.GetTagsAsync(orgId, pkg.Id, ct);
         var metadata = BuildNpmMetadata(httpContext, pkg, versions,
-            tags.Count > 0 ? tags : null, settings!, signals, time.GetUtcNow());
+            tags.Count > 0 ? tags : null, settings, signals, time.GetUtcNow());
         byte[] localBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(metadata);
         cache.Set(cacheKey, localBytes, PackumentLocalTtl);
         return ServePackumentBytes(httpContext, localBytes, "private, max-age=300");
@@ -253,13 +252,13 @@ public sealed class NpmPackumentHandler(
         HttpContext httpContext, string orgId, string fullName, CancellationToken ct)
     {
         var bases = await registries.ResolveAsync(orgId, "npm", ct);
-        foreach (string upstreamBase in bases)
+        foreach (var source in bases)
         {
             try
             {
                 // Single-flight packument fetch — collapses N concurrent npm-install
                 // requests onto one upstream call when a coordinate first warms up.
-                var response = await upstream.GetOrFetchMetadataAsync($"{upstreamBase}/{fullName}", ct);
+                var response = await upstream.GetOrFetchMetadataAsync($"{source.Url}/{fullName}", source.AuthorizationHeader, ct);
                 if (!response.IsSuccessStatusCode)
                 {
                     continue;

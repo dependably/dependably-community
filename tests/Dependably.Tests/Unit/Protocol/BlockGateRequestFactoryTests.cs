@@ -44,7 +44,9 @@ public sealed class BlockGateRequestFactoryTests
             Origin: version.Origin,
             HasInstallScript: version.HasInstallScript,
             InstallScriptKind: version.InstallScriptKind,
-            BlockInstallScriptsMode: settings.BlockInstallScripts);
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            RevokedAt: version.RevokedAt,
+            BlockRevokedMode: settings.BlockRevoked);
 
         Assert.Equal(manual, factory);
     }
@@ -77,7 +79,9 @@ public sealed class BlockGateRequestFactoryTests
             Origin: version.Origin,
             HasInstallScript: version.HasInstallScript,
             InstallScriptKind: version.InstallScriptKind,
-            BlockInstallScriptsMode: settings.BlockInstallScripts);
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            RevokedAt: version.RevokedAt,
+            BlockRevokedMode: settings.BlockRevoked);
 
         Assert.Equal(manual, factory);
     }
@@ -110,7 +114,9 @@ public sealed class BlockGateRequestFactoryTests
             Origin: version.Origin,
             HasInstallScript: version.HasInstallScript,
             InstallScriptKind: version.InstallScriptKind,
-            BlockInstallScriptsMode: null);
+            BlockInstallScriptsMode: null,
+            RevokedAt: version.RevokedAt,
+            BlockRevokedMode: null);
 
         Assert.Equal(manual, factory);
     }
@@ -151,7 +157,9 @@ public sealed class BlockGateRequestFactoryTests
             Origin: blockedVersion.Origin,
             HasInstallScript: blockedVersion.HasInstallScript,
             InstallScriptKind: blockedVersion.InstallScriptKind,
-            BlockInstallScriptsMode: settings.BlockInstallScripts);
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            RevokedAt: blockedVersion.RevokedAt,
+            BlockRevokedMode: settings.BlockRevoked);
 
         var factoryAllowed = BlockGateRequest.For(orgId, ecosystem, allowedVersion, null, settings, null);
         var manualAllowed = new BlockGateRequest(orgId, ecosystem, allowedVersion.Purl, allowedVersion.Id,
@@ -168,7 +176,9 @@ public sealed class BlockGateRequestFactoryTests
             Origin: allowedVersion.Origin,
             HasInstallScript: allowedVersion.HasInstallScript,
             InstallScriptKind: allowedVersion.InstallScriptKind,
-            BlockInstallScriptsMode: settings.BlockInstallScripts);
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            RevokedAt: allowedVersion.RevokedAt,
+            BlockRevokedMode: settings.BlockRevoked);
 
         // Assert: factory requests are field-identical to manual — mixed results
         // (one blocked, one allowed) confirm both paths are covered.

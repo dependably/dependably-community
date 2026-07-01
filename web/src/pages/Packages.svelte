@@ -112,13 +112,13 @@
   }
 </script>
 
-<div class="page page-wide">
+<div class="page page-fluid">
   <div class="page-header">
     <h1 class="page-title">{$t('packages.title')}</h1>
-    <SearchInput placeholder={$t('packages.searchPlaceholder')} bind:value={search} on:search={handleSearch} class="header-search" />
   </div>
 
-  <div class="search-bar">
+  <div class="page-toolbar">
+    <SearchInput placeholder={$t('packages.searchPlaceholder')} bind:value={search} on:search={handleSearch} class="toolbar-search" />
     <select bind:value={filterEco} on:change={handleEcoChange} class="eco-select">
       <option value="">{$t('common.allEcosystems')}</option>
       {#each ECOSYSTEMS as eco (eco)}
@@ -231,14 +231,6 @@
 </div>
 
 <style>
-  .page-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .page-header :global(.header-search) {
-    width: 220px;
-  }
   .nowrap { white-space: nowrap; }
   .vuln-cell { white-space: nowrap; }
   /* The global `td { overflow: hidden }` (cell ellipsis) would clip the absolutely
@@ -284,7 +276,6 @@
   }
   .name-cell { overflow-wrap: anywhere; }
   .purl-cell { font-size: 12px; color: var(--text2); overflow-wrap: anywhere; }
-  .eco-select { width: auto; }
   .actions-cell { overflow: visible; width: 48px; }
   .row-actions { display: flex; justify-content: center; }
   .menu-check { color: var(--success); margin-right: 4px; vertical-align: middle; }

@@ -239,7 +239,7 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         var blobs = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
         return new OciUpstreamResolver(
             http, authSvc, options, blobs, _db,
-            new DisabledAirGap(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
+            new DisabledAirGap(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
     }
 
     // Returns a controller that uses _emptyOrgId (no OCI upstreams in the DB) so that
@@ -711,7 +711,7 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         var blobs = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
         var resolver = new OciUpstreamResolver(
             new NeverCallFactory(), authSvc, options, blobs, _db,
-            airGap, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System);
+            airGap, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var ctl = BuildController(resolver);
         var result = await ctl.Get("library/ubuntu/tags/list", default);

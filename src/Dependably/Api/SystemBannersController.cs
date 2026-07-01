@@ -119,17 +119,24 @@ public sealed class SystemBannersController : ControllerBase
         string severity, string body, string? linkUrl, string? linkLabel,
         string targetRole, string startsAt, string endsAt)
     {
-        if (string.IsNullOrWhiteSpace(body))
-        {
-            return _problems.ValidationErrorAction("body", "Banner body is required.");
-        }
+        return ValidateBody(body)
+            ?? ValidateLink(linkUrl, linkLabel)
+            ?? ValidateWindow(startsAt, endsAt)
+            ?? ValidateSeverityAndRole(severity, targetRole);
+    }
 
-        if (body.Length > BannerRepository.MaxBodyLength)
-        {
-            return _problems.ValidationErrorAction("body",
-                $"Banner body must not exceed {BannerRepository.MaxBodyLength} characters.");
-        }
+    private IActionResult? ValidateBody(string body)
+    {
+        return string.IsNullOrWhiteSpace(body)
+            ? _problems.ValidationErrorAction("body", "Banner body is required.")
+            : body.Length > BannerRepository.MaxBodyLength
+            ? _problems.ValidationErrorAction("body",
+                $"Banner body must not exceed {BannerRepository.MaxBodyLength} characters.")
+            : null;
+    }
 
+    private IActionResult? ValidateLink(string? linkUrl, string? linkLabel)
+    {
         if (linkUrl is not null)
         {
             if (linkUrl.Length > BannerRepository.MaxLinkUrlLength)
@@ -146,27 +153,25 @@ public sealed class SystemBannersController : ControllerBase
             }
         }
 
-        if (linkLabel is not null && linkLabel.Length > BannerRepository.MaxLinkLabelLength)
-        {
-            return _problems.ValidationErrorAction("linkLabel",
-                $"Link label must not exceed {BannerRepository.MaxLinkLabelLength} characters.");
-        }
+        return linkLabel is not null && linkLabel.Length > BannerRepository.MaxLinkLabelLength
+            ? _problems.ValidationErrorAction("linkLabel",
+                $"Link label must not exceed {BannerRepository.MaxLinkLabelLength} characters.")
+            : null;
+    }
 
-        if (!DateTimeOffset.TryParse(startsAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedStart))
-        {
-            return _problems.ValidationErrorAction("startsAt", "startsAt must be a valid ISO-8601 UTC date-time.");
-        }
+    private IActionResult? ValidateWindow(string startsAt, string endsAt)
+    {
+        return !DateTimeOffset.TryParse(startsAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedStart)
+            ? _problems.ValidationErrorAction("startsAt", "startsAt must be a valid ISO-8601 UTC date-time.")
+            : !DateTimeOffset.TryParse(endsAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedEnd)
+            ? _problems.ValidationErrorAction("endsAt", "endsAt must be a valid ISO-8601 UTC date-time.")
+            : parsedEnd <= parsedStart
+            ? _problems.ValidationErrorAction("endsAt", "endsAt must be after startsAt.")
+            : null;
+    }
 
-        if (!DateTimeOffset.TryParse(endsAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedEnd))
-        {
-            return _problems.ValidationErrorAction("endsAt", "endsAt must be a valid ISO-8601 UTC date-time.");
-        }
-
-        if (parsedEnd <= parsedStart)
-        {
-            return _problems.ValidationErrorAction("endsAt", "endsAt must be after startsAt.");
-        }
-
+    private IActionResult? ValidateSeverityAndRole(string severity, string targetRole)
+    {
         string[] validSeverities = ["info", "warn", "alert"];
         if (!validSeverities.Contains(severity, StringComparer.Ordinal))
         {

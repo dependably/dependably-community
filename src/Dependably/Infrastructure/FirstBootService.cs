@@ -1,6 +1,7 @@
 using System.Data.Common;
 using System.Security.Cryptography;
 using Dapper;
+using Dependably.Infrastructure.Identity;
 
 namespace Dependably.Infrastructure;
 
@@ -17,18 +18,23 @@ namespace Dependably.Infrastructure;
 /// The action branches by <c>DEPLOYMENT_MODE</c>:
 ///   - <c>single</c> (default): create one tenant + the bootstrap admin as that tenant's owner.
 ///   - <c>multi</c> or <c>header</c>: create the system_admin only. No tenant is auto-created.
+///
+/// When an <see cref="EnvelopeProtector"/> is configured, instance secrets are written with
+/// the <c>enc:v1:</c> envelope so fresh installs never store plaintext secrets on disk.
 /// </summary>
 public sealed class FirstBootService
 {
     private readonly IMetadataStore _db;
     private readonly IConfiguration _config;
     private readonly ILogger<FirstBootService> _logger;
+    private readonly EnvelopeProtector _envelope;
 
-    public FirstBootService(IMetadataStore db, IConfiguration config, ILogger<FirstBootService> logger)
+    public FirstBootService(IMetadataStore db, IConfiguration config, ILogger<FirstBootService> logger, EnvelopeProtector envelope)
     {
         _db = db;
         _config = config;
         _logger = logger;
+        _envelope = envelope;
     }
 
     public async Task RunAsync(CancellationToken ct = default)
@@ -59,25 +65,29 @@ public sealed class FirstBootService
             _logger.LogInformation("First boot detected — initializing instance.");
 
             // JWT secret is needed in both modes — generate once per install.
+            // When a master key is configured, store the envelope-encrypted form so the
+            // raw secret is never at rest in plaintext on a fresh install.
             string jwtSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+            string jwtStored = _envelope.IsConfigured ? _envelope.Protect(jwtSecret) : jwtSecret;
             await conn.ExecuteAsync(
                 """
                 INSERT INTO instance_settings (key, value) VALUES ('jwt_secret', @value)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
-                new { value = jwtSecret });
+                new { value = jwtStored });
 
             // MFA encryption key seeds alongside the JWT secret so both are present from
             // first boot. MfaEncryptionKeyProvider handles the generate-if-missing path for
             // upgraded installs, making this DO UPDATE SET value safe (idempotent overwrite
             // within the same first-boot transaction).
             string mfaKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+            string mfaStored = _envelope.IsConfigured ? _envelope.Protect(mfaKey) : mfaKey;
             await conn.ExecuteAsync(
                 """
                 INSERT INTO instance_settings (key, value) VALUES ('mfa_encryption_key', @value)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
-                new { value = mfaKey });
+                new { value = mfaStored });
 
             await SeedInstanceSettingsAsync(conn);
 
@@ -89,7 +99,7 @@ public sealed class FirstBootService
             }
             else
             {
-                await BootstrapSingleAsync(conn, _config);
+                await BootstrapSingleAsync(conn, _config, _envelope);
             }
 
             await conn.ExecuteAsync("COMMIT");
@@ -101,7 +111,7 @@ public sealed class FirstBootService
         }
     }
 
-    private static async Task BootstrapSingleAsync(DbConnection conn, IConfiguration config)
+    private static async Task BootstrapSingleAsync(DbConnection conn, IConfiguration config, EnvelopeProtector envelope)
     {
         string orgSlug = config["DEFAULT_TENANT_SLUG"] ?? config["DEFAULT_ORG_SLUG"] ?? "default";
         string orgId = NewId();
@@ -114,8 +124,9 @@ public sealed class FirstBootService
             "INSERT INTO org_settings (org_id) VALUES (@org_id)",
             new { org_id = orgId });
 
-        // Seed the standard public upstreams so the default org keeps proxying out of the box.
-        await UpstreamRegistrySeeder.SeedForOrgAsync(conn, orgId, config);
+        // Seed the standard public upstreams (plus any configured upstream auth) so the default
+        // org keeps proxying out of the box.
+        await UpstreamRegistrySeeder.SeedForOrgAsync(conn, orgId, config, envelope);
 
         string rawPassword = config["FIRST_BOOT_ADMIN_PASSWORD"]
             ?? Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));

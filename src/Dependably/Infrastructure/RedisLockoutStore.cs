@@ -47,29 +47,38 @@ public sealed class RedisLockoutStore : ILockoutStore
         string attemptsKey = _redis.ApplyPrefix($"lockout:attempts:{emailHash}");
         string lockedKey = _redis.ApplyPrefix($"lockout:locked:{emailHash}");
 
-        // Use a pipeline to minimize round trips.
+        // Pipeline the writes to minimize round trips, but await their completion: a dropped
+        // lockout write must surface, not vanish as an unobserved task. Silently losing the
+        // attempt count would under-count failures (a lockout-bypass risk under Redis trouble).
         var batch = db.CreateBatch();
-        _ = batch.StringSetAsync(attemptsKey, newCount, TimeSpan.FromSeconds(LockoutSeconds));
+        var writes = new List<Task>
+        {
+            batch.StringSetAsync(attemptsKey, newCount, TimeSpan.FromSeconds(LockoutSeconds)),
+        };
 
         if (lockedUntil.HasValue)
         {
             var ttl = lockedUntil.Value - _time.GetUtcNow();
             if (ttl > TimeSpan.Zero)
             {
-                _ = batch.StringSetAsync(lockedKey, "1", ttl);
+                writes.Add(batch.StringSetAsync(lockedKey, "1", ttl));
             }
         }
 
         batch.Execute();
+        await Task.WhenAll(writes);
     }
 
     public async Task ClearAsync(string emailHash, CancellationToken ct)
     {
         var db = _redis.GetDatabase();
         var batch = db.CreateBatch();
-        _ = batch.KeyDeleteAsync(_redis.ApplyPrefix($"lockout:attempts:{emailHash}"));
-        _ = batch.KeyDeleteAsync(_redis.ApplyPrefix($"lockout:locked:{emailHash}"));
+        var deletes = new[]
+        {
+            batch.KeyDeleteAsync(_redis.ApplyPrefix($"lockout:attempts:{emailHash}")),
+            batch.KeyDeleteAsync(_redis.ApplyPrefix($"lockout:locked:{emailHash}")),
+        };
         batch.Execute();
-        await Task.CompletedTask;
+        await Task.WhenAll(deletes);
     }
 }

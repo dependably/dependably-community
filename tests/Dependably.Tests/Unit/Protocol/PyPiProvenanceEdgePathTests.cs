@@ -3,8 +3,9 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using Dependably.Infrastructure;
 using Dependably.Protocol.Provenance;
-using Microsoft.Extensions.Configuration;
+using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Tests.Unit.Protocol;
@@ -76,8 +77,8 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var verifier = MakeVerifier(root, (Issuer, Subject));
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var (verifier, trust) = MakeVerifier(root, (Issuer, Subject));
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
         Assert.Equal(Identity, result.Signer);
@@ -106,8 +107,8 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var verifier = MakeVerifier(root, (Issuer, Subject));
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var (verifier, trust) = MakeVerifier(root, (Issuer, Subject));
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
@@ -117,9 +118,9 @@ public sealed class PyPiProvenanceEdgePathTests
     public void SingleObjectWithoutEnvelopeProperty_Unsigned()
     {
         var (root, _) = BuildChain();
-        var verifier = MakeVerifier(root, (Issuer, Subject));
+        var (verifier, trust) = MakeVerifier(root, (Issuer, Subject));
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, """{"version":1,"publisher":"pypi"}""");
+        var result = verifier.VerifyAttestation(FileName, FileSha256, """{"version":1,"publisher":"pypi"}""", trust);
 
         Assert.Equal(ProvenanceStatus.Unsigned, result.Status);
     }
@@ -168,8 +169,8 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var verifier = MakeVerifier(root, (Issuer, Subject));
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var (verifier, trust) = MakeVerifier(root, (Issuer, Subject));
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
@@ -210,8 +211,8 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var verifier = MakeVerifier(root, (Issuer, Subject));
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var (verifier, trust) = MakeVerifier(root, (Issuer, Subject));
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -251,8 +252,8 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var verifier = MakeVerifier(root, (Issuer, Subject));
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var (verifier, trust) = MakeVerifier(root, (Issuer, Subject));
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -296,8 +297,8 @@ public sealed class PyPiProvenanceEdgePathTests
         });
 
         // Trust the issuer + DNS name as the identity.
-        var verifier = MakeVerifier(root, (Issuer, dnsName));
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var (verifier, trust) = MakeVerifier(root, (Issuer, dnsName));
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
         Assert.Equal(dnsName, result.Signer);
@@ -318,12 +319,12 @@ public sealed class PyPiProvenanceEdgePathTests
         string json = BuildRekorBundle(leaf, FileName, FileSha256, otherRekorKey, integratedTime,
             tamperProof: false, tamperSet: false);
 
-        // Store contains rekorKey, but the bundle was signed with otherRekorKey.
-        var store = PyPiRekorVerifierTests.BuildTrustStoreWithRekor(
+        // Trust material contains rekorKey, but the bundle was signed with otherRekorKey.
+        var trust = PyPiRekorVerifierTests.BuildTrustMaterialWithRekor(
             new[] { root }, rekorKey, new[] { (Issuer, Subject) });
-        var verifier = new PyPiProvenanceVerifier(store, NullLogger<PyPiProvenanceVerifier>.Instance);
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -392,11 +393,11 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var store = PyPiRekorVerifierTests.BuildTrustStoreWithRekor(
+        var trust = PyPiRekorVerifierTests.BuildTrustMaterialWithRekor(
             new[] { root }, rekorKey, new[] { (Issuer, Subject) });
-        var verifier = new PyPiProvenanceVerifier(store, NullLogger<PyPiProvenanceVerifier>.Instance);
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -468,11 +469,11 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var store = PyPiRekorVerifierTests.BuildTrustStoreWithRekor(
+        var trust = PyPiRekorVerifierTests.BuildTrustMaterialWithRekor(
             new[] { root }, rekorKey, new[] { (Issuer, Subject) });
-        var verifier = new PyPiProvenanceVerifier(store, NullLogger<PyPiProvenanceVerifier>.Instance);
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -532,11 +533,11 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var store = PyPiRekorVerifierTests.BuildTrustStoreWithRekor(
+        var trust = PyPiRekorVerifierTests.BuildTrustMaterialWithRekor(
             new[] { root }, rekorKey, new[] { (Issuer, Subject) });
-        var verifier = new PyPiProvenanceVerifier(store, NullLogger<PyPiProvenanceVerifier>.Instance);
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -597,11 +598,11 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var store = PyPiRekorVerifierTests.BuildTrustStoreWithRekor(
+        var trust = PyPiRekorVerifierTests.BuildTrustMaterialWithRekor(
             new[] { root }, rekorKey, new[] { (Issuer, Subject) });
-        var verifier = new PyPiProvenanceVerifier(store, NullLogger<PyPiProvenanceVerifier>.Instance);
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -684,11 +685,11 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var store = PyPiRekorVerifierTests.BuildTrustStoreWithRekor(
+        var trust = PyPiRekorVerifierTests.BuildTrustMaterialWithRekor(
             new[] { root }, rekorKey, new[] { (Issuer, Subject) });
-        var verifier = new PyPiProvenanceVerifier(store, NullLogger<PyPiProvenanceVerifier>.Instance);
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
@@ -734,11 +735,11 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var store = PyPiRekorVerifierTests.BuildTrustStoreWithRekor(
+        var trust = PyPiRekorVerifierTests.BuildTrustMaterialWithRekor(
             new[] { root }, rekorKey, new[] { (Issuer, Subject) });
-        var verifier = new PyPiProvenanceVerifier(store, NullLogger<PyPiProvenanceVerifier>.Instance);
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
@@ -818,11 +819,11 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var store = PyPiRekorVerifierTests.BuildTrustStoreWithRekor(
+        var trust = PyPiRekorVerifierTests.BuildTrustMaterialWithRekor(
             new[] { root }, rekorKey, new[] { (Issuer, Subject) });
-        var verifier = new PyPiProvenanceVerifier(store, NullLogger<PyPiProvenanceVerifier>.Instance);
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
 
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
@@ -903,12 +904,12 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var store = PyPiRekorVerifierTests.BuildTrustStoreWithRekor(
+        var trust = PyPiRekorVerifierTests.BuildTrustMaterialWithRekor(
             new[] { root }, rekorKey, new[] { (Issuer, Subject) });
-        var verifier = new PyPiProvenanceVerifier(store, NullLogger<PyPiProvenanceVerifier>.Instance);
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
 
         // The base64 path is taken; since this is a valid proof, it should verify.
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
     }
 
@@ -959,8 +960,8 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var verifier = MakeVerifier(root, (Issuer, Subject));
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var (verifier, trust) = MakeVerifier(root, (Issuer, Subject));
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         Assert.Equal(ProvenanceStatus.Verified, result.Status);
         Assert.Equal(Identity, result.Signer);
@@ -1009,95 +1010,78 @@ public sealed class PyPiProvenanceEdgePathTests
             },
         });
 
-        var verifier = MakeVerifier(root, (Issuer, Subject));
-        var result = verifier.VerifyAttestation(FileName, FileSha256, json);
+        var (verifier, trust) = MakeVerifier(root, (Issuer, Subject));
+        var result = verifier.VerifyAttestation(FileName, FileSha256, json, trust);
 
         // At least one attestation present but none verified — must return Failed, not Unsigned.
         Assert.Equal(ProvenanceStatus.Failed, result.Status);
     }
 
-    // ── TrustStore: LoadRoots — invalid cert entry is skipped with a warning ──
+    // ── BuildFromAnchors: invalid cert entry is skipped with a warning ──────────
 
     [Fact]
     public void TrustStore_LoadRoots_InvalidCertEntry_IsSkippedAndNotConfigured()
     {
         // A base64 string that is not a valid DER certificate should be silently skipped;
-        // the store ends up with zero roots and reports IsConfigured = false.
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
+        // BuildFromAnchors ends up with zero roots and IsConfigured is false.
+        var anchors = new List<TrustAnchorMaterial>
         {
-            ["PyPI"] = new Dictionary<string, object>
-            {
-                ["SigstoreRoots"] = new[] { Convert.ToBase64String(new byte[] { 0x01, 0x02, 0x03 }) },
-                ["TrustedPublishers"] = new[] { new Dictionary<string, string> { ["issuer"] = Issuer, ["subject"] = Subject } },
-            },
-        });
+            new() { Id = "r1", AnchorKind = "sigstore_root", Material = Convert.ToBase64String(new byte[] { 0x01, 0x02, 0x03 }) },
+            new() { Id = "p1", AnchorKind = "trusted_publisher", Material = JsonSerializer.Serialize(new { issuer = Issuer, subject = Subject, match = "prefix" }) },
+        };
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        var store = new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        var material = PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
 
-        Assert.False(store.IsConfigured);
-        Assert.Empty(store.GetRoots());
+        Assert.False(material.IsConfigured);
+        Assert.Empty(material.GetRoots());
     }
 
-    // ── TrustStore: LoadRoots — whitespace-only entry is skipped ─────────────
+    // ── BuildFromAnchors: whitespace-only entry is skipped ───────────────────
 
     [Fact]
     public void TrustStore_LoadRoots_WhitespaceEntry_ValidEntryStillLoads()
     {
-        // A whitespace-only SigstoreRoots entry should be silently skipped; the next valid
-        // entry is still loaded and the store reports IsConfigured = true.
+        // A whitespace-only sigstore_root entry should be silently skipped; the next valid
+        // entry is still loaded and IsConfigured should be true.
         var (root, _) = BuildChain();
-        string validRoot = Convert.ToBase64String(root.Export(X509ContentType.Cert));
+        string validRootB64 = Convert.ToBase64String(root.Export(X509ContentType.Cert));
 
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
+        var anchors = new List<TrustAnchorMaterial>
         {
-            ["PyPI"] = new Dictionary<string, object>
-            {
-                // One whitespace entry (skipped) and one valid entry.
-                ["SigstoreRoots"] = new[] { "   ", validRoot },
-                ["TrustedPublishers"] = new[] { new Dictionary<string, string> { ["issuer"] = Issuer, ["subject"] = Subject } },
-            },
-        });
+            // Whitespace-only entry (skipped) then valid entry.
+            new() { Id = "r0", AnchorKind = "sigstore_root", Material = "   " },
+            new() { Id = "r1", AnchorKind = "sigstore_root", Material = validRootB64 },
+            new() { Id = "p1", AnchorKind = "trusted_publisher", Material = JsonSerializer.Serialize(new { issuer = Issuer, subject = Subject, match = "prefix" }) },
+        };
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        var store = new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        var material = PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
 
         // One valid root loaded; whitespace entry skipped; IsConfigured should be true.
-        Assert.True(store.IsConfigured);
-        Assert.Single(store.GetRoots());
+        Assert.True(material.IsConfigured);
+        Assert.Single(material.GetRoots());
     }
 
-    // ── TrustStore: LoadPublishers — entry missing issuer/subject is skipped ──
+    // ── BuildFromAnchors: publisher entry missing issuer/subject is skipped ───
 
     [Fact]
     public void TrustStore_LoadPublishers_MissingIssuer_IsSkipped()
     {
         // An entry with a missing issuer must be logged and skipped; Publishers.Count = 0 → not configured.
         var (root, _) = BuildChain();
-        string validRoot = Convert.ToBase64String(root.Export(X509ContentType.Cert));
+        string validRootB64 = Convert.ToBase64String(root.Export(X509ContentType.Cert));
 
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
+        var anchors = new List<TrustAnchorMaterial>
         {
-            ["PyPI"] = new Dictionary<string, object>
-            {
-                ["SigstoreRoots"] = new[] { validRoot },
-                // Entry has subject but no issuer.
-                ["TrustedPublishers"] = new[] { new Dictionary<string, string> { ["subject"] = Subject } },
-            },
-        });
+            new() { Id = "r1", AnchorKind = "sigstore_root", Material = validRootB64 },
+            // Entry has subject but no issuer — should be skipped.
+            new() { Id = "p1", AnchorKind = "trusted_publisher", Material = JsonSerializer.Serialize(new { subject = Subject }) },
+        };
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        var store = new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        var material = PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
 
         // Publishers count is 0 because the incomplete entry was skipped.
-        Assert.Empty(store.Publishers);
-        Assert.False(store.IsConfigured);
+        Assert.Empty(material.Publishers);
+        Assert.False(material.IsConfigured);
     }
 
     [Fact]
@@ -1105,151 +1089,120 @@ public sealed class PyPiProvenanceEdgePathTests
     {
         // Same as above, but subject is missing instead of issuer.
         var (root, _) = BuildChain();
-        string validRoot = Convert.ToBase64String(root.Export(X509ContentType.Cert));
+        string validRootB64 = Convert.ToBase64String(root.Export(X509ContentType.Cert));
 
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
+        var anchors = new List<TrustAnchorMaterial>
         {
-            ["PyPI"] = new Dictionary<string, object>
-            {
-                ["SigstoreRoots"] = new[] { validRoot },
-                ["TrustedPublishers"] = new[] { new Dictionary<string, string> { ["issuer"] = Issuer } },
-            },
-        });
+            new() { Id = "r1", AnchorKind = "sigstore_root", Material = validRootB64 },
+            // Entry has issuer but no subject — should be skipped.
+            new() { Id = "p1", AnchorKind = "trusted_publisher", Material = JsonSerializer.Serialize(new { issuer = Issuer }) },
+        };
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        var store = new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        var material = PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
 
-        Assert.Empty(store.Publishers);
-        Assert.False(store.IsConfigured);
+        Assert.Empty(material.Publishers);
+        Assert.False(material.IsConfigured);
     }
 
-    // ── TrustStore: LoadRekorKeys — entry missing keyId/key is skipped ────────
+    // ── BuildFromAnchors: rekor_key entry missing key material is skipped ─────
 
     [Fact]
     public void TrustStore_LoadRekorKeys_MissingKeyId_HasNoRekorKeys()
     {
+        // A rekor_key anchor with no key material (empty string) should be skipped.
         using var rekorKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         string keyB64 = Convert.ToBase64String(rekorKey.ExportSubjectPublicKeyInfo());
 
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
+        var anchors = new List<TrustAnchorMaterial>
         {
-            ["PyPI"] = new Dictionary<string, object>
-            {
-                ["RekorPublicKeys"] = new[] { new Dictionary<string, string> { ["key"] = keyB64 /* missing keyId */ } },
-            },
-        });
+            // Provide only the material (key bytes) but empty KeyId — the row has empty material
+            // to simulate the "missing key" failure path.
+            new() { Id = "k1", AnchorKind = "rekor_key", Material = "" },
+        };
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        var store = new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        var material = PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
 
-        Assert.False(store.HasRekorKeys);
+        Assert.False(material.HasRekorKeys);
     }
 
     [Fact]
     public void TrustStore_LoadRekorKeys_MissingKey_HasNoRekorKeys()
     {
+        // A rekor_key anchor with empty material should be skipped since it can't be parsed.
         using var rekorKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         byte[] spki = rekorKey.ExportSubjectPublicKeyInfo();
         string logIdB64 = Convert.ToBase64String(SHA256.HashData(spki));
 
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
+        var anchors = new List<TrustAnchorMaterial>
         {
-            ["PyPI"] = new Dictionary<string, object>
-            {
-                ["RekorPublicKeys"] = new[] { new Dictionary<string, string> { ["keyId"] = logIdB64 /* missing key */ } },
-            },
-        });
+            new() { Id = "k1", AnchorKind = "rekor_key", KeyId = logIdB64, Material = "" },
+        };
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        var store = new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        var material = PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
 
-        Assert.False(store.HasRekorKeys);
+        Assert.False(material.HasRekorKeys);
     }
 
-    // ── TrustStore: LoadRekorKeys — invalid key material is skipped ──────────
+    // ── BuildFromAnchors: invalid key material is skipped ────────────────────
 
     [Fact]
     public void TrustStore_LoadRekorKeys_InvalidKeyMaterial_HasNoRekorKeys()
     {
-        // keyId is valid base64 but the key bytes are not a valid ECDSA SPKI.
+        // KeyId is valid base64 but the key bytes are not a valid ECDSA SPKI.
         string keyIdB64 = Convert.ToBase64String(new byte[32]);
         string badKeyB64 = Convert.ToBase64String(new byte[] { 0x01, 0x02, 0x03 });
 
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
+        var anchors = new List<TrustAnchorMaterial>
         {
-            ["PyPI"] = new Dictionary<string, object>
-            {
-                ["RekorPublicKeys"] = new[]
-                {
-                    new Dictionary<string, string> { ["keyId"] = keyIdB64, ["key"] = badKeyB64 },
-                },
-            },
-        });
+            new() { Id = "k1", AnchorKind = "rekor_key", KeyId = keyIdB64, Material = badKeyB64 },
+        };
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        var store = new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        var material = PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
 
-        Assert.False(store.HasRekorKeys);
+        Assert.False(material.HasRekorKeys);
     }
 
-    // ── TrustStore: LoadRekorKeys — mismatched keyId logs warning, uses computed id ──
+    // ── BuildFromAnchors: mismatched keyId logs warning, uses computed id ─────
 
     [Fact]
     public void TrustStore_LoadRekorKeys_MismatchedKeyId_UsesComputedId()
     {
-        // The operator supplies a keyId that does not match SHA-256(SPKI) of the key.
-        // The store must log a warning and use the computed id; GetRekorKey must match on
+        // The operator supplies a KeyId that does not match SHA-256(SPKI) of the key.
+        // BuildFromAnchors must log a warning and use the computed id; GetRekorKey must match on
         // the computed id, not the configured (wrong) one.
         using var rekorKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         byte[] spki = rekorKey.ExportSubjectPublicKeyInfo();
         byte[] computedLogId = SHA256.HashData(spki);
         string keyB64 = Convert.ToBase64String(spki);
 
-        // Deliberately wrong keyId: all zeros.
+        // Deliberately wrong KeyId: all zeros.
         string wrongKeyIdB64 = Convert.ToBase64String(new byte[32]);
 
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
+        var anchors = new List<TrustAnchorMaterial>
         {
-            ["PyPI"] = new Dictionary<string, object>
-            {
-                ["RekorPublicKeys"] = new[]
-                {
-                    new Dictionary<string, string> { ["keyId"] = wrongKeyIdB64, ["key"] = keyB64 },
-                },
-            },
-        });
+            new() { Id = "k1", AnchorKind = "rekor_key", KeyId = wrongKeyIdB64, Material = keyB64 },
+        };
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        var store = new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        var material = PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
 
-        // HasRekorKeys should still be true (the key parsed even though the keyId was wrong).
-        Assert.True(store.HasRekorKeys);
+        // HasRekorKeys should still be true (the key parsed even though the KeyId was wrong).
+        Assert.True(material.HasRekorKeys);
 
         // GetRekorKey with the COMPUTED id should find the key.
-        var found = store.GetRekorKey(computedLogId);
+        var found = material.GetRekorKey(computedLogId);
         Assert.NotNull(found);
 
         // GetRekorKey with the WRONG (configured) id should NOT find the key.
-        var notFound = store.GetRekorKey(new byte[32]);
+        var notFound = material.GetRekorKey(new byte[32]);
         Assert.Null(notFound);
     }
 
-    // ── TrustStore: ExtractBase64 — PEM armour strip path ────────────────────
+    // ── ExtractBase64 — PEM armour strip path ────────────────────────────────
 
     [Fact]
     public void TrustStore_LoadRoots_PemInput_ParsedCorrectly()
     {
-        // When a SigstoreRoots entry is in PEM format, ExtractBase64 must strip the armour
+        // When a sigstore_root anchor is in PEM format, ExtractBase64 must strip the armour
         // and produce a valid DER certificate.
         var (root, _) = BuildChain();
         byte[] der = root.Export(X509ContentType.Cert);
@@ -1259,22 +1212,16 @@ public sealed class PyPiProvenanceEdgePathTests
             + Convert.ToBase64String(der, Base64FormattingOptions.InsertLineBreaks)
             + "\n-----END CERTIFICATE-----";
 
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
+        var anchors = new List<TrustAnchorMaterial>
         {
-            ["PyPI"] = new Dictionary<string, object>
-            {
-                ["SigstoreRoots"] = new[] { pem },
-                ["TrustedPublishers"] = new[] { new Dictionary<string, string> { ["issuer"] = Issuer, ["subject"] = Subject } },
-            },
-        });
+            new() { Id = "r1", AnchorKind = "sigstore_root", Material = pem },
+            new() { Id = "p1", AnchorKind = "trusted_publisher", Material = JsonSerializer.Serialize(new { issuer = Issuer, subject = Subject, match = "prefix" }) },
+        };
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        var store = new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        var material = PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
 
-        Assert.True(store.IsConfigured);
-        Assert.Single(store.GetRoots());
+        Assert.True(material.IsConfigured);
+        Assert.Single(material.GetRoots());
     }
 
     // ── TrustedPublisher.Matches — exact and prefix matching ─────────────────
@@ -1308,27 +1255,90 @@ public sealed class PyPiProvenanceEdgePathTests
         Assert.False(publisher.Matches(Issuer, Identity));
     }
 
-    // ── IsConfigured + Ecosystem pass-through ─────────────────────────────────
+    // ── Exact vs Prefix match mode ────────────────────────────────────────────
 
     [Fact]
-    public void Verifier_IsConfigured_ReflectsTrustStore()
+    public void TrustedPublisher_ExactMode_RejectsLongerIdentity()
     {
-        // Verifier.IsConfigured must delegate to the trust store.
+        // An Exact-mode publisher pins a full workflow+ref identity.
+        // The leaf's SAN is the full identity — exact match passes.
+        var exact = new TrustedPublisher(Issuer, Identity, TrustedPublisherMatchMode.Exact);
+        Assert.True(exact.Matches(Issuer, Identity));
+
+        // A Prefix-mode publisher with only the org prefix accepts the same leaf.
+        var prefix = new TrustedPublisher(Issuer, Subject, TrustedPublisherMatchMode.Prefix);
+        Assert.True(prefix.Matches(Issuer, Identity));
+
+        // Exact-mode publisher with only the org prefix rejects the longer leaf identity.
+        var exactPrefix = new TrustedPublisher(Issuer, Subject, TrustedPublisherMatchMode.Exact);
+        Assert.False(exactPrefix.Matches(Issuer, Identity));
+    }
+
+    [Fact]
+    public void TrustedPublisher_ExactMode_DifferentRef_Fails()
+    {
+        // Exact match on a specific ref: a leaf with a different ref must be rejected.
+        const string mainRef = "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main";
+        const string prRef = "https://github.com/org/repo/.github/workflows/release.yml@refs/pull/99/merge";
+
+        var publisher = new TrustedPublisher(Issuer, mainRef, TrustedPublisherMatchMode.Exact);
+
+        Assert.True(publisher.Matches(Issuer, mainRef));
+        Assert.False(publisher.Matches(Issuer, prRef));
+    }
+
+    // ── InferMatchMode smart default ──────────────────────────────────────────
+
+    [Fact]
+    public void InferMatchMode_WorkflowYmlWithRef_ReturnsExact()
+    {
+        // A subject that contains a .yml workflow path + @ref marker should infer Exact.
+        const string workflowSubject =
+            "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main";
+        Assert.Equal(TrustedPublisherMatchMode.Exact, TrustedPublisher.InferMatchMode(workflowSubject));
+    }
+
+    [Fact]
+    public void InferMatchMode_WorkflowYamlWithRef_ReturnsExact()
+    {
+        // Same as above but with a .yaml extension.
+        const string workflowSubject =
+            "https://github.com/org/repo/.github/workflows/publish.yaml@refs/tags/v1.0.0";
+        Assert.Equal(TrustedPublisherMatchMode.Exact, TrustedPublisher.InferMatchMode(workflowSubject));
+    }
+
+    [Fact]
+    public void InferMatchMode_OrgPrefix_ReturnsPrefix()
+    {
+        // An org/repo URL prefix with no workflow path infers Prefix.
+        Assert.Equal(TrustedPublisherMatchMode.Prefix, TrustedPublisher.InferMatchMode("https://github.com/org/repo/"));
+    }
+
+    [Fact]
+    public void InferMatchMode_RepoRootOnly_ReturnsPrefix()
+    {
+        // A short repository root identity with no workflow path infers Prefix.
+        Assert.Equal(TrustedPublisherMatchMode.Prefix, TrustedPublisher.InferMatchMode("https://github.com/org/"));
+    }
+
+    // ── IsConfigured on trust material ───────────────────────────────────────
+
+    [Fact]
+    public void TrustMaterial_IsConfigured_TrueWhenRootsAndPublishersPresent()
+    {
+        // IsConfigured requires at least one root AND at least one publisher.
         var (root, _) = BuildChain();
-        var configured = MakeVerifier(root, (Issuer, Subject));
+        var configured = MakeTrustMaterial(new[] { root }, new[] { (Issuer, Subject) });
         Assert.True(configured.IsConfigured);
 
-        var notConfigured = new PyPiProvenanceVerifier(
-            MakeTrustStore(Array.Empty<X509Certificate2>(), Array.Empty<(string, string)>()),
-            NullLogger<PyPiProvenanceVerifier>.Instance);
-        Assert.False(notConfigured.IsConfigured);
+        var empty = MakeTrustMaterial(Array.Empty<X509Certificate2>(), Array.Empty<(string, string)>());
+        Assert.False(empty.IsConfigured);
     }
 
     [Fact]
     public void Verifier_Ecosystem_IsPypi()
     {
-        var (root, _) = BuildChain();
-        var verifier = MakeVerifier(root, (Issuer, Subject));
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
         Assert.Equal("pypi", verifier.Ecosystem);
     }
 
@@ -1517,32 +1527,40 @@ public sealed class PyPiProvenanceEdgePathTests
         });
     }
 
-    private static PyPiProvenanceVerifier MakeVerifier(
+    private static (PyPiProvenanceVerifier Verifier, PyPiTrustMaterial Trust) MakeVerifier(
         X509Certificate2 root, params (string Issuer, string Subject)[] publishers)
-        => new(MakeTrustStore(new[] { root }, publishers), NullLogger<PyPiProvenanceVerifier>.Instance);
+    {
+        var trust = MakeTrustMaterial(new[] { root }, publishers);
+        var verifier = new PyPiProvenanceVerifier(new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
+        return (verifier, trust);
+    }
 
-    private static PyPiSigstoreTrustStore MakeTrustStore(
+    // Builds PyPiTrustMaterial from cert roots and publishers using BuildFromAnchors.
+    private static PyPiTrustMaterial MakeTrustMaterial(
         X509Certificate2[] roots, (string Issuer, string Subject)[] publishers)
     {
-        string[] rootEntries = roots.Select(c => Convert.ToBase64String(c.Export(X509ContentType.Cert))).ToArray();
-        var publisherEntries = publishers.Select(p => new Dictionary<string, string>
-        {
-            ["issuer"] = p.Issuer,
-            ["subject"] = p.Subject,
-        }).ToArray();
+        var anchors = new List<TrustAnchorMaterial>();
 
-        string json = JsonSerializer.Serialize(new Dictionary<string, object>
+        foreach (var cert in roots)
         {
-            ["PyPI"] = new Dictionary<string, object>
+            anchors.Add(new TrustAnchorMaterial
             {
-                ["SigstoreRoots"] = rootEntries,
-                ["TrustedPublishers"] = publisherEntries,
-            },
-        });
+                Id = Guid.NewGuid().ToString(),
+                AnchorKind = "sigstore_root",
+                Material = Convert.ToBase64String(cert.Export(X509ContentType.Cert)),
+            });
+        }
 
-        var config = new ConfigurationBuilder()
-            .AddJsonStream(new MemoryStream(Encoding.UTF8.GetBytes(json)))
-            .Build();
-        return new PyPiSigstoreTrustStore(config, NullLogger<PyPiSigstoreTrustStore>.Instance);
+        foreach (var (issuer, subject) in publishers)
+        {
+            anchors.Add(new TrustAnchorMaterial
+            {
+                Id = Guid.NewGuid().ToString(),
+                AnchorKind = "trusted_publisher",
+                Material = JsonSerializer.Serialize(new { issuer, subject, match = "prefix" }),
+            });
+        }
+
+        return PyPiSigstoreTrustStore.BuildFromAnchors(anchors, NullLogger.Instance);
     }
 }

@@ -765,9 +765,9 @@ public sealed class CargoController : OrgScopedControllerBase
     {
         var upstreamLines = new List<string>();
         var upstreamUrls = await _registries.ResolveAsync(orgId, "cargo", ct);
-        foreach (string upstreamBase in upstreamUrls)
+        foreach (var source in upstreamUrls)
         {
-            string? fetched = await FetchUpstreamIndexAsync(upstreamBase, name, ct);
+            string? fetched = await FetchUpstreamIndexAsync(source.Url, name, ct, source.AuthorizationHeader);
             if (fetched is null)
             {
                 continue;
@@ -851,10 +851,10 @@ public sealed class CargoController : OrgScopedControllerBase
             return NotFound();
         }
 
-        var upstreamUrls = await _registries.ResolveAsync(orgId, "cargo", ct);
-        return upstreamUrls.Count == 0
+        var upstreamSources = await _registries.ResolveAsync(orgId, "cargo", ct);
+        return upstreamSources.Count == 0
             ? NotFound()
-            : await ProxyCrateFromUpstreamAsync(orgId, name, version, blobKey, upstreamUrls, ct);
+            : await ProxyCrateFromUpstreamAsync(orgId, name, version, blobKey, upstreamSources, ct);
     }
 
     // Walks the configured upstream URLs in priority order, fetching the crate from the first
@@ -863,12 +863,14 @@ public sealed class CargoController : OrgScopedControllerBase
     [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Functional Snyk // deepcode ignore suppression marker, not commented-out code.")]
     private async Task<IActionResult> ProxyCrateFromUpstreamAsync(
         string orgId, string name, string version, string blobKey,
-        IReadOnlyList<string> upstreamUrls, CancellationToken ct)
+        IReadOnlyList<UpstreamSource> upstreamSources, CancellationToken ct)
     {
-        foreach (string upstreamBase in upstreamUrls)
+        foreach (var source in upstreamSources)
         {
+            string upstreamBase = source.Url;
+            string? authorizationHeader = source.AuthorizationHeader;
             string downloadUrl = BuildCrateDownloadUrl(upstreamBase, name, version);
-            var checksumSpec = await ResolveUpstreamChecksumSpecAsync(upstreamBase, name, version, ct);
+            var checksumSpec = await ResolveUpstreamChecksumSpecAsync(upstreamBase, name, version, ct, authorizationHeader);
 
             Stream crateStream;
             try
@@ -880,7 +882,7 @@ public sealed class CargoController : OrgScopedControllerBase
                 // deepcode ignore PT,LogForging: name and version are validated by PathSafeValidator.ValidateUpstreamSegment above;
                 // blobKey comes from BlobKeys.Cargo (no traversal possible); Serilog uses structured rendering.
                 (crateStream, _) = await _upstream.GetOrFetchStreamAsync(
-                    blobKey, downloadUrl, checksumSpec, "cargo", orgId, ct: ct);
+                    blobKey, downloadUrl, checksumSpec, "cargo", orgId, ct: ct, authorizationHeader: authorizationHeader);
             }
             catch (ChecksumException)
             {
@@ -923,7 +925,7 @@ public sealed class CargoController : OrgScopedControllerBase
 
             // Resolve the index line to store alongside the cache_artifact row so the
             // sparse-index renderer can serve it without a package_versions row.
-            string? upstreamIndexText = await FetchUpstreamIndexAsync(upstreamBase, name, ct);
+            string? upstreamIndexText = await FetchUpstreamIndexAsync(upstreamBase, name, ct, authorizationHeader);
             string indexLine = BuildProxyIndexLine(name, version, sha256Hex, upstreamIndexText);
 
             await RecordProxiedVersionAsync(orgId, name, ct);
@@ -1052,13 +1054,13 @@ public sealed class CargoController : OrgScopedControllerBase
     /// </summary>
     [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Functional Snyk // deepcode ignore suppression marker, not commented-out code.")]
     private async Task<string?> FetchUpstreamIndexAsync(
-        string upstreamBase, string name, CancellationToken ct)
+        string upstreamBase, string name, CancellationToken ct, string? authorizationHeader = null)
     {
         string indexPath = IndexPath(name);
         string url = $"{upstreamBase}/{indexPath}";
         try
         {
-            var response = await _upstream.GetOrFetchMetadataAsync(url, ct);
+            var response = await _upstream.GetOrFetchMetadataAsync(url, authorizationHeader, ct);
             return response.IsSuccessStatusCode
                 ? response.BodyAsString()
                 : null;
@@ -1213,9 +1215,9 @@ public sealed class CargoController : OrgScopedControllerBase
     /// proceeds unverified, exactly as a registry that omits cksum would behave.
     /// </summary>
     private async Task<ChecksumSpec?> ResolveUpstreamChecksumSpecAsync(
-        string upstreamBase, string name, string version, CancellationToken ct)
+        string upstreamBase, string name, string version, CancellationToken ct, string? authorizationHeader = null)
     {
-        string? indexText = await FetchUpstreamIndexAsync(upstreamBase, name, ct);
+        string? indexText = await FetchUpstreamIndexAsync(upstreamBase, name, ct, authorizationHeader);
         if (indexText is null)
         {
             return null;

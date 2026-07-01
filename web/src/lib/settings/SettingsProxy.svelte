@@ -98,6 +98,14 @@
     </select>
   </div>
   <div class="form-row">
+    <label class="label-row" for="block-revoked">{$t('settings.proxy.blockRevoked')} <InfoTip text={$t('settings.proxy.blockRevokedHint')} /></label>
+    <select id="block-revoked" bind:value={proxySettings.block_revoked}>
+      <option value="off">{$t('settings.proxy.blockRevokedOff')}</option>
+      <option value="warn">{$t('settings.proxy.blockRevokedWarn')}</option>
+      <option value="block">{$t('settings.proxy.blockRevokedBlock')}</option>
+    </select>
+  </div>
+  <div class="form-row">
     <label class="label-row" for="block-malicious">{$t('settings.proxy.blockMalicious')} <InfoTip text={$t('settings.proxy.blockMaliciousHint')} /></label>
     <select id="block-malicious" bind:value={proxySettings.block_malicious}>
       <option value="off">{$t('settings.proxy.blockMaliciousOff')}</option>

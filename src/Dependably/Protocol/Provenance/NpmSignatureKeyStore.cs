@@ -1,82 +1,107 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
+using Dependably.Infrastructure;
 
 namespace Dependably.Protocol.Provenance;
 
 /// <summary>
-/// Operator-pinned trust anchors for npm registry signatures. Mirrors the RPM
-/// <c>Rpm:GpgKey</c> posture: the trust root is always configured out of band by the operator,
-/// never the key the upstream registry serves at <c>/-/npm/v1/keys</c> (fetching the verifier's
+/// Per-org trust anchor store for npm registry signatures. Trust anchors are stored
+/// as per-org rows in <c>signature_trust_anchor</c> (<c>ecosystem='npm'</c>,
+/// <c>anchor_kind='spki'</c>). Each row carries a base64 SPKI DER public key for one
+/// keyid; the verifier resolves all rows at request time from
+/// <see cref="IPerOrgTrustAnchorStore"/> and accepts any signature that verifies
+/// against a pinned key.
+///
+/// The trust root is always configured out of band by the operator — never the key
+/// the upstream registry serves at <c>/-/npm/v1/keys</c> (fetching the verifier's
 /// own trust root from the thing it is verifying would defeat the check).
 ///
-/// Configuration: <c>Npm:SignatureKeys</c> is an array (like <c>Oci:Upstreams</c>) of
-/// <c>{ "keyid": "&lt;keyid&gt;", "key": "&lt;base64 SPKI DER&gt;" }</c> objects. The <c>key</c>
-/// is the base64-encoded SubjectPublicKeyInfo (SPKI) DER of the registry's ECDSA P-256 public key
-/// — exactly the <c>key</c> field the public registry publishes at <c>/-/npm/v1/keys</c>, which an
-/// operator copies in after verifying it out of band. An array (rather than a keyid-keyed object)
-/// is required because npm keyids contain a colon (e.g.
-/// <c>SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA</c>), which the configuration system
-/// treats as a hierarchy separator.
-///
-/// Unparseable entries are logged and skipped (the keyid simply has no anchor, so any signature
-/// quoting it fails closed); a store with zero usable keys reports
-/// <see cref="IsConfigured"/> = false.
+/// Unparseable entries are logged and skipped (the keyid simply has no anchor, so any
+/// signature quoting it fails closed); an org with zero usable keys reports
+/// <see cref="IsConfiguredForAsync"/> = false.
 /// </summary>
 public sealed class NpmSignatureKeyStore
 {
-    private readonly Dictionary<string, byte[]> _spkiByKeyId;
-    private readonly ILogger<NpmSignatureKeyStore> _logger;
+    private readonly IPerOrgTrustAnchorStore _store;
 
-    public NpmSignatureKeyStore(IConfiguration configuration, ILogger<NpmSignatureKeyStore> logger)
+    public NpmSignatureKeyStore(IPerOrgTrustAnchorStore store)
     {
-        _logger = logger;
-        _spkiByKeyId = LoadKeys(configuration.GetSection("Npm:SignatureKeys"));
+        _store = store;
     }
 
-    /// <summary>True when at least one pinned key parsed into a usable SPKI blob.</summary>
-    public bool IsConfigured => _spkiByKeyId.Count > 0;
+    /// <summary>
+    /// Always false at the instance level — npm trust anchors are per-org, not instance-wide.
+    /// Use <see cref="IsConfiguredForAsync"/> to test whether a specific org has anchors.
+    /// This property exists only to satisfy the <see cref="IArtifactProvenanceVerifier"/> interface
+    /// contract; code that needs the per-org gate must call <see cref="IsConfiguredForAsync"/>.
+    /// </summary>
+    public bool IsConfigured => false;
 
     /// <summary>
-    /// Returns the pinned SPKI DER for <paramref name="keyId"/>, or null when no anchor is
-    /// pinned for that id. A signature quoting an unknown keyid is unverifiable → fail closed.
+    /// Returns true when at least one npm SPKI trust anchor is configured for <paramref name="orgId"/>.
+    /// Fail-closed: an org with no anchors cannot enable signature verification.
     /// </summary>
-    // Null signals "no anchor for this keyid" to the caller; returning empty bytes would be
-    // semantically incorrect (an empty SPKI is not a valid absent-key sentinel).
-    [SuppressMessage("Major Bug", "S1168:Empty arrays and collections should be returned instead of null",
-        Justification = "Null is the intended absent-key sentinel; an empty byte array is not a valid SPKI.")]
-    public byte[]? GetSpki(string keyId) =>
-        _spkiByKeyId.TryGetValue(keyId, out byte[]? spki) ? spki : null;
+    public Task<bool> IsConfiguredForAsync(string orgId, CancellationToken ct = default)
+        => _store.IsConfiguredForAsync(orgId, "npm", ct);
 
-    private Dictionary<string, byte[]> LoadKeys(IConfigurationSection section)
+    /// <summary>
+    /// Resolves the per-org SPKI dictionary keyed by keyid for <paramref name="orgId"/>.
+    /// Entries that fail base64 or ECDSA parse are logged and omitted. Returns an empty
+    /// dictionary when no anchors are configured.
+    /// </summary>
+    public Task<IReadOnlyDictionary<string, byte[]>> GetSpkiMapAsync(
+        string orgId, CancellationToken ct = default)
+        => _store.GetNpmKeysAsync(orgId, ct);
+
+    // Parses a list of TrustAnchorMaterial rows into a keyid→SPKI-bytes map.
+    // Skips entries with missing keyid/material or unparseable SPKI blobs (logged + fail-closed).
+    internal static IReadOnlyDictionary<string, byte[]> BuildSpkiMap(
+        IReadOnlyList<TrustAnchorMaterial> anchors, ILogger logger)
     {
         var result = new Dictionary<string, byte[]>(StringComparer.Ordinal);
-        foreach (var entry in section.GetChildren())
+        foreach (var anchor in anchors)
         {
-            string? keyId = entry["keyid"];
-            string? b64 = entry["key"];
-            if (string.IsNullOrWhiteSpace(keyId) || string.IsNullOrWhiteSpace(b64))
+            string keyId = anchor.KeyId ?? "";
+            string material = anchor.Material ?? "";
+            if (string.IsNullOrWhiteSpace(keyId) || string.IsNullOrWhiteSpace(material))
             {
                 continue;
             }
 
-            try
+            if (!TryParseSpki(keyId, material.Trim(), out byte[]? spki, logger))
             {
-                byte[] spki = Convert.FromBase64String(b64.Trim());
-                // Validate the blob is a real P-256 SPKI now, at load time, so a typo surfaces
-                // as a missing anchor (fail-closed) rather than a per-request crypto throw.
-                using var ecdsa = ECDsa.Create();
-                ecdsa.ImportSubjectPublicKeyInfo(spki, out _);
-                result[keyId] = spki;
+                continue;
             }
-            catch (Exception ex) when (ex is FormatException or CryptographicException)
-            {
-                _logger.LogWarning(
-                    "Npm:SignatureKeys entry for keyid {KeyId} could not be parsed as a base64 "
-                    + "ECDSA SPKI key ({ExceptionType}); signatures quoting this keyid fail closed.",
-                    keyId, ex.GetType().Name);
-            }
+
+            result[keyId] = spki!;
         }
 
         return result;
+    }
+
+    // Parses a single base64 SPKI DER entry. Returns false and logs a warning on failure.
+    // Validation now (at load time from the anchor store) means a typo surfaces as a missing
+    // anchor (fail-closed) rather than a per-request crypto throw.
+    [SuppressMessage("Major Bug", "S1168:Empty arrays and collections should be returned instead of null",
+        Justification = "Null output is the intended absent-key sentinel on parse failure.")]
+    internal static bool TryParseSpki(string keyId, string b64, out byte[]? spki, ILogger logger)
+    {
+        spki = null;
+        try
+        {
+            byte[] bytes = Convert.FromBase64String(b64);
+            using var ecdsa = ECDsa.Create();
+            ecdsa.ImportSubjectPublicKeyInfo(bytes, out _);
+            spki = bytes;
+            return true;
+        }
+        catch (Exception ex) when (ex is FormatException or CryptographicException)
+        {
+            logger.LogWarning(
+                "npm trust anchor for keyid {KeyId} could not be parsed as a base64 "
+                + "ECDSA SPKI key ({ExceptionType}); signatures quoting this keyid fail closed.",
+                keyId, ex.GetType().Name);
+            return false;
+        }
     }
 }

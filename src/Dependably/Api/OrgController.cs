@@ -111,13 +111,13 @@ public sealed class OrgController : OrgScopedControllerBase
         }
 
         string orgId = CurrentTenantId();
-        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(name), ct);
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
         if (pkg is null)
         {
             return NotFound();
         }
 
-        var versions = await LoadCombinedVersionsForOrgAsync(orgId, pkg.Id, ecosystem, AsPurlName(name), ct);
+        var versions = await LoadCombinedVersionsForOrgAsync(orgId, pkg.Id, ecosystem, AsPurlName(ecosystem, name), ct);
         // OCI: load the digest → tags lookup so each version row surfaces its associated tags.
         var ociTagsByDigest = ecosystem == "oci"
             ? await _packages.GetOciTagsByDigestAsync(orgId, pkg.PurlName, ct)
@@ -145,7 +145,7 @@ public sealed class OrgController : OrgScopedControllerBase
     // Merges per-version OSV scores from uploaded versions (keyed by package_version_id) and proxy
     // versions (keyed by cache_artifact_id) into a single id → max-CVSS map.
     private async Task<Dictionary<string, double>> BuildVersionScoreMapAsync(
-        IReadOnlyList<string> uploadedIds, IReadOnlyList<string> proxyIds, CancellationToken ct)
+        List<string> uploadedIds, List<string> proxyIds, CancellationToken ct)
     {
         var uploadedScores = uploadedIds.Count > 0
             ? await _vulns.GetMaxScoresForVersionsAsync(uploadedIds, ct)
@@ -168,7 +168,7 @@ public sealed class OrgController : OrgScopedControllerBase
     // computed gate status, and (for OCI) the tags pointing at its digest.
     private static object ProjectVersionView(
         PackageVersion v,
-        IReadOnlyDictionary<string, double> scoreMap,
+        Dictionary<string, double> scoreMap,
         double tolerance,
         string blockDeprecatedMode,
         ILookup<string, string> uploadedLicenses,
@@ -197,6 +197,7 @@ public sealed class OrgController : OrgScopedControllerBase
             v.PublishedAt,
             v.ManualBlockState,
             v.Deprecated,
+            v.RevokedAt,
             v.Origin,
             v.UpstreamIntegrityValue,
             v.UpstreamIntegrityAlgorithm,
@@ -322,7 +323,7 @@ public sealed class OrgController : OrgScopedControllerBase
         }
 
         string orgId = CurrentTenantId();
-        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(name), ct);
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
         if (pkg is null)
         {
             return NotFound();
@@ -387,7 +388,7 @@ public sealed class OrgController : OrgScopedControllerBase
         }
 
         string orgId = CurrentTenantId();
-        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(name), ct);
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
         if (pkg is null)
         {
             return NotFound();
@@ -420,7 +421,7 @@ public sealed class OrgController : OrgScopedControllerBase
         // Global-plane fallback: proxy versions no longer have a package_versions row.
         // Look up the artifact in cache_artifact (joined to tenant_artifact_access for org
         // scoping) and serve from the cache tier.
-        var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, AsPurlName(name), ct);
+        var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
         var facts = proxyEntries.FirstOrDefault(
             e => string.Equals(e.Version, version, StringComparison.OrdinalIgnoreCase)
                  && (string.IsNullOrEmpty(file) || string.Equals(e.Filename, file, StringComparison.OrdinalIgnoreCase)));
@@ -474,7 +475,7 @@ public sealed class OrgController : OrgScopedControllerBase
         }
 
         string orgId = CurrentTenantId();
-        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(name), ct);
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
         if (pkg is null)
         {
             return NotFound();
@@ -752,7 +753,14 @@ public sealed class OrgController : OrgScopedControllerBase
 
     // The UI encodes '/' as %2F for every ecosystem (npm scopes, OCI image
     // namespaces like library/ubuntu, etc.); ASP.NET keeps %2F encoded in route
-    // values to prevent path splitting, so decode it back before lookup.
-    private static string AsPurlName(string name) =>
-        NpmRouteHelper.DecodeRouteName(name);
+    // values to prevent path splitting, so decode it back before lookup. PyPI
+    // additionally requires PEP 503 normalization (case, -/_/. all equivalent) since
+    // that's the form package rows are stored under (PurlNormalizer.PyPiName, applied
+    // by every PyPI publish/lookup path) — without it, a non-canonical spelling here
+    // resolves to a different (or no) package row than the one a publish matches.
+    private static string AsPurlName(string ecosystem, string name)
+    {
+        string decoded = NpmRouteHelper.DecodeRouteName(name);
+        return ecosystem == "pypi" ? PurlNormalizer.PyPiName(decoded) : decoded;
+    }
 }

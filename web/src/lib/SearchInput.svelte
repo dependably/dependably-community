@@ -7,7 +7,7 @@
   export let ariaLabel = ''
   export let debounce = 300
   // `class` is a reserved word in script context — forward it under an alias so
-  // callers keep their page-level sizing classes (.header-search, .table-search).
+  // callers keep their page-level sizing classes (.toolbar-search, .table-search).
   let klass = ''
   export { klass as class }
 

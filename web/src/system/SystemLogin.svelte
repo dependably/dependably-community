@@ -1,7 +1,8 @@
 <script>
   import { t } from 'svelte-i18n'
   import { api, systemApi } from '../lib/api.js'
-  import { user, navigate, takePendingRoute } from '../lib/store.js'
+  import { user, navigate, takePendingRoute, sessionExpired } from '../lib/store.js'
+  import { armSessionWatch } from '../lib/session.js'
 
   let email = '', password = '', error = '', loading = false
 
@@ -12,9 +13,11 @@
   let useRecovery = false
 
   function postLoginNavigate(me) {
-    // mustChangePassword users go to system-profile; the pending route (if any) is consumed
-    // by SystemProfile.svelte once rotation completes. Other users consume it now.
-    if (me.mustChangePassword) {
+    // mustChangePassword users go to system-profile first (rotation required); the pending route
+    // is consumed by SystemProfile.svelte once rotation and any required MFA setup complete.
+    // mfaEnrollmentRequired users also go straight to system-profile so the auto-open reactive
+    // fires the MFA setup modal immediately, without a visible dashboard→profile bounce.
+    if (me.mustChangePassword || me.mfaEnrollmentRequired) {
       navigate('system-profile', {}, { replace: true })
     } else {
       const pending = takePendingRoute()
@@ -34,6 +37,8 @@
       }
       const me = await systemApi.me()
       user.set(me)
+      sessionExpired.set(false)
+      armSessionWatch(me.sessionExpiresAt, systemApi.me)
       postLoginNavigate(me)
     } catch (e) {
       error = e.message || $t('system.login.failed')
@@ -49,6 +54,8 @@
       await api.loginTotp(totpCode, rememberDevice)
       const me = await systemApi.me()
       user.set(me)
+      sessionExpired.set(false)
+      armSessionWatch(me.sessionExpiresAt, systemApi.me)
       postLoginNavigate(me)
     } catch (e) {
       if (e.status === 401) {
@@ -80,6 +87,13 @@
 
       <label>{$t('system.login.password')}</label>
       <input type="password" bind:value={password} required autocomplete="current-password" />
+
+      {#if $sessionExpired}
+        <div class="session-expired-notice" role="alert">
+          <svg width="14" height="14" aria-hidden="true"><use href="/icons.svg#icon-info"/></svg>
+          {$t('auth.login.sessionExpired')}
+        </div>
+      {/if}
 
       {#if error}<div class="error-msg">{error}</div>{/if}
 
@@ -143,6 +157,18 @@
 </div>
 
 <style>
+  .session-expired-notice {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    background: var(--info-bg, var(--bg3));
+    border: 1px solid var(--info-border, var(--border));
+    color: var(--info-text, var(--text2));
+    font-size: 13px;
+  }
+
   .login-page {
     display: flex;
     align-items: center;

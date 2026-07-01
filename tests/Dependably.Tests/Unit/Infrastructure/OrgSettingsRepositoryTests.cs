@@ -242,18 +242,22 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
     public async Task UpsertRetentionAsync_InsertThenUpdate_BothPathsHit()
     {
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"ret-{Guid.NewGuid():N}");
-        await _repo.UpsertRetentionAsync(orgId, keepVersions: 10, keepDays: 30, activityRetentionDays: 90);
+        await _repo.UpsertRetentionAsync(orgId, keepVersions: 10, keepDays: 30, activityRetentionDays: 90,
+            purgeUnlistedAfterDays: 45);
         var first = (await _repo.GetSettingsAsync(orgId))!;
         Assert.Equal(10, first.KeepVersions);
         Assert.Equal(30, first.KeepDays);
         Assert.Equal(90, first.ActivityRetentionDays);
+        Assert.Equal(45, first.PurgeUnlistedAfterDays);
 
         // Update path — ON CONFLICT DO UPDATE branch.
-        await _repo.UpsertRetentionAsync(orgId, keepVersions: null, keepDays: 7, activityRetentionDays: null);
+        await _repo.UpsertRetentionAsync(orgId, keepVersions: null, keepDays: 7, activityRetentionDays: null,
+            purgeUnlistedAfterDays: null);
         var second = (await _repo.GetSettingsAsync(orgId))!;
         Assert.Null(second.KeepVersions);
         Assert.Equal(7, second.KeepDays);
         Assert.Null(second.ActivityRetentionDays);
+        Assert.Null(second.PurgeUnlistedAfterDays);
     }
 
     // ── UpsertProxySettingsAsync ─────────────────────────────────────────────
@@ -304,34 +308,29 @@ public sealed class OrgSettingsRepositoryTests : IClassFixture<InMemoryDbFixture
         Assert.Equal("block", (await _repo.GetSettingsAsync(orgId))!.LicenseEnforcementMode);
     }
 
-    // ── Instance settings ────────────────────────────────────────────────────
+    // ── Instance settings — ListInstanceSettingsAsync ─────────────────────────
 
     [Fact]
-    public async Task GetInstanceSettingAsync_UnknownKey_ReturnsNull()
+    public async Task ListInstanceSettingsAsync_ExcludesJwtSecretAndMfaKey()
     {
-        Assert.Null(await _repo.GetInstanceSettingAsync($"missing-{Guid.NewGuid():N}"));
-    }
-
-    [Fact]
-    public async Task SetInstanceSettingAsync_InsertThenOverwrite_ListExcludesJwtSecret()
-    {
+        // Seed rows directly via Dapper to avoid the deleted Set path.
+        await using var conn = await _fixture.Store.OpenAsync();
         string unique = Guid.NewGuid().ToString("N");
-        string key = $"k-{unique}";
+        string userKey = $"k-{unique}";
+        await conn.ExecuteAsync(
+            "INSERT INTO instance_settings (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value = @value",
+            new { key = userKey, value = "v1" });
+        await conn.ExecuteAsync(
+            "INSERT INTO instance_settings (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value = @value",
+            new { key = "jwt_secret", value = "TOPSECRET" });
+        await conn.ExecuteAsync(
+            "INSERT INTO instance_settings (key, value) VALUES (@key, @value) ON CONFLICT(key) DO UPDATE SET value = @value",
+            new { key = "mfa_encryption_key", value = "MFASECRET" });
 
-        // Insert path.
-        await _repo.SetInstanceSettingAsync(key, "v1");
-        Assert.Equal("v1", await _repo.GetInstanceSettingAsync(key));
-
-        // ON CONFLICT update path.
-        await _repo.SetInstanceSettingAsync(key, "v2");
-        Assert.Equal("v2", await _repo.GetInstanceSettingAsync(key));
-
-        // jwt_secret stored but excluded from list.
-        await _repo.SetInstanceSettingAsync("jwt_secret", "TOPSECRET");
         var listed = await _repo.ListInstanceSettingsAsync();
-        Assert.False(listed.ContainsKey("jwt_secret"));
-        Assert.Equal("v2", listed[key]);
-        // Direct lookup still returns it — used by JWT signing path.
-        Assert.Equal("TOPSECRET", await _repo.GetInstanceSettingAsync("jwt_secret"));
+
+        Assert.False(listed.ContainsKey("jwt_secret"), "jwt_secret must be excluded from listing");
+        Assert.False(listed.ContainsKey("mfa_encryption_key"), "mfa_encryption_key must be excluded from listing");
+        Assert.Equal("v1", listed[userKey]);
     }
 }

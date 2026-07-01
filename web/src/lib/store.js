@@ -22,9 +22,27 @@ theme.subscribe(t => {
   localStorage.setItem('theme', t)
 })
 
+// ── Sidebar ─────────────────────────────────────────────────────────────────────
+// Collapsed state persists per-browser (same pattern as theme). '1' = collapsed.
+const savedCollapsed = typeof localStorage !== 'undefined' ? localStorage.getItem('sidebarCollapsed') : null
+export const sidebarCollapsed = writable(savedCollapsed === '1')
+sidebarCollapsed.subscribe(c => {
+  if (typeof localStorage === 'undefined') return
+  localStorage.setItem('sidebarCollapsed', c ? '1' : '0')
+})
+
+// Open-source notices modal (Licenses.svelte). Shared so both the sidebar footer
+// and the Profile page trigger the single modal rendered at the App root.
+export const noticesOpen = writable(false)
+
 // ── Auth ───────────────────────────────────────────────────────────────────────
 /** @type {import('svelte/store').Writable<User | null>} */
 export const user = writable(null)
+
+// Set to true when a proactive session-expiry timer fires or a focus/visibility
+// re-validation detects an expired session. Consumed by Login and SystemLogin to
+// show an "Your session expired" notice. Cleared on successful login or manual navigation away.
+export const sessionExpired = writable(false)
 
 // ── Navigation ─────────────────────────────────────────────────────────────────
 // route: { page, params }

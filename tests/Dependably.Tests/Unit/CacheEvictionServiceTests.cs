@@ -1,5 +1,7 @@
+using System.Diagnostics.Metrics;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Observability;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
@@ -67,15 +69,55 @@ public class CacheEvictionServiceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task NoCapsConfigured_DoesNothing()
+    public async Task NoCapsConfigured_AppliesDefaultAgeCap()
     {
-        await SeedAsync("1.0.0", _clock.GetUtcNow().AddDays(-100));
+        var t = _clock.GetUtcNow();
+        await SeedAsync("old", t.AddDays(-100));
+        await SeedAsync("recent", t.AddDays(-1));
+
         var svc = Build(new Dictionary<string, string?>());
         var result = await svc.RunOnceAsync();
-        Assert.Equal(0, result.ArtifactsEvicted);
 
+        Assert.Equal(1, result.ArtifactsEvicted);
         var repo = new CacheArtifactRepository(_db);
-        Assert.NotNull(await repo.GetByCoordinateAsync("npm", "lodash", "1.0.0", "lodash-1.0.0.tgz"));
+        Assert.Null(await repo.GetByCoordinateAsync("npm", "lodash", "old", "lodash-old.tgz"));
+        Assert.NotNull(await repo.GetByCoordinateAsync("npm", "lodash", "recent", "lodash-recent.tgz"));
+    }
+
+    [Fact]
+    public async Task ExplicitCap_OverridesDefault()
+    {
+        var t = _clock.GetUtcNow();
+        await SeedAsync("stale", t.AddDays(-15));
+        await SeedAsync("fresh", t.AddDays(-3));
+
+        var svc = Build(new Dictionary<string, string?> { ["CACHE_MAX_AGE_DAYS"] = "7" });
+        var result = await svc.RunOnceAsync();
+
+        Assert.Equal(1, result.ArtifactsEvicted);
+        var repo = new CacheArtifactRepository(_db);
+        Assert.Null(await repo.GetByCoordinateAsync("npm", "lodash", "stale", "lodash-stale.tgz"));
+        Assert.NotNull(await repo.GetByCoordinateAsync("npm", "lodash", "fresh", "lodash-fresh.tgz"));
+    }
+
+    [Fact]
+    public async Task Eviction_EmitsCacheEvictionsMetric()
+    {
+        var t = _clock.GetUtcNow();
+        await SeedAsync("evict-me", t.AddDays(-100));
+
+        long evictions = 0;
+        long evictedBytes = 0;
+        using var listener = EvictionMeterListener(
+            onEvictions: delta => evictions += delta,
+            onBytes: delta => evictedBytes += delta);
+
+        var svc = Build(new Dictionary<string, string?>());
+        var result = await svc.RunOnceAsync();
+
+        Assert.Equal(1, result.ArtifactsEvicted);
+        Assert.Equal(1, evictions);
+        Assert.Equal(100, evictedBytes);
     }
 
     [Fact]
@@ -133,5 +175,41 @@ public class CacheEvictionServiceTests : IAsyncLifetime
             "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = @id",
             new { id = a.Id });
         Assert.Equal(0, count);
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns an active <see cref="MeterListener"/> that invokes the supplied callbacks
+    /// with each measurement emitted by <c>dependably.cache.evictions</c> and
+    /// <c>dependably.cache.evicted_bytes</c>. Must be disposed after the assertion.
+    /// </summary>
+    private static MeterListener EvictionMeterListener(Action<long> onEvictions, Action<long> onBytes)
+    {
+        var listener = new MeterListener
+        {
+            InstrumentPublished = (instrument, l) =>
+            {
+                if (instrument.Meter.Name == DependablyMeter.MeterName &&
+                    (instrument.Name == "dependably.cache.evictions" ||
+                     instrument.Name == "dependably.cache.evicted_bytes"))
+                {
+                    l.EnableMeasurementEvents(instrument);
+                }
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((instrument, measurement, _, _) =>
+        {
+            if (instrument.Name == "dependably.cache.evictions")
+            {
+                onEvictions(measurement);
+            }
+            else if (instrument.Name == "dependably.cache.evicted_bytes")
+            {
+                onBytes(measurement);
+            }
+        });
+        listener.Start();
+        return listener;
     }
 }
