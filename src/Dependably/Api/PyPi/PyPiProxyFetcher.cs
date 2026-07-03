@@ -31,7 +31,7 @@ public sealed class PyPiProxyFetcher(
         string orgId, PyPiFilename parsed,
         TokenRecord? token, OrgSettings settings, string? sourceIp, CancellationToken ct)
     {
-        string purlCheck = $"pkg:pypi/{parsed.PurlName}";
+        string purlCheck = PurlNormalizer.NameOnly("pypi", parsed.PurlName);
         if (settings.AllowlistMode && !await allowlist.IsAllowedAsync(orgId, purlCheck, ct))
         {
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
@@ -70,7 +70,7 @@ public sealed class PyPiProxyFetcher(
             httpContext.Response.Headers["X-Cache"] = fetched.IsHit ? "HIT" : "MISS";
             if (pkgVersions is not null)
             {
-                httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersions.Value.Version.Purl);
+                httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVersions.Value.Version.Purl);
             }
 
             // Record into cache_artifact + tenant_artifact_access on every fetch path
@@ -86,7 +86,7 @@ public sealed class PyPiProxyFetcher(
             if (!fetched.IsHit && pkgVersions is null)
             {
                 var firstFetchBlock = await RecordAndScanFirstFetchAsync(
-                    file, parsed, fetched.Blob, upstreamSha256, gate, cacheArtifactId, ct);
+                    file, parsed, fetched.Blob, upstreamSha256, gate, cacheArtifactId, upstreamUrl, ct);
                 if (firstFetchBlock is not null)
                 {
                     return firstFetchBlock;
@@ -171,11 +171,11 @@ public sealed class PyPiProxyFetcher(
     ///   <item><b>Known-sha path:</b> routes through
     ///         <see cref="UpstreamClient.GetOrFetchStreamAsync"/> which hash-and-stages the
     ///         body to disk — no full-artefact byte[] is ever materialised.</item>
-    ///   <item><b>Unknown-sha cold-start:</b> still buffers via
-    ///         <see cref="UpstreamClient.GetOrFetchMetadataAsync"/> because the cache key
-    ///         only exists after hashing. The byte[] residue is bounded to this path and
-    ///         wrapped in a <see cref="BlobHandle"/> so all downstream code is
-    ///         stream-shaped.</item>
+    ///   <item><b>Unknown-sha cold-start:</b> routes through
+    ///         <see cref="UpstreamClient.FetchAndCacheByUrlAsync"/> which hash-and-stages the
+    ///         body to a disk temp file (SHA-256 computed inline), stores it under the
+    ///         content-addressed key, and wraps the result in a <see cref="BlobHandle"/> — no
+    ///         full-artefact byte[] is ever materialised.</item>
     /// </list>
     /// </summary>
     // deepcode ignore PT,LogForging: blob put uses BlobKeys.Proxy(sha) which validates
@@ -212,34 +212,21 @@ public sealed class PyPiProxyFetcher(
             return new PyPiFetchOutcome(blob, isHit);
         }
 
-        // Unknown checksum — fetch, compute, cache, wrap in a BlobHandle. Route through
-        // single-flighted metadata fetch so a stampede of concurrent CI clients
-        // pulling an unchecked-sha coordinate triggers just one upstream call.
-        //
-        // PyPi cold-start residue of the proxy-fetch: the SHA isn't known up front so the
-        // content-addressed hash-and-stage pipeline can't route this request. Wrapping the
-        // byte[] in a BlobHandle keeps the residue localized — ProxyFetchService,
-        // ProxyVersionRecorder, and LicenseExtractor never see a byte[].
-        // Artifact bytes flow through the buffered path here, so the cap is the artifact
-        // limit, not the (much smaller) default metadata limit.
-        var resp = await upstream.GetOrFetchMetadataAsync(
-            upstreamUrl, UpstreamClient.MaxUpstreamResponseBytes, authorizationHeader, ct);
-        if (!resp.IsSuccessStatusCode)
-        {
-            return null;
-        }
+        // Unknown checksum — the content-addressed cache key only exists after hashing, so route
+        // through the hash-and-stage disk pipeline. FetchAndCacheByUrlAsync streams the body to a
+        // staging temp file (SHA-256 computed inline via HashingFileStream), stores it under
+        // BlobKeys.Proxy(sha), and single-flights concurrent first-fetches of the same URL. No
+        // full-artefact byte[] is ever materialised — memory stays bounded by the staging buffer
+        // regardless of wheel size or concurrency. A genuine upstream 404 surfaces as an
+        // HttpRequestException (mapped to 404 by the caller); a transient exhaustion surfaces as
+        // UpstreamFetchFailedException (mapped to a retryable 503).
+        var fetched = await upstream.FetchAndCacheByUrlAsync(
+            upstreamUrl, checksumSpec: null, "pypi", orgId, authorizationHeader, ct);
 
-        byte[] bytes = resp.Body;
-        string sha = ChecksumVerifier.ComputeSha256Hex(bytes);
-        string proxyKey = BlobKeys.Proxy(sha);
-        if (!await blobs.ExistsAsync(proxyKey, ct))
-        {
-            await blobs.PutAsync(proxyKey, new MemoryStream(bytes), ct);
-        }
-
-        var coldBlob = new BlobHandle(proxyKey, sha, bytes.LongLength,
-            async openCt => await blobs.GetAsync(proxyKey, openCt)
-                ?? (Stream)new MemoryStream(bytes, writable: false));
+        var coldBlob = new BlobHandle(fetched.BlobKey, fetched.Sha256Hex, fetched.SizeBytes,
+            async openCt => await blobs.GetAsync(fetched.BlobKey, openCt)
+                ?? throw new InvalidOperationException(
+                    $"Blob {fetched.BlobKey} vanished between PutAsync and GetAsync."));
         return new PyPiFetchOutcome(coldBlob, IsHit: false);
     }
 
@@ -247,7 +234,7 @@ public sealed class PyPiProxyFetcher(
     // 64-char lowercase hex; Serilog uses RenderedCompactJsonFormatter (CRLF-safe).
     private async Task<IActionResult?> RecordAndScanFirstFetchAsync(
         string file, PyPiFilename parsed, BlobHandle blob, string? upstreamSha256,
-        ProxyContext gate, string? cacheArtifactId, CancellationToken ct)
+        ProxyContext gate, string? cacheArtifactId, string upstreamUrl, CancellationToken ct)
     {
         string purl = PurlNormalizer.PyPi(parsed.PurlName, parsed.Version);
         // Use the highest-priority configured upstream for the supplementary JSON metadata fetch.
@@ -295,7 +282,8 @@ public sealed class PyPiProxyFetcher(
             BlockInstallScriptsMode: gate.Settings.BlockInstallScripts,
             ProvenanceStatus: Dependably.Protocol.Provenance.ProvenanceStatuses.ToColumn(prov.Status),
             ProvenanceSigner: prov.Signer,
-            VerifyProvenanceMode: gate.Settings.VerifyPyPiAttestations), ct);
+            VerifyProvenanceMode: gate.Settings.VerifyPyPiAttestations,
+            UpstreamUrl: upstreamUrl), ct);
         return result.Decision == BlockDecision.Blocked ? new StatusCodeResult(StatusCodes.Status403Forbidden) : null;
     }
 
@@ -441,7 +429,4 @@ public sealed class PyPiProxyFetcher(
         string? sha = match.Groups[3].Success ? match.Groups[3].Value.ToLowerInvariant() : null;
         return (absolute.ToString(), sha);
     }
-
-    private static string SanitizeHeader(string value)
-        => value.Replace("\r", "").Replace("\n", "").Replace("\0", "");
 }

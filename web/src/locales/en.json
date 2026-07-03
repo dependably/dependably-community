@@ -146,6 +146,9 @@
       "unknown": "No upstream version to compare",
       "versionLabel": "Latest: {version}"
     },
+    "vulns": {
+      "none": "No known vulnerabilities"
+    },
     "malicious": {
       "label": "Malicious",
       "help": "This package has a version flagged as known-malicious (OSV MAL- advisory)."
@@ -201,7 +204,7 @@
     "loadFailed": "Failed to load claims: {message}"
   },
   "upload": {
-    "title": "Upload packages",
+    "title": "Upload Packages",
     "description": "Select package for upload",
     "drop": "Drop files here, or click to choose",
     "selected": "{count, plural, =0 {No files selected} =1 {1 file selected} other {# files selected}}",
@@ -504,16 +507,63 @@
     "tabs": {
       "general": "General",
       "authentication": "Authentication",
-      "uploadLimits": "Upload limits",
-      "retention": "Retention",
-      "licenses": "Licenses",
+      "storage": "Storage",
       "proxy": "Proxy",
-      "claims": "Claims",
+      "gates": "Gates",
+      "signatures": "Signatures",
+      "namespaces": "Namespaces",
+      "licenses": "Licenses",
       "serviceTokens": "Service tokens",
+      "webhooks": "Webhooks",
       "banners": "Banners",
-      "security": "Security",
       "instance": "Instance settings",
       "metrics": "Metrics access"
+    },
+    "storage": {
+      "uploadTitle": "Upload limits",
+      "retentionTitle": "Retention"
+    },
+    "webhooks": {
+      "section": "Webhook subscriptions",
+      "hint": "Dependably posts a signed JSON payload to each URL when a matching event occurs — for example, a package publish, yank, or new vulnerability. Requires DEPENDABLY_MASTER_KEY to store a signing secret.",
+      "empty": "No webhook subscriptions.",
+      "add": "Add webhook",
+      "remove": "Remove",
+      "removeConfirm": "Remove this webhook subscription?",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "test": "Send test",
+      "testOk": "Test ping sent.",
+      "testFail": "Test ping failed.",
+      "noSecretWarning": "No signing secret — deliveries are unsigned. Configure DEPENDABLY_MASTER_KEY to enable secrets.",
+      "secretSet": "Secret set",
+      "columns": {
+        "url": "URL",
+        "events": "Events",
+        "status": "Status",
+        "lastDelivery": "Last delivery"
+      },
+      "modal": {
+        "addTitle": "Add webhook",
+        "editTitle": "Edit webhook",
+        "url": "Endpoint URL",
+        "urlHint": "Must be an https:// URL reachable from the Dependably host.",
+        "events": "Events",
+        "eventsHint": "Select one or more event types to subscribe to.",
+        "secret": "Signing secret (optional)",
+        "secretHint": "HMAC-SHA-256 key sent in the X-Dependably-Signature header. Leave blank to disable signing. Requires DEPENDABLY_MASTER_KEY.",
+        "secretRotateHint": "Enter a new value to rotate the secret. Leave blank to keep the current secret.",
+        "description": "Description (optional)",
+        "enabledLabel": "Enabled"
+      },
+      "eventTypes": {
+        "package.publish": "Publish",
+        "package.replace": "Replace",
+        "package.import": "Import",
+        "package.unlist": "Unlist",
+        "package.yank": "Yank",
+        "package.vulnerability": "Vulnerability"
+      }
     },
     "banners": {
       "severity": "Severity",
@@ -644,7 +694,7 @@
       "testFailed": "SAML test failed: {reason}",
       "certExpiryWarningTitle": "IdP signing certificate expiring soon",
       "certExpiryExpiredTitle": "IdP signing certificate has expired",
-      "certExpiryWarningBody": "The SAML IdP signing certificate expires in {days} day(s) ({notAfter}). Replace it in Settings → Authentication before it expires to avoid SAML login disruption.",
+      "certExpiryWarningBody": "The SAML IdP signing certificate expires in {days, plural, one {# day} other {# days}} ({notAfter}). Replace it in Settings → Authentication before it expires to avoid SAML login disruption.",
       "certExpiryExpiredBody": "The SAML IdP signing certificate expired on {notAfter}. SAML logins may fail. Replace the certificate in Settings → Authentication immediately.",
       "certExpiryReplace": "Replace certificate"
     },
@@ -653,7 +703,7 @@
     "security": {
       "trustAnchors": {
         "section": "Signature trust anchors",
-        "hint": "Per-org public key material used to verify signatures at proxy fetch time. Add an anchor for an ecosystem, then enable signature verification in Settings → Proxy.",
+        "hint": "Per-org public key material used to verify signatures at proxy fetch time. Add an anchor for an ecosystem, then enable signature verification in Settings → Signatures.",
         "add": "Add anchor",
         "emptyEco": "No trust anchors configured for {ecosystem}.",
         "removeConfirm": "Remove this trust anchor?",
@@ -764,35 +814,35 @@
       "blockInstallScriptsWarn": "Warn — flag only",
       "blockInstallScriptsBlock": "Block — refuse install scripts",
       "verifyNpmSignatures": "npm signature verification",
-      "verifyNpmSignaturesHint": "Verify the npm registry's signature on each proxied version against pinned trust anchors, the same check npm audit signatures performs. Block fails closed — a version that fails verification or carries no signature is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Configure keys in Settings → Security → Signature trust anchors.",
+      "verifyNpmSignaturesHint": "Verify the npm registry's signature on each proxied version against pinned trust anchors, the same check npm audit signatures performs. Block fails closed — a version that fails verification or carries no signature is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Configure keys in Settings → Signatures → Trust anchors.",
       "verifyNpmSignaturesOff": "Off — do not verify",
       "verifyNpmSignaturesWarn": "Warn — verify, flag only",
       "verifyNpmSignaturesBlock": "Block — refuse unverified",
-      "verifyNpmSignaturesNoKeys": "No npm trust anchors are configured. Add the registry's SPKI public keys in Settings → Security → Signature trust anchors to enable signature verification.",
+      "verifyNpmSignaturesNoKeys": "No npm trust anchors are configured. Add the registry's SPKI public keys in Settings → Signatures → Trust anchors to enable signature verification.",
       "verifyNuGetSignatures": "NuGet signature verification",
-      "verifyNuGetSignaturesHint": "Verify the signature embedded in each proxied .nupkg against pinned trust anchors. Block fails closed — a version whose signature fails verification or that carries no signature is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Configure certificates in Settings → Security → Signature trust anchors.",
+      "verifyNuGetSignaturesHint": "Verify the signature embedded in each proxied .nupkg against pinned trust anchors. Block fails closed — a version whose signature fails verification or that carries no signature is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Configure certificates in Settings → Signatures → Trust anchors.",
       "verifyNuGetSignaturesOff": "Off — do not verify",
       "verifyNuGetSignaturesWarn": "Warn — verify, flag only",
       "verifyNuGetSignaturesBlock": "Block — refuse unverified",
-      "verifyNuGetSignaturesNoCerts": "No NuGet trust anchors are configured. Add the registry's signing certificates in Settings → Security → Signature trust anchors to enable signature verification.",
+      "verifyNuGetSignaturesNoCerts": "No NuGet trust anchors are configured. Add the registry's signing certificates in Settings → Signatures → Trust anchors to enable signature verification.",
       "verifyPyPiAttestations": "PyPI attestation verification",
-      "verifyPyPiAttestationsHint": "Verify the PEP 740 digital attestation for each proxied PyPI file against pinned Sigstore roots and a Trusted Publisher allowlist. The attestation's signed digest is bound to the downloaded bytes, the Fulcio leaf is chained to a pinned root, and the publisher identity is matched. Block fails closed — a version whose attestation fails verification or that carries none is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Configure roots and publishers in Settings → Security → Signature trust anchors.",
+      "verifyPyPiAttestationsHint": "Verify the PEP 740 digital attestation for each proxied PyPI file against pinned Sigstore roots and a Trusted Publisher allowlist. The attestation's signed digest is bound to the downloaded bytes, the Fulcio leaf is chained to a pinned root, and the publisher identity is matched. Block fails closed — a version whose attestation fails verification or that carries none is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Configure roots and publishers in Settings → Signatures → Trust anchors.",
       "verifyPyPiAttestationsOff": "Off — do not verify",
       "verifyPyPiAttestationsWarn": "Warn — verify, flag only",
       "verifyPyPiAttestationsBlock": "Block — refuse unverified",
-      "verifyPyPiAttestationsNoRoots": "No PyPI Sigstore roots and Trusted Publishers are configured. Add them in Settings → Security → Signature trust anchors to enable attestation verification.",
+      "verifyPyPiAttestationsNoRoots": "No PyPI Sigstore roots and Trusted Publishers are configured. Add them in Settings → Signatures → Trust anchors to enable attestation verification.",
       "verifyRpmSignatures": "RPM signature verification",
       "verifyRpmSignaturesHint": "Verify the OpenPGP signature embedded in each proxied RPM package header against the org's trusted GPG keys. Block fails closed — a package whose signature fails verification or that carries none is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched packages only. Requires at least one RPM trust anchor to enable.",
       "verifyRpmSignaturesOff": "Off — do not verify",
       "verifyRpmSignaturesWarn": "Warn — verify, flag only",
       "verifyRpmSignaturesBlock": "Block — refuse unverified",
-      "verifyRpmSignaturesNoKey": "No RPM trust anchors are configured. Add the repository's signing key in Settings → Trust Anchors to enable signature verification.",
+      "verifyRpmSignaturesNoKey": "No RPM trust anchors are configured. Add the repository's signing key in Settings → Signatures → Trust anchors to enable signature verification.",
       "verifyMavenSignatures": "Maven signature verification",
-      "verifyMavenSignaturesHint": "Verify the detached OpenPGP signature (.asc sidecar) for each proxied Maven artifact against pinned trust anchors. Block fails closed — a version whose .asc fails verification or that carries none is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Configure keys in Settings → Security → Signature trust anchors.",
+      "verifyMavenSignaturesHint": "Verify the detached OpenPGP signature (.asc sidecar) for each proxied Maven artifact against pinned trust anchors. Block fails closed — a version whose .asc fails verification or that carries none is refused (never cached or served); Warn records the outcome without blocking. Applies to proxy-fetched versions only. Configure keys in Settings → Signatures → Trust anchors.",
       "verifyMavenSignaturesOff": "Off — do not verify",
       "verifyMavenSignaturesWarn": "Warn — verify, flag only",
       "verifyMavenSignaturesBlock": "Block — refuse unverified",
-      "verifyMavenSignaturesNoKeys": "No Maven trust anchors are configured. Add the repository's signing keys in Settings → Security → Signature trust anchors to enable signature verification.",
+      "verifyMavenSignaturesNoKeys": "No Maven trust anchors are configured. Add the repository's signing keys in Settings → Signatures → Trust anchors to enable signature verification.",
       "maxEpssTolerance": "EPSS probability ceiling",
       "maxEpssToleranceHint": "Maximum FIRST.org EPSS exploitation probability (0.0–1.0) tolerated across a version's advisories. EPSS estimates the likelihood a CVE is exploited within 30 days; for example 0.5 blocks versions with an advisory considered more likely than not to be exploited. Scores are refreshed daily by the threat-feed job. Leave empty to disable.",
       "maxEpssTolerancePlaceholder": "Off",
@@ -832,6 +882,14 @@
           "credentialSet": "credential set",
           "catchAllLabel": "(catch-all)",
           "catchAllWarn": "Registries listed below this catch-all are never reached."
+        },
+        "rpmMode": {
+          "label": "Hosted publishing",
+          "hint": "Passthrough forwards upstream repodata verbatim and refuses hosted RPM uploads while an upstream is configured (a local package would shadow upstream and break dnf resolution). Merged serves a combined local and upstream index and allows hosted uploads. Inherit follows the instance default and changes automatically if the operator changes it.",
+          "inherit": "Inherit (instance default: {mode})",
+          "passthrough": "Passthrough (refuse hosted publish)",
+          "merged": "Merged (allow hosted publish)",
+          "effective": "Currently in effect: {mode}"
         }
       }
     },
@@ -1081,7 +1139,7 @@
     "unscored": "UNSCORED",
     "samlCertExpiryCard": "SAML cert expiring",
     "samlCertExpiredCard": "SAML cert expired",
-    "samlCertDays": "{days} day(s) remaining",
+    "samlCertDays": "{days, plural, one {# day remaining} other {# days remaining}}",
     "samlCertNotAfter": "Expires {notAfter}"
   },
   "quarantine": {
@@ -1228,7 +1286,7 @@
     "mfa": {
       "rowTitle": "Two-factor authentication",
       "rowHelpOff": "Add an extra layer of security using an authenticator app.",
-      "rowHelpOn": "Two-factor authentication is active. {count} recovery code(s) remaining.",
+      "rowHelpOn": "Two-factor authentication is active. {count, plural, one {# recovery code remaining} other {# recovery codes remaining}}.",
       "enableButton": "Set up",
       "disableButton": "Disable",
       "regenButton": "Regenerate recovery codes",
@@ -1388,6 +1446,7 @@
     },
     "login": {
       "title": "Dependably",
+      "subtitle": "Sign in to continue",
       "email": "Email",
       "password": "Password",
       "submit": "Sign in",
@@ -1727,7 +1786,7 @@
       "mfa": {
         "rowTitle": "Two-factor authentication",
         "rowHelpOff": "Add an extra layer of security using an authenticator app.",
-        "rowHelpOn": "Two-factor authentication is active. {count} recovery code(s) remaining.",
+        "rowHelpOn": "Two-factor authentication is active. {count, plural, one {# recovery code remaining} other {# recovery codes remaining}}.",
         "enableButton": "Set up",
         "disableButton": "Disable",
         "regenButton": "Regenerate recovery codes",

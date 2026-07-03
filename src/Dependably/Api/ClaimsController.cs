@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using Dependably.Infrastructure;
+using Dependably.Protocol;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -119,11 +120,13 @@ public sealed class ClaimsController : ControllerBase
             return Error;
         }
 
-        var eff = await _resolver.ResolveAsync(OrgId!, ecosystem, name.ToLowerInvariant(), ct);
+        string canonicalEcosystem = ecosystem.ToLowerInvariant();
+        string canonicalName = PurlNormalizer.CanonicalName(canonicalEcosystem, name);
+        var eff = await _resolver.ResolveAsync(OrgId!, canonicalEcosystem, canonicalName, ct);
         return Ok(new
         {
-            ecosystem,
-            name = name.ToLowerInvariant(),
+            ecosystem = canonicalEcosystem,
+            name = canonicalName,
             state = eff.State,
             isImplicit = eff.IsImplicit,
             claim = eff.Row is null ? null : ToDto(eff.Row),
@@ -154,12 +157,14 @@ public sealed class ClaimsController : ControllerBase
         }
 
         string ecosystem = req.Ecosystem?.ToLowerInvariant() ?? "";
-        string name = req.Name?.ToLowerInvariant() ?? "";
-        if (ecosystem is not ("npm" or "pypi" or "nuget" or "maven" or "rpm" or "oci"))
+        if (!ClaimEcosystems.Enforced.Contains(ecosystem))
         {
-            return BadRequest("ecosystem must be one of: npm, pypi, nuget, maven, rpm, oci.");
+            return BadRequest(ClaimEcosystems.IsClaimAware(ecosystem)
+                ? $"claims are not enforced for the '{ecosystem}' ecosystem — no data path consults them, so a claim would be a silent no-op. Accepted: {ClaimEcosystems.AcceptedList}."
+                : $"ecosystem must be one of: {ClaimEcosystems.AcceptedList}.");
         }
 
+        string name = PurlNormalizer.CanonicalName(ecosystem, req.Name ?? "");
         if (string.IsNullOrEmpty(name))
         {
             return BadRequest("name is required.");
@@ -206,8 +211,8 @@ public sealed class ClaimsController : ControllerBase
         };
         await _claims.ApplyTransitionAsync(tx, ct);
         await _audit.LogAsync("claim.create", OrgId, ActorId, ecosystem,
-            $"pkg:{ecosystem}/{name}",
-            detail: $"{{\"state\":\"{req.State}\",\"reason\":{System.Text.Json.JsonSerializer.Serialize(req.Reason)},\"purged\":{purgedCount}}}",
+            PurlNormalizer.NameOnly(ecosystem, name),
+            detail: $"{{\"state\":\"{req.State}\",\"reason\":{System.Text.Json.JsonSerializer.Serialize(req.Reason, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail)},\"purged\":{purgedCount}}}",
             ct: ct);
         // Typed event into audit_event.
         string createPayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Create(
@@ -244,7 +249,7 @@ public sealed class ClaimsController : ControllerBase
         }
 
         ecosystem = ecosystem.ToLowerInvariant();
-        name = name.ToLowerInvariant();
+        name = PurlNormalizer.CanonicalName(ecosystem, name);
 
         var existing = await _claims.GetAsync(OrgId!, ecosystem, name, ct);
         if (existing is null)
@@ -279,7 +284,7 @@ public sealed class ClaimsController : ControllerBase
         };
         await _claims.ApplyTransitionAsync(tx, ct);
         await _audit.LogAsync("claim.transition", OrgId, ActorId, ecosystem,
-            $"pkg:{ecosystem}/{name}",
+            PurlNormalizer.NameOnly(ecosystem, name),
             detail: $"{{\"from\":\"{existing.State}\",\"to\":\"{req.State}\",\"purged\":{purgedCount}}}",
             ct: ct);
         string transitionPayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Transition(
@@ -307,7 +312,7 @@ public sealed class ClaimsController : ControllerBase
         }
 
         ecosystem = ecosystem.ToLowerInvariant();
-        name = name.ToLowerInvariant();
+        name = PurlNormalizer.CanonicalName(ecosystem, name);
 
         var existing = await _claims.GetAsync(OrgId!, ecosystem, name, ct);
         if (existing is null)
@@ -342,7 +347,7 @@ public sealed class ClaimsController : ControllerBase
         };
         await _claims.ApplyTransitionAsync(tx, ct);
         await _audit.LogAsync("claim.release", OrgId, ActorId, ecosystem,
-            $"pkg:{ecosystem}/{name}",
+            PurlNormalizer.NameOnly(ecosystem, name),
             detail: $"{{\"from\":\"{existing.State}\"}}",
             ct: ct);
         string releasePayload = new Dependably.Infrastructure.Audit.Events.ClaimEvents.Release(

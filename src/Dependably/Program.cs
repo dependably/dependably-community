@@ -28,6 +28,7 @@ try
     Dependably.Infrastructure.Observability.BackgroundJobScope.Services = app.Services;
     Program.WarnOnDeprecatedConfiguration(app.Configuration);
     Program.WarnOnAirGapContradictions(app.Configuration);
+    Program.ValidateEdgeConfiguration(app.Configuration);
     Program.ConfigureApp(app);
     await app.RunAsync();
     return 0;
@@ -95,6 +96,10 @@ public partial class Program
         // SIEM push (opt-in via env vars). Webhook and syslog both sit behind
         // ISiemForwarder; webhook wins when both are set. No-op when neither is configured.
         builder.Services.AddDependablySiemForwarding(builder.Configuration);
+
+        // Per-org outbound webhook dispatcher (always registered; the queue is only active
+        // when subscriptions exist). WEBHOOK_ALLOW_PRIVATE controls the SSRF predicate.
+        builder.Services.AddDependablyWebhookDispatcher(builder.Configuration);
 
         // Invite email delivery (opt-in via SMTP_HOST). No-op when SMTP_HOST is absent —
         // the controller falls back to returning the invite link in the response body.
@@ -215,6 +220,81 @@ public partial class Program
         }
     }
 
+    // Validates DEPLOYMENT_MODE=edge configuration. EDGE_MASTER_URL and EDGE_MASTER_TOKEN are
+    // mandatory (an edge node has no reason to exist without its master) — a missing value is a
+    // hard startup error, not a warning. Contradictory multi-tenant / SSO / SAML config is warned
+    // on, mirroring WarnOnAirGapContradictions: an edge is single-realm and headless, so those
+    // knobs have no effect and their presence signals a misconfigured deployment.
+    private static void ValidateEdgeConfiguration(IConfiguration configuration)
+    {
+        string mode = (configuration["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
+        if (mode != "edge")
+        {
+            return;
+        }
+
+        string masterUrl = (configuration["EDGE_MASTER_URL"] ?? "").Trim();
+        string masterToken = (configuration["EDGE_MASTER_TOKEN"] ?? "").Trim();
+
+        var missing = new List<string>();
+        if (string.IsNullOrWhiteSpace(masterUrl))
+        {
+            missing.Add("EDGE_MASTER_URL");
+        }
+
+        if (string.IsNullOrWhiteSpace(masterToken))
+        {
+            missing.Add("EDGE_MASTER_TOKEN");
+        }
+
+        if (missing.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"DEPLOYMENT_MODE=edge requires {string.Join(" and ", missing)} to be set. "
+                + "An edge node's sole upstream is the central master, authenticated with one "
+                + "reader token — set the master URL and token, then restart.");
+        }
+
+        if (!Uri.TryCreate(masterUrl, UriKind.Absolute, out var uri)
+            || uri.Scheme is not "http" and not "https")
+        {
+#pragma warning disable S5332 // The http:// literal is diagnostic text in an error message, not an insecure transport.
+            throw new InvalidOperationException(
+                $"DEPLOYMENT_MODE=edge but EDGE_MASTER_URL ('{masterUrl}') is not an absolute "
+                + "http:// or https:// URL.");
+#pragma warning restore S5332
+        }
+
+        // Contradictory configuration: an edge collapses to one implicit realm and ships no
+        // management/SSO plane, so these knobs are inert. Warn rather than fail so an operator
+        // migrating an existing config sees the dead settings without a boot block.
+        foreach (string key in new[] { "SAML_ENABLED", "REQUIRE_MFA" })
+        {
+            string? value = configuration[key];
+            if (!string.IsNullOrWhiteSpace(value)
+                && !string.Equals(value, "false", StringComparison.OrdinalIgnoreCase))
+            {
+                Log.Warning(
+                    "DEPLOYMENT_MODE=edge but {Key} is set ({Value}). An edge node is headless and "
+                    + "single-realm; this setting has no effect.",
+                    key, value);
+            }
+        }
+
+        if (string.Equals(configuration["DEPENDABLY_DEPLOYMENT_MODE"], "ha", StringComparison.OrdinalIgnoreCase))
+        {
+            Log.Warning(
+                "DEPLOYMENT_MODE=edge with DEPENDABLY_DEPLOYMENT_MODE=ha. Each edge node is a "
+                + "standalone cache with its own SQLite and cache volume; HA orchestration of the "
+                + "management plane does not apply to an edge.");
+        }
+    }
+
+    // Test seam for the edge startup guard so the fail-fast behaviour can be asserted without
+    // booting a full host. Delegates to the same private validator used at startup.
+    internal static void ValidateEdgeConfigurationForTest(IConfiguration configuration) =>
+        ValidateEdgeConfiguration(configuration);
+
     public static void ConfigureApp(WebApplication app)
     {
         // ── Middleware pipeline (order matters) ─────────────────────────────────
@@ -319,6 +399,11 @@ public partial class Program
             return Results.Ok(new { version });
         }).RequireRateLimiting("anon");
         app.MapGet("/ready", BuildReadyHandler()).RequireRateLimiting("anon");
+
+        // Edge-only, anonymous read-only status surface. Mapped only when DEPLOYMENT_MODE=edge;
+        // in every other mode the route is never registered (404) and stays out of the OpenAPI
+        // documents / ApiContract gate.
+        Dependably.Api.EdgeStatusEndpoint.Map(app, version);
 
         app.UseRateLimiter();
 
@@ -492,7 +577,7 @@ public partial class Program
 
     private static readonly string[] NonSpaPathPrefixes =
         ["/api/", "/simple/", "/npm/", "/nuget/", "/packages/", "/pypi/", "/maven/", "/rpm/", "/v2/", "/saml/",
-         "/docs/", "/openapi/", "/cargo/", "/go/"];
+         "/docs/", "/openapi/", "/cargo/", "/go/", "/edge/"];
 
     private static readonly string[] NonSpaExactPaths = ["/health", "/ready", "/metrics", "/docs", "/cargo/config.json"];
 

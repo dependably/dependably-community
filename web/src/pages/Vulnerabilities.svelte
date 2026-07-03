@@ -9,6 +9,7 @@
   import SearchInput from '../lib/SearchInput.svelte'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
   import { readQuery, writeQuery } from '../lib/tableState.js'
+  import Toggle from '../lib/Toggle.svelte'
 
   // Table state lives in the URL query string so it survives route changes,
   // reloads, and copied links.
@@ -149,10 +150,10 @@
         </button>
       {/each}
     </div>
-    <label class="revoked-filter">
-      <input type="checkbox" bind:checked={revokedOnly} />
+    <span class="revoked-filter">
+      <Toggle bind:checked={revokedOnly} ariaLabel={$t('vulnerabilities.revokedOnly')} />
       {$t('vulnerabilities.revokedOnly')}
-    </label>
+    </span>
   </div>
 
   <ErrorBanner message={error} />

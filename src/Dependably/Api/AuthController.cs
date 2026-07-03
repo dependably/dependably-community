@@ -28,6 +28,8 @@ public sealed class AuthController : ControllerBase
     private readonly IRequireMfaMode _requireMfa;
     private readonly SystemAdminRepository _admins;
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Dependency-injection constructor: the parameter list is the declared dependency set; grouping it into an aggregate would hide dependencies without adding cohesion.")]
     public AuthController(
         LoginService login,
         UserService users,
@@ -522,7 +524,7 @@ public sealed class AuthController : ControllerBase
             {
                 sessions_invalidated = true,
                 api_tokens_revoked = result.RevokedApiTokens,
-            }),
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return Ok(new { message = "Password changed." });
     }
@@ -576,7 +578,22 @@ public sealed class AuthController : ControllerBase
         var ctx = sub is not null ? await _users.GetUserContextAsync(sub, orgId, ct) : null;
         string tenantDefault = string.IsNullOrEmpty(ctx?.TenantDefaultLanguage)
             ? LanguageCodes.Default : ctx.TenantDefaultLanguage;
-        string resolvedLanguage = ctx?.Language ?? tenantDefault;
+        // Resolution chain: user override → negotiated request culture (query string /
+        // culture cookie / Accept-Language, via RequestLocalization) → tenant default → en.
+        // The request culture counts only when a provider actually matched (Provider is
+        // null when the middleware fell back to its default), and it ranks above the
+        // tenant default because it is a per-user signal — org_settings.default_language
+        // is NOT NULL, so ordering it first would make browser language unreachable and
+        // snap a French-browser user back to English right after login.
+        var cultureFeature = HttpContext.Features
+            .Get<Microsoft.AspNetCore.Localization.IRequestCultureFeature>();
+        string? requestCulture = cultureFeature?.Provider is null
+            ? null
+            : cultureFeature.RequestCulture.UICulture.TwoLetterISOLanguageName;
+        string resolvedLanguage = ctx?.Language
+            ?? (requestCulture is not null && LanguageCodes.IsSupported(requestCulture) ? requestCulture : null)
+            ?? (string.IsNullOrEmpty(ctx?.TenantDefaultLanguage) ? null : ctx.TenantDefaultLanguage)
+            ?? LanguageCodes.Default;
 
         return Ok(new
         {
@@ -621,7 +638,7 @@ public sealed class AuthController : ControllerBase
             action: "user.language_changed",
             orgId: orgId,
             actorId: sub,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { language = req.Language }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { language = req.Language }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return NoContent();

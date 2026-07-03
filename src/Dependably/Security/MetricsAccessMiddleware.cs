@@ -19,9 +19,17 @@ namespace Dependably.Security;
 /// <para>The caller IP comes from <c>Connection.RemoteIpAddress</c>,
 /// which is the value <i>after</i> <c>ForwardedHeadersMiddleware</c>
 /// rewrites it from <c>X-Forwarded-For</c> per the existing
-/// <c>Program.cs</c> config. Operators behind a reverse proxy must keep
-/// the proxy in <c>KnownProxies</c> / <c>KnownNetworks</c> for the
-/// allowlist to match the original client IP. See
+/// <c>Program.cs</c> config — that middleware runs ahead of this one in
+/// the pipeline, so a request routed through a proxy declared in
+/// <c>TRUSTED_PROXIES</c> is evaluated against the real forwarded client
+/// IP, not the proxy's own socket address. This holds even for a
+/// co-located proxy on loopback: as long as its address is in
+/// <c>TRUSTED_PROXIES</c>, the allowlist sees the forwarded caller, not
+/// 127.0.0.1. When <c>TRUSTED_PROXIES</c> is unset (fail-closed default),
+/// <c>X-Forwarded-For</c> is discarded entirely and the raw socket peer is
+/// evaluated instead — an undeclared co-located proxy is indistinguishable
+/// from a genuine local caller in that configuration; declaring the proxy
+/// in <c>TRUSTED_PROXIES</c> is the fix. See
 /// <c>dependably-enterprise/docs/reverse-proxy.md</c>.</para>
 ///
 /// <para><see cref="AuditRepository"/> is resolved per-request via
@@ -107,7 +115,7 @@ public sealed class MetricsAccessMiddleware
                 return;
             }
 
-            string detail = JsonSerializer.Serialize(new { endpoint, reason = "denied_ip" });
+            string detail = JsonSerializer.Serialize(new { endpoint, reason = "denied_ip" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
 
             if (scope == "tenant" && orgId is not null)
             {

@@ -183,6 +183,7 @@ internal static class NuGetNupkgProxyHelper
             MinReleaseAgeHours: settings.MinReleaseAgeHours,
             CacheAccess: new CacheAccess(orgId, "nuget", normalizedId, normalizedVersion, file,
                 Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: $"{upstreamBase}/flatcontainer/{normalizedId}/{normalizedVersion}/{file}"),
+            UpstreamUrl: upstreamBase,
             PublishedAt: meta.PublishedAt,
             UpstreamChecksum: meta.Checksum,
             UpstreamIntegrityValue: meta.IntegrityBase64,

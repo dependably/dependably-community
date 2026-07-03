@@ -48,17 +48,17 @@
   <data name="error.auth.forbidden" xml:space="preserve">
     <value>Portée du jeton insuffisante.</value>
   </data>
-  <data name="error.org.slugRequired" xml:space="preserve">
-    <value>L'identifiant est obligatoire.</value>
+  <data name="error.org.slugInvalid" xml:space="preserve">
+    <value>L'identifiant est manquant, réservé ou contient des caractères non valides.</value>
   </data>
   <data name="error.org.slugConflict" xml:space="preserve">
-    <value>Une organisation avec cet identifiant existe déjà.</value>
+    <value>Un locataire avec cet identifiant existe déjà.</value>
   </data>
-  <data name="error.allowlist.fieldsRequired" xml:space="preserve">
-    <value>Les champs ecosystem et purl_pattern sont obligatoires.</value>
+  <data name="error.allowlist.purlPatternRequired" xml:space="preserve">
+    <value>Le champ purl_pattern est obligatoire.</value>
   </data>
-  <data name="error.token.scopeInvalid" xml:space="preserve">
-    <value>La portée doit être « pull » ou « push ».</value>
+  <data name="error.token.scopeRetired" xml:space="preserve">
+    <value>Le champ « scope » n'est plus accepté. Envoyez « capabilities » à la place.</value>
   </data>
   <data name="error.token.nameRequired" xml:space="preserve">
     <value>Le nom est obligatoire.</value>
@@ -67,12 +67,283 @@
     <value>L'adresse courriel est obligatoire.</value>
   </data>
   <data name="error.member.roleInvalid" xml:space="preserve">
-    <value>Le rôle doit être « member », « admin » ou « owner ».</value>
+    <value>Le rôle doit être « member », « admin », « owner » ou « auditor ».</value>
   </data>
   <data name="error.member.lastOwnerDemote" xml:space="preserve">
     <value>Impossible de rétrograder le dernier propriétaire de l'organisation.</value>
   </data>
   <data name="error.member.lastOwnerRemove" xml:space="preserve">
     <value>Impossible de retirer le dernier propriétaire de l'organisation.</value>
+  </data>
+  <data name="error.banner.maxActivePerTenant" xml:space="preserve">
+    <value>Le maximum de {0} annonces simultanément actives par locataire est atteint. Désactivez ou faites expirer des annonces existantes d'abord.</value>
+  </data>
+  <data name="error.banner.maxActiveSystem" xml:space="preserve">
+    <value>Le maximum de {0} annonces système simultanément actives est atteint.</value>
+  </data>
+  <data name="error.banner.bodyRequired" xml:space="preserve">
+    <value>Le corps de l'annonce est obligatoire.</value>
+  </data>
+  <data name="error.banner.bodyTooLong" xml:space="preserve">
+    <value>Le corps de l'annonce ne doit pas dépasser {0} caractères.</value>
+  </data>
+  <data name="error.banner.linkUrlTooLong" xml:space="preserve">
+    <value>L'URL du lien ne doit pas dépasser {0} caractères.</value>
+  </data>
+  <data name="error.banner.linkUrlScheme" xml:space="preserve">
+    <value>L'URL du lien doit utiliser le schéma http ou https.</value>
+  </data>
+  <data name="error.banner.linkLabelTooLong" xml:space="preserve">
+    <value>Le libellé du lien ne doit pas dépasser {0} caractères.</value>
+  </data>
+  <data name="error.banner.startsAtInvalid" xml:space="preserve">
+    <value>startsAt doit être une date-heure UTC ISO-8601 valide.</value>
+  </data>
+  <data name="error.banner.endsAtInvalid" xml:space="preserve">
+    <value>endsAt doit être une date-heure UTC ISO-8601 valide.</value>
+  </data>
+  <data name="error.banner.endsAfterStarts" xml:space="preserve">
+    <value>endsAt doit être postérieur à startsAt.</value>
+  </data>
+  <data name="error.banner.severityInvalid" xml:space="preserve">
+    <value>severity doit être l'une des valeurs suivantes : info, warn, alert.</value>
+  </data>
+  <data name="error.banner.targetRoleInvalid" xml:space="preserve">
+    <value>targetRole doit être l'une des valeurs suivantes : all, member, admin, owner, auditor.</value>
+  </data>
+  <data name="error.common.requestBodyRequired" xml:space="preserve">
+    <value>Le corps de la requête est obligatoire.</value>
+  </data>
+  <data name="error.common.bodyRequired" xml:space="preserve">
+    <value>Le corps de la requête est obligatoire.</value>
+  </data>
+  <data name="error.common.invalidIpOrCidr" xml:space="preserve">
+    <value>« {0} » n'est pas une adresse IP ou un CIDR valide.</value>
+  </data>
+  <data name="error.common.mustBeOneOf" xml:space="preserve">
+    <value>Doit être l'une des valeurs suivantes : {0}.</value>
+  </data>
+  <data name="error.license.modeInvalid" xml:space="preserve">
+    <value>Le mode doit être « off », « warn » ou « block ».</value>
+  </data>
+  <data name="error.license.spdxRequired" xml:space="preserve">
+    <value>L'identifiant SPDX est obligatoire.</value>
+  </data>
+  <data name="error.license.allowlistDuplicate" xml:space="preserve">
+    <value>« {0} » figure déjà sur la liste d'autorisation.</value>
+  </data>
+  <data name="error.license.blocklistDuplicate" xml:space="preserve">
+    <value>« {0} » figure déjà sur la liste de blocage.</value>
+  </data>
+  <data name="error.saml.nameIdFormatRequired" xml:space="preserve">
+    <value>nameIdFormat est obligatoire.</value>
+  </data>
+  <data name="error.saml.nameIdFormatInvalid" xml:space="preserve">
+    <value>nameIdFormat doit être un URI absolu valide (par exemple urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress).</value>
+  </data>
+  <data name="error.saml.metadataXmlRequired" xml:space="preserve">
+    <value>metadataXml est obligatoire.</value>
+  </data>
+  <data name="error.saml.certificateRequired" xml:space="preserve">
+    <value>certificate est obligatoire.</value>
+  </data>
+  <data name="error.saml.certificateInvalid" xml:space="preserve">
+    <value>Le certificat n'est pas un X.509 base64 valide.</value>
+  </data>
+  <data name="error.saml.formsLoginRequiresSaml" xml:space="preserve">
+    <value>La connexion par formulaire ne peut être désactivée que lorsque SAML est activé.</value>
+  </data>
+  <data name="error.saml.formsLoginNeedsMetadata" xml:space="preserve">
+    <value>Téléversez les métadonnées IdP avant de désactiver la connexion par formulaire.</value>
+  </data>
+  <data name="error.saml.formsLoginNeedsRecentTest" xml:space="preserve">
+    <value>Effectuez un test SAML réussi dans les 10 dernières minutes avant de désactiver la connexion par formulaire.</value>
+  </data>
+  <data name="error.invite.limitReached" xml:space="preserve">
+    <value>Limite d'invitations en attente ({0}) atteinte pour ce locataire. Annulez des invitations inutilisées avant d'en créer de nouvelles.</value>
+  </data>
+  <data name="error.token.limitReached" xml:space="preserve">
+    <value>Limite de jetons actifs ({0}) atteinte pour ce locataire. Révoquez des jetons inutilisés avant d'en créer de nouveaux.</value>
+  </data>
+  <data name="error.list.patternRequired" xml:space="preserve">
+    <value>pattern est obligatoire.</value>
+  </data>
+  <data name="error.list.patternTooLong512" xml:space="preserve">
+    <value>Le motif doit compter au plus 512 caractères.</value>
+  </data>
+  <data name="error.list.patternInvalidRegex" xml:space="preserve">
+    <value>Le motif n'est pas une expression régulière valide.</value>
+  </data>
+  <data name="error.list.ecosystemInvalidProxy" xml:space="preserve">
+    <value>ecosystem doit être l'une des valeurs suivantes : npm, pypi, nuget, maven, cargo, golang.</value>
+  </data>
+  <data name="error.list.patternTooLong256" xml:space="preserve">
+    <value>Le motif doit compter au plus 256 caractères.</value>
+  </data>
+  <data name="error.list.trailingGlobOnly" xml:space="preserve">
+    <value>« * » n'est pris en charge qu'en dernier caractère (glob final).</value>
+  </data>
+  <data name="error.list.ecosystemInvalidDenylist" xml:space="preserve">
+    <value>ecosystem doit être l'une des valeurs suivantes : npm, pypi, nuget, maven, cargo, golang, rpm, oci.</value>
+  </data>
+  <data name="error.list.nameRequired" xml:space="preserve">
+    <value>name est obligatoire.</value>
+  </data>
+  <data name="error.list.nameTooLong" xml:space="preserve">
+    <value>name doit compter au plus 512 caractères.</value>
+  </data>
+  <data name="error.list.versionPatternTooLong" xml:space="preserve">
+    <value>version_pattern doit compter au plus 128 caractères.</value>
+  </data>
+  <data name="error.settings.overwritePolicyInvalid" xml:space="preserve">
+    <value>Doit être « block », « exception » ou « allow ».</value>
+  </data>
+  <data name="error.settings.rpmUpstreamModeInvalid" xml:space="preserve">
+    <value>Doit être null (hérite de la valeur par défaut de l'instance), « passthrough » ou « merged ».</value>
+  </data>
+  <data name="error.settings.osvScoreRange" xml:space="preserve">
+    <value>Doit être compris entre 0,0 et 10,0.</value>
+  </data>
+  <data name="error.settings.releaseAgeRange" xml:space="preserve">
+    <value>Doit être compris entre 0 et {0} heures (1 an), ou null pour désactiver.</value>
+  </data>
+  <data name="error.settings.epssRange" xml:space="preserve">
+    <value>Doit être compris entre 0,0 et 1,0 (probabilité EPSS), ou null pour désactiver.</value>
+  </data>
+  <data name="error.settings.deprecatedPolicyInvalid" xml:space="preserve">
+    <value>Doit être « off », « warn », « block_new » ou « block_all ».</value>
+  </data>
+  <data name="error.settings.offWarnBlock" xml:space="preserve">
+    <value>Doit être « off », « warn » ou « block ».</value>
+  </data>
+  <data name="error.quarantine.stateInvalid" xml:space="preserve">
+    <value>Doit être « pending », « approved » ou « denied ».</value>
+  </data>
+  <data name="error.quarantine.decisionInvalid" xml:space="preserve">
+    <value>Doit être « approved », « denied » ou « pending ».</value>
+  </data>
+  <data name="error.quarantine.alreadyPending" xml:space="preserve">
+    <value>L'entrée est déjà en attente.</value>
+  </data>
+  <data name="error.admin.emailRequired" xml:space="preserve">
+    <value>email est obligatoire.</value>
+  </data>
+  <data name="error.admin.emailConflict" xml:space="preserve">
+    <value>Un system_admin avec ce courriel existe déjà.</value>
+  </data>
+  <data name="error.admin.accountStatusInvalid" xml:space="preserve">
+    <value>Doit être « active », « locked » ou « disabled ».</value>
+  </data>
+  <data name="error.admin.selfStatusChange" xml:space="preserve">
+    <value>Les opérateurs ne peuvent pas modifier l'état de leur propre compte; utilisez plutôt /api/v1/system/me/password.</value>
+  </data>
+  <data name="error.admin.lastActive" xml:space="preserve">
+    <value>Impossible de désactiver ou de verrouiller le dernier system_admin actif.</value>
+  </data>
+  <data name="error.admin.selfPasswordReset" xml:space="preserve">
+    <value>Les opérateurs ne peuvent pas réinitialiser leur propre mot de passe via ce point de terminaison; utilisez plutôt /api/v1/system/me/password.</value>
+  </data>
+  <data name="error.admin.selfDelete" xml:space="preserve">
+    <value>Les opérateurs ne peuvent pas supprimer leur propre compte.</value>
+  </data>
+  <data name="error.admin.disableBeforeDelete" xml:space="preserve">
+    <value>Désactivez le system_admin (PATCH /account-status avec « disabled ») avant la suppression.</value>
+  </data>
+  <data name="error.system.ownerEmailInvalid" xml:space="preserve">
+    <value>Une adresse courriel de propriétaire valide est obligatoire.</value>
+  </data>
+  <data name="error.system.quotaInvalid" xml:space="preserve">
+    <value>Le quota doit être un nombre d'octets positif, ou null pour effacer.</value>
+  </data>
+  <data name="error.system.tenantStatusInvalid" xml:space="preserve">
+    <value>Doit être « active » ou « suspended ». (« archived » et « deleting » sont réservés à l'édition entreprise.)</value>
+  </data>
+  <data name="error.system.tenantAlreadyActive" xml:space="preserve">
+    <value>Le locataire est déjà actif.</value>
+  </data>
+  <data name="error.system.lookupQueryRequired" xml:space="preserve">
+    <value>Fournissez au moins l'un des champs suivants : email, tenantSlug.</value>
+  </data>
+  <data name="error.system.unknownSettingKey" xml:space="preserve">
+    <value>Clé de paramètre inconnue : {0}</value>
+  </data>
+  <data name="error.system.tenantSlugRequired" xml:space="preserve">
+    <value>tenantSlug est obligatoire.</value>
+  </data>
+  <data name="error.system.unsupportedLanguage" xml:space="preserve">
+    <value>Code de langue non pris en charge. Autorisés : {0}.</value>
+  </data>
+  <data name="error.password.currentRequired" xml:space="preserve">
+    <value>Le mot de passe actuel est obligatoire.</value>
+  </data>
+  <data name="error.password.mustDiffer" xml:space="preserve">
+    <value>Le nouveau mot de passe doit différer de l'actuel.</value>
+  </data>
+  <data name="error.trustAnchor.materialEmpty" xml:space="preserve">
+    <value>material ne doit pas être vide.</value>
+  </data>
+  <data name="error.upstream.ociOnlyFields" xml:space="preserve">
+    <value>Les champs prefixes et tokenEndpoint ne sont valides que pour ecosystem=oci.</value>
+  </data>
+  <data name="error.upstream.rpmAnonymousOnly" xml:space="preserve">
+    <value>Les amonts authentifiés ne sont pas pris en charge pour ecosystem=rpm.</value>
+  </data>
+  <data name="error.upstream.httpsRequiredForAuth" xml:space="preserve">
+    <value>Les amonts authentifiés requièrent https:// — une URL http:// en clair divulguerait les identifiants.</value>
+  </data>
+  <data name="error.upstream.masterKeyRequired" xml:space="preserve">
+    <value>DEPENDABLY_MASTER_KEY doit être configurée pour stocker un secret d'amont au repos.</value>
+  </data>
+  <data name="error.upstream.anonymousNoCredentials" xml:space="preserve">
+    <value>username et secret ne sont pas valides pour authType=anonymous.</value>
+  </data>
+  <data name="error.upstream.bearerSecretRequired" xml:space="preserve">
+    <value>secret est obligatoire pour authType=bearer.</value>
+  </data>
+  <data name="error.upstream.basicUsernameRequired" xml:space="preserve">
+    <value>username est obligatoire pour authType=basic.</value>
+  </data>
+  <data name="error.upstream.basicSecretRequired" xml:space="preserve">
+    <value>secret est obligatoire pour authType=basic.</value>
+  </data>
+  <data name="error.upstream.authTypeInvalid" xml:space="preserve">
+    <value>authType doit être l'une des valeurs suivantes : anonymous, basic, bearer.</value>
+  </data>
+  <data name="error.upstream.ociHostRequired" xml:space="preserve">
+    <value>L'hôte est obligatoire pour les amonts OCI.</value>
+  </data>
+  <data name="error.upstream.ociPrefixRequired" xml:space="preserve">
+    <value>Au moins un préfixe est obligatoire pour les amonts OCI.</value>
+  </data>
+  <data name="error.upstream.awsEcrUnsupported" xml:space="preserve">
+    <value>authType « aws_ecr » n'est pas pris en charge. Utilisez « basic » avec un mot de passe dérivé de GetAuthorizationToken.</value>
+  </data>
+  <data name="error.upstream.ociAuthTypeInvalid" xml:space="preserve">
+    <value>authType doit être l'une des valeurs suivantes : anonymous, basic, dockerhub_token_exchange.</value>
+  </data>
+  <data name="error.webhook.masterKeyRequired" xml:space="preserve">
+    <value>DEPENDABLY_MASTER_KEY doit être configurée pour stocker un secret de signature de webhook au repos.</value>
+  </data>
+  <data name="error.webhook.urlRequired" xml:space="preserve">
+    <value>url est obligatoire.</value>
+  </data>
+  <data name="error.webhook.eventTypeRequired" xml:space="preserve">
+    <value>Au moins un type d'événement est obligatoire.</value>
+  </data>
+  <data name="error.webhook.unknownEventTypes" xml:space="preserve">
+    <value>Types d'événements inconnus : {0}. Types valides : {1}.</value>
+  </data>
+  <data name="email.invite.subject" xml:space="preserve">
+    <value>Invitation à rejoindre {0} sur Dependably</value>
+  </data>
+  <data name="email.invite.body" xml:space="preserve">
+    <value>Vous avez reçu une invitation à rejoindre {0} sur Dependably.
+
+Acceptez votre invitation à l'aide du lien ci-dessous. Le lien expire le {1} UTC.
+
+{2}
+
+Si vous n'attendiez pas cette invitation, vous pouvez ignorer ce courriel.
+</value>
   </data>
 </root>

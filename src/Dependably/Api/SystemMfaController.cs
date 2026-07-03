@@ -55,6 +55,14 @@ public sealed class SystemMfaController : ControllerBase
             return Unauthorized();
         }
 
+        // Re-enrollment is a credential-state change: refuse to rotate the authenticator key
+        // for an already-enrolled account. Re-enrolling requires disabling MFA first, which is
+        // gated on password + current factor, so a hijacked session cannot silently rebind it.
+        if (await _mfa.GetEnabledAsync(adminId, ct))
+        {
+            return Conflict(new { detail = "MFA is already enabled. Disable it first to re-enroll." });
+        }
+
         await _mfa.ResetKeyAsync(adminId, ct);
         string? key = await _mfa.GetKeyAsync(adminId, ct);
         if (key is null)
@@ -79,6 +87,13 @@ public sealed class SystemMfaController : ControllerBase
         if (adminId is null)
         {
             return Unauthorized();
+        }
+
+        // Defense in depth: reject verify on an already-enrolled account so a re-enrollment can
+        // never enable against a rotated key without first going through the password-gated disable.
+        if (await _mfa.GetEnabledAsync(adminId, ct))
+        {
+            return Conflict(new { detail = "MFA is already enabled. Disable it first to re-enroll." });
         }
 
         bool valid = await _mfa.VerifyTotpAsync(adminId, req.Code, ct);

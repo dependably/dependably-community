@@ -23,56 +23,433 @@
   <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
   <data name="error.validation.title" xml:space="preserve">
     <value>Validation Error</value>
+    <comment>Title of the HTTP 422 problem response; shown as an error heading in clients. Keep short.</comment>
   </data>
   <data name="error.conflict.title" xml:space="preserve">
     <value>Conflict</value>
+    <comment>Title of the HTTP 409 problem response (duplicate or conflicting resource).</comment>
   </data>
   <data name="error.notFound.title" xml:space="preserve">
     <value>Not Found</value>
+    <comment>Title of the HTTP 404 problem response.</comment>
   </data>
   <data name="error.unauthorized.title" xml:space="preserve">
     <value>Unauthorized</value>
+    <comment>Title of the HTTP 401 problem response (authentication missing or failed).</comment>
   </data>
   <data name="error.forbidden.title" xml:space="preserve">
     <value>Forbidden</value>
+    <comment>Title of the HTTP 403 problem response (authenticated but not permitted).</comment>
   </data>
   <data name="error.payloadTooLarge.title" xml:space="preserve">
     <value>Payload Too Large</value>
+    <comment>Title of the HTTP 413 problem response (upload exceeds the configured size limit).</comment>
   </data>
   <data name="error.org.notFound" xml:space="preserve">
     <value>Organization not found.</value>
+    <comment>404 body when the organization (tenant) addressed by the request does not exist.</comment>
   </data>
   <data name="error.auth.required" xml:space="preserve">
     <value>Authentication required.</value>
+    <comment>401 body: the client must authenticate (registry token or web session).</comment>
   </data>
   <data name="error.auth.forbidden" xml:space="preserve">
     <value>Insufficient token scope.</value>
+    <comment>403 body when an API token lacks the capability required for the operation. Here 'scope' means the token's permission set, not OAuth.</comment>
   </data>
-  <data name="error.org.slugRequired" xml:space="preserve">
-    <value>Slug is required.</value>
+  <data name="error.org.slugInvalid" xml:space="preserve">
+    <value>Slug is missing, reserved, or contains invalid characters.</value>
+    <comment>Rejects a new tenant's slug (the URL/subdomain identifier). 'Slug' may be rendered with a local term for identifier.</comment>
   </data>
   <data name="error.org.slugConflict" xml:space="preserve">
-    <value>An org with that slug already exists.</value>
+    <value>A tenant with that slug already exists.</value>
+    <comment>Creating a tenant whose slug is already taken. 'Tenant' = a customer organization on this instance.</comment>
   </data>
-  <data name="error.allowlist.fieldsRequired" xml:space="preserve">
-    <value>ecosystem and purl_pattern are required.</value>
+  <data name="error.allowlist.purlPatternRequired" xml:space="preserve">
+    <value>purl_pattern is required.</value>
+    <comment>Missing required API field when adding a package allowlist entry. Keep the field name 'purl_pattern' verbatim.</comment>
   </data>
-  <data name="error.token.scopeInvalid" xml:space="preserve">
-    <value>Scope must be 'pull' or 'push'.</value>
+  <data name="error.token.scopeRetired" xml:space="preserve">
+    <value>The 'scope' field is no longer accepted. Send 'capabilities' instead.</value>
+    <comment>The legacy 'scope' field on the token API was replaced by 'capabilities'. Keep both field names verbatim - they are API literals.</comment>
   </data>
   <data name="error.token.nameRequired" xml:space="preserve">
     <value>Name is required.</value>
+    <comment>Creating a service token without a display name.</comment>
   </data>
   <data name="error.invite.emailRequired" xml:space="preserve">
     <value>Email is required.</value>
+    <comment>Inviting an organization member without an email address.</comment>
   </data>
   <data name="error.member.roleInvalid" xml:space="preserve">
-    <value>Role must be 'member', 'admin', or 'owner'.</value>
+    <value>Role must be 'member', 'admin', 'owner', or 'auditor'.</value>
+    <comment>Invalid role when inviting a member or changing a member's role. The four role values are API literals - do not translate them.</comment>
   </data>
   <data name="error.member.lastOwnerDemote" xml:space="preserve">
     <value>Cannot demote the last owner of an org.</value>
+    <comment>Blocked demotion of a tenant's only owner; an organization must always keep at least one owner.</comment>
   </data>
   <data name="error.member.lastOwnerRemove" xml:space="preserve">
     <value>Cannot remove the last owner of an org.</value>
+    <comment>Blocked removal of a tenant's only owner; an organization must always keep at least one owner.</comment>
+  </data>
+  <data name="error.banner.maxActivePerTenant" xml:space="preserve">
+    <value>Maximum of {0} simultaneously active banners per tenant reached. Disable or expire existing banners first.</value>
+    <comment>422 detail when creating a tenant banner past the active-banner cap. {0} = the cap.</comment>
+  </data>
+  <data name="error.banner.maxActiveSystem" xml:space="preserve">
+    <value>Maximum of {0} simultaneously active system banners reached.</value>
+    <comment>422 detail when creating a system banner past the active-banner cap. {0} = the cap.</comment>
+  </data>
+  <data name="error.banner.bodyRequired" xml:space="preserve">
+    <value>Banner body is required.</value>
+    <comment>422 detail: banner created or updated with an empty body.</comment>
+  </data>
+  <data name="error.banner.bodyTooLong" xml:space="preserve">
+    <value>Banner body must not exceed {0} characters.</value>
+    <comment>422 detail: banner body over the length cap. {0} = maximum characters.</comment>
+  </data>
+  <data name="error.banner.linkUrlTooLong" xml:space="preserve">
+    <value>Link URL must not exceed {0} characters.</value>
+    <comment>422 detail: banner link URL over the length cap. {0} = maximum characters.</comment>
+  </data>
+  <data name="error.banner.linkUrlScheme" xml:space="preserve">
+    <value>Link URL must use the http or https scheme.</value>
+    <comment>422 detail: banner link URL with a scheme other than http/https.</comment>
+  </data>
+  <data name="error.banner.linkLabelTooLong" xml:space="preserve">
+    <value>Link label must not exceed {0} characters.</value>
+    <comment>422 detail: banner link label over the length cap. {0} = maximum characters.</comment>
+  </data>
+  <data name="error.banner.startsAtInvalid" xml:space="preserve">
+    <value>startsAt must be a valid ISO-8601 UTC date-time.</value>
+    <comment>422 detail. 'startsAt' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.banner.endsAtInvalid" xml:space="preserve">
+    <value>endsAt must be a valid ISO-8601 UTC date-time.</value>
+    <comment>422 detail. 'endsAt' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.banner.endsAfterStarts" xml:space="preserve">
+    <value>endsAt must be after startsAt.</value>
+    <comment>422 detail: banner window ends before it starts. Field names are API literals.</comment>
+  </data>
+  <data name="error.banner.severityInvalid" xml:space="preserve">
+    <value>severity must be one of: info, warn, alert.</value>
+    <comment>422 detail. 'severity' and the listed values are API literals - do not translate them.</comment>
+  </data>
+  <data name="error.banner.targetRoleInvalid" xml:space="preserve">
+    <value>targetRole must be one of: all, member, admin, owner, auditor.</value>
+    <comment>422 detail. 'targetRole' and the listed values are API literals - do not translate them.</comment>
+  </data>
+  <data name="error.common.requestBodyRequired" xml:space="preserve">
+    <value>Request body required.</value>
+    <comment>422 detail for endpoints that received no JSON body.</comment>
+  </data>
+  <data name="error.common.bodyRequired" xml:space="preserve">
+    <value>Body is required.</value>
+    <comment>422 detail for endpoints that received no JSON body.</comment>
+  </data>
+  <data name="error.common.invalidIpOrCidr" xml:space="preserve">
+    <value>"{0}" is not a valid IP or CIDR.</value>
+    <comment>422 detail for the /metrics allowlist editors. {0} = the rejected entry.</comment>
+  </data>
+  <data name="error.common.mustBeOneOf" xml:space="preserve">
+    <value>Must be one of: {0}.</value>
+    <comment>Generic enum-validation 422 detail. {0} = comma-joined allowed values (API literals).</comment>
+  </data>
+  <data name="error.license.modeInvalid" xml:space="preserve">
+    <value>Mode must be 'off', 'warn', or 'block'.</value>
+    <comment>422 detail. The quoted values are API literals - do not translate them.</comment>
+  </data>
+  <data name="error.license.spdxRequired" xml:space="preserve">
+    <value>SPDX identifier is required.</value>
+    <comment>422 detail: license allow/block entry without an SPDX id.</comment>
+  </data>
+  <data name="error.license.allowlistDuplicate" xml:space="preserve">
+    <value>'{0}' is already on the allowlist.</value>
+    <comment>409 detail. {0} = the SPDX identifier.</comment>
+  </data>
+  <data name="error.license.blocklistDuplicate" xml:space="preserve">
+    <value>'{0}' is already on the blocklist.</value>
+    <comment>409 detail. {0} = the SPDX identifier.</comment>
+  </data>
+  <data name="error.saml.nameIdFormatRequired" xml:space="preserve">
+    <value>nameIdFormat is required.</value>
+    <comment>422 detail. 'nameIdFormat' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.saml.nameIdFormatInvalid" xml:space="preserve">
+    <value>nameIdFormat must be a valid absolute URI (e.g. urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress).</value>
+    <comment>422 detail. Keep the field name and the example URN verbatim.</comment>
+  </data>
+  <data name="error.saml.metadataXmlRequired" xml:space="preserve">
+    <value>metadataXml is required.</value>
+    <comment>422 detail. 'metadataXml' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.saml.certificateRequired" xml:space="preserve">
+    <value>certificate is required.</value>
+    <comment>422 detail. 'certificate' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.saml.certificateInvalid" xml:space="preserve">
+    <value>Certificate is not valid base64 X.509.</value>
+    <comment>422 detail: uploaded SAML signing certificate failed to parse.</comment>
+  </data>
+  <data name="error.saml.formsLoginRequiresSaml" xml:space="preserve">
+    <value>Forms login can only be disabled when SAML is enabled.</value>
+    <comment>422 detail: guard against locking every user out of the tenant.</comment>
+  </data>
+  <data name="error.saml.formsLoginNeedsMetadata" xml:space="preserve">
+    <value>Upload IdP metadata before disabling forms login.</value>
+    <comment>422 detail: guard against locking every user out of the tenant.</comment>
+  </data>
+  <data name="error.saml.formsLoginNeedsRecentTest" xml:space="preserve">
+    <value>Run a successful SAML test within the last 10 minutes before disabling forms login.</value>
+    <comment>422 detail: guard against locking every user out of the tenant.</comment>
+  </data>
+  <data name="error.invite.limitReached" xml:space="preserve">
+    <value>Pending invite limit ({0}) reached for this tenant. Cancel unused invites before creating new ones.</value>
+    <comment>422 detail. {0} = the per-tenant pending-invite cap.</comment>
+  </data>
+  <data name="error.token.limitReached" xml:space="preserve">
+    <value>Active token limit ({0}) reached for this tenant. Revoke unused tokens before creating new ones.</value>
+    <comment>422 detail. {0} = the per-tenant active-token cap.</comment>
+  </data>
+  <data name="error.list.patternRequired" xml:space="preserve">
+    <value>pattern is required.</value>
+    <comment>422 detail. 'pattern' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.list.patternTooLong512" xml:space="preserve">
+    <value>Pattern must be 512 characters or fewer.</value>
+    <comment>422 detail: list pattern over the length cap.</comment>
+  </data>
+  <data name="error.list.patternInvalidRegex" xml:space="preserve">
+    <value>Pattern is not a valid regular expression.</value>
+    <comment>422 detail: list pattern failed regex compilation.</comment>
+  </data>
+  <data name="error.list.ecosystemInvalidProxy" xml:space="preserve">
+    <value>ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang.</value>
+    <comment>422 detail. The field name and values are API literals - do not translate them.</comment>
+  </data>
+  <data name="error.list.patternTooLong256" xml:space="preserve">
+    <value>Pattern must be 256 characters or fewer.</value>
+    <comment>422 detail: list pattern over the length cap.</comment>
+  </data>
+  <data name="error.list.trailingGlobOnly" xml:space="preserve">
+    <value>'*' is only supported as the final character (trailing glob).</value>
+    <comment>422 detail: wildcard placed anywhere except the end of the pattern.</comment>
+  </data>
+  <data name="error.list.ecosystemInvalidDenylist" xml:space="preserve">
+    <value>ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang, rpm, oci.</value>
+    <comment>422 detail. The field name and values are API literals - do not translate them.</comment>
+  </data>
+  <data name="error.list.nameRequired" xml:space="preserve">
+    <value>name is required.</value>
+    <comment>422 detail. 'name' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.list.nameTooLong" xml:space="preserve">
+    <value>name must be 512 characters or fewer.</value>
+    <comment>422 detail. 'name' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.list.versionPatternTooLong" xml:space="preserve">
+    <value>version_pattern must be 128 characters or fewer.</value>
+    <comment>422 detail. 'version_pattern' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.settings.overwritePolicyInvalid" xml:space="preserve">
+    <value>Must be 'block', 'exception', or 'allow'.</value>
+    <comment>422 detail for version_overwrite_policy. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.settings.rpmUpstreamModeInvalid" xml:space="preserve">
+    <value>Must be null (inherit the instance default), 'passthrough', or 'merged'.</value>
+    <comment>422 detail for rpm_upstream_mode. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.settings.osvScoreRange" xml:space="preserve">
+    <value>Must be between 0.0 and 10.0.</value>
+    <comment>422 detail for max_osv_score_tolerance (CVSS-scale bound).</comment>
+  </data>
+  <data name="error.settings.releaseAgeRange" xml:space="preserve">
+    <value>Must be between 0 and {0} hours (1 year), or null to disable.</value>
+    <comment>422 detail for min_release_age_hours. {0} = the upper bound in hours.</comment>
+  </data>
+  <data name="error.settings.epssRange" xml:space="preserve">
+    <value>Must be between 0.0 and 1.0 (EPSS probability), or null to disable.</value>
+    <comment>422 detail for max_epss_tolerance.</comment>
+  </data>
+  <data name="error.settings.deprecatedPolicyInvalid" xml:space="preserve">
+    <value>Must be 'off', 'warn', 'block_new', or 'block_all'.</value>
+    <comment>422 detail for block_deprecated. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.settings.offWarnBlock" xml:space="preserve">
+    <value>Must be 'off', 'warn', or 'block'.</value>
+    <comment>422 detail shared by the tri-state security gates. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.quarantine.stateInvalid" xml:space="preserve">
+    <value>Must be 'pending', 'approved', or 'denied'.</value>
+    <comment>422 detail for the quarantine state filter. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.quarantine.decisionInvalid" xml:space="preserve">
+    <value>Must be 'approved', 'denied', or 'pending'.</value>
+    <comment>422 detail for a quarantine decision. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.quarantine.alreadyPending" xml:space="preserve">
+    <value>Entry is already pending.</value>
+    <comment>422 detail: re-pending a quarantine entry that is already pending.</comment>
+  </data>
+  <data name="error.admin.emailRequired" xml:space="preserve">
+    <value>email is required.</value>
+    <comment>422 detail. 'email' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.admin.emailConflict" xml:space="preserve">
+    <value>A system_admin with that email already exists.</value>
+    <comment>409 detail. 'system_admin' is the role name - keep it verbatim.</comment>
+  </data>
+  <data name="error.admin.accountStatusInvalid" xml:space="preserve">
+    <value>Must be 'active', 'locked', or 'disabled'.</value>
+    <comment>422 detail for accountStatus. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.admin.selfStatusChange" xml:space="preserve">
+    <value>Operators cannot change their own account status; use /api/v1/system/me/password instead.</value>
+    <comment>403 detail. Keep the endpoint path verbatim.</comment>
+  </data>
+  <data name="error.admin.lastActive" xml:space="preserve">
+    <value>Cannot disable or lock the last active system_admin.</value>
+    <comment>409 detail: at least one operator account must stay active.</comment>
+  </data>
+  <data name="error.admin.selfPasswordReset" xml:space="preserve">
+    <value>Operators cannot reset their own password through this endpoint; use /api/v1/system/me/password instead.</value>
+    <comment>403 detail. Keep the endpoint path verbatim.</comment>
+  </data>
+  <data name="error.admin.selfDelete" xml:space="preserve">
+    <value>Operators cannot delete their own account.</value>
+    <comment>403 detail.</comment>
+  </data>
+  <data name="error.admin.disableBeforeDelete" xml:space="preserve">
+    <value>Disable the system_admin (PATCH /account-status with 'disabled') before deleting.</value>
+    <comment>409 detail. Keep the endpoint path and 'disabled' verbatim.</comment>
+  </data>
+  <data name="error.system.ownerEmailInvalid" xml:space="preserve">
+    <value>Valid owner email is required.</value>
+    <comment>422 detail when creating a tenant without a parseable owner email.</comment>
+  </data>
+  <data name="error.system.quotaInvalid" xml:space="preserve">
+    <value>Quota must be a positive number of bytes, or null to clear.</value>
+    <comment>422 detail for the tenant storage quota.</comment>
+  </data>
+  <data name="error.system.tenantStatusInvalid" xml:space="preserve">
+    <value>Must be 'active' or 'suspended'. ('archived' and 'deleting' are enterprise-only.)</value>
+    <comment>422 detail for tenant status. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.system.tenantAlreadyActive" xml:space="preserve">
+    <value>Tenant is already active.</value>
+    <comment>409 detail: re-activating an active tenant.</comment>
+  </data>
+  <data name="error.system.lookupQueryRequired" xml:space="preserve">
+    <value>Provide at least one of: email, tenantSlug.</value>
+    <comment>422 detail for user lookup. The field names are API literals.</comment>
+  </data>
+  <data name="error.system.unknownSettingKey" xml:space="preserve">
+    <value>Unknown setting key: {0}</value>
+    <comment>422 detail. {0} = the rejected instance-setting key.</comment>
+  </data>
+  <data name="error.system.tenantSlugRequired" xml:space="preserve">
+    <value>tenantSlug is required.</value>
+    <comment>422 detail. 'tenantSlug' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.system.unsupportedLanguage" xml:space="preserve">
+    <value>Unsupported language code. Allowed: {0}.</value>
+    <comment>422 detail. {0} = comma-joined supported locale codes.</comment>
+  </data>
+  <data name="error.password.currentRequired" xml:space="preserve">
+    <value>Current password is required.</value>
+    <comment>422 detail on the operator password-change endpoint.</comment>
+  </data>
+  <data name="error.password.mustDiffer" xml:space="preserve">
+    <value>New password must differ from current.</value>
+    <comment>422 detail on the operator password-change endpoint.</comment>
+  </data>
+  <data name="error.trustAnchor.materialEmpty" xml:space="preserve">
+    <value>material must not be empty.</value>
+    <comment>422 detail. 'material' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.upstream.ociOnlyFields" xml:space="preserve">
+    <value>Fields prefixes and tokenEndpoint are only valid for ecosystem=oci.</value>
+    <comment>422 detail. Field names and 'ecosystem=oci' are API literals.</comment>
+  </data>
+  <data name="error.upstream.rpmAnonymousOnly" xml:space="preserve">
+    <value>Authenticated upstreams are not supported for ecosystem=rpm.</value>
+    <comment>422 detail. 'ecosystem=rpm' is an API literal.</comment>
+  </data>
+  <data name="error.upstream.masterKeyRequired" xml:space="preserve">
+    <value>DEPENDABLY_MASTER_KEY must be configured to store an upstream secret at rest.</value>
+    <comment>422 detail. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</comment>
+  </data>
+  <data name="error.upstream.httpsRequiredForAuth" xml:space="preserve">
+    <value>Authenticated upstreams require https:// — a plaintext http:// URL would leak the credential.</value>
+    <comment>422 detail. Keep the URL schemes 'https://' and 'http://' verbatim.</comment>
+  </data>
+  <data name="error.upstream.anonymousNoCredentials" xml:space="preserve">
+    <value>username and secret are not valid for authType=anonymous.</value>
+    <comment>422 detail. Field names and the authType value are API literals.</comment>
+  </data>
+  <data name="error.upstream.bearerSecretRequired" xml:space="preserve">
+    <value>secret is required for authType=bearer.</value>
+    <comment>422 detail. Field names and the authType value are API literals.</comment>
+  </data>
+  <data name="error.upstream.basicUsernameRequired" xml:space="preserve">
+    <value>username is required for authType=basic.</value>
+    <comment>422 detail. Field names and the authType value are API literals.</comment>
+  </data>
+  <data name="error.upstream.basicSecretRequired" xml:space="preserve">
+    <value>secret is required for authType=basic.</value>
+    <comment>422 detail. Field names and the authType value are API literals.</comment>
+  </data>
+  <data name="error.upstream.authTypeInvalid" xml:space="preserve">
+    <value>authType must be one of: anonymous, basic, bearer.</value>
+    <comment>422 detail. The field name and values are API literals.</comment>
+  </data>
+  <data name="error.upstream.ociHostRequired" xml:space="preserve">
+    <value>Host is required for OCI upstreams.</value>
+    <comment>422 detail for OCI upstream registration.</comment>
+  </data>
+  <data name="error.upstream.ociPrefixRequired" xml:space="preserve">
+    <value>At least one prefix is required for OCI upstreams.</value>
+    <comment>422 detail for OCI upstream registration.</comment>
+  </data>
+  <data name="error.upstream.awsEcrUnsupported" xml:space="preserve">
+    <value>AuthType 'aws_ecr' is not supported. Use 'basic' with a GetAuthorizationToken-derived password.</value>
+    <comment>422 detail. The quoted values and GetAuthorizationToken are API literals.</comment>
+  </data>
+  <data name="error.upstream.ociAuthTypeInvalid" xml:space="preserve">
+    <value>authType must be one of: anonymous, basic, dockerhub_token_exchange.</value>
+    <comment>422 detail. The field name and values are API literals.</comment>
+  </data>
+  <data name="error.webhook.masterKeyRequired" xml:space="preserve">
+    <value>DEPENDABLY_MASTER_KEY must be configured to store a webhook signing secret at rest.</value>
+    <comment>422 detail. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</comment>
+  </data>
+  <data name="error.webhook.urlRequired" xml:space="preserve">
+    <value>url is required.</value>
+    <comment>422 detail. 'url' is the JSON field name - keep it verbatim.</comment>
+  </data>
+  <data name="error.webhook.eventTypeRequired" xml:space="preserve">
+    <value>At least one event type is required.</value>
+    <comment>422 detail: webhook created with an empty eventTypes array.</comment>
+  </data>
+  <data name="error.webhook.unknownEventTypes" xml:space="preserve">
+    <value>Unknown event types: {0}. Valid types: {1}.</value>
+    <comment>422 detail. {0} = rejected entries, {1} = the full valid set (API literals).</comment>
+  </data>
+  <data name="email.invite.subject" xml:space="preserve">
+    <value>You've been invited to {0} on Dependably</value>
+    <comment>Invite email subject line. {0} = the organization (tenant) name.</comment>
+  </data>
+  <data name="email.invite.body" xml:space="preserve">
+    <value>You have been invited to join {0} on Dependably.
+
+Accept your invitation using the link below. The link expires at {1} UTC.
+
+{2}
+
+If you were not expecting this invitation, you can ignore this email.
+</value>
+    <comment>Plain-text invite email body. {0} = organization name, {1} = expiry timestamp, {2} = invite link. Keep the blank lines and the trailing newline.</comment>
   </data>
 </root>

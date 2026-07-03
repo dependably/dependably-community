@@ -3,7 +3,6 @@ using System.Text.Json;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Siem;
 using Dependably.Security;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Dependably.Api;
@@ -14,11 +13,19 @@ namespace Dependably.Api;
 /// carrying read:audit. Platform admins (capability <c>platform:*</c>) get cross-tenant
 /// access; everyone else is scoped to their own tenant.
 ///
+/// Deliberately carries no <c>[AllowAnonymous]</c>: auth is resolved manually below to support
+/// both a JWT session and an opaque API token with <c>read:audit</c>, but the endpoints are not
+/// anonymous. Leaving <c>[AllowAnonymous]</c> off keeps the global <c>RouteScopeFilter</c>,
+/// <c>PasswordRotationGuard</c>, and <c>MfaEnrollmentGuard</c> filters live for JWT-session
+/// callers, so a session mid-forced-password-rotation or missing required MFA enrollment cannot
+/// pull audit/vuln data through this surface. The opaque-API-token path never authenticates
+/// against the default JWT Bearer scheme (it isn't a JWT), so those guards remain a no-op for it,
+/// exactly as before.
+///
 ///   GET /api/v1/siem/events/auth          — auth event stream from audit_log
 ///   GET /api/v1/siem/vulnerabilities/summary — vuln severity totals
 /// </summary>
 [ApiController]
-[AllowAnonymous] // Auth is checked manually to support both JWT and siem:read tokens
 public sealed class SiemController : ControllerBase
 {
     // Maximum page size for SIEM event stream responses.

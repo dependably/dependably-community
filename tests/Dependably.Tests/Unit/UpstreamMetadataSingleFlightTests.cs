@@ -74,6 +74,75 @@ public sealed class UpstreamMetadataSingleFlightTests
     }
 
     [Fact]
+    public async Task FirstWaiterCancels_SecondJoinerDoesNotTriggerSecondFetch()
+    {
+        // The first caller's WaitAsync(ct) detaches early (its own token cancels) while the
+        // shared upstream fetch is still running. A second, uncancelled caller for the SAME
+        // (url, maxBytes, authorizationHeader) coordinate must join the SAME shared fetch rather
+        // than triggering a brand-new upstream call.
+        var handler = new GateHandler(HttpStatusCode.OK, "metadata-body");
+        var (client, _) = BuildClient(handler);
+        const string url = "http://upstream.invalid/pkg/cancel-index.json";
+
+        using var cts = new CancellationTokenSource();
+        var firstTask = client.GetOrFetchMetadataAsync(url, authorizationHeader: null, ct: cts.Token);
+
+        await Task.Delay(80);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstTask);
+
+        var secondTask = Task.Run(() => client.GetOrFetchMetadataAsync(url));
+        await Task.Delay(80);
+        handler.Release();
+        var second = await secondTask;
+
+        Assert.Equal(1, handler.CallCount);
+        Assert.Equal("metadata-body", second.BodyAsString());
+    }
+
+    [Fact]
+    public async Task DifferentAuthorizationHeaders_SameUrl_DoNotShareFetch()
+    {
+        // Single-flight keys must include a hash of the Authorization header: two callers
+        // presenting different credentials for the identical URL must never ride the same
+        // fetch — otherwise the second caller would silently inherit the first caller's
+        // upstream credentials (and any resulting audit/attribution).
+        var handler = new GateHandler(HttpStatusCode.OK, "shared-body");
+        var (client, _) = BuildClient(handler);
+        const string url = "http://upstream.invalid/pkg/creds-index.json";
+
+        var taskA = Task.Run(() => client.GetOrFetchMetadataAsync(url, authorizationHeader: "Bearer token-a"));
+        var taskB = Task.Run(() => client.GetOrFetchMetadataAsync(url, authorizationHeader: "Bearer token-b"));
+
+        await Task.Delay(80);
+        handler.Release();
+        await Task.WhenAll(taskA, taskB);
+
+        // Two distinct credentials on the identical URL must not collapse into one fetch.
+        Assert.Equal(2, handler.CallCount);
+    }
+
+    [Fact]
+    public async Task DifferentMaxBytes_SameUrl_DoNotShareFetch()
+    {
+        // A metadata caller (32 MB cap) and an artifact-buffering caller (600 MB cap) hitting the
+        // identical URL must never share a fetch — the winner's cap would otherwise silently
+        // apply to the other caller too.
+        var handler = new GateHandler(HttpStatusCode.OK, "shared-body");
+        var (client, _) = BuildClient(handler);
+        const string url = "http://upstream.invalid/pkg/cap-index.json";
+
+        var taskA = Task.Run(() => client.GetOrFetchMetadataAsync(url, UpstreamClient.MaxMetadataResponseBytes, null));
+        var taskB = Task.Run(() => client.GetOrFetchMetadataAsync(url, UpstreamClient.MaxUpstreamResponseBytes, null));
+
+        await Task.Delay(80);
+        handler.Release();
+        await Task.WhenAll(taskA, taskB);
+
+        Assert.Equal(2, handler.CallCount);
+    }
+
+    [Fact]
     public async Task GetOrFetchMetadataAsync_AirGapped_Throws()
     {
         var handler = new GateHandler(HttpStatusCode.OK, "");
@@ -172,14 +241,14 @@ public sealed class UpstreamMetadataSingleFlightTests
 
     private sealed class AllowEverythingValidator : IUpstreamUrlValidator
     {
-        public Task<bool> IsAllowedAsync(string url, string? orgId = null, CancellationToken ct = default)
-            => Task.FromResult(true);
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId = null, CancellationToken ct = default)
+            => Task.FromResult(UpstreamUrlBlock.None);
     }
 
     private sealed class BlockAllValidator : IUpstreamUrlValidator
     {
-        public Task<bool> IsAllowedAsync(string url, string? orgId = null, CancellationToken ct = default)
-            => Task.FromResult(false);
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId = null, CancellationToken ct = default)
+            => Task.FromResult(UpstreamUrlBlock.BlockedRange);
     }
 
     /// <summary>Discard-only metadata store for unit tests that only need AuditRepository to no-op.</summary>

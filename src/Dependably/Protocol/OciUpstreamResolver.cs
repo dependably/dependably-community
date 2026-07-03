@@ -408,24 +408,30 @@ public sealed class OciUpstreamResolver
             () => FetchAndCacheBlobAsync(orgId, upstream, repository, digest, blobKey, CancellationToken.None),
             LazyThreadSafetyMode.ExecutionAndPublication));
 
-        try
-        {
-            // WaitAsync(ct) lets the caller's request token abort the wait without
-            // cancelling the shared upstream fetch that other waiters depend on.
-            var meta = await lazy.Value.WaitAsync(ct);
-            if (meta is null)
-            {
-                return null;
-            }
+        // Removes exactly this (blobKey, lazy) pair once the shared fetch genuinely completes —
+        // success or failure — never when an individual caller's WaitAsync(ct) below merely
+        // detaches early. A caller cancelling mid-fetch must not evict a live in-flight entry
+        // while the shared upstream pull is still running for the remaining waiters, and the
+        // pair-targeted removal never touches a newer generation that replaced this entry. Every
+        // concurrent caller attaches its own continuation to the same Task; TryRemove is
+        // idempotent — only the first continuation to run has any effect.
+        _ = lazy.Value.ContinueWith(
+            _ => _blobInflight.TryRemove(new KeyValuePair<string, Lazy<Task<OciBlobFetchMetadata?>>>(blobKey, lazy)),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
 
-            // Each waiter opens an INDEPENDENT stream from the cache store — never shared.
-            var stream = await _blobs.Cache.GetAsync(meta.BlobKey, ct);
-            return stream is null ? null : new OciBlobResult(stream, meta.MediaType);
-        }
-        finally
+        // WaitAsync(ct) lets the caller's request token abort the wait without
+        // cancelling the shared upstream fetch that other waiters depend on.
+        var meta = await lazy.Value.WaitAsync(ct);
+        if (meta is null)
         {
-            _blobInflight.TryRemove(blobKey, out _);
+            return null;
         }
+
+        // Each waiter opens an INDEPENDENT stream from the cache store — never shared.
+        var stream = await _blobs.Cache.GetAsync(meta.BlobKey, ct);
+        return stream is null ? null : new OciBlobResult(stream, meta.MediaType);
     }
 
     /// <summary>

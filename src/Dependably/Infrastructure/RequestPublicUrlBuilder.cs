@@ -9,12 +9,14 @@ namespace Dependably.Infrastructure;
 public sealed class RequestPublicUrlBuilder : IPublicUrlBuilder
 {
     private readonly string? _configuredScheme;
+    private readonly bool _requireSecureCookies;
 
     public RequestPublicUrlBuilder(IConfiguration config)
     {
         _configuredScheme = config["BASE_URL"] is { } bu && Uri.TryCreate(bu, UriKind.Absolute, out var uri)
             ? uri.Scheme
             : null;
+        _requireSecureCookies = string.Equals(config["REQUIRE_SECURE_COOKIES"], "true", StringComparison.OrdinalIgnoreCase);
     }
 
     public string BaseUrl(HttpContext context) => $"{Scheme(context)}://{context.Request.Host}";
@@ -35,7 +37,10 @@ public sealed class RequestPublicUrlBuilder : IPublicUrlBuilder
         new()
         {
             HttpOnly = true,
-            Secure = ctx.Request.IsHttps || IsHttpsDeployment,
+            // REQUIRE_SECURE_COOKIES pins Secure=true unconditionally so an operator-declared
+            // HTTPS-only deployment never ships a session/MFA/device cookie without Secure, even
+            // if a misconfigured proxy or a downgraded request makes ctx.Request.IsHttps false.
+            Secure = _requireSecureCookies || ctx.Request.IsHttps || IsHttpsDeployment,
             SameSite = sameSite,
             IsEssential = true,
         };

@@ -1,112 +1,972 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <xliff version="2.0" xmlns="urn:oasis:names:tc:xliff:document:2.0" srcLang="en" trgLang="fr">
   <file id="backend" original="src/Dependably/Resources/SharedResource.resx">
-    <unit id="error.allowlist.fieldsRequired">
-      <segment>
-        <source>ecosystem and purl_pattern are required.</source>
-        <target/>
+    <unit id="email.invite.body">
+      <notes>
+        <note category="translator">Plain-text invite email body. {0} = organization name, {1} = expiry timestamp, {2} = invite link. Keep the blank lines and the trailing newline.</note>
+      </notes>
+      <segment state="translated">
+        <source>You have been invited to join {0} on Dependably.
+
+Accept your invitation using the link below. The link expires at {1} UTC.
+
+{2}
+
+If you were not expecting this invitation, you can ignore this email.
+</source>
+        <target>Vous avez reçu une invitation à rejoindre {0} sur Dependably.
+
+Acceptez votre invitation à l&apos;aide du lien ci-dessous. Le lien expire le {1} UTC.
+
+{2}
+
+Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
+</target>
+      </segment>
+    </unit>
+    <unit id="email.invite.subject">
+      <notes>
+        <note category="translator">Invite email subject line. {0} = the organization (tenant) name.</note>
+      </notes>
+      <segment state="translated">
+        <source>You&apos;ve been invited to {0} on Dependably</source>
+        <target>Invitation à rejoindre {0} sur Dependably</target>
+      </segment>
+    </unit>
+    <unit id="error.admin.accountStatusInvalid">
+      <notes>
+        <note category="translator">422 detail for accountStatus. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;active&apos;, &apos;locked&apos;, or &apos;disabled&apos;.</source>
+        <target>Doit être « active », « locked » ou « disabled ».</target>
+      </segment>
+    </unit>
+    <unit id="error.admin.disableBeforeDelete">
+      <notes>
+        <note category="translator">409 detail. Keep the endpoint path and &apos;disabled&apos; verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>Disable the system_admin (PATCH /account-status with &apos;disabled&apos;) before deleting.</source>
+        <target>Désactivez le system_admin (PATCH /account-status avec « disabled ») avant la suppression.</target>
+      </segment>
+    </unit>
+    <unit id="error.admin.emailConflict">
+      <notes>
+        <note category="translator">409 detail. &apos;system_admin&apos; is the role name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>A system_admin with that email already exists.</source>
+        <target>Un system_admin avec ce courriel existe déjà.</target>
+      </segment>
+    </unit>
+    <unit id="error.admin.emailRequired">
+      <notes>
+        <note category="translator">422 detail. &apos;email&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>email is required.</source>
+        <target>email est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.admin.lastActive">
+      <notes>
+        <note category="translator">409 detail: at least one operator account must stay active.</note>
+      </notes>
+      <segment state="translated">
+        <source>Cannot disable or lock the last active system_admin.</source>
+        <target>Impossible de désactiver ou de verrouiller le dernier system_admin actif.</target>
+      </segment>
+    </unit>
+    <unit id="error.admin.selfDelete">
+      <notes>
+        <note category="translator">403 detail.</note>
+      </notes>
+      <segment state="translated">
+        <source>Operators cannot delete their own account.</source>
+        <target>Les opérateurs ne peuvent pas supprimer leur propre compte.</target>
+      </segment>
+    </unit>
+    <unit id="error.admin.selfPasswordReset">
+      <notes>
+        <note category="translator">403 detail. Keep the endpoint path verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>Operators cannot reset their own password through this endpoint; use /api/v1/system/me/password instead.</source>
+        <target>Les opérateurs ne peuvent pas réinitialiser leur propre mot de passe via ce point de terminaison; utilisez plutôt /api/v1/system/me/password.</target>
+      </segment>
+    </unit>
+    <unit id="error.admin.selfStatusChange">
+      <notes>
+        <note category="translator">403 detail. Keep the endpoint path verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>Operators cannot change their own account status; use /api/v1/system/me/password instead.</source>
+        <target>Les opérateurs ne peuvent pas modifier l&apos;état de leur propre compte; utilisez plutôt /api/v1/system/me/password.</target>
+      </segment>
+    </unit>
+    <unit id="error.allowlist.purlPatternRequired">
+      <notes>
+        <note category="translator">Missing required API field when adding a package allowlist entry. Keep the field name &apos;purl_pattern&apos; verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>purl_pattern is required.</source>
+        <target>Le champ purl_pattern est obligatoire.</target>
       </segment>
     </unit>
     <unit id="error.auth.forbidden">
-      <segment>
+      <notes>
+        <note category="translator">403 body when an API token lacks the capability required for the operation. Here &apos;scope&apos; means the token&apos;s permission set, not OAuth.</note>
+      </notes>
+      <segment state="translated">
         <source>Insufficient token scope.</source>
-        <target/>
+        <target>Portée du jeton insuffisante.</target>
       </segment>
     </unit>
     <unit id="error.auth.required">
-      <segment>
+      <notes>
+        <note category="translator">401 body: the client must authenticate (registry token or web session).</note>
+      </notes>
+      <segment state="translated">
         <source>Authentication required.</source>
-        <target/>
+        <target>Authentification requise.</target>
+      </segment>
+    </unit>
+    <unit id="error.banner.bodyRequired">
+      <notes>
+        <note category="translator">422 detail: banner created or updated with an empty body.</note>
+      </notes>
+      <segment state="translated">
+        <source>Banner body is required.</source>
+        <target>Le corps de l&apos;annonce est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.banner.bodyTooLong">
+      <notes>
+        <note category="translator">422 detail: banner body over the length cap. {0} = maximum characters.</note>
+      </notes>
+      <segment state="translated">
+        <source>Banner body must not exceed {0} characters.</source>
+        <target>Le corps de l&apos;annonce ne doit pas dépasser {0} caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.banner.endsAfterStarts">
+      <notes>
+        <note category="translator">422 detail: banner window ends before it starts. Field names are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>endsAt must be after startsAt.</source>
+        <target>endsAt doit être postérieur à startsAt.</target>
+      </segment>
+    </unit>
+    <unit id="error.banner.endsAtInvalid">
+      <notes>
+        <note category="translator">422 detail. &apos;endsAt&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>endsAt must be a valid ISO-8601 UTC date-time.</source>
+        <target>endsAt doit être une date-heure UTC ISO-8601 valide.</target>
+      </segment>
+    </unit>
+    <unit id="error.banner.linkLabelTooLong">
+      <notes>
+        <note category="translator">422 detail: banner link label over the length cap. {0} = maximum characters.</note>
+      </notes>
+      <segment state="translated">
+        <source>Link label must not exceed {0} characters.</source>
+        <target>Le libellé du lien ne doit pas dépasser {0} caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.banner.linkUrlScheme">
+      <notes>
+        <note category="translator">422 detail: banner link URL with a scheme other than http/https.</note>
+      </notes>
+      <segment state="translated">
+        <source>Link URL must use the http or https scheme.</source>
+        <target>L&apos;URL du lien doit utiliser le schéma http ou https.</target>
+      </segment>
+    </unit>
+    <unit id="error.banner.linkUrlTooLong">
+      <notes>
+        <note category="translator">422 detail: banner link URL over the length cap. {0} = maximum characters.</note>
+      </notes>
+      <segment state="translated">
+        <source>Link URL must not exceed {0} characters.</source>
+        <target>L&apos;URL du lien ne doit pas dépasser {0} caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.banner.maxActivePerTenant">
+      <notes>
+        <note category="translator">422 detail when creating a tenant banner past the active-banner cap. {0} = the cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Maximum of {0} simultaneously active banners per tenant reached. Disable or expire existing banners first.</source>
+        <target>Le maximum de {0} annonces simultanément actives par locataire est atteint. Désactivez ou faites expirer des annonces existantes d&apos;abord.</target>
+      </segment>
+    </unit>
+    <unit id="error.banner.maxActiveSystem">
+      <notes>
+        <note category="translator">422 detail when creating a system banner past the active-banner cap. {0} = the cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Maximum of {0} simultaneously active system banners reached.</source>
+        <target>Le maximum de {0} annonces système simultanément actives est atteint.</target>
+      </segment>
+    </unit>
+    <unit id="error.banner.severityInvalid">
+      <notes>
+        <note category="translator">422 detail. &apos;severity&apos; and the listed values are API literals - do not translate them.</note>
+      </notes>
+      <segment state="translated">
+        <source>severity must be one of: info, warn, alert.</source>
+        <target>severity doit être l&apos;une des valeurs suivantes : info, warn, alert.</target>
+      </segment>
+    </unit>
+    <unit id="error.banner.startsAtInvalid">
+      <notes>
+        <note category="translator">422 detail. &apos;startsAt&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>startsAt must be a valid ISO-8601 UTC date-time.</source>
+        <target>startsAt doit être une date-heure UTC ISO-8601 valide.</target>
+      </segment>
+    </unit>
+    <unit id="error.banner.targetRoleInvalid">
+      <notes>
+        <note category="translator">422 detail. &apos;targetRole&apos; and the listed values are API literals - do not translate them.</note>
+      </notes>
+      <segment state="translated">
+        <source>targetRole must be one of: all, member, admin, owner, auditor.</source>
+        <target>targetRole doit être l&apos;une des valeurs suivantes : all, member, admin, owner, auditor.</target>
+      </segment>
+    </unit>
+    <unit id="error.common.bodyRequired">
+      <notes>
+        <note category="translator">422 detail for endpoints that received no JSON body.</note>
+      </notes>
+      <segment state="translated">
+        <source>Body is required.</source>
+        <target>Le corps de la requête est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.common.invalidIpOrCidr">
+      <notes>
+        <note category="translator">422 detail for the /metrics allowlist editors. {0} = the rejected entry.</note>
+      </notes>
+      <segment state="translated">
+        <source>&quot;{0}&quot; is not a valid IP or CIDR.</source>
+        <target>« {0} » n&apos;est pas une adresse IP ou un CIDR valide.</target>
+      </segment>
+    </unit>
+    <unit id="error.common.mustBeOneOf">
+      <notes>
+        <note category="translator">Generic enum-validation 422 detail. {0} = comma-joined allowed values (API literals).</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be one of: {0}.</source>
+        <target>Doit être l&apos;une des valeurs suivantes : {0}.</target>
+      </segment>
+    </unit>
+    <unit id="error.common.requestBodyRequired">
+      <notes>
+        <note category="translator">422 detail for endpoints that received no JSON body.</note>
+      </notes>
+      <segment state="translated">
+        <source>Request body required.</source>
+        <target>Le corps de la requête est obligatoire.</target>
       </segment>
     </unit>
     <unit id="error.conflict.title">
-      <segment>
+      <notes>
+        <note category="translator">Title of the HTTP 409 problem response (duplicate or conflicting resource).</note>
+      </notes>
+      <segment state="translated">
         <source>Conflict</source>
-        <target/>
+        <target>Conflit</target>
       </segment>
     </unit>
     <unit id="error.forbidden.title">
-      <segment>
+      <notes>
+        <note category="translator">Title of the HTTP 403 problem response (authenticated but not permitted).</note>
+      </notes>
+      <segment state="translated">
         <source>Forbidden</source>
-        <target/>
+        <target>Accès refusé</target>
       </segment>
     </unit>
     <unit id="error.invite.emailRequired">
-      <segment>
+      <notes>
+        <note category="translator">Inviting an organization member without an email address.</note>
+      </notes>
+      <segment state="translated">
         <source>Email is required.</source>
-        <target/>
+        <target>L&apos;adresse courriel est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.invite.limitReached">
+      <notes>
+        <note category="translator">422 detail. {0} = the per-tenant pending-invite cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Pending invite limit ({0}) reached for this tenant. Cancel unused invites before creating new ones.</source>
+        <target>Limite d&apos;invitations en attente ({0}) atteinte pour ce locataire. Annulez des invitations inutilisées avant d&apos;en créer de nouvelles.</target>
+      </segment>
+    </unit>
+    <unit id="error.license.allowlistDuplicate">
+      <notes>
+        <note category="translator">409 detail. {0} = the SPDX identifier.</note>
+      </notes>
+      <segment state="translated">
+        <source>&apos;{0}&apos; is already on the allowlist.</source>
+        <target>« {0} » figure déjà sur la liste d&apos;autorisation.</target>
+      </segment>
+    </unit>
+    <unit id="error.license.blocklistDuplicate">
+      <notes>
+        <note category="translator">409 detail. {0} = the SPDX identifier.</note>
+      </notes>
+      <segment state="translated">
+        <source>&apos;{0}&apos; is already on the blocklist.</source>
+        <target>« {0} » figure déjà sur la liste de blocage.</target>
+      </segment>
+    </unit>
+    <unit id="error.license.modeInvalid">
+      <notes>
+        <note category="translator">422 detail. The quoted values are API literals - do not translate them.</note>
+      </notes>
+      <segment state="translated">
+        <source>Mode must be &apos;off&apos;, &apos;warn&apos;, or &apos;block&apos;.</source>
+        <target>Le mode doit être « off », « warn » ou « block ».</target>
+      </segment>
+    </unit>
+    <unit id="error.license.spdxRequired">
+      <notes>
+        <note category="translator">422 detail: license allow/block entry without an SPDX id.</note>
+      </notes>
+      <segment state="translated">
+        <source>SPDX identifier is required.</source>
+        <target>L&apos;identifiant SPDX est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.list.ecosystemInvalidDenylist">
+      <notes>
+        <note category="translator">422 detail. The field name and values are API literals - do not translate them.</note>
+      </notes>
+      <segment state="translated">
+        <source>ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang, rpm, oci.</source>
+        <target>ecosystem doit être l&apos;une des valeurs suivantes : npm, pypi, nuget, maven, cargo, golang, rpm, oci.</target>
+      </segment>
+    </unit>
+    <unit id="error.list.ecosystemInvalidProxy">
+      <notes>
+        <note category="translator">422 detail. The field name and values are API literals - do not translate them.</note>
+      </notes>
+      <segment state="translated">
+        <source>ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang.</source>
+        <target>ecosystem doit être l&apos;une des valeurs suivantes : npm, pypi, nuget, maven, cargo, golang.</target>
+      </segment>
+    </unit>
+    <unit id="error.list.nameRequired">
+      <notes>
+        <note category="translator">422 detail. &apos;name&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>name is required.</source>
+        <target>name est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.list.nameTooLong">
+      <notes>
+        <note category="translator">422 detail. &apos;name&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>name must be 512 characters or fewer.</source>
+        <target>name doit compter au plus 512 caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.list.patternInvalidRegex">
+      <notes>
+        <note category="translator">422 detail: list pattern failed regex compilation.</note>
+      </notes>
+      <segment state="translated">
+        <source>Pattern is not a valid regular expression.</source>
+        <target>Le motif n&apos;est pas une expression régulière valide.</target>
+      </segment>
+    </unit>
+    <unit id="error.list.patternRequired">
+      <notes>
+        <note category="translator">422 detail. &apos;pattern&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>pattern is required.</source>
+        <target>pattern est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.list.patternTooLong256">
+      <notes>
+        <note category="translator">422 detail: list pattern over the length cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Pattern must be 256 characters or fewer.</source>
+        <target>Le motif doit compter au plus 256 caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.list.patternTooLong512">
+      <notes>
+        <note category="translator">422 detail: list pattern over the length cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Pattern must be 512 characters or fewer.</source>
+        <target>Le motif doit compter au plus 512 caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.list.trailingGlobOnly">
+      <notes>
+        <note category="translator">422 detail: wildcard placed anywhere except the end of the pattern.</note>
+      </notes>
+      <segment state="translated">
+        <source>&apos;*&apos; is only supported as the final character (trailing glob).</source>
+        <target>« * » n&apos;est pris en charge qu&apos;en dernier caractère (glob final).</target>
+      </segment>
+    </unit>
+    <unit id="error.list.versionPatternTooLong">
+      <notes>
+        <note category="translator">422 detail. &apos;version_pattern&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>version_pattern must be 128 characters or fewer.</source>
+        <target>version_pattern doit compter au plus 128 caractères.</target>
       </segment>
     </unit>
     <unit id="error.member.lastOwnerDemote">
-      <segment>
+      <notes>
+        <note category="translator">Blocked demotion of a tenant&apos;s only owner; an organization must always keep at least one owner.</note>
+      </notes>
+      <segment state="translated">
         <source>Cannot demote the last owner of an org.</source>
-        <target/>
+        <target>Impossible de rétrograder le dernier propriétaire de l&apos;organisation.</target>
       </segment>
     </unit>
     <unit id="error.member.lastOwnerRemove">
-      <segment>
+      <notes>
+        <note category="translator">Blocked removal of a tenant&apos;s only owner; an organization must always keep at least one owner.</note>
+      </notes>
+      <segment state="translated">
         <source>Cannot remove the last owner of an org.</source>
-        <target/>
+        <target>Impossible de retirer le dernier propriétaire de l&apos;organisation.</target>
       </segment>
     </unit>
     <unit id="error.member.roleInvalid">
-      <segment>
-        <source>Role must be &apos;member&apos;, &apos;admin&apos;, or &apos;owner&apos;.</source>
-        <target/>
+      <notes>
+        <note category="translator">Invalid role when inviting a member or changing a member&apos;s role. The four role values are API literals - do not translate them.</note>
+      </notes>
+      <segment state="translated">
+        <source>Role must be &apos;member&apos;, &apos;admin&apos;, &apos;owner&apos;, or &apos;auditor&apos;.</source>
+        <target>Le rôle doit être « member », « admin », « owner » ou « auditor ».</target>
       </segment>
     </unit>
     <unit id="error.notFound.title">
-      <segment>
+      <notes>
+        <note category="translator">Title of the HTTP 404 problem response.</note>
+      </notes>
+      <segment state="translated">
         <source>Not Found</source>
-        <target/>
+        <target>Introuvable</target>
       </segment>
     </unit>
     <unit id="error.org.notFound">
-      <segment>
+      <notes>
+        <note category="translator">404 body when the organization (tenant) addressed by the request does not exist.</note>
+      </notes>
+      <segment state="translated">
         <source>Organization not found.</source>
-        <target/>
+        <target>Organisation introuvable.</target>
       </segment>
     </unit>
     <unit id="error.org.slugConflict">
-      <segment>
-        <source>An org with that slug already exists.</source>
-        <target/>
+      <notes>
+        <note category="translator">Creating a tenant whose slug is already taken. &apos;Tenant&apos; = a customer organization on this instance.</note>
+      </notes>
+      <segment state="translated">
+        <source>A tenant with that slug already exists.</source>
+        <target>Un locataire avec cet identifiant existe déjà.</target>
       </segment>
     </unit>
-    <unit id="error.org.slugRequired">
-      <segment>
-        <source>Slug is required.</source>
-        <target/>
+    <unit id="error.org.slugInvalid">
+      <notes>
+        <note category="translator">Rejects a new tenant&apos;s slug (the URL/subdomain identifier). &apos;Slug&apos; may be rendered with a local term for identifier.</note>
+      </notes>
+      <segment state="translated">
+        <source>Slug is missing, reserved, or contains invalid characters.</source>
+        <target>L&apos;identifiant est manquant, réservé ou contient des caractères non valides.</target>
+      </segment>
+    </unit>
+    <unit id="error.password.currentRequired">
+      <notes>
+        <note category="translator">422 detail on the operator password-change endpoint.</note>
+      </notes>
+      <segment state="translated">
+        <source>Current password is required.</source>
+        <target>Le mot de passe actuel est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.password.mustDiffer">
+      <notes>
+        <note category="translator">422 detail on the operator password-change endpoint.</note>
+      </notes>
+      <segment state="translated">
+        <source>New password must differ from current.</source>
+        <target>Le nouveau mot de passe doit différer de l&apos;actuel.</target>
       </segment>
     </unit>
     <unit id="error.payloadTooLarge.title">
-      <segment>
+      <notes>
+        <note category="translator">Title of the HTTP 413 problem response (upload exceeds the configured size limit).</note>
+      </notes>
+      <segment state="translated">
         <source>Payload Too Large</source>
-        <target/>
+        <target>Charge utile trop volumineuse</target>
+      </segment>
+    </unit>
+    <unit id="error.quarantine.alreadyPending">
+      <notes>
+        <note category="translator">422 detail: re-pending a quarantine entry that is already pending.</note>
+      </notes>
+      <segment state="translated">
+        <source>Entry is already pending.</source>
+        <target>L&apos;entrée est déjà en attente.</target>
+      </segment>
+    </unit>
+    <unit id="error.quarantine.decisionInvalid">
+      <notes>
+        <note category="translator">422 detail for a quarantine decision. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;approved&apos;, &apos;denied&apos;, or &apos;pending&apos;.</source>
+        <target>Doit être « approved », « denied » ou « pending ».</target>
+      </segment>
+    </unit>
+    <unit id="error.quarantine.stateInvalid">
+      <notes>
+        <note category="translator">422 detail for the quarantine state filter. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;pending&apos;, &apos;approved&apos;, or &apos;denied&apos;.</source>
+        <target>Doit être « pending », « approved » ou « denied ».</target>
+      </segment>
+    </unit>
+    <unit id="error.saml.certificateInvalid">
+      <notes>
+        <note category="translator">422 detail: uploaded SAML signing certificate failed to parse.</note>
+      </notes>
+      <segment state="translated">
+        <source>Certificate is not valid base64 X.509.</source>
+        <target>Le certificat n&apos;est pas un X.509 base64 valide.</target>
+      </segment>
+    </unit>
+    <unit id="error.saml.certificateRequired">
+      <notes>
+        <note category="translator">422 detail. &apos;certificate&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>certificate is required.</source>
+        <target>certificate est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.saml.formsLoginNeedsMetadata">
+      <notes>
+        <note category="translator">422 detail: guard against locking every user out of the tenant.</note>
+      </notes>
+      <segment state="translated">
+        <source>Upload IdP metadata before disabling forms login.</source>
+        <target>Téléversez les métadonnées IdP avant de désactiver la connexion par formulaire.</target>
+      </segment>
+    </unit>
+    <unit id="error.saml.formsLoginNeedsRecentTest">
+      <notes>
+        <note category="translator">422 detail: guard against locking every user out of the tenant.</note>
+      </notes>
+      <segment state="translated">
+        <source>Run a successful SAML test within the last 10 minutes before disabling forms login.</source>
+        <target>Effectuez un test SAML réussi dans les 10 dernières minutes avant de désactiver la connexion par formulaire.</target>
+      </segment>
+    </unit>
+    <unit id="error.saml.formsLoginRequiresSaml">
+      <notes>
+        <note category="translator">422 detail: guard against locking every user out of the tenant.</note>
+      </notes>
+      <segment state="translated">
+        <source>Forms login can only be disabled when SAML is enabled.</source>
+        <target>La connexion par formulaire ne peut être désactivée que lorsque SAML est activé.</target>
+      </segment>
+    </unit>
+    <unit id="error.saml.metadataXmlRequired">
+      <notes>
+        <note category="translator">422 detail. &apos;metadataXml&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>metadataXml is required.</source>
+        <target>metadataXml est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.saml.nameIdFormatInvalid">
+      <notes>
+        <note category="translator">422 detail. Keep the field name and the example URN verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>nameIdFormat must be a valid absolute URI (e.g. urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress).</source>
+        <target>nameIdFormat doit être un URI absolu valide (par exemple urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress).</target>
+      </segment>
+    </unit>
+    <unit id="error.saml.nameIdFormatRequired">
+      <notes>
+        <note category="translator">422 detail. &apos;nameIdFormat&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>nameIdFormat is required.</source>
+        <target>nameIdFormat est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.settings.deprecatedPolicyInvalid">
+      <notes>
+        <note category="translator">422 detail for block_deprecated. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;off&apos;, &apos;warn&apos;, &apos;block_new&apos;, or &apos;block_all&apos;.</source>
+        <target>Doit être « off », « warn », « block_new » ou « block_all ».</target>
+      </segment>
+    </unit>
+    <unit id="error.settings.epssRange">
+      <notes>
+        <note category="translator">422 detail for max_epss_tolerance.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be between 0.0 and 1.0 (EPSS probability), or null to disable.</source>
+        <target>Doit être compris entre 0,0 et 1,0 (probabilité EPSS), ou null pour désactiver.</target>
+      </segment>
+    </unit>
+    <unit id="error.settings.offWarnBlock">
+      <notes>
+        <note category="translator">422 detail shared by the tri-state security gates. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;off&apos;, &apos;warn&apos;, or &apos;block&apos;.</source>
+        <target>Doit être « off », « warn » ou « block ».</target>
+      </segment>
+    </unit>
+    <unit id="error.settings.osvScoreRange">
+      <notes>
+        <note category="translator">422 detail for max_osv_score_tolerance (CVSS-scale bound).</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be between 0.0 and 10.0.</source>
+        <target>Doit être compris entre 0,0 et 10,0.</target>
+      </segment>
+    </unit>
+    <unit id="error.settings.overwritePolicyInvalid">
+      <notes>
+        <note category="translator">422 detail for version_overwrite_policy. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;block&apos;, &apos;exception&apos;, or &apos;allow&apos;.</source>
+        <target>Doit être « block », « exception » ou « allow ».</target>
+      </segment>
+    </unit>
+    <unit id="error.settings.releaseAgeRange">
+      <notes>
+        <note category="translator">422 detail for min_release_age_hours. {0} = the upper bound in hours.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be between 0 and {0} hours (1 year), or null to disable.</source>
+        <target>Doit être compris entre 0 et {0} heures (1 an), ou null pour désactiver.</target>
+      </segment>
+    </unit>
+    <unit id="error.settings.rpmUpstreamModeInvalid">
+      <notes>
+        <note category="translator">422 detail for rpm_upstream_mode. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be null (inherit the instance default), &apos;passthrough&apos;, or &apos;merged&apos;.</source>
+        <target>Doit être null (hérite de la valeur par défaut de l&apos;instance), « passthrough » ou « merged ».</target>
+      </segment>
+    </unit>
+    <unit id="error.system.lookupQueryRequired">
+      <notes>
+        <note category="translator">422 detail for user lookup. The field names are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Provide at least one of: email, tenantSlug.</source>
+        <target>Fournissez au moins l&apos;un des champs suivants : email, tenantSlug.</target>
+      </segment>
+    </unit>
+    <unit id="error.system.ownerEmailInvalid">
+      <notes>
+        <note category="translator">422 detail when creating a tenant without a parseable owner email.</note>
+      </notes>
+      <segment state="translated">
+        <source>Valid owner email is required.</source>
+        <target>Une adresse courriel de propriétaire valide est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.system.quotaInvalid">
+      <notes>
+        <note category="translator">422 detail for the tenant storage quota.</note>
+      </notes>
+      <segment state="translated">
+        <source>Quota must be a positive number of bytes, or null to clear.</source>
+        <target>Le quota doit être un nombre d&apos;octets positif, ou null pour effacer.</target>
+      </segment>
+    </unit>
+    <unit id="error.system.tenantAlreadyActive">
+      <notes>
+        <note category="translator">409 detail: re-activating an active tenant.</note>
+      </notes>
+      <segment state="translated">
+        <source>Tenant is already active.</source>
+        <target>Le locataire est déjà actif.</target>
+      </segment>
+    </unit>
+    <unit id="error.system.tenantSlugRequired">
+      <notes>
+        <note category="translator">422 detail. &apos;tenantSlug&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>tenantSlug is required.</source>
+        <target>tenantSlug est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.system.tenantStatusInvalid">
+      <notes>
+        <note category="translator">422 detail for tenant status. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;active&apos; or &apos;suspended&apos;. (&apos;archived&apos; and &apos;deleting&apos; are enterprise-only.)</source>
+        <target>Doit être « active » ou « suspended ». (« archived » et « deleting » sont réservés à l&apos;édition entreprise.)</target>
+      </segment>
+    </unit>
+    <unit id="error.system.unknownSettingKey">
+      <notes>
+        <note category="translator">422 detail. {0} = the rejected instance-setting key.</note>
+      </notes>
+      <segment state="translated">
+        <source>Unknown setting key: {0}</source>
+        <target>Clé de paramètre inconnue : {0}</target>
+      </segment>
+    </unit>
+    <unit id="error.system.unsupportedLanguage">
+      <notes>
+        <note category="translator">422 detail. {0} = comma-joined supported locale codes.</note>
+      </notes>
+      <segment state="translated">
+        <source>Unsupported language code. Allowed: {0}.</source>
+        <target>Code de langue non pris en charge. Autorisés : {0}.</target>
+      </segment>
+    </unit>
+    <unit id="error.token.limitReached">
+      <notes>
+        <note category="translator">422 detail. {0} = the per-tenant active-token cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Active token limit ({0}) reached for this tenant. Revoke unused tokens before creating new ones.</source>
+        <target>Limite de jetons actifs ({0}) atteinte pour ce locataire. Révoquez des jetons inutilisés avant d&apos;en créer de nouveaux.</target>
       </segment>
     </unit>
     <unit id="error.token.nameRequired">
-      <segment>
+      <notes>
+        <note category="translator">Creating a service token without a display name.</note>
+      </notes>
+      <segment state="translated">
         <source>Name is required.</source>
-        <target/>
+        <target>Le nom est obligatoire.</target>
       </segment>
     </unit>
-    <unit id="error.token.scopeInvalid">
-      <segment>
-        <source>Scope must be &apos;pull&apos; or &apos;push&apos;.</source>
-        <target/>
+    <unit id="error.token.scopeRetired">
+      <notes>
+        <note category="translator">The legacy &apos;scope&apos; field on the token API was replaced by &apos;capabilities&apos;. Keep both field names verbatim - they are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>The &apos;scope&apos; field is no longer accepted. Send &apos;capabilities&apos; instead.</source>
+        <target>Le champ « scope » n&apos;est plus accepté. Envoyez « capabilities » à la place.</target>
+      </segment>
+    </unit>
+    <unit id="error.trustAnchor.materialEmpty">
+      <notes>
+        <note category="translator">422 detail. &apos;material&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>material must not be empty.</source>
+        <target>material ne doit pas être vide.</target>
       </segment>
     </unit>
     <unit id="error.unauthorized.title">
-      <segment>
+      <notes>
+        <note category="translator">Title of the HTTP 401 problem response (authentication missing or failed).</note>
+      </notes>
+      <segment state="translated">
         <source>Unauthorized</source>
-        <target/>
+        <target>Non autorisé</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.anonymousNoCredentials">
+      <notes>
+        <note category="translator">422 detail. Field names and the authType value are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>username and secret are not valid for authType=anonymous.</source>
+        <target>username et secret ne sont pas valides pour authType=anonymous.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.authTypeInvalid">
+      <notes>
+        <note category="translator">422 detail. The field name and values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>authType must be one of: anonymous, basic, bearer.</source>
+        <target>authType doit être l&apos;une des valeurs suivantes : anonymous, basic, bearer.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.awsEcrUnsupported">
+      <notes>
+        <note category="translator">422 detail. The quoted values and GetAuthorizationToken are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>AuthType &apos;aws_ecr&apos; is not supported. Use &apos;basic&apos; with a GetAuthorizationToken-derived password.</source>
+        <target>authType « aws_ecr » n&apos;est pas pris en charge. Utilisez « basic » avec un mot de passe dérivé de GetAuthorizationToken.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.basicSecretRequired">
+      <notes>
+        <note category="translator">422 detail. Field names and the authType value are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>secret is required for authType=basic.</source>
+        <target>secret est obligatoire pour authType=basic.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.basicUsernameRequired">
+      <notes>
+        <note category="translator">422 detail. Field names and the authType value are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>username is required for authType=basic.</source>
+        <target>username est obligatoire pour authType=basic.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.bearerSecretRequired">
+      <notes>
+        <note category="translator">422 detail. Field names and the authType value are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>secret is required for authType=bearer.</source>
+        <target>secret est obligatoire pour authType=bearer.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.httpsRequiredForAuth">
+      <notes>
+        <note category="translator">422 detail. Keep the URL schemes &apos;https://&apos; and &apos;http://&apos; verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>Authenticated upstreams require https:// — a plaintext http:// URL would leak the credential.</source>
+        <target>Les amonts authentifiés requièrent https:// — une URL http:// en clair divulguerait les identifiants.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.masterKeyRequired">
+      <notes>
+        <note category="translator">422 detail. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>DEPENDABLY_MASTER_KEY must be configured to store an upstream secret at rest.</source>
+        <target>DEPENDABLY_MASTER_KEY doit être configurée pour stocker un secret d&apos;amont au repos.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.ociAuthTypeInvalid">
+      <notes>
+        <note category="translator">422 detail. The field name and values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>authType must be one of: anonymous, basic, dockerhub_token_exchange.</source>
+        <target>authType doit être l&apos;une des valeurs suivantes : anonymous, basic, dockerhub_token_exchange.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.ociHostRequired">
+      <notes>
+        <note category="translator">422 detail for OCI upstream registration.</note>
+      </notes>
+      <segment state="translated">
+        <source>Host is required for OCI upstreams.</source>
+        <target>L&apos;hôte est obligatoire pour les amonts OCI.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.ociOnlyFields">
+      <notes>
+        <note category="translator">422 detail. Field names and &apos;ecosystem=oci&apos; are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Fields prefixes and tokenEndpoint are only valid for ecosystem=oci.</source>
+        <target>Les champs prefixes et tokenEndpoint ne sont valides que pour ecosystem=oci.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.ociPrefixRequired">
+      <notes>
+        <note category="translator">422 detail for OCI upstream registration.</note>
+      </notes>
+      <segment state="translated">
+        <source>At least one prefix is required for OCI upstreams.</source>
+        <target>Au moins un préfixe est obligatoire pour les amonts OCI.</target>
+      </segment>
+    </unit>
+    <unit id="error.upstream.rpmAnonymousOnly">
+      <notes>
+        <note category="translator">422 detail. &apos;ecosystem=rpm&apos; is an API literal.</note>
+      </notes>
+      <segment state="translated">
+        <source>Authenticated upstreams are not supported for ecosystem=rpm.</source>
+        <target>Les amonts authentifiés ne sont pas pris en charge pour ecosystem=rpm.</target>
       </segment>
     </unit>
     <unit id="error.validation.title">
-      <segment>
+      <notes>
+        <note category="translator">Title of the HTTP 422 problem response; shown as an error heading in clients. Keep short.</note>
+      </notes>
+      <segment state="translated">
         <source>Validation Error</source>
-        <target/>
+        <target>Erreur de validation</target>
+      </segment>
+    </unit>
+    <unit id="error.webhook.eventTypeRequired">
+      <notes>
+        <note category="translator">422 detail: webhook created with an empty eventTypes array.</note>
+      </notes>
+      <segment state="translated">
+        <source>At least one event type is required.</source>
+        <target>Au moins un type d&apos;événement est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.webhook.masterKeyRequired">
+      <notes>
+        <note category="translator">422 detail. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>DEPENDABLY_MASTER_KEY must be configured to store a webhook signing secret at rest.</source>
+        <target>DEPENDABLY_MASTER_KEY doit être configurée pour stocker un secret de signature de webhook au repos.</target>
+      </segment>
+    </unit>
+    <unit id="error.webhook.unknownEventTypes">
+      <notes>
+        <note category="translator">422 detail. {0} = rejected entries, {1} = the full valid set (API literals).</note>
+      </notes>
+      <segment state="translated">
+        <source>Unknown event types: {0}. Valid types: {1}.</source>
+        <target>Types d&apos;événements inconnus : {0}. Types valides : {1}.</target>
+      </segment>
+    </unit>
+    <unit id="error.webhook.urlRequired">
+      <notes>
+        <note category="translator">422 detail. &apos;url&apos; is the JSON field name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>url is required.</source>
+        <target>url est obligatoire.</target>
       </segment>
     </unit>
   </file>

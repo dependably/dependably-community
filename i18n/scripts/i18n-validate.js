@@ -18,7 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const REPO_ROOT = path.resolve(__dirname, '..');
+const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
 let errorCount = 0;
 let warnCount = 0;
@@ -89,7 +89,7 @@ const localesDir = path.join(REPO_ROOT, 'web', 'src', 'locales');
 const sourceJsonPath = path.join(localesDir, 'en.json');
 
 if (!fs.existsSync(sourceJsonPath)) {
-  console.log(`INFO: ${sourceJsonPath} not found — skipping frontend validation.`);
+  error(`${sourceJsonPath} not found — frontend source locale is required.`);
 } else {
   console.log(`\nValidating frontend locales (source: web/src/locales/en.json)`);
   console.log('─'.repeat(60));
@@ -137,7 +137,7 @@ const resourcesDir = path.join(REPO_ROOT, 'src', 'Dependably', 'Resources');
 const sourceResxPath = path.join(resourcesDir, 'SharedResource.resx');
 
 if (!fs.existsSync(sourceResxPath)) {
-  console.log(`\nINFO: ${sourceResxPath} not found — skipping backend validation.`);
+  error(`${sourceResxPath} not found — backend source resource is required.`);
 } else {
   console.log(`\nValidating backend resources (source: src/Dependably/Resources/SharedResource.resx)`);
   console.log('─'.repeat(60));
@@ -181,6 +181,58 @@ if (!fs.existsSync(sourceResxPath)) {
   }
 }
 
+// ── Handoff currency ───────────────────────────────────────────────────────────
+// The XLIFF handoff package (i18n/handoff/*.xlf) is generated from the source locale
+// files by i18n-export.sh. A unit-id set that no longer matches the source keys means
+// the package was not regenerated after keys were added, renamed, or removed — the
+// drift that twice left translators working from a stale export. Unit IDs only are
+// compared: editing a string's value without renaming its key stays non-blocking.
+
+function parseXlfUnitIds(xlf) {
+  const ids = {};
+  const pattern = /<unit\s+id="([^"]+)"/g;
+  let match;
+  while ((match = pattern.exec(xlf)) !== null) {
+    ids[match[1]] = true;
+  }
+  return ids;
+}
+
+function checkHandoff(label, xlfPath, sourceKeys) {
+  if (sourceKeys === null) {
+    return; // source file missing — already reported above
+  }
+  console.log(`\nValidating handoff currency (${label}: ${path.relative(REPO_ROOT, xlfPath)})`);
+  console.log('─'.repeat(60));
+  if (!fs.existsSync(xlfPath)) {
+    error(`${xlfPath} not found — run i18n/scripts/i18n-export.sh to (re)generate the handoff package.`);
+    return;
+  }
+
+  const unitIds = parseXlfUnitIds(fs.readFileSync(xlfPath, 'utf8'));
+  const missing = Object.keys(sourceKeys).filter(k => !unitIds[k]);
+  const stale = Object.keys(unitIds).filter(k => !sourceKeys[k]);
+  for (const key of missing) {
+    error(`Handoff (${label}) is missing unit: ${key} — run i18n/scripts/i18n-export.sh.`);
+  }
+  for (const key of stale) {
+    error(`Handoff (${label}) has a stale unit: ${key} — run i18n/scripts/i18n-export.sh.`);
+  }
+  if (missing.length === 0 && stale.length === 0) {
+    console.log(`  ${label}: OK (${Object.keys(unitIds).length} units)`);
+  }
+}
+
+const frontendSourceKeys = fs.existsSync(sourceJsonPath)
+  ? flattenKeys(JSON.parse(fs.readFileSync(sourceJsonPath, 'utf8')))
+  : null;
+const backendSourceKeys = fs.existsSync(sourceResxPath)
+  ? parseResxKeys(fs.readFileSync(sourceResxPath, 'utf8'))
+  : null;
+
+checkHandoff('frontend', path.join(REPO_ROOT, 'i18n', 'handoff', 'frontend.en.xlf'), frontendSourceKeys);
+checkHandoff('backend', path.join(REPO_ROOT, 'i18n', 'handoff', 'backend.en.xlf'), backendSourceKeys);
+
 // ── Summary ────────────────────────────────────────────────────────────────────
 
 console.log('\n' + '─'.repeat(60));
@@ -191,7 +243,7 @@ if (errorCount === 0 && warnCount === 0) {
     console.log(`${warnCount} warning(s) — orphaned keys should be cleaned up.`);
   }
   if (errorCount > 0) {
-    console.error(`${errorCount} error(s) — missing keys must be translated before merging.`);
+    console.error(`${errorCount} error(s) — missing keys or a stale handoff must be fixed before merging.`);
   }
 }
 

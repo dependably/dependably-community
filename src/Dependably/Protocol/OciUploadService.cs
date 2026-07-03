@@ -100,35 +100,61 @@ public sealed class OciUploadService
     ///      below the operator-configured floor.
     ///   2. Per-tenant session cap — throws <see cref="OciSessionCapExceededException"/>
     ///      when the tenant already has <c>max_concurrent_oci_uploads_per_tenant</c> open
-    ///      sessions. The count and insert happen in separate statements so a small window
-    ///      exists for concurrent races; a tight cap (default 32) bounds the blast radius.
+    ///      sessions. The count and insert run inside one transaction serialised per tenant by
+    ///      <see cref="MetadataTransactionExtensions.BeginTenantSerializedAsync"/>, so N
+    ///      concurrent <see cref="StartUploadAsync"/> calls for the same org can never all
+    ///      observe a count under the cap and all insert — closing the check-then-act race a
+    ///      count-then-insert in separate statements would leave open.
     /// </summary>
     public async Task<OciUploadSession> StartUploadAsync(string orgId, string repository, CancellationToken ct)
     {
         EnsureStagingDiskFloor();
 
         int cap = await _orgs.GetMaxConcurrentOciUploadsPerTenantAsync(ct);
-        long active = await _orgs.GetActiveOciUploadCountAsync(orgId, ct);
-        if (active >= cap)
-        {
-            throw new OciSessionCapExceededException(orgId, (int)active, cap);
-        }
 
         string uploadId = Guid.NewGuid().ToString("N");
         string stagingFile = StagingFileFor(uploadId);
-        // Create-and-close the (empty) staging file so PATCH-less monolithic PUTs and chunked
-        // PATCHes share one append target.
-        // deepcode ignore PT: staging file name is "oci-upload-{server-GUID}" under the operator-configured staging root — no user input reaches the path.
-        await File.Create(stagingFile).DisposeAsync();
 
         await using var conn = await _db.OpenAsync(ct);
-        // xtenant: (upload_id, org_id) PK binds the session to the opening tenant.
-        await conn.ExecuteAsync(
-            """
-            INSERT INTO oci_uploads (upload_id, org_id, repository, staging_path, received_bytes)
-            VALUES (@uploadId, @orgId, @repository, @stagingPath, 0)
-            """,
-            new { uploadId, orgId, repository, stagingPath = stagingFile });
+        await conn.BeginTenantSerializedAsync(_db.Provider, orgId, ct);
+        try
+        {
+            // xtenant: counted per org_id — cap applies per tenant, not fleet-wide.
+            long active = await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(1) FROM oci_uploads WHERE org_id = @orgId", new { orgId });
+            if (active >= cap)
+            {
+                await conn.ExecuteAsync("ROLLBACK");
+                throw new OciSessionCapExceededException(orgId, (int)active, cap);
+            }
+
+            // Create-and-close the (empty) staging file only once the cap check passes, inside
+            // the locked section, so a rejected request never touches the filesystem and no
+            // session can ever be admitted past the cap. PATCH-less monolithic PUTs and chunked
+            // PATCHes share this one append target.
+            // deepcode ignore PT: staging file name is "oci-upload-{server-GUID}" under the operator-configured staging root — no user input reaches the path.
+            await File.Create(stagingFile).DisposeAsync();
+
+            // xtenant: (upload_id, org_id) PK binds the session to the opening tenant.
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO oci_uploads (upload_id, org_id, repository, staging_path, received_bytes)
+                VALUES (@uploadId, @orgId, @repository, @stagingPath, 0)
+                """,
+                new { uploadId, orgId, repository, stagingPath = stagingFile });
+            await conn.ExecuteAsync("COMMIT");
+        }
+        catch (OciSessionCapExceededException)
+        {
+            // Already rolled back above; rethrow without a second ROLLBACK attempt.
+            throw;
+        }
+        catch
+        {
+            await conn.ExecuteAsync("ROLLBACK");
+            throw;
+        }
+
         return new OciUploadSession(uploadId, repository, stagingFile, 0);
     }
 

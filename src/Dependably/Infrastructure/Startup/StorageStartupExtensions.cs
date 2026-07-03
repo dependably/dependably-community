@@ -18,15 +18,26 @@ internal static class StorageStartupExtensions
         {
             "postgres" => new NpgsqlMetadataStore(
                 dbConnStr ?? throw new InvalidOperationException("DB_CONNECTION_STRING required for DB_PROVIDER=postgres")),
-            // Cache=Shared is the legacy SQLite shared-cache mode that introduces
-            // table-level locking and reduces WAL read concurrency. WAL with private
-            // per-connection caches is the recommended configuration.
-            _ => new SqliteMetadataStore($"Data Source={dbPath};Mode=ReadWriteCreate")
+            _ => new SqliteMetadataStore(BuildSqliteConnectionString(dbPath))
         };
         builder.Services.AddSingleton<IMetadataStore>(metadataStore);
         builder.Services.AddSingleton<SchemaInitializer>();
         builder.Services.AddSingleton<FirstBootService>();
     }
+
+    /// <summary>
+    /// Composes the SQLite connection string used by <see cref="SqliteMetadataStore"/>.
+    /// Cache=Shared is deliberately absent — it is the legacy SQLite shared-cache mode that
+    /// introduces table-level locking and reduces WAL read concurrency; WAL with private
+    /// per-connection caches is the recommended configuration. <c>Pooling=True</c> is already
+    /// Microsoft.Data.Sqlite's default, but every hot-path <c>OpenAsync</c> call still pays a
+    /// fresh <c>SqliteConnection</c> + PRAGMA setup (<see cref="SqliteMetadataStore.OpenAsync"/>)
+    /// regardless of pooling — spelling the value out here documents that a burst of concurrent
+    /// requests reuses pooled native handles rather than silently depending on an implicit
+    /// default that a future Microsoft.Data.Sqlite version could flip.
+    /// </summary>
+    internal static string BuildSqliteConnectionString(string dbPath) =>
+        $"Data Source={dbPath};Mode=ReadWriteCreate;Pooling=True";
 
     /// <summary>
     /// Registers <see cref="TieredBlobStorage"/> and the default <see cref="IBlobStore"/>

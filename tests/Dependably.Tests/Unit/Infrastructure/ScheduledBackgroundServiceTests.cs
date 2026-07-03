@@ -1,4 +1,5 @@
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Redis;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -60,6 +61,7 @@ public sealed class ScheduledBackgroundServiceTests
         protected override bool RunOnStartup { get; }
         protected override string? JitterEnvKey { get; }
         protected override bool DisableOnInvalidCron { get; }
+        protected override bool RequiresLeaderLock { get; }
 
         public TrackingService(
             IConfiguration config,
@@ -73,9 +75,12 @@ public sealed class ScheduledBackgroundServiceTests
             bool continueOnTickError = true,
             bool runOnStartup = false,
             string? jitterEnvKey = null,
-            bool disableOnInvalidCron = false)
-            : base(config, NullLogger.Instance, TestTime.Frozen())
+            bool disableOnInvalidCron = false,
+            bool requiresLeaderLock = false,
+            IDistributedLock? locks = null)
+            : base(config, NullLogger.Instance, TestTime.Frozen(), locks ?? new InProcessDistributedLock(TestTime.Frozen()))
         {
+            RequiresLeaderLock = requiresLeaderLock;
             _outcomes = outcomes;
             _maxTicks = maxTicks;
             _cts = cts;
@@ -119,7 +124,9 @@ public sealed class ScheduledBackgroundServiceTests
         bool runOnStartup = false,
         string? jitterEnvKey = null,
         bool disableOnInvalidCron = false,
-        string defaultCron = "* * * * *")
+        string defaultCron = "* * * * *",
+        bool requiresLeaderLock = false,
+        IDistributedLock? locks = null)
     {
         var cts = new CancellationTokenSource();
         var svc = new TrackingService(
@@ -133,7 +140,9 @@ public sealed class ScheduledBackgroundServiceTests
             continueOnTickError: continueOnTickError,
             runOnStartup: runOnStartup,
             jitterEnvKey: jitterEnvKey,
-            disableOnInvalidCron: disableOnInvalidCron);
+            disableOnInvalidCron: disableOnInvalidCron,
+            requiresLeaderLock: requiresLeaderLock,
+            locks: locks);
         return (svc, cts);
     }
 
@@ -364,6 +373,242 @@ public sealed class ScheduledBackgroundServiceTests
         Assert.IsType<InvalidOperationException>(svc.OutcomeHistory[1]);
         Assert.IsType<ArgumentException>(svc.OutcomeHistory[2]);
         Assert.Null(svc.OutcomeHistory[3]);
+        cts.Dispose();
+    }
+
+    // ── RequiresLeaderLock (multi-replica HA coordination) ─────────────────────────
+
+    // Always denies the leader lock (models another replica already holding it) and
+    // cancels the driving token once a caller-chosen number of attempts have been made, so
+    // a test that expects the tick to never run still terminates deterministically instead
+    // of spinning until the WaitForServiceCompletionAsync safety timeout.
+    private sealed class CountingDenyLock : IDistributedLock
+    {
+        private readonly CancellationTokenSource _cts;
+        private readonly int _cancelAfterAttempts;
+
+        public int Attempts { get; private set; }
+
+        public CountingDenyLock(CancellationTokenSource cts, int cancelAfterAttempts)
+        {
+            _cts = cts;
+            _cancelAfterAttempts = cancelAfterAttempts;
+        }
+
+        public Task<ILockHandle?> TryAcquireAsync(string name, TimeSpan ttl, CancellationToken ct = default)
+        {
+            Attempts++;
+            if (Attempts >= _cancelAfterAttempts)
+            {
+                _cts.Cancel();
+            }
+            return Task.FromResult<ILockHandle?>(null);
+        }
+
+        public Task<ILockHandle> AcquireAsync(
+            string name, TimeSpan ttl, TimeSpan wait, TimeSpan retryInterval, CancellationToken ct = default) =>
+            throw new TimeoutException("lock held");
+    }
+
+    // Denies the first N attempts (another replica holds the lock), then delegates to a real
+    // in-process lock so a subsequent attempt succeeds — models the leader lock becoming
+    // available (the holder crashed / released) partway through this replica's polling.
+    private sealed class DenyThenGrantLock : IDistributedLock
+    {
+        private readonly int _denyCount;
+        private readonly IDistributedLock _inner;
+
+        public int Attempts { get; private set; }
+
+        public DenyThenGrantLock(int denyCount, TimeProvider time)
+        {
+            _denyCount = denyCount;
+            _inner = new InProcessDistributedLock(time);
+        }
+
+        public Task<ILockHandle?> TryAcquireAsync(string name, TimeSpan ttl, CancellationToken ct = default)
+        {
+            Attempts++;
+            return Attempts <= _denyCount
+                ? Task.FromResult<ILockHandle?>(null)
+                : _inner.TryAcquireAsync(name, ttl, ct);
+        }
+
+        public Task<ILockHandle> AcquireAsync(
+            string name, TimeSpan ttl, TimeSpan wait, TimeSpan retryInterval, CancellationToken ct = default) =>
+            _inner.AcquireAsync(name, ttl, wait, retryInterval, ct);
+    }
+
+    /// <summary>
+    /// Pins the HA fan-out fix: a job flagged <see cref="ScheduledBackgroundService.RequiresLeaderLock"/>
+    /// must never invoke <c>RunTickAsync</c> while another replica holds the leader lock — this is
+    /// what stops every replica in a multi-instance deployment from running the same destructive/
+    /// expensive job on every tick. Pre-fix, RequiresLeaderLock did not exist and every tick ran
+    /// unconditionally regardless of another instance's lock.
+    /// </summary>
+    [Fact]
+    public async Task RequiresLeaderLock_LockHeldByAnotherInstance_TickNeverRuns()
+    {
+        var outcomes = new Queue<Exception?>();
+        var cts = new CancellationTokenSource();
+        var lockHeldElsewhere = new CountingDenyLock(cts, cancelAfterAttempts: 3);
+        var (svc, _) = Build(outcomes, maxTicks: 100, requiresLeaderLock: true, locks: lockHeldElsewhere);
+
+        await svc.StartAsync(cts.Token);
+        await WaitForServiceCompletionAsync(svc);
+
+        Assert.Equal(0, svc.TickCount);
+        Assert.True(lockHeldElsewhere.Attempts >= 3);
+        cts.Dispose();
+    }
+
+    /// <summary>
+    /// Mixed partial-failure shape for the leader-lock gate: some tick attempts are skipped
+    /// (another replica holds the lock), and once this replica wins the lock the job runs
+    /// exactly once — proving the gate is a per-tick check, not a one-time disable.
+    /// </summary>
+    [Fact]
+    public async Task RequiresLeaderLock_LockAvailableAfterHeldAttempts_TickRunsOnceLockWon()
+    {
+        var outcomes = new Queue<Exception?>(new Exception?[] { null });
+        var lockEventuallyAvailable = new DenyThenGrantLock(denyCount: 2, TestTime.Frozen());
+        var (svc, cts) = Build(outcomes, maxTicks: 1, requiresLeaderLock: true, locks: lockEventuallyAvailable);
+
+        await svc.StartAsync(cts.Token);
+        await WaitForServiceCompletionAsync(svc);
+
+        Assert.Equal(1, svc.TickCount);
+        Assert.True(lockEventuallyAvailable.Attempts >= 3, "expected 2 denied attempts then a grant");
+        cts.Dispose();
+    }
+
+    /// <summary>
+    /// Default (RequiresLeaderLock = false, the shape every job had before HA coordination):
+    /// the in-process lock always grants, so standalone/non-coordinated jobs run every tick
+    /// exactly as before — the leader-lock gate is opt-in per job, not a global behavior change.
+    /// </summary>
+    [Fact]
+    public async Task RequiresLeaderLock_DefaultFalse_TicksRunWithoutLockCheck()
+    {
+        var outcomes = new Queue<Exception?>(new Exception?[] { null, null });
+        var (svc, cts) = Build(outcomes, maxTicks: 2);
+
+        await svc.StartAsync(cts.Token);
+        await WaitForServiceCompletionAsync(svc);
+
+        Assert.Equal(2, svc.TickCount);
+        cts.Dispose();
+    }
+
+    // Always throws on TryAcquireAsync (models a Redis connection blip/failover — the lock
+    // backend itself is unreachable, distinct from a clean "lock held" null response) and
+    // cancels the driving token once a caller-chosen number of attempts have been made, so a
+    // test expecting the tick to never run still terminates deterministically.
+    private sealed class CountingThrowLock : IDistributedLock
+    {
+        private readonly CancellationTokenSource _cts;
+        private readonly int _cancelAfterAttempts;
+
+        public int Attempts { get; private set; }
+
+        public CountingThrowLock(CancellationTokenSource cts, int cancelAfterAttempts)
+        {
+            _cts = cts;
+            _cancelAfterAttempts = cancelAfterAttempts;
+        }
+
+        public Task<ILockHandle?> TryAcquireAsync(string name, TimeSpan ttl, CancellationToken ct = default)
+        {
+            Attempts++;
+            if (Attempts >= _cancelAfterAttempts)
+            {
+                _cts.Cancel();
+            }
+            throw new InvalidOperationException("simulated distributed-lock backend failure (e.g. Redis connection blip)");
+        }
+
+        public Task<ILockHandle> AcquireAsync(
+            string name, TimeSpan ttl, TimeSpan wait, TimeSpan retryInterval, CancellationToken ct = default) =>
+            throw new InvalidOperationException("simulated distributed-lock backend failure (e.g. Redis connection blip)");
+    }
+
+    // Throws on TryAcquireAsync for the first N attempts (models a transient Redis blip/failover
+    // that then recovers), then delegates to a real in-process lock so a later attempt succeeds.
+    private sealed class ThrowThenGrantLock : IDistributedLock
+    {
+        private readonly int _throwCount;
+        private readonly IDistributedLock _inner;
+
+        public int Attempts { get; private set; }
+
+        public ThrowThenGrantLock(int throwCount, TimeProvider time)
+        {
+            _throwCount = throwCount;
+            _inner = new InProcessDistributedLock(time);
+        }
+
+        public Task<ILockHandle?> TryAcquireAsync(string name, TimeSpan ttl, CancellationToken ct = default)
+        {
+            Attempts++;
+            return Attempts <= _throwCount
+                ? throw new InvalidOperationException("simulated distributed-lock backend failure (e.g. Redis connection blip)")
+                : _inner.TryAcquireAsync(name, ttl, ct);
+        }
+
+        public Task<ILockHandle> AcquireAsync(
+            string name, TimeSpan ttl, TimeSpan wait, TimeSpan retryInterval, CancellationToken ct = default) =>
+            _inner.AcquireAsync(name, ttl, wait, retryInterval, ct);
+    }
+
+    /// <summary>
+    /// Pins the Redis-blip fix: a distributed-lock backend failure (Redis connection
+    /// exception/failover, not a clean "lock held" response) during
+    /// <see cref="ScheduledBackgroundService.RequiresLeaderLock"/> acquire must be treated as a
+    /// skipped tick, not an unhandled exception. Pre-fix, the acquire call sat outside any
+    /// try/catch in RunTickGuardedAsync, so this exception escaped ExecuteAsync and — under
+    /// BackgroundService's default StopHost behavior — would take the whole host down on a
+    /// routine Redis hiccup. This test fails on the pre-fix code (ExecuteTask ends up faulted)
+    /// and passes on the fix (ExecuteTask completes cleanly, RunTickAsync is never invoked).
+    /// </summary>
+    [Fact]
+    public async Task RequiresLeaderLock_LockAcquireThrows_TickSkipped_ServiceSurvives()
+    {
+        var outcomes = new Queue<Exception?>();
+        var cts = new CancellationTokenSource();
+        var throwingLock = new CountingThrowLock(cts, cancelAfterAttempts: 3);
+        var (svc, _) = Build(outcomes, maxTicks: 100, requiresLeaderLock: true, locks: throwingLock);
+
+        await svc.StartAsync(cts.Token);
+        await WaitForServiceCompletionAsync(svc);
+
+        Assert.Equal(0, svc.TickCount);
+        Assert.True(throwingLock.Attempts >= 3);
+        Assert.NotNull(svc.ExecuteTask);
+        Assert.False(svc.ExecuteTask!.IsFaulted,
+            "a distributed-lock acquire failure must not escape ExecuteAsync and fault the service — " +
+            "under BackgroundService's default StopHost behavior a fault here would take the whole host down.");
+        cts.Dispose();
+    }
+
+    /// <summary>
+    /// Mixed partial-failure shape for the Redis-blip fix: some lock-acquire attempts throw
+    /// (transient backend failure), and once the backend recovers the job runs exactly once —
+    /// the next scheduled tick retries rather than the service staying down.
+    /// </summary>
+    [Fact]
+    public async Task RequiresLeaderLock_LockAcquireThrowsThenRecovers_TickRunsOnceRecovered()
+    {
+        var outcomes = new Queue<Exception?>(new Exception?[] { null });
+        var recoveringLock = new ThrowThenGrantLock(throwCount: 2, TestTime.Frozen());
+        var (svc, cts) = Build(outcomes, maxTicks: 1, requiresLeaderLock: true, locks: recoveringLock);
+
+        await svc.StartAsync(cts.Token);
+        await WaitForServiceCompletionAsync(svc);
+
+        Assert.Equal(1, svc.TickCount);
+        Assert.True(recoveringLock.Attempts >= 3, "expected 2 throwing attempts then a successful grant");
+        Assert.NotNull(svc.ExecuteTask);
+        Assert.False(svc.ExecuteTask!.IsFaulted);
         cts.Dispose();
     }
 }

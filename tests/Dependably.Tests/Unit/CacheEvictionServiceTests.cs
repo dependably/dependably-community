@@ -65,7 +65,8 @@ public class CacheEvictionServiceTests : IAsyncLifetime
         // Tier-shared bootstrap: in unit tests the cache and registry tiers point to the
         // same in-memory store. The eviction service only ever calls Cache.DeleteAsync.
         var tiered = new TieredBlobStorage(_blobs, _blobs);
-        return new CacheEvictionService(repo, tiered, Config(cfg), NullLogger<CacheEvictionService>.Instance, _clock);
+        return new CacheEvictionService(repo, tiered, Config(cfg), NullLogger<CacheEvictionService>.Instance, _clock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
     }
 
     [Fact]

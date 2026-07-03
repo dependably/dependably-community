@@ -67,7 +67,7 @@
   $: columns = [
     { key: 'name',        label: $t('serviceTokens.columns.name'),        sortable: true },
     { key: 'description', label: $t('serviceTokens.columns.description'), sortable: true },
-    { key: 'scope',       label: $t('serviceTokens.columns.scope'),       sortable: true, width: '80px' },
+    { key: 'scope',       label: $t('serviceTokens.columns.scope'),       sortable: true, width: '120px' },
     { key: 'createdAt',   label: $t('serviceTokens.columns.created'),     sortable: true, width: '110px' },
     { key: 'expiresAt',   label: $t('serviceTokens.columns.expires'),     sortable: true, width: '130px' },
     { key: 'lastUsedAt',  label: $t('serviceTokens.columns.lastUsed'),    sortable: true, width: '130px' },
@@ -112,13 +112,13 @@
     <td>{tok.name}</td>
     <td class="t-sm" title={tok.description || ''}>{tok.description || '—'}</td>
     <td><span class="badge {label}">{label === '—' ? '—' : $t('tokenScopes.' + label)}</span></td>
-    <td class="text-muted">{$formatDateShort(tok.createdAt)}</td>
-    <td>
+    <td class="text-muted date-cell">{$formatDateShort(tok.createdAt)}</td>
+    <td class="date-cell">
       {#if expired(tok)}<span class="badge expired">{$t('serviceTokens.expired')}</span>
       {:else if tok.expiresAt}{$formatDateShort(tok.expiresAt)}
       {:else}{$t('common.never')}{/if}
     </td>
-    <td class="text-muted">{tok.lastUsedAt ? $formatDateShort(tok.lastUsedAt) : $t('serviceTokens.never')}</td>
+    <td class="text-muted date-cell">{tok.lastUsedAt ? $formatDateShort(tok.lastUsedAt) : $t('serviceTokens.never')}</td>
     <td><button class="danger btn-sm" on:click={() => revoke(tok.id)}>{$t('common.actions.revoke')}</button></td>
   </tr>
 </DataTable>
@@ -142,3 +142,8 @@
     </div>
   </div>
 {/if}
+
+<style>
+  /* Dates read as one token — never wrap "May 31, 2026" onto two lines. */
+  .date-cell { white-space: nowrap; }
+</style>

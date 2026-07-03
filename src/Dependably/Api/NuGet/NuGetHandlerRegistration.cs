@@ -2,6 +2,7 @@ using Dependably.Api;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
 using Dependably.Infrastructure.Publish;
+using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -35,10 +36,14 @@ internal static class NuGetHandlerRegistration
                 publish: sp.GetRequiredService<IPackagePublishService>(),
                 claimResolver: sp.GetRequiredService<ClaimResolver>(),
                 licenses: sp.GetRequiredService<LicenseRepository>(),
+                symbolIndex: sp.GetRequiredService<NuGetSymbolIndexRepository>(),
                 cache: sp.GetRequiredService<RenderedResponseCache<NuGetRegistrationKey>>(),
                 logger: sp.GetRequiredService<ILogger<NuGetPublishHandler>>(),
                 time: sp.GetRequiredService<TimeProvider>(),
-                stagingPath: stagingPath);
+                stagingPath: stagingPath,
+                audit: sp.GetRequiredService<AuditRepository>(),
+                eventSink: sp.GetRequiredService<IPackageEventSink>(),
+                edgeGuard: sp.GetRequiredService<Dependably.Infrastructure.Edge.EdgePublishGuard>());
         });
         services.AddScoped<NuGetControllerServices>();
     }

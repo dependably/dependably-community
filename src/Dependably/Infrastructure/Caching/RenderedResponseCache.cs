@@ -89,14 +89,20 @@ public sealed class RenderedResponseCache<TKey> : MetadataResponseCache<TKey, by
                 return bytes;
             }));
 
-        try
-        {
-            return await lazy.Value.WaitAsync(ct);
-        }
-        finally
-        {
-            _inFlight.TryRemove(new KeyValuePair<string, Lazy<Task<byte[]?>>>(formatted, lazy));
-        }
+        // Removes exactly this (formatted, lazy) pair once the shared rebuild genuinely
+        // completes — success or failure — never when an individual caller's WaitAsync(ct) below
+        // merely detaches early. A caller cancelling mid-rebuild must not evict a live in-flight
+        // entry while the shared rebuild is still running for the remaining waiters, and the
+        // pair-targeted removal never touches a newer generation that replaced this entry. Every
+        // concurrent caller attaches its own continuation to the same Task; TryRemove is
+        // idempotent — only the first continuation to run has any effect.
+        _ = lazy.Value.ContinueWith(
+            _ => _inFlight.TryRemove(new KeyValuePair<string, Lazy<Task<byte[]?>>>(formatted, lazy)),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+        return await lazy.Value.WaitAsync(ct);
     }
 
     // Wraps the rebuild delegate with the optional concurrency gate. When no gate is

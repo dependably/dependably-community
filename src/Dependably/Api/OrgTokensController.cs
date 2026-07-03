@@ -79,8 +79,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         // clear 400 instead of having their intent silently dropped.
         if (req.Scope is not null)
         {
-            return _problems.ValidationErrorAction("scope",
-                "The 'scope' field is no longer accepted. Send 'capabilities' instead.");
+            return _problems.ValidationErrorActionKey("scope", "error.token.scopeRetired");
         }
 
         string orgId = CurrentTenantId();
@@ -105,8 +104,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         int cap = await _orgs.GetMaxActiveTokensPerTenantAsync(ct);
         if (activeCount >= cap)
         {
-            return _problems.ValidationErrorAction("tokens",
-                $"Active token limit ({cap}) reached for this tenant. Revoke unused tokens before creating new ones.");
+            return _problems.ValidationErrorActionKey("tokens", "error.token.limitReached", cap);
         }
 
         var (raw, record) = await _tokens.CreateUserTokenAsync(
@@ -120,7 +118,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
                 capabilities = caps,
                 expires_at = record.ExpiresAt,
                 description,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenCreate,
             orgId, "user", userId, "accepted",
@@ -164,7 +162,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         }
 
         await _audit.LogAsync("token_revoked", orgId, userId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenRevoke,
             orgId, "user", userId, "accepted",
@@ -201,13 +199,12 @@ public sealed class OrgTokensController : OrgScopedControllerBase
 
         if (string.IsNullOrWhiteSpace(req.Name))
         {
-            return _problems.ValidationErrorAction("name", "Name is required.");
+            return _problems.ValidationErrorActionKey("name", "error.token.nameRequired");
         }
 
         if (req.Scope is not null)
         {
-            return _problems.ValidationErrorAction("scope",
-                "The 'scope' field is no longer accepted. Send 'capabilities' instead.");
+            return _problems.ValidationErrorActionKey("scope", "error.token.scopeRetired");
         }
 
         // Service tokens are minted under tenant:configure; the caller's role grants form the
@@ -227,8 +224,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         int capSvc = await _orgs.GetMaxActiveTokensPerTenantAsync(ct);
         if (activeCountSvc >= capSvc)
         {
-            return _problems.ValidationErrorAction("tokens",
-                $"Active token limit ({capSvc}) reached for this tenant. Revoke unused tokens before creating new ones.");
+            return _problems.ValidationErrorActionKey("tokens", "error.token.limitReached", capSvc);
         }
 
         var (raw, record) = await _tokens.CreateServiceTokenAsync(orgId, req.Name, canonicalJson!, req.ExpiresAt, description, ct);
@@ -242,7 +238,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
                 capabilities = caps,
                 expires_at = record.ExpiresAt,
                 description,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenCreate,
             orgId, "user", GetUserId(), "accepted",
@@ -272,7 +268,7 @@ public sealed class OrgTokensController : OrgScopedControllerBase
         }
 
         await _audit.LogAsync("service_token_revoked", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
         await _auditEmitter.EmitAsync(
             TenantEvents.TypeTokenRevoke,
             orgId, "user", GetUserId(), "accepted",

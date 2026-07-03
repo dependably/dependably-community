@@ -90,6 +90,39 @@ public sealed class ETagCacheControlTests : IClassFixture<DependablyFactory>, IA
         Assert.Contains("max-age=31536000", cc);
     }
 
+    [Fact]
+    public async Task NpmTarball_Returns_304_On_ConditionalGet_WithoutBody()
+    {
+        await _factory.PushNpmPackage("etag-npm-tarball-304", "1.0.0");
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        string json = await client.GetStringAsync("/npm/etag-npm-tarball-304");
+        using var doc = JsonDocument.Parse(json);
+        string path = new Uri(doc.RootElement
+            .GetProperty("versions").GetProperty("1.0.0")
+            .GetProperty("dist").GetProperty("tarball").GetString()!).PathAndQuery;
+
+        var first = await client.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        string? etag = first.Headers.ETag?.Tag;
+        Assert.NotNull(etag);
+
+        var req = new HttpRequestMessage(HttpMethod.Get, path);
+        req.Headers.TryAddWithoutValidation("If-None-Match", etag);
+        var conditional = await client.SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.NotModified, conditional.StatusCode);
+        Assert.Empty(await conditional.Content.ReadAsStringAsync());
+
+        // A non-matching tag falls through to the normal 200 body.
+        var mismatch = new HttpRequestMessage(HttpMethod.Get, path);
+        mismatch.Headers.TryAddWithoutValidation("If-None-Match", "\"sha256:not-the-real-hash\"");
+        var mismatchResp = await client.SendAsync(mismatch);
+        Assert.Equal(HttpStatusCode.OK, mismatchResp.StatusCode);
+        Assert.NotEmpty(await mismatchResp.Content.ReadAsByteArrayAsync());
+    }
+
     // ── PyPI simple index ────────────────────────────────────────────────────
 
     [Fact]
@@ -161,6 +194,39 @@ public sealed class ETagCacheControlTests : IClassFixture<DependablyFactory>, IA
         Assert.NotNull(cc);
         Assert.Contains("immutable", cc);
         Assert.Contains("max-age=31536000", cc);
+    }
+
+    [Fact]
+    public async Task PyPiArtifact_Returns_304_On_ConditionalGet_WithoutBody()
+    {
+        await _factory.PushPyPiPackage("etag-pypi-art-304", "1.0.0");
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+
+        string html = await client.GetStringAsync("/simple/etag-pypi-art-304/");
+        int hrefStart = html.IndexOf("href=\"", StringComparison.Ordinal) + 6;
+        int hrefEnd = html.IndexOf('"', hrefStart);
+        string href = html[hrefStart..hrefEnd];
+        int fragmentIdx = href.IndexOf('#');
+        string downloadPath = fragmentIdx >= 0 ? href[..fragmentIdx] : href;
+
+        var first = await client.GetAsync(downloadPath);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        string? etag = first.Headers.ETag?.Tag;
+        Assert.NotNull(etag);
+
+        var req = new HttpRequestMessage(HttpMethod.Get, downloadPath);
+        req.Headers.TryAddWithoutValidation("If-None-Match", etag);
+        var conditional = await client.SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.NotModified, conditional.StatusCode);
+        Assert.Empty(await conditional.Content.ReadAsStringAsync());
+
+        var mismatch = new HttpRequestMessage(HttpMethod.Get, downloadPath);
+        mismatch.Headers.TryAddWithoutValidation("If-None-Match", "\"sha256:not-the-real-hash\"");
+        var mismatchResp = await client.SendAsync(mismatch);
+        Assert.Equal(HttpStatusCode.OK, mismatchResp.StatusCode);
+        Assert.NotEmpty(await mismatchResp.Content.ReadAsByteArrayAsync());
     }
 
     // ── NuGet registration ───────────────────────────────────────────────────
@@ -274,6 +340,33 @@ public sealed class ETagCacheControlTests : IClassFixture<DependablyFactory>, IA
         Assert.Contains("max-age=31536000", cc);
     }
 
+    [Fact]
+    public async Task MavenArtifact_Returns_304_On_ConditionalGet_WithoutBody()
+    {
+        await _factory.PushMavenArtifact("com.example", "etag-maven-art-304", "1.0.0");
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        const string path = "/maven/com/example/etag-maven-art-304/1.0.0/etag-maven-art-304-1.0.0.jar";
+
+        var first = await client.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        string? etag = first.Headers.ETag?.Tag;
+        Assert.NotNull(etag);
+
+        var req = new HttpRequestMessage(HttpMethod.Get, path);
+        req.Headers.TryAddWithoutValidation("If-None-Match", etag);
+        var conditional = await client.SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.NotModified, conditional.StatusCode);
+        Assert.Empty(await conditional.Content.ReadAsStringAsync());
+
+        var mismatch = new HttpRequestMessage(HttpMethod.Get, path);
+        mismatch.Headers.TryAddWithoutValidation("If-None-Match", "\"sha256:not-the-real-hash\"");
+        var mismatchResp = await client.SendAsync(mismatch);
+        Assert.Equal(HttpStatusCode.OK, mismatchResp.StatusCode);
+        Assert.NotEmpty(await mismatchResp.Content.ReadAsByteArrayAsync());
+    }
+
     // ── RPM package ──────────────────────────────────────────────────────────
 
     [Fact]
@@ -294,5 +387,32 @@ public sealed class ETagCacheControlTests : IClassFixture<DependablyFactory>, IA
         Assert.NotNull(cc);
         Assert.Contains("immutable", cc);
         Assert.Contains("max-age=31536000", cc);
+    }
+
+    [Fact]
+    public async Task RpmPackage_Returns_304_On_ConditionalGet_WithoutBody()
+    {
+        string file = await _factory.PushRpmPackage();
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        string path = $"/rpm/packages/{file}";
+
+        var first = await client.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        string? etag = first.Headers.ETag?.Tag;
+        Assert.NotNull(etag);
+
+        var req = new HttpRequestMessage(HttpMethod.Get, path);
+        req.Headers.TryAddWithoutValidation("If-None-Match", etag);
+        var conditional = await client.SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.NotModified, conditional.StatusCode);
+        Assert.Empty(await conditional.Content.ReadAsStringAsync());
+
+        var mismatch = new HttpRequestMessage(HttpMethod.Get, path);
+        mismatch.Headers.TryAddWithoutValidation("If-None-Match", "\"sha256:not-the-real-hash\"");
+        var mismatchResp = await client.SendAsync(mismatch);
+        Assert.Equal(HttpStatusCode.OK, mismatchResp.StatusCode);
+        Assert.NotEmpty(await mismatchResp.Content.ReadAsByteArrayAsync());
     }
 }

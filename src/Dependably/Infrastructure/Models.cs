@@ -247,6 +247,15 @@ public class OrgSettings
     public long StorageUsedBytes { get; set; }
 
     /// <summary>
+    /// Per-tenant RPM hosted-publishing posture override: NULL (unset), 'passthrough', or 'merged'.
+    /// NULL inherits the instance <c>Rpm:UpstreamMode</c> env value; an explicit value overrides
+    /// the env value in EITHER direction (see <c>RpmController.IsRpmPassthroughEffective</c>).
+    /// 'passthrough' refuses hosted RPM publish while an rpm upstream registry is configured;
+    /// 'merged' allows hosted publish and serves a combined local ∪ upstream repodata document.
+    /// </summary>
+    public string? RpmUpstreamMode { get; set; }
+
+    /// <summary>
     /// Resolves the signature-verification mode ('off' | 'warn' | 'block') for an ecosystem so the
     /// block-gate provenance arm reads the right per-ecosystem policy on the serve path. The
     /// stored <c>package_versions.provenance_status</c> column is ecosystem-agnostic, but the
@@ -316,6 +325,11 @@ public class PackageVersion
     /// </summary>
     public long DownloadCount { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+    /// <summary>
+    /// ISO 8601 UTC; stamped when a same-version re-push overwrites this row's bytes. NULL
+    /// means never overwritten, so the effective pushed date is <see cref="CreatedAt"/>.
+    /// </summary>
+    public DateTimeOffset? UpdatedAt { get; set; }
     public DateTimeOffset? VulnCheckedAt { get; set; }
     public string? ManualBlockState { get; set; }
     /// <summary>NULL = not deprecated; otherwise the upstream deprecation message (npm/NuGet).</summary>
@@ -338,8 +352,11 @@ public class PackageVersion
     /// Upstream-published integrity hash captured at proxy first-fetch, stored verbatim in
     /// upstream's native encoding (npm <c>sha512-{b64}</c> SRI, NuGet base64, PyPI hex) so
     /// operators can copy-paste against the public registry's UI without re-encoding.
-    /// Paired with <see cref="UpstreamIntegrityAlgorithm"/>. NULL for uploaded versions and
-    /// legacy rows.
+    /// For hosted npm publishes the same pair carries the artefact's sha512 SRI
+    /// (<c>'sha512-sri'</c>) — the publisher's <c>dist.integrity</c> claim when the client
+    /// sent one, otherwise computed server-side from the uploaded bytes — so the packument
+    /// can emit <c>dist.integrity</c>. Paired with <see cref="UpstreamIntegrityAlgorithm"/>.
+    /// NULL for non-npm uploaded versions and legacy rows.
     /// </summary>
     public string? UpstreamIntegrityValue { get; set; }
     /// <summary>
@@ -384,6 +401,16 @@ public class PackageVersion
     /// <see cref="ProvenanceStatus"/> is <c>'verified'</c>. NULL otherwise.
     /// </summary>
     public string? ProvenanceSigner { get; set; }
+    /// <summary>
+    /// Install-relevant manifest subset (bin, dependencies, optionalDependencies,
+    /// peerDependencies, peerDependenciesMeta, bundleDependencies, engines, os, cpu, libc,
+    /// directories, _hasShrinkwrap) captured at hosted npm publish from the tarball's
+    /// package.json and stored as one JSON object. Merged into the packument's per-version
+    /// objects so npm/npx can resolve bin links and transitive dependencies. NULL for proxy
+    /// rows, non-npm rows, and hosted rows published before the column existed (those render
+    /// the legacy minimal shape).
+    /// </summary>
+    public string? ManifestJson { get; set; }
     /// <summary>
     /// True when this version is linked to an OSV <c>MAL-</c> advisory (OpenSSF
     /// malicious-packages feed) — i.e. known-malicious. MAL advisories usually carry no CVSS

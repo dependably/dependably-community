@@ -1,7 +1,6 @@
 using System.Net;
 using System.Text.Json;
 using Dependably.Infrastructure;
-using Dependably.Infrastructure.Observability;
 
 namespace Dependably.Security;
 
@@ -15,8 +14,15 @@ namespace Dependably.Security;
 public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
 {
     private readonly AuditRepository _audit;
+    private readonly string? _allowedHost;
 
-    public UpstreamUrlValidator(AuditRepository audit) => _audit = audit;
+    public UpstreamUrlValidator(AuditRepository audit, IEdgeMode edge)
+    {
+        _audit = audit;
+        // Edge mode admits exactly the master host at the request-time DNS check so an internal
+        // master resolves through; null (non-edge) leaves the block check fully in force.
+        _allowedHost = edge.IsEdge && !string.IsNullOrEmpty(edge.MasterHost) ? edge.MasterHost : null;
+    }
 
     /// <summary>
     /// Validates a URL string for use as an upstream registry URL (save-time check).
@@ -47,13 +53,24 @@ public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
 
     /// <summary>
     /// Re-validates at request time via DNS resolution to prevent DNS rebinding.
-    /// Returns false and records an audit event if blocked.
+    /// Returns <see cref="UpstreamUrlBlock.BlockedRange"/> and records an audit event if
+    /// a resolved address is blocked; returns <see cref="UpstreamUrlBlock.DnsFailure"/> when
+    /// resolution fails (fail-closed); returns <see cref="UpstreamUrlBlock.None"/> when allowed.
+    /// Emits no metric — the caller owns reason-tagged counter emission.
     /// </summary>
-    public async Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
+    public async Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
         {
-            return false;
+            return UpstreamUrlBlock.DnsFailure;
+        }
+
+        // Edge allowlist: the exact master host is an operator-pinned trusted upstream, so it
+        // bypasses the private-range DNS check that would otherwise block an internal master.
+        if (_allowedHost is not null
+            && string.Equals(uri.Host, _allowedHost, StringComparison.OrdinalIgnoreCase))
+        {
+            return UpstreamUrlBlock.None;
         }
 
         try
@@ -62,21 +79,20 @@ public sealed class UpstreamUrlValidator : IUpstreamUrlValidator
             var blocked = addresses.FirstOrDefault(SsrfGuard.IsBlockedIp);
             if (blocked is null)
             {
-                return true;
+                return UpstreamUrlBlock.None;
             }
 
-            DependablyMeter.UpstreamUrlBlocks.Add(1);
             await _audit.LogAsync(
                 "ssrf_blocked",
                 orgId: orgId,
-                detail: JsonSerializer.Serialize(new { url = uri.Host, resolved = blocked.ToString() }),
+                detail: JsonSerializer.Serialize(new { url = uri.Host, resolved = blocked.ToString() }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 ct: ct);
-            return false;
+            return UpstreamUrlBlock.BlockedRange;
         }
         catch (Exception)
         {
             // DNS resolution failure — fail closed
-            return false;
+            return UpstreamUrlBlock.DnsFailure;
         }
     }
 }

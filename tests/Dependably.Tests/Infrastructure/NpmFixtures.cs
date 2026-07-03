@@ -15,9 +15,12 @@ public static class NpmFixtures
     /// Builds a minimal .tgz (gzip'd tar) suitable for npm publish.
     /// Contains package/package.json as required by the npm registry protocol.
     /// Pass <paramref name="tarballLicense"/>=null to omit the license field from package.json.
+    /// <paramref name="extraManifestFields"/> entries (e.g. bin/dependencies/engines) are
+    /// merged into package.json for manifest-capture tests.
     /// </summary>
     public static (byte[] Bytes, string Sha256Hex, string IntegrityHash) BuildTarball(
-        string name, string version, string? tarballLicense = "MIT")
+        string name, string version, string? tarballLicense = "MIT",
+        IReadOnlyDictionary<string, object>? extraManifestFields = null)
     {
         var fields = new Dictionary<string, object>
         {
@@ -29,6 +32,10 @@ public static class NpmFixtures
         if (tarballLicense is not null)
         {
             fields["license"] = tarballLicense;
+        }
+        foreach (var (key, value) in extraManifestFields ?? new Dictionary<string, object>())
+        {
+            fields[key] = value;
         }
 
         string packageJson = JsonSerializer.Serialize(fields, IndentedJson);

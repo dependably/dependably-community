@@ -39,12 +39,14 @@ public sealed class ProxyFetchService
     private readonly PackageRepository _packages;
     private readonly AuditRepository _audit;
     private readonly TimeProvider _time;
+    private readonly Infrastructure.SourcePinRepository _sourcePins;
 
-    // DI constructor: 9 dependencies are required by the post-fetch pipeline stages (access
+    // DI constructor: 10 dependencies are required by the post-fetch pipeline stages (access
     // recording, version recording, artifact repository, tenant access, scan, block gate,
-    // package CRUD, audit, and time). No cleaner grouping exists — each dependency serves a
-    // distinct pipeline step and splitting the class would scatter the shared sequencing logic.
-#pragma warning disable S107 // DI constructor — all 9 dependencies are distinct pipeline stages
+    // package CRUD, audit, time, and source-pin enforcement). No cleaner grouping exists — each
+    // dependency serves a distinct pipeline step and splitting the class would scatter the shared
+    // sequencing logic.
+#pragma warning disable S107 // DI constructor — all 10 dependencies are distinct pipeline stages
     public ProxyFetchService(
         CacheAccessRecorder cacheRecorder,
         ProxyVersionRecorder proxyVersions,
@@ -54,7 +56,8 @@ public sealed class ProxyFetchService
         BlockGateService blockGate,
         PackageRepository packages,
         AuditRepository audit,
-        TimeProvider time)
+        TimeProvider time,
+        Infrastructure.SourcePinRepository sourcePins)
 #pragma warning restore S107
     {
         _cacheRecorder = cacheRecorder;
@@ -66,6 +69,7 @@ public sealed class ProxyFetchService
         _packages = packages;
         _audit = audit;
         _time = time;
+        _sourcePins = sourcePins;
     }
 
     /// <summary>
@@ -80,6 +84,15 @@ public sealed class ProxyFetchService
         string sha256 = request.Blob.Sha256Hex;
         string blobKey = request.Blob.BlobKey;
         long sizeBytes = request.Blob.SizeBytes;
+
+        // Source pin: bind the name to its first-serving upstream and refuse a later serve from a
+        // different upstream (dependency-confusion guard). Runs before any version row is written
+        // so a shadowed name is never adopted into the cache catalogue.
+        var pinBlock = await EvaluateSourcePinAsync(request, sha256, blobKey, ct);
+        if (pinBlock is not null)
+        {
+            return pinBlock;
+        }
 
         await VerifyChecksumOrThrowAsync(request, sha256, ct);
         var earlyBlock = await EvaluateFirstFetchGatesAsync(request, sha256, blobKey, ct);
@@ -155,6 +168,52 @@ public sealed class ProxyFetchService
         throw new ChecksumException(
             $"Upstream-supplied {spec.Algorithm} hash for {request.Purl} did not match the downloaded bytes.");
     }
+
+    // Source-pin gate. Binds the (org, ecosystem, name) to the upstream host that first serves it
+    // and refuses a later serve from a different upstream host — the non-OCI dependency-confusion
+    // guard. No-ops when pinning is disabled or the serving upstream is unknown (fail-open on
+    // missing routing information rather than blocking a legitimate fetch).
+    private async Task<ProxyFetchResult?> EvaluateSourcePinAsync(
+        ProxyFetchRequest request, string sha256, string blobKey, CancellationToken ct)
+    {
+        if (!_sourcePins.Enabled)
+        {
+            return null;
+        }
+
+        string? servingHost = ExtractHost(request.UpstreamUrl);
+        if (servingHost is null)
+        {
+            return null;
+        }
+
+        string pinnedHost = await _sourcePins.PinIfAbsentAsync(
+            request.OrgId, request.Ecosystem, request.PurlName, servingHost, ct);
+
+        if (string.Equals(pinnedHost, servingHost, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        // The name is pinned to a different upstream than the one that just answered. Refuse the
+        // serve so a squatted public name cannot shadow a private-upstream name on miss.
+        await _audit.LogAsync(
+            "upstream_source_pin_violation",
+            orgId: request.OrgId,
+            ecosystem: request.Ecosystem,
+            purl: request.Purl,
+            detail: $"{{\"name\":\"{request.PurlName}\",\"pinned_host\":\"{pinnedHost}\",\"serving_host\":\"{servingHost}\"}}",
+            ct: ct);
+
+        return new ProxyFetchResult(BlockDecision.Blocked, sha256, blobKey, VersionId: null);
+    }
+
+    // Returns the scheme+authority (e.g. https://registry.npmjs.org) of an absolute URL, or null
+    // when the URL is absent or unparseable.
+    private static string? ExtractHost(string? url) =>
+        !string.IsNullOrEmpty(url) && Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            ? uri.GetLeftPart(UriPartial.Authority)
+            : null;
 
     // Runs the pre-record gates (deprecation + provenance) that must fire BEFORE the version row
     // is written. A blocked result means the version is never adopted into the cache catalogue.
@@ -506,7 +565,13 @@ public sealed record ProxyFetchRequest(
     /// <summary>Verifying trust-anchor keyid when <see cref="ProvenanceStatus"/> is verified; NULL otherwise.</summary>
     string? ProvenanceSigner = null,
     /// <summary>Tenant policy from <c>org_settings.verify_npm_signatures</c>: 'off' | 'warn' | 'block'.</summary>
-    string? VerifyProvenanceMode = null);
+    string? VerifyProvenanceMode = null,
+    /// <summary>
+    /// The upstream URL this artefact was fetched from. The scheme+authority is bound to the
+    /// package name as a source pin so a later serve of the same name from a different upstream
+    /// is refused (dependency-confusion guard). Null skips pinning for this fetch.
+    /// </summary>
+    string? UpstreamUrl = null);
 
 /// <summary>Outcome of <see cref="ProxyFetchService.RecordAndScanAsync"/>.</summary>
 public sealed record ProxyFetchResult(

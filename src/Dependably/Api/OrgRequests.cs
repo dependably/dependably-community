@@ -33,6 +33,10 @@ public sealed record UpdateOrgSettingsRequest(
     // Per-tenant MFA enrollment requirement. null = leave unchanged.
     bool? RequireMfa = null);
 
+// Per-tenant RPM hosted-publishing posture override. null (inherit instance env) | 'passthrough' |
+// 'merged'. Validated by OrgSettingsController.UpdateRpmUpstreamMode.
+public sealed record UpdateRpmUpstreamModeRequest(string? Mode);
+
 public sealed record UpdateRetentionRequest(
     int? KeepVersions,
     int? KeepDays,

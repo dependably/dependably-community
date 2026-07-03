@@ -12,10 +12,21 @@ namespace Dependably.Tests.Unit;
 [Trait("Category", "Unit")]
 public sealed class RequestPublicUrlBuilderExtendedTests
 {
-    private static IConfiguration Config(string? baseUrl = null) =>
-        new ConfigurationBuilder().AddInMemoryCollection(
-            baseUrl is null ? [] : new Dictionary<string, string?> { ["BASE_URL"] = baseUrl }
-        ).Build();
+    private static IConfiguration Config(string? baseUrl = null, string? requireSecureCookies = null)
+    {
+        var dict = new Dictionary<string, string?>();
+        if (baseUrl is not null)
+        {
+            dict["BASE_URL"] = baseUrl;
+        }
+
+        if (requireSecureCookies is not null)
+        {
+            dict["REQUIRE_SECURE_COOKIES"] = requireSecureCookies;
+        }
+
+        return new ConfigurationBuilder().AddInMemoryCollection(dict).Build();
+    }
 
     private static DefaultHttpContext Ctx(string scheme, string host)
     {
@@ -79,6 +90,42 @@ public sealed class RequestPublicUrlBuilderExtendedTests
         var b = new RequestPublicUrlBuilder(Config("https://dependably.example.com"));
         var opts = b.SessionCookieOptions(Ctx("http", "internal.svc"));
         Assert.True(opts.Secure);
+    }
+
+    [Fact]
+    public void SessionCookieOptions_RequireSecureCookiesUnset_DefaultsToOldBehavior()
+    {
+        // Regression: REQUIRE_SECURE_COOKIES defaults to off so local plain-HTTP dev is unaffected.
+        var b = new RequestPublicUrlBuilder(Config("http://dev.local"));
+        var opts = b.SessionCookieOptions(Ctx("http", "dev.local"));
+        Assert.False(opts.Secure);
+    }
+
+    [Fact]
+    public void SessionCookieOptions_RequireSecureCookiesTrue_ForcesSecureOnPlainHttpRequest()
+    {
+        // A plain-HTTP request/deployment would otherwise ship the session cookie without
+        // Secure (MITM can capture the session JWT). REQUIRE_SECURE_COOKIES=true forces it.
+        var b = new RequestPublicUrlBuilder(Config("http://dev.local", requireSecureCookies: "true"));
+        var opts = b.SessionCookieOptions(Ctx("http", "dev.local"));
+        Assert.True(opts.Secure);
+    }
+
+    [Fact]
+    public void SessionCookieOptions_RequireSecureCookiesTrue_NoBaseUrl_StillForcesSecure()
+    {
+        var b = new RequestPublicUrlBuilder(Config(requireSecureCookies: "true"));
+        var opts = b.SessionCookieOptions(Ctx("http", "localhost"));
+        Assert.True(opts.Secure);
+    }
+
+    [Fact]
+    public void SessionCookieOptions_RequireSecureCookiesFalseValue_DoesNotForceSecure()
+    {
+        // Any value other than "true" (case-insensitive) leaves the existing precedence intact.
+        var b = new RequestPublicUrlBuilder(Config("http://dev.local", requireSecureCookies: "false"));
+        var opts = b.SessionCookieOptions(Ctx("http", "dev.local"));
+        Assert.False(opts.Secure);
     }
 
     [Fact]

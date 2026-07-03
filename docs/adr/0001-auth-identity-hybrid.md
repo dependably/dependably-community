@@ -15,7 +15,7 @@ The auth stack is an intentional hybrid:
 
 - **Identity Core layer (AddIdentityCore only, no SignInManager/cookie scheme):** `UserManager<DependablyUser>` and `UserManager<SystemAdminUser>` supply TOTP token generation/validation, recovery code generation/validation, and BCrypt password hashing via the registered `IPasswordHasher`. `DependablyUserStore` and `SystemAdminUserStore` are custom Dapper implementations of `IUserStore`. `security_stamp` is rotated alongside `token_version` at every credential/session-invalidation event to keep the Identity model internally consistent.
 
-- **Bespoke first-factor layer (LoginService, LoginServiceSaml, SqliteLockoutStore):** Constant-time BCrypt verification + timing sentinel for email-enumeration defense. Lockout keyed on `(realm, tenantId, email)` so unknown accounts can be locked. SAML JIT-provisioning with configurable attribute mapping.
+- **Bespoke first-factor layer (LoginService, LoginService.LoginSamlAsync + SamlController, SqliteLockoutStore):** Constant-time BCrypt verification + timing sentinel for email-enumeration defense. Lockout keyed on `(realm, tenantId, email)` so unknown accounts can be locked. SAML JIT-provisioning with configurable attribute mapping.
 
 - **Bespoke session layer (JWT-in-cookie, RouteScopeFilter, OnJwtTokenValidatedAsync):** HS256 JWT issued by `LoginService`; validated in `OnJwtTokenValidatedAsync` against the revocation store and the `tver` claim. `RouteScopeFilter` pins each scope claim (`tenant`/`system`) to its realm and rejects mismatches. The `ApiToken` scheme (service tokens + user PATs) resolves via `TokenAuthExtensions.ResolveTokenAsync` by SHA-256 hash lookup.
 
@@ -26,7 +26,7 @@ The auth stack is an intentional hybrid:
 ## Consequences
 
 **Retained bespoke layers (deliberately not migrated):**
-- First-factor login → `LoginService` / `LoginServiceSaml` (constant-time + timing sentinel for email enumeration defense; lockout on unknown accounts)
+- First-factor login → `LoginService` / `LoginService.LoginSamlAsync` (constant-time + timing sentinel for email enumeration defense; lockout on unknown accounts)
 - Lockout → `SqliteLockoutStore` / `RedisLockoutStore` keyed on `(realm, tenantId, email)` (bounds unknown accounts, not just known users)
 - JWT session issuance → `LoginService.IssueTenantJwt` / `IssueSystemJwt` (HS256, scope/tid/tver claims that RouteScopeFilter depends on)
 - Per-request session invalidation → `OnJwtTokenValidatedAsync` + `tver` claim (immediate invalidation on password change vs SecurityStampValidator's poll interval)

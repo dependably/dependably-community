@@ -1,6 +1,8 @@
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Publish;
+using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -8,6 +10,7 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
 
 namespace Dependably.Tests.Unit;
 
@@ -50,7 +53,7 @@ public sealed class QuotaReservationTests : IAsyncLifetime
             new Dependably.Infrastructure.Audit.AuditEventRepository(_db),
             new Microsoft.AspNetCore.Http.HttpContextAccessor(),
             NullLogger<Dependably.Infrastructure.Audit.AuditEmitter>.Instance, cfg,
-            new ServiceCollection().BuildServiceProvider(), TimeProvider.System);
+            new ServiceCollection().BuildServiceProvider(), new OrgRepository(_db), TimeProvider.System);
         var tiered = new TieredBlobStorage(_blobs, _blobs);
         var storage = new GlobalTenantStorageResolver(_db, tiered);
         var osv = new NullOsvSource();
@@ -59,9 +62,12 @@ public sealed class QuotaReservationTests : IAsyncLifetime
             new VulnerabilityRepository(_db, TimeProvider.System), audit, cfg,
             new NoAirGap(),
             NullLogger<VulnerabilityScanService>.Instance,
-            TimeProvider.System));
+            TimeProvider.System,
+            new OrgRepository(_db),
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
+            new Dependably.Infrastructure.Edge.EdgePublishGuard(TestEdgeMode.Disabled()),
             auditor, scanner, NullLogger<PackagePublishService>.Instance);
     }
 
@@ -266,7 +272,7 @@ public sealed class QuotaReservationTests : IAsyncLifetime
             new Dependably.Infrastructure.Audit.AuditEventRepository(_db),
             new Microsoft.AspNetCore.Http.HttpContextAccessor(),
             NullLogger<Dependably.Infrastructure.Audit.AuditEmitter>.Instance, cfg,
-            new ServiceCollection().BuildServiceProvider(), TimeProvider.System);
+            new ServiceCollection().BuildServiceProvider(), new OrgRepository(_db), TimeProvider.System);
         var tiered = new TieredBlobStorage(_blobs, registry);
         var storage = new GlobalTenantStorageResolver(_db, tiered);
         var osv = new NullOsvSource();
@@ -275,9 +281,12 @@ public sealed class QuotaReservationTests : IAsyncLifetime
             new VulnerabilityRepository(_db, TimeProvider.System), audit, cfg,
             new NoAirGap(),
             NullLogger<VulnerabilityScanService>.Instance,
-            TimeProvider.System));
+            TimeProvider.System,
+            new OrgRepository(_db),
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
+            new Dependably.Infrastructure.Edge.EdgePublishGuard(TestEdgeMode.Disabled()),
             auditor, scanner, NullLogger<PackagePublishService>.Instance);
     }
 

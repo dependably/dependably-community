@@ -86,15 +86,6 @@ public class PyPiController : ControllerBase
     public Task<IActionResult> Upload(CancellationToken ct)
         => _publish.UploadAsync(HttpContext, CurrentTenantId(), ct);
 
-    // ── Compatibility shim for unit tests ─────────────────────────────
-
-    /// <summary>
-    /// Forwards to <see cref="PyPiSimpleIndexHelper.RewriteUpstreamSimpleIndexHtml"/> for
-    /// backward compatibility with unit tests that reference this method via the controller type.
-    /// </summary>
-    internal static string RewriteUpstreamSimpleIndexHtml(string html)
-        => PyPiSimpleIndexHelper.RewriteUpstreamSimpleIndexHtml(html);
-
     // ── Helpers ────────────────────────────────────────────────────────
 
     private string CurrentTenantId() =>

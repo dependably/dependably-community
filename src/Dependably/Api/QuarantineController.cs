@@ -61,7 +61,7 @@ public sealed class QuarantineController : OrgScopedControllerBase
 
         if (state is not (null or "pending" or "approved" or "denied"))
         {
-            return _problems.ValidationErrorAction("state", "Must be 'pending', 'approved', or 'denied'.");
+            return _problems.ValidationErrorActionKey("state", "error.quarantine.stateInvalid");
         }
 
         limit = Math.Clamp(limit, 1, MaxQuarantinePageSize);
@@ -108,7 +108,7 @@ public sealed class QuarantineController : OrgScopedControllerBase
 
         if (req.Decision is not ("approved" or "denied" or "pending"))
         {
-            return _problems.ValidationErrorAction("decision", "Must be 'approved', 'denied', or 'pending'.");
+            return _problems.ValidationErrorActionKey("decision", "error.quarantine.decisionInvalid");
         }
 
         string orgId = CurrentTenantId();
@@ -125,7 +125,7 @@ public sealed class QuarantineController : OrgScopedControllerBase
             // Initial decision — only approve or deny; "pending" would be a no-op transition.
             if (req.Decision == "pending")
             {
-                return _problems.ValidationErrorAction("decision", "Entry is already pending.");
+                return _problems.ValidationErrorActionKey("decision", "error.quarantine.alreadyPending");
             }
             if (!await _quarantine.DecideAsync(orgId, id, req.Decision, userId, req.Note, ct))
             {
@@ -168,7 +168,7 @@ public sealed class QuarantineController : OrgScopedControllerBase
                 from = entry.State,
                 decision = req.Decision,
                 note = req.Note,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return Ok(new { id = entry.Id, state = req.Decision });
     }

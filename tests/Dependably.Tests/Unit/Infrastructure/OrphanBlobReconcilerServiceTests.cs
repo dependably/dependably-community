@@ -35,8 +35,10 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
             .Build();
         var tiered = new TieredBlobStorage(_cache, _registry);
         _sut = new OrphanBlobReconcilerService(tiered, new PackageRepository(_db), cfg,
+            new AirGapMode(cfg),
             NullLogger<OrphanBlobReconcilerService>.Instance,
-            _clock);
+            _clock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
     }
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
@@ -82,6 +84,57 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
         Assert.Equal(1, summary.OrphansDeleted);
         Assert.Equal(3, summary.BytesFreed);
         Assert.False(await _registry.ExistsAsync(orphanKey));
+    }
+
+    [Fact]
+    public async Task Disabled_ByDenylist_SkipsSweep_OrphanSurvives()
+    {
+        // Wiring test: with orphan-reconciler in DISABLE_BACKGROUND_JOBS the sweep must be a
+        // no-op, so an over-grace orphan survives (proves the IsJobDisabled guard fires).
+        string orphanKey = BlobKeys.Hosted("o1", "npm", "ghost", "2.0.0", "ghost-2.0.0.tgz");
+        _registry.SeedWithLastModified(orphanKey, new byte[] { 9 }, _clock.GetUtcNow().AddMinutes(-10));
+
+        var cfg = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ORPHAN_RECONCILE_GRACE_MINUTES"] = "1",
+                ["DISABLE_BACKGROUND_JOBS"] = "orphan-reconciler",
+            })
+            .Build();
+        var sut = new OrphanBlobReconcilerService(
+            new TieredBlobStorage(_cache, _registry), new PackageRepository(_db), cfg,
+            new AirGapMode(cfg), NullLogger<OrphanBlobReconcilerService>.Instance, _clock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
+
+        var summary = await sut.RunOnceAsync();
+
+        Assert.Equal(0, summary.OrphansDeleted);
+        Assert.True(await _registry.ExistsAsync(orphanKey));
+    }
+
+    [Fact]
+    public async Task EdgeMode_SkipsSweep_OrphanSurvives()
+    {
+        // orphan-reconciler is not in the edge allowlist, so an edge node force-disables it.
+        string orphanKey = BlobKeys.Hosted("o1", "npm", "ghost", "3.0.0", "ghost-3.0.0.tgz");
+        _registry.SeedWithLastModified(orphanKey, new byte[] { 9 }, _clock.GetUtcNow().AddMinutes(-10));
+
+        var cfg = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ORPHAN_RECONCILE_GRACE_MINUTES"] = "1",
+                ["DEPLOYMENT_MODE"] = "edge",
+            })
+            .Build();
+        var sut = new OrphanBlobReconcilerService(
+            new TieredBlobStorage(_cache, _registry), new PackageRepository(_db), cfg,
+            new AirGapMode(cfg), NullLogger<OrphanBlobReconcilerService>.Instance, _clock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
+
+        var summary = await sut.RunOnceAsync();
+
+        Assert.Equal(0, summary.OrphansDeleted);
+        Assert.True(await _registry.ExistsAsync(orphanKey));
     }
 
     [Fact]
@@ -158,8 +211,10 @@ public sealed class OrphanBlobReconcilerServiceTests : IAsyncLifetime
             { ["ORPHAN_RECONCILE_GRACE_MINUTES"] = "1" })
             .Build();
         var sut = new OrphanBlobReconcilerService(tiered, new PackageRepository(_db), cfg,
+            new AirGapMode(cfg),
             NullLogger<OrphanBlobReconcilerService>.Instance,
-            _clock);
+            _clock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
 
         var summary = await sut.RunOnceAsync();
 

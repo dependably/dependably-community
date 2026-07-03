@@ -161,6 +161,43 @@ public sealed class UpstreamBlobSingleFlightTests
         }
     }
 
+    // ── Cancelled waiter must not collapse the in-flight entry (dedup under cancellation) ──
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_FirstWaiterCancels_SecondJoinerDoesNotTriggerSecondFetch()
+    {
+        // The first caller's WaitAsync(ct) detaches early (its own token cancels) while the
+        // shared upstream fetch is still running. A second, uncancelled caller for the SAME key
+        // must join the SAME shared fetch rather than triggering a brand-new upstream call —
+        // exactly the stampede+cancellation scenario the in-flight map exists to collapse.
+        var gate = new GateHandler(HttpStatusCode.OK, RandomBytes(64));
+        var (client, _) = BuildClient(gate);
+
+        string blobKey = BlobKeys.Proxy(Sha256Hex(gate.ResponseBody));
+        const string url = "http://upstream.invalid/pkg-cancel.whl";
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(gate.ResponseBody));
+
+        using var cts = new CancellationTokenSource();
+        var firstTask = client.GetOrFetchStreamAsync(blobKey, url, spec, "pypi", ct: cts.Token);
+
+        // Let the first caller register in the in-flight map and start the shared upstream call
+        // (parked on the gate) before cancelling it.
+        await Task.Delay(80);
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstTask);
+
+        // A second caller for the same key must join the still-running shared fetch, not start
+        // a fresh one.
+        var secondTask = Task.Run(() => client.GetOrFetchStreamAsync(blobKey, url, spec, "pypi", ct: default));
+        await Task.Delay(80);
+        gate.Release();
+        var (stream, _) = await secondTask;
+        await stream.DisposeAsync();
+
+        Assert.Equal(1, gate.CallCount);
+    }
+
     // ── UpstreamQueueThrottleHandler ──────────────────────────────────────────
 
     [Fact]
@@ -343,8 +380,8 @@ public sealed class UpstreamBlobSingleFlightTests
 
     private sealed class AllowAllValidator : IUpstreamUrlValidator
     {
-        public Task<bool> IsAllowedAsync(string url, string? orgId = null, CancellationToken ct = default)
-            => Task.FromResult(true);
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId = null, CancellationToken ct = default)
+            => Task.FromResult(UpstreamUrlBlock.None);
     }
 
     private sealed class DisabledAirGap : IAirGapMode

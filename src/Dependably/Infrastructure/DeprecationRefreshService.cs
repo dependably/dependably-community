@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Dependably.Infrastructure.Observability;
+using Dependably.Infrastructure.Redis;
 using Dependably.Protocol;
 
 namespace Dependably.Infrastructure;
@@ -39,6 +40,10 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     protected override bool RunOnStartup => true;
     protected override bool ContinueOnTickError => false;
 
+    // Refreshes shared package/version rows and drives one-shot upstream fetches — with
+    // RunOnStartup=true a rolling deploy would otherwise fire N simultaneous upstream sweeps.
+    protected override bool RequiresLeaderLock => true;
+
     public DeprecationRefreshService(
         PackageRepository packages,
         CacheArtifactRepository cacheArtifacts,
@@ -48,8 +53,9 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         IAirGapMode airGap,
         IConfiguration config,
         ILogger<DeprecationRefreshService> logger,
-        TimeProvider time)
-        : base(config, logger, time)
+        TimeProvider time,
+        IDistributedLock locks)
+        : base(config, logger, time, locks)
     {
         _packages = packages;
         _cacheArtifacts = cacheArtifacts;
@@ -269,7 +275,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             try
             {
                 string detail = System.Text.Json.JsonSerializer.Serialize(
-                    new { version, revoked_at = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") });
+                    new { version, revoked_at = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ") }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
                 await _audit.LogActivityAsync(
                     orgId,
                     ecosystem: ecosystem,

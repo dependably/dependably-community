@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using Dapper;
 using Microsoft.AspNetCore.Identity;
@@ -27,15 +25,18 @@ internal sealed class DependablyUserStore :
     private readonly IMetadataStore _db;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly IMfaSecretProtector _protector;
+    private readonly IRecoveryCodeHasher _recoveryCodeHasher;
 
     public DependablyUserStore(
         IMetadataStore db,
         IHttpContextAccessor httpContextAccessor,
-        IMfaSecretProtector protector)
+        IMfaSecretProtector protector,
+        IRecoveryCodeHasher recoveryCodeHasher)
     {
         _db = db;
         _httpContextAccessor = httpContextAccessor;
         _protector = protector;
+        _recoveryCodeHasher = recoveryCodeHasher;
     }
 
     private string RequireTenantId()
@@ -302,16 +303,14 @@ internal sealed class DependablyUserStore :
             return false;
         }
 
-        string inputHash = HashCode(code);
+        // Verify against each stored hash (keyed+salted new form or legacy SHA-256) without an
+        // early break, so the loop's timing does not leak which slot matched.
         int matchIndex = -1;
         for (int i = 0; i < hashes.Count; i++)
         {
-            if (CryptographicOperations.FixedTimeEquals(
-                    Encoding.UTF8.GetBytes(inputHash),
-                    Encoding.UTF8.GetBytes(hashes[i])))
+            if (_recoveryCodeHasher.Verify(code, hashes[i]))
             {
                 matchIndex = i;
-                break;
             }
         }
 
@@ -328,8 +327,8 @@ internal sealed class DependablyUserStore :
 
     public Task ReplaceCodesAsync(DependablyUser user, IEnumerable<string> recoveryCodes, CancellationToken cancellationToken)
     {
-        // Store SHA-256 hashes of the codes, never the plaintext values.
-        var hashes = recoveryCodes.Select(HashCode).ToList();
+        // Store salted, keyed hashes of the codes, never the plaintext values.
+        var hashes = recoveryCodes.Select(_recoveryCodeHasher.Hash).ToList();
         user.RecoveryCodes = JsonSerializer.Serialize(hashes);
         return Task.CompletedTask;
     }
@@ -348,12 +347,4 @@ internal sealed class DependablyUserStore :
     // ── IDisposable ───────────────────────────────────────────────────────────
 
     public void Dispose() { /* No unmanaged resources; each operation opens and disposes its own connection. */ }
-
-    // ── helpers ───────────────────────────────────────────────────────────────
-
-    private static string HashCode(string code)
-    {
-        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(code));
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
 }

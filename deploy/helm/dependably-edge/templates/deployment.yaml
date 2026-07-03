@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dependably-edge.fullname" . }}
+  labels:
+    {{- include "dependably-edge.labels" . | nindent 4 }}
+spec:
+  # replicas is hard-coded to 1 and deliberately NOT templated. A dependably edge node uses a
+  # single SQLite file on its cache volume; SQLite tolerates exactly one writing process, and the
+  # startup instance-lock guard fails fast on a second replica sharing the volume. Scale-out is a
+  # second edge (its own release + volume), never replicas > 1 on one volume.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dependably-edge.selectorLabels" . | nindent 6 }}
+  # One SQLite writer at a time: recreate on upgrade so the old pod releases the lock before the
+  # new one claims it, rather than two pods briefly contending for the shared volume.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "dependably-edge.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: dependably-edge
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: DEPLOYMENT_MODE
+              value: edge
+            - name: EDGE_MASTER_URL
+              value: {{ required "edge.masterUrl is required" .Values.edge.masterUrl | quote }}
+            - name: EDGE_MASTER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "edge.existingSecret is required (holds EDGE_MASTER_TOKEN)" .Values.edge.existingSecret }}
+                  key: EDGE_MASTER_TOKEN
+            {{- if .Values.edge.accessTokenEnabled }}
+            - name: EDGE_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.edge.existingSecret }}
+                  key: EDGE_ACCESS_TOKEN
+            {{- end }}
+            # SQLite cache-index file on the persistent cache volume, alongside the blobs it
+            # references, so index and artefacts never diverge across pod restarts.
+            - name: DB_PATH
+              value: /cache/dependably.db
+            - name: LOCAL_STORAGE_PATH
+              value: /cache/blobs
+            # Disk-backed staging dir on the persistent cache volume (container /tmp is tmpfs).
+            - name: PROXY_STAGING_PATH
+              value: /cache/staging
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: cache
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "dependably-edge.fullname" . }}-cache
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

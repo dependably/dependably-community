@@ -14,6 +14,7 @@
   import SettingsInstallScriptAllowlist from './SettingsInstallScriptAllowlist.svelte'
   import SettingsUpstreamRegistries from './SettingsUpstreamRegistries.svelte'
   import InfoTip from '../InfoTip.svelte'
+  import Toggle from '../Toggle.svelte'
 
   export let proxySettings
   export let allowlistMode = false
@@ -53,14 +54,14 @@
 <div class="card card-narrow">
   <div class="form-row form-row-inline">
     <label class="flex-1 label-row">{$t('settings.proxy.passthroughEnabled')} <InfoTip text={$t('settings.proxy.passthroughHint')} /></label>
-    <input type="checkbox" bind:checked={proxySettings.proxy_passthrough_enabled} disabled={airGapped} class="w-auto" />
+    <Toggle bind:checked={proxySettings.proxy_passthrough_enabled} disabled={airGapped} ariaLabel={$t('settings.proxy.passthroughEnabled')} />
   </div>
   {#if airGapped}
     <div class="form-hint mb-3">{$t('settings.proxy.passthroughOverriddenByAirGap')}</div>
   {/if}
   <div class="form-row form-row-inline">
     <label class="flex-1">{$t('settings.proxy.allowlistMode')}</label>
-    <input type="checkbox" bind:checked={allowlistMode} class="w-auto" />
+    <Toggle bind:checked={allowlistMode} ariaLabel={$t('settings.proxy.allowlistMode')} />
   </div>
   <div class="form-row">
     <label class="label-row">{$t('settings.proxy.osvTolerance')} <InfoTip text={$t('settings.proxy.osvToleranceHint')} /></label>

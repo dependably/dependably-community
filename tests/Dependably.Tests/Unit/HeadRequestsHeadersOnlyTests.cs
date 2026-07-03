@@ -408,7 +408,8 @@ public sealed class HeadRequestsHeadersOnlyTests : IAsyncLifetime
                 new StagingOptions(Path.GetTempPath(), FloorBytes: 0),
                 new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
                 NullLogger<OciUploadService>.Instance,
-                TimeProvider.System)));
+                TimeProvider.System)),
+            EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard());
 
         return new OciController(svc, NullLogger<OciController>.Instance)
         {

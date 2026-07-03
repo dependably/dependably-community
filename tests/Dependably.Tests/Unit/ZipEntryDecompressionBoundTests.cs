@@ -300,6 +300,80 @@ public sealed class ZipEntryDecompressionBoundTests
         Assert.Same(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
+    // ── NuGetSymbolKey.ExtractPortablePdbs (symbol-server PDB entries) ─────────
+
+    /// <summary>
+    /// Regression test for the ZIP entry decompression cap on the NuGet symbol-server PDB
+    /// extraction path. The bomb <c>.pdb</c> entry is highly-compressible filler well beyond
+    /// <see cref="ZipEntryLimits.MaxPdbEntryBytes"/>: it compresses at &gt;1000:1, so the pushed
+    /// <c>.snupkg</c> stays small while the decompressed read would otherwise be unbounded.
+    /// Without the cap, the entry is read to completion into an in-memory buffer before
+    /// <c>MetadataReaderProvider</c> even gets a chance to reject it as non-Portable-PDB content.
+    /// With the cap, <see cref="LimitedReadStream"/> throws mid-read and the entry is
+    /// skipped-with-null — bounding the maximum per-entry allocation regardless of upload size.
+    /// </summary>
+    [Fact]
+    public void ExtractPortablePdbs_PdbZipBombEntry_IsSkipped()
+    {
+        byte[] bomb = BuildPdbZipBomb();
+
+        using var stream = new MemoryStream(bomb);
+        var symbols = NuGetSymbolKey.ExtractPortablePdbs(stream);
+
+        Assert.Empty(symbols);
+    }
+
+    [Fact]
+    public void ExtractPortablePdbs_LegitimatePdbUnderCap_StillIndexes()
+    {
+        // Sibling of the bomb test: a real, well-under-cap Portable PDB in the same shape of
+        // archive must still index normally — the cap must not reject legitimate entries.
+        var signature = Guid.Parse("99998888-7777-4666-8555-444433332222");
+        byte[] pdb = NuGetFixtures.BuildPortablePdb(signature);
+        byte[] snupkg = NuGetFixtures.BuildSnupkgWithPdbs("BombSibling", "1.0.0", ("ok.pdb", pdb));
+
+        using var stream = new MemoryStream(snupkg);
+        var symbols = NuGetSymbolKey.ExtractPortablePdbs(stream);
+
+        var only = Assert.Single(symbols);
+        Assert.Equal(NuGetSymbolKey.PortableKey(signature), only.SsqpKey);
+    }
+
+    private static byte[] BuildPdbZipBomb()
+    {
+        using var ms = new MemoryStream();
+        using var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true);
+        var nuspecEntry = zip.CreateEntry("BombPkg.nuspec");
+        using (var w = new StreamWriter(nuspecEntry.Open(), Encoding.UTF8))
+        {
+            w.Write("""
+                <?xml version="1.0" encoding="utf-8"?>
+                <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+                  <metadata>
+                    <id>BombPkg</id><version>1.0.0</version>
+                    <authors>x</authors><description>d</description>
+                  </metadata>
+                </package>
+                """);
+        }
+
+        var entry = zip.CreateEntry("lib/netstandard2.0/bomb.pdb", CompressionLevel.SmallestSize);
+        using (var es = entry.Open())
+        {
+            byte[] chunk = new byte[1024 * 1024];
+            Array.Fill(chunk, (byte)'A');
+            long total = 0;
+            long target = ZipEntryLimits.MaxPdbEntryBytes + chunk.Length;
+            while (total < target)
+            {
+                es.Write(chunk, 0, chunk.Length);
+                total += chunk.Length;
+            }
+        }
+        zip.Dispose();
+        return ms.ToArray();
+    }
+
     // ── Mixed partial-failure scenario ─────────────────────────────────────────
 
     /// <summary>

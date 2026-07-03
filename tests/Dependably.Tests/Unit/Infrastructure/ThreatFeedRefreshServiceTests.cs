@@ -34,7 +34,8 @@ public sealed class ThreatFeedRefreshServiceTests : IClassFixture<InMemoryDbFixt
             new ConfigurationBuilder().Build(),
             new FakeAirGap(jobDisabled),
             NullLogger<ThreatFeedRefreshService>.Instance,
-            TimeProvider.System);
+            TimeProvider.System,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(TimeProvider.System));
     }
 
     [Fact]

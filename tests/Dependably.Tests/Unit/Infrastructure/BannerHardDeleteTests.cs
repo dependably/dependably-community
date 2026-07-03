@@ -45,6 +45,8 @@ public sealed class BannerHardDeleteTests : IClassFixture<InMemoryDbFixture>
             .Build();
         return new TenantHardDeleteService(
             orgs, audit, db, banners, config,
+            new AirGapMode(config),
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(clock),
             NullLogger<TenantHardDeleteService>.Instance,
             clock);
     }

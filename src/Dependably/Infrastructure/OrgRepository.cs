@@ -95,7 +95,8 @@ public sealed class OrgRepository
                COALESCE(verify_pypi_attestations, 'off') as VerifyPyPiAttestations,
                COALESCE(verify_rpm_signatures, 'off') as VerifyRpmSignatures,
                COALESCE(verify_maven_signatures, 'off') as VerifyMavenSignatures,
-               COALESCE(storage_used_bytes, 0) as StorageUsedBytes
+               COALESCE(storage_used_bytes, 0) as StorageUsedBytes,
+               rpm_upstream_mode as RpmUpstreamMode
         FROM org_settings WHERE org_id = @orgId
         """;
 
@@ -570,12 +571,26 @@ public sealed class OrgRepository
             new { orgId });
     }
 
-    public async Task UpdateMemberRoleAsync(string orgId, string userId, string role, CancellationToken ct = default)
+    /// <summary>
+    /// Changes a member's role and terminates their outstanding sessions. The role is snapshotted
+    /// into the tenant session JWT, so a demotion must move <c>token_version</c> forward (and evict
+    /// the in-memory version cache) or the demoted user keeps the elevated role claim until their
+    /// 8h token expires — mirroring <see cref="SetUserAccountStatusAsync"/>. Returns the post-update
+    /// <c>token_version</c> so a caller re-issuing a session in the same flow (self-demotion cookie
+    /// refresh, SAML role resync) embeds the new value rather than self-invalidating.
+    /// </summary>
+    public async Task<long> UpdateMemberRoleAsync(string orgId, string userId, string role, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
-            "UPDATE users SET role = @role WHERE id = @userId AND tenant_id = @orgId",
+        long newVersion = await conn.ExecuteScalarAsync<long>(
+            """
+            UPDATE users SET role = @role, token_version = token_version + 1
+            WHERE id = @userId AND tenant_id = @orgId
+            RETURNING token_version
+            """,
             new { orgId, userId, role });
+        _tokenVersions?.Invalidate(userId);
+        return newVersion;
     }
 
     /// <summary>
@@ -776,4 +791,6 @@ public sealed record OrgSettingsUpdate(
     // Tri-state same-version-push policy. null = leave unchanged. 'block' | 'exception' | 'allow'.
     string? VersionOverwritePolicy = null,
     // Per-tenant MFA enrollment requirement. null = leave unchanged.
-    bool? RequireMfa = null);
+    bool? RequireMfa = null,
+    // Per-tenant RPM hosted-publishing posture. null = leave unchanged. 'passthrough' | 'merged'.
+    string? RpmUpstreamMode = null);

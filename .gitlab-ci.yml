@@ -90,6 +90,7 @@ variables:
   - { job: dotnet-format,          artifacts: false }
   - { job: csp-inline-style-guard, artifacts: false }
   - { job: chrome-emoji-guard,     artifacts: false }
+  - { job: i18n-validate,          artifacts: false }
   - { job: secret-scan,            artifacts: false }
   - { job: unit-tests,             artifacts: false }
   - { job: api-contract,           artifacts: false }
@@ -154,6 +155,27 @@ variables:
       if ! grep -qF "$HOST" "$CI_PROJECT_DIR/nuget.config"; then
         echo "ERROR: nuget.config does not reference the private host '$HOST' after write." >&2
         exit 1
+      fi
+      # Effective-config guard. The greps above only inspect the file we just wrote; a public
+      # source living in an inherited machine/user config (~/.nuget/NuGet/NuGet.Config, a global
+      # npmrc) merges in without touching that file. `<clear/>` drops inherited package *sources*,
+      # but disabledPackageSources / packageSourceMapping and npm's precedence rules don't, so
+      # assert the RESOLVED config — not the written file. Each check is gated on its toolchain
+      # because this template is shared by dotnet, node, and alpine jobs.
+      if command -v dotnet >/dev/null 2>&1; then
+        if dotnet nuget list source 2>/dev/null | grep -qiE 'api\.nuget\.org|registry\.npmjs\.org'; then
+          echo "ERROR: effective NuGet config lists a public source (inherited from a machine/user config):" >&2
+          dotnet nuget list source >&2
+          exit 1
+        fi
+      fi
+      if command -v npm >/dev/null 2>&1; then
+        eff=$(npm config get registry 2>/dev/null)
+        want="${REGISTRY_URL}/npm/"
+        case "$eff" in
+          "$want"|"${want%/}") : ;;
+          *) echo "ERROR: effective npm registry is '$eff', not the private feed '$want' (overridden by an inherited npmrc)." >&2; exit 1 ;;
+        esac
       fi
 
 # === validate ===
@@ -436,6 +458,16 @@ chrome-emoji-guard:
         echo "Emoji codepoint detected in web/src. Use a sprite from web/public/icons.svg instead — DESIGN.md §11." >&2
         exit 1
       fi
+
+# Locale completeness gate: every key in the source locale (web en.json, backend
+# SharedResource.resx) must exist in every translated locale. Missing keys fail;
+# orphaned keys warn. Pure node script — no npm install or registry access needed.
+i18n-validate:
+  stage: test
+  extends: [.runs-on-ci, .release-required]
+  image: ${DEP_IMAGE_REGISTRY}/library/node:22-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752
+  script:
+    - node i18n/scripts/i18n-validate.js
 
 # Full-history, all-detectors sweep over the entire repository: no --since-commit
 # (every commit), no --only-verified (unverified findings count too). Completes in
@@ -746,7 +778,9 @@ integration-external:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
     - *release-tag-rule
-  image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  # Same digest as every other dotnet job, pulled through the private mirror
+  # rather than mcr.microsoft.com directly so CI image traffic stays off public registries.
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   needs: [build]
   tags: [amd64]
   allow_failure: true

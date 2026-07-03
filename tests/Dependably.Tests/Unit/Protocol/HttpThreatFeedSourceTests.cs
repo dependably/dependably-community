@@ -15,6 +15,9 @@ namespace Dependably.Tests.Unit.Protocol;
 [Trait("Category", "Unit")]
 public sealed class HttpThreatFeedSourceTests
 {
+    // One byte over the source's feed-response cap.
+    private const int OverCapSize = (int)HttpThreatFeedSource.MaxFeedResponseBytes + 1;
+
     private static HttpThreatFeedSource Build(Func<HttpRequestMessage, HttpResponseMessage> responder)
     {
         return new HttpThreatFeedSource(
@@ -50,6 +53,63 @@ public sealed class HttpThreatFeedSourceTests
         await Assert.ThrowsAsync<HttpRequestException>(() => source.GetKevCveIdsAsync());
     }
 
+    /// <summary>
+    /// Regression: an oversized KEV feed response (attacker-controlled or compromised mirror,
+    /// or a misconfigured KEV_FEED_URL pointing at something huge) must not be buffered
+    /// unbounded. No Content-Length is set so the counted-copy loop — not the declared-length
+    /// fast path — has to enforce the cap.
+    /// </summary>
+    [Fact]
+    public async Task Kev_OversizedResponse_ThrowsTooLarge()
+    {
+        var source = Build(_ =>
+        {
+            byte[] body = new byte[OverCapSize];
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
+            response.Content.Headers.ContentLength = null;
+            return response;
+        });
+
+        await Assert.ThrowsAsync<UpstreamResponseTooLargeException>(() => source.GetKevCveIdsAsync());
+    }
+
+    /// <summary>
+    /// Regression: the KEV fetch must use <c>HttpCompletionOption.ResponseHeadersRead</c>.
+    /// The default (ResponseContentRead) has HttpClient itself buffer the whole body via
+    /// <c>SerializeToStreamAsync</c> before the cap check ever runs, silently defeating a
+    /// declared-Content-Length fast path that assumes the body is untouched. This content
+    /// throws if its body is ever serialized, so a Content-Length-only cap check without
+    /// ResponseHeadersRead trips it during <c>SendAsync</c> itself rather than throwing the
+    /// expected <see cref="UpstreamResponseTooLargeException"/>.
+    /// </summary>
+    [Fact]
+    public async Task Kev_DeclaredOversizeContentLength_FailsBeforeReadingBody()
+    {
+        var source = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new PoisonContent(OverCapSize),
+        });
+
+        await Assert.ThrowsAsync<UpstreamResponseTooLargeException>(() => source.GetKevCveIdsAsync());
+    }
+
+    /// <summary>HttpContent that declares a Content-Length but throws if its body is ever read.</summary>
+    private sealed class PoisonContent : HttpContent
+    {
+        private readonly long _declaredLength;
+
+        public PoisonContent(long declaredLength) => _declaredLength = declaredLength;
+
+        protected override Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context)
+            => throw new InvalidOperationException("Body must not be read when Content-Length exceeds the cap.");
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = _declaredLength;
+            return true;
+        }
+    }
+
     [Fact]
     public async Task Epss_ParsesStringScores_AndMarksWholeBatchQueried()
     {
@@ -83,6 +143,41 @@ public sealed class HttpThreatFeedSourceTests
             return call == 1
                 ? new HttpResponseMessage(HttpStatusCode.InternalServerError)
                 : Json($$"""{"data":[{"cve":"{{cves[100]}}","epss":"0.42"}]}""");
+        });
+
+        var result = await source.GetEpssScoresAsync(cves);
+
+        Assert.Equal(2, call);
+        Assert.Equal(50, result.Queried.Count);
+        Assert.DoesNotContain(cves[0], result.Queried);
+        Assert.Contains(cves[100], result.Queried);
+        Assert.Equal(0.42, Assert.Contains(cves[100], result.Scores));
+    }
+
+    /// <summary>
+    /// Mixed partial-failure regression: one EPSS batch returns an oversized body (over the
+    /// feed-response cap, no Content-Length so the counted-copy loop enforces it) while the
+    /// other batch succeeds in the same call. The oversized batch's CVEs stay unqueried
+    /// (retryable next pass) without aborting the successful batch — mirroring the existing
+    /// one-failed-batch isolation, now for the size-cap failure mode specifically.
+    /// </summary>
+    [Fact]
+    public async Task Epss_OneBatchOversized_OtherBatchStillParsed()
+    {
+        var cves = Enumerable.Range(1, 150).Select(i => $"CVE-2024-{i:D4}").ToList();
+        int call = 0;
+        var source = Build(req =>
+        {
+            call++;
+            if (call == 1)
+            {
+                byte[] body = new byte[OverCapSize];
+                var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
+                response.Content.Headers.ContentLength = null;
+                return response;
+            }
+
+            return Json($$"""{"data":[{"cve":"{{cves[100]}}","epss":"0.42"}]}""");
         });
 
         var result = await source.GetEpssScoresAsync(cves);

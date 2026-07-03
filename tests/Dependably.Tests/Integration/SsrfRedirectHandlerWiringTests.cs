@@ -179,10 +179,11 @@ public sealed class SsrfRedirectHandlerWiringTests : IAsyncLifetime
         public HashSet<string> DenyUrls { get; } = [];
         public List<string> ValidatedUrls { get; } = [];
 
-        public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
         {
             ValidatedUrls.Add(url);
-            return Task.FromResult(!DenyUrls.Contains(url));
+            return Task.FromResult(
+                DenyUrls.Contains(url) ? UpstreamUrlBlock.BlockedRange : UpstreamUrlBlock.None);
         }
     }
 }

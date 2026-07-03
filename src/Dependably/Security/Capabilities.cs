@@ -81,6 +81,16 @@ public static class Capabilities
         ReadMetadata, ReadArtifact, ReadPackages, ReadClaims, ManageOwnTokens
     };
 
+    /// <summary>
+    /// The canonical (sorted, JSON-array) capability string granted to a reader principal —
+    /// the same shape <see cref="TryNormalizeAndAuthorize"/> produces. An edge node's inbound
+    /// access token is seeded with exactly this set so the existing capability, authorization,
+    /// and audit machinery authenticates edge clients with no new auth code paths.
+    /// </summary>
+    public static string ReaderCapsCanonicalJson { get; } =
+        System.Text.Json.JsonSerializer.Serialize(
+            ReaderCaps.OrderBy(c => c, StringComparer.Ordinal).ToArray());
+
     private static readonly IReadOnlySet<string> PublisherCaps = new HashSet<string>(ReaderCaps)
     {
         PublishAll, ImportAll, YankAll

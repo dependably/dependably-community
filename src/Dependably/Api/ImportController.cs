@@ -160,7 +160,7 @@ public sealed class ImportController : ControllerBase
             // file is rejected before any bytes enter managed memory. The publish pipeline
             // re-checks the per-ecosystem cap after detection; both layers are necessary.
             long preStageCap = await ResolveGlobalCapAsync(orgId, ct);
-            var stageResult = await StageFileAsync(file, preStageCap, ct);
+            var stageResult = await StageToDiskAsync(file, preStageCap, ct);
             if (stageResult.Error is not null)
             {
                 outcomes.Add(Reject(file.FileName, stageResult.Error.Value.Code, stageResult.Error.Value.Message, dryRun: dryRun));
@@ -168,8 +168,20 @@ public sealed class ImportController : ControllerBase
                 continue;
             }
 
-            byte[] bytes = stageResult.Bytes!;
-            object outcome = await ImportOneAsync(importCtx, file.FileName, bytes, settings, dryRun, ct);
+            string tempPath = stageResult.TempPath!;
+            object outcome;
+            try
+            {
+                // The artifact never enters managed memory as a whole: detection reads
+                // it back from disk one buffer at a time, and the publish tail streams
+                // the same staged file straight to the blob store.
+                outcome = await ImportOneAsync(importCtx, file.FileName, tempPath, stageResult.Size, settings, dryRun, ct);
+            }
+            finally
+            {
+                DeleteTempFile(tempPath);
+            }
+
             outcomes.Add(outcome);
             if (outcome is AcceptedOutcome)
             {
@@ -236,9 +248,9 @@ public sealed class ImportController : ControllerBase
                 unlisted.Add(file.FileName);
                 continue;
             }
-            using var ms = new MemoryStream();
-            await file.CopyToAsync(ms, ct);
-            string actual = Convert.ToHexString(SHA256.HashData(ms.ToArray())).ToLowerInvariant();
+            // Streamed straight from the multipart part — the sidecar check runs before any
+            // artefact is staged, so hashing must not buffer the whole file to compute it.
+            string actual = await ComputeSha256Async(file, ct);
             if (!string.Equals(actual, declared, StringComparison.OrdinalIgnoreCase))
             {
                 mismatches.Add(new { filename = file.FileName, expected = declared, actual });
@@ -427,14 +439,14 @@ public sealed class ImportController : ControllerBase
 
     /// <summary>
     /// Stages each artefact to a disk temp file one at a time, computes its SHA-256, and
-    /// runs ecosystem detection. Each file's bytes are in RAM only for the duration of its
-    /// detection pass; the temp file is kept on disk so <see cref="ImportLoadedArtefactsAsync"/>
-    /// can re-open it per-file during the import loop. The caller is responsible for
-    /// deleting all staged temp paths via the <see cref="LoadedArtefact.TempPath"/> field
-    /// regardless of outcome — a try/finally in <see cref="ImportManifest"/> covers this.
-    /// Files that exceed <paramref name="perFileCap"/> are treated as unparseable
-    /// (no temp path) so <see cref="BuildManifestCoverage"/> surfaces them in the
-    /// unparseable bucket and the 422 includes the reason.
+    /// runs ecosystem detection — both by streaming the staged file, never materialising the
+    /// whole artefact in a byte[]. The temp file is kept on disk so
+    /// <see cref="ImportLoadedArtefactsAsync"/> can re-open it per-file during the import
+    /// loop. The caller is responsible for deleting all staged temp paths via the
+    /// <see cref="LoadedArtefact.TempPath"/> field regardless of outcome — a try/finally in
+    /// <see cref="ImportManifest"/> covers this. Files that exceed <paramref name="perFileCap"/>
+    /// are treated as unparseable (no temp path) so <see cref="BuildManifestCoverage"/>
+    /// surfaces them in the unparseable bucket and the 422 includes the reason.
     /// </summary>
     private async Task<(List<LoadedArtefact>? loaded, IActionResult? error)> LoadArtefactsAsync(
         List<IFormFile> artefactFiles, long perFileCap, CancellationToken ct)
@@ -447,21 +459,16 @@ public sealed class ImportController : ControllerBase
             {
                 // Treat oversized/error files as unparseable; no temp path to track.
                 loaded.Add(new LoadedArtefact(
-                    file.FileName, null, string.Empty,
+                    file.FileName, null, 0, string.Empty,
                     null, null, null, null,
                     stageResult.Error.Value.Message));
                 continue;
             }
 
-            // Read bytes into RAM only long enough to hash and detect ecosystem; release
-            // before the next file is staged. The temp file remains on disk for the import loop.
             string tempPath = stageResult.TempPath!;
-            byte[] bytes = await System.IO.File.ReadAllBytesAsync(tempPath, ct);
-            string sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-            var (ok, err) = EcosystemDetector.Detect(file.FileName, bytes);
-            // bytes goes out of scope here; GC can reclaim before the next iteration.
+            var (sha, ok, err) = await HashAndDetectAsync(tempPath, file.FileName, ct);
             loaded.Add(new LoadedArtefact(
-                file.FileName, tempPath, sha,
+                file.FileName, tempPath, stageResult.Size, sha,
                 ok?.Ecosystem, ok?.Name, ok?.PurlName, ok?.Version,
                 err?.Message));
         }
@@ -469,46 +476,53 @@ public sealed class ImportController : ControllerBase
     }
 
     /// <summary>
-    /// Streams a single multipart file to a temp file under PROXY_STAGING_PATH, enforcing
-    /// <paramref name="sizeCap"/> during the write, then reads the staged bytes back into
-    /// memory and deletes the temp file. On success returns the file's bytes. On failure
-    /// (size cap exceeded or I/O error) returns an error code/message pair and ensures the
-    /// temp file is cleaned up.
+    /// Streams the staged file once to compute its SHA-256, then seeks back to the start and
+    /// runs content-based ecosystem detection directly against the same open stream — the
+    /// artefact is never materialised in a byte[] for either step.
     /// </summary>
-    private async Task<StagedFile> StageFileAsync(IFormFile file, long sizeCap, CancellationToken ct)
+    private static async Task<(string Sha256, EcosystemDetector.DetectionResult? Ok, EcosystemDetector.DetectionFailure? Err)>
+        HashAndDetectAsync(string tempPath, string filename, CancellationToken ct)
     {
-        var diskResult = await StageToDiskAsync(file, sizeCap, ct);
-        if (diskResult.Error is not null)
+        // deepcode ignore PT: tempPath is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        await using var fs = new FileStream(
+            tempPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true);
+        using var sha256Alg = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] buffer = new byte[81920];
+        int read;
+        while ((read = await fs.ReadAsync(buffer, ct)) > 0)
         {
-            return new StagedFile(null, diskResult.Error);
+            sha256Alg.AppendData(buffer, 0, read);
         }
-        string tempPath = diskResult.TempPath!;
-        try
+        string sha256 = Convert.ToHexString(sha256Alg.GetHashAndReset()).ToLowerInvariant();
+
+        fs.Seek(0, SeekOrigin.Begin);
+        var (ok, err) = EcosystemDetector.Detect(filename, fs);
+        return (sha256, ok, err);
+    }
+
+    /// <summary>
+    /// Streams a single multipart file's bytes to compute its SHA-256 without ever buffering
+    /// the whole artefact — used by the sha256sums sidecar check, which runs before any
+    /// artefact is staged to disk.
+    /// </summary>
+    private static async Task<string> ComputeSha256Async(IFormFile file, CancellationToken ct)
+    {
+        await using var stream = file.OpenReadStream();
+        using var sha256Alg = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] buffer = new byte[81920];
+        int read;
+        while ((read = await stream.ReadAsync(buffer, ct)) > 0)
         {
-            byte[] bytes = await System.IO.File.ReadAllBytesAsync(tempPath, ct);
-            return new StagedFile(bytes, null);
+            sha256Alg.AppendData(buffer, 0, read);
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            return new StagedFile(null,
-                (Code: "staging_error",
-                 Message: $"Failed to read staged file: {ex.GetType().Name}"));
-        }
-        finally
-        {
-            DeleteTempFile(tempPath);
-        }
+        return Convert.ToHexString(sha256Alg.GetHashAndReset()).ToLowerInvariant();
     }
 
     /// <summary>
     /// Streams a single multipart file to a temp file under PROXY_STAGING_PATH, enforcing
-    /// <paramref name="sizeCap"/> during the write. On success returns the temp file path;
-    /// the caller is responsible for deleting it. On failure (size cap exceeded or I/O error)
-    /// returns an error and ensures the partial temp file is cleaned up.
+    /// <paramref name="sizeCap"/> during the write. On success returns the temp file path and
+    /// its exact byte count; the caller is responsible for deleting it. On failure (size cap
+    /// exceeded or I/O error) returns an error and ensures the partial temp file is cleaned up.
     /// </summary>
     private async Task<StagedToDisk> StageToDiskAsync(IFormFile file, long sizeCap, CancellationToken ct)
     {
@@ -532,7 +546,7 @@ public sealed class ImportController : ControllerBase
                     {
                         // Abort: the file exceeds the size cap. The finally block cleans
                         // up the partial temp file.
-                        return new StagedToDisk(null,
+                        return new StagedToDisk(null, 0,
                             (Code: "size_limit_exceeded",
                              Message: $"File exceeds the upload size limit ({sizeCap} bytes)."));
                     }
@@ -540,7 +554,7 @@ public sealed class ImportController : ControllerBase
                 }
             }
             succeeded = true;
-            return new StagedToDisk(tempPath, null);
+            return new StagedToDisk(tempPath, written, null);
         }
         catch (OperationCanceledException)
         {
@@ -548,7 +562,7 @@ public sealed class ImportController : ControllerBase
         }
         catch (Exception ex)
         {
-            return new StagedToDisk(null,
+            return new StagedToDisk(null, 0,
                 (Code: "staging_error",
                  Message: $"Failed to stage file for processing: {ex.GetType().Name}"));
         }
@@ -578,8 +592,7 @@ public sealed class ImportController : ControllerBase
         }
     }
 
-    private sealed record StagedFile(byte[]? Bytes, (string Code, string Message)? Error);
-    private sealed record StagedToDisk(string? TempPath, (string Code, string Message)? Error);
+    private sealed record StagedToDisk(string? TempPath, long Size, (string Code, string Message)? Error);
 
     private sealed record CoverageReport(
         IReadOnlyList<object> ManifestEntriesWithoutFiles,
@@ -642,10 +655,11 @@ public sealed class ImportController : ControllerBase
     }
 
     /// <summary>
-    /// Iterates the pre-validated artefact list. For each entry: reads its bytes from the
-    /// staged temp file, imports the artefact, then immediately deletes the temp file.
-    /// Only one file's bytes are in RAM at a time. The caller's try/finally ensures any
-    /// temp files not yet reached by the loop are cleaned up on exception or cancellation.
+    /// Iterates the pre-validated artefact list. For each entry: imports the artefact by
+    /// handing the publish tail the staged temp file path (never re-reading it into a
+    /// byte[]), then deletes the temp file once that call returns. Only one file is being
+    /// staged/streamed at a time. The caller's try/finally ensures any temp files not yet
+    /// reached by the loop are cleaned up on exception or cancellation.
     /// </summary>
     private async Task<(List<object> outcomes, int accepted, int rejected)> ImportLoadedArtefactsAsync(
         ImportContext ctx, IReadOnlyList<LoadedArtefact> loaded, OrgSettings? settings,
@@ -662,15 +676,21 @@ public sealed class ImportController : ControllerBase
             }
             // Every artefact reaching this loop passed BuildManifestCoverage pre-validation,
             // so it carries no parse error and its staged temp path is guaranteed non-null.
-            // deepcode ignore PT: TempPath is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
-            byte[] bytes = await System.IO.File.ReadAllBytesAsync(artefact.TempPath!, cancellationToken);
-            // Delete the temp file immediately after reading so memory is released and
-            // disk space is freed before processing begins.
-            DeleteTempFile(artefact.TempPath!);
             var detection = new EcosystemDetector.DetectionResult(
                 artefact.Ecosystem!, artefact.Name!, artefact.PurlName!, artefact.Version!);
-            object outcome = await ImportDetectedAsync(
-                ctx, artefact.Filename, bytes, detection, settings, dryRun, cancellationToken);
+            object outcome;
+            try
+            {
+                outcome = await ImportDetectedAsync(
+                    ctx, artefact.Filename, artefact.TempPath!, artefact.SizeBytes, detection, settings, dryRun, cancellationToken);
+            }
+            finally
+            {
+                // Deleted only after the publish tail has finished streaming from it —
+                // ArtifactStagingPath consumers read the file during StoreAndRecordAsync/
+                // ValidateAsync, so it must still exist while that call is in flight.
+                DeleteTempFile(artefact.TempPath!);
+            }
             outcomes.Add(outcome);
             if (outcome is AcceptedOutcome)
             {
@@ -684,32 +704,38 @@ public sealed class ImportController : ControllerBase
         return (outcomes, accepted, rejected);
     }
 
-#pragma warning restore SCS0018
-
     // TempPath is the disk-staged file path, null when staging failed (ParseError is set).
-    // The import loop reads bytes from TempPath one file at a time and deletes it after use.
+    // The import loop streams from TempPath one file at a time and deletes it after use.
     private sealed record LoadedArtefact(
-        string Filename, string? TempPath, string Sha256,
+        string Filename, string? TempPath, long SizeBytes, string Sha256,
         string? Ecosystem, string? Name, string? PurlName, string? Version,
         string? ParseError);
 
     /// <summary>
-    /// Per-file dispatch for the unified upload path. Detects ecosystem from content, resolves
-    /// the per-ecosystem size cap, then defers the shared tail (path safety, claim gate, size,
-    /// dedup, blob put, version row, audit) to <see cref="IPackagePublishService"/>.
+    /// Per-file dispatch for the unified upload path. Detects ecosystem by streaming the
+    /// staged file (never materialising it in a byte[]), resolves the per-ecosystem size
+    /// cap, then defers the shared tail (path safety, claim gate, size, dedup, blob put,
+    /// version row, audit) to <see cref="IPackagePublishService"/>.
     /// </summary>
     private async Task<object> ImportOneAsync(
-        ImportContext ctx, string filename, byte[] bytes, OrgSettings? settings,
+        ImportContext ctx, string filename, string tempPath, long sizeBytes, OrgSettings? settings,
         bool dryRun, CancellationToken ct)
     {
-        var (ok, err) = EcosystemDetector.Detect(filename, bytes);
+        EcosystemDetector.DetectionResult? ok;
+        EcosystemDetector.DetectionFailure? err;
+        // deepcode ignore PT: tempPath is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        await using (var detectStream = new FileStream(
+            tempPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true))
+        {
+            (ok, err) = EcosystemDetector.Detect(filename, detectStream);
+        }
         return ok is null
             ? Reject(filename, err!.Code, err.Message, dryRun: dryRun)
-            : await ImportDetectedAsync(ctx, filename, bytes, ok, settings, dryRun, ct);
+            : await ImportDetectedAsync(ctx, filename, tempPath, sizeBytes, ok, settings, dryRun, ct);
     }
 
     private async Task<object> ImportDetectedAsync(
-        ImportContext ctx, string filename, byte[] bytes,
+        ImportContext ctx, string filename, string tempPath, long sizeBytes,
         EcosystemDetector.DetectionResult detection, OrgSettings? settings,
         bool dryRun, CancellationToken ct)
     {
@@ -725,7 +751,8 @@ public sealed class ImportController : ControllerBase
             Version = detection.Version,
             Filename = filename,
             Purl = purl,
-            ArtifactBytes = bytes,
+            ArtifactStagingPath = tempPath,
+            ArtifactSizeBytes = sizeBytes,
             Origin = "uploaded",
             SizeCap = sizeCap,
             ActorUserId = ctx.ActorId,
@@ -734,6 +761,7 @@ public sealed class ImportController : ControllerBase
             AuditDetail = AuditDetailFor(ctx.BatchId, detection.Ecosystem),
             ClaimState = claim.State,
             SourceIp = HttpContext.GetNormalizedRemoteIp(),
+            ManifestJson = detection.NpmManifestJson,
         };
         var result = dryRun
             ? await _publish.ValidateAsync(request, ct)
@@ -741,7 +769,7 @@ public sealed class ImportController : ControllerBase
 
         if (!dryRun && result is PublishResult.Accepted accepted)
         {
-            var extracted = ExtractLicense(detection.Ecosystem, bytes, filename);
+            var extracted = await ExtractLicenseAsync(detection.Ecosystem, tempPath, filename, ct);
             if (extracted.Spdx.Count > 0)
             {
                 await _licenses.SetLicensesAsync(accepted.VersionId, extracted.Spdx, "uploaded", ct);
@@ -767,15 +795,28 @@ public sealed class ImportController : ControllerBase
         return OutcomeFromResult(filename, result, detection.Ecosystem, detection.PurlName, dryRun);
     }
 
-    private static LicenseExtractor.ExtractedMetadata ExtractLicense(
-        string ecosystem, byte[] bytes, string filename) => ecosystem switch
+    // deepcode ignore PT: tempPath is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+    private static async Task<LicenseExtractor.ExtractedMetadata> ExtractLicenseAsync(
+        string ecosystem, string tempPath, string filename, CancellationToken ct)
+    {
+        if (ecosystem is not ("nuget" or "pypi" or "npm"))
         {
-            // Wrap in a MemoryStream so we use the unified Stream-shaped LicenseExtractor surface.
-            "nuget" => LicenseExtractor.FromNuspec(new MemoryStream(bytes, writable: false)),
-            "pypi" => LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes, writable: false), filename),
-            "npm" => LicenseExtractor.FromNpmTarballPackageJson(new MemoryStream(bytes, writable: false)),
+            return LicenseExtractor.ExtractedMetadata.Empty;
+        }
+
+        await using var stream = new FileStream(
+            tempPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true);
+        ct.ThrowIfCancellationRequested();
+        return ecosystem switch
+        {
+            "nuget" => LicenseExtractor.FromNuspec(stream),
+            "pypi" => LicenseExtractor.FromPyPiPackageBytes(stream, filename),
+            "npm" => LicenseExtractor.FromNpmTarballPackageJson(stream),
             _ => LicenseExtractor.ExtractedMetadata.Empty,
         };
+    }
+
+#pragma warning restore SCS0018
 
     private static string PurlFor(EcosystemDetector.DetectionResult d) => d.Ecosystem switch
     {

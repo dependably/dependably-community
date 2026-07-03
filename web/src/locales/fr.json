@@ -6,8 +6,8 @@
     "brand": "Dependably",
     "packages": "Paquets",
     "upload": "Téléverser",
-    "airGapped": "Hors ligne",
-    "airGappedHint": "AIR_GAPPED=true. Le téléchargement depuis les registres en amont est désactivé ; l'analyse OSV ne s'exécute que sur le miroir local.",
+    "airGapped": "Isolé (air-gap)",
+    "airGappedHint": "AIR_GAPPED=true. Le téléchargement depuis les registres en amont est désactivé; l'analyse OSV ne s'exécute que sur le miroir local.",
     "insecureHttp": "http",
     "insecureHttpHint": "Les témoins de session ne sont pas sécurisés. Pour les déploiements accessibles depuis Internet, configurez un proxy inverse avec TLS et définissez BASE_URL=https://...",
     "tokens": "Jetons",
@@ -43,7 +43,7 @@
       "saving": "Enregistrement…",
       "cancel": "Annuler",
       "copy": "Copier",
-      "copied": "Copié !",
+      "copied": "Copié!",
       "copyFailed": "Échec de la copie",
       "dismiss": "Fermer",
       "discard": "Abandonner",
@@ -63,7 +63,7 @@
       "summary": "{from}–{to} sur {total}",
       "prev": "Page précédente",
       "next": "Page suivante",
-      "perPage": "Par page :"
+      "perPage": "Par page :"
     },
     "noData": "Aucune donnée",
     "never": "jamais",
@@ -74,10 +74,10 @@
   },
   "password": {
     "tooShort": "Utilisez au moins {min} caractères.",
-    "tooLong": "Mot de passe trop long (plus de 72 octets ; au-delà, l'algorithme de hachage tronque silencieusement la fin).",
+    "tooLong": "Mot de passe trop long (plus de 72 octets; au-delà, l'algorithme de hachage tronque silencieusement la fin).",
     "lowEntropy": "Trop facile à deviner. {warning}",
     "lowEntropyGeneric": "Trop facile à deviner. Essayez une phrase de passe plus longue ou mélangez des mots sans rapport.",
-    "containsContext": "N'incluez pas « {term} » dans votre mot de passe.",
+    "containsContext": "N'incluez pas « {term} » dans votre mot de passe.",
     "strength": {
       "ok": "Mot de passe robuste."
     }
@@ -117,7 +117,7 @@
       "confirmPassword": "Confirmer le mot de passe",
       "submit": "Accepter l'invitation",
       "submitting": "Création du compte…",
-      "success": "Compte créé !",
+      "success": "Compte créé!",
       "signIn": "Se connecter",
       "errorMinLength": "Le mot de passe doit comporter au moins 12 caractères.",
       "errorMismatch": "Les mots de passe ne correspondent pas.",
@@ -144,7 +144,10 @@
       "current": "La dernière version amont est en cache",
       "stale": "Une version amont plus récente n'est pas en cache",
       "unknown": "Aucune version amont à comparer",
-      "versionLabel": "Dernière : {version}"
+      "versionLabel": "Dernière : {version}"
+    },
+    "vulns": {
+      "none": "Aucune vulnérabilité connue"
     },
     "malicious": {
       "label": "Malveillant",
@@ -160,7 +163,7 @@
   },
   "claims": {
     "title": "Revendications de noms",
-    "description": "Politique par nom contrôlant si un locataire peut publier sous ce nom et si le proxy le sert. Trois états : non revendiqué (proxy uniquement), local_only (proxy désactivé, écritures locales acceptées), mixed (les deux, local prioritaire).",
+    "description": "Politique par nom contrôlant si un locataire peut publier sous ce nom et si le proxy le sert. Trois états : non revendiqué (proxy uniquement), local_only (proxy désactivé, écritures locales acceptées), mixed (les deux, local prioritaire).",
     "ecosystem": "Écosystème",
     "name": "Nom",
     "state": "État",
@@ -177,28 +180,28 @@
       "mixed": "Mixte"
     },
     "newClaim": "Nouvelle revendication",
-    "transition": "Transitionner",
+    "transition": "Changer l'état",
     "release": "Libérer",
     "modal": {
       "createTitle": "Créer une revendication",
-      "transitionTitle": "Transitionner la revendication",
+      "transitionTitle": "Changer l'état de la revendication",
       "releaseTitle": "Libérer la revendication",
       "ecosystem": "Écosystème",
       "name": "Nom",
       "state": "État",
       "newState": "Nouvel état",
       "reason": "Raison (obligatoire)",
-      "reasonPlaceholder": "Pourquoi cette revendication est-elle créée/modifiée ?",
-      "mixedWarning": "L'état 'mixed' permet aux versions locales d'avoir préséance sur l'amont. Confirmez avant de continuer.",
+      "reasonPlaceholder": "Pourquoi cette revendication est-elle créée/modifiée?",
+      "mixedWarning": "L'état « mixed » permet aux versions locales d'avoir préséance sur l'amont. Confirmez avant de continuer.",
       "mixedAck": "Je comprends l'implication pour la chaîne d'approvisionnement.",
-      "purgeWarning": "La transition vers 'local_only' purgera les versions proxy en cache pour ce nom.",
+      "purgeWarning": "La transition vers « local_only » purgera les versions proxy en cache pour ce nom.",
       "create": "Créer",
       "save": "Enregistrer",
       "confirmRelease": "Libérer",
       "cancel": "Annuler"
     },
     "empty": "Aucune revendication pour ce locataire pour l'instant.",
-    "loadFailed": "Échec du chargement des revendications : {message}"
+    "loadFailed": "Échec du chargement des revendications : {message}"
   },
   "upload": {
     "title": "Téléverser des paquets",
@@ -208,7 +211,7 @@
     "submit": "Téléverser",
     "uploading": "Téléversement…",
     "remove": "Retirer du téléversement",
-    "summary": "Lot {batchId} : {accepted} acceptés, {rejected} rejetés.",
+    "summary": "Lot {batchId} : {accepted} acceptés, {rejected} rejetés.",
     "outcome": {
       "accepted": "Accepté",
       "rejected": "Rejeté",
@@ -235,10 +238,9 @@
       "checksum": "Somme de contrôle",
       "size": "Taille",
       "pushed": "Reçu le",
-      "flags": "Indicateurs",
       "license": "Licence",
       "downloads": "Téléchargements",
-      "vulnScan": "Scan vuln.",
+      "vulnScan": "Analyse vuln.",
       "origin": "Origine",
       "status": "Statut",
       "actions": "Actions"
@@ -250,16 +252,16 @@
     "empty": "Aucune version.",
     "badges": {
       "firstFetch": "premier accès",
-      "yanked": "retiré",
+      "yanked": "retirée",
       "deprecated": "obsolète",
       "revoked": "révoquée",
       "revokedHelp": "Cette version a été supprimée du registre en amont et ne peut plus être récupérée. Une disparition en amont peut signaler le retrait d'une version compromise — examinez-la avant de continuer à la servir.",
-      "verified": "vérifié",
-      "signed": "signé",
+      "verified": "vérifiée",
+      "signed": "signée",
       "installScript": "exécute des scripts d'installation",
       "installScriptHelp": "Cette version embarque un script d'installation/cycle de vie exécuté automatiquement à l'installation ({kind}).",
       "provenanceVerified": "signature vérifiée",
-      "provenanceVerifiedHelp": "La signature du registre npm sur cette version a été vérifiée par rapport à une ancre de confiance épinglée (signataire : {signer}).",
+      "provenanceVerifiedHelp": "La signature du registre npm sur cette version a été vérifiée par rapport à une ancre de confiance épinglée (signataire : {signer}).",
       "provenanceFailed": "signature invalide",
       "provenanceFailedHelp": "Cette version portait une signature qui n'a pas pu être vérifiée par rapport aux ancres de confiance épinglées.",
       "provenanceUnsigned": "non signée",
@@ -279,6 +281,11 @@
       "stale": "En retard sur l'amont — la dernière version {version} n'est pas mise en cache ici.",
       "current": "À jour avec l'amont — la dernière version {version} est mise en cache."
     },
+    "latestCell": {
+      "isLatest": "Dernière version en amont",
+      "behind": "En retard sur la dernière version en amont",
+      "unknown": "Aucune version en amont à comparer"
+    },
     "vulnNever": "Jamais",
     "fileCount": "{count} fichiers",
     "multiFileHint": "Plusieurs fichiers — développez pour voir les sommes de contrôle par fichier",
@@ -288,13 +295,11 @@
     },
     "rescan": "Relancer",
     "rescanning": "…",
-    "rescanCooldown": "Délai : {minutes} min restantes",
+    "rescanCooldown": "Délai : {minutes} min restantes",
     "rescanTitle": "Rechercher des vulnérabilités",
     "blockDisabledTitle": "Déjà bloqué",
     "unblockDisabledTitle": "Non bloqué actuellement",
-    "sbom": "SBOM",
-    "sbomTitle": "Télécharger le SBOM",
-    "deleteTitle": "Supprimer la version {version} ? Cette action est irréversible.",
+    "deleteTitle": "Supprimer la version {version}? Cette action est irréversible.",
     "del": "Supp.",
     "actionsMenu": {
       "open": "Actions",
@@ -309,8 +314,7 @@
       "files": "Fichiers",
       "checksum": "SHA-256",
       "published": "Publié le",
-      "downloads": "Téléchargements",
-      "vulnScan": "Dernier scan",
+      "vulnScan": "Dernière analyse",
       "vulns": "Vulnérabilités",
       "noVulns": "Aucune vulnérabilité connue",
       "copy": "Copier",
@@ -332,9 +336,9 @@
       "push": "Publication",
       "import": "Importation",
       "download": "Téléchargement",
-      "vulnScan": "Scan de vulnérabilités",
-      "vulnScanPass": "Scan de vulnérabilités (quotidien)",
-      "vulnRescanPass": "Re-scan de vulnérabilités (quotidien)",
+      "vulnScan": "Analyse de vulnérabilités",
+      "vulnScanPass": "Analyse de vulnérabilités (quotidienne)",
+      "vulnRescanPass": "Nouvelle analyse de vulnérabilités (quotidienne)",
       "delete": "Suppression",
       "manualBlock": "Blocage manuel",
       "manualUnblock": "Déblocage manuel",
@@ -345,7 +349,7 @@
       "blockedKev": "Bloqué (KEV)",
       "blockedEpss": "Bloqué (EPSS)",
       "blockedVulnScore": "Bloqué (score vuln.)",
-      "blockedDeprecated": "Bloqué (déprécié)",
+      "blockedDeprecated": "Bloqué (obsolète)",
       "loginSuccess": "Connexion (réussie)",
       "loginFailure": "Connexion (échec)",
       "loginLocked": "Connexion (verrouillée)"
@@ -385,7 +389,7 @@
       "saml": "SAML",
       "tokens": "Jetons",
       "usersInvites": "Utilisateurs et invitations",
-      "lists": "Listes blanche / noire",
+      "lists": "Listes d'autorisation / de blocage",
       "licenses": "Politique de licences",
       "claims": "Revendications de paquets",
       "supplyChain": "Chaîne d'approvisionnement",
@@ -410,10 +414,10 @@
       "token_revoked": "Jeton révoqué",
       "service_token_created": "Jeton de service créé",
       "service_token_revoked": "Jeton de service révoqué",
-      "allowlist_added": "Entrée de liste blanche ajoutée",
-      "allowlist_removed": "Entrée de liste blanche supprimée",
-      "blocklist_added": "Entrée de liste noire ajoutée",
-      "blocklist_removed": "Entrée de liste noire supprimée",
+      "allowlist_added": "Entrée de liste d'autorisation ajoutée",
+      "allowlist_removed": "Entrée de liste d'autorisation supprimée",
+      "blocklist_added": "Entrée de liste de blocage ajoutée",
+      "blocklist_removed": "Entrée de liste de blocage supprimée",
       "member_role_changed": "Rôle de membre modifié",
       "member_removed": "Membre supprimé",
       "invite_created": "Invitation créée",
@@ -424,15 +428,15 @@
       "saml.signing_cert_expiring": "Certificat de signature SAML arrivant à expiration",
       "saml.signing_cert_expired": "Certificat de signature SAML expiré",
       "license_policy_mode_changed": "Mode de politique de licences modifié",
-      "license_allowlist_added": "Entrée de liste blanche de licences ajoutée",
-      "license_allowlist_removed": "Entrée de liste blanche de licences supprimée",
-      "license_blocklist_added": "Entrée de liste noire de licences ajoutée",
-      "license_blocklist_removed": "Entrée de liste noire de licences supprimée",
+      "license_allowlist_added": "Entrée de liste d'autorisation de licences ajoutée",
+      "license_allowlist_removed": "Entrée de liste d'autorisation de licences supprimée",
+      "license_blocklist_added": "Entrée de liste de blocage de licences ajoutée",
+      "license_blocklist_removed": "Entrée de liste de blocage de licences supprimée",
       "claim.create": "Revendication créée",
-      "claim.transition": "Revendication transitionnée",
+      "claim.transition": "État de la revendication modifié",
       "claim.release": "Revendication libérée",
       "package.replace": "Version de paquet remplacée",
-      "allowlist_blocked": "PURL bloqué par la liste blanche",
+      "allowlist_blocked": "PURL bloqué par la liste d'autorisation",
       "conflict_resolved": "Conflit résolu",
       "upstream_response_too_large": "Réponse amont trop volumineuse",
       "ssrf_blocked": "SSRF bloqué",
@@ -466,7 +470,7 @@
     "modal": {
       "title": "Nouveau jeton d'accès",
       "description": "Description (optionnel)",
-      "descriptionPlaceholder": "p. ex. : ordinateur portable de développement",
+      "descriptionPlaceholder": "p. ex. : ordinateur portable de développement",
       "scope": "Portée",
       "expiresAt": "Expire le (optionnel)"
     }
@@ -486,14 +490,14 @@
     "expired": "expiré",
     "never": "jamais",
     "empty": "Aucun jeton de service",
-    "revokeConfirm": "Révoquer ce jeton de service ?",
+    "revokeConfirm": "Révoquer ce jeton de service?",
     "modal": {
       "title": "Nouveau jeton de service",
       "name": "Nom",
-      "namePlaceholder": "p. ex. : GitHub Actions",
+      "namePlaceholder": "p. ex. : GitHub Actions",
       "nameRequired": "Le nom est obligatoire.",
       "description": "Description (optionnel)",
-      "descriptionPlaceholder": "p. ex. : serveur de build en us-east-1",
+      "descriptionPlaceholder": "p. ex. : serveur de build en us-east-1",
       "scope": "Portée",
       "expiresAt": "Expire le (optionnel)"
     }
@@ -503,16 +507,63 @@
     "tabs": {
       "general": "Général",
       "authentication": "Authentification",
-      "uploadLimits": "Limites de téléversement",
-      "retention": "Rétention",
-      "licenses": "Licences",
+      "storage": "Stockage",
       "proxy": "Proxy",
-      "claims": "Revendications",
+      "gates": "Filtres",
+      "signatures": "Signatures",
+      "namespaces": "Espaces de noms",
+      "licenses": "Licences",
       "serviceTokens": "Jetons de service",
+      "webhooks": "Webhooks",
       "banners": "Annonces",
-      "security": "Sécurité",
       "instance": "Paramètres de l'instance",
       "metrics": "Accès aux métriques"
+    },
+    "storage": {
+      "uploadTitle": "Limites de téléversement",
+      "retentionTitle": "Rétention"
+    },
+    "webhooks": {
+      "section": "Abonnements aux webhooks",
+      "hint": "Dependably envoie une charge utile JSON signée à chaque URL lorsqu'un événement correspondant se produit — par exemple, la publication d'un paquet, un retrait ou une nouvelle vulnérabilité. Nécessite DEPENDABLY_MASTER_KEY pour stocker un secret de signature.",
+      "empty": "Aucun abonnement aux webhooks.",
+      "add": "Ajouter un webhook",
+      "remove": "Supprimer",
+      "removeConfirm": "Supprimer cet abonnement au webhook?",
+      "enabled": "Activé",
+      "disabled": "Désactivé",
+      "test": "Envoyer un test",
+      "testOk": "Ping de test envoyé.",
+      "testFail": "Échec du ping de test.",
+      "noSecretWarning": "Aucun secret de signature — les livraisons ne sont pas signées. Configurez DEPENDABLY_MASTER_KEY pour activer les secrets.",
+      "secretSet": "Secret défini",
+      "columns": {
+        "url": "URL",
+        "events": "Événements",
+        "status": "Statut",
+        "lastDelivery": "Dernière livraison"
+      },
+      "modal": {
+        "addTitle": "Ajouter un webhook",
+        "editTitle": "Modifier le webhook",
+        "url": "URL du point de terminaison",
+        "urlHint": "Doit être une URL https:// accessible depuis l'hôte Dependably.",
+        "events": "Événements",
+        "eventsHint": "Sélectionnez un ou plusieurs types d'événements auxquels vous abonner.",
+        "secret": "Secret de signature (facultatif)",
+        "secretHint": "Clé HMAC-SHA-256 envoyée dans l'en-tête X-Dependably-Signature. Laissez vide pour désactiver la signature. Nécessite DEPENDABLY_MASTER_KEY.",
+        "secretRotateHint": "Saisissez une nouvelle valeur pour renouveler le secret. Laissez vide pour conserver le secret actuel.",
+        "description": "Description (facultatif)",
+        "enabledLabel": "Activé"
+      },
+      "eventTypes": {
+        "package.publish": "Publication",
+        "package.replace": "Remplacement",
+        "package.import": "Importation",
+        "package.unlist": "Retrait de la liste",
+        "package.yank": "Rétractation",
+        "package.vulnerability": "Vulnérabilité"
+      }
     },
     "banners": {
       "severity": "Niveau",
@@ -530,7 +581,7 @@
       "no": "Non"
     },
     "instance": {
-      "intro": "Limites et planifications à l'échelle de l'instance pour ce déploiement. En mode mono-locataire, le propriétaire est aussi l'opérateur, donc ils sont gérés ici."
+      "intro": "Limites et planifications à l'échelle de l'instance pour ce déploiement. En mode mono-locataire, le propriétaire est aussi l'opérateur, donc elles sont gérées ici."
     },
     "metrics": {
       "intro": "Contrôle l'accès au point de terminaison Prometheus /metrics pour ce déploiement."
@@ -571,7 +622,7 @@
       "replaceFile": "Remplacer le fichier",
       "resetButton": "Effacer la configuration SAML",
       "resetHint": "Supprime les métadonnées de l'IdP, les surcharges SP et l'historique des tests. La connexion par formulaire est réactivée. Cette action est auditée.",
-      "resetConfirm": "Effacer toute la configuration SAML pour ce locataire ? Les métadonnées de l'IdP, les paramètres de connexion et l'historique des tests seront supprimés, et la connexion par formulaire sera réactivée.",
+      "resetConfirm": "Effacer toute la configuration SAML pour ce locataire? Les métadonnées de l'IdP, les paramètres de connexion et l'historique des tests seront supprimés, et la connexion par formulaire sera réactivée.",
       "resetSuccess": "Configuration SAML effacée.",
       "idpEntityId": "ID d'entité IdP",
       "idpSsoUrl": "URL SSO IdP",
@@ -594,7 +645,7 @@
       "testRecentOk": "Test récent réussi",
       "testButton": "Lancer le test SAML",
       "testRerun": "Relancer le test",
-      "testLastRunRecent": "Dernier test réussi : {when}",
+      "testLastRunRecent": "Dernier test réussi : {when}",
       "testLastRunMetaReady": "Courriel reçu {email} · La configuration est prête. Activez le SSO SAML depuis les méthodes de connexion ci-dessus.",
       "testLastRunStale": "Le dernier test réussi est périmé",
       "testLastRunMetaStale": "Testé {when}. Lancez un nouveau test pour activer le SSO SAML.",
@@ -622,7 +673,7 @@
       "signingCertOverrideHint": "Facultatif. Collez un certificat PEM ou DER pour épingler la clé de signature IdP hors bande. Lorsqu'il est défini, il devient la seule ancre de confiance pour la validation de signature SAML.",
       "signingCertOverridePlaceholder": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
       "signingCertOverrideSet": "Le certificat de remplacement est actif",
-      "signingCertOverrideFingerprint": "Empreinte : {fp}",
+      "signingCertOverrideFingerprint": "Empreinte : {fp}",
       "signingCertOverrideClear": "Supprimer le remplacement",
       "signingCertOverrideSave": "Définir le certificat",
       "signingCertOverrideCleared": "Remplacement du certificat de signature supprimé.",
@@ -630,7 +681,7 @@
       "roleMappingTitle": "Mappage des rôles",
       "roleMappingHint": "Mappez les valeurs de revendication de rôle/groupe IdP aux rôles de locataire Dependably. Lorsqu'un mappage correspond, le rôle de l'utilisateur est défini à chaque connexion.",
       "roleAttributeLabel": "Attribut de revendication de rôle",
-      "roleAttributePlaceholder": "Par défaut : Role, groups, …",
+      "roleAttributePlaceholder": "Par défaut : Role, groups, …",
       "defaultRoleLabel": "Rôle par défaut (aucune correspondance)",
       "roleMappingTableHeader": "Valeur IdP → Rôle",
       "roleMappingAddRow": "Ajouter un mappage",
@@ -639,11 +690,11 @@
       "roleMappingRole": "Rôle",
       "roleMappingSaved": "Mappage des rôles enregistré.",
       "testPopupBlocked": "Le navigateur a bloqué la fenêtre contextuelle de test SAML. Autorisez les fenêtres contextuelles pour ce site et réessayez.",
-      "testSucceeded": "Test SAML réussi (courriel reçu : {email}). La connexion par formulaire peut maintenant être désactivée dans les 10 prochaines minutes.",
-      "testFailed": "Échec du test SAML : {reason}",
+      "testSucceeded": "Test SAML réussi (courriel reçu : {email}). La connexion par formulaire peut maintenant être désactivée dans les 10 prochaines minutes.",
+      "testFailed": "Échec du test SAML : {reason}",
       "certExpiryWarningTitle": "Le certificat de signature IdP arrive à expiration",
       "certExpiryExpiredTitle": "Le certificat de signature IdP a expiré",
-      "certExpiryWarningBody": "Le certificat de signature IdP SAML expire dans {days} jour(s) ({notAfter}). Remplacez-le dans Paramètres → Authentification avant son expiration pour éviter toute interruption de la connexion SAML.",
+      "certExpiryWarningBody": "Le certificat de signature IdP SAML expire dans {days, plural, one {# jour} other {# jours}} ({notAfter}). Remplacez-le dans Paramètres → Authentification avant son expiration pour éviter toute interruption de la connexion SAML.",
       "certExpiryExpiredBody": "Le certificat de signature IdP SAML a expiré le {notAfter}. Les connexions SAML peuvent échouer. Remplacez le certificat dans Paramètres → Authentification immédiatement.",
       "certExpiryReplace": "Remplacer le certificat"
     },
@@ -652,10 +703,10 @@
     "security": {
       "trustAnchors": {
         "section": "Ancres de confiance de signature",
-        "hint": "Matériel de clé publique par organisation utilisé pour vérifier les signatures lors de la récupération par proxy. Ajoutez une ancre pour un écosystème, puis activez la vérification des signatures dans Paramètres → Proxy.",
+        "hint": "Matériel de clé publique par organisation utilisé pour vérifier les signatures lors de la récupération par proxy. Ajoutez une ancre pour un écosystème, puis activez la vérification des signatures dans Paramètres → Signatures.",
         "add": "Ajouter une ancre",
         "emptyEco": "Aucune ancre de confiance configurée pour {ecosystem}.",
-        "removeConfirm": "Supprimer cette ancre de confiance ?",
+        "removeConfirm": "Supprimer cette ancre de confiance?",
         "colKeyId": "Identifiant / empreinte de clé",
         "colKind": "Type",
         "colLabel": "Étiquette",
@@ -665,17 +716,17 @@
           "ecosystem": "Écosystème",
           "anchorKind": "Type",
           "label": "Étiquette (optionnel)",
-          "labelPlaceholder": "ex. : Clé de signature Maven Central",
+          "labelPlaceholder": "ex. : Clé de signature Maven Central",
           "keyId": "Identifiant de clé",
-          "keyIdPlaceholder": "ex. : SHA256:jl3bwswu80Pj…",
+          "keyIdPlaceholder": "ex. : SHA256:jl3bwswu80Pj…",
           "keyIdHint": "L'identifiant de clé du registre npm, par exemple SHA256:jl3bwswu80Pj… extrait du point de terminaison /-/npm/v1/keys. Obligatoire pour les ancres npm SPKI — l'identifiant ne peut pas être déduit des octets de la clé seule.",
           "material": "Matériel de clé publique",
           "materialPlaceholder": "Collez ici un bloc PGP blindé, du DER base64, un certificat PEM ou un JSON…",
           "materialHint": "Matériel de clé publique uniquement — aucune clé privée n'est acceptée.",
           "tpIssuer": "Émetteur",
-          "tpIssuerPlaceholder": "ex. : https://token.actions.githubusercontent.com",
+          "tpIssuerPlaceholder": "ex. : https://token.actions.githubusercontent.com",
           "tpSubject": "Sujet",
-          "tpSubjectPlaceholder": "ex. : https://github.com/org/dépôt/",
+          "tpSubjectPlaceholder": "ex. : https://github.com/org/repo/",
           "tpMatch": "Mode de correspondance",
           "tpMatchPrefix": "Préfixe — faire confiance à tout flux de travail ou ref sous ce chemin",
           "tpMatchExact": "Exact — faire confiance uniquement à ce flux de travail et cette ref spécifiques",
@@ -698,15 +749,15 @@
       "versionOverwritePolicyAllow": "Autoriser — permettre tous les écrasements",
       "versionOverwritePolicyWarning": "Autoriser les écrasements permet à une publication de remplacer le contenu d'une version existante. Le changement est audité (package.replace enregistre les deux empreintes) mais les implications pour la chaîne d'approvisionnement sont réelles — les paquets déjà téléchargés par vos développeurs peuvent avoir un contenu différent au prochain téléchargement. Le basculement de ce paramètre est lui-même audité.",
       "airGapped": "Environnement isolé (air-gap)",
-      "airGappedHint": "Lorsque activé, Dependably n'émet aucune requête réseau sortante pour cette organisation : les récupérations via le proxy amont sont désactivées (les paquets non mis en cache renvoient 404), et les analyses de vulnérabilités et de métadonnées d'obsolescence ignorent cette organisation. À utiliser pour les déploiements isolés / air-gap.",
-      "airGappedEnforcedNote": "Imposé pour toute l'instance par l'opérateur (AIR_GAPPED) ; non modifiable ici.",
-      "airGappedWarning": "Les requêtes sortantes sont désactivées pour cette organisation : les paquets amont non mis en cache renvoient 404, et les analyses de vulnérabilités et d'obsolescence l'ignorent.",
+      "airGappedHint": "Lorsque activé, Dependably n'émet aucune requête réseau sortante pour cette organisation : les récupérations via le proxy amont sont désactivées (les paquets non mis en cache renvoient 404), et les analyses de vulnérabilités et de métadonnées d'obsolescence ignorent cette organisation. À utiliser pour les déploiements isolés / air-gap.",
+      "airGappedEnforcedNote": "Imposé pour toute l'instance par l'opérateur (AIR_GAPPED); non modifiable ici.",
+      "airGappedWarning": "Les requêtes sortantes sont désactivées pour cette organisation : les paquets amont non mis en cache renvoient 404, et les analyses de vulnérabilités et d'obsolescence l'ignorent.",
       "requireMfa": "Exiger l'inscription MFA",
       "requireMfaHint": "Lorsque activé, tous les utilisateurs de cette organisation doivent compléter l'inscription MFA avant d'accéder aux points d'accès API. La variable d'environnement REQUIRE_MFA de l'instance applique cette règle à toutes les organisations.",
-      "requireMfaEnforcedNote": "Imposé pour toute l'instance par l'opérateur (REQUIRE_MFA) ; non modifiable ici."
+      "requireMfaEnforcedNote": "Imposé pour toute l'instance par l'opérateur (REQUIRE_MFA); non modifiable ici."
     },
     "uploadLimits": {
-      "instanceCeiling": "Plafond de l'instance : {mb} Mo",
+      "instanceCeiling": "Plafond de l'instance : {mb} Mo",
       "allEcosystems": "Tous les écosystèmes",
       "exceedsCeiling": "Ne peut pas dépasser le plafond de l'instance de {bytes} octets.",
       "bytesLabel": "{label} (octets)",
@@ -722,87 +773,87 @@
     "proxy": {
       "passthroughEnabled": "Relais proxy activé",
       "passthroughHint": "Lorsque désactivé, seuls les paquets déjà mis en cache dans ce registre sont servis.",
-      "passthroughOverriddenByAirGap": "Remplacé par le paramètre Environnement isolé (onglet Général) : le relais proxy est désactivé en mode air-gap.",
-      "allowlistMode": "Proxy : liste d'autorisation et de blocage uniquement",
+      "passthroughOverriddenByAirGap": "Remplacé par le paramètre Environnement isolé (onglet Général) : le relais proxy est désactivé en mode air-gap.",
+      "allowlistMode": "Proxy : liste d'autorisation et de blocage uniquement",
       "osvTolerance": "Score OSV maximal toléré",
       "osvToleranceHint": "Les paquets dont le score de vulnérabilité dépasse ce seuil sont bloqués (0 – 10). La valeur par défaut 10 autorise tout.",
       "minReleaseAge": "Âge minimal de la version",
-      "minReleaseAgeHint": "Bloque les téléchargements via le proxy pour les versions amont plus récentes que ce délai. La valeur par défaut 0 autorise tout. L'âge est mesuré à partir de l'horodatage de publication du registre amont ; les versions sans horodatage sont autorisées.",
+      "minReleaseAgeHint": "Bloque les téléchargements via le proxy pour les versions amont plus récentes que ce délai. La valeur par défaut 0 autorise tout. L'âge est mesuré à partir de l'horodatage de publication du registre amont; les versions sans horodatage sont autorisées.",
       "minReleaseAgeUnitHours": "Heures",
       "minReleaseAgeUnitDays": "Jours",
       "allowlistSection": "Liste d'autorisation",
       "blocklistSection": "Liste de blocage",
       "reservedSection": "Espaces de noms réservés",
-      "reservedHint": "Protection contre la confusion de dépendances : les noms correspondant à ces modèles par écosystème ne sont jamais récupérés ni fusionnés depuis l'amont — seul votre contenu hébergé est servi. Les noms que vous avez publiés sont protégés automatiquement ; réservez des modèles ici pour couvrir aussi les noms pas encore publiés.",
+      "reservedHint": "Protection contre la confusion de dépendances : les noms correspondant à ces modèles par écosystème ne sont jamais récupérés ni fusionnés depuis l'amont — seul votre contenu hébergé est servi. Les noms que vous avez publiés sont protégés automatiquement; réservez des modèles ici pour couvrir aussi les noms pas encore publiés.",
       "installScriptAllowlistSection": "Liste d'autorisation des scripts d'installation",
-      "installScriptAllowlistHint": "Paquets exemptés du blocage des scripts d'installation. Lorsque la politique ci-dessus est « Bloquer », les versions listées ici sont servies normalement même si elles embarquent un script d'installation. Utilisez ceci pour autoriser des outils de build connus (p. ex. esbuild, node-gyp) tout en maintenant le blocage pour tout le reste.",
+      "installScriptAllowlistHint": "Paquets exemptés du blocage des scripts d'installation. Lorsque la politique ci-dessus est « Bloquer », les versions listées ici sont servies normalement même si elles embarquent un script d'installation. Utilisez ceci pour autoriser des outils de build connus (p. ex. esbuild, node-gyp) tout en maintenant le blocage pour tout le reste.",
       "blockDeprecated": "Politique des paquets obsolètes",
-      "blockDeprecatedHint": "Traitement des versions marquées obsolètes en amont. « Avertir » affiche un statut « obsolète » dans l'interface et l'API. « Bloquer les nouveaux » refuse une version obsolète absente du cache — elle n'est jamais récupérée, mise en cache ni servie — tandis que les versions déjà en cache continuent d'être servies. « Tout bloquer » renvoie en plus une erreur 403 pour les versions déjà en cache une fois obsolètes. Les données d'obsolescence sont capturées lors de la récupération via le proxy et actualisées chaque jour par la tâche d'actualisation.",
+      "blockDeprecatedHint": "Traitement des versions marquées obsolètes en amont. « Avertir » affiche un statut « obsolète » dans l'interface et l'API. « Bloquer les nouveaux » refuse une version obsolète absente du cache — elle n'est jamais récupérée, mise en cache ni servie — tandis que les versions déjà en cache continuent d'être servies. « Tout bloquer » renvoie en plus une erreur 403 pour les versions déjà en cache une fois obsolètes. Les données d'obsolescence sont capturées lors de la récupération via le proxy et actualisées chaque jour par la tâche d'actualisation.",
       "blockDeprecatedOff": "Désactivé — autoriser les obsolètes",
       "blockDeprecatedWarn": "Avertir — signaler seulement",
       "blockDeprecatedBlockNew": "Bloquer les nouveaux — refuser les nouvelles récupérations obsolètes",
       "blockDeprecatedBlockAll": "Tout bloquer — cesser aussi de servir le cache",
       "blockRevoked": "Politique des versions révoquées (retirées en amont)",
-      "blockRevokedHint": "Comment traiter les versions supprimées du registre en amont (dépublication npm, suppression PyPI, retrait d'une version compromise). Détectées chaque jour par le travail de rafraîchissement des obsolescences lorsqu'une version en cache n'apparaît plus dans les métadonnées en amont ; une réapparition l'annule. Avertir affiche un badge « révoquée » dans l'interface et l'API tandis que les copies en cache continuent d'être servies. Bloquer renvoie 403 à la récupération et au service et met la version en quarantaine pour examen. Révoquée diffère d'obsolète — la version a entièrement disparu en amont et ne peut jamais être récupérée à nouveau. npm et PyPI uniquement.",
+      "blockRevokedHint": "Comment traiter les versions supprimées du registre en amont (dépublication npm, suppression PyPI, retrait d'une version compromise). Détectées chaque jour par le travail de rafraîchissement des obsolescences lorsqu'une version en cache n'apparaît plus dans les métadonnées en amont; une réapparition l'annule. Avertir affiche un badge « révoquée » dans l'interface et l'API tandis que les copies en cache continuent d'être servies. Bloquer renvoie 403 à la récupération et au service et met la version en quarantaine pour examen. Révoquée diffère d'obsolète — la version a entièrement disparu en amont et ne peut jamais être récupérée à nouveau. npm et PyPI uniquement.",
       "blockRevokedOff": "Désactivé — continuer à servir les versions révoquées",
       "blockRevokedWarn": "Avertir — signaler seulement",
       "blockRevokedBlock": "Bloquer — refuser les versions retirées en amont",
       "blockMalicious": "Politique des paquets malveillants",
-      "blockMaliciousHint": "Traitement des versions associées à un avis de paquet malveillant (rapports OSV MAL- du flux OpenSSF malicious-packages, collectés par l'analyse de vulnérabilités habituelle). Ces avis n'ont généralement pas de score CVSS, la tolérance de score OSV ne s'y applique donc jamais. « Bloquer » renvoie une erreur 403 à la récupération et au service ; « Avertir » affiche seulement l'avis dans le rapport de vulnérabilités. Une autorisation manuelle par version reste prioritaire, comme échappatoire aux faux positifs.",
+      "blockMaliciousHint": "Traitement des versions associées à un avis de paquet malveillant (rapports OSV MAL- du flux OpenSSF malicious-packages, collectés par l'analyse de vulnérabilités habituelle). Ces avis n'ont généralement pas de score CVSS, la tolérance de score OSV ne s'y applique donc jamais. « Bloquer » renvoie une erreur 403 à la récupération et au service; « Avertir » affiche seulement l'avis dans le rapport de vulnérabilités. Une autorisation manuelle par version reste prioritaire, comme échappatoire aux faux positifs.",
       "blockMaliciousOff": "Désactivé — ignorer les avis de malveillance",
       "blockMaliciousWarn": "Avertir — signaler seulement",
       "blockMaliciousBlock": "Bloquer — refuser les versions signalées",
       "blockKev": "Politique des vulnérabilités exploitées (KEV)",
-      "blockKevHint": "Traitement des versions dont un avis correspond à une CVE du catalogue CISA Known Exploited Vulnerabilities — exploitation confirmée sur le terrain, indépendamment du score CVSS. Le catalogue est actualisé chaque jour par la tâche de flux de menaces. « Bloquer » renvoie une erreur 403 à la récupération et au service ; « Avertir » affiche seulement l'indicateur KEV dans le rapport de vulnérabilités. Une autorisation manuelle par version reste prioritaire.",
+      "blockKevHint": "Traitement des versions dont un avis correspond à une CVE du catalogue CISA Known Exploited Vulnerabilities — exploitation confirmée sur le terrain, indépendamment du score CVSS. Le catalogue est actualisé chaque jour par la tâche de flux de menaces. « Bloquer » renvoie une erreur 403 à la récupération et au service; « Avertir » affiche seulement l'indicateur KEV dans le rapport de vulnérabilités. Une autorisation manuelle par version reste prioritaire.",
       "blockKevOff": "Désactivé — ignorer le catalogue KEV",
       "blockKevWarn": "Avertir — signaler seulement",
       "blockKevBlock": "Bloquer — refuser les vulnérabilités exploitées",
       "blockInstallScripts": "Politique des scripts d'installation",
-      "blockInstallScriptsHint": "Traitement des versions embarquant un script d'installation/cycle de vie exécuté automatiquement à l'installation — un hook npm preinstall/install/postinstall, un setup.py de sdist PyPI, ou un tools install.ps1/init.ps1 ou build .targets/.props NuGet. « Bloquer » renvoie une erreur 403 à la récupération et au service ; « Avertir » affiche seulement le badge dans le détail de version. Une autorisation manuelle par version reste prioritaire.",
+      "blockInstallScriptsHint": "Traitement des versions embarquant un script d'installation/cycle de vie exécuté automatiquement à l'installation — un hook npm preinstall/install/postinstall, un setup.py de sdist PyPI, ou un tools install.ps1/init.ps1 ou build .targets/.props NuGet. « Bloquer » renvoie une erreur 403 à la récupération et au service; « Avertir » affiche seulement le badge dans le détail de version. Une autorisation manuelle par version reste prioritaire.",
       "blockInstallScriptsOff": "Désactivé — autoriser les scripts d'installation",
       "blockInstallScriptsWarn": "Avertir — signaler seulement",
       "blockInstallScriptsBlock": "Bloquer — refuser les scripts d'installation",
       "verifyNpmSignatures": "Vérification des signatures npm",
-      "verifyNpmSignaturesHint": "Vérifie la signature du registre npm sur chaque version proxifiée par rapport aux ancres de confiance épinglées, le même contrôle que npm audit signatures. Bloquer échoue en mode fermé — une version dont la vérification échoue ou sans signature est refusée (jamais mise en cache ni servie) ; Avertir enregistre le résultat sans bloquer. S'applique uniquement aux versions récupérées via le proxy. Configurez les clés dans Paramètres → Sécurité → Ancres de confiance de signature.",
+      "verifyNpmSignaturesHint": "Vérifie la signature du registre npm sur chaque version proxifiée par rapport aux ancres de confiance épinglées, le même contrôle que npm audit signatures. Bloquer échoue en mode fermé — une version dont la vérification échoue ou sans signature est refusée (jamais mise en cache ni servie); Avertir enregistre le résultat sans bloquer. S'applique uniquement aux versions récupérées via le proxy. Configurez les clés dans Paramètres → Signatures → Ancres de confiance.",
       "verifyNpmSignaturesOff": "Désactivé — ne pas vérifier",
       "verifyNpmSignaturesWarn": "Avertir — vérifier, signaler seulement",
       "verifyNpmSignaturesBlock": "Bloquer — refuser les non vérifiées",
-      "verifyNpmSignaturesNoKeys": "Aucune ancre de confiance npm n'est configurée. Ajoutez les clés publiques SPKI du registre dans Paramètres → Sécurité → Ancres de confiance de signature pour activer la vérification des signatures.",
+      "verifyNpmSignaturesNoKeys": "Aucune ancre de confiance npm n'est configurée. Ajoutez les clés publiques SPKI du registre dans Paramètres → Signatures → Ancres de confiance pour activer la vérification des signatures.",
       "verifyNuGetSignatures": "Vérification des signatures NuGet",
-      "verifyNuGetSignaturesHint": "Vérifie la signature intégrée dans chaque .nupkg proxifié par rapport aux ancres de confiance épinglées. Bloquer échoue en mode fermé — une version dont la vérification échoue ou sans signature est refusée (jamais mise en cache ni servie) ; Avertir enregistre le résultat sans bloquer. S'applique uniquement aux versions récupérées via le proxy. Configurez les certificats dans Paramètres → Sécurité → Ancres de confiance de signature.",
+      "verifyNuGetSignaturesHint": "Vérifie la signature intégrée dans chaque .nupkg proxifié par rapport aux ancres de confiance épinglées. Bloquer échoue en mode fermé — une version dont la vérification échoue ou sans signature est refusée (jamais mise en cache ni servie); Avertir enregistre le résultat sans bloquer. S'applique uniquement aux versions récupérées via le proxy. Configurez les certificats dans Paramètres → Signatures → Ancres de confiance.",
       "verifyNuGetSignaturesOff": "Désactivé — ne pas vérifier",
       "verifyNuGetSignaturesWarn": "Avertir — vérifier, signaler seulement",
       "verifyNuGetSignaturesBlock": "Bloquer — refuser les non vérifiées",
-      "verifyNuGetSignaturesNoCerts": "Aucune ancre de confiance NuGet n'est configurée. Ajoutez les certificats de signature du registre dans Paramètres → Sécurité → Ancres de confiance de signature pour activer la vérification des signatures.",
+      "verifyNuGetSignaturesNoCerts": "Aucune ancre de confiance NuGet n'est configurée. Ajoutez les certificats de signature du registre dans Paramètres → Signatures → Ancres de confiance pour activer la vérification des signatures.",
       "verifyPyPiAttestations": "Vérification des attestations PyPI",
-      "verifyPyPiAttestationsHint": "Vérifie l'attestation numérique PEP 740 de chaque fichier PyPI proxifié par rapport aux racines Sigstore épinglées et à une liste d'autorisation d'éditeurs de confiance. Le condensat signé de l'attestation est lié aux octets téléchargés, le certificat feuille Fulcio est chaîné à une racine épinglée et l'identité de l'éditeur est confrontée. Bloquer échoue en mode fermé — une version dont la vérification échoue ou sans attestation est refusée (jamais mise en cache ni servie) ; Avertir enregistre le résultat sans bloquer. S'applique uniquement aux versions récupérées via le proxy. Configurez les racines et les éditeurs dans Paramètres → Sécurité → Ancres de confiance de signature.",
+      "verifyPyPiAttestationsHint": "Vérifie l'attestation numérique PEP 740 de chaque fichier PyPI proxifié par rapport aux racines Sigstore épinglées et à une liste d'autorisation d'éditeurs de confiance. Le condensat signé de l'attestation est lié aux octets téléchargés, le certificat feuille Fulcio est chaîné à une racine épinglée et l'identité de l'éditeur est confrontée. Bloquer échoue en mode fermé — une version dont la vérification échoue ou sans attestation est refusée (jamais mise en cache ni servie); Avertir enregistre le résultat sans bloquer. S'applique uniquement aux versions récupérées via le proxy. Configurez les racines et les éditeurs dans Paramètres → Signatures → Ancres de confiance.",
       "verifyPyPiAttestationsOff": "Désactivé — ne pas vérifier",
       "verifyPyPiAttestationsWarn": "Avertir — vérifier, signaler seulement",
       "verifyPyPiAttestationsBlock": "Bloquer — refuser les non vérifiées",
-      "verifyPyPiAttestationsNoRoots": "Aucune racine Sigstore PyPI ni éditeur de confiance n'est configuré. Ajoutez-les dans Paramètres → Sécurité → Ancres de confiance de signature pour activer la vérification des attestations.",
+      "verifyPyPiAttestationsNoRoots": "Aucune racine Sigstore PyPI ni éditeur de confiance n'est configuré. Ajoutez-les dans Paramètres → Signatures → Ancres de confiance pour activer la vérification des attestations.",
       "verifyRpmSignatures": "Vérification des signatures RPM",
-      "verifyRpmSignaturesHint": "Vérifie la signature OpenPGP intégrée dans l'en-tête de chaque paquet RPM proxifié par rapport aux clés GPG de confiance de l'organisation. Bloquer échoue en mode fermé — un paquet dont la vérification échoue ou sans signature est refusé (jamais mis en cache ni servi) ; Avertir enregistre le résultat sans bloquer. S'applique uniquement aux paquets récupérés via le proxy. Nécessite au moins une ancre de confiance RPM pour être activé.",
+      "verifyRpmSignaturesHint": "Vérifie la signature OpenPGP intégrée dans l'en-tête de chaque paquet RPM proxifié par rapport aux clés GPG de confiance de l'organisation. Bloquer échoue en mode fermé — un paquet dont la vérification échoue ou sans signature est refusé (jamais mis en cache ni servi); Avertir enregistre le résultat sans bloquer. S'applique uniquement aux paquets récupérés via le proxy. Nécessite au moins une ancre de confiance RPM pour être activé.",
       "verifyRpmSignaturesOff": "Désactivé — ne pas vérifier",
       "verifyRpmSignaturesWarn": "Avertir — vérifier, signaler seulement",
       "verifyRpmSignaturesBlock": "Bloquer — refuser les non vérifiés",
-      "verifyRpmSignaturesNoKey": "Aucune ancre de confiance RPM n'est configurée. Ajoutez la clé de signature du dépôt dans Paramètres → Ancres de confiance pour activer la vérification des signatures.",
+      "verifyRpmSignaturesNoKey": "Aucune ancre de confiance RPM n'est configurée. Ajoutez la clé de signature du dépôt dans Paramètres → Signatures → Ancres de confiance pour activer la vérification des signatures.",
       "verifyMavenSignatures": "Vérification des signatures Maven",
-      "verifyMavenSignaturesHint": "Vérifie la signature OpenPGP détachée (sidecar .asc) de chaque artefact Maven proxifié par rapport aux ancres de confiance épinglées. Bloquer échoue en mode fermé — une version dont le .asc échoue à la vérification ou sans .asc est refusée (jamais mise en cache ni servie) ; Avertir enregistre le résultat sans bloquer. S'applique uniquement aux versions récupérées via le proxy. Configurez les clés dans Paramètres → Sécurité → Ancres de confiance de signature.",
+      "verifyMavenSignaturesHint": "Vérifie la signature OpenPGP détachée (sidecar .asc) de chaque artefact Maven proxifié par rapport aux ancres de confiance épinglées. Bloquer échoue en mode fermé — une version dont le .asc échoue à la vérification ou sans .asc est refusée (jamais mise en cache ni servie); Avertir enregistre le résultat sans bloquer. S'applique uniquement aux versions récupérées via le proxy. Configurez les clés dans Paramètres → Signatures → Ancres de confiance.",
       "verifyMavenSignaturesOff": "Désactivé — ne pas vérifier",
       "verifyMavenSignaturesWarn": "Avertir — vérifier, signaler seulement",
       "verifyMavenSignaturesBlock": "Bloquer — refuser les non vérifiées",
-      "verifyMavenSignaturesNoKeys": "Aucune ancre de confiance Maven n'est configurée. Ajoutez les clés de signature du dépôt dans Paramètres → Sécurité → Ancres de confiance de signature pour activer la vérification des signatures.",
+      "verifyMavenSignaturesNoKeys": "Aucune ancre de confiance Maven n'est configurée. Ajoutez les clés de signature du dépôt dans Paramètres → Signatures → Ancres de confiance pour activer la vérification des signatures.",
       "maxEpssTolerance": "Plafond de probabilité EPSS",
-      "maxEpssToleranceHint": "Probabilité d'exploitation EPSS (FIRST.org) maximale tolérée (0,0–1,0) parmi les avis d'une version. EPSS estime la probabilité qu'une CVE soit exploitée sous 30 jours ; par exemple 0.5 bloque les versions dont un avis est jugé plus probablement exploité qu'improbable. Les scores sont actualisés chaque jour par la tâche de flux de menaces. Laisser vide pour désactiver.",
+      "maxEpssToleranceHint": "Probabilité d'exploitation EPSS (FIRST.org) maximale tolérée (0,0–1,0) parmi les avis d'une version. EPSS estime la probabilité qu'une CVE soit exploitée sous 30 jours; par exemple 0,5 bloque les versions dont un avis est jugé plus probablement exploité qu'improbable. Les scores sont actualisés chaque jour par la tâche de flux de menaces. Laisser vide pour désactiver.",
       "maxEpssTolerancePlaceholder": "Désactivé",
       "saved": "Paramètres proxy enregistrés.",
       "upstreamRegistries": {
         "section": "Registres en amont",
-        "hint": "Par écosystème, les registres interrogés par ce proxy, par ordre de priorité. La première entrée est essayée en premier ; en cas d'échec ou d'indisponibilité, la suivante est tentée. Faites glisser une ligne par sa poignée pour réordonner. Sans registre configuré, le proxy est désactivé pour cet écosystème — seuls les paquets déjà en cache sont servis.",
+        "hint": "Par écosystème, les registres interrogés par ce proxy, par ordre de priorité. La première entrée est essayée en premier; en cas d'échec ou d'indisponibilité, la suivante est tentée. Faites glisser une ligne par sa poignée pour réordonner. Sans registre configuré, le proxy est désactivé pour cet écosystème — seuls les paquets déjà en cache sont servis.",
         "add": "Ajouter un registre",
         "emptyDisabled": "Aucun registre en amont — le proxy est désactivé pour {ecosystem}.",
         "dragHint": "Glisser pour réordonner",
-        "removeConfirm": "Supprimer ce registre en amont ?",
+        "removeConfirm": "Supprimer ce registre en amont?",
         "modal": {
           "title": "Ajouter un registre en amont",
           "ecosystem": "Écosystème",
@@ -831,6 +882,14 @@
           "credentialSet": "identifiants configurés",
           "catchAllLabel": "(attrape-tout)",
           "catchAllWarn": "Les registres listés sous cet attrape-tout ne sont jamais atteints."
+        },
+        "rpmMode": {
+          "label": "Publication hébergée",
+          "hint": "Le mode passthrough transmet les repodata amont telles quelles et refuse les téléversements RPM hébergés tant qu'un amont est configuré (un paquet local masquerait l'amont et casserait la résolution dnf). Le mode merged sert un index combinant local et amont et autorise les téléversements hébergés. Le mode hérité suit la valeur par défaut de l'instance et change automatiquement si l'opérateur la modifie.",
+          "inherit": "Hérité (valeur par défaut de l'instance : {mode})",
+          "passthrough": "Passthrough (refuser la publication hébergée)",
+          "merged": "Merged (autoriser la publication hébergée)",
+          "effective": "Actuellement en vigueur : {mode}"
         }
       }
     },
@@ -861,11 +920,11 @@
         "block": "Bloquer",
         "compound": "composée",
         "deprecated": "dépréciée",
-        "compoundTooltip": "Les expressions composées (p. ex. « MIT OR Apache-2.0 ») ne peuvent pas être ajoutées directement à la politique — elles ne correspondraient pas à une recherche ultérieure pour une licence unique. Séparez-les en amont.",
+        "compoundTooltip": "Les expressions composées (p. ex. « MIT OR Apache-2.0 ») ne peuvent pas être ajoutées directement à la politique — elles ne correspondraient pas à une recherche ultérieure pour une licence unique. Séparez-les en amont.",
         "columns": {
           "packages": "Paquets",
-          "firstSeen": "Vue pour la 1ère fois",
-          "flags": "Drapeaux"
+          "firstSeen": "Première détection",
+          "flags": "Indicateurs"
         }
       },
       "allow": {
@@ -882,7 +941,7 @@
         "spdx": "Identifiant SPDX",
         "added": "Ajoutée"
       },
-      "removeConfirm": "Supprimer cette entrée de licence ?",
+      "removeConfirm": "Supprimer cette entrée de licence?",
       "modal": {
         "addAllowTitle": "Ajouter une licence autorisée",
         "addBlockTitle": "Ajouter une licence bloquée",
@@ -895,7 +954,7 @@
   "allowlist": {
     "title": "Liste d'autorisation",
     "addEntry": "Ajouter une entrée",
-    "removeConfirm": "Supprimer cette entrée de la liste d'autorisation ?",
+    "removeConfirm": "Supprimer cette entrée de la liste d'autorisation?",
     "columns": {
       "purlPattern": "Modèle PURL",
       "added": "Ajouté le"
@@ -910,7 +969,7 @@
   },
   "blocklist": {
     "addEntry": "Ajouter une entrée",
-    "removeConfirm": "Supprimer cette entrée de la liste de blocage ?",
+    "removeConfirm": "Supprimer cette entrée de la liste de blocage?",
     "columns": {
       "pattern": "Modèle regex",
       "added": "Ajouté le"
@@ -925,7 +984,7 @@
   },
   "reservedNamespaces": {
     "addEntry": "Réserver un espace de noms",
-    "removeConfirm": "Supprimer cet espace de noms réservé ? Les noms correspondants redeviennent récupérables depuis l'amont.",
+    "removeConfirm": "Supprimer cet espace de noms réservé? Les noms correspondants redeviennent récupérables depuis l'amont.",
     "columns": {
       "ecosystem": "Écosystème",
       "pattern": "Modèle",
@@ -937,12 +996,12 @@
       "ecosystem": "Écosystème",
       "pattern": "Modèle",
       "patternPlaceholder": "p. ex. @acme/* ou com.acme",
-      "patternHint": "Nom exact ou glob final * (« @acme/* », « Acme.* »). Les modèles Maven sont des préfixes de groupId délimités par des points : « com.acme » réserve aussi tous les groupIds « com.acme.* », mais jamais « com.acmecorp »."
+      "patternHint": "Nom exact ou glob final * (« @acme/* », « Acme.* »). Les modèles Maven sont des préfixes de groupId délimités par des points : « com.acme » réserve aussi tous les groupIds « com.acme.* », mais jamais « com.acmecorp »."
     }
   },
   "installScriptAllowlist": {
     "addEntry": "Ajouter une entrée à la liste d'autorisation",
-    "removeConfirm": "Supprimer cette entrée ? Le paquet sera de nouveau bloqué lorsque block_install_scripts est « block ».",
+    "removeConfirm": "Supprimer cette entrée? Le paquet sera de nouveau bloqué lorsque block_install_scripts est « block ».",
     "allVersions": "Toutes les versions",
     "columns": {
       "ecosystem": "Écosystème",
@@ -965,7 +1024,7 @@
   "users": {
     "title": "Utilisateurs et invitations",
     "inviteUser": "Inviter un utilisateur",
-    "inviteLink": "Lien d'invitation (à envoyer à l'utilisateur) :",
+    "inviteLink": "Lien d'invitation (à envoyer à l'utilisateur) :",
     "tabs": {
       "members": "Membres ({count})",
       "pendingInvites": "Invitations en attente ({count})"
@@ -975,7 +1034,7 @@
         "email": "Courriel",
         "role": "Rôle",
         "type": "Type",
-        "mfa": "AFM",
+        "mfa": "MFA",
         "joined": "Inscrit le"
       },
       "role": {
@@ -993,7 +1052,7 @@
         "saml": "SAML"
       },
       "empty": "Aucun membre",
-      "removeConfirm": "Retirer cet utilisateur de l'organisation ?"
+      "removeConfirm": "Retirer cet utilisateur de l'organisation?"
     },
     "invites": {
       "columns": {
@@ -1021,7 +1080,7 @@
   "setup": {
     "title": "Extraits de configuration",
     "subtitle": "Extraits de configuration pour connecter vos outils à ce registre.",
-    "moreOptions": "Plus d’options de configuration (recettes projet + globales pour npm, PyPI, NuGet) →"
+    "moreOptions": "Plus d'options de configuration (recettes projet + globales pour npm, PyPI, NuGet) →"
   },
   "admin": {
     "orgs": {
@@ -1033,7 +1092,7 @@
         "created": "Créé le"
       },
       "empty": "Aucune organisation",
-      "deleteConfirm": "Supprimer l'organisation « {slug} » ? Cette action est irréversible.",
+      "deleteConfirm": "Supprimer l'organisation « {slug} »? Cette action est irréversible.",
       "modal": {
         "title": "Nouvelle organisation",
         "slug": "Identifiant",
@@ -1046,7 +1105,7 @@
     "totalPackages": "Total des paquets",
     "totalDisk": "Espace disque total",
     "fetchesTitle": "Téléchargements — dernières 24 heures",
-    "fetchesTotal": "Total : {n} téléchargements",
+    "fetchesTotal": "Total : {n} téléchargements",
     "vulnsTitle": "Vulnérabilités par écosystème",
     "ecosystem": "Écosystème",
     "total": "Total",
@@ -1080,12 +1139,12 @@
     "unscored": "NON COTÉE",
     "samlCertExpiryCard": "Cert. SAML arrivant à expiration",
     "samlCertExpiredCard": "Cert. SAML expiré",
-    "samlCertDays": "{days} jour(s) restant(s)",
+    "samlCertDays": "{days, plural, one {# jour restant} other {# jours restants}}",
     "samlCertNotAfter": "Expire le {notAfter}"
   },
   "quarantine": {
     "title": "Quarantaine",
-    "intro": "Chaque blocage automatique de politique (obsolète, âge de publication, malveillant, KEV, EPSS, score de vulnérabilité) arrive ici pour révision pendant que les téléchargements continuent de renvoyer 403. Approuver pose l'autorisation manuelle de la version — elle prime sur toutes les politiques ; refuser enregistre un blocage manuel. Les décisions sont consignées dans le journal d'audit.",
+    "intro": "Chaque blocage automatique de politique (obsolète, âge de publication, malveillant, KEV, EPSS, score de vulnérabilité) arrive ici pour révision pendant que les téléchargements continuent de renvoyer 403. Approuver pose l'autorisation manuelle de la version — elle prime sur toutes les politiques; refuser enregistre un blocage manuel. Les décisions sont consignées dans le journal d'audit.",
     "empty": "Aucune entrée.",
     "approve": "Approuver",
     "deny": "Refuser",
@@ -1131,7 +1190,7 @@
     "malicious": "MALVEILLANT",
     "revoked": "révoquée",
     "revokedOnly": "Révoquées seulement",
-    "revokedHelp": "Retirée du registre en amont le {at} ; ne peut plus être récupérée. Un signal de cycle de vie distinct, pas une vulnérabilité.",
+    "revokedHelp": "Retirée du registre en amont le {at}; ne peut plus être récupérée. Un signal de cycle de vie distinct, pas une vulnérabilité.",
     "severityFilter": {
       "label": "Filtrer par gravité",
       "all": "Toutes",
@@ -1157,7 +1216,7 @@
       "aliases": "Alias",
       "related": "Associés",
       "references": "Références",
-      "affected": "Affecté",
+      "affected": "Affectées",
       "versions": "Versions",
       "credits": "Crédits",
       "details": "Détails",
@@ -1215,7 +1274,7 @@
       "themeTitle": "Thème",
       "themeHelp": "Choisissez l'apparence de Dependably.",
       "languageTitle": "Langue",
-      "languageHelpTenantDefault": "Langue par défaut du locataire : {language}.",
+      "languageHelpTenantDefault": "Langue par défaut du locataire : {language}.",
       "languageHelpSystemFallback": "Bascule sur {language} par défaut."
     },
     "theme": {
@@ -1227,7 +1286,7 @@
     "mfa": {
       "rowTitle": "Authentification à deux facteurs",
       "rowHelpOff": "Ajoutez une couche de sécurité supplémentaire avec une application d'authentification.",
-      "rowHelpOn": "L'authentification à deux facteurs est active. {count} code(s) de récupération restant(s).",
+      "rowHelpOn": "L'authentification à deux facteurs est active. {count, plural, one {# code de récupération restant} other {# codes de récupération restants}}.",
       "enableButton": "Configurer",
       "disableButton": "Désactiver",
       "regenButton": "Régénérer les codes de récupération",
@@ -1263,6 +1322,7 @@
       "admins": "Administrateurs",
       "users": "Utilisateurs",
       "audit": "Audit",
+      "observability": "Observabilité",
       "settings": "Paramètres",
       "banners": "Annonces",
       "profile": "Profil",
@@ -1314,8 +1374,8 @@
           "low": "Disque intermédiaire sous le seuil — les récupérations proxy peuvent échouer."
         },
         "tenants": {
-          "needAttention": "{count} locataire nécessite attention",
-          "needAttentionPlural": "{count} locataires nécessitent attention",
+          "needAttention": "{count} locataire nécessite de l'attention",
+          "needAttentionPlural": "{count} locataires nécessitent de l'attention",
           "viewAll": "Voir les locataires →"
         },
         "overallSummary": {
@@ -1342,8 +1402,51 @@
         }
       }
     },
+    "observability": {
+      "title": "Observabilité de l'instance",
+      "subtitle": "Instantané opérateur en direct — compteurs depuis le démarrage, configuration d'accès à /metrics, diagnostics de scrape. Pour les taux et les séries temporelles, pointez Grafana vers /metrics.",
+      "sinceStartup": "depuis le démarrage",
+      "seeGrafana": "les taux et centiles se trouvent dans Grafana",
+      "tier": "Niveau",
+      "size": "Taille",
+      "jobName": "Tâche",
+      "lastSuccess": "Dernier succès",
+      "age": "Âge",
+      "numbers": {
+        "title": "Compteurs",
+        "lifetimeNote": "Les compteurs sont remis à zéro à chaque redémarrage du processus — aucune fenêtre glissante ici.",
+        "activeTenants": "Locataires actifs",
+        "publishes": "Publications",
+        "proxyFetches": "Récupérations proxy",
+        "cacheHits": "Succès du cache",
+        "cacheMisses": "Défauts du cache",
+        "blobStore": "Stockage de blobs par niveau",
+        "jobs": "Dernier succès des tâches d'arrière-plan",
+        "capturedAt": "Capturé"
+      },
+      "access": {
+        "title": "Point de terminaison /metrics",
+        "subtitle": "Configuration effective utilisée à l'instant par l'intergiciel /metrics. Les variables d'environnement (lorsqu'elles sont définies) ont priorité sur instance_settings; instance_settings a priorité sur les valeurs par défaut codées en dur.",
+        "enabled": "Activé",
+        "allowedIps": "IP autorisées",
+        "yes": "Oui",
+        "no": "Non"
+      },
+      "scrape": {
+        "title": "Diagnostics de scrape",
+        "subtitle": "Les 50 dernières requêtes /metrics + compteurs cumulatifs d'autorisations et de refus. Tampon circulaire (capacité 500); aucun accès à la base de données.",
+        "allowed": "Autorisés",
+        "deniedIp": "Refusés (IP)",
+        "deniedDisabled": "Refusés (désactivé)",
+        "when": "Quand",
+        "remoteIp": "IP distante",
+        "outcome": "Résultat",
+        "empty": "Aucune tentative de scrape enregistrée pour l'instant."
+      }
+    },
     "login": {
       "title": "Dependably",
+      "subtitle": "Connectez-vous pour continuer",
       "email": "Courriel",
       "password": "Mot de passe",
       "submit": "Se connecter",
@@ -1395,11 +1498,11 @@
       "delete": "Supprimer",
       "restore": "Restaurer",
       "deleteModalTitle": "Suppression douce du locataire",
-      "deleteConfirm": "Supprimer (suppression douce) le locataire {slug} ? Il sera inaccessible immédiatement et supprimé définitivement après le délai de grâce (30 jours par défaut).",
+      "deleteConfirm": "Supprimer (suppression douce) le locataire {slug}? Il sera inaccessible immédiatement et supprimé définitivement après le délai de grâce (30 jours par défaut).",
       "disableModalTitle": "Désactiver le locataire",
-      "disableConfirm": "Désactiver {slug} ? Les publications et téléversements seront refusés jusqu'à la réactivation. Les données existantes sont préservées.",
+      "disableConfirm": "Désactiver {slug}? Les publications et téléversements seront refusés jusqu'à la réactivation. Les données existantes sont préservées.",
       "enableModalTitle": "Réactiver le locataire",
-      "enableConfirm": "Réactiver {slug} ? Les écritures reprendront immédiatement.",
+      "enableConfirm": "Réactiver {slug}? Les écritures reprendront immédiatement.",
       "statusUpdating": "Mise à jour…",
       "modal": {
         "title": "Créer un locataire",
@@ -1442,8 +1545,8 @@
         "deleted": "Supprimé",
         "storagePct": "{used} sur {quota} ({pct}%)",
         "storageUnlimited": "{used} utilisés (aucun quota)",
-        "packagesLabel": "{ecosystem} : {count} paquets",
-        "diskLabel": "{ecosystem} : {size}",
+        "packagesLabel": "{ecosystem} : {count} paquets",
+        "diskLabel": "{ecosystem} : {size}",
         "downloads30d": "{count} téléchargements (30 j)",
         "quarantinePending": "{count} en attente de révision de quarantaine",
         "noStats": "Aucun instantané de statistiques.",
@@ -1468,7 +1571,7 @@
       "columns": {
         "email": "Courriel",
         "status": "Statut",
-        "mfa": "AMF",
+        "mfa": "MFA",
         "lastLogin": "Dernière connexion",
         "passwordReset": "Réinit. mot de passe",
         "created": "Créé",
@@ -1486,19 +1589,19 @@
         "submit": "Créer"
       },
       "statusConfirm": {
-        "title": "Modifier le statut ?",
-        "body": "Passer {email} à {status} ?",
+        "title": "Modifier le statut?",
+        "body": "Passer {email} à {status}?",
         "apply": "Appliquer"
       },
       "reset": {
         "button": "Réinitialiser le mot de passe",
-        "title": "Réinitialiser le mot de passe ?",
-        "body": "Réinitialiser le mot de passe de {email} ? Son mot de passe actuel cessera de fonctionner immédiatement."
+        "title": "Réinitialiser le mot de passe?",
+        "body": "Réinitialiser le mot de passe de {email}? Son mot de passe actuel cessera de fonctionner immédiatement."
       },
       "delete": {
         "button": "Supprimer",
-        "title": "Supprimer l'administrateur ?",
-        "body": "Supprimer définitivement {email} ? Cette action est irréversible."
+        "title": "Supprimer l'administrateur?",
+        "body": "Supprimer définitivement {email}? Cette action est irréversible."
       },
       "tempPassword": {
         "title": "Mot de passe temporaire",
@@ -1537,8 +1640,8 @@
       "unlock": "Déverrouiller",
       "resetPassword": "Réinit. mdp",
       "resetModalTitle": "Réinitialiser le mot de passe",
-      "resetConfirm": "Émettre un mot de passe temporaire pour {email} sur le locataire {slug} ? Il devra être changé à la prochaine connexion.",
-      "resetBannerLine1": "Mot de passe temporaire émis pour {email} sur {slug} :",
+      "resetConfirm": "Émettre un mot de passe temporaire pour {email} sur le locataire {slug}? Il devra être changé à la prochaine connexion.",
+      "resetBannerLine1": "Mot de passe temporaire émis pour {email} sur {slug} :",
       "resetBannerLine2": "Transmettez-le à l'utilisateur hors bande. Il devra le changer à la prochaine connexion. Affiché une seule fois.",
       "dismiss": "Fermer"
     },
@@ -1611,7 +1714,7 @@
         "string": "non défini",
         "number": "—"
       },
-      "defaultHint": "Défaut : {value}",
+      "defaultHint": "Défaut : {value}",
       "defaults": {
         "maxUploadBytes": "500 Mo",
         "maxUploadBytesPyPi": "100 Mo — équivalent à pypi.org",
@@ -1634,21 +1737,21 @@
         "subtitle": "Activez ou désactivez /metrics et configurez la liste d'adresses IP autorisées. Les variables d'environnement ont priorité sur ces valeurs lorsqu'elles sont définies.",
         "envLocked": "Un ou plusieurs paramètres sont verrouillés par des variables d'environnement (METRICS_ENABLED / METRICS_ALLOWED_IPS). Supprimez la variable d'environnement pour gérer via l'interface.",
         "enabled": "Point de terminaison activé",
-        "enabledHint": "Désactivé : /metrics renvoie 404 — le point de terminaison disparaît entièrement (pas un 403). Activé : la liste d'adresses IP contrôle l'accès ; les adresses autorisées reçoivent un 200 (anonyme), toutes les autres reçoivent un 403.",
+        "enabledHint": "Désactivé : /metrics renvoie 404 — le point de terminaison disparaît entièrement (pas un 403). Activé : la liste d'adresses IP contrôle l'accès; les adresses autorisées reçoivent un 200 (anonyme), toutes les autres reçoivent un 403.",
         "allowedIps": "Adresses IP / CIDRs autorisées",
-        "allowedIpsHint": "Une entrée par ligne. Par défaut si non défini : boucle locale uniquement (127.0.0.1, ::1). Exemples : 10.0.0.0/8, 2001:db8::/32.",
+        "allowedIpsHint": "Une entrée par ligne. Par défaut si non défini : boucle locale uniquement (127.0.0.1, ::1). Exemples : 10.0.0.0/8, 2001:db8::/32.",
         "sourceIpNote": "Saisissez les IP telles que le serveur voit la source de la connexion. Les scrapes Docker directs peuvent apparaître comme la passerelle du pont Docker (par exemple 172.17.0.1) plutôt que le client d'origine. Pour autoriser les vraies IP clientes, scrapez via un proxy inverse de confiance et configurez TRUSTED_PROXIES.",
-        "broadCidrWarn": "⚠ 0.0.0.0/0 ou ::/0 désactive entièrement le filtrage IP. À utiliser uniquement si /metrics est protégé par ailleurs (réseau privé, authentification par proxy inverse).",
+        "broadCidrWarn": "⚠ 0.0.0.0/0 ou ::/0 désactive entièrement le filtrage IP. À utiliser uniquement si /metrics est protégé par ailleurs (réseau privé, authentification par proxy inverse).",
         "save": "Enregistrer l'accès aux métriques",
         "recentDenied": {
-          "title": "Recently denied scrapes",
-          "hint": "Adresses sources des connexions telles que vues par le serveur, bloquées par la liste d'autorisation durant cette session. Cliquez sur + Add pour l'ajouter à la liste ci-dessus.",
-          "add": "+ Add",
-          "addTitle": "Append this IP to the allowlist",
-          "justNow": "just now",
-          "minutesAgo": "{n}m ago",
-          "hoursAgo": "{n}h ago",
-          "daysAgo": "{n}d ago"
+          "title": "Scrapes récemment refusés",
+          "hint": "Adresses sources des connexions telles que vues par le serveur, bloquées par la liste d'autorisation durant cette session. Cliquez sur + Ajouter pour l'ajouter à la liste ci-dessus.",
+          "add": "+ Ajouter",
+          "addTitle": "Ajouter cette IP à la liste d'autorisation",
+          "justNow": "à l'instant",
+          "minutesAgo": "il y a {n}m",
+          "hoursAgo": "il y a {n}h",
+          "daysAgo": "il y a {n}j"
         }
       }
     },
@@ -1669,7 +1772,7 @@
       "create": "Créer l'annonce",
       "creating": "Création…",
       "delete": "Supprimer",
-      "deleteConfirm": "Supprimer cette annonce système ?",
+      "deleteConfirm": "Supprimer cette annonce système?",
       "window": "Fenêtre",
       "yes": "Oui",
       "no": "Non",
@@ -1683,7 +1786,7 @@
       "mfa": {
         "rowTitle": "Authentification à deux facteurs",
         "rowHelpOff": "Ajoutez une couche de sécurité supplémentaire avec une application d'authentification.",
-        "rowHelpOn": "L'authentification à deux facteurs est active. {count} code(s) de récupération restant(s).",
+        "rowHelpOn": "L'authentification à deux facteurs est active. {count, plural, one {# code de récupération restant} other {# codes de récupération restants}}.",
         "enableButton": "Configurer",
         "disableButton": "Désactiver",
         "regenButton": "Régénérer les codes de récupération",

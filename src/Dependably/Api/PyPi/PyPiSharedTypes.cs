@@ -22,11 +22,6 @@ internal static class PyPiConstants
     // Route-level hard ceiling for PyPI uploads (500 MiB).
     internal const long UploadSizeLimitBytes = 500L * 1024 * 1024;
 
-    // TTL for proxy-merged simple indices (upstream can change); local-only indices use a
-    // longer TTL because invalidation on mutation is the primary expiry mechanism.
-    internal static readonly TimeSpan SimpleIndexProxyTtl = TimeSpan.FromMinutes(5);
-    internal static readonly TimeSpan SimpleIndexLocalTtl = TimeSpan.FromMinutes(10);
-
     // Bounded regex evaluation — guards against ReDoS on user-supplied/upstream HTML inputs.
     internal static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(2);
 }

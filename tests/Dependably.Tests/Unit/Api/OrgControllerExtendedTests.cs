@@ -559,4 +559,48 @@ public sealed class OrgControllerExtendedTests
         string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
         Assert.DoesNotContain("Max upload", snippet);
     }
+
+    [Fact]
+    public async Task GetSetup_Oci_Http_IncludesInsecureRegistries()
+    {
+        // Scheme=http triggers the daemon.json insecure-registries block. Scenario builder
+        // defaults to https, so we flip the scheme on the HttpContext.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        b.OrgController.HttpContext.Request.Scheme = "http";
+
+        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("oci", CancellationToken.None));
+        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
+        Assert.Contains("insecure-registries", snippet);
+        Assert.Contains("daemon.json", snippet);
+    }
+
+    [Fact]
+    public async Task GetSetup_Oci_Https_OmitsInsecureRegistries()
+    {
+        // HTTPS registries use the default TLS trust chain; the daemon.json block must not appear.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("oci", CancellationToken.None));
+        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
+        Assert.DoesNotContain("insecure-registries", snippet);
+    }
+
+    [Fact]
+    public async Task GetSetup_Maven_IncludesGradleVariant()
+    {
+        // Maven snippet bundles Groovy and Kotlin Gradle DSL blocks after the Maven XML.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var ok = Assert.IsType<OkObjectResult>(await b.OrgController.GetSetup("maven", CancellationToken.None));
+        string snippet = (string)ok.Value!.GetType().GetProperty("snippet")!.GetValue(ok.Value)!;
+        Assert.Contains("build.gradle", snippet);
+        Assert.Contains("build.gradle.kts", snippet);
+        Assert.Contains("gradle.properties", snippet);
+    }
 }

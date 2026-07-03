@@ -1,7 +1,6 @@
 using System.Security.Claims;
 using Dependably.Api;
 using Dependably.Infrastructure;
-using Dependably.Resources;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;

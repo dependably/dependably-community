@@ -64,13 +64,13 @@ public sealed partial class SystemController
     {
         if (req is null || string.IsNullOrWhiteSpace(req.Email))
         {
-            return _problems.ValidationErrorAction("email", "email is required.");
+            return _problems.ValidationErrorActionKey("email", "error.admin.emailRequired");
         }
 
         var existing = await _systemAdmins.GetByEmailAsync(req.Email, ct);
         if (existing is not null)
         {
-            return _problems.ConflictAction("A system_admin with that email already exists.", reason: "duplicate_email");
+            return _problems.ConflictActionKey("error.admin.emailConflict", reason: "duplicate_email");
         }
 
         string rawPassword = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(GeneratedPasswordByteLength));
@@ -82,7 +82,7 @@ public sealed partial class SystemController
         await _audit.LogSystemAsync(
             action: "system_admin.admin_created",
             actorId: actor,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { id, email = req.Email }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { id, email = req.Email }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return CreatedAtAction(nameof(GetAdmin), new { id }, new
@@ -106,16 +106,14 @@ public sealed partial class SystemController
     {
         if (req is null || req.AccountStatus is not ("active" or "locked" or "disabled"))
         {
-            return _problems.ValidationErrorAction("accountStatus", "Must be 'active', 'locked', or 'disabled'.");
+            return _problems.ValidationErrorActionKey("accountStatus", "error.admin.accountStatusInvalid");
         }
 
         string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         if (string.Equals(actor, id, StringComparison.Ordinal))
         {
-            return _problems.ForbiddenAction(
-                "Operators cannot change their own account status; use /api/v1/system/me/password instead.",
-                reason: "cannot_modify_self");
+            return _problems.ForbiddenActionKey("error.admin.selfStatusChange", reason: "cannot_modify_self");
         }
 
         var target = await _systemAdmins.GetByIdAsync(id, ct);
@@ -129,9 +127,7 @@ public sealed partial class SystemController
             int otherActive = await _systemAdmins.CountActiveExcludingAsync(id, ct);
             if (otherActive == 0)
             {
-                return _problems.ConflictAction(
-                    "Cannot disable or lock the last active system_admin.",
-                    reason: "last_active_admin");
+                return _problems.ConflictActionKey("error.admin.lastActive", reason: "last_active_admin");
             }
         }
 
@@ -144,7 +140,7 @@ public sealed partial class SystemController
         await _audit.LogSystemAsync(
             action: "system_admin.admin_account_status_changed",
             actorId: actor,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { id, accountStatus = req.AccountStatus }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { id, accountStatus = req.AccountStatus }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return NoContent();
@@ -162,9 +158,7 @@ public sealed partial class SystemController
             ?? User.FindFirst("sub")?.Value;
         if (string.Equals(actor, id, StringComparison.Ordinal))
         {
-            return _problems.ForbiddenAction(
-                "Operators cannot reset their own password through this endpoint; use /api/v1/system/me/password instead.",
-                reason: "cannot_modify_self");
+            return _problems.ForbiddenActionKey("error.admin.selfPasswordReset", reason: "cannot_modify_self");
         }
 
         var target = await _systemAdmins.GetByIdAsync(id, ct);
@@ -185,7 +179,7 @@ public sealed partial class SystemController
         await _audit.LogSystemAsync(
             action: "system_admin.admin_password_reset",
             actorId: actor,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { id, email = target.Email }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { id, email = target.Email }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return Ok(new
@@ -212,9 +206,7 @@ public sealed partial class SystemController
             ?? User.FindFirst("sub")?.Value;
         if (string.Equals(actor, id, StringComparison.Ordinal))
         {
-            return _problems.ForbiddenAction(
-                "Operators cannot delete their own account.",
-                reason: "cannot_modify_self");
+            return _problems.ForbiddenActionKey("error.admin.selfDelete", reason: "cannot_modify_self");
         }
 
         var target = await _systemAdmins.GetByIdAsync(id, ct);
@@ -225,9 +217,7 @@ public sealed partial class SystemController
 
         if (target.AccountStatus != "disabled")
         {
-            return _problems.ConflictAction(
-                "Disable the system_admin (PATCH /account-status with 'disabled') before deleting.",
-                reason: "must_disable_first");
+            return _problems.ConflictActionKey("error.admin.disableBeforeDelete", reason: "must_disable_first");
         }
 
         int affected = await _systemAdmins.DeleteIfDisabledAsync(id, ct);
@@ -239,7 +229,7 @@ public sealed partial class SystemController
         await _audit.LogSystemAsync(
             action: "system_admin.admin_deleted",
             actorId: actor,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { id, email = target.Email }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { id, email = target.Email }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return NoContent();

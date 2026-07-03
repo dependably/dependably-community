@@ -1,4 +1,5 @@
 using Dapper;
+using Dependably.Infrastructure.Redis;
 using Dependably.Storage;
 
 namespace Dependably.Infrastructure;
@@ -24,8 +25,10 @@ public sealed class RetentionService : ScheduledBackgroundService
         InviteRepository Invites,
         SamlConfigRepository SamlConfig,
         IConfiguration Config,
+        IAirGapMode AirGap,
         ILogger<RetentionService> Logger,
-        TimeProvider Time);
+        TimeProvider Time,
+        IDistributedLock Locks);
 
     private readonly IMetadataStore _db;
     private readonly IBlobStore _blobs;
@@ -33,6 +36,7 @@ public sealed class RetentionService : ScheduledBackgroundService
     private readonly InviteRepository _invites;
     private readonly SamlConfigRepository _samlConfig;
     private readonly IConfiguration _config;
+    private readonly IAirGapMode _airGap;
     private readonly ILogger<RetentionService> _logger;
     private readonly TimeProvider _time;
 
@@ -41,8 +45,11 @@ public sealed class RetentionService : ScheduledBackgroundService
     protected override string ScopeJobName => "retention";
     protected override string ScopeMetricName => "retention.gc";
 
+    // Deletes shared version rows, blobs, and expired security/invite state — one replica per tick.
+    protected override bool RequiresLeaderLock => true;
+
     public RetentionService(Dependencies deps)
-        : base(deps.Config, deps.Logger, deps.Time)
+        : base(deps.Config, deps.Logger, deps.Time, deps.Locks)
     {
         _db = deps.Db;
         _blobs = deps.Blobs;
@@ -50,6 +57,7 @@ public sealed class RetentionService : ScheduledBackgroundService
         _invites = deps.Invites;
         _samlConfig = deps.SamlConfig;
         _config = deps.Config;
+        _airGap = deps.AirGap;
         _logger = deps.Logger;
         _time = deps.Time;
     }
@@ -58,6 +66,15 @@ public sealed class RetentionService : ScheduledBackgroundService
 
     private async Task RunGcPassAsync(CancellationToken ct)
     {
+        // A headless edge node holds no durable registry tier and no per-tenant retention
+        // policy, so GC is inert there — edge mode force-disables retention (not in the allowlist).
+        if (_airGap.IsJobDisabled("retention"))
+        {
+            _logger.LogInformation(
+                "Retention GC skipped (disabled by AIR_GAPPED, DISABLE_BACKGROUND_JOBS, or edge mode).");
+            return;
+        }
+
         _logger.LogInformation("Retention GC pass starting.");
 
         await using var conn = await _db.OpenAsync(ct);
@@ -125,6 +142,12 @@ public sealed class RetentionService : ScheduledBackgroundService
         _logger.LogInformation("Retention GC pass complete.");
     }
 
+    // Chunk size for the batched audit_event delete below. Small enough that each chunk's
+    // DELETE releases the writer lock quickly, large enough that a year-scale backlog drains
+    // in a bounded number of round-trips. Internal (not private) so tests can seed a multi-chunk
+    // backlog scaled to this exact size rather than hardcoding a copy of the production value.
+    internal const int AuditEventPruneBatchSize = 5000;
+
     internal async Task PruneAuditEventsAsync(System.Data.Common.DbConnection conn, CancellationToken ct)
     {
         int retentionDays = int.TryParse(_config["AUDIT_EVENT_RETENTION_DAYS"], out int d) && d > 0
@@ -134,15 +157,34 @@ public sealed class RetentionService : ScheduledBackgroundService
         // Hard-delete is the right shape today: there's no archive destination yet (decision
         // deferred per cross-cutting-decisions.md). When archive lands, this becomes a copy
         // followed by a delete behind a single transaction.
-        int deleted = await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM audit_event WHERE occurred_at < @cutoff",
-            new { cutoff },
-            cancellationToken: ct));
+        //
+        // Deletes in bounded chunks keyed by the event_id primary key (portable across SQLite
+        // and Postgres — both support LIMIT inside the subselect) so a year-scale backlog
+        // never holds the writer lock for one long-running statement; the lock is released
+        // between chunks for other writers to make progress.
+        int totalDeleted = 0;
+        int deletedInChunk;
+        do
+        {
+            // xtenant: instance-wide retention sweep by age, same as JwtRevocationRepository /
+            // InviteRepository's expiry-only prunes — every org's stale rows age out together.
+            deletedInChunk = await conn.ExecuteAsync(new CommandDefinition(
+                """
+                DELETE FROM audit_event
+                WHERE event_id IN (
+                    SELECT event_id FROM audit_event WHERE occurred_at < @cutoff LIMIT @batchSize
+                )
+                """,
+                new { cutoff, batchSize = AuditEventPruneBatchSize },
+                cancellationToken: ct));
+            totalDeleted += deletedInChunk;
+        }
+        while (deletedInChunk >= AuditEventPruneBatchSize && !ct.IsCancellationRequested);
 
-        if (deleted > 0)
+        if (totalDeleted > 0)
         {
             _logger.LogInformation("Audit reaper: pruned {Count} audit_event rows older than {Days} days.",
-                deleted, retentionDays);
+                totalDeleted, retentionDays);
         }
     }
 

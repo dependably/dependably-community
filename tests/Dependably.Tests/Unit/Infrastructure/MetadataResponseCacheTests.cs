@@ -116,6 +116,43 @@ public sealed class MetadataResponseCacheTests
     }
 
     [Fact]
+    public async Task GetOrRebuildAsync_FirstWaiterCancels_SecondJoinerDoesNotTriggerSecondRebuild()
+    {
+        // The first caller's WaitAsync(ct) detaches early (its own token cancels) while the
+        // shared rebuild is still running. A second, uncancelled caller for the SAME key must
+        // join the SAME shared rebuild rather than triggering a brand-new one.
+        var cache = new RenderedResponseCache<NpmPackumentKey>(
+            NewCache(), MetadataCacheKeys.NpmPackument);
+        var key = new NpmPackumentKey("org1", "cancel-pkg");
+
+        int rebuildCount = 0;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task<byte[]?> Rebuild(CancellationToken _)
+        {
+            Interlocked.Increment(ref rebuildCount);
+            await gate.Task;
+            return [99];
+        }
+
+        using var cts = new CancellationTokenSource();
+        var firstTask = cache.GetOrRebuildAsync(key, TimeSpan.FromMinutes(5), Rebuild, cts.Token);
+
+        await Task.Delay(50);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstTask);
+
+        var secondTask = Task.Run(() =>
+            cache.GetOrRebuildAsync(key, TimeSpan.FromMinutes(5), Rebuild, CancellationToken.None));
+        await Task.Delay(50);
+        gate.SetResult();
+        byte[]? second = await secondTask;
+
+        Assert.Equal(1, rebuildCount);
+        Assert.Equal([99], second);
+    }
+
+    [Fact]
     public async Task GetOrRebuildAsync_CacheHit_DoesNotRebuild()
     {
         var cache = new RenderedResponseCache<NpmPackumentKey>(

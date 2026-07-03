@@ -74,7 +74,10 @@ public sealed class OrgAuthConfigController : ControllerBase
             buttonLabel = cfg?.ButtonLabel,
             lastTestAt = cfg?.LastTestAt,
             lastTestEmail = cfg?.LastTestEmail,
-            lastTestClaims = ParseClaimsJson(cfg?.LastTestClaims),
+            lastTestNameId = ExtractNameIdClaim(cfg?.LastTestClaims),
+            lastTestClaims = ParseClaimsJson(cfg?.LastTestClaims)
+                .Where(c => !IsNameIdSentinel(c))
+                .ToArray(),
             roleAttribute = cfg?.RoleAttribute,
             roleMapping = cfg?.RoleMapping,
             defaultRole = cfg?.DefaultRole ?? "member",
@@ -96,15 +99,14 @@ public sealed class OrgAuthConfigController : ControllerBase
 
         if (string.IsNullOrWhiteSpace(req.NameIdFormat))
         {
-            return _problems.ValidationErrorAction("nameIdFormat", "nameIdFormat is required.");
+            return _problems.ValidationErrorActionKey("nameIdFormat", "error.saml.nameIdFormatRequired");
         }
 
         // NameID format must be a valid absolute URI — the SAML 2.0 spec mandates
         // URI-format identifiers for NameID format values.
         if (!Uri.TryCreate(req.NameIdFormat, UriKind.Absolute, out _))
         {
-            return _problems.ValidationErrorAction("nameIdFormat",
-                "nameIdFormat must be a valid absolute URI (e.g. urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress).");
+            return _problems.ValidationErrorActionKey("nameIdFormat", "error.saml.nameIdFormatInvalid");
         }
 
         string orgId = CurrentTenantId();
@@ -147,7 +149,7 @@ public sealed class OrgAuthConfigController : ControllerBase
                 role_attribute = req.RoleAttribute,
                 default_role = req.DefaultRole,
                 idp_can_assign_admin = req.IdpCanAssignAdmin,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return NoContent();
     }
@@ -164,7 +166,7 @@ public sealed class OrgAuthConfigController : ControllerBase
 
         if (string.IsNullOrWhiteSpace(req.MetadataXml))
         {
-            return _problems.ValidationErrorAction("metadataXml", "metadataXml is required.");
+            return _problems.ValidationErrorActionKey("metadataXml", "error.saml.metadataXmlRequired");
         }
 
         string orgId = CurrentTenantId();
@@ -185,7 +187,7 @@ public sealed class OrgAuthConfigController : ControllerBase
                 idp_entity_id = parsed.EntityId,
                 idp_sso_url = parsed.SsoUrl,
                 cert_thumbprint = ThumbprintOrNull(parsed.SigningCertBase64),
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return Ok(new
         {
@@ -224,7 +226,7 @@ public sealed class OrgAuthConfigController : ControllerBase
 
         if (string.IsNullOrWhiteSpace(req.Certificate))
         {
-            return _problems.ValidationErrorAction("certificate", "certificate is required.");
+            return _problems.ValidationErrorActionKey("certificate", "error.saml.certificateRequired");
         }
 
         // Accept PEM or raw base64 DER.
@@ -238,7 +240,7 @@ public sealed class OrgAuthConfigController : ControllerBase
             byte[] bytes = Convert.FromBase64String(certBase64);
             cert = System.Security.Cryptography.X509Certificates.X509CertificateLoader.LoadCertificate(bytes);
         }
-        catch { return _problems.ValidationErrorAction("certificate", "Certificate is not valid base64 X.509."); }
+        catch { return _problems.ValidationErrorActionKey("certificate", "error.saml.certificateInvalid"); }
 
         // Compute summary for response + audit.
         var summary = CertSummary(cert);
@@ -253,7 +255,7 @@ public sealed class OrgAuthConfigController : ControllerBase
                 fingerprint = summary.Fingerprint,
                 subject = summary.Subject,
                 not_after = summary.NotAfter,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return Ok(summary);
     }
@@ -289,8 +291,7 @@ public sealed class OrgAuthConfigController : ControllerBase
     {
         if (!req.Enabled)
         {
-            return _problems.ValidationErrorAction("formsLoginEnabled",
-                "Forms login can only be disabled when SAML is enabled.");
+            return _problems.ValidationErrorActionKey("formsLoginEnabled", "error.saml.formsLoginRequiresSaml");
         }
 
         bool samlReady = existing is not null
@@ -298,14 +299,12 @@ public sealed class OrgAuthConfigController : ControllerBase
             && (!string.IsNullOrWhiteSpace(existing.IdpSigningCert) || !string.IsNullOrWhiteSpace(existing.IdpSigningCertOverride));
         if (!samlReady)
         {
-            return _problems.ValidationErrorAction("formsLoginEnabled",
-                "Upload IdP metadata before disabling forms login.");
+            return _problems.ValidationErrorActionKey("formsLoginEnabled", "error.saml.formsLoginNeedsMetadata");
         }
 
         var lastTest = existing!.LastTestAt;
         return lastTest is null || _time.GetUtcNow() - lastTest.Value > TimeSpan.FromMinutes(10)
-            ? _problems.ValidationErrorAction("formsLoginEnabled",
-                "Run a successful SAML test within the last 10 minutes before disabling forms login.")
+            ? _problems.ValidationErrorActionKey("formsLoginEnabled", "error.saml.formsLoginNeedsRecentTest")
             : null;
     }
 
@@ -325,6 +324,38 @@ public sealed class OrgAuthConfigController : ControllerBase
                 ?? Array.Empty<object>();
         }
         catch { return Array.Empty<object>(); }
+    }
+
+    // The NameID the IdP asserted during the last test is persisted as a synthetic entry in
+    // last_test_claims (see SamlController.LoginAsync's isTest branch) rather than reflected
+    // into the /saml-test-result redirect URL. Pull it out here so the frontend gets it as its
+    // own field, sourced from this authenticated read, not from attacker-influenced URL state.
+    private static bool IsNameIdSentinel(object claim) =>
+        claim is System.Text.Json.JsonElement el
+        && el.TryGetProperty("type", out var typeEl)
+        && typeEl.ValueKind == System.Text.Json.JsonValueKind.String
+        && typeEl.GetString() == Dependably.Infrastructure.Saml.SamlTestClaimTypes.NameId;
+
+    private static string? ExtractNameIdClaim(string? claimsJson)
+    {
+        foreach (object claim in ParseClaimsJson(claimsJson))
+        {
+            if (!IsNameIdSentinel(claim))
+            {
+                continue;
+            }
+
+            var el = (System.Text.Json.JsonElement)claim;
+            if (el.TryGetProperty("values", out var valuesEl)
+                && valuesEl.ValueKind == System.Text.Json.JsonValueKind.Array
+                && valuesEl.GetArrayLength() > 0
+                && valuesEl[0].ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                return valuesEl[0].GetString();
+            }
+        }
+
+        return null;
     }
 
     private static string NormalizeCertInput(string input)

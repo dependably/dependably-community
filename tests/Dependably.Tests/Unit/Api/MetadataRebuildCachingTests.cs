@@ -381,7 +381,10 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
             cacheRecorder,
             cacheArtifacts,
             tenantAccess,
-            rpmProvenance);
+            rpmProvenance,
+            Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
+            Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, _clock),
+            new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0));
         return new RpmController(svc) { ControllerContext = BuildRpmContext() };
     }
 

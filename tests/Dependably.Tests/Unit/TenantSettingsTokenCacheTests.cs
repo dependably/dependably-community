@@ -216,4 +216,145 @@ public sealed class TenantSettingsTokenCacheTests : IAsyncLifetime
 
         Assert.Null(await tokens.ResolveAsync("expired-raw"));
     }
+
+    // ── TokenRepository resolve cache ───────────────────────────────────────
+
+    [Fact]
+    public async Task ResolveAsync_CachesResult_WithinTtl_HitsStoreOnce()
+    {
+        var counting = new CountingMetadataStore(_db);
+        var tokens = new TokenRepository(counting, TimeProvider.System, _cache);
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("""
+                INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities, created_at)
+                VALUES ('t-cache-hit', 'o1', 'ci', @hash, '["publish:npm"]', '2026-01-01T00:00:00Z')
+                """, new { hash = TokenRepository.HashToken("cache-hit-raw") });
+        }
+
+        var first = await tokens.ResolveAsync("cache-hit-raw");
+        var second = await tokens.ResolveAsync("cache-hit-raw");
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.Equal("t-cache-hit", second!.Id);
+        // The resolve query opens exactly one connection — the second call is served
+        // entirely from the in-memory cache without touching the store.
+        Assert.Equal(1, counting.OpenCount);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_CachesResult_UntilOutOfBandMutation_ObservedAfterInvalidation()
+    {
+        var tokens = new TokenRepository(_db, TimeProvider.System, _cache);
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("""
+                INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities, created_at)
+                VALUES ('t-cache-stale', 'o1', 'ci', @hash, '["publish:npm"]', '2026-01-01T00:00:00Z')
+                """, new { hash = TokenRepository.HashToken("cache-stale-raw") });
+        }
+
+        var first = await tokens.ResolveAsync("cache-stale-raw");
+        Assert.Contains("publish:npm", first!.CapabilitySet);
+
+        // Revoke the capability out-of-band (e.g. a concurrent admin edit). Without the
+        // resolve cache this would be visible on the very next request; the 1-second TTL
+        // is the accepted revocation-lag trade-off documented on TokenRepository.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("UPDATE service_tokens SET capabilities = '[]' WHERE id = 't-cache-stale'");
+        }
+
+        var cached = await tokens.ResolveAsync("cache-stale-raw");
+        Assert.Contains("publish:npm", cached!.CapabilitySet); // still serving the cached resolution
+    }
+
+    [Fact]
+    public async Task ResolveAsync_DistinctTokensAcrossOrgs_NeverShareCacheEntry()
+    {
+        var tokens = new TokenRepository(_db, TimeProvider.System, _cache);
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o2', 'other')");
+            await conn.ExecuteAsync("""
+                INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities, created_at)
+                VALUES ('svc-o1', 'o1', 'ci-o1', @hashA, '["publish:npm"]', '2026-01-01T00:00:00Z');
+                INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities, created_at)
+                VALUES ('svc-o2', 'o2', 'ci-o2', @hashB, '["publish:npm"]', '2026-01-01T00:00:00Z')
+                """,
+                new { hashA = TokenRepository.HashToken("org1-raw"), hashB = TokenRepository.HashToken("org2-raw") });
+        }
+
+        var first = await tokens.ResolveAsync("org1-raw");
+        var second = await tokens.ResolveAsync("org2-raw");
+        // Re-resolving the first token must still land on org1 — a distinct raw token can
+        // never be served from another tenant's cache entry (the cache key is the token's
+        // own SHA-256 hash, unique per token).
+        var firstAgain = await tokens.ResolveAsync("org1-raw");
+
+        Assert.Equal("o1", first!.OrgId);
+        Assert.Equal("o2", second!.OrgId);
+        Assert.Equal("o1", firstAgain!.OrgId);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_NeverCachesMiss_ForUnknownToken()
+    {
+        var counting = new CountingMetadataStore(_db);
+        var tokens = new TokenRepository(counting, TimeProvider.System, _cache);
+
+        Assert.Null(await tokens.ResolveAsync("still-never-issued"));
+        Assert.Null(await tokens.ResolveAsync("still-never-issued"));
+
+        // A miss is never cached — an account-disabled or removed user token also resolves
+        // to null, and caching that would delay the reactivation/removal tests' expected
+        // same-request recovery just as badly as caching a stale hit would.
+        Assert.Equal(2, counting.OpenCount);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_NeverCachesUserTokenResolution()
+    {
+        var counting = new CountingMetadataStore(_db);
+        var tokens = new TokenRepository(counting, TimeProvider.System, _cache);
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("""
+                INSERT INTO users (id, tenant_id, email, password_hash, role, created_at)
+                VALUES ('u-cache', 'o1', 'cache@example.com', '', 'member', '2026-01-01T00:00:00Z');
+                INSERT INTO user_tokens (id, org_id, user_id, token_hash, capabilities, created_at)
+                VALUES ('t-user-cache', 'o1', 'u-cache', @hash, '["read:metadata"]', '2026-01-01T00:00:00Z')
+                """, new { hash = TokenRepository.HashToken("user-cache-raw") });
+        }
+
+        var first = await tokens.ResolveAsync("user-cache-raw");
+        var second = await tokens.ResolveAsync("user-cache-raw");
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        // User-token resolutions are never cached — every call re-queries so an account
+        // lock/disable or a password-change token revocation takes effect on the very next
+        // request rather than lagging by the cache TTL.
+        Assert.Equal(2, counting.OpenCount);
+    }
+
+    // Wraps an IMetadataStore and counts OpenAsync calls, so cache-hit tests can assert the
+    // store was (or wasn't) actually queried rather than inferring it from timing.
+    private sealed class CountingMetadataStore(IMetadataStore inner) : IMetadataStore
+    {
+        public int OpenCount { get; private set; }
+
+        public DbProvider Provider => inner.Provider;
+
+        public async Task<System.Data.Common.DbConnection> OpenAsync(CancellationToken ct = default)
+        {
+            OpenCount++;
+            return await inner.OpenAsync(ct);
+        }
+    }
 }

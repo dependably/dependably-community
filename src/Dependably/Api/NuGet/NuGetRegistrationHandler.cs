@@ -27,14 +27,16 @@ public sealed class NuGetRegistrationHandler(
     ClaimResolver claimResolver,
     ReservedNamespaceService reserved,
     RenderedResponseCache<NuGetRegistrationKey> cache,
+    RenderedMetadataCacheOptions cacheOptions,
     IPublicUrlBuilder urls,
     TimeProvider time,
     ILogger<NuGetRegistrationHandler> logger)
 {
     // TTL for proxy-merged registration pages (upstream can change); local-only registrations
-    // use a longer TTL because invalidation on mutation is the primary expiry mechanism.
-    private static readonly TimeSpan RegistrationProxyTtl = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan RegistrationLocalTtl = TimeSpan.FromMinutes(10);
+    // use a longer TTL because invalidation on mutation is the primary expiry mechanism. Both are
+    // operator-tunable via METADATA_PROXY/LOCAL_CACHE_TTL_SECONDS (see RenderedMetadataCacheOptions).
+    private TimeSpan RegistrationProxyTtl => cacheOptions.ProxyTtl;
+    private TimeSpan RegistrationLocalTtl => cacheOptions.LocalTtl;
 
     // SHA-256 hex digest prefix length used for ETags (16 hex chars = 64 bits of entropy).
     private const int ETagHexPrefixLength = 16;

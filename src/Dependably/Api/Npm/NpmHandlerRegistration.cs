@@ -35,6 +35,7 @@ internal static class NpmHandlerRegistration
                 uploadLimits: sp.GetRequiredService<IUploadLimitResolver>(),
                 distTags: sp.GetRequiredService<NpmDistTagRepository>(),
                 cache: sp.GetRequiredService<RenderedResponseCache<NpmPackumentKey>>(),
+                edgeGuard: sp.GetRequiredService<Dependably.Infrastructure.Edge.EdgePublishGuard>(),
                 stagingPath: path);
         });
         services.AddScoped<NpmControllerHandlers>();

@@ -119,15 +119,20 @@ public sealed class RpmRepodataService
     }
 
     /// <summary>
-    /// Builds a combined <c>primary.xml</c> for merged upstream mode: every locally published
-    /// RPM under the tenant, unioned with the upstream repo's packages parsed from
-    /// <paramref name="upstreamPrimaryGz"/>. Local packages shadow upstream on filename (NEVRA)
-    /// collision so a published version always wins. Upstream <c>&lt;location href&gt;</c> values
-    /// are rewritten to the flat <c>packages/{file}</c> form so dnf routes every download back
-    /// through Dependably — a registry hit for local artefacts, a proxy fetch for upstream ones —
-    /// rather than hitting the mirror directly.
+    /// Builds a combined, gzip-compressed <c>primary.xml.gz</c> for merged upstream mode: every
+    /// locally published RPM under the tenant, unioned with the upstream repo's packages parsed
+    /// from <paramref name="upstreamPrimaryGz"/>. Local packages shadow upstream on filename
+    /// (NEVRA) collision so a published version always wins. Upstream <c>&lt;location href&gt;</c>
+    /// values are rewritten to the flat <c>packages/{file}</c> form so dnf routes every download
+    /// back through Dependably — a registry hit for local artefacts, a proxy fetch for upstream
+    /// ones — rather than hitting the mirror directly.
+    ///
+    /// Serializes and gzip-compresses in one streamed pass (<see cref="SaveGzipped"/>) instead of
+    /// building an intermediate UTF-16 string and a separate pre-gzip byte array — for a large
+    /// upstream repo the unioned document itself can be tens of megabytes, so this avoids doubling
+    /// that peak on the way out.
     /// </summary>
-    public async Task<string> BuildMergedPrimaryAsync(string orgId, byte[] upstreamPrimaryGz, CancellationToken ct)
+    public async Task<byte[]> BuildMergedPrimaryGzAsync(string orgId, byte[] upstreamPrimaryGz, CancellationToken ct)
     {
         var localRows = await LoadLocalRowsAsync(orgId, ct);
 
@@ -150,17 +155,17 @@ public sealed class RpmRepodataService
                 new XAttribute("packages", all.Count),
                 all));
 
-        using var sw = new Utf8StringWriter();
-        doc.Save(sw, SaveOptions.None);
-        return sw.ToString();
+        return SaveGzipped(doc);
     }
 
     /// <summary>
-    /// Builds a merged <c>filelists.xml</c> for merged upstream mode. Local package entries are
-    /// rendered from stored <c>files_json</c>; upstream filelists entries whose filenames are not
-    /// shadowed by a local package are appended verbatim from <paramref name="upstreamFilelistsGz"/>.
+    /// Builds a merged, gzip-compressed <c>filelists.xml.gz</c> for merged upstream mode. Local
+    /// package entries are rendered from stored <c>files_json</c>; upstream filelists entries
+    /// whose filenames are not shadowed by a local package are appended verbatim from
+    /// <paramref name="upstreamFilelistsGz"/>. See <see cref="BuildMergedPrimaryGzAsync"/> for why
+    /// this serializes directly to gzip bytes rather than an intermediate string.
     /// </summary>
-    public async Task<string> BuildMergedFilelistsAsync(string orgId, byte[] upstreamFilelistsGz, CancellationToken ct)
+    public async Task<byte[]> BuildMergedFilelistsGzAsync(string orgId, byte[] upstreamFilelistsGz, CancellationToken ct)
     {
         var localRows = await LoadLocalRowsAsync(orgId, ct);
 
@@ -180,9 +185,7 @@ public sealed class RpmRepodataService
                 new XAttribute("packages", all.Count),
                 all));
 
-        using var sw = new Utf8StringWriter();
-        doc.Save(sw, SaveOptions.None);
-        return sw.ToString();
+        return SaveGzipped(doc);
     }
 
     private async Task<List<RpmPrimaryRow>> LoadLocalRowsAsync(string orgId, CancellationToken ct)
@@ -278,19 +281,17 @@ public sealed class RpmRepodataService
     private static List<XElement> ExtractUpstreamPackages(
         byte[] upstreamPrimaryGz, XNamespace common, HashSet<string> shadowed)
     {
-        byte[] xmlBytes;
-        using (var limited = new LimitedReadStream(
+        // Parse directly from the decompression stream — no intermediate xmlBytes byte[] copy
+        // of what can be a 256 MiB decompressed document.
+        using var limited = new LimitedReadStream(
             new GZipStream(new MemoryStream(upstreamPrimaryGz), CompressionMode.Decompress),
-            RepodataDecompressLimits.MaxDecompressedBytes, "primary.xml.gz"))
-        using (var ms = new MemoryStream())
-        {
-            limited.CopyTo(ms);
-            xmlBytes = ms.ToArray();
-        }
+            RepodataDecompressLimits.MaxDecompressedBytes, "primary.xml.gz");
+        var doc = XDocument.Load(limited);
 
-        var doc = XDocument.Load(new MemoryStream(xmlBytes));
         var result = new List<XElement>();
-        foreach (var pkg in doc.Descendants(common + "package"))
+        // Snapshot the live Descendants query into a list before mutating the tree below
+        // (Remove() during enumeration of a lazy query would throw).
+        foreach (var pkg in doc.Descendants(common + "package").ToList())
         {
             if ((string?)pkg.Attribute("type") != "rpm")
             {
@@ -309,11 +310,14 @@ public sealed class RpmRepodataService
                 continue;
             }
 
-            var clone = new XElement(pkg);
-            var cloneLocation = clone.Element(common + "location");
-            cloneLocation?.Attribute(XNamespace.Xml + "base")?.Remove();
-            cloneLocation?.SetAttributeValue("href", $"packages/{filename}");
-            result.Add(clone);
+            // Detach from the source doc (which is discarded once this method returns) instead
+            // of cloning: LINQ to XML would otherwise silently deep-clone this element again
+            // when the caller adds it to the merged document, doubling the retained package set.
+            pkg.Remove();
+            var location = pkg.Element(common + "location");
+            location?.Attribute(XNamespace.Xml + "base")?.Remove();
+            location?.SetAttributeValue("href", $"packages/{filename}");
+            result.Add(pkg);
         }
         return result;
     }
@@ -334,19 +338,14 @@ public sealed class RpmRepodataService
     private static List<XElement> ExtractUpstreamFilelistsPackages(
         byte[] upstreamFilelistsGz, XNamespace fl, HashSet<string> shadowed)
     {
-        byte[] xmlBytes;
-        using (var limited = new LimitedReadStream(
+        // Parse directly from the decompression stream — see ExtractUpstreamPackages.
+        using var limited = new LimitedReadStream(
             new GZipStream(new MemoryStream(upstreamFilelistsGz), CompressionMode.Decompress),
-            RepodataDecompressLimits.MaxDecompressedBytes, "filelists.xml.gz"))
-        using (var ms = new MemoryStream())
-        {
-            limited.CopyTo(ms);
-            xmlBytes = ms.ToArray();
-        }
+            RepodataDecompressLimits.MaxDecompressedBytes, "filelists.xml.gz");
+        var doc = XDocument.Load(limited);
 
-        var doc = XDocument.Load(new MemoryStream(xmlBytes));
         var result = new List<XElement>();
-        foreach (var pkg in doc.Descendants(fl + "package"))
+        foreach (var pkg in doc.Descendants(fl + "package").ToList())
         {
             string name = (string?)pkg.Attribute("name") ?? "";
             string arch = (string?)pkg.Attribute("arch") ?? "";
@@ -356,7 +355,9 @@ public sealed class RpmRepodataService
             string filename = $"{name}-{rpmVer}-{rpmRel}.{arch}.rpm";
             if (!shadowed.Contains(filename))
             {
-                result.Add(new XElement(pkg));
+                // Detach rather than clone — see ExtractUpstreamPackages.
+                pkg.Remove();
+                result.Add(pkg);
             }
         }
         return result;
@@ -438,6 +439,29 @@ public sealed class RpmRepodataService
         using (var gz = new GZipStream(ms, CompressionLevel.Optimal, leaveOpen: true))
         {
             gz.Write(data, 0, data.Length);
+        }
+
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Serializes <paramref name="doc"/> and gzip-compresses it in one streamed pass, producing
+    /// the same UTF-8-declared, indented XML content as <c>doc.Save(new Utf8StringWriter())</c>
+    /// followed by <c>Gzip(Encoding.UTF8.GetBytes(...))</c> — but without ever materializing the
+    /// intermediate UTF-16 string or the separate pre-gzip UTF-8 byte array. For a large merged
+    /// document (local ∪ a big upstream repo) those two intermediates are each a full copy of the
+    /// output, so folding serialize → encode → compress into one pass measurably lowers peak
+    /// memory on the merged-repodata rebuild path.
+    /// </summary>
+    private static byte[] SaveGzipped(XDocument doc)
+    {
+        using var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, CompressionLevel.Optimal, leaveOpen: true))
+        // UTF8Encoding(false): no BOM preamble, matching Encoding.UTF8.GetBytes(string) — the
+        // declared "encoding=\"utf-8\"" in the XML prolog comes from this writer's Encoding.WebName.
+        using (var writer = new StreamWriter(gz, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+        {
+            doc.Save(writer, SaveOptions.None);
         }
 
         return ms.ToArray();

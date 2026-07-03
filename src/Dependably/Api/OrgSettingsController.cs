@@ -87,15 +87,22 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         // airGappedEnforced — the instance-level AIR_GAPPED posture. The UI renders the
         // air-gap checkbox checked + read-only when enforced; the tenant flag (airGapped)
         // remains the editable per-tenant value.
-        var node = System.Text.Json.JsonSerializer.SerializeToNode(settings, SettingsJsonOptions)
+        var node = System.Text.Json.JsonSerializer.SerializeToNode(settings, JsonContracts.Web)
                    ?? new System.Text.Json.Nodes.JsonObject();
         node["airGappedEnforced"] = _airGap.IsEnabled;
         node["requireMfaEnforced"] = _requireMfa.IsEnabled;
+
+        // rpmUpstreamMode is a nullable per-org override (null = inherit). Surface the resolved
+        // instance default and the resulting effective mode alongside the raw override so the RPM
+        // upstream card can render "Inherit (currently: passthrough)" instead of misreporting the
+        // override as the live behaviour. Mirrors RpmController.IsRpmPassthroughEffective's
+        // normalization: any instance value other than 'merged' resolves to 'passthrough'.
+        string rpmInstanceDefault = string.Equals(_config["Rpm:UpstreamMode"], "merged", StringComparison.OrdinalIgnoreCase)
+            ? "merged" : "passthrough";
+        node["rpmUpstreamModeInstanceDefault"] = rpmInstanceDefault;
+        node["rpmUpstreamModeEffective"] = settings?.RpmUpstreamMode ?? rpmInstanceDefault;
         return new JsonResult(node);
     }
-
-    private static readonly System.Text.Json.JsonSerializerOptions SettingsJsonOptions =
-        new(System.Text.Json.JsonSerializerDefaults.Web);
 
     /// <summary>PUT /api/v1/orgs/{org}/settings</summary>
     [HttpPut("api/v1/settings")]
@@ -115,8 +122,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
         if (req.VersionOverwritePolicy is { } pol && pol is not ("block" or "exception" or "allow"))
         {
-            return _problems.ValidationErrorAction("version_overwrite_policy",
-                "Must be 'block', 'exception', or 'allow'.");
+            return _problems.ValidationErrorActionKey("version_overwrite_policy", "error.settings.overwritePolicyInvalid");
         }
 
         string orgId = CurrentTenantId();
@@ -163,7 +169,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 version_overwrite_policy = req.VersionOverwritePolicy,
                 air_gapped = req.AirGapped,
                 require_mfa = req.RequireMfa,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         if (req.VersionOverwritePolicy is { } newPolicy && newPolicy != priorPolicy)
         {
@@ -197,7 +203,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 key,
                 prior_value = priorValue,
                 new_value = newValue,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.TenantEvents.TypeSettingChange,
             orgId, "user", userId, "accepted",
@@ -247,7 +253,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 keep_days = req.KeepDays,
                 activity_retention_days = req.ActivityRetentionDays,
                 purge_unlisted_after_days = req.PurgeUnlistedAfterDays,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return NoContent();
     }
@@ -371,7 +377,43 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 verify_pypi_attestations = sigVerify.VerifyPyPiAttestations,
                 verify_rpm_signatures = sigVerify.VerifyRpmSignatures,
                 verify_maven_signatures = sigVerify.VerifyMavenSignatures,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+
+        return NoContent();
+    }
+
+    /// <summary>
+    /// PUT /api/v1/rpm-upstream-mode — sets the per-tenant RPM hosted-publishing posture override
+    /// without touching any other setting. Accepts null to clear the override back to "inherit the
+    /// instance Rpm:UpstreamMode env value", or an explicit 'passthrough' | 'merged' that overrides
+    /// the env value in either direction — letting an operator enable (or disable) hosted RPM
+    /// publishing for this org from the UI without an instance restart.
+    /// </summary>
+    [HttpPut("api/v1/rpm-upstream-mode")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> UpdateRpmUpstreamMode([FromBody] UpdateRpmUpstreamModeRequest req, CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        if (req.Mode is not (null or "passthrough" or "merged"))
+        {
+            return _problems.ValidationErrorActionKey("rpm_upstream_mode", "error.settings.rpmUpstreamModeInvalid");
+        }
+
+        string orgId = CurrentTenantId();
+        var prior = await _settings.GetSettingsAsync(orgId, ct);
+        string? priorMode = prior?.RpmUpstreamMode;
+
+        await _settings.UpsertRpmUpstreamModeAsync(orgId, req.Mode, ct);
+
+        if (req.Mode != priorMode)
+        {
+            await EmitSettingChangeAsync(orgId, "rpm_upstream_mode", priorMode, req.Mode, ct);
+        }
 
         return NoContent();
     }
@@ -380,14 +422,11 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     // result when any field is out of range, or null when all pass.
     private IActionResult? ValidateProxyNumericFields(UpdateProxySettingsRequest req)
         => req.MaxOsvScoreTolerance is < 0.0 or > MaxOsvScore
-            ? _problems.ValidationErrorAction("max_osv_score_tolerance", "Must be between 0.0 and 10.0.")
+            ? _problems.ValidationErrorActionKey("max_osv_score_tolerance", "error.settings.osvScoreRange")
             : req.MinReleaseAgeHours is { } age && (age < 0 || age > MaxReleaseAgeHours)
-                ? _problems.ValidationErrorAction(
-                    "min_release_age_hours",
-                    $"Must be between 0 and {MaxReleaseAgeHours} hours (1 year), or null to disable.")
+                ? _problems.ValidationErrorActionKey("min_release_age_hours", "error.settings.releaseAgeRange", MaxReleaseAgeHours)
                 : req.MaxEpssTolerance is < 0.0 or > 1.0
-                    ? _problems.ValidationErrorAction(
-                        "max_epss_tolerance", "Must be between 0.0 and 1.0 (EPSS probability), or null to disable.")
+                    ? _problems.ValidationErrorActionKey("max_epss_tolerance", "error.settings.epssRange")
                     : null;
 
     // Normalizes the block_deprecated field (maps retired 'block' alias to 'block_all') and
@@ -404,8 +443,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         }
 
         return normalized is not ("off" or "warn" or "block_new" or "block_all")
-            ? _problems.ValidationErrorAction(
-                "block_deprecated", "Must be 'off', 'warn', 'block_new', or 'block_all'.")
+            ? _problems.ValidationErrorActionKey("block_deprecated", "error.settings.deprecatedPolicyInvalid")
             : null;
     }
 
@@ -428,27 +466,23 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
         if (blockMalicious is not ("off" or "warn" or "block"))
         {
-            return _problems.ValidationErrorAction(
-                "block_malicious", "Must be 'off', 'warn', or 'block'.");
+            return _problems.ValidationErrorActionKey("block_malicious", "error.settings.offWarnBlock");
         }
 
         // Absent = off, matching the column default — both KEV and EPSS are opt-in policies.
         if (blockKev is not ("off" or "warn" or "block"))
         {
-            return _problems.ValidationErrorAction(
-                "block_kev", "Must be 'off', 'warn', or 'block'.");
+            return _problems.ValidationErrorActionKey("block_kev", "error.settings.offWarnBlock");
         }
 
         if (blockInstallScripts is not ("off" or "warn" or "block"))
         {
-            return _problems.ValidationErrorAction(
-                "block_install_scripts", "Must be 'off', 'warn', or 'block'.");
+            return _problems.ValidationErrorActionKey("block_install_scripts", "error.settings.offWarnBlock");
         }
 
         // Three values (no block_new analog — revocation is always a full upstream removal).
         return blockRevoked is not ("off" or "warn" or "block")
-            ? _problems.ValidationErrorAction(
-                "block_revoked", "Must be 'off', 'warn', or 'block'.")
+            ? _problems.ValidationErrorActionKey("block_revoked", "error.settings.offWarnBlock")
             : null;
     }
 

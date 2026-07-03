@@ -60,11 +60,13 @@ public sealed class OrgSettingsRepository
             INSERT INTO org_settings (org_id, anonymous_pull, allowlist_mode,
                 max_upload_bytes, max_upload_bytes_pypi, max_upload_bytes_npm, max_upload_bytes_nuget,
                 max_upload_bytes_maven, max_upload_bytes_rpm, max_upload_bytes_oci, max_upload_bytes_cargo,
-                default_language, allow_version_overwrite, version_overwrite_policy, air_gapped, require_mfa)
+                default_language, allow_version_overwrite, version_overwrite_policy, air_gapped, require_mfa,
+                rpm_upstream_mode)
             VALUES (@orgId, @anonPull, @allowlist, @maxBytes, @maxBytesPyPi, @maxBytesNpm, @maxBytesNuGet,
                 @maxBytesMaven, @maxBytesRpm, @maxBytesOci, @maxBytesCargo,
                 COALESCE(@lang, 'en'), COALESCE(@legacyOverwrite, 0),
-                COALESCE(@policy, 'block'), COALESCE(@airGapped, 0), COALESCE(@requireMfa, 0))
+                COALESCE(@policy, 'block'), COALESCE(@airGapped, 0), COALESCE(@requireMfa, 0),
+                COALESCE(@rpmUpstreamMode, 'passthrough'))
             ON CONFLICT(org_id) DO UPDATE SET
                 anonymous_pull      = @anonPull,
                 allowlist_mode      = @allowlist,
@@ -81,7 +83,8 @@ public sealed class OrgSettingsRepository
                 allow_version_overwrite  = CASE WHEN @legacyOverwrite IS NULL THEN allow_version_overwrite
                                                 ELSE @legacyOverwrite END,
                 air_gapped          = COALESCE(@airGapped, air_gapped),
-                require_mfa         = COALESCE(@requireMfa, require_mfa)
+                require_mfa         = COALESCE(@requireMfa, require_mfa),
+                rpm_upstream_mode   = COALESCE(@rpmUpstreamMode, rpm_upstream_mode)
             """,
             new
             {
@@ -101,6 +104,7 @@ public sealed class OrgSettingsRepository
                 policy,
                 airGapped = ToBoolFlag(update.AirGapped),
                 requireMfa = ToBoolFlag(update.RequireMfa),
+                rpmUpstreamMode = update.RpmUpstreamMode,
             });
 
         _orgs?.InvalidateSettingsCache(update.OrgId);
@@ -195,6 +199,28 @@ public sealed class OrgSettingsRepository
             INSERT INTO org_settings (org_id, license_enforcement_mode)
             VALUES (@orgId, @mode)
             ON CONFLICT(org_id) DO UPDATE SET license_enforcement_mode = @mode
+            """,
+            new { orgId, mode });
+        _orgs?.InvalidateSettingsCache(orgId);
+    }
+
+    /// <summary>
+    /// Targeted single-column write for the RPM upstream mode override, used by the RPM upstream
+    /// card so it never has to round-trip the whole settings blob. Every other column keeps its
+    /// current value (INSERT applies the schema defaults for a first-time row). Unlike
+    /// <see cref="UpsertSettingsAsync"/>'s COALESCE-preserve-on-null semantics, this always SETs
+    /// the column verbatim — including to NULL — so an operator can explicitly clear the override
+    /// back to "inherit the instance Rpm:UpstreamMode env value".
+    /// </summary>
+    public async Task UpsertRpmUpstreamModeAsync(
+        string orgId, string? mode, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO org_settings (org_id, rpm_upstream_mode)
+            VALUES (@orgId, @mode)
+            ON CONFLICT(org_id) DO UPDATE SET rpm_upstream_mode = @mode
             """,
             new { orgId, mode });
         _orgs?.InvalidateSettingsCache(orgId);

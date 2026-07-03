@@ -206,6 +206,9 @@ export const api = {
   updateRetention: (r) => req('PUT', '/retention', r),
   getProxySettings: () => req('GET', '/proxy-settings'),
   updateProxySettings: (s) => req('PUT', '/proxy-settings', s),
+  // Per-tenant RPM hosted-publishing posture ('passthrough' | 'merged'). Read from the org
+  // settings payload (rpmUpstreamMode); the PUT touches only this column.
+  updateRpmUpstreamMode: (mode) => req('PUT', '/rpm-upstream-mode', { mode }),
 
   // Global search (cross-entity by design; packages-only for now).
   // Returns { query, groups: [{ kind, results: [...] }] }.
@@ -331,6 +334,16 @@ export const api = {
   createServiceToken: (name, capabilities, expiresAt, description) =>
     req('POST', '/service-tokens', { name, capabilities, expiresAt, description }),
   deleteServiceToken: (id) => req('DELETE', `/service-tokens/${id}`),
+
+  // Outbound webhook subscriptions (Settings → Webhooks).
+  // Secret is write-only: GET/list responses return hasSecret (bool), never the raw value.
+  listWebhooks: () => req('GET', '/webhooks'),
+  addWebhook: (url, eventTypes, secret, description) =>
+    req('POST', '/webhooks', { url, eventTypes, secret, description }),
+  updateWebhook: (id, url, eventTypes, enabled, secret, description) =>
+    req('PUT', `/webhooks/${id}`, { url, eventTypes, enabled, secret, description }),
+  deleteWebhook: (id) => req('DELETE', `/webhooks/${id}`),
+  testWebhook: (id) => req('POST', `/webhooks/${id}/test`),
 
   // Invites
   listInvites: () => req('GET', '/invites'),

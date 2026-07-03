@@ -1,0 +1,54 @@
+image:
+  repository: dependably
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# The edge master URL — the sole upstream for every ecosystem. Required.
+edge:
+  masterUrl: ""
+  # Name of an existing Kubernetes Secret holding the edge credentials. The chart references
+  # it by name and never renders token values into rendered manifests. The Secret must carry:
+  #   EDGE_MASTER_TOKEN  — reader-scoped service token minted on the master (required)
+  #   EDGE_ACCESS_TOKEN  — optional pre-shared token edge clients present; omit for
+  #                        LAN-anonymous reads (trusted networks only — the node logs a warning)
+  existingSecret: ""
+  # Set true when the referenced Secret also provides EDGE_ACCESS_TOKEN.
+  accessTokenEnabled: false
+
+# Persistent warm-cache volume. The whole egress/offload win depends on the cache surviving
+# restarts — do not disable persistence for a real deployment.
+persistence:
+  enabled: true
+  size: 20Gi
+  # storageClassName: ""  # empty uses the cluster default
+  accessMode: ReadWriteOnce
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# Optional ingress. Kept minimal — a single host/path block, no TLS templating beyond an
+# optional secretName. Leave disabled to reach the edge via the Service only.
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  path: /
+  pathType: Prefix
+  tlsSecretName: ""
+
+resources: {}
+  # limits:
+  #   memory: 1536Mi
+  # requests:
+  #   memory: 512Mi
+
+# Extra environment variables (e.g. DOTNET_GCHeapHardLimit, CACHE_MAX_SIZE_BYTES,
+# CACHE_EVICT_SCHEDULE, INSTANCE_LOCK_STALE_SECONDS).
+extraEnv: []
+  # - name: CACHE_MAX_SIZE_BYTES
+  #   value: "10737418240"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

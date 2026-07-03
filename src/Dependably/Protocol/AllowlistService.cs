@@ -11,9 +11,6 @@ namespace Dependably.Protocol;
 /// </summary>
 public sealed class AllowlistService
 {
-    // Byte offset past the "pkg:" PURL scheme prefix.
-    private const int PurlSchemeLength = 4;
-
     private readonly IMetadataStore _db;
     private readonly AuditRepository _audit;
 
@@ -60,16 +57,7 @@ public sealed class AllowlistService
         return false;
     }
 
-    private static string ExtractEcosystem(string purl)
-    {
-        if (!purl.StartsWith("pkg:", StringComparison.Ordinal))
-        {
-            return "";
-        }
-
-        int slash = purl.IndexOf('/', PurlSchemeLength);
-        return slash > PurlSchemeLength ? purl[PurlSchemeLength..slash] : "";
-    }
+    private static string ExtractEcosystem(string purl) => PurlParser.TryGetEcosystem(purl) ?? "";
 
     /// <summary>
     /// Detects and records a dependency confusion conflict when a hosted package

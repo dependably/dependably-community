@@ -70,6 +70,7 @@ public sealed class AuditEmitterSiemTests : IAsyncLifetime
                 NullLogger<AuditEmitter>.Instance,
                 EmptyConfig(),
                 services,
+                new OrgRepository(_db),
                 TestTime.Frozen());
 
             await emitter.EmitAsync(
@@ -113,6 +114,7 @@ public sealed class AuditEmitterSiemTests : IAsyncLifetime
             NullLogger<AuditEmitter>.Instance,
             EmptyConfig(),
             sp,
+            new OrgRepository(_db),
             TestTime.Frozen());
 
         await emitter.EmitAsync(
@@ -154,6 +156,7 @@ public sealed class AuditEmitterSiemTests : IAsyncLifetime
                 NullLogger<AuditEmitter>.Instance,
                 EmptyConfig(),
                 services,
+                new OrgRepository(_db),
                 TestTime.Frozen());
 
             await emitter.EmitAsync(

@@ -51,7 +51,9 @@ public sealed class StartupServiceTests : IAsyncLifetime
             StagingOptions.Resolve(config),
             NullLogger<StartupService>.Instance,
             envelope,
-            _db);
+            _db,
+            new EdgeMode(config),
+            new InstanceLock(_db, config, TestTime.Frozen(), NullLogger<InstanceLock>.Instance));
     }
 
     // deepcode ignore NoHardcodedCredentials: `key` is a settings-row name passed as a SQL parameter, not a credential.
@@ -215,6 +217,113 @@ public sealed class StartupServiceTests : IAsyncLifetime
         var repo = new OrgRepository(_db, envelope: ep);
         Assert.Equal(plaintextJwt, await repo.GetInstanceSettingAsync("jwt_secret"));
         Assert.Equal(plaintextMfa, await repo.GetInstanceSettingAsync("mfa_encryption_key"));
+    }
+
+    // ── Envelope migration for per-org secret-bearing tables (upstream + webhook) ──
+
+    private async Task<string> FirstOrgIdAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        return (await conn.ExecuteScalarAsync<string?>("SELECT id FROM orgs LIMIT 1"))!;
+    }
+
+    private async Task SeedUpstreamSecretAsync(string orgId, string secret)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO upstream_registry (id, org_id, ecosystem, url, auth_type, secret) " +
+            "VALUES (@id, @org, 'npm', 'https://private.example/npm', 'bearer', @secret)",
+            new { id = Guid.NewGuid().ToString("n"), org = orgId, secret });
+    }
+
+    private async Task SeedWebhookSecretAsync(string orgId, string secret)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO webhook_subscription (id, org_id, url, secret) " +
+            "VALUES (@id, @org, 'https://hook.example/x', @secret)",
+            new { id = Guid.NewGuid().ToString("n"), org = orgId, secret });
+    }
+
+    private async Task<string?> ReadColumnAsync(string table, string column, string orgId)
+    {
+        await using var conn = await _db.OpenAsync();
+        // Table/column are test-fixed constants, not user input. Scope to non-null secrets so a
+        // first-boot-seeded anonymous upstream row (NULL secret) does not shadow the seeded row.
+        return await conn.ExecuteScalarAsync<string?>(
+            $"SELECT {column} FROM {table} WHERE org_id = @org AND {column} IS NOT NULL LIMIT 1",
+            new { org = orgId });
+    }
+
+    [Fact]
+    public async Task StartAsync_ConfiguredEnvelope_MigratesPlaintextUpstreamAndWebhookSecrets()
+    {
+        // First boot without a KEK, then seed pre-retrofit plaintext secrets in the per-org tables.
+        await BuildService().StartAsync(CancellationToken.None);
+        string orgId = await FirstOrgIdAsync();
+        await SeedUpstreamSecretAsync(orgId, "npm-upstream-token");
+        await SeedWebhookSecretAsync(orgId, "webhook-hmac-secret");
+
+        // Restart with a configured KEK — the migration must wrap both plaintext rows.
+        using var ep = ConfiguredEnvelope();
+        await BuildService(envelope: ep).StartAsync(CancellationToken.None);
+
+        string? upstreamAfter = await ReadColumnAsync("upstream_registry", "secret", orgId);
+        string? webhookAfter = await ReadColumnAsync("webhook_subscription", "secret", orgId);
+
+        Assert.True(ep.IsEncrypted(upstreamAfter!),
+            $"upstream_registry.secret must be enc:v1:-prefixed after migration, got: {upstreamAfter}");
+        Assert.True(ep.IsEncrypted(webhookAfter!),
+            $"webhook_subscription.secret must be enc:v1:-prefixed after migration, got: {webhookAfter}");
+        Assert.DoesNotContain("npm-upstream-token", upstreamAfter!);
+        Assert.DoesNotContain("webhook-hmac-secret", webhookAfter!);
+    }
+
+    [Fact]
+    public async Task StartAsync_ConfiguredEnvelope_UpstreamSecretMigration_IsIdempotent()
+    {
+        await BuildService().StartAsync(CancellationToken.None);
+        string orgId = await FirstOrgIdAsync();
+        await SeedUpstreamSecretAsync(orgId, "npm-upstream-token");
+
+        using var ep = ConfiguredEnvelope();
+        await BuildService(envelope: ep).StartAsync(CancellationToken.None);
+        string? afterFirst = await ReadColumnAsync("upstream_registry", "secret", orgId);
+
+        // Second pass must skip the already-encrypted row (no enc:v1:enc:v1: double-wrap).
+        await BuildService(envelope: ep).StartAsync(CancellationToken.None);
+        string? afterSecond = await ReadColumnAsync("upstream_registry", "secret", orgId);
+
+        Assert.Equal(afterFirst, afterSecond);
+    }
+
+    [Fact]
+    public async Task StartAsync_UnconfiguredEnvelope_EncryptedUpstreamSecretPresent_Throws()
+    {
+        // First boot without a KEK, then simulate an upstream secret that a KEK-configured instance
+        // encrypted — but the master key is now absent (lost-key scenario).
+        await BuildService().StartAsync(CancellationToken.None);
+        string orgId = await FirstOrgIdAsync();
+        using var ep = ConfiguredEnvelope();
+        await SeedUpstreamSecretAsync(orgId, ep.Protect("npm-upstream-token"));
+
+        // Restart without a KEK — the probe must now cover the upstream table and fail closed.
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => BuildService().StartAsync(CancellationToken.None));
+        Assert.Contains("DEPENDABLY_MASTER_KEY", thrown.Message);
+    }
+
+    [Fact]
+    public async Task StartAsync_UnconfiguredEnvelope_EncryptedWebhookSecretPresent_Throws()
+    {
+        await BuildService().StartAsync(CancellationToken.None);
+        string orgId = await FirstOrgIdAsync();
+        using var ep = ConfiguredEnvelope();
+        await SeedWebhookSecretAsync(orgId, ep.Protect("webhook-hmac-secret"));
+
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => BuildService().StartAsync(CancellationToken.None));
+        Assert.Contains("DEPENDABLY_MASTER_KEY", thrown.Message);
     }
 
     private sealed class StubJwtOptionsMonitor : IOptionsMonitor<JwtBearerOptions>

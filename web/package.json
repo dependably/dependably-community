@@ -1,7 +1,7 @@
 {
   "name": "web",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -22,11 +22,11 @@
     "sbom:prod": "cyclonedx-npm --omit dev --output-format json --output-file sbom-frontend-prod.json"
   },
   "overrides": {
-    "esbuild": "^0.28.1",
-    "fast-uri": "^3.1.2",
-    "undici": "^7.28.0",
-    "js-yaml": "^4.2.0",
-    "tar": "^7.5.16"
+    "esbuild": "0.28.1",
+    "fast-uri": "3.1.2",
+    "undici": "7.28.0",
+    "js-yaml": "4.2.0",
+    "tar": "7.5.16"
   },
   "allowScripts": {
     "esbuild": true,

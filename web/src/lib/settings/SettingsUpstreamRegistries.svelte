@@ -25,6 +25,16 @@
   let loaded = false
   let error = ''
 
+  // Per-tenant RPM hosted-publishing posture override, loaded from the org settings payload and
+  // saved through its own targeted endpoint so it never clobbers other settings. '' is the UI
+  // sentinel for "inherit the instance default" (sent to the API as null); an explicit
+  // 'passthrough' | 'merged' overrides the instance default in either direction. The resolved
+  // effective mode is shown alongside so the card never misreports what's actually enforced.
+  let rpmUpstreamMode = ''
+  let rpmUpstreamModeEffective = 'passthrough'
+  let rpmUpstreamModeInstanceDefault = 'passthrough'
+  let savingRpmMode = false
+
   // Add modal — shared fields
   let showAdd = false, addEco = 'pypi', newUrl = '', newName = '', adding = false
 
@@ -42,7 +52,10 @@
 
   async function load() {
     try {
-      const entries = await api.getUpstreamRegistries()
+      const [entries, settings] = await Promise.all([
+        api.getUpstreamRegistries(),
+        api.getOrgSettings(),
+      ])
       /** @type {Record<string, any[]>} */
       const grouped = Object.fromEntries(ECOSYSTEMS.map(e => [e.key, []]))
       for (const e of entries) {
@@ -50,8 +63,26 @@
       }
       for (const k of Object.keys(grouped)) grouped[k].sort((a, b) => a.position - b.position)
       byEco = grouped
+      // null override → '' sentinel (renders as "Inherit" in the select).
+      rpmUpstreamMode = settings?.rpmUpstreamMode === 'merged' || settings?.rpmUpstreamMode === 'passthrough'
+        ? settings.rpmUpstreamMode : ''
+      rpmUpstreamModeEffective = settings?.rpmUpstreamModeEffective === 'merged' ? 'merged' : 'passthrough'
+      rpmUpstreamModeInstanceDefault = settings?.rpmUpstreamModeInstanceDefault === 'merged' ? 'merged' : 'passthrough'
       loaded = true
     } catch (e) { error = extract(e) }
+  }
+
+  async function saveRpmMode() {
+    savingRpmMode = true; error = ''
+    try {
+      // '' sentinel (inherit) sends null so the API clears the override rather than storing it.
+      // The endpoint returns 204, so the resolved effective mode is derived locally rather than
+      // from a response body: an explicit override wins outright, '' falls back to the instance
+      // default already loaded from GET /api/v1/settings.
+      await api.updateRpmUpstreamMode(rpmUpstreamMode || null)
+      rpmUpstreamModeEffective = rpmUpstreamMode || rpmUpstreamModeInstanceDefault
+    } catch (e) { error = extract(e); await load() }
+    finally { savingRpmMode = false }
   }
 
   function openAdd(eco) {
@@ -185,6 +216,29 @@
         {$t('settings.proxy.upstreamRegistries.add')}
       </button>
     </div>
+
+    {#if eco.key === 'rpm'}
+      <div class="rpm-mode">
+        <label class="rpm-mode-label" for="rpm-upstream-mode">
+          {$t('settings.proxy.upstreamRegistries.rpmMode.label')}
+          <InfoTip text={$t('settings.proxy.upstreamRegistries.rpmMode.hint')} />
+        </label>
+        <select
+          id="rpm-upstream-mode"
+          bind:value={rpmUpstreamMode}
+          on:change={saveRpmMode}
+          disabled={savingRpmMode}>
+          <option value="">
+            {$t('settings.proxy.upstreamRegistries.rpmMode.inherit', { values: { mode: rpmUpstreamModeInstanceDefault } })}
+          </option>
+          <option value="passthrough">{$t('settings.proxy.upstreamRegistries.rpmMode.passthrough')}</option>
+          <option value="merged">{$t('settings.proxy.upstreamRegistries.rpmMode.merged')}</option>
+        </select>
+        <span class="rpm-mode-effective">
+          {$t('settings.proxy.upstreamRegistries.rpmMode.effective', { values: { mode: rpmUpstreamModeEffective } })}
+        </span>
+      </div>
+    {/if}
 
     {#if loaded && byEco[eco.key].length === 0}
       <p class="text-muted empty">
@@ -358,4 +412,11 @@
   /* Row actions belong in their own flex wrapper — never on a flex cell directly. */
   .row-actions { display: flex; gap: 6px; align-items: center; flex: 0 0 auto; }
   textarea { width: 100%; resize: vertical; min-height: 56px; }
+  .rpm-mode {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 6px 4px 8px; border-bottom: 1px solid var(--border);
+  }
+  .rpm-mode-label { font-size: 13px; color: var(--text2); }
+  .rpm-mode select { max-width: 320px; }
+  .rpm-mode-effective { font-size: 12px; color: var(--text2); }
 </style>

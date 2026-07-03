@@ -1376,6 +1376,49 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// A caller cancelling its own <c>WaitAsync(ct)</c> while the shared upstream pull is still
+    /// running must not evict the in-flight entry — a second, uncancelled caller for the SAME
+    /// digest must join the SAME shared fetch rather than triggering a brand-new upstream pull.
+    /// </summary>
+    [Fact]
+    public async Task FetchBlobAsync_FirstWaiterCancels_SecondJoinerDoesNotTriggerSecondFetch()
+    {
+        byte[] blobBytes = RandomBytes(256);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+
+        var gate = new GateFactory(blobBytes);
+        var opts = Options.Create(DefaultOptions());
+        var authSvc = new OciUpstreamAuthService(gate, opts, new StubAirGap(false),
+            NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
+        var cacheBlobs = new InMemoryBlobStore();
+        var blobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
+        var resolver = new OciUpstreamResolver(gate, authSvc, opts, blobs, _db, new StubAirGap(false),
+            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+
+        string orgId = await OrgSeeder.InsertAsync(_db, "blob-cancel-org");
+        await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
+
+        using var cts = new CancellationTokenSource();
+        var firstTask = resolver.FetchBlobAsync(orgId, "library/ubuntu", digest, cts.Token);
+
+        await Task.Delay(100); // let the first caller register and park the shared Lazy on the gate
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstTask);
+
+        var secondTask = Task.Run(() => resolver.FetchBlobAsync(orgId, "library/ubuntu", digest, default));
+        await Task.Delay(100);
+        gate.Release();
+        var result = await secondTask;
+
+        Assert.Equal(1, gate.CallCount);
+        Assert.NotNull(result);
+        using var ms = new MemoryStream();
+        await result!.Content.CopyToAsync(ms);
+        Assert.Equal(blobBytes, ms.ToArray());
+    }
+
+    /// <summary>
     /// Distinct digests must each trigger their own independent upstream pull — the single-flight
     /// key is digest-specific and must not collapse pulls for different blobs.
     /// </summary>

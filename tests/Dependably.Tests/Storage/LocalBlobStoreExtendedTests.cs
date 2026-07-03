@@ -172,4 +172,113 @@ public sealed class LocalBlobStoreExtendedTests : IDisposable
         var ex = Record.Exception(() => new LocalBlobStore(_root));
         Assert.Null(ex);
     }
+
+    [Fact]
+    [Trait("Category", "Unit")]
+    public async Task GetAsync_DuringInFlightPutAsync_NeverThrowsOrObservesTruncatedContent()
+    {
+        var store = new LocalBlobStore(_root);
+        string key = "atomic/put-in-progress.bin";
+
+        // Larger than the default CopyToAsync buffer (81920 bytes) so the copy spans
+        // multiple read/write chunks — the source pauses mid-copy, after the first chunk
+        // has already been flushed to the temp file but before the write completes and
+        // the atomic rename into the final path happens.
+        byte[] full = new byte[3 * 81920 + 12345];
+        new Random(99).NextBytes(full);
+
+        var midCopySignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var resumeGate = new SemaphoreSlim(0, 1);
+        var source = new PausingReadStream(full, midCopySignal, resumeGate);
+
+        var putTask = store.PutAsync(key, source);
+
+        // Wait until the writer is paused mid-copy (first chunk already on disk in the
+        // temp file, remaining chunks pending).
+        await midCopySignal.Task;
+
+        // Probe concurrently while the write is still in flight. A reader must only ever
+        // observe "not visible yet" (null) — never an IOException sharing violation
+        // against a partially-written file, and never a short/truncated read.
+        var observed = new List<byte[]?>();
+        for (int i = 0; i < 25; i++)
+        {
+            var stream = await store.GetAsync(key);
+            if (stream is null)
+            {
+                observed.Add(null);
+                continue;
+            }
+
+            await using (stream)
+            {
+                using var ms = new MemoryStream();
+                await stream.CopyToAsync(ms);
+                observed.Add(ms.ToArray());
+            }
+        }
+
+        resumeGate.Release();
+        await putTask;
+
+        Assert.All(observed, bytes => Assert.True(
+            bytes is null || bytes.SequenceEqual(full),
+            "GetAsync must only ever see an absent key or the complete blob, never a partial write."));
+
+        await using var finalStream = await store.GetAsync(key);
+        Assert.NotNull(finalStream);
+        using var finalMs = new MemoryStream();
+        await finalStream!.CopyToAsync(finalMs);
+        Assert.Equal(full, finalMs.ToArray());
+    }
+
+    /// <summary>
+    /// Source stream for <see cref="GetAsync_DuringInFlightPutAsync_NeverThrowsOrObservesTruncatedContent"/>
+    /// that hands back the first chunk immediately, then blocks the second read behind a
+    /// gate — modeling a slow upstream copy that has already flushed some bytes to the
+    /// destination's temp file but has not yet finished writing.
+    /// </summary>
+    private sealed class PausingReadStream : Stream
+    {
+        private readonly MemoryStream _inner;
+        private readonly TaskCompletionSource _pausedSignal;
+        private readonly SemaphoreSlim _resumeGate;
+        private int _readCount;
+
+        public PausingReadStream(byte[] data, TaskCompletionSource pausedSignal, SemaphoreSlim resumeGate)
+        {
+            _inner = new MemoryStream(data);
+            _pausedSignal = pausedSignal;
+            _resumeGate = resumeGate;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => _inner.Length;
+        public override long Position
+        {
+            get => _inner.Position;
+            set => throw new NotSupportedException();
+        }
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            int callIndex = Interlocked.Increment(ref _readCount);
+            if (callIndex == 2)
+            {
+                _pausedSignal.TrySetResult();
+                await _resumeGate.WaitAsync(cancellationToken);
+            }
+
+            return await _inner.ReadAsync(buffer, cancellationToken);
+        }
+
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 }

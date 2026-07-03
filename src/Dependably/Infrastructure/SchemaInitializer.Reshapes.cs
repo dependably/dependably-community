@@ -101,6 +101,7 @@ public sealed partial class SchemaInitializer
                 checksum_sha256 TEXT,
                 yanked      INTEGER NOT NULL DEFAULT 0,
                 yank_reason TEXT,
+                yanked_at   TEXT,
                 first_fetch INTEGER NOT NULL DEFAULT 0,
                 last_used   TEXT,
                 download_count INTEGER NOT NULL DEFAULT 0,
@@ -114,20 +115,29 @@ public sealed partial class SchemaInitializer
                 upstream_integrity_algorithm TEXT,
                 filename    TEXT,
                 deprecation_checked_at TEXT,
+                revoked_at  TEXT,
                 has_install_script INTEGER NOT NULL DEFAULT 0,
                 install_script_kind TEXT,
                 provenance_status TEXT,
                 provenance_signer TEXT,
+                manifest_json TEXT,
                 created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                updated_at  TEXT,
                 UNIQUE (package_id, version)
             );
             INSERT INTO package_versions_new
+                (id, package_id, version, purl, blob_key, size_bytes, checksum_sha256, yanked,
+                 yank_reason, yanked_at, first_fetch, last_used, download_count, vuln_checked_at,
+                 manual_block_state, deprecated, origin, published_at, checksum_sha1,
+                 upstream_integrity_value, upstream_integrity_algorithm, filename,
+                 deprecation_checked_at, revoked_at, has_install_script, install_script_kind,
+                 provenance_status, provenance_signer, manifest_json, created_at, updated_at)
             SELECT id, package_id, version, purl, blob_key, size_bytes, checksum_sha256, yanked,
-                   yank_reason, first_fetch, last_used, download_count, vuln_checked_at,
+                   yank_reason, yanked_at, first_fetch, last_used, download_count, vuln_checked_at,
                    manual_block_state, deprecated, origin, published_at, checksum_sha1,
                    upstream_integrity_value, upstream_integrity_algorithm, filename,
-                   deprecation_checked_at, has_install_script, install_script_kind,
-                   provenance_status, provenance_signer, created_at
+                   deprecation_checked_at, revoked_at, has_install_script, install_script_kind,
+                   provenance_status, provenance_signer, manifest_json, created_at, updated_at
             FROM package_versions;
             DROP TABLE package_versions;
             ALTER TABLE package_versions_new RENAME TO package_versions;

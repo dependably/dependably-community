@@ -11,8 +11,13 @@ namespace Dependably.Infrastructure;
 public sealed class TenantArtifactAccessRepository
 {
     private readonly IMetadataStore _db;
+    private readonly DownloadCountWriter? _downloadCountWriter;
 
-    public TenantArtifactAccessRepository(IMetadataStore db) { _db = db; }
+    public TenantArtifactAccessRepository(IMetadataStore db, DownloadCountWriter? downloadCountWriter = null)
+    {
+        _db = db;
+        _downloadCountWriter = downloadCountWriter;
+    }
 
     /// <summary>
     /// Records access for <paramref name="orgId"/> on <paramref name="cacheArtifactId"/>.
@@ -56,6 +61,32 @@ public sealed class TenantArtifactAccessRepository
                 last_used        = excluded.last_used,
                 download_count   = tenant_artifact_access.download_count + 1
             """, new { orgId, cacheArtifactId, at });
+    }
+
+    /// <summary>
+    /// Records a proxy cache-hit download tick without a synchronous write on the request
+    /// path. The row is guaranteed to already exist (seeded durably by
+    /// <see cref="UpsertStateAsync"/> at first-fetch), so a hit never needs the insert branch —
+    /// only the conflict-branch <c>last_used</c>/<c>download_count</c> bump, which the
+    /// <see cref="DownloadCountWriter"/> drainer applies in its aggregated batch.
+    /// When no writer is wired (e.g. a caller running without the hosted drainer), falls back
+    /// to the synchronous <see cref="UpsertStateAsync"/> so the counter is never silently lost.
+    /// last_used freshness for cache eviction tolerates the drainer's flush interval (up to
+    /// <see cref="DownloadCountWriterHostedService.MaxFlushInterval"/>) — eviction sweeps run
+    /// on a much coarser cadence, so a delay of tens to hundreds of milliseconds never causes a
+    /// recently-served artifact to be evicted as stale.
+    /// </summary>
+    public async Task RecordDownloadHitAsync(
+        string orgId, string cacheArtifactId, DateTimeOffset at, CancellationToken ct = default)
+    {
+        if (_downloadCountWriter is not null)
+        {
+            _downloadCountWriter.TryEnqueue(
+                new DownloadCountRecord(VersionId: null, Purl: null, OrgId: orgId, CacheArtifactId: cacheArtifactId));
+            return;
+        }
+
+        await UpsertStateAsync(orgId, cacheArtifactId, at, ct);
     }
 
     /// <summary>

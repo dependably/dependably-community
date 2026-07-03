@@ -1,9 +1,11 @@
 using Dapper;
 using Dependably.Api;
+using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
+using Microsoft.Extensions.Configuration;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -236,6 +238,64 @@ public sealed class ClaimsControllerUnitTests
         var result = await b.ClaimsController.Release("npm", "never", "x", CancellationToken.None);
         int? status = (result as IStatusCodeActionResult)?.StatusCode;
         Assert.Equal(StatusCodes.Status404NotFound, status);
+    }
+
+    // ── Name canonicalization + ecosystem vocabulary ─────────────────────────
+
+    [Fact]
+    public async Task Create_PyPiNonCanonicalName_HonoredByResolverUnderPep503Name()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        // Operator claims an internal PyPI package by the dotted/underscored name Python uses.
+        var created = await b.ClaimsController.Create(
+            new CreateClaimRequest("pypi", "Foo.Bar_baz", "local_only", "close dep-confusion"),
+            CancellationToken.None);
+        Assert.IsType<CreatedResult>(created);
+
+        // Every PyPI enforcement site resolves by the PEP 503 name; the claim must match it.
+        var resolver = new ClaimResolver(
+            new ClaimRepository(b.Db), new AirGapMode(new ConfigurationBuilder().Build()));
+        var eff = await resolver.ResolveAsync(b.PrimaryOrgId, "pypi", "foo-bar-baz", CancellationToken.None);
+
+        Assert.Equal(ClaimStateMachine.LocalOnly, eff.State);
+        Assert.False(eff.IsImplicit); // matched the explicit row, not the implicit fallback
+        Assert.False(await resolver.IsProxyFetchAllowedAsync(
+            b.PrimaryOrgId, "pypi", "foo-bar-baz", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Create_Cargo_Accepted()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        // Cargo's data paths consult ClaimResolver, so a cargo claim must be creatable — the
+        // first publish of a new crate depends on it under CLAIM_ENFORCEMENT=on.
+        var result = await b.ClaimsController.Create(
+            new CreateClaimRequest("cargo", $"acme-core-{Guid.NewGuid():N}", "local_only", "internal"),
+            CancellationToken.None);
+        Assert.IsType<CreatedResult>(result);
+    }
+
+    [Theory]
+    [InlineData("maven")]
+    [InlineData("rpm")]
+    [InlineData("oci")]
+    public async Task Create_ClaimUnawareEcosystem_Rejected(string eco)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        // maven/rpm/oci have no ClaimResolver call site, so a claim would be a silent no-op —
+        // the API rejects rather than storing a control that nothing enforces.
+        var result = await b.ClaimsController.Create(
+            new CreateClaimRequest(eco, "some-name", "local_only", "test"), CancellationToken.None);
+        Assert.IsType<BadRequestObjectResult>(result);
     }
 
     // ── Auth boundaries ──────────────────────────────────────────────────────

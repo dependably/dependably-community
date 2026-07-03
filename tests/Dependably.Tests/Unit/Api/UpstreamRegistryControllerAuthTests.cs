@@ -101,4 +101,57 @@ public sealed class UpstreamRegistryControllerAuthTests
 
         Assert.IsType<CreatedAtActionResult>(result);
     }
+
+    [Fact]
+    public async Task Bearer_Secret_PlaintextHttpUrl_Returns422()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        s.WithMasterKey();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        // http:// + bearer credential would transit the secret in cleartext — rejected.
+        var req = new AddUpstreamRegistryRequest(
+            Ecosystem: "npm", Url: "http://cache.example/npm", AuthType: "bearer", Secret: "tok-xyz");
+        var result = await b.UpstreamRegistryController.Add(req, CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, ((ObjectResult)result).StatusCode);
+
+        // Nothing was persisted.
+        await using var conn = await b.Db.OpenAsync();
+        int rows = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM upstream_registry WHERE org_id = @org AND ecosystem = 'npm'",
+            new { org = b.PrimaryOrgId });
+        Assert.Equal(0, rows);
+    }
+
+    [Fact]
+    public async Task Basic_Secret_PlaintextHttpUrl_Returns422()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        s.WithMasterKey();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var req = new AddUpstreamRegistryRequest(
+            Ecosystem: "npm", Url: "http://cache.example/npm", AuthType: "basic", Username: "u", Secret: "pw");
+        var result = await b.UpstreamRegistryController.Add(req, CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, ((ObjectResult)result).StatusCode);
+    }
+
+    [Fact]
+    public async Task Anonymous_PlaintextHttpUrl_Persists201()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        // Anonymous http upstreams (internal mirrors) stay allowed — no secret transits.
+        var req = new AddUpstreamRegistryRequest(
+            Ecosystem: "npm", Url: "http://mirror.internal/npm", AuthType: null, Username: null, Secret: null);
+        var result = await b.UpstreamRegistryController.Add(req, CancellationToken.None);
+
+        Assert.IsType<CreatedAtActionResult>(result);
+    }
 }

@@ -54,8 +54,7 @@ public sealed class SystemBannersController : ControllerBase
         int activeCount = await _banners.CountActiveForScopeAsync("system", null, ct);
         if (activeCount >= BannerRepository.MaxActiveBannersPerScope)
         {
-            return _problems.ValidationErrorAction("banners",
-                $"Maximum of {BannerRepository.MaxActiveBannersPerScope} simultaneously active system banners reached.");
+            return _problems.ValidationErrorActionKey("banners", "error.banner.maxActiveSystem", BannerRepository.MaxActiveBannersPerScope);
         }
 
         string? actorId = GetActorId();
@@ -128,10 +127,9 @@ public sealed class SystemBannersController : ControllerBase
     private IActionResult? ValidateBody(string body)
     {
         return string.IsNullOrWhiteSpace(body)
-            ? _problems.ValidationErrorAction("body", "Banner body is required.")
+            ? _problems.ValidationErrorActionKey("body", "error.banner.bodyRequired")
             : body.Length > BannerRepository.MaxBodyLength
-            ? _problems.ValidationErrorAction("body",
-                $"Banner body must not exceed {BannerRepository.MaxBodyLength} characters.")
+            ? _problems.ValidationErrorActionKey("body", "error.banner.bodyTooLong", BannerRepository.MaxBodyLength)
             : null;
     }
 
@@ -141,32 +139,29 @@ public sealed class SystemBannersController : ControllerBase
         {
             if (linkUrl.Length > BannerRepository.MaxLinkUrlLength)
             {
-                return _problems.ValidationErrorAction("linkUrl",
-                    $"Link URL must not exceed {BannerRepository.MaxLinkUrlLength} characters.");
+                return _problems.ValidationErrorActionKey("linkUrl", "error.banner.linkUrlTooLong", BannerRepository.MaxLinkUrlLength);
             }
 
             if (!Uri.TryCreate(linkUrl, UriKind.Absolute, out var uri)
                 || (uri.Scheme != "http" && uri.Scheme != "https"))
             {
-                return _problems.ValidationErrorAction("linkUrl",
-                    "Link URL must use the http or https scheme.");
+                return _problems.ValidationErrorActionKey("linkUrl", "error.banner.linkUrlScheme");
             }
         }
 
         return linkLabel is not null && linkLabel.Length > BannerRepository.MaxLinkLabelLength
-            ? _problems.ValidationErrorAction("linkLabel",
-                $"Link label must not exceed {BannerRepository.MaxLinkLabelLength} characters.")
+            ? _problems.ValidationErrorActionKey("linkLabel", "error.banner.linkLabelTooLong", BannerRepository.MaxLinkLabelLength)
             : null;
     }
 
     private IActionResult? ValidateWindow(string startsAt, string endsAt)
     {
         return !DateTimeOffset.TryParse(startsAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedStart)
-            ? _problems.ValidationErrorAction("startsAt", "startsAt must be a valid ISO-8601 UTC date-time.")
+            ? _problems.ValidationErrorActionKey("startsAt", "error.banner.startsAtInvalid")
             : !DateTimeOffset.TryParse(endsAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedEnd)
-            ? _problems.ValidationErrorAction("endsAt", "endsAt must be a valid ISO-8601 UTC date-time.")
+            ? _problems.ValidationErrorActionKey("endsAt", "error.banner.endsAtInvalid")
             : parsedEnd <= parsedStart
-            ? _problems.ValidationErrorAction("endsAt", "endsAt must be after startsAt.")
+            ? _problems.ValidationErrorActionKey("endsAt", "error.banner.endsAfterStarts")
             : null;
     }
 
@@ -175,14 +170,12 @@ public sealed class SystemBannersController : ControllerBase
         string[] validSeverities = ["info", "warn", "alert"];
         if (!validSeverities.Contains(severity, StringComparer.Ordinal))
         {
-            return _problems.ValidationErrorAction("severity",
-                "severity must be one of: info, warn, alert.");
+            return _problems.ValidationErrorActionKey("severity", "error.banner.severityInvalid");
         }
 
         string[] validRoles = ["all", "member", "admin", "owner", "auditor"];
         return !validRoles.Contains(targetRole, StringComparer.Ordinal)
-            ? _problems.ValidationErrorAction("targetRole",
-                "targetRole must be one of: all, member, admin, owner, auditor.")
+            ? _problems.ValidationErrorActionKey("targetRole", "error.banner.targetRoleInvalid")
             : null;
     }
 }

@@ -82,7 +82,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
 
         if (string.IsNullOrWhiteSpace(req.PurlPattern))
         {
-            return _problems.ValidationErrorAction("purl_pattern", "purl_pattern is required.");
+            return _problems.ValidationErrorActionKey("purl_pattern", "error.allowlist.purlPatternRequired");
         }
 
         string orgId = CurrentTenantId();
@@ -93,7 +93,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
             {
                 id = entry.Id,
                 purl_pattern = entry.PurlPattern,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return CreatedAtAction(nameof(GetAllowlist), null, entry);
     }
@@ -115,7 +115,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
         if (await _allowlist.DeleteAsync(orgId, id, ct) > 0)
         {
             await _audit.LogAsync("allowlist_removed", orgId, GetUserId(),
-                detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
+                detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
         }
 
         return NoContent();
@@ -151,14 +151,14 @@ public sealed class OrgListsController : OrgScopedControllerBase
 
         if (string.IsNullOrWhiteSpace(req.Pattern))
         {
-            return _problems.ValidationErrorAction("pattern", "pattern is required.");
+            return _problems.ValidationErrorActionKey("pattern", "error.list.patternRequired");
         }
 
         // Length-cap: bounds worst-case compile + match cost. 512 chars is generous for
         // package-name / version globs and far below pathological-regex territory.
         if (req.Pattern.Length > AllowlistPatternMaxLength)
         {
-            return _problems.ValidationErrorAction("pattern", "Pattern must be 512 characters or fewer.");
+            return _problems.ValidationErrorActionKey("pattern", "error.list.patternTooLong512");
         }
 
         // Reject patterns that fail to compile within 2 s — bounds the worst-case
@@ -169,7 +169,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
         // length-capped above, and compiled with a 2 s match-timeout that propagates to
         // every downstream Match invocation.
         try { _ = new System.Text.RegularExpressions.Regex(req.Pattern, System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(2)); }
-        catch { return _problems.ValidationErrorAction("pattern", "Pattern is not a valid regular expression."); }
+        catch { return _problems.ValidationErrorActionKey("pattern", "error.list.patternInvalidRegex"); }
 
         string orgId = CurrentTenantId();
         var entry = await _blocklist.AddAsync(orgId, req.Pattern, ct);
@@ -179,7 +179,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
             {
                 id = entry.Id,
                 pattern = entry.Pattern,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return CreatedAtAction(nameof(GetBlocklist), null, entry);
     }
@@ -201,7 +201,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
         if (await _blocklist.DeleteAsync(orgId, id, ct) > 0)
         {
             await _audit.LogAsync("blocklist_removed", orgId, GetUserId(),
-                detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
+                detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
         }
 
         return NoContent();
@@ -238,29 +238,27 @@ public sealed class OrgListsController : OrgScopedControllerBase
         string ecosystem = (req.Ecosystem ?? "").Trim().ToLowerInvariant();
         if (!Protocol.ReservedNamespaceService.SupportedEcosystems.Contains(ecosystem))
         {
-            return _problems.ValidationErrorAction("ecosystem",
-                "ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang.");
+            return _problems.ValidationErrorActionKey("ecosystem", "error.list.ecosystemInvalidProxy");
         }
 
         string pattern = (req.Pattern ?? "").Trim();
         if (pattern.Length == 0)
         {
-            return _problems.ValidationErrorAction("pattern", "pattern is required.");
+            return _problems.ValidationErrorActionKey("pattern", "error.list.patternRequired");
         }
 
         // Length-cap keeps patterns in package-name territory; matching is a plain prefix
         // compare so this is a sanity bound, not a ReDoS guard.
         if (pattern.Length > BlocklistPatternMaxLength)
         {
-            return _problems.ValidationErrorAction("pattern", "Pattern must be 256 characters or fewer.");
+            return _problems.ValidationErrorActionKey("pattern", "error.list.patternTooLong256");
         }
 
         // Globs are trailing-only: '*' anywhere else would silently match nothing.
         int star = pattern.IndexOf('*');
         if (star >= 0 && star != pattern.Length - 1)
         {
-            return _problems.ValidationErrorAction("pattern",
-                "'*' is only supported as the final character (trailing glob).");
+            return _problems.ValidationErrorActionKey("pattern", "error.list.trailingGlobOnly");
         }
 
         string orgId = CurrentTenantId();
@@ -272,7 +270,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
                 id = entry.Id,
                 ecosystem = entry.Ecosystem,
                 pattern = entry.Pattern,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return CreatedAtAction(nameof(GetReservedNamespaces), null, entry);
     }
@@ -293,7 +291,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
         if (await _reserved.DeleteAsync(orgId, id, ct) > 0)
         {
             await _audit.LogAsync("reserved_namespace_removed", orgId, GetUserId(),
-                detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
+                detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
         }
 
         return NoContent();
@@ -331,19 +329,18 @@ public sealed class OrgListsController : OrgScopedControllerBase
         string ecosystem = (req.Ecosystem ?? "").Trim().ToLowerInvariant();
         if (!Protocol.InstallScriptAllowlistService.SupportedEcosystems.Contains(ecosystem))
         {
-            return _problems.ValidationErrorAction("ecosystem",
-                "ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang, rpm, oci.");
+            return _problems.ValidationErrorActionKey("ecosystem", "error.list.ecosystemInvalidDenylist");
         }
 
         string name = (req.Name ?? "").Trim();
         if (name.Length == 0)
         {
-            return _problems.ValidationErrorAction("name", "name is required.");
+            return _problems.ValidationErrorActionKey("name", "error.list.nameRequired");
         }
 
         if (name.Length > InstallScriptNameMaxLength)
         {
-            return _problems.ValidationErrorAction("name", "name must be 512 characters or fewer.");
+            return _problems.ValidationErrorActionKey("name", "error.list.nameTooLong");
         }
 
         // version_pattern is optional; validate length when present.
@@ -355,8 +352,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
 
         if (versionPattern is not null && versionPattern.Length > InstallScriptVersionPatternMaxLength)
         {
-            return _problems.ValidationErrorAction("version_pattern",
-                "version_pattern must be 128 characters or fewer.");
+            return _problems.ValidationErrorActionKey("version_pattern", "error.list.versionPatternTooLong");
         }
 
         // Globs are trailing-only: '*' anywhere else would silently match nothing useful.
@@ -365,8 +361,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
             int star = versionPattern.IndexOf('*');
             if (star >= 0 && star != versionPattern.Length - 1)
             {
-                return _problems.ValidationErrorAction("version_pattern",
-                    "'*' is only supported as the final character (trailing glob).");
+                return _problems.ValidationErrorActionKey("version_pattern", "error.list.trailingGlobOnly");
             }
         }
 
@@ -381,7 +376,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
                 ecosystem = entry.Ecosystem,
                 name = entry.Name,
                 version_pattern = entry.VersionPattern,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return CreatedAtAction(nameof(GetInstallScriptAllowlist), null, entry);
     }
@@ -403,7 +398,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
         if (await _installScriptAllowlist.DeleteAsync(orgId, id, ct) > 0)
         {
             await _audit.LogAsync("install_script_allowlist_removed", orgId, GetUserId(),
-                detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
+                detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
         }
 
         return NoContent();

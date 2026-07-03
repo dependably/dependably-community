@@ -24,6 +24,12 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
     // pass to a handful of calls for a typical instance.
     private const int EpssBatchSize = 100;
 
+    // The KEV catalog is a few megabytes today and grows slowly as CISA adds entries; the EPSS
+    // batch responses are smaller still (100 CVEs per call). A malicious or compromised feed
+    // endpoint should not be able to force unbounded buffering, so both reads share a generous
+    // cap well above any expected catalog size without matching the tighter package-metadata cap.
+    internal const long MaxFeedResponseBytes = 64L * 1024 * 1024; // 64 MB
+
     private readonly IHttpClientFactory _httpFactory;
     private readonly IConfiguration _config;
     private readonly ILogger<HttpThreatFeedSource> _logger;
@@ -43,10 +49,12 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
         string url = _config["KEV_FEED_URL"] ?? DefaultKevFeedUrl;
         var http = _httpFactory.CreateClient("threatfeed");
 
-        using var response = await http.GetAsync(url, ct);
+        // ResponseHeadersRead is load-bearing: the default (ResponseContentRead) would have
+        // HttpClient buffer the whole body before the cap check below ever runs, defeating it.
+        using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+        byte[] body = await UpstreamClient.ReadBodyCappedAsync(response, MaxFeedResponseBytes, url, ct);
+        using var doc = JsonDocument.Parse(body);
 
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int skipped = 0;
@@ -93,10 +101,11 @@ public sealed class HttpThreatFeedSource : IThreatFeedSource
             try
             {
                 string url = $"{baseUrl}?cve={Uri.EscapeDataString(string.Join(",", batch))}";
-                using var response = await http.GetAsync(url, ct);
+                // ResponseHeadersRead is load-bearing here too — see GetKevCveIdsAsync.
+                using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
                 response.EnsureSuccessStatusCode();
-                await using var stream = await response.Content.ReadAsStreamAsync(ct);
-                using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+                byte[] body = await UpstreamClient.ReadBodyCappedAsync(response, MaxFeedResponseBytes, url, ct);
+                using var doc = JsonDocument.Parse(body);
 
                 if (doc.RootElement.TryGetProperty("data", out var data)
                     && data.ValueKind == JsonValueKind.Array)

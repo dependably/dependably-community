@@ -186,7 +186,7 @@
             <span class="text-muted" aria-hidden="true">—</span>
           {/if}
         </td>
-        <td class="text-muted">{$formatDateShort(u.joinedAt)}</td>
+        <td class="text-muted date-cell">{$formatDateShort(u.joinedAt)}</td>
         <td>
           <div class="row-actions">
             {#if editingUserId === u.userId}
@@ -217,8 +217,8 @@
     >
       <tr>
         <td>{inv.email}</td>
-        <td class="text-muted">{$formatDateShort(inv.createdAt)}</td>
-        <td>{$formatDateShort(inv.expiresAt)}</td>
+        <td class="text-muted date-cell">{$formatDateShort(inv.createdAt)}</td>
+        <td class="date-cell">{$formatDateShort(inv.expiresAt)}</td>
         <td>
           {#if inv.acceptedAt}<span class="badge success">{$t('users.invites.status.accepted')}</span>
           {:else if inviteExpired(inv)}<span class="badge expired">{$t('users.invites.status.expired')}</span>
@@ -237,6 +237,8 @@
   .role-select { padding: 2px 6px; }
   .mfa-cell { text-align: center; }
   .mfa-check { display: inline-block; color: var(--success); vertical-align: middle; }
+  /* Dates read as one token — never wrap "May 18, 2026" onto two lines. */
+  .date-cell { white-space: nowrap; }
 </style>
 
 {#if showInvite}

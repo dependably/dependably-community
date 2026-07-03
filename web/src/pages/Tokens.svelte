@@ -63,7 +63,7 @@
   $: columns = [
     { key: 'id',          label: $t('tokens.columns.id'),          sortable: false, width: '100px' },
     { key: 'description', label: $t('tokens.columns.description'), sortable: true },
-    { key: 'scope',       label: $t('tokens.columns.scope'),       sortable: true,  width: '80px' },
+    { key: 'scope',       label: $t('tokens.columns.scope'),       sortable: true,  width: '120px' },
     { key: 'createdAt',   label: $t('tokens.columns.created'),     sortable: true,  width: '110px', defaultDir: 'desc' },
     { key: 'expiresAt',   label: $t('tokens.columns.expires'),     sortable: true,  width: '130px' },
     { key: 'lastUsedAt',  label: $t('tokens.columns.lastUsed'),    sortable: true,  width: '130px' },

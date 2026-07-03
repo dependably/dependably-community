@@ -227,6 +227,10 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
         var byVersionId = new Dictionary<string, int>(StringComparer.Ordinal);
         // Key is (orgId, purl) so each tenant's counter advances independently.
         var byOrgPurl = new Dictionary<(string OrgId, string Purl), int>();
+        // Key is (orgId, cacheArtifactId) — the direct-id analog of byOrgPurl, used by
+        // cache-hit serve paths that already hold the cache_artifact id and would otherwise
+        // need an extra purl lookup just to enqueue the counter.
+        var byOrgCacheArtifactId = new Dictionary<(string OrgId, string CacheArtifactId), int>();
         foreach (var rec in records)
         {
             if (rec.VersionId is not null)
@@ -239,6 +243,12 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
                 var key = (rec.OrgId, rec.Purl);
                 byOrgPurl.TryGetValue(key, out int current);
                 byOrgPurl[key] = current + 1;
+            }
+            else if (rec.CacheArtifactId is not null && rec.OrgId is not null)
+            {
+                var key = (rec.OrgId, rec.CacheArtifactId);
+                byOrgCacheArtifactId.TryGetValue(key, out int current);
+                byOrgCacheArtifactId[key] = current + 1;
             }
         }
 
@@ -276,6 +286,25 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
                   )
                 """,
                 new { n = kv.Value, now, orgId, purl },
+                transaction: tx);
+        }
+
+        foreach (var kv in byOrgCacheArtifactId)
+        {
+            string orgId = kv.Key.OrgId;
+            string cacheArtifactId = kv.Key.CacheArtifactId;
+            // Cache-hit serve paths tick this counter directly by id — the row is guaranteed
+            // to exist (seeded durably at first-fetch), so this is always the conflict-branch
+            // update of TenantArtifactAccessRepository.UpsertStateAsync's ON CONFLICT arm.
+            await conn.ExecuteAsync(
+                """
+                UPDATE tenant_artifact_access
+                SET download_count = download_count + @n,
+                    last_used = @now
+                WHERE org_id = @orgId
+                  AND cache_artifact_id = @cacheArtifactId
+                """,
+                new { n = kv.Value, now, orgId, cacheArtifactId },
                 transaction: tx);
         }
 

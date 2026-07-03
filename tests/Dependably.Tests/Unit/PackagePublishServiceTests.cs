@@ -1,6 +1,8 @@
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Publish;
+using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -8,6 +10,7 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
 
 namespace Dependably.Tests.Unit;
 
@@ -45,7 +48,8 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             NullLogger<Dependably.Infrastructure.Audit.AuditEmitter>.Instance, cfg,
             // SIEM queue is opt-in; empty service provider yields a null forwarder
             // and the emit path becomes a no-op for SIEM, which is correct for unit tests.
-            new Microsoft.Extensions.DependencyInjection.ServiceCollection().BuildServiceProvider(), _clock);
+            new Microsoft.Extensions.DependencyInjection.ServiceCollection().BuildServiceProvider(),
+            new OrgRepository(_db), _clock);
         // Tier-shared bootstrap: PackagePublishService writes to Registry; in unit tests
         // both tiers point to the same in-memory store. Wrap in the community resolver so
         // the status + provisioning gates run on the real path.
@@ -59,9 +63,12 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             new VulnerabilityRepository(_db, _clock), audit, cfg,
             new NoAirGap(),
             NullLogger<VulnerabilityScanService>.Instance,
-            _clock));
+            _clock,
+            new OrgRepository(_db),
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
+            new Dependably.Infrastructure.Edge.EdgePublishGuard(TestEdgeMode.Disabled()),
             auditor, scanner, NullLogger<PackagePublishService>.Instance);
     }
 
@@ -669,7 +676,8 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             new Dependably.Infrastructure.Audit.AuditEventRepository(_db),
             new Microsoft.AspNetCore.Http.HttpContextAccessor(),
             NullLogger<Dependably.Infrastructure.Audit.AuditEmitter>.Instance, cfg,
-            new Microsoft.Extensions.DependencyInjection.ServiceCollection().BuildServiceProvider(), _clock);
+            new Microsoft.Extensions.DependencyInjection.ServiceCollection().BuildServiceProvider(),
+            new OrgRepository(_db), _clock);
         var tiered = new TieredBlobStorage(_blobs, registry);
         var storage = new GlobalTenantStorageResolver(_db, tiered);
         _osv ??= new RecordingOsvSource();
@@ -678,9 +686,12 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             new VulnerabilityRepository(_db, _clock), audit, cfg,
             new NoAirGap(),
             NullLogger<VulnerabilityScanService>.Instance,
-            _clock));
+            _clock,
+            new OrgRepository(_db),
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
         return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
+            new Dependably.Infrastructure.Edge.EdgePublishGuard(TestEdgeMode.Disabled()),
             auditor, scanner, NullLogger<PackagePublishService>.Instance);
     }
 

@@ -69,6 +69,42 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// </summary>
     public string? MasterKey { get; init; }
 
+    /// <summary>
+    /// When set (with <see cref="DeploymentMode"/> = <c>edge</c>), configures the edge node's
+    /// sole-upstream master URL and token. First boot seeds one <c>upstream_registry</c> row per
+    /// ecosystem pointing at this URL. Tests point it at <see cref="MockUpstream"/>.
+    /// </summary>
+    public string? EdgeMasterUrl { get; init; }
+
+    /// <summary>The edge reader token presented to the master; seeded into the upstream rows.</summary>
+    public string? EdgeMasterToken { get; init; }
+
+    /// <summary>
+    /// Inbound edge client access token (<c>EDGE_ACCESS_TOKEN</c>). When set on an edge factory,
+    /// first boot seeds it as a reader service token and disables anonymous pull; when null, the
+    /// edge runs in anonymous mode. Only applied when <see cref="DeploymentMode"/> is <c>edge</c>.
+    /// </summary>
+    public string? EdgeAccessToken { get; init; }
+
+    /// <summary>
+    /// Optional Serilog sink registered as a singleton before the host is built. The production
+    /// logging pipeline calls <c>ReadFrom.Services</c>, so a registered <c>ILogEventSink</c> is
+    /// wired into the real Serilog logger — letting a test capture structured log events (e.g. the
+    /// edge anonymous-mode startup warning) without a bespoke logging harness.
+    /// </summary>
+    public Serilog.Core.ILogEventSink? LogSink { get; init; }
+
+    /// <summary>Default edge reader token used when <see cref="DeploymentMode"/> is edge and no
+    /// explicit token is set. Edge integration tests match on this exact Bearer value.</summary>
+    public const string DefaultEdgeToken = "edge-reader-tok-123";
+
+    /// <summary>
+    /// Instance-level <c>Rpm:UpstreamMode</c> env value ('passthrough' | 'merged'). Null leaves the
+    /// production default (passthrough) in place. Lets a test exercise the per-org
+    /// <c>rpm_upstream_mode</c> override composing with a non-default instance env value.
+    /// </summary>
+    public string? RpmUpstreamMode { get; init; }
+
     protected override IHost CreateHost(IHostBuilder _)
     {
         var builder = WebApplication.CreateBuilder();
@@ -87,9 +123,29 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
             // Null entry is treated as absent by IConfiguration, so the protector stays
             // unconfigured unless a test opts in by setting MasterKey.
             ["DEPENDABLY_MASTER_KEY"] = MasterKey,
+            // Edge-mode master enrollment. In edge mode the master defaults to this factory's own
+            // WireMock instance (its URL is only known after the server starts, so it is resolved
+            // here rather than in an init property); null entries are absent for non-edge hosts.
+            ["EDGE_MASTER_URL"] = DeploymentMode == "edge"
+                ? EdgeMasterUrl ?? MockUpstream.Urls[0]
+                : EdgeMasterUrl,
+            ["EDGE_MASTER_TOKEN"] = DeploymentMode == "edge"
+                ? EdgeMasterToken ?? DefaultEdgeToken
+                : EdgeMasterToken,
+            // Inbound edge client auth: null keeps the edge anonymous; a value seeds a reader
+            // token and disables anonymous pull. Only meaningful in edge mode.
+            ["EDGE_ACCESS_TOKEN"] = DeploymentMode == "edge" ? EdgeAccessToken : null,
+            ["Rpm:UpstreamMode"] = RpmUpstreamMode,
         });
 
         Program.ConfigureBuilder(builder);
+
+        // Register the optional capture sink AS ILogEventSink so Serilog's ReadFrom.Services
+        // wires it into this host's logger (the interface type is what the resolver looks up).
+        if (LogSink is not null)
+        {
+            builder.Services.AddSingleton<Serilog.Core.ILogEventSink>(LogSink);
+        }
 
         if (FrozenClock is not null)
         {
@@ -590,6 +646,20 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// </summary>
     public async Task<string> PushRpmPackage(string org = "default")
     {
+        var response = await UploadRpm(org);
+        response.EnsureSuccessStatusCode();
+        response.Dispose();
+
+        // The NEVRA filename is: {name}-{version}-{release}.{arch}.rpm
+        return "testpkg-1.0-1.x86_64.rpm";
+    }
+
+    /// <summary>
+    /// Uploads a minimal valid RPM and returns the raw response without asserting success, so
+    /// callers can inspect a refusal status (e.g. the passthrough-mode 409 publish guard).
+    /// </summary>
+    public async Task<HttpResponseMessage> UploadRpm(string org = "default")
+    {
         string token = await CreateToken("push", org);
         byte[] bytes = BuildMinimalRpm();
 
@@ -598,11 +668,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", credentials);
 
         using var content = new ByteArrayContent(bytes);
-        var response = await client.PutAsync("/rpm/upload", content);
-        response.EnsureSuccessStatusCode();
-
-        // The NEVRA filename is: {name}-{version}-{release}.{arch}.rpm
-        return "testpkg-1.0-1.x86_64.rpm";
+        return await client.PutAsync("/rpm/upload", content);
     }
 
     // Builds the minimum valid RPM binary that passes RpmArtifactValidator.Validate:

@@ -39,8 +39,6 @@ public sealed partial class SystemController : ControllerBase
     // Storage utilisation thresholds for per-tenant health signals.
     private const double StorageWarnFraction = 0.90;
 
-    private static readonly JsonSerializerOptions WebJsonOptions = new(JsonSerializerDefaults.Web);
-
     // Random byte count for generated admin passwords (produces a base64 string ≈ 22 chars).
     private const int GeneratedPasswordByteLength = 16;
 
@@ -143,36 +141,36 @@ public sealed partial class SystemController : ControllerBase
     {
         if (req is null)
         {
-            return _problems.ValidationErrorAction("body", "Body is required.");
+            return _problems.ValidationErrorActionKey("body", "error.common.bodyRequired");
         }
 
         var extraReserved = ReservedSlugs.ParseExtra(_config["RESERVED_SUBDOMAINS"]);
         string? slug = ReservedSlugs.Normalize(req.Slug, extraReserved);
         if (slug is null)
         {
-            return _problems.ValidationErrorAction("slug", "Slug is missing, reserved, or contains invalid characters.");
+            return _problems.ValidationErrorActionKey("slug", "error.org.slugInvalid");
         }
 
         if (string.IsNullOrWhiteSpace(req.OwnerEmail) || !req.OwnerEmail.Contains('@'))
         {
-            return _problems.ValidationErrorAction("ownerEmail", "Valid owner email is required.");
+            return _problems.ValidationErrorActionKey("ownerEmail", "error.system.ownerEmailInvalid");
         }
 
         string orgId;
         string ownerPassword;
         await using (var conn = await _db.OpenAsync(ct))
         {
-            await conn.ExecuteAsync("BEGIN IMMEDIATE");
+            await conn.BeginSerializedAsync(_db.Provider, ct);
             try
             {
                 // Slug uniqueness check before commit so the response is a clean 409 instead of
-                // a SQLite UNIQUE constraint exception bubbling up.
+                // a UNIQUE constraint exception bubbling up.
                 int existing = await conn.ExecuteScalarAsync<int>(
                     "SELECT COUNT(*) FROM orgs WHERE slug = @slug", new { slug });
                 if (existing > 0)
                 {
                     await conn.ExecuteAsync("ROLLBACK");
-                    return _problems.ConflictAction("A tenant with that slug already exists.");
+                    return _problems.ConflictActionKey("error.org.slugConflict");
                 }
 
                 // Email uniqueness is per-tenant — the same email can be a separate account in
@@ -218,7 +216,7 @@ public sealed partial class SystemController : ControllerBase
             action: "tenant.created",
             actorId: actor,
             orgId: orgId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { slug, ownerEmail = req.OwnerEmail }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { slug, ownerEmail = req.OwnerEmail }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return Ok(new
@@ -253,7 +251,7 @@ public sealed partial class SystemController : ControllerBase
             action: "tenant.deleted",
             actorId: actor,
             orgId: org.Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { slug }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { slug }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return NoContent();
@@ -273,13 +271,12 @@ public sealed partial class SystemController : ControllerBase
     {
         if (req is null)
         {
-            return _problems.ValidationErrorAction("body", "Body is required.");
+            return _problems.ValidationErrorActionKey("body", "error.common.bodyRequired");
         }
 
         if (req.QuotaBytes is long bytes && bytes <= 0)
         {
-            return _problems.ValidationErrorAction("quotaBytes",
-                "Quota must be a positive number of bytes, or null to clear.");
+            return _problems.ValidationErrorActionKey("quotaBytes", "error.system.quotaInvalid");
         }
 
         var org = await _orgs.GetBySlugAsync(slug, ct: ct);
@@ -301,7 +298,7 @@ public sealed partial class SystemController : ControllerBase
                 slug,
                 quotaBytes = req.QuotaBytes,
                 priorQuotaBytes = org.StorageQuotaBytes,
-            }),
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return Ok(new { slug, quotaBytes = req.QuotaBytes });
@@ -324,13 +321,12 @@ public sealed partial class SystemController : ControllerBase
     {
         if (req is null)
         {
-            return _problems.ValidationErrorAction("body", "Body is required.");
+            return _problems.ValidationErrorActionKey("body", "error.common.bodyRequired");
         }
 
         if (req.Status is not ("active" or "suspended"))
         {
-            return _problems.ValidationErrorAction("status",
-                "Must be 'active' or 'suspended'. ('archived' and 'deleting' are enterprise-only.)");
+            return _problems.ValidationErrorActionKey("status", "error.system.tenantStatusInvalid");
         }
 
         var org = await _orgs.GetBySlugAsync(slug, ct: ct);
@@ -354,7 +350,7 @@ public sealed partial class SystemController : ControllerBase
             action: "tenant.status_changed",
             actorId: actor,
             orgId: org.Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { slug, status = req.Status, priorStatus }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { slug, status = req.Status, priorStatus }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return NoContent();
@@ -376,7 +372,7 @@ public sealed partial class SystemController : ControllerBase
 
         if (org.DeletedAt is null)
         {
-            return _problems.ConflictAction("Tenant is already active.");
+            return _problems.ConflictActionKey("error.system.tenantAlreadyActive");
         }
 
         bool restored = await _orgs.RestoreOrgAsync(org.Id, ct);
@@ -393,7 +389,7 @@ public sealed partial class SystemController : ControllerBase
             action: "tenant.restored",
             actorId: actor,
             orgId: org.Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { slug }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { slug }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return NoContent();
@@ -413,7 +409,7 @@ public sealed partial class SystemController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(email) && string.IsNullOrWhiteSpace(tenantSlug))
         {
-            return _problems.ValidationErrorAction("query", "Provide at least one of: email, tenantSlug.");
+            return _problems.ValidationErrorActionKey("query", "error.system.lookupQueryRequired");
         }
 
         limit = Math.Clamp(limit, 1, MaxSystemAdminPageSize);
@@ -680,7 +676,7 @@ public sealed partial class SystemController : ControllerBase
 
         try
         {
-            var stats = JsonSerializer.Deserialize<OrgStats>(statsJson, WebJsonOptions);
+            var stats = JsonSerializer.Deserialize<OrgStats>(statsJson, JsonContracts.Web);
             if (stats is not null)
             {
                 if (stats.QuarantinePending > 0)
@@ -733,7 +729,7 @@ public sealed partial class SystemController : ControllerBase
         {
             if (!InstanceSettingDefaults.AllowedKeys.Contains(key))
             {
-                return _problems.ValidationErrorAction("settings", $"Unknown setting key: {key}");
+                return _problems.ValidationErrorActionKey("settings", "error.system.unknownSettingKey", key);
             }
         }
 
@@ -751,7 +747,7 @@ public sealed partial class SystemController : ControllerBase
             {
                 keys = settings.Keys.ToArray(),
                 values = settings,
-            }),
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return NoContent();
@@ -768,12 +764,12 @@ public sealed partial class SystemController : ControllerBase
     {
         if (req is null || string.IsNullOrWhiteSpace(req.TenantSlug))
         {
-            return _problems.ValidationErrorAction("tenantSlug", "tenantSlug is required.");
+            return _problems.ValidationErrorActionKey("tenantSlug", "error.system.tenantSlugRequired");
         }
 
         if (req.AccountStatus is not ("active" or "locked" or "disabled"))
         {
-            return _problems.ValidationErrorAction("accountStatus", "Must be 'active', 'locked', or 'disabled'.");
+            return _problems.ValidationErrorActionKey("accountStatus", "error.admin.accountStatusInvalid");
         }
 
         bool ok = await _orgs.SetUserAccountStatusAsync(email, req.TenantSlug, req.AccountStatus, ct);
@@ -787,7 +783,7 @@ public sealed partial class SystemController : ControllerBase
         await _audit.LogSystemAsync(
             action: "system_admin.account_status_changed",
             actorId: actor,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { email, tenantSlug = req.TenantSlug, accountStatus = req.AccountStatus }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { email, tenantSlug = req.TenantSlug, accountStatus = req.AccountStatus }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return NoContent();
@@ -805,7 +801,7 @@ public sealed partial class SystemController : ControllerBase
     {
         if (req is null || string.IsNullOrWhiteSpace(req.TenantSlug))
         {
-            return _problems.ValidationErrorAction("tenantSlug", "tenantSlug is required.");
+            return _problems.ValidationErrorActionKey("tenantSlug", "error.system.tenantSlugRequired");
         }
 
         var result = await _orgs.IssuePasswordResetAsync(email, req.TenantSlug, ct);
@@ -819,7 +815,7 @@ public sealed partial class SystemController : ControllerBase
         await _audit.LogSystemAsync(
             action: "system_admin.password_reset",
             actorId: actor,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { email, tenantSlug = req.TenantSlug }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { email, tenantSlug = req.TenantSlug }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return Ok(new
@@ -846,7 +842,7 @@ public sealed partial class SystemController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(req.CurrentPassword))
         {
-            return _problems.ValidationErrorAction("currentPassword", "Current password is required.");
+            return _problems.ValidationErrorActionKey("currentPassword", "error.password.currentRequired");
         }
 
         var verdict = _passwordPolicy.Evaluate(req.NewPassword, new Dependably.Security.PasswordContext());
@@ -857,7 +853,7 @@ public sealed partial class SystemController : ControllerBase
 
         if (req.NewPassword == req.CurrentPassword)
         {
-            return _problems.ValidationErrorAction("newPassword", "New password must differ from current.");
+            return _problems.ValidationErrorActionKey("newPassword", "error.password.mustDiffer");
         }
 
         string? sub = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
@@ -936,8 +932,7 @@ public sealed partial class SystemController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(req.Language) || !LanguageCodes.IsSupported(req.Language))
         {
-            return _problems.ValidationErrorAction("language",
-                $"Unsupported language code. Allowed: {string.Join(", ", LanguageCodes.Supported)}.");
+            return _problems.ValidationErrorActionKey("language", "error.system.unsupportedLanguage", string.Join(", ", LanguageCodes.Supported));
         }
 
         string? sub = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
@@ -952,7 +947,7 @@ public sealed partial class SystemController : ControllerBase
         await _audit.LogSystemAsync(
             action: "system_admin.language_changed",
             actorId: sub,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { language = req.Language }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { language = req.Language }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return NoContent();
@@ -991,7 +986,7 @@ public sealed partial class SystemController : ControllerBase
     {
         if (req is null)
         {
-            return _problems.ValidationErrorAction("body", "Request body required.");
+            return _problems.ValidationErrorActionKey("body", "error.common.requestBodyRequired");
         }
 
         var resolved = await access.ResolveAsync(ct);
@@ -1012,7 +1007,7 @@ public sealed partial class SystemController : ControllerBase
             string? invalid = Dependably.Security.MetricsAccessEditing.FindInvalidEntry(req.AllowedIps, warnings);
             if (invalid is not null)
             {
-                return _problems.ValidationErrorAction("allowedIps", $"\"{invalid}\" is not a valid IP or CIDR.");
+                return _problems.ValidationErrorActionKey("allowedIps", "error.common.invalidIpOrCidr", invalid);
             }
         }
 
@@ -1040,7 +1035,7 @@ public sealed partial class SystemController : ControllerBase
             {
                 enabled = req.Enabled,
                 allowedIps = req.AllowedIps,
-            }),
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return Ok(new { warnings });

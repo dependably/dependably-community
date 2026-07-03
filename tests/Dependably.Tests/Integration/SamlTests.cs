@@ -238,7 +238,10 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     /// <summary>
     /// An existing admin account is blocked from silent email-link without the
     /// idp_can_assign_admin opt-in (privilege-escalation gate). With the opt-in set, the
-    /// link is permitted and the existing admin role is preserved.
+    /// link is permitted and the existing admin role is preserved. Seeded passwordless
+    /// (SSO-only) so this isolates the role-ceiling opt-in mechanism from the separate
+    /// password-backed-account guard covered by
+    /// <see cref="LoginSaml_ExistingPasswordBackedAccount_NeverAutoLinked_EvenWithOptIn"/>.
     /// </summary>
     [Fact]
     public async Task LoginSaml_ExistingAdminFormsUser_BlockedWithoutOptIn_AllowedWithOptIn()
@@ -246,7 +249,11 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         var login = _factory.Services.GetRequiredService<LoginService>();
         string orgId = await GetDefaultOrgIdAsync();
         string email = $"admin-{Guid.NewGuid():N}@example.com";
-        await _factory.CreateUser(email, "doesntmatter12", role: "admin");
+        string userId = await _factory.CreateUser(email, "doesntmatter12", role: "admin");
+        await using (var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync())
+        {
+            await conn.ExecuteAsync("UPDATE users SET password_hash = '' WHERE id = @id", new { id = userId });
+        }
 
         // Without opt-in: blocked — the email-link ceiling matches the JIT ceiling.
         var blockedResult = await login.LoginSamlAsync(
@@ -269,6 +276,38 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
         Assert.NotNull(allowedResult.Token);
         Assert.True(allowedResult.Linked);
         Assert.Equal("admin", allowedResult.Role);
+    }
+
+    /// <summary>
+    /// Regression for the SAML email-link account-takeover gap: a password-backed (forms-login
+    /// capable) account is never silently linked and logged into by a SAML assertion asserting
+    /// its email — not even with the idp_can_assign_admin opt-in, which only lifts the role
+    /// ceiling, not the password-backed-account guard. This is a deliberate behavior change:
+    /// before the fix, only owner/admin roles without the opt-in were blocked, so a
+    /// password-backed member account would have linked and logged in via a bare email match.
+    /// </summary>
+    [Fact]
+    public async Task LoginSaml_ExistingPasswordBackedAccount_NeverAutoLinked_EvenWithOptIn()
+    {
+        var login = _factory.Services.GetRequiredService<LoginService>();
+        string orgId = await GetDefaultOrgIdAsync();
+        string email = $"member-pw-{Guid.NewGuid():N}@example.com";
+        await _factory.CreateUser(email, "doesntmatter12", role: "member");
+
+        var result = await login.LoginSamlAsync(
+            tenantId: orgId,
+            idpEntityId: "https://idp.example.com/entity",
+            nameId: "saml-pw-member-blocked",
+            assertionEmail: email,
+            new SamlLoginOptions(IdpCanAssignAdmin: true));
+
+        Assert.Null(result.Token);
+        Assert.False(result.Linked);
+
+        await using var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
+        int linked = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM external_identities WHERE idp_entity_id = 'https://idp.example.com/entity' AND nameid = 'saml-pw-member-blocked'");
+        Assert.Equal(0, linked);
     }
 
     [Fact]

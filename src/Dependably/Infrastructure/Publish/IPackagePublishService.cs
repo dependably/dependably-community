@@ -117,6 +117,21 @@ public sealed record PublishRequest
     /// row so the lifecycle feed shows where a push originated.
     /// </summary>
     public string? SourceIp { get; init; }
+
+    /// <summary>
+    /// Install-relevant manifest subset (see <see cref="Protocol.NpmInstallManifest"/>)
+    /// persisted on the version row so the packument can advertise bin/dependencies/engines.
+    /// Set by npm callers; null for other ecosystems.
+    /// </summary>
+    public string? ManifestJson { get; init; }
+
+    /// <summary>
+    /// Publisher-declared sha512 SRI (npm's <c>dist.integrity</c>) captured verbatim from
+    /// the publish body. When null on an npm publish, the service computes the SRI from the
+    /// uploaded bytes instead, so the stored integrity always matches the served artefact.
+    /// Null for non-npm ecosystems.
+    /// </summary>
+    public string? DeclaredIntegritySri { get; init; }
 }
 
 /// <summary>Outcome of a <see cref="IPackagePublishService.StoreAndRecordAsync"/> call.</summary>

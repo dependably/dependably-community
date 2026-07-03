@@ -50,6 +50,13 @@ public static class ZipEntryLimits
 {
     /// <summary>Maximum decompressed bytes for a single metadata ZIP entry (32 MiB).</summary>
     public const long MaxMetadataEntryBytes = 32L * 1024 * 1024;
+
+    /// <summary>
+    /// Maximum decompressed bytes for a single Portable PDB ZIP entry (128 MiB). PDBs are
+    /// larger than pure-text metadata entries but still bounded; this caps the amplification a
+    /// crafted <c>.snupkg</c> entry can achieve well below the outer upload size ceiling.
+    /// </summary>
+    public const long MaxPdbEntryBytes = 128L * 1024 * 1024;
 }
 
 /// <summary>

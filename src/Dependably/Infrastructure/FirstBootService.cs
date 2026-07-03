@@ -12,12 +12,14 @@ namespace Dependably.Infrastructure;
 ///   needsBootstrap = users.count + system_admins.count + orgs.count == 0
 ///
 /// Once any row exists in any of those tables, this method does nothing on subsequent restarts.
-/// On a partial-failure mid-bootstrap, BEGIN IMMEDIATE rolls back cleanly so the next start
-/// retries from a known-empty state.
+/// On a partial-failure mid-bootstrap, the serialized transaction rolls back cleanly so the
+/// next start retries from a known-empty state.
 ///
 /// The action branches by <c>DEPLOYMENT_MODE</c>:
 ///   - <c>single</c> (default): create one tenant + the bootstrap admin as that tenant's owner.
 ///   - <c>multi</c> or <c>header</c>: create the system_admin only. No tenant is auto-created.
+///   - <c>edge</c>: create one tenant and seed its upstream rows to the configured master; no
+///     admin or user account is created — an edge node is a headless cache with no login.
 ///
 /// When an <see cref="EnvelopeProtector"/> is configured, instance secrets are written with
 /// the <c>enc:v1:</c> envelope so fresh installs never store plaintext secrets on disk.
@@ -41,9 +43,11 @@ public sealed class FirstBootService
     {
         await using var conn = await _db.OpenAsync(ct);
 
-        // BEGIN IMMEDIATE: serialise concurrent first-boot attempts (e.g. blue/green deploys
-        // racing against the same DB file) and ensure partial state rolls back atomically.
-        await conn.ExecuteAsync("BEGIN IMMEDIATE");
+        // Serialise concurrent first-boot attempts (e.g. blue/green deploys racing against the
+        // same DB) and ensure partial state rolls back atomically. Provider-aware: SQLite uses
+        // BEGIN IMMEDIATE; Postgres opens a transaction and takes a transaction-scoped advisory
+        // lock (BEGIN IMMEDIATE is a SQLite-only syntax that Postgres rejects).
+        await conn.BeginSerializedAsync(_db.Provider, ct);
         try
         {
             // xtenant: instance-wide first-boot check; the whole point is to find whether
@@ -93,7 +97,11 @@ public sealed class FirstBootService
 
             string mode = (_config["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
 
-            if (mode is "multi" or "header")
+            if (mode == "edge")
+            {
+                await BootstrapEdgeAsync(conn, _config, _envelope);
+            }
+            else if (mode is "multi" or "header")
             {
                 BootstrapMulti(conn, _config);
             }
@@ -145,6 +153,35 @@ public sealed class FirstBootService
             new { id = adminId, tenantId = orgId, email = adminEmail, hash = passwordHash });
 
         PrintCredentials(adminEmail, rawPassword, "tenant owner (single mode)");
+    }
+
+    private static async Task BootstrapEdgeAsync(DbConnection conn, IConfiguration config, EnvelopeProtector envelope)
+    {
+        // A headless edge node needs a single implicit org to anchor the org-scoped
+        // upstream_registry rows and the org-scoped query stack, but NO admin user, no
+        // must_change_password account, and no management identity: an edge serves registry
+        // reads only and creates nothing authoritative. The seeded rows point every ecosystem at
+        // the master rather than the public registries.
+        string orgSlug = config["DEFAULT_TENANT_SLUG"] ?? config["DEFAULT_ORG_SLUG"] ?? "edge";
+        string orgId = NewId();
+
+        conn.Execute(
+            "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
+            new { id = orgId, slug = orgSlug });
+
+        conn.Execute(
+            "INSERT INTO org_settings (org_id) VALUES (@org_id)",
+            new { org_id = orgId });
+
+        string masterUrl = (config["EDGE_MASTER_URL"] ?? "").Trim();
+        string masterToken = (config["EDGE_MASTER_TOKEN"] ?? "").Trim();
+        await EdgeUpstreamSeeder.SeedForEdgeAsync(conn, orgId, masterUrl, masterToken, envelope);
+
+        // Inbound client auth: seed the optional pre-shared EDGE_ACCESS_TOKEN as a reader
+        // service token, or enable anonymous_pull when absent. The per-boot reseed in
+        // StartupService keeps this current on rotation and emits the anonymous-mode warning;
+        // seeding here means the first request after first boot is already gated correctly.
+        await EdgeAccessTokenSeeder.SeedForEdgeAsync(conn, orgId, config["EDGE_ACCESS_TOKEN"]);
     }
 
     private static void BootstrapMulti(DbConnection conn, IConfiguration config)

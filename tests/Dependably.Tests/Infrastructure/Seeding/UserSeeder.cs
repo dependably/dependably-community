@@ -10,17 +10,21 @@ namespace Dependably.Tests.Infrastructure.Seeding;
 /// </summary>
 public static class UserSeeder
 {
+    /// <param name="password">
+    /// Password to hash and store. Pass <c>null</c> to seed a passwordless (SSO-only) account —
+    /// an empty <c>password_hash</c>, matching how JIT-provisioned SAML users are created.
+    /// </param>
     public static async Task<string> InsertAsync(
         IMetadataStore db,
         string orgId,
         string email,
         string role = "member",
-        string password = "Password12345",
+        string? password = "Password12345",
         string accountStatus = "active",
         CancellationToken ct = default)
     {
         string id = Guid.NewGuid().ToString("N");
-        string passwordHash = BCrypt.Net.BCrypt.HashPassword(password, workFactor: 4);
+        string passwordHash = password is null ? "" : BCrypt.Net.BCrypt.HashPassword(password, workFactor: 4);
         await using var conn = await db.OpenAsync(ct);
         await conn.ExecuteAsync("""
             INSERT INTO users (id, tenant_id, email, password_hash, role, account_status)

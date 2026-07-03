@@ -74,8 +74,14 @@
       .map(f => f.status)
       .filter(Boolean)
       .sort((a, b) => (STATUS_RANK[a] ?? 9) - (STATUS_RANK[b] ?? 9))[0] ?? null
-    // Most-recent cache time represents the version's recency for the default "pushed" sort.
-    const createdAt = files.reduce((m, f) => (m && new Date(m) >= new Date(f.createdAt) ? m : f.createdAt), null)
+    // Most-recent pushed time represents the version's recency for the default "pushed" sort.
+    // A same-version re-push stamps updatedAt without disturbing createdAt (the original
+    // publish time), so the effective pushed date per file falls back to createdAt when the
+    // file has never been overwritten.
+    const createdAt = files.reduce((m, f) => {
+      const pushedAt = f.updatedAt ?? f.createdAt
+      return m && new Date(m) >= new Date(pushedAt) ? m : pushedAt
+    }, null)
     // Surface the strongest provenance signal across the version's files (failed dominates).
     const provenanceStatus =
         files.some(f => f.provenanceStatus === 'failed') ? 'failed'

@@ -20,12 +20,12 @@ public static class DependablyMeter
 
     public static readonly Meter Meter = new(MeterName);
 
-    // ── Migrated from prometheus-net (PR 2) ──────────────────────────────────
+    // ── Upstream / security enforcement counters ────────────────────────────
 
     public static readonly Counter<long> UpstreamUrlBlocks =
         Meter.CreateCounter<long>(
             "dependably.security.upstream_url_blocks",
-            description: "Upstream URLs blocked by SSRF protection. Attributes: reason.");
+            description: "Upstream URLs blocked by SSRF protection. Attributes: reason (blocked_range|redirect_to_internal|dns_rebind|dns_failure).");
 
     public static readonly Counter<long> AllowlistBlocks =
         Meter.CreateCounter<long>(
@@ -47,6 +47,18 @@ public static class DependablyMeter
         Meter.CreateUpDownCounter<long>(
             "dependably.upstream.inflight_fetches",
             description: "Upstream fetches currently in flight. Attributes: ecosystem.");
+
+    /// <summary>
+    /// Callers that entered the single-flight path for an upstream fetch, whether they triggered
+    /// the shared upstream call or joined an already-in-flight one. Combined with
+    /// <see cref="UpstreamFetchDuration"/> (which counts real upstream operations, not waiters),
+    /// the ratio of joins to fetches shows the fan-in a burst is being collapsed by. Attributes:
+    /// ecosystem.
+    /// </summary>
+    public static readonly Counter<long> UpstreamSingleFlightJoins =
+        Meter.CreateCounter<long>(
+            "dependably.upstream.singleflight_joins",
+            description: "Callers that entered the upstream single-flight path (winner + waiters). Attributes: ecosystem.");
 
     /// <summary>
     /// Maven artifact fetch bailed out because the SHA-256 sidecar was unavailable or
@@ -75,8 +87,7 @@ public static class DependablyMeter
             unit: "s",
             description: "Outbound healthcheck ping duration in seconds.");
 
-    // ── New instruments declared in PR 2; emission lands in PR 3 / follow-up
-    //    where the data source is wired. See observability/metrics.md. ──────
+    // ── Cache-plane counters ─────────────────────────────────────────────────
 
     public static readonly Counter<long> CacheLookups =
         Meter.CreateCounter<long>(
@@ -374,6 +385,14 @@ public static class DependablyMeter
     /// <summary>Bytes used by files in the staging directory; written by StagingDiskMonitor.</summary>
     private static long _stagingDiskUsedBytes;
 
+    /// <summary>
+    /// Current advisory-inventory snapshot, grouped by (ecosystem, severity); written by
+    /// AdvisoryInventoryPoller. A poll replaces the whole snapshot rather than upserting
+    /// per-key, so a combination that drops to zero rows disappears from the gauge instead
+    /// of sticking at its last observed value.
+    /// </summary>
+    private static volatile IReadOnlyList<(string Ecosystem, string Severity, long Count)> _advisoryInventory = [];
+
     static DependablyMeter()
     {
         Meter.CreateObservableGauge(
@@ -410,6 +429,15 @@ public static class DependablyMeter
             observeValue: () => Interlocked.Read(ref _stagingDiskUsedBytes),
             unit: "By",
             description: "Bytes used by files currently present in the staging directory. Updated by StagingDiskMonitor.");
+
+        Meter.CreateObservableGauge(
+            "dependably.advisories.tracked",
+            observeValues: () => _advisoryInventory.Select(x =>
+                new Measurement<long>(
+                    x.Count,
+                    new KeyValuePair<string, object?>("ecosystem", x.Ecosystem),
+                    new KeyValuePair<string, object?>("severity", x.Severity))),
+            description: "Current count of tracked advisories (rows in the vulnerabilities catalog), grouped by ecosystem and severity (severity 'unscored' when the advisory carries no CVSS classification). Updated by AdvisoryInventoryPoller.");
     }
 
     /// <summary>
@@ -452,6 +480,16 @@ public static class DependablyMeter
     public static void RecordStagingDiskUsed(long bytes)
         => Interlocked.Exchange(ref _stagingDiskUsedBytes, bytes);
 
+    /// <summary>
+    /// Replaces the advisory-inventory snapshot for the observable gauge
+    /// <c>dependably.advisories.tracked</c>. Called by <c>AdvisoryInventoryPoller</c>;
+    /// the whole snapshot is swapped atomically so an (ecosystem, severity) combination
+    /// that drops to zero rows disappears from the gauge rather than sticking at its
+    /// last observed value.
+    /// </summary>
+    public static void RecordAdvisoryInventory(IReadOnlyList<(string Ecosystem, string Severity, long Count)> snapshot)
+        => _advisoryInventory = snapshot;
+
     // ── Read accessors for the in-app snapshot page ────────────────────────
     //
     // MetricsSnapshotProvider needs to display the same values the
@@ -478,4 +516,11 @@ public static class DependablyMeter
     /// <see cref="RecordStagingDiskUsed"/>. Zero when the poller has not yet run.
     /// </summary>
     public static long ReadStagingDiskUsed() => Interlocked.Read(ref _stagingDiskUsedBytes);
+
+    /// <summary>
+    /// Returns the last recorded advisory-inventory snapshot, as set by
+    /// <see cref="RecordAdvisoryInventory"/>. Empty until the poller has run.
+    /// </summary>
+    public static IReadOnlyList<(string Ecosystem, string Severity, long Count)> ReadAdvisoryInventory()
+        => _advisoryInventory;
 }

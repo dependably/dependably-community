@@ -1,5 +1,7 @@
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
@@ -24,7 +26,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
 
-    private ProxyFetchService Build(IBlobStore? blobOverride = null, IOsvSource? osvOverride = null)
+    private ProxyFetchService Build(IBlobStore? blobOverride = null, IOsvSource? osvOverride = null, bool sourcePinningEnabled = false)
     {
         var blobs = blobOverride ?? _blobs;
         var packages = new PackageRepository(_db);
@@ -56,7 +58,9 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             _db, osv, vulns, audit, cfg,
             airGap,
             NullLogger<VulnerabilityScanService>.Instance,
-            TimeProvider.System));
+            TimeProvider.System,
+            new OrgRepository(_db),
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
         var cacheArtifact = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var proxyVersions = new ProxyVersionRecorder(packages, audit, licenses, cacheArtifact,
@@ -64,7 +68,10 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         var blockGate = new BlockGateService(vulns, audit, new QuarantineRepository(_db, TimeProvider.System), new InstallScriptAllowlistService(_db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, TimeProvider.System);
         var cacheRecorder = new CacheAccessRecorder(cacheArtifact, tenantAccess,
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
-        return new ProxyFetchService(cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, packages, audit, TimeProvider.System);
+        return new ProxyFetchService(cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, packages, audit, TimeProvider.System,
+            new Dependably.Infrastructure.SourcePinRepository(_db, new Microsoft.Extensions.Configuration.ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?> { ["PROXY_SOURCE_PINNING"] = sourcePinningEnabled ? "true" : "false" })
+                .Build()));
     }
 
     private static async Task<BlobHandle> SeedBlobAsync(InMemoryBlobStore blobs, byte[] bytes)
@@ -97,6 +104,60 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         Assert.Equal(BlockDecision.Allowed, result.Decision);
         Assert.NotNull(result.VersionId);
         Assert.True(await _blobs.ExistsAsync(result.BlobKey));
+    }
+
+    [Fact]
+    public async Task RecordAndScanAsync_source_pin_blocks_second_upstream_for_same_name()
+    {
+        // A name first served by one upstream is pinned to that upstream. A later first-fetch of
+        // the same name resolved from a DIFFERENT upstream (dependency-confusion fallback) is
+        // refused before any version row is recorded.
+        var svc = Build(sourcePinningEnabled: true);
+
+        byte[] bytesA = "left-pad-from-private"u8.ToArray();
+        var blobA = await SeedBlobAsync(_blobs, bytesA);
+        var first = await svc.RecordAndScanAsync(new ProxyFetchRequest(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "left-pad", PurlName: "left-pad",
+            Version: "1.0.0", Purl: "pkg:npm/left-pad@1.0.0",
+            File: "left-pad-1.0.0.tgz", Blob: blobA,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: null,
+            UpstreamUrl: "https://private.registry.example/left-pad/-/left-pad-1.0.0.tgz"));
+        Assert.Equal(BlockDecision.Allowed, first.Decision);
+
+        // Same name, different version, served from a different upstream host → blocked.
+        byte[] bytesB = "left-pad-from-public"u8.ToArray();
+        var blobB = await SeedBlobAsync(_blobs, bytesB);
+        var second = await svc.RecordAndScanAsync(new ProxyFetchRequest(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "left-pad", PurlName: "left-pad",
+            Version: "1.0.1", Purl: "pkg:npm/left-pad@1.0.1",
+            File: "left-pad-1.0.1.tgz", Blob: blobB,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: null,
+            UpstreamUrl: "https://registry.npmjs.org/left-pad/-/left-pad-1.0.1.tgz"));
+        Assert.Equal(BlockDecision.Blocked, second.Decision);
+        Assert.Null(second.VersionId);
+
+        // Same name from the ORIGINAL upstream still serves.
+        byte[] bytesC = "left-pad-from-private-2"u8.ToArray();
+        var blobC = await SeedBlobAsync(_blobs, bytesC);
+        var third = await svc.RecordAndScanAsync(new ProxyFetchRequest(
+            OrgId: "o1", Ecosystem: "npm",
+            PackageName: "left-pad", PurlName: "left-pad",
+            Version: "1.0.2", Purl: "pkg:npm/left-pad@1.0.2",
+            File: "left-pad-1.0.2.tgz", Blob: blobC,
+            ExtractLicenses: null,
+            UserId: null, ActorKind: null, SourceIp: "127.0.0.1",
+            MaxOsvScoreTolerance: 10.0,
+            CacheAccess: null,
+            UpstreamUrl: "https://private.registry.example/left-pad/-/left-pad-1.0.2.tgz"));
+        Assert.Equal(BlockDecision.Allowed, third.Decision);
     }
 
     [Fact]

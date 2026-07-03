@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Xml.Linq;
 using Dapper;
 using Dependably.Storage;
@@ -9,7 +10,7 @@ using Xunit;
 namespace Dependably.Tests.Unit.Storage;
 
 /// <summary>
-/// Coverage for <see cref="RpmRepodataService.BuildMergedPrimaryAsync"/> — the union of locally
+/// Coverage for <see cref="RpmRepodataService.BuildMergedPrimaryGzAsync"/> — the union of locally
 /// published RPMs with the upstream repo's packages that backs <c>Rpm:UpstreamMode=merged</c>.
 /// Local versions must shadow upstream on filename (NEVRA) collision, and every upstream
 /// <c>&lt;location&gt;</c> must be rewritten to the flat <c>packages/{file}</c> route so dnf
@@ -38,7 +39,8 @@ public sealed class RpmRepodataServiceMergeTests : IClassFixture<InMemoryDbFixtu
             ("tree", "2.1.1", "1.el9", "x86_64", "Packages/t/tree-2.1.1-1.el9.x86_64.rpm", 4242));
 
         var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
-        string xml = await svc.BuildMergedPrimaryAsync(orgId, upstreamGz, CancellationToken.None);
+        byte[] gz = await svc.BuildMergedPrimaryGzAsync(orgId, upstreamGz, CancellationToken.None);
+        string xml = System.Text.Encoding.UTF8.GetString(Gunzip(gz));
         var doc = XDocument.Parse(xml);
 
         var packages = doc.Root!.Elements(Common + "package").ToList();
@@ -65,13 +67,54 @@ public sealed class RpmRepodataServiceMergeTests : IClassFixture<InMemoryDbFixtu
             ("tree", "2.1.1", "1.el9", "x86_64", "Packages/t/tree-2.1.1-1.el9.x86_64.rpm", 7));
 
         var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
-        string xml = await svc.BuildMergedPrimaryAsync(orgId, upstreamGz, CancellationToken.None);
+        byte[] gz = await svc.BuildMergedPrimaryGzAsync(orgId, upstreamGz, CancellationToken.None);
+        string xml = System.Text.Encoding.UTF8.GetString(Gunzip(gz));
         var doc = XDocument.Parse(xml);
 
         var pkg = Assert.Single(doc.Root!.Elements(Common + "package"));
         Assert.Equal("tree", pkg.Element(Common + "name")!.Value);
         Assert.Equal("packages/tree-2.1.1-1.el9.x86_64.rpm",
             pkg.Element(Common + "location")!.Attribute("href")!.Value);
+    }
+
+    [Fact]
+    public async Task BuildMergedPrimaryGzAsync_StripsXmlBase_AndPreservesUpstreamFieldsVerbatim()
+    {
+        // Pins the streaming rewrite in BuildMergedPrimaryGzAsync/ExtractUpstreamPackages: every
+        // entry here comes from upstream (no local packages), exercising the detach-and-mutate
+        // path (each element is removed from the source doc and reused directly) for every
+        // package. An xml:base attribute (as real mirrors sometimes emit) must be stripped, the
+        // href must be rewritten to the flat route, and every other field must survive byte-for-byte.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        byte[] upstreamGz = BuildUpstreamPrimaryGzWithXmlBase(
+            ("curl", "8.6.0", "1.fc40", "x86_64", "Packages/c/curl-8.6.0-1.fc40.x86_64.rpm",
+             "HTTP client library", "A command line tool for transferring data.", "MIT"),
+            ("wget", "1.21", "3.fc40", "x86_64", "Packages/w/wget-1.21-3.fc40.x86_64.rpm",
+             "A utility for retrieving files", "GNU Wget retrieves content from web servers.", "GPL-3.0-or-later"));
+
+        var svc = new RpmRepodataService(_fixture.Store, NullLogger<RpmRepodataService>.Instance, TimeProvider.System);
+        byte[] gz = await svc.BuildMergedPrimaryGzAsync(orgId, upstreamGz, CancellationToken.None);
+        string xml = System.Text.Encoding.UTF8.GetString(Gunzip(gz));
+        var doc = XDocument.Parse(xml);
+
+        var packages = doc.Root!.Elements(Common + "package").ToList();
+        Assert.Equal("2", doc.Root.Attribute("packages")!.Value);
+        Assert.Equal(2, packages.Count);
+
+        var curl = Assert.Single(packages, p => p.Element(Common + "name")!.Value == "curl");
+        var curlLocation = curl.Element(Common + "location")!;
+        Assert.Equal("packages/curl-8.6.0-1.fc40.x86_64.rpm", curlLocation.Attribute("href")!.Value);
+        Assert.Null(curlLocation.Attribute(XNamespace.Xml + "base"));
+        Assert.Equal("HTTP client library", curl.Element(Common + "summary")!.Value);
+        Assert.Equal("A command line tool for transferring data.", curl.Element(Common + "description")!.Value);
+        Assert.Equal("MIT", curl.Element(Common + "format")!.Element(Rpm + "license")!.Value);
+
+        var wget = Assert.Single(packages, p => p.Element(Common + "name")!.Value == "wget");
+        var wgetLocation = wget.Element(Common + "location")!;
+        Assert.Equal("packages/wget-1.21-3.fc40.x86_64.rpm", wgetLocation.Attribute("href")!.Value);
+        Assert.Null(wgetLocation.Attribute(XNamespace.Xml + "base"));
+        Assert.Equal("A utility for retrieving files", wget.Element(Common + "summary")!.Value);
+        Assert.Equal("GPL-3.0-or-later", wget.Element(Common + "format")!.Element(Rpm + "license")!.Value);
     }
 
     private async Task SeedLocalHelloAsync(string orgId)
@@ -120,5 +163,40 @@ public sealed class RpmRepodataServiceMergeTests : IClassFixture<InMemoryDbFixtu
                     new XElement(Common + "format", new XElement(Rpm + "license", "MIT"))))));
 
         return RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(doc.ToString()));
+    }
+
+    private static byte[] BuildUpstreamPrimaryGzWithXmlBase(
+        params (string Name, string Ver, string Rel, string Arch, string Href, string Summary, string Description, string License)[] pkgs)
+    {
+        var doc = new XDocument(
+            new XElement(Common + "metadata",
+                new XAttribute(XNamespace.Xmlns + "rpm", Rpm.NamespaceName),
+                new XAttribute("packages", pkgs.Length),
+                pkgs.Select(p => new XElement(Common + "package",
+                    new XAttribute("type", "rpm"),
+                    new XElement(Common + "name", p.Name),
+                    new XElement(Common + "arch", p.Arch),
+                    new XElement(Common + "version",
+                        new XAttribute("epoch", 0), new XAttribute("ver", p.Ver), new XAttribute("rel", p.Rel)),
+                    new XElement(Common + "checksum",
+                        new XAttribute("type", "sha256"), new XAttribute("pkgid", "YES"), new string('b', 64)),
+                    new XElement(Common + "summary", p.Summary),
+                    new XElement(Common + "description", p.Description),
+                    new XElement(Common + "size",
+                        new XAttribute("package", 1), new XAttribute("installed", 1), new XAttribute("archive", 1)),
+                    new XElement(Common + "location",
+                        new XAttribute(XNamespace.Xml + "base", "https://mirror.example.com/upstream-repo/"),
+                        new XAttribute("href", p.Href)),
+                    new XElement(Common + "format", new XElement(Rpm + "license", p.License))))));
+
+        return RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(doc.ToString()));
+    }
+
+    private static byte[] Gunzip(byte[] gz)
+    {
+        using var gzStream = new GZipStream(new MemoryStream(gz), CompressionMode.Decompress);
+        using var ms = new MemoryStream();
+        gzStream.CopyTo(ms);
+        return ms.ToArray();
     }
 }

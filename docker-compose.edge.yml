@@ -1,0 +1,85 @@
+# Headless cache-only edge node. One edge process is a pull-through cache for every ecosystem
+# whose sole upstream is a central "master" dependably instance. It ships no management plane
+# (no admin UI, no orgs/users, no first-boot wizard) and publishes nothing — publish attempts
+# fail closed with a 405 pointing at the master.
+#
+# Bring it up with the three edge variables set in the environment (or an .env file):
+#   EDGE_MASTER_URL=https://dependably.example.com \
+#   EDGE_MASTER_TOKEN=<reader service token minted on the master> \
+#   docker compose -f docker-compose.edge.yml up -d
+#
+# See docs/edge-node.md for enrollment, the trusted-LAN anonymous-access note, and recovery.
+services:
+  dependably-edge:
+    build:
+      context: .
+      args:
+        REGISTRY_URL: ${REGISTRY_URL:-}
+      secrets:
+        - registry_key
+    ports:
+      - "8080:8080"
+    volumes:
+      # Persistent warm cache. The entire egress/offload win depends on the cache tier
+      # surviving container restarts and being shared across CI jobs — an ephemeral per-job
+      # cache is all cold misses and saves nothing. This named volume MUST be persistent.
+      - dependably-edge-cache:/cache
+    environment:
+      # Selects headless cache-only edge mode. Collapses tenancy to one implicit realm, strips
+      # the management/auth plane, and forces the cache-only background-job set.
+      DEPLOYMENT_MODE: edge
+      # The master base URL — the edge's sole upstream for every ecosystem. Required.
+      EDGE_MASTER_URL: ${EDGE_MASTER_URL:?set EDGE_MASTER_URL to the central master base URL}
+      # Reader-scoped service token minted on the master for this edge node. Required.
+      # Held in memory from the environment; revoke it on the master to cut this edge to
+      # cold-only immediately. Never commit the value — pass it via the environment / an .env file.
+      EDGE_MASTER_TOKEN: ${EDGE_MASTER_TOKEN:?set EDGE_MASTER_TOKEN to a reader service token minted on the master}
+      # Optional pre-shared token the edge's own clients must present. When unset the edge accepts
+      # ANONYMOUS reads and logs a startup warning — intended for trusted LANs only. Set it whenever
+      # the master token can see private/hosted content.
+      EDGE_ACCESS_TOKEN: ${EDGE_ACCESS_TOKEN:-}
+      BASE_URL: ${BASE_URL:-http://localhost:8080}
+      # SQLite cache-index file on the SAME persistent volume as the blobs, so the index and the
+      # cached artefacts it references never diverge across restarts (an anonymous /data volume
+      # would survive `compose down -v` differently than the named cache volume). One writer per
+      # file — the startup instance-lock guard enforces it.
+      DB_PATH: /cache/dependably.db
+      # Cache lives on the persistent volume. Registry-tier vars are unset: an edge never writes a
+      # durable registry tier (publish is refused), so only the cache path matters here.
+      LOCAL_STORAGE_PATH: /cache/blobs
+      # Proxy-fetch MISS hash-and-stage dir. Points at the persistent disk-backed volume: the
+      # container's /tmp is RAM-backed tmpfs, which defeats memory bounding for large artifacts.
+      PROXY_STAGING_PATH: /cache/staging
+      # Warm-cache disk cap (bytes). Cache eviction removes least-recently-accessed proxy
+      # artefacts once the cache tier exceeds this. Tune to the volume size. CACHE_MAX_AGE_DAYS
+      # (age-based) and CACHE_MAX_ARTIFACTS (count-based) are alternative/additional caps.
+      CACHE_MAX_SIZE_BYTES: ${CACHE_MAX_SIZE_BYTES:-10737418240}
+      # Eviction schedule (cron). Default is hourly when unset.
+      CACHE_EVICT_SCHEDULE: ${CACHE_EVICT_SCHEDULE:-0 * * * *}
+      # GC heap cap — prevents OOM-kill on memory-constrained hosts. Uncomment to match your host:
+      #   1 GiB host  → 0x30000000  (768 MiB)
+      #   2 GiB host  → 0x60000000  (1.5 GiB)
+      #   4 GiB host  → 0xC0000000  (3 GiB)
+      # DOTNET_GCHeapHardLimit: "0x60000000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  # Persistent warm-cache volume — durable across restarts by design.
+  dependably-edge-cache:
+
+secrets:
+  registry_key:
+    environment: REGISTRY_KEY

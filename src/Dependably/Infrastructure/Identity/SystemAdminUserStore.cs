@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using Dapper;
 using Microsoft.AspNetCore.Identity;
@@ -21,11 +19,13 @@ internal sealed class SystemAdminUserStore :
 {
     private readonly IMetadataStore _db;
     private readonly IMfaSecretProtector _protector;
+    private readonly IRecoveryCodeHasher _recoveryCodeHasher;
 
-    public SystemAdminUserStore(IMetadataStore db, IMfaSecretProtector protector)
+    public SystemAdminUserStore(IMetadataStore db, IMfaSecretProtector protector, IRecoveryCodeHasher recoveryCodeHasher)
     {
         _db = db;
         _protector = protector;
+        _recoveryCodeHasher = recoveryCodeHasher;
     }
 
     // ── IUserStore ────────────────────────────────────────────────────────────
@@ -267,16 +267,14 @@ internal sealed class SystemAdminUserStore :
             return false;
         }
 
-        string inputHash = HashCode(code);
+        // Verify against each stored hash (keyed+salted new form or legacy SHA-256) without an
+        // early break, so the loop's timing does not leak which slot matched.
         int matchIndex = -1;
         for (int i = 0; i < hashes.Count; i++)
         {
-            if (System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
-                    Encoding.UTF8.GetBytes(inputHash),
-                    Encoding.UTF8.GetBytes(hashes[i])))
+            if (_recoveryCodeHasher.Verify(code, hashes[i]))
             {
                 matchIndex = i;
-                break;
             }
         }
 
@@ -293,7 +291,7 @@ internal sealed class SystemAdminUserStore :
 
     public Task ReplaceCodesAsync(SystemAdminUser user, IEnumerable<string> recoveryCodes, CancellationToken cancellationToken)
     {
-        var hashes = recoveryCodes.Select(HashCode).ToList();
+        var hashes = recoveryCodes.Select(_recoveryCodeHasher.Hash).ToList();
         user.RecoveryCodes = JsonSerializer.Serialize(hashes);
         return Task.CompletedTask;
     }
@@ -312,12 +310,4 @@ internal sealed class SystemAdminUserStore :
     // ── IDisposable ───────────────────────────────────────────────────────────
 
     public void Dispose() { /* No unmanaged resources; each operation opens and disposes its own connection. */ }
-
-    // ── helpers ───────────────────────────────────────────────────────────────
-
-    private static string HashCode(string code)
-    {
-        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(code));
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
 }

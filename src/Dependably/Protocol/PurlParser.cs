@@ -46,4 +46,27 @@ public static class PurlParser
 
         return new ParsedPurl(ecosystem, name, version);
     }
+
+    /// <summary>
+    /// Extracts just the ecosystem segment from a PURL (<c>pkg:nuget/name@version</c> → <c>nuget</c>),
+    /// without requiring a version — unlike <see cref="TryParse"/>, this also accepts versionless
+    /// PURLs (<c>pkg:nuget/name</c>). Returns <see langword="null"/> when the input isn't PURL-shaped.
+    /// </summary>
+    public static string? TryGetEcosystem(string purl)
+    {
+        const string prefix = "pkg:";
+        if (!purl.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        int slash = purl.IndexOf('/', prefix.Length);
+        if (slash < 0)
+        {
+            return null;
+        }
+
+        string ecosystem = purl[prefix.Length..slash];
+        return ecosystem.Length == 0 ? null : ecosystem;
+    }
 }

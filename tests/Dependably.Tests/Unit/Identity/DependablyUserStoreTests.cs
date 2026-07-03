@@ -21,6 +21,7 @@ public sealed class DependablyUserStoreTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
     private readonly MfaSecretProtector _protector = new(RandomNumberGenerator.GetBytes(32));
+    private readonly RecoveryCodeHasher _recoveryHasher = new(RandomNumberGenerator.GetBytes(32));
 
     public async Task InitializeAsync()
     {
@@ -53,7 +54,7 @@ public sealed class DependablyUserStoreTests : IAsyncLifetime
         var accessor = Substitute.For<IHttpContextAccessor>();
         accessor.HttpContext.Returns(httpContext);
 
-        return new DependablyUserStore(_db, accessor, _protector);
+        return new DependablyUserStore(_db, accessor, _protector, _recoveryHasher);
     }
 
     // ── BOLA isolation ────────────────────────────────────────────────────────
@@ -96,7 +97,7 @@ public sealed class DependablyUserStoreTests : IAsyncLifetime
         // FindByIdAsync does not require a tenant context — it is a PK lookup.
         var accessor = Substitute.For<IHttpContextAccessor>();
         accessor.HttpContext.Returns((HttpContext?)null);
-        var store = new DependablyUserStore(_db, accessor, _protector);
+        var store = new DependablyUserStore(_db, accessor, _protector, _recoveryHasher);
 
         var user = await store.FindByIdAsync("uA", CancellationToken.None);
         Assert.Equal("uA", user?.Id);
@@ -161,7 +162,7 @@ public sealed class DependablyUserStoreTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ReplaceCodesAsync_StoredColumnHoldsHashesNotPlaintext()
+    public async Task ReplaceCodesAsync_StoredColumnHoldsKeyedHashesNotPlaintextNorBareSha256()
     {
         var store = StoreForTenant("tenantA");
         var user = new DependablyUser { Id = "uA", TenantId = "tenantA", Email = "alice@example.com" };
@@ -173,9 +174,48 @@ public sealed class DependablyUserStoreTests : IAsyncLifetime
         Assert.DoesNotContain(plainCode, user.RecoveryCodes!);
 
         var hashes = JsonSerializer.Deserialize<List<string>>(user.RecoveryCodes!);
-        string expectedHash = Convert.ToHexString(
+        // Salted + keyed form, not the old unsalted bare SHA-256 hex.
+        Assert.All(hashes!, h => Assert.StartsWith("hmac:v1:", h));
+        string bareSha256 = Convert.ToHexString(
             SHA256.HashData(Encoding.UTF8.GetBytes(plainCode))).ToLowerInvariant();
-        Assert.Contains(expectedHash, hashes!);
+        Assert.DoesNotContain(bareSha256, hashes!);
+    }
+
+    [Fact]
+    public async Task ReplaceCodesAsync_IdenticalCodes_ProduceDistinctSaltedHashes()
+    {
+        var store = StoreForTenant("tenantA");
+        var user = new DependablyUser { Id = "uA", TenantId = "tenantA", Email = "alice@example.com" };
+
+        // Two identical plaintext codes must hash to two DISTINCT stored values (per-code salt),
+        // so a DB dump cannot spot duplicate codes or precompute a single rainbow entry.
+        await store.ReplaceCodesAsync(user, ["SAME-CODE", "SAME-CODE"], CancellationToken.None);
+
+        var hashes = JsonSerializer.Deserialize<List<string>>(user.RecoveryCodes!);
+        Assert.Equal(2, hashes!.Count);
+        Assert.NotEqual(hashes[0], hashes[1]);
+    }
+
+    [Fact]
+    public async Task RedeemCodeAsync_LegacyBareSha256Code_StillRedeems()
+    {
+        var store = StoreForTenant("tenantA");
+        var user = new DependablyUser { Id = "uA", TenantId = "tenantA", Email = "alice@example.com" };
+        const string legacyCode = "LEGACY-CODE-99";
+
+        // Simulate a pre-upgrade stored code: unsalted bare SHA-256 hex written directly.
+        string legacyHash = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(legacyCode))).ToLowerInvariant();
+        user.RecoveryCodes = JsonSerializer.Serialize(new List<string> { legacyHash });
+        await store.UpdateAsync(user, CancellationToken.None);
+
+        // The transition-aware verifier accepts the legacy format and consumes it.
+        bool redeemed = await store.RedeemCodeAsync(user, legacyCode, CancellationToken.None);
+        Assert.True(redeemed);
+        Assert.Equal(0, await store.CountCodesAsync(user, CancellationToken.None));
+
+        // One-time use: a second attempt fails.
+        Assert.False(await store.RedeemCodeAsync(user, legacyCode, CancellationToken.None));
     }
 
     [Fact]

@@ -179,6 +179,20 @@ public partial class NuGetController : ControllerBase
     public Task<IActionResult> GetSymbols(string id, string version, string file, CancellationToken ct)
         => _publishHandler.GetSymbolsAsync(HttpContext, CurrentTenantId(), id, version, file, ct);
 
+    // ── Symbol server (SSQP) ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// GET /nuget/symbols/{pdbName}/{key}/{pdbName} — Simple Symbol Query Protocol read endpoint.
+    /// The 40-hex <c>key</c> constraint (Portable-PDB GUID + <c>ffffffff</c> age) disambiguates
+    /// this route from the whole-<c>.snupkg</c> download route above, whose middle segment is a
+    /// dotted NuGet version. The trailing filename segment is the SSQP echo of the first and is
+    /// unused by the handler.
+    /// </summary>
+    [HttpGet("/nuget/symbols/{pdbName}/{key:regex(^[[0-9a-fA-F]]{{40}}$)}/{pdbNameEcho}")]
+    [EnableRateLimiting("download")]
+    public Task<IActionResult> GetSymbolFile(string pdbName, string key, string pdbNameEcho, CancellationToken ct)
+        => _publishHandler.GetSymbolFileAsync(HttpContext, CurrentTenantId(), pdbName, key, ct);
+
     // ── Static helpers used by tests ─────────────────────────────────────────
 
     // These forward to NuGetRegistrationHelpers so existing tests continue to call

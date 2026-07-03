@@ -1,4 +1,5 @@
 using Dapper;
+using Dependably.Infrastructure.Redis;
 
 namespace Dependably.Infrastructure;
 
@@ -42,12 +43,18 @@ public sealed class OciStagingJanitorService : ScheduledBackgroundService
     protected override string ScopeJobName => "oci-staging-janitor";
     protected override string ScopeMetricName => "oci.staging.janitor";
 
+    // Deliberately NOT leader-gated: the orphan sweep enumerates this node's local
+    // PROXY_STAGING_PATH and the session sweep deletes node-local staging files, so every
+    // replica must run its own pass. The shared oci_uploads row DELETE is an idempotent
+    // stale-row reclaim where a benign inter-replica race just no-ops on the second delete.
+
     public OciStagingJanitorService(
         IMetadataStore db,
         IConfiguration config,
         ILogger<OciStagingJanitorService> logger,
-        TimeProvider time)
-        : base(config, logger, time)
+        TimeProvider time,
+        IDistributedLock locks)
+        : base(config, logger, time, locks)
     {
         _db = db;
         _config = config;

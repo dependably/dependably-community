@@ -100,6 +100,6 @@ Use the following French terms consistently. When a term is listed here, it supe
 
 **Placeholders:** String placeholders such as `{user}`, `{org}`, `{count}` must be preserved exactly as-is in translated strings. Do not translate placeholder names.
 
-**Punctuation:** French typography uses a non-breaking space before double punctuation marks (`:`, `;`, `!`, `?`). CAT tools that handle French correctly will insert these automatically. If inserting manually, use the Unicode non-breaking space character (U+00A0), not a regular space.
+**Punctuation:** The French locale targets Canadian French (OQLF conventions): a non-breaking space (U+00A0, never a regular space) before `:` and inside guillemets (`« … »`), and **no** space before `;`, `!`, or `?`. This differs from France-French typography, which spaces all four marks — configure CAT tools for fr-CA accordingly.
 
 **Capitalization:** French uses significantly less title-case than English. Page titles and navigation items should use sentence case in French. Example: "Paramètres de l'organisation" not "Paramètres De L'Organisation".

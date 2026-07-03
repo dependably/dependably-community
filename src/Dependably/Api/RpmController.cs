@@ -45,22 +45,36 @@ public sealed class RpmController : OrgScopedControllerBase
     [RequireCapability(Capabilities.PublishRpm)]
     [EnableRateLimiting("push")]
     [RequestSizeLimit(RpmUploadSizeLimitBytes)]
+    // The staged file path is a server-generated GUID under the operator-configured staging root;
+    // the request body reaches the file content, not the file name. SCS's taint from Request.Body
+    // into staged.Path is a false positive.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "SCS0018",
+        Justification = "Staging path is a server-generated GUID under the operator-configured root, not user input.")]
     public async Task<IActionResult> Upload(CancellationToken ct)
     {
+        // Fail-closed on an edge node: RPM upload writes the registry tier directly (outside the
+        // shared publish service), so the edge guard is applied here at the choke point.
+        if (_svc.EdgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
         string orgId = CurrentTenantId();
 
-        // Refuse uploads when upstream passthrough is active for this org — a locally published
+        // Refuse uploads when upstream passthrough is effective for this org — a locally published
         // package would silently shadow upstream content and break dep-resolution for dnf clients.
-        // Effective passthrough = instance mode is 'passthrough' AND the org has ≥1 rpm registry.
-        if (_svc.Proxy is { IsPassthroughModeSelected: true }
+        // Effective passthrough = effective mode is 'passthrough' AND the org has ≥1 rpm registry.
+        var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
+        if (IsRpmPassthroughEffective(settings)
             && (await _svc.Registries.ResolveAsync(orgId, "rpm", ct)).Count > 0)
         {
             return Conflict(new ProblemDetails
             {
                 Title = "Cannot publish under passthrough proxy mode",
-                Detail = "This org has a configured rpm upstream registry and Rpm:UpstreamMode=passthrough. " +
-                         "Publishing would silently shadow upstream content. Switch Rpm:UpstreamMode " +
-                         "to 'merged' or remove the org's rpm upstream registry to enable hosted publishing.",
+                Detail = "This org has a configured rpm upstream registry and its RPM upstream mode is " +
+                         "'passthrough'. Publishing would silently shadow upstream content. Set the RPM " +
+                         "upstream mode to 'merged' under Settings → Proxy, or remove the org's rpm " +
+                         "upstream registry, to enable hosted publishing.",
                 Status = StatusCodes.Status409Conflict,
             });
         }
@@ -72,54 +86,83 @@ public sealed class RpmController : OrgScopedControllerBase
             return Unauthorized();
         }
 
-        using var ms = new MemoryStream();
-        await Request.Body.CopyToAsync(ms, ct);
-        byte[] bytes = ms.ToArray();
-        if (bytes.Length < RpmArtifactValidator.MinimumValidSize)
-        {
-            return BadRequest("RPM upload too small.");
-        }
+        // Resolve the size cap BEFORE reading the body so the tenant cap gates the stream itself
+        // and an oversize upload is rejected (413) before any bytes reach the blob store. When no
+        // tenant/instance cap is configured, the route-level ceiling still bounds the read.
+        long? sizeCap = await ResolveSizeCapAsync(orgId, ct);
+        long effectiveCap = sizeCap ?? RpmUploadSizeLimitBytes;
 
-        RpmHeaderInfo header;
+        // Stream the request body to a staging temp file with SHA-256 computed inline, instead of
+        // the old growing-MemoryStream + ToArray double buffer that peaked at ~2x the body and
+        // only checked the cap afterward.
+        RequestBodyStager.StagedBody staged;
         try
         {
-            header = RpmArtifactValidator.Validate(bytes);
+            staged = await RequestBodyStager.StageAsync(
+                Request.Body, _svc.Staging.Path, effectiveCap, withMavenDigests: false, ct);
         }
-        catch (RpmParseException ex)
+        catch (InvalidDataException)
         {
-            return BadRequest(ex.Message);
+            return StatusCode(StatusCodes.Status413PayloadTooLarge,
+                $"RPM upload exceeds size limit ({effectiveCap} bytes).");
         }
 
-        // Size cap: per-tenant override → instance global.
-        long? sizeCap = await ResolveSizeCapAsync(orgId, ct);
-        if (sizeCap is { } cap && bytes.LongLength > cap)
+        try
         {
-            return StatusCode(StatusCodes.Status413PayloadTooLarge, $"RPM upload exceeds size limit ({cap} bytes).");
+            if (staged.Size < RpmArtifactValidator.MinimumValidSize)
+            {
+                return BadRequest("RPM upload too small.");
+            }
+
+            // RpmArtifactValidator and scriptlet detection parse the RPM header (at the file
+            // start) from a byte[]. Read the staged file — bounded by the tenant cap enforced
+            // above — rather than holding the body in two live buffers.
+            // deepcode ignore PT: staged.Path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+            byte[] bytes = await System.IO.File.ReadAllBytesAsync(staged.Path, ct);
+
+            RpmHeaderInfo header;
+            try
+            {
+                header = RpmArtifactValidator.Validate(bytes);
+            }
+            catch (RpmParseException ex)
+            {
+                return BadRequest(ex.Message);
+            }
+
+            // NEVRA filename convention; dnf clients expect this exact shape.
+            string filename = $"{header.Name}-{header.Version}-{header.Release}.{header.Arch}.rpm";
+            string purlName = header.Name.ToLowerInvariant();
+            string version = $"{header.Version}-{header.Release}";
+            string purl = PurlNormalizer.Rpm(header.Name, header.Version, header.Release, header.Arch, header.Epoch ?? 0);
+            string blobKey = BlobKeys.Hosted(orgId, "rpm", purlName, version, filename);
+
+            // Install/lifecycle-script detection on the staged bytes. Best-effort: the artifact
+            // already passed validation, so a parse failure here must not fail the upload.
+            var scriptResult = ScriptDetectionService.Detect("rpm", filename, bytes);
+
+            // Store the verified artifact by streaming the staged file into the blob store.
+            // deepcode ignore PT: staged.Path is under the operator-configured staging root — no user input reaches the path.
+            await using (var artifactStream = new FileStream(
+                staged.Path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true))
+            {
+                await _svc.BlobStore.Registry.PutAsync(blobKey, artifactStream, ct);
+            }
+
+            var pkg = await _svc.Packages.GetOrCreateAsync(orgId, "rpm", header.Name, purlName, isProxy: false, ct);
+            await PersistRpmVersionAsync(new RpmVersionArgs(orgId, pkg, version, purl, blobKey, filename, bytes.Length, staged.Sha256, header,
+                HasInstallScript: scriptResult.HasScript, InstallScriptKind: scriptResult.Kind), ct);
+
+            await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "push",
+                actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+            Response.Headers["X-Dependably-PURL"] = purl;
+            return StatusCode(StatusCodes.Status201Created);
         }
-
-        // NEVRA filename convention; dnf clients expect this exact shape.
-        string filename = $"{header.Name}-{header.Version}-{header.Release}.{header.Arch}.rpm";
-        string purlName = header.Name.ToLowerInvariant();
-        string version = $"{header.Version}-{header.Release}";
-        string purl = PurlNormalizer.Rpm(header.Name, header.Version, header.Release, header.Arch, header.Epoch ?? 0);
-        string sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        string blobKey = BlobKeys.Hosted(orgId, "rpm", purlName, version, filename);
-
-        // Install/lifecycle-script detection on the in-memory bytes. Best-effort: the artifact
-        // already passed validation, so a parse failure here must not fail the upload.
-        var scriptResult = ScriptDetectionService.Detect("rpm", filename, bytes);
-
-        await _svc.BlobStore.Registry.PutAsync(blobKey, new MemoryStream(bytes), ct);
-
-        var pkg = await _svc.Packages.GetOrCreateAsync(orgId, "rpm", header.Name, purlName, isProxy: false, ct);
-        await PersistRpmVersionAsync(new RpmVersionArgs(orgId, pkg, version, purl, blobKey, filename, bytes.Length, sha256, header,
-            HasInstallScript: scriptResult.HasScript, InstallScriptKind: scriptResult.Kind), ct);
-
-        await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "push",
-            actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-
-        Response.Headers["X-Dependably-PURL"] = purl;
-        return StatusCode(StatusCodes.Status201Created);
+        finally
+        {
+            RequestBodyStager.TryDelete(staged.Path);
+        }
     }
 
     // Cohesive set of values for a newly published RPM version, bundled to keep
@@ -292,7 +335,7 @@ public sealed class RpmController : OrgScopedControllerBase
 
         if (versionMatch is not null)
         {
-            return await ServePackageFromCacheAsync(orgId, file, versionMatch.Value, token, ct);
+            return await ServePackageFromCacheAsync(orgId, file, versionMatch.Value, token, settings, ct);
         }
 
         // Global-plane lookup for proxy RPMs stored in cache_artifact.
@@ -305,7 +348,7 @@ public sealed class RpmController : OrgScopedControllerBase
                 orgId, "rpm", nevra.Value.Name.ToLowerInvariant(), $"{nevra.Value.Version}-{nevra.Value.Release}", file, ct);
             if (globalCa is not null)
             {
-                return await ServeGlobalPlaneRpmAsync(orgId, file, globalCa, token, ct);
+                return await ServeGlobalPlaneRpmAsync(orgId, file, globalCa, token, settings, ct);
             }
         }
 
@@ -330,8 +373,29 @@ public sealed class RpmController : OrgScopedControllerBase
     private async Task<IActionResult> ServePackageFromCacheAsync(
         string orgId, string file,
         (Package Package, PackageVersion Version) versionMatch,
-        TokenRecord? token, CancellationToken ct)
+        TokenRecord? token, OrgSettings? settings, CancellationToken ct)
     {
+        // Block gate runs before any bytes are served, so an operator-blocked (or OSV-flagged)
+        // uploaded RPM stops serving from the cache path, not just at never-before-fetched time.
+        if (await _svc.BlockGate.EvaluateAsync(
+                BlockGateRequest.For(orgId, "rpm", versionMatch.Version, token, settings,
+                    HttpContext.GetNormalizedRemoteIp()), ct)
+            == BlockDecision.Blocked)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden);
+        }
+
+        // 304 short-circuit: check the client's cached copy before opening the blob stream.
+        string? uploadedEtag = versionMatch.Version.ChecksumSha256 is not null
+            ? $"\"sha256:{versionMatch.Version.ChecksumSha256}\""
+            : null;
+        if (uploadedEtag is not null && ConditionalRequestHelper.IfNoneMatchHits(Request.Headers, uploadedEtag))
+        {
+            Response.Headers.ETag = uploadedEtag;
+            Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            return StatusCode(StatusCodes.Status304NotModified);
+        }
+
         string blobKey = BlobKeys.StoreKey(versionMatch.Version.BlobKey);
         var hitStore = versionMatch.Version.Origin == "proxy"
             ? _svc.BlobStore.Cache
@@ -343,9 +407,9 @@ public sealed class RpmController : OrgScopedControllerBase
         }
 
         Response.Headers["X-Cache"] = "HIT";
-        if (versionMatch.Version.ChecksumSha256 is not null)
+        if (uploadedEtag is not null)
         {
-            Response.Headers.ETag = $"\"sha256:{versionMatch.Version.ChecksumSha256}\"";
+            Response.Headers.ETag = uploadedEtag;
             Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
         await _svc.Audit.LogActivityAsync(orgId, "rpm", versionMatch.Version.Purl, "download",
@@ -355,10 +419,32 @@ public sealed class RpmController : OrgScopedControllerBase
     }
 
     // Serves a proxy RPM that was recorded in the global plane (cache_artifact) after the P3b flip.
-    // The per-tenant download count is bumped via tenant_artifact_access (UpsertStateAsync).
+    // The per-tenant download count is bumped via tenant_artifact_access (RecordDownloadHitAsync).
     private async Task<IActionResult> ServeGlobalPlaneRpmAsync(
-        string orgId, string file, CacheArtifactServeFacts caFacts, TokenRecord? token, CancellationToken ct)
+        string orgId, string file, CacheArtifactServeFacts caFacts, TokenRecord? token,
+        OrgSettings? settings, CancellationToken ct)
     {
+        // Block gate runs before any bytes are served, so a manual block / OSV finding on a
+        // proxy-cached RPM takes effect on every subsequent download, not just first-fetch.
+        if (await _svc.BlockGate.EvaluateAsync(
+                BlockGateRequest.ForProxyCacheFacts(
+                    orgId, "rpm", caFacts, token, settings, HttpContext.GetNormalizedRemoteIp()), ct)
+            == BlockDecision.Blocked)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden);
+        }
+
+        // 304 short-circuit: check the client's cached copy before opening the blob stream.
+        string? cachedEtag = !string.IsNullOrEmpty(caFacts.ContentHash)
+            ? $"\"sha256:{caFacts.ContentHash}\""
+            : null;
+        if (cachedEtag is not null && ConditionalRequestHelper.IfNoneMatchHits(Request.Headers, cachedEtag))
+        {
+            Response.Headers.ETag = cachedEtag;
+            Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            return StatusCode(StatusCodes.Status304NotModified);
+        }
+
         // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey routes to cache tier.
         var stream = await _svc.BlobStore.Cache.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
         if (stream is null)
@@ -367,17 +453,18 @@ public sealed class RpmController : OrgScopedControllerBase
         }
 
         Response.Headers["X-Cache"] = "HIT";
-        if (!string.IsNullOrEmpty(caFacts.ContentHash))
+        if (cachedEtag is not null)
         {
-            Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
+            Response.Headers.ETag = cachedEtag;
             Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
 
         string purl = caFacts.Purl ?? string.Empty;
         await _svc.Audit.LogActivityAsync(orgId, "rpm", purl, "download",
             token?.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-        // Increment per-tenant download count on the global plane.
-        await _svc.TenantAccess.UpsertStateAsync(orgId, caFacts.Id, _svc.Time.GetUtcNow(), ct);
+        // Increment per-tenant download count on the global plane. Enqueued off the request
+        // path — the row already exists (seeded durably at first-fetch).
+        await _svc.TenantAccess.RecordDownloadHitAsync(orgId, caFacts.Id, _svc.Time.GetUtcNow(), ct);
         return File(stream, "application/x-rpm", file);
     }
 
@@ -554,19 +641,29 @@ public sealed class RpmController : OrgScopedControllerBase
             return null;
         }
 
-        if (_svc.Proxy is { IsPassthroughModeSelected: true })
+        if (IsRpmPassthroughEffective(settings))
         {
             var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
             return bases.Count > 0 ? await TryServeRepodataFromUpstreamAsync(bases[0].Url, file, ct) : null;
         }
 
-        if (_svc.Proxy is { IsMergedModeSelected: true })
-        {
-            var bases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
-            return bases.Count > 0 ? await TryServeMergedRepodataAsync(orgId, bases[0].Url, file, ct) : null;
-        }
+        // Effective merged mode: serve a combined local ∪ upstream index.
+        var mergedBases = await _svc.Registries.ResolveAsync(orgId, "rpm", ct);
+        return mergedBases.Count > 0 ? await TryServeMergedRepodataAsync(orgId, mergedBases[0].Url, file, ct) : null;
+    }
 
-        return null;
+    // Resolves the effective RPM upstream mode for an org and reports whether passthrough is in
+    // force. The per-org rpm_upstream_mode is an override, not a floor: an explicit org value
+    // (set via PUT /api/v1/rpm-upstream-mode) wins over the instance Rpm:UpstreamMode env value in
+    // EITHER direction — an org can opt into 'merged' on a passthrough instance, or opt out to
+    // 'passthrough' on a merged instance. A null org setting (never configured, or explicitly
+    // cleared back to inherit) falls back to the env value. A garbage/unset env value normalizes
+    // to the documented 'passthrough' default (mirrors IRpmUpstreamProxy.IsMergedModeSelected).
+    private bool IsRpmPassthroughEffective(OrgSettings? settings)
+    {
+        string envMode = _svc.Proxy is { IsMergedModeSelected: true } ? "merged" : "passthrough";
+        string effectiveMode = settings?.RpmUpstreamMode ?? envMode;
+        return !string.Equals(effectiveMode, "merged", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -701,16 +798,15 @@ public sealed class RpmController : OrgScopedControllerBase
                 upstreamBase, ex.GetType().Name);
         }
 
-        // Build merged primary.
-        string mergedPrimary = await _svc.Repodata.BuildMergedPrimaryAsync(orgId, upstreamPrimaryGz, ct);
-        byte[] primaryGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(mergedPrimary));
+        // Build merged primary. Builds gzip bytes directly (no intermediate string/byte[]) —
+        // see RpmRepodataService.BuildMergedPrimaryGzAsync.
+        byte[] primaryGz = await _svc.Repodata.BuildMergedPrimaryGzAsync(orgId, upstreamPrimaryGz, ct);
 
         // Build merged filelists: local entries from stored files_json merged with upstream entries.
         byte[] filelistsGz;
         if (upstreamFilelistsGz is not null)
         {
-            string mergedFilelists = await _svc.Repodata.BuildMergedFilelistsAsync(orgId, upstreamFilelistsGz, ct);
-            filelistsGz = RpmRepodataService.Gzip(System.Text.Encoding.UTF8.GetBytes(mergedFilelists));
+            filelistsGz = await _svc.Repodata.BuildMergedFilelistsGzAsync(orgId, upstreamFilelistsGz, ct);
         }
         else
         {
@@ -1150,5 +1246,8 @@ public sealed record RpmControllerServices(
     CacheArtifactRepository CacheArtifacts,
     TenantArtifactAccessRepository TenantAccess,
     Dependably.Protocol.Provenance.RpmProvenanceVerifier RpmProvenance,
+    Dependably.Infrastructure.Edge.EdgePublishGuard EdgeGuard,
+    Dependably.Protocol.BlockGateService BlockGate,
+    Dependably.Infrastructure.StagingOptions Staging,
     UpstreamClient? UpstreamClient = null,
     IRpmUpstreamProxy? Proxy = null);

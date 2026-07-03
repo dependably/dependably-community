@@ -297,7 +297,7 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
             days_remaining = (int)Math.Floor(daysRemaining),
             not_after = notAfter.ToString("yyyy-MM-ddTHH:mm:ssZ"),
             stage = targetStage,
-        });
+        }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
 
         await _audit.LogAsync(action, orgId: row.OrgId, detail: detail, ct: ct);
         await _samlConfig.SetCertExpiryAlertStageAsync(row.OrgId, targetStage, ct);

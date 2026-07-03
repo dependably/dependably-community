@@ -82,7 +82,11 @@ CREATE TABLE IF NOT EXISTS org_settings (
     verify_maven_signatures   TEXT    NOT NULL DEFAULT 'off' CHECK (verify_maven_signatures IN ('off', 'warn', 'block')),
     -- Running tally of hosted-artefact bytes for this tenant. See Schema.sql for the full
     -- rationale (atomic reserve-before-write, backfill, delete decrement).
-    storage_used_bytes        BIGINT NOT NULL DEFAULT 0
+    storage_used_bytes        BIGINT NOT NULL DEFAULT 0,
+    -- Per-tenant RPM hosted-publishing posture override. NULL (default) inherits the instance
+    -- Rpm:UpstreamMode env value; an explicit value overrides the env value in EITHER direction.
+    -- See Schema.sql.
+    rpm_upstream_mode         TEXT    CHECK (rpm_upstream_mode IS NULL OR rpm_upstream_mode IN ('passthrough','merged'))
 );
 
 CREATE TABLE IF NOT EXISTS instance_settings (
@@ -209,7 +213,12 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- Provenance/signature-verification outcome + verifying signer keyid. See Schema.sql.
     provenance_status TEXT,
     provenance_signer TEXT,
+    -- Install-relevant manifest subset captured at hosted npm publish. See Schema.sql.
+    manifest_json TEXT,
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    -- ISO 8601 UTC; stamped when a same-version re-push overwrites this row's bytes.
+    -- NULL means never overwritten, in which case the effective pushed date is created_at.
+    updated_at  TEXT,
     UNIQUE (package_id, version)
 );
 
@@ -528,6 +537,40 @@ CREATE TABLE IF NOT EXISTS upstream_registry (
 );
 CREATE INDEX IF NOT EXISTS idx_upstream_registry_org_eco
     ON upstream_registry(org_id, ecosystem, position);
+
+-- Per-(org, ecosystem, package name) upstream source pin. The first upstream to successfully
+-- serve a proxied name binds that name to that upstream host; a later proxy fetch resolving the
+-- same name from a DIFFERENT upstream host is refused. This is the non-OCI analogue of OCI
+-- repository-prefix routing and closes the dependency-confusion window where a private-upstream
+-- miss silently falls through to a public upstream squatting the same name. upstream_host is the
+-- scheme+authority (e.g. https://registry.npmjs.org) of the serving upstream.
+CREATE TABLE IF NOT EXISTS upstream_source_pin (
+    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem     TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    upstream_host TEXT NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    PRIMARY KEY (org_id, ecosystem, name)
+);
+
+-- NuGet symbol-server (SSQP) index. Maps a Portable-PDB debug-id key to the exact PDB entry
+-- inside a stored .snupkg so a debugger can fetch a single PDB by GUID+age via
+-- GET /nuget/symbols/{pdb}/{key}/{pdb}. Populated on symbol push (one row per contained PDB).
+-- ssqp_key and pdb_filename are stored lowercased and matched case-insensitively per the SSQP
+-- protocol. Tenant-scoped on org_id; each row references the owning package_versions row.
+CREATE TABLE IF NOT EXISTS nuget_symbol_index (
+    id                 TEXT PRIMARY KEY,
+    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    package_version_id TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    pdb_filename       TEXT NOT NULL,
+    ssqp_key           TEXT NOT NULL,
+    snupkg_blob_key    TEXT NOT NULL,
+    entry_path         TEXT NOT NULL,
+    created_at         TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    UNIQUE (org_id, ssqp_key, pdb_filename, package_version_id)
+);
+CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_lookup ON nuget_symbol_index(org_id, ssqp_key, pdb_filename);
+CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_pv ON nuget_symbol_index(package_version_id);
 
 -- Per-org operator-pinned signature trust anchors. Each row is one trust anchor
 -- (PGP public key, X.509 cert, npm SPKI key, Sigstore root, Rekor key, or publisher
@@ -931,6 +974,10 @@ CREATE TABLE IF NOT EXISTS audit_event (
 CREATE INDEX IF NOT EXISTS idx_audit_event_org_time ON audit_event (org_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_event_org_type ON audit_event (org_id, event_type, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_event_actor ON audit_event (org_id, actor_id, occurred_at DESC);
+-- Retention-sweep index: the reaper's DELETE filters on a bare occurred_at range with no
+-- org_id, so none of the org-scoped indexes above can serve it — this one exists purely to
+-- keep that sweep an index range scan instead of a full-table scan.
+CREATE INDEX IF NOT EXISTS idx_audit_event_occurred_at ON audit_event (occurred_at);
 
 -- Per-tenant registry bucket binding. See Schema.sql for the full semantics.
 CREATE TABLE IF NOT EXISTS tenant_storage (
@@ -1086,6 +1133,37 @@ CREATE TABLE IF NOT EXISTS banner_dismissals (
     PRIMARY KEY (banner_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_banner_dismissals_user ON banner_dismissals(user_id);
+
+-- User-configured outbound webhooks for package events. See Schema.sql for the full rationale.
+CREATE TABLE IF NOT EXISTS webhook_subscription (
+    id                   TEXT PRIMARY KEY,
+    org_id               TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    url                  TEXT NOT NULL,
+    secret               TEXT,
+    event_types          TEXT NOT NULL DEFAULT '[]',
+    enabled              INTEGER NOT NULL DEFAULT 1,
+    description          TEXT,
+    last_delivery_at     TEXT,
+    last_status          TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    failing_since        TEXT,
+    last_error           TEXT,
+    created_at           TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    updated_at           TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_sub_org_enabled ON webhook_subscription(org_id, enabled);
+
+-- Single-writer mutual-exclusion lock over a shared SQLite database file. Carried here for schema
+-- parity only: the guard that writes this table is SQLite-only (Postgres is a legitimately
+-- multi-writer store, so a dependably fleet backed by Postgres never claims the lock). See
+-- Schema.sql for the full rationale. Dormant in a Postgres deployment.
+CREATE TABLE IF NOT EXISTS instance_lock (
+    id           TEXT PRIMARY KEY,
+    instance_id  TEXT NOT NULL,
+    hostname     TEXT,
+    heartbeat_at TEXT NOT NULL,
+    acquired_at  TEXT NOT NULL
+);
 
 -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
 -- Those are no-ops on fresh installs (IF NOT EXISTS). They exist solely to add the

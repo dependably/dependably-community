@@ -110,6 +110,47 @@ public sealed class UploadEndpointTests : IClassFixture<DependablyFactory>, IAsy
     }
 
     [Fact]
+    public async Task NuGetImport_MixedCasePrerelease_DownloadableViaLowercasedFlatcontainerRoute()
+    {
+        // EcosystemDetector's nuget arm previously used the case-preserving
+        // PurlNormalizer.NormalizeNuGetVersionString, so a mixed-case prerelease imported
+        // through the unified upload path (this endpoint) was stored under its case-preserving
+        // form while every read path lowercases before lookup — the same undownloadable-version
+        // bug as a direct publish, but via the import surface (which shares detection with the
+        // bulk-manifest import path too).
+        string id = $"ImportMixedCase{Guid.NewGuid():N}"[..20];
+        const string pushedVersion = "2.0.0-Beta2";
+        const string lowercased = "2.0.0-beta2";
+        var (nupkgBytes, _) = NuGetFixtures.BuildNupkg(id, pushedVersion);
+
+        using var uploadClient = await AdminClient();
+        using var content = new MultipartFormDataContent();
+        content.Add(File(nupkgBytes), "files", $"{id}.{pushedVersion}.nupkg");
+        var uploadResp = await uploadClient.PostAsync("/api/v1/admin/upload", content);
+        Assert.Equal(HttpStatusCode.OK, uploadResp.StatusCode);
+
+        var doc = JsonDocument.Parse(await uploadResp.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(1, doc.GetProperty("accepted").GetInt32());
+
+        string pullToken = await _factory.CreateToken("pull");
+        using var pullClient = _factory.CreateClientWithBasic(pullToken);
+        string lowerId = id.ToLowerInvariant();
+
+        var indexResp = await pullClient.GetAsync($"/nuget/flatcontainer/{lowerId}/index.json");
+        Assert.Equal(HttpStatusCode.OK, indexResp.StatusCode);
+        using (var indexDoc = JsonDocument.Parse(await indexResp.Content.ReadAsStringAsync()))
+        {
+            var versions = indexDoc.RootElement.GetProperty("versions").EnumerateArray()
+                .Select(e => e.GetString()).ToList();
+            Assert.Contains(lowercased, versions);
+        }
+
+        var downloadResp = await pullClient.GetAsync(
+            $"/nuget/flatcontainer/{lowerId}/{lowercased}/{lowerId}.{lowercased}.nupkg");
+        Assert.Equal(HttpStatusCode.OK, downloadResp.StatusCode);
+    }
+
+    [Fact]
     public async Task PartialFailure_SlashLadenManifestName_RejectedWhileValidSiblingAccepted()
     {
         // A crafted package.json name with extra '/' segments would otherwise flow verbatim

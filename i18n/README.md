@@ -2,6 +2,18 @@
 
 This document describes how Dependably handles locale selection, string storage, translation handoff, and runtime formatting across its backend (.NET) and frontend (Svelte) layers.
 
+## How the stores align
+
+There are exactly **two runtime translation stores**, one per layer, plus one generated exchange artifact:
+
+| Store | Files | Consumed by |
+|-------|-------|-------------|
+| Frontend | `web/src/locales/en.json`, `fr.json` | Svelte UI via `svelte-i18n` |
+| Backend | `src/Dependably/Resources/SharedResource.resx`, `SharedResource.fr.resx` | API problem details and emails via `IStringLocalizer<SharedResource>` |
+| Handoff (generated) | `i18n/handoff/{frontend,backend}.en.xlf` | External translators / CAT tools — **never read at runtime** |
+
+The handoff package is regenerated from both stores by `i18n/scripts/i18n-export.sh`: English sources, existing French pre-filled as `<target>` (`state="translated"`), and resx `<comment>` context emitted as translator notes. `i18n/scripts/i18n-validate.js` (a blocking CI job) enforces en↔fr key parity in both stores **and** that the handoff unit set matches the source keys — a key add/rename/remove without re-running the export fails the pipeline.
+
 ## Locale codes
 
 Dependably uses [BCP 47](https://www.rfc-editor.org/rfc/rfc5646) locale tags throughout.
@@ -27,15 +39,16 @@ src/Dependably/Resources/
   SharedResource.fr.resx       # French translation
 ```
 
-The `.resx` format is standard .NET XML. Each string is a `<data>` element:
+The `.resx` format is standard .NET XML. Each string is a `<data>` element. In the English source file, give every entry a `<comment>` describing where the string appears and any terms that must stay verbatim — the XLIFF export turns it into a translator note:
 
 ```xml
-<data name="packages.list.empty.title" xml:space="preserve">
-  <value>No packages found</value>
+<data name="error.token.nameRequired" xml:space="preserve">
+  <value>Name is required.</value>
+  <comment>Creating a service token without a display name.</comment>
 </data>
 ```
 
-Access via `IStringLocalizer<SharedResource>` injected into controllers or services. The localizer selects the `.resx` file for the current request culture automatically.
+Access via `IStringLocalizer<SharedResource>` injected into controllers or services. The localizer selects the `.resx` file for the current request culture automatically. (`ProblemResults` exposes `ValidationErrorActionKey` / `ConflictActionKey` helpers so controllers pass a resource key instead of injecting the localizer themselves.)
 
 ### Frontend — JSON
 
@@ -103,26 +116,25 @@ Keys use **hierarchical dot-separated semantic identifiers**. The hierarchy shou
 <domain>.<context>.<element>.<property>
 ```
 
-Examples:
+Examples (from `web/src/locales/en.json`):
 
 | Key | String |
 |-----|--------|
 | `common.actions.save` | Save |
 | `common.actions.cancel` | Cancel |
-| `packages.list.empty.title` | No packages found |
-| `packages.list.empty.hint` | Push your first package to get started. |
-| `packages.detail.version.yanked` | This version has been yanked. |
-| `auth.login.error.invalid_credentials` | Invalid username or password. |
-| `settings.tokens.create.label` | Token name |
-| `org.members.role.owner` | Owner |
-| `errors.upload.too_large` | File exceeds the maximum upload size. |
+| `nav.airGapped` | Air-gapped |
+| `auth.login.tooManyAttempts` | Too many attempts. Try again in {seconds}s. |
+| `versionDetail.badges.installScript` | runs install scripts |
+| `versionDetail.latestCell.isLatest` | Latest upstream version |
+| `settings.proxy.maxEpssToleranceHint` | Maximum FIRST.org EPSS exploitation probability… |
+| `system.observability.numbers.cacheHits` | Cache hits |
 
 Rules:
 
-- All lowercase, words separated by underscores within a segment, segments separated by dots.
+- Segments are separated by dots; multi-word segments use camelCase (`maxEpssToleranceHint`, `airGapped`), never underscores.
 - Keep keys stable. Renaming a key is a breaking change that requires updating all locale files, XLIFF exports, and any code references.
-- Prefer semantic names that describe intent, not content. Use `auth.login.error.invalid_credentials` not `auth.login.error.wrong_password_message`.
-- Do not encode formatting in keys (no `_html`, `_bold` suffixes). Use svelte-i18n message parameters for interpolation.
+- Prefer semantic names that describe intent, not content. Use `auth.login.tooManyAttempts` not `auth.login.rateLimitErrorMessage`.
+- Do not encode formatting in keys (no `Html`, `Bold` suffixes). Use svelte-i18n message parameters for interpolation.
 
 ## Fallback chain
 
@@ -142,15 +154,17 @@ The fallback ensures the UI is never blank even when a translation is incomplete
 
 ## Backend locale selection
 
-The backend uses ASP.NET Core's `RequestLocalizationMiddleware`. Configuration lives in `Program.cs`:
+The backend uses ASP.NET Core's `RequestLocalizationMiddleware`. Configuration lives in `src/Dependably/Infrastructure/Startup/InfrastructureStartupExtensions.cs` (`AddDependablyLocalization`); `Program.cs` applies it with `app.UseRequestLocalization()`:
 
 ```csharp
+builder.Services.AddLocalization(o => o.ResourcesPath = "Resources");
 builder.Services.Configure<RequestLocalizationOptions>(options =>
 {
-    var supported = new[] { "en", "fr" };
+    var supported = new[] { new CultureInfo("en"), new CultureInfo("fr") };
     options.DefaultRequestCulture = new RequestCulture("en");
-    options.SupportedCultures = supported.Select(c => new CultureInfo(c)).ToList();
-    options.SupportedUICultures = options.SupportedCultures;
+    options.SupportedCultures = supported;
+    options.SupportedUICultures = supported;
+    // Providers: query string, cookie, Accept-Language (first match wins)
 });
 ```
 
@@ -268,7 +282,7 @@ node i18n/scripts/i18n-validate.js
 
 ### Adding a new string
 
-1. Add the key and English value to `web/src/locales/en.json` (frontend) or `src/Dependably/Resources/SharedResource.resx` (backend).
+1. Add the key and English value to `web/src/locales/en.json` (frontend) or `src/Dependably/Resources/SharedResource.resx` (backend). For backend strings, include a `<comment>` with translator context (where the string appears, which terms are API literals).
 2. Add the translated value to every locale file (`fr.json`, `SharedResource.fr.resx`, etc.).
 3. Run `node i18n/scripts/i18n-validate.js` — the script exits non-zero if any locale is missing the new key.
 

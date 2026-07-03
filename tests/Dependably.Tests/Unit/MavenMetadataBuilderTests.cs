@@ -89,4 +89,24 @@ public sealed class MavenMetadataBuilderTests
         var doc = XDocument.Parse(xml);
         Assert.Null(doc.Root!.Element("versioning")!.Element("lastUpdated"));
     }
+
+    [Fact]
+    public void Build_XmlDeclaration_MatchesUtf8ServedBytes()
+    {
+        // The controller serves the returned string as UTF-8 bytes (Encoding.UTF8.GetBytes).
+        // The XML declaration must therefore advertise utf-8, not the utf-16 that a plain
+        // StringWriter would emit — otherwise encoding-sniffing Maven/Gradle readers choke on
+        // the declaration/byte mismatch and version resolution breaks.
+        string xml = MavenMetadataBuilder.Build("com.example", "mylib", new[] { "1.0" }, Stamp);
+
+        Assert.StartsWith("<?xml version=\"1.0\" encoding=\"utf-8\"?>", xml, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("utf-16", xml, StringComparison.OrdinalIgnoreCase);
+
+        // The declared encoding must round-trip when the body is parsed from the exact UTF-8
+        // bytes the controller sends — this fails on the old utf-16 declaration.
+        byte[] served = System.Text.Encoding.UTF8.GetBytes(xml);
+        using var ms = new MemoryStream(served);
+        var reparsed = XDocument.Load(ms);
+        Assert.Equal("mylib", reparsed.Root!.Element("artifactId")!.Value);
+    }
 }

@@ -79,7 +79,7 @@ public sealed class PublishAuditor
             prior_artifact_hash = priorHash,
             artifact_hash = newHash,
             origin = request.Origin,
-        });
+        }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogAsync("package.replace", request.OrgId, request.ActorUserId,
             request.ActorKind, request.Ecosystem, request.Purl, detail: replaceDetail, ct: ct);
 

@@ -191,7 +191,7 @@ public sealed class LoginService
         {
             int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
             await _audit.LogAsync("lockout.triggered",
-                detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "tenant" }),
+                detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "tenant" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: sourceIp, ct: ct);
             await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.locked",
                 sourceIp: sourceIp, ct: ct);
@@ -249,7 +249,7 @@ public sealed class LoginService
         string userId, string tenantId, string role, long tokenVersion,
         string method, string? sourceIp, CancellationToken ct)
     {
-        string loginDetail = System.Text.Json.JsonSerializer.Serialize(new { method });
+        string loginDetail = System.Text.Json.JsonSerializer.Serialize(new { method }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogAsync("login.success", actorId: userId, detail: loginDetail, sourceIp: sourceIp, ct: ct);
         await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: userId,
             detail: loginDetail,
@@ -289,7 +289,7 @@ public sealed class LoginService
         {
             int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
             await _audit.LogAsync("lockout.triggered",
-                detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "tenant" }),
+                detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "tenant" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: sourceIp, ct: ct);
             await _auditEmitter.EmitAsync(
                 Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLockout,
@@ -475,7 +475,7 @@ public sealed class LoginService
         {
             int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
             await _audit.LogAsync("lockout.triggered",
-                detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "system" }),
+                detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "system" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: sourceIp, ct: ct);
             await _auditEmitter.EmitAsync(
                 Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLockout,
@@ -541,7 +541,7 @@ public sealed class LoginService
         string adminId, long tokenVersion, string method, string? sourceIp, CancellationToken ct)
     {
         await _audit.LogSystemAsync("login.success", actorId: adminId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { realm = "system", method }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { realm = "system", method }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: sourceIp, ct: ct);
         // deepcode ignore PrivateInformationExposure: payload contains only the user UUID,
         // realm name, and method name — no email. The email arg was reduced to emailHash
@@ -573,7 +573,7 @@ public sealed class LoginService
         {
             int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
             await _audit.LogSystemAsync("lockout.triggered",
-                detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "system" }),
+                detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "system" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: sourceIp, ct: ct);
             await _auditEmitter.EmitAsync(
                 Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLockout,
@@ -763,7 +763,7 @@ public sealed class LoginService
                 idp_can_assign_admin = ctx.IdpCanAssignAdmin,
                 idp_entity_id = ctx.IdpEntityId,
                 nameid = ctx.NameId,
-            }),
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: ctx.SourceIp, ct: ct);
 
     // Branch 1: an external identity (idpEntityId, nameId) already maps to a local user.
@@ -788,23 +788,29 @@ public sealed class LoginService
 
         await LogSamlSuccessAsync(ctx.TenantId, Id, ctx.IdpEntityId, ctx.NameId, "external_identity", ctx.SourceIp, ct);
 
-        string effectiveRole = await ResyncRoleAsync(ctx, Id, Role, logRefusal: true, ct);
+        (string effectiveRole, long effectiveTokenVersion) = await ResyncRoleAsync(ctx, Id, Role, TokenVersion, logRefusal: true, ct);
 
-        return new SamlLoginResult(IssueJwt(Id, ctx.TenantId, effectiveRole, await JwtSecretAsync(ct), TokenVersion),
+        return new SamlLoginResult(IssueJwt(Id, ctx.TenantId, effectiveRole, await JwtSecretAsync(ct), effectiveTokenVersion),
             null, Id, effectiveRole, false, false);
     }
 
     // Branch 2: no external identity, but a local user shares the asserted email — link them.
     // Returns null when no user matches the email, so the caller falls through to JIT provisioning.
-    // Privileged accounts (owner, or admin without idp_can_assign_admin) are never silently linked:
-    // the IdP ceiling that guards JIT provisioning must also guard the email-link path. Refusal is
-    // audited and returns null-token so the ACS issues a 401; no external_identities row is created.
+    // Two classes of account are never silently linked:
+    //   - Password-backed accounts (non-empty password_hash): a SAML assertion asserting
+    //     someone else's registered email must not silently take over a forms-login account —
+    //     the attacker only needs the IdP to assert an email, not the account's password.
+    //   - Privileged accounts beyond the IdP ceiling (owner, or admin without
+    //     idp_can_assign_admin): the ceiling that guards JIT provisioning must also guard the
+    //     email-link path.
+    // Either refusal is audited and returns null-token so the ACS issues a 401; no
+    // external_identities row is created and no session is issued.
     private async Task<SamlLoginResult?> TryLoginViaEmailLinkAsync(
         System.Data.Common.DbConnection conn, SamlLoginContext ctx, CancellationToken ct)
     {
-        var (Id, Role, AccountStatus, TokenVersion) = await conn.QuerySingleOrDefaultAsync<(string Id, string Role, string AccountStatus, long TokenVersion)>(
+        var (Id, Role, AccountStatus, TokenVersion, PasswordHash) = await conn.QuerySingleOrDefaultAsync<(string Id, string Role, string AccountStatus, long TokenVersion, string PasswordHash)>(
             """
-            SELECT id AS Id, role AS Role, account_status AS AccountStatus, token_version AS TokenVersion
+            SELECT id AS Id, role AS Role, account_status AS AccountStatus, token_version AS TokenVersion, password_hash AS PasswordHash
             FROM users
             WHERE lower(email) = lower(@email) AND tenant_id = @tenantId
             LIMIT 1
@@ -818,6 +824,27 @@ public sealed class LoginService
         if (AccountStatus is "locked" or "disabled")
         {
             return await RejectInactiveAccountAsync(Id, AccountStatus, ctx, ct);
+        }
+
+        // Guard: refuse to auto-link a password-backed account. A password-backed forms user
+        // must not be silently taken over by a SAML assertion that merely asserts a matching
+        // email — the assertion carries no proof of the account's password. Passwordless
+        // SSO-only accounts (password_hash empty, as JIT-provisioned SAML users are seeded)
+        // still link normally.
+        if (!string.IsNullOrEmpty(PasswordHash))
+        {
+            await _audit.LogAsync("auth.saml.login.failure",
+                orgId: ctx.TenantId, actorId: Id,
+                detail: System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    reason = "email_link_password_account_blocked",
+                    idp_entity_id = ctx.IdpEntityId,
+                    nameid = ctx.NameId,
+                }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                sourceIp: ctx.SourceIp, ct: ct);
+            await EmitSamlFailureAsync(ctx.TenantId, Id,
+                "email_link_password_account_blocked", ctx.IdpEntityId, ctx.NameId, ct);
+            return new SamlLoginResult(null, "SSO auto-link is not permitted for this account.", null, null, false, false);
         }
 
         // Guard: refuse to auto-link when the matched account is privileged beyond the IdP ceiling.
@@ -837,7 +864,7 @@ public sealed class LoginService
                     idp_can_assign_admin = ctx.IdpCanAssignAdmin,
                     idp_entity_id = ctx.IdpEntityId,
                     nameid = ctx.NameId,
-                }),
+                }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: ctx.SourceIp, ct: ct);
             await EmitSamlFailureAsync(ctx.TenantId, Id,
                 "email_link_privileged_account_blocked", ctx.IdpEntityId, ctx.NameId, ct);
@@ -849,13 +876,13 @@ public sealed class LoginService
 
         await _audit.LogAsync("auth.saml.user_linked",
             orgId: ctx.TenantId, actorId: Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId, email = ctx.AssertionEmail }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId, email = ctx.AssertionEmail }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: ctx.SourceIp, ct: ct);
         await LogSamlSuccessAsync(ctx.TenantId, Id, ctx.IdpEntityId, ctx.NameId, "email_link", ctx.SourceIp, ct);
 
-        string finalRole = await ResyncRoleAsync(ctx, Id, Role, logRefusal: false, ct);
+        (string finalRole, long finalTokenVersion) = await ResyncRoleAsync(ctx, Id, Role, TokenVersion, logRefusal: false, ct);
 
-        return new SamlLoginResult(IssueJwt(Id, ctx.TenantId, finalRole, await JwtSecretAsync(ct), TokenVersion),
+        return new SamlLoginResult(IssueJwt(Id, ctx.TenantId, finalRole, await JwtSecretAsync(ct), finalTokenVersion),
             null, Id, finalRole, false, true);
     }
 
@@ -868,7 +895,7 @@ public sealed class LoginService
         {
             await _audit.LogAsync("auth.saml.login.failure",
                 orgId: ctx.TenantId,
-                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "no_email_in_assertion", idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId }),
+                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "no_email_in_assertion", idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: ctx.SourceIp, ct: ct);
             await EmitSamlFailureAsync(ctx.TenantId, null, "no_email_in_assertion", ctx.IdpEntityId, ctx.NameId, ct);
             return new SamlLoginResult(null, "Assertion did not include an email and no existing user matches.", null, null, false, false);
@@ -896,13 +923,13 @@ public sealed class LoginService
 
         await _audit.LogAsync("auth.saml.user_provisioned",
             orgId: ctx.TenantId, actorId: newUserId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId, email = ctx.AssertionEmail, role = jitRole }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = ctx.IdpEntityId, nameid = ctx.NameId, email = ctx.AssertionEmail, role = jitRole }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: ctx.SourceIp, ct: ct);
 
         if (ctx.MappedRole is not null)
         {
             await _audit.LogAsync("auth.saml.role_assigned", orgId: ctx.TenantId, actorId: newUserId,
-                detail: System.Text.Json.JsonSerializer.Serialize(new { role = jitRole, idp_entity_id = ctx.IdpEntityId }),
+                detail: System.Text.Json.JsonSerializer.Serialize(new { role = jitRole, idp_entity_id = ctx.IdpEntityId }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: ctx.SourceIp, ct: ct);
         }
 
@@ -916,41 +943,44 @@ public sealed class LoginService
     // Re-syncs the user's role to the IdP-mapped role, with two guards: the IdP role ceiling
     // (an over-ceiling mapping never changes the role — a tenant-admin demotion must not be
     // silently re-promoted by the IdP) and last-owner protection (never demote the last owner).
-    // Returns the role in effect after the attempt. When logRefusal is set, a blocked demotion
-    // is audited as auth.saml.role_change_refused; over-ceiling attempts are always audited as
-    // auth.saml.role_mapping_blocked.
-    private async Task<string> ResyncRoleAsync(
-        SamlLoginContext ctx, string userId, string currentRole, bool logRefusal, CancellationToken ct)
+    // Returns the role in effect after the attempt plus the token_version the freshly minted
+    // session JWT must carry: a role change bumps token_version, so the emitted session must use
+    // the post-bump value (currentTokenVersion + 1) or it would fail the tver check on its next
+    // request. When no resync happens, the passed-in version is returned unchanged. When logRefusal
+    // is set, a blocked demotion is audited as auth.saml.role_change_refused; over-ceiling attempts
+    // are always audited as auth.saml.role_mapping_blocked.
+    private async Task<(string Role, long TokenVersion)> ResyncRoleAsync(
+        SamlLoginContext ctx, string userId, string currentRole, long currentTokenVersion, bool logRefusal, CancellationToken ct)
     {
         if (ctx.MappedRole is null || ctx.MappedRole == currentRole)
         {
-            return currentRole;
+            return (currentRole, currentTokenVersion);
         }
 
         if (ExceedsIdpRoleCeiling(ctx, ctx.MappedRole))
         {
             await AuditRoleMappingBlockedAsync(ctx, userId, ctx.MappedRole, currentRole, ct);
-            return currentRole;
+            return (currentRole, currentTokenVersion);
         }
 
         bool canResync = !(currentRole == "owner" && await _orgs.CountOwnersAsync(ctx.TenantId, ct) <= 1);
         if (canResync)
         {
-            await _orgs.UpdateMemberRoleAsync(ctx.TenantId, userId, ctx.MappedRole, ct);
+            long newTokenVersion = await _orgs.UpdateMemberRoleAsync(ctx.TenantId, userId, ctx.MappedRole, ct);
             await _audit.LogAsync("auth.saml.role_changed", orgId: ctx.TenantId, actorId: userId,
-                detail: System.Text.Json.JsonSerializer.Serialize(new { old_role = currentRole, new_role = ctx.MappedRole, idp_entity_id = ctx.IdpEntityId }),
+                detail: System.Text.Json.JsonSerializer.Serialize(new { old_role = currentRole, new_role = ctx.MappedRole, idp_entity_id = ctx.IdpEntityId }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: ctx.SourceIp, ct: ct);
-            return ctx.MappedRole;
+            return (ctx.MappedRole, newTokenVersion);
         }
 
         if (logRefusal)
         {
             await _audit.LogAsync("auth.saml.role_change_refused", orgId: ctx.TenantId, actorId: userId,
-                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "last_owner_protection", attempted_role = ctx.MappedRole }),
+                detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "last_owner_protection", attempted_role = ctx.MappedRole }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: ctx.SourceIp, ct: ct);
         }
 
-        return currentRole;
+        return (currentRole, currentTokenVersion);
     }
 
     private async Task<string> JwtSecretAsync(CancellationToken ct) =>
@@ -987,10 +1017,10 @@ public sealed class LoginService
     {
         await _audit.LogAsync("auth.saml.login.success",
             orgId: tenantId, actorId: userId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid = nameId, path }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid = nameId, path }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: sourceIp, ct: ct);
         await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: userId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { method = "saml" }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { method = "saml" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: sourceIp, ct: ct);
         await _auditEmitter.EmitAsync(
             Dependably.Infrastructure.Audit.Events.AuthEvents.TypeSamlSuccess,
@@ -1006,7 +1036,7 @@ public sealed class LoginService
     {
         await _audit.LogAsync("auth.saml.login.failure",
             orgId: ctx.TenantId, actorId: userId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = accountStatus }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { reason = "account_status", account_status = accountStatus }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: ctx.SourceIp, ct: ct);
         await EmitSamlFailureAsync(ctx.TenantId, userId, "account_status_" + accountStatus, ctx.IdpEntityId, ctx.NameId, ct);
         return new SamlLoginResult(null, "Account is not active.", null, null, false, false);
@@ -1025,7 +1055,7 @@ public sealed class LoginService
     {
         await _audit.LogAsync("auth.saml.test.success",
             orgId: tenantId, actorId: actorId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid = nameId, email }),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { idp_entity_id = idpEntityId, nameid = nameId, email }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
     }
 
@@ -1060,7 +1090,7 @@ public sealed class LoginService
             : null;
         // lockoutKey is realm+tenant scoped; emailHash is the unsalted audit pseudonym.
         await _lockout.RecordFailureAsync(lockoutKey, newCount, lockExpiry, ct);
-        string failureDetail = System.Text.Json.JsonSerializer.Serialize(new { reason, realm });
+        string failureDetail = System.Text.Json.JsonSerializer.Serialize(new { reason, realm }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         // Scope the audit row to the realm that rejected the login: a system/master failure is
         // visible only on the operator audit list (scope='system'); a tenant failure is pinned to
         // that one tenant's audit list (scope='tenant', org_id=<tenant>) so no other tenant — nor

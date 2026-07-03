@@ -57,6 +57,15 @@ public sealed class MfaController : OrgScopedControllerBase
             return NotFound();
         }
 
+        // Re-enrollment is a credential-state change: refuse to rotate the authenticator key
+        // for an already-enrolled account. A hijacked session must not be able to silently
+        // rebind the second factor (or invalidate the victim's TOTP by rotating the key).
+        // Re-enrolling requires disabling MFA first, which is gated on password + current factor.
+        if (await _mfa.GetEnabledAsync(userId, ct))
+        {
+            return Conflict(new { detail = "MFA is already enabled. Disable it first to re-enroll." });
+        }
+
         await _mfa.ResetKeyAsync(userId, ct);
         string? key = await _mfa.GetKeyAsync(userId, ct);
         if (key is null)
@@ -86,6 +95,13 @@ public sealed class MfaController : OrgScopedControllerBase
         if (!await TenantOwnsUserAsync(userId))
         {
             return NotFound();
+        }
+
+        // Defense in depth: reject verify on an already-enrolled account so a re-enrollment can
+        // never enable against a rotated key without first going through the password-gated disable.
+        if (await _mfa.GetEnabledAsync(userId, ct))
+        {
+            return Conflict(new { detail = "MFA is already enabled. Disable it first to re-enroll." });
         }
 
         bool valid = await _mfa.VerifyTotpAsync(userId, req.Code, ct);

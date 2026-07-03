@@ -319,6 +319,17 @@ public sealed class GoController : OrgScopedControllerBase
         var cached = await _svc.Blobs.GetAsync(blobKey, ct);
         if (cached is not null)
         {
+            // Block gate runs before the cached bytes are served. Only the .zip (the module code)
+            // is recorded on the global plane, so it is the artefact an operator block / OSV
+            // finding attaches to; a blocked module stops serving on every subsequent download,
+            // not only at never-before-fetched time. The .info / .mod metadata sidecars carry no
+            // cache_artifact row and no block state, so they fall through unblocked.
+            if (ext == "zip"
+                && await IsGoZipBlockedAsync(orgId, module, version, settings, token, ct))
+            {
+                return StatusCode(StatusCodes.Status403Forbidden);
+            }
+
             Response.Headers["X-Cache"] = "HIT";
             if (ext == "zip")
             {
@@ -694,9 +705,13 @@ public sealed class GoController : OrgScopedControllerBase
         if (cacheArtifactId is not null)
         {
             // Increment per-tenant download counter and write global supply-chain facts.
-            await _svc.TenantAccess.UpsertStateAsync(orgId, cacheArtifactId, _svc.Time.GetUtcNow(), ct);
+            // First-fetch (upstreamUrl set) must be durable before the row's global facts are
+            // written below, so it stays synchronous; a cache hit only bumps the counter and is
+            // enqueued off the request path — the row already exists.
             if (upstreamUrl is not null)
             {
+                await _svc.TenantAccess.UpsertStateAsync(orgId, cacheArtifactId, _svc.Time.GetUtcNow(), ct);
+
                 // Only write global facts on first-fetch (when upstreamUrl is non-null).
                 // Cache-hit calls pass null to signal the artifact row already carries them.
                 await _svc.CacheArtifacts.UpdateGlobalFactsAsync(
@@ -713,7 +728,26 @@ public sealed class GoController : OrgScopedControllerBase
                     upstreamIntegrityAlgorithm: contentHash.Length > 0 ? "sha256" : null,
                     ct);
             }
+            else
+            {
+                await _svc.TenantAccess.RecordDownloadHitAsync(orgId, cacheArtifactId, _svc.Time.GetUtcNow(), ct);
+            }
         }
+    }
+
+    // Evaluates the block gate for a cache-hit Go .zip download from the global plane. Returns
+    // false (allow) when no cache_artifact row exists for the coordinate — there is no block
+    // state to enforce.
+    private async Task<bool> IsGoZipBlockedAsync(
+        string orgId, string module, string version, OrgSettings? settings, TokenRecord? token, CancellationToken ct)
+    {
+        var caFacts = await _svc.CacheArtifacts.GetServeFactsByCoordinateAsync(
+            orgId, "golang", module, version, $"{version}.zip", ct);
+        return caFacts is not null
+            && await _svc.BlockGate.EvaluateAsync(
+                BlockGateRequest.ForProxyCacheFacts(
+                    orgId, "golang", caFacts, token, settings, HttpContext.GetNormalizedRemoteIp()), ct)
+                == BlockDecision.Blocked;
     }
 
     private sealed record GoVersionBytesRow(string? ChecksumSha256, long SizeBytes);
@@ -769,4 +803,5 @@ public sealed record GoControllerServices(
     IConfiguration Configuration,
     ILogger<GoController> Logger,
     GoLatestFetchCoordinator LatestCoordinator,
-    ReservedNamespaceService Reserved);
+    ReservedNamespaceService Reserved,
+    BlockGateService BlockGate);

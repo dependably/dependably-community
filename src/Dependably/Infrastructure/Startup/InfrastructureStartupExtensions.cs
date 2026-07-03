@@ -32,6 +32,12 @@ internal static class InfrastructureStartupExtensions
         // 50 MB covers hundreds of typical packuments/indices with headroom for large ones.
         builder.Services.AddMemoryCache(o => o.SizeLimit = MetadataCacheSizeLimitBytes);
 
+        // Configurable TTLs for the rendered-metadata caches (npm packument, NuGet registration,
+        // PyPI simple index, Maven metadata). Resolved once from METADATA_LOCAL_CACHE_TTL_SECONDS /
+        // METADATA_PROXY_CACHE_TTL_SECONDS so operators can shorten the post-publish staleness
+        // window on non-publishing replicas in HA deployments.
+        builder.Services.AddSingleton(RenderedMetadataCacheOptions.Resolve(builder.Configuration));
+
         // Per-ecosystem typed metadata caches over the one shared IMemoryCache. Registered as
         // singletons so each helper's single-flight in-flight map persists across the transient
         // controller instances that resolve it, and so every get/set/evict for a logical entry
@@ -84,16 +90,28 @@ internal static class InfrastructureStartupExtensions
         // Startup: schema migration + first-boot + JWT key load (must complete before other services)
         builder.Services.AddHostedService<StartupService>();
 
-        // Leader election for background jobs in HA mode
-        builder.Services.AddHostedService<LeaderElectedScheduler>();
+        // Shared-SQLite single-writer guard. StartupService claims the lock before the server
+        // accepts traffic (fail-fast on a live peer); this hosted service keeps the heartbeat alive
+        // and releases the row on graceful shutdown. Self-skips for Postgres and in-memory stores.
+        builder.Services.AddSingleton<InstanceLock>();
+        builder.Services.AddHostedService<InstanceLockHeartbeatService>();
+
+        // Multi-replica (HA) job coordination is per-job, not centralized: each scheduled job that
+        // mutates shared state acquires its own distributed lock per tick (see
+        // ScheduledBackgroundService.RequiresLeaderLock and the SamlCertExpiryCheckService /
+        // TenantHardDeleteService / StatsRefreshService sweep locks). In standalone mode the
+        // in-process lock always grants, so every job runs on the single node exactly as before.
 
         // Health infrastructure
         builder.Services.AddSingleton<ReadinessAggregator>();
         builder.Services.AddSingleton<Dependably.Infrastructure.Health.HealthService>();
         builder.Services.AddHostedService<HealthcheckPinger>();
 
-        builder.Services.AddSingleton<Dependably.Storage.UpstreamFetchCoordinator>();
         builder.Services.AddSingleton<IAirGapMode, AirGapMode>();
+        builder.Services.AddSingleton<IEdgeMode, EdgeMode>();
+        // Passive master-reachability tracker fed at the UpstreamClient fetch boundary; read only
+        // by the edge-only /edge/status endpoint. Registered in all modes (near-free), exposed on edge.
+        builder.Services.AddSingleton<Dependably.Infrastructure.Observability.EdgeStatusTracker>();
         builder.Services.AddSingleton<IRequireMfaMode, RequireMfaMode>();
         builder.Services.AddHostedService<CacheEvictionService>();
 
@@ -104,6 +122,7 @@ internal static class InfrastructureStartupExtensions
         builder.Services.AddHostedService<OrphanBlobReconcilerService>();
         builder.Services.AddHostedService<BlobStoreSizePoller>();
         builder.Services.AddHostedService<TenantCountPoller>();
+        builder.Services.AddHostedService<AdvisoryInventoryPoller>();
 
         builder.Services.AddHostedService<RetentionService>();
         builder.Services.AddHostedService<Dependably.Background.TenantHardDeleteService>();
@@ -171,6 +190,9 @@ internal static class InfrastructureStartupExtensions
         // audit). Used by NpmController/PyPiController/NuGetController publish handlers and
         // by ImportController bulk endpoints — replaces six near-identical inlined flows.
         builder.Services.AddSingleton<Dependably.Infrastructure.Publish.PublishAuditor>();
+        // Fail-closed publish guard: refuses every publish/push/import on an edge node with a 405.
+        // No-op in every non-edge mode. Shared by PackagePublishService and OciController.
+        builder.Services.AddSingleton<Dependably.Infrastructure.Edge.EdgePublishGuard>();
         builder.Services.AddSingleton<Dependably.Infrastructure.Publish.IPackagePublishService,
                                       Dependably.Infrastructure.Publish.PackagePublishService>();
 

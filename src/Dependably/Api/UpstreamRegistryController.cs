@@ -70,9 +70,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         string ecosystem = req.Ecosystem?.Trim().ToLowerInvariant() ?? "";
         if (!UpstreamRegistryRepository.IsSupportedEcosystem(ecosystem))
         {
-            return _problems.ValidationErrorAction(
-                "ecosystem",
-                $"Must be one of: {string.Join(", ", UpstreamRegistryRepository.SupportedEcosystems)}.");
+            return _problems.ValidationErrorActionKey("ecosystem", "error.common.mustBeOneOf", string.Join(", ", UpstreamRegistryRepository.SupportedEcosystems));
         }
 
         string orgId = CurrentTenantId();
@@ -88,9 +86,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         // Prefixes and tokenEndpoint are OCI-only (repository-prefix routing / token-exchange pin).
         if (req.Prefixes is not null || req.TokenEndpoint is not null)
         {
-            return _problems.ValidationErrorAction(
-                "prefixes",
-                "Fields prefixes and tokenEndpoint are only valid for ecosystem=oci.");
+            return _problems.ValidationErrorActionKey("prefixes", "error.upstream.ociOnlyFields");
         }
 
         string? url = req.Url?.Trim();
@@ -104,9 +100,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         // RPM proxy does not thread per-upstream credentials).
         if (ecosystem == "rpm" && (req.AuthType is not null || req.Username is not null || req.Secret is not null))
         {
-            return _problems.ValidationErrorAction(
-                "authType",
-                "Authenticated upstreams are not supported for ecosystem=rpm.");
+            return _problems.ValidationErrorActionKey("authType", "error.upstream.rpmAnonymousOnly");
         }
 
         // Parse auth_type. Non-OCI supports anonymous (default), bearer (Authorization: Bearer
@@ -121,12 +115,20 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
             return authFieldsProblem;
         }
 
+        // Refuse to pair a credential with a plaintext http:// upstream — the envelope-encrypted
+        // secret would transit the network in cleartext on every proxy miss. Anonymous http
+        // upstreams (internal mirrors) stay allowed.
+        if (authType != "anonymous"
+            && Uri.TryCreate(url, UriKind.Absolute, out var parsedUrl)
+            && parsedUrl.Scheme == Uri.UriSchemeHttp)
+        {
+            return _problems.ValidationErrorActionKey("url", "error.upstream.httpsRequiredForAuth");
+        }
+
         // Fail closed: a secret can only be stored when the master key is configured (D275-1).
         if (secret is not null && !_envelope.IsConfigured)
         {
-            return _problems.ValidationErrorAction(
-                "secret",
-                "DEPENDABLY_MASTER_KEY must be configured to store an upstream secret at rest.");
+            return _problems.ValidationErrorActionKey("secret", "error.upstream.masterKeyRequired");
         }
 
         string? name = string.IsNullOrWhiteSpace(req.Name) ? null : req.Name.Trim();
@@ -143,7 +145,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
                 name = entry.Name,
                 authType,
                 hasSecret = entry.HasSecret,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return CreatedAtAction(nameof(List), null, entry);
     }
@@ -156,25 +158,23 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         {
             case "anonymous":
                 return username is not null || secret is not null
-                    ? _problems.ValidationErrorAction(
-                        "authType", "username and secret are not valid for authType=anonymous.")
+                    ? _problems.ValidationErrorActionKey("authType", "error.upstream.anonymousNoCredentials")
                     : null;
             case "bearer":
                 return secret is null
-                    ? _problems.ValidationErrorAction("secret", "secret is required for authType=bearer.")
+                    ? _problems.ValidationErrorActionKey("secret", "error.upstream.bearerSecretRequired")
                     : null;
             case "basic":
                 if (username is null)
                 {
-                    return _problems.ValidationErrorAction("username", "username is required for authType=basic.");
+                    return _problems.ValidationErrorActionKey("username", "error.upstream.basicUsernameRequired");
                 }
 
                 return secret is null
-                    ? _problems.ValidationErrorAction("secret", "secret is required for authType=basic.")
+                    ? _problems.ValidationErrorActionKey("secret", "error.upstream.basicSecretRequired")
                     : null;
             default:
-                return _problems.ValidationErrorAction(
-                    "authType", "authType must be one of: anonymous, basic, bearer.");
+                return _problems.ValidationErrorActionKey("authType", "error.upstream.authTypeInvalid");
         }
     }
 
@@ -185,7 +185,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         string host = (req.Url ?? req.Host ?? "").Trim();
         if (string.IsNullOrEmpty(host))
         {
-            return _problems.ValidationErrorAction("url", "Host is required for OCI upstreams.");
+            return _problems.ValidationErrorActionKey("url", "error.upstream.ociHostRequired");
         }
 
         // SSRF: validate the host by synthesising a full https:// URL.
@@ -198,7 +198,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         // Prefixes are required and must be non-empty.
         if (req.Prefixes is null || req.Prefixes.Count == 0)
         {
-            return _problems.ValidationErrorAction("prefixes", "At least one prefix is required for OCI upstreams.");
+            return _problems.ValidationErrorActionKey("prefixes", "error.upstream.ociPrefixRequired");
         }
 
         var (authType, authTypeProblem) = ParseOciAuthType(req.AuthType, req.Username, req.Secret);
@@ -211,9 +211,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         // key (D275-1 retrofits OCI's previously-plaintext secrets to the same fail-closed posture).
         if (!string.IsNullOrWhiteSpace(req.Secret) && !_envelope.IsConfigured)
         {
-            return _problems.ValidationErrorAction(
-                "secret",
-                "DEPENDABLY_MASTER_KEY must be configured to store an upstream secret at rest.");
+            return _problems.ValidationErrorActionKey("secret", "error.upstream.masterKeyRequired");
         }
 
         string? name = string.IsNullOrWhiteSpace(req.Name) ? null : req.Name.Trim();
@@ -239,7 +237,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
                 prefixes = req.Prefixes,
                 hasSecret = entry.HasSecret,
                 name,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return CreatedAtAction(nameof(List), null, entry);
     }
@@ -263,25 +261,21 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
                 authType = OciAuthType.DockerHubTokenExchange;
                 break;
             case "aws_ecr":
-                return (OciAuthType.Anonymous, _problems.ValidationErrorAction(
-                    "authType",
-                    "AuthType 'aws_ecr' is not supported. Use 'basic' with a GetAuthorizationToken-derived password."));
+                return (OciAuthType.Anonymous, _problems.ValidationErrorActionKey("authType", "error.upstream.awsEcrUnsupported"));
             default:
-                return (OciAuthType.Anonymous, _problems.ValidationErrorAction(
-                    "authType",
-                    "authType must be one of: anonymous, basic, dockerhub_token_exchange."));
+                return (OciAuthType.Anonymous, _problems.ValidationErrorActionKey("authType", "error.upstream.ociAuthTypeInvalid"));
         }
 
         if (authType == OciAuthType.Basic)
         {
             if (string.IsNullOrWhiteSpace(username))
             {
-                return (authType, _problems.ValidationErrorAction("username", "username is required for authType=basic."));
+                return (authType, _problems.ValidationErrorActionKey("username", "error.upstream.basicUsernameRequired"));
             }
 
             if (string.IsNullOrWhiteSpace(secret))
             {
-                return (authType, _problems.ValidationErrorAction("secret", "secret is required for authType=basic."));
+                return (authType, _problems.ValidationErrorActionKey("secret", "error.upstream.basicSecretRequired"));
             }
         }
 
@@ -303,7 +297,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         await _registries.DeleteAsync(orgId, id, ct);
 
         await _audit.LogAsync("upstream_registry_removed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return NoContent();
     }
@@ -323,9 +317,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         string eco = ecosystem?.Trim().ToLowerInvariant() ?? "";
         if (!UpstreamRegistryRepository.IsSupportedEcosystem(eco))
         {
-            return _problems.ValidationErrorAction(
-                "ecosystem",
-                $"Must be one of: {string.Join(", ", UpstreamRegistryRepository.SupportedEcosystems)}.");
+            return _problems.ValidationErrorActionKey("ecosystem", "error.common.mustBeOneOf", string.Join(", ", UpstreamRegistryRepository.SupportedEcosystems));
         }
 
         var ids = req.Ids ?? [];
@@ -333,7 +325,7 @@ public sealed class UpstreamRegistryController : OrgScopedControllerBase
         await _registries.ReorderAsync(orgId, eco, ids, ct);
 
         await _audit.LogAsync("upstream_registry_reordered", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { ecosystem = eco, ids }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { ecosystem = eco, ids }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return NoContent();
     }

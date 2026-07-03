@@ -257,6 +257,108 @@ public class TokenAuthExtensionsTests : IAsyncLifetime
         // the throttled UPDATE on a missing id is a 0-row no-op even if it had been called.
     }
 
+    // ── last_used_at throttle gate (in-process skip of the no-op write) ─────────
+
+    /// <summary>
+    /// Counts calls to <see cref="TokenRepository.TouchLastUsedAsync"/> so the throttle-gate
+    /// tests can assert the in-process skip fires — the DB-level guard alone would make a
+    /// no-op indistinguishable from a skipped write.
+    /// </summary>
+    private sealed class CountingTokenRepository : TokenRepository
+    {
+        public int TouchCalls { get; private set; }
+
+        public CountingTokenRepository(IMetadataStore db, TimeProvider time) : base(db, time)
+        {
+        }
+
+        public override Task TouchLastUsedAsync(
+            string tokenId, TokenSource source, int minIntervalSeconds = 60, CancellationToken ct = default)
+        {
+            TouchCalls++;
+            return base.TouchLastUsedAsync(tokenId, source, minIntervalSeconds, ct);
+        }
+    }
+
+    private async Task<(CountingTokenRepository Spy, string RawToken)> SeedUserTokenWithLastUsedAsync(
+        string orgSlug, TimeProvider clock, DateTimeOffset? lastUsedAt)
+    {
+        var spy = new CountingTokenRepository(_db, clock);
+        string rawToken = $"raw-{orgSlug}-token";
+        string hash = TokenRepository.HashToken(rawToken);
+        string tokenId = Guid.NewGuid().ToString("N");
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
+            new { id = $"org-{orgSlug}", slug = orgSlug });
+        await conn.ExecuteAsync(
+            "INSERT INTO users (id, tenant_id, email, password_hash, role) VALUES (@id, @tenant, @email, @pw, @role)",
+            new { id = $"user-{orgSlug}", tenant = $"org-{orgSlug}", email = $"{orgSlug}@example.com", pw = "x", role = "member" });
+        await conn.ExecuteAsync("""
+            INSERT INTO user_tokens (id, org_id, user_id, token_hash, capabilities, created_at, last_used_at)
+            VALUES (@id, @org, @user, @hash, @caps, @createdAt, @lastUsed)
+            """,
+            new
+            {
+                id = tokenId,
+                org = $"org-{orgSlug}",
+                user = $"user-{orgSlug}",
+                hash,
+                caps = """["read:metadata"]""",
+                createdAt = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                lastUsed = lastUsedAt?.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            });
+        return (spy, rawToken);
+    }
+
+    [Fact]
+    public async Task ResolveTokenAsync_LastUsedWithinThrottleWindow_SkipsTouchWrite()
+    {
+        // last_used_at is 30s old — inside the 60s window — so the resolve helper must NOT
+        // open a write transaction. On the pre-fix code TouchLastUsedAsync ran unconditionally,
+        // so this assertion (0 calls) fails there.
+        var clock = TestTime.Frozen();
+        var (spy, rawToken) = await SeedUserTokenWithLastUsedAsync(
+            "fresh", clock, TestTime.KnownNow.AddSeconds(-30));
+
+        var req = RequestWithAuth($"Bearer {rawToken}");
+        var resolved = await req.ResolveTokenAsync(spy);
+
+        Assert.NotNull(resolved);
+        Assert.Equal(0, spy.TouchCalls);
+    }
+
+    [Fact]
+    public async Task ResolveTokenAsync_LastUsedOlderThanThrottleWindow_InvokesTouchWrite()
+    {
+        // last_used_at is 2 minutes old — past the 60s window — so the write must go through.
+        var clock = TestTime.Frozen();
+        var (spy, rawToken) = await SeedUserTokenWithLastUsedAsync(
+            "stale", clock, TestTime.KnownNow.AddMinutes(-2));
+
+        var req = RequestWithAuth($"Bearer {rawToken}");
+        var resolved = await req.ResolveTokenAsync(spy);
+
+        Assert.NotNull(resolved);
+        Assert.Equal(1, spy.TouchCalls);
+        var after = await spy.GetTokenByIdAsync(resolved!.Id, "org-stale");
+        Assert.Equal(TestTime.KnownNow, after!.LastUsedAt!.Value);
+    }
+
+    [Fact]
+    public async Task ResolveTokenAsync_NullLastUsed_InvokesTouchWrite()
+    {
+        // A token that has never been used (NULL last_used_at) is always stamped on first use.
+        var clock = TestTime.Frozen();
+        var (spy, rawToken) = await SeedUserTokenWithLastUsedAsync("firstuse", clock, lastUsedAt: null);
+
+        var req = RequestWithAuth($"Bearer {rawToken}");
+        var resolved = await req.ResolveTokenAsync(spy);
+
+        Assert.NotNull(resolved);
+        Assert.Equal(1, spy.TouchCalls);
+    }
+
     [Fact]
     public async Task ResolveTokenAsync_OrgScopedOverload_MatchingOrg_ReturnsToken()
     {

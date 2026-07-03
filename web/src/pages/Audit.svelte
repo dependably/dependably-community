@@ -225,6 +225,7 @@
           {#if ev.detail && ev.sourceIp}{ev.detail} · {ev.sourceIp}
           {:else if ev.detail}{ev.detail}
           {:else if ev.sourceIp}{ev.sourceIp}
+          {:else}—
           {/if}
         </td>
         <td class="actor-cell text-muted">{ev.actorEmail ?? (SYSTEM_EVENTS.has(ev.eventType) ? $t('activity.system') : $t('activity.anonymous'))}</td>
@@ -267,7 +268,7 @@
         <td class="nowrap text-muted">{$formatDate(e.createdAt)}</td>
         <td><code>{e.action}</code></td>
         <td class="text-muted">{e.actorEmail ?? e.actorId ?? '—'}</td>
-        <td class="audit-detail-cell">{e.detail ?? ''}</td>
+        <td class="audit-detail-cell">{e.detail || '—'}</td>
       </tr>
     </DataTable>
 

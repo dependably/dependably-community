@@ -1,5 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
+using System.Text.Json;
+using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Security;
@@ -389,6 +391,108 @@ public class UpstreamClientTests : IAsyncLifetime
         Assert.True(record.Properties.ContainsKey("Duration"));
         Assert.True(record.Properties.ContainsKey("TraceId"));
     }
+
+    // ── Result-returning fetch: no buffer, reuses computed SHA-256 (Cargo path) ────
+
+    // Builds a client whose audit repository writes to the persistent _db so audit rows
+    // can be read back after the fetch.
+    private (UpstreamClient Client, FakeHttpHandler Handler) BuildAuditingClient(IBlobStore store)
+    {
+        var handler = new FakeHttpHandler();
+        var factory = new FakeHttpClientFactory(handler);
+        var tiered = new TieredBlobStorage(store, store);
+        string stagingDir = Path.Combine(Path.GetTempPath(), $"dependably-audit-{Guid.NewGuid():N}");
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["PROXY_STAGING_PATH"] = stagingDir })
+            .Build();
+        var client = new UpstreamClient(
+            factory, tiered, new AuditRepository(_db), new AllowAllValidator(),
+            new StubAirGapMode(false), new DriveInfoStagingDiskInfo(stagingDir),
+            StagingOptions.Resolve(config), NullLogger<UpstreamClient>.Instance);
+        return (client, handler);
+    }
+
+    [Fact]
+    public async Task GetOrFetchToBlobKeyAsync_CacheMiss_ReusesComputedShaAndStreamsFromBlob()
+    {
+        // The Cargo proxy path uses this method so it can serve straight from the blob store
+        // instead of buffering the crate and recomputing its digest. The returned fact set must
+        // carry the SHA-256 the streamed stage already produced (matching the content) and the
+        // size, and the artifact must be retrievable under the caller-supplied key.
+        byte[] data = RandomBytes(4096);
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(data));
+        var store = new InMemoryBlobStore();
+        var (client, handler) = BuildClient(new AllowAllValidator(), store);
+        handler.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(data)
+        };
+
+        var result = await client.GetOrFetchToBlobKeyAsync(
+            "cargo/org1/foo/1.0.0.crate", "http://upstream.test/foo-1.0.0.crate", spec, "cargo");
+
+        Assert.Equal(Sha256Hex(data), result.Sha256Hex);
+        Assert.Equal(data.Length, result.SizeBytes);
+        Assert.Equal("cargo/org1/foo/1.0.0.crate", result.BlobKey);
+        Assert.Equal(1, handler.CallCount);
+
+        var stored = await store.GetAsync("cargo/org1/foo/1.0.0.crate");
+        Assert.NotNull(stored);
+        Assert.Equal(data, await DrainAsync(stored!));
+    }
+
+    [Fact]
+    public async Task GetOrFetchToBlobKeyAsync_CacheHit_RecoversShaWithoutUpstreamCall()
+    {
+        // On a concurrent cache hit the digest is recovered by stream-hashing the stored blob —
+        // no upstream call, no full buffer.
+        byte[] data = RandomBytes(4096);
+        var store = new InMemoryBlobStore();
+        await store.PutAsync("cargo/org1/bar/2.0.0.crate", new MemoryStream(data));
+        var (client, handler) = BuildClient(new AllowAllValidator(), store);
+
+        var result = await client.GetOrFetchToBlobKeyAsync(
+            "cargo/org1/bar/2.0.0.crate", "http://upstream.invalid/bar", null, "cargo");
+
+        Assert.Equal(Sha256Hex(data), result.Sha256Hex);
+        Assert.Equal(data.Length, result.SizeBytes);
+        Assert.Equal(0, handler.CallCount);
+    }
+
+    // ── Audit detail JSON escaping on a hostile upstream checksum value ───────────
+
+    [Fact]
+    public async Task VerifyChecksum_HostileExpectedValue_WritesValidJsonAuditDetail()
+    {
+        // A compromised/misbehaving upstream can return an integrity string containing a double
+        // quote or backslash. The checksum_failure audit row's detail column is contractually
+        // JSON; string-interpolating the raw value produced an unparseable blob. Serializing
+        // through JsonSerializer escapes it, so the security event the row exists to record stays
+        // machine-readable.
+        byte[] data = RandomBytes();
+        const string hostileExpected = "abc\"def\\ghi\"injected";
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, hostileExpected);
+        var store = new InMemoryBlobStore();
+        var (client, handler) = BuildAuditingClient(store);
+        handler.NextResponse = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(data)
+        };
+
+        await Assert.ThrowsAsync<ChecksumException>(() =>
+            client.GetOrFetchToBlobKeyAsync(
+                "cargo/org1/evil/1.0.0.crate", "http://upstream.test/evil-1.0.0.crate\"q", spec, "cargo",
+                orgId: "org1", purl: "pkg:cargo/evil@1.0.0"));
+
+        await using var conn = await _db.OpenAsync();
+        string? detail = await conn.QuerySingleOrDefaultAsync<string?>(
+            "SELECT detail FROM audit_log WHERE action = 'checksum_failure' ORDER BY created_at DESC LIMIT 1");
+        Assert.NotNull(detail);
+
+        // Fails on the old interpolated code: the unescaped quote yields invalid JSON here.
+        using var doc = JsonDocument.Parse(detail!);
+        Assert.Equal(hostileExpected, doc.RootElement.GetProperty("expected").GetString());
+    }
 }
 
 // ── Retry + UpstreamFetchFailedException tests ────────────────────────────────
@@ -540,6 +644,29 @@ public sealed class UpstreamFetchRetryTests : IAsyncLifetime
         Assert.Equal(1, handler.CallCount);
     }
 
+    [Fact]
+    public async Task GetOrFetchStreamAsync_NonTransient404_DisposesResponseToReleaseConnection()
+    {
+        // The response is obtained with HttpCompletionOption.ResponseHeadersRead; on a
+        // non-transient status the client surfaces HttpRequestException so the multi-base loop
+        // advances. It must dispose the undrained response first — EnsureSuccessStatusCode does
+        // NOT dispose it, and an un-disposed ResponseHeadersRead body pins the pooled connection
+        // (per-host pool caps at 10) until GC finalization. Upstream 404s are the hot path.
+        bool[] disposed = new bool[1];
+        var (client, handler) = BuildRetryClient();
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new DisposeTrackingContent(disposed),
+        });
+
+        await Assert.ThrowsAsync<HttpRequestException>(() =>
+            client.GetOrFetchStreamAsync(
+                "blobs/leak-key", "http://upstream.test/missing.tgz", null, "npm"));
+
+        Assert.True(disposed[0],
+            "the non-transient (404) response must be disposed so its ResponseHeadersRead connection returns to the pool");
+    }
+
     // ── FetchAndCacheByUrlAsync: persistent 403 → UpstreamFetchFailedException ─
 
     [Fact]
@@ -685,15 +812,15 @@ public sealed class UpstreamFetchFailedExceptionMiddlewareTests
 /// <summary>Allows all URLs — used to test non-SSRF paths.</summary>
 file sealed class AllowAllValidator : IUpstreamUrlValidator
 {
-    public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
-        => Task.FromResult(true);
+    public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
+        => Task.FromResult(UpstreamUrlBlock.None);
 }
 
 /// <summary>Blocks all URLs — used to test SSRF rejection paths.</summary>
 file sealed class BlockAllValidator : IUpstreamUrlValidator
 {
-    public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
-        => Task.FromResult(false);
+    public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
+        => Task.FromResult(UpstreamUrlBlock.BlockedRange);
 }
 
 /// <summary>Controllable HttpMessageHandler for unit tests.</summary>
@@ -839,11 +966,30 @@ internal sealed class FakeSequencedHttpClientFactory : IHttpClientFactory
     public HttpClient CreateClient(string name) => _client;
 }
 
+/// <summary>
+/// HttpContent that flips a flag when disposed — lets a test assert the client disposes a
+/// non-transient (404/410) response instead of stranding its pooled connection.
+/// </summary>
+file sealed class DisposeTrackingContent : ByteArrayContent
+{
+    private readonly bool[] _disposed;
+    public DisposeTrackingContent(bool[] disposed) : base(Array.Empty<byte>()) => _disposed = disposed;
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _disposed[0] = true;
+        }
+        base.Dispose(disposing);
+    }
+}
+
 /// <summary>Allows all URLs — used by retry test helpers.</summary>
 file sealed class AllowAllRetryValidator : IUpstreamUrlValidator
 {
-    public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
-        => Task.FromResult(true);
+    public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
+        => Task.FromResult(UpstreamUrlBlock.None);
 }
 
 /// <summary>Not air-gapped — used by retry test helpers.</summary>

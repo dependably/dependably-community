@@ -3,7 +3,9 @@
   markup via the default slot (one <tr> per visible row).
 
   Props:
-    columns      array of { key, label, sortable?, defaultDir?, width? } (width applied via colgroup)
+    columns      array of { key, label, sortable?, defaultDir?, width?, align? } (width applied via
+                 colgroup; align: 'right' | 'center' right/center-aligns the header to match a
+                 right/center-aligned value column — anything else defaults to left)
     rows         the source array
     comparators  optional map of { [key]: (a, b) => number }; missing keys fall back to
                  string compare on row[key] (or just-render — keys without comparators
@@ -24,7 +26,7 @@
   import { createEventDispatcher } from 'svelte'
   import { sortIndicator } from './sortIndicator.js'
 
-  /** @type {Array<{ key: string, label: string, sortable?: boolean, defaultDir?: string, width?: string }>} */
+  /** @type {Array<{ key: string, label: string, sortable?: boolean, defaultDir?: string, width?: string, align?: string }>} */
   export let columns = []
   /** @type {any[]} */
   export let rows = []
@@ -80,11 +82,11 @@
     <tr>
       {#each columns as c (c.key)}
         {#if c.sortable}
-          <th class="sortable" on:click={() => toggleSort(c.key)}>
+          <th class="sortable" class:text-right={c.align === 'right'} class:text-center={c.align === 'center'} on:click={() => toggleSort(c.key)}>
             {c.label}{sortIndicator(c.key, sortCol, sortDir)}
           </th>
         {:else}
-          <th>{c.label}</th>
+          <th class:text-right={c.align === 'right'} class:text-center={c.align === 'center'}>{c.label}</th>
         {/if}
       {/each}
     </tr>

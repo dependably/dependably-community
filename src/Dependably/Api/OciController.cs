@@ -45,6 +45,13 @@ public sealed class OciController : OrgScopedControllerBase
     // Route-level hard ceiling for OCI upload requests (2048 MiB matches the OCI default).
     private const long OciUploadSizeLimitBytes = 2048L * 1024 * 1024;
 
+    // Manifest-body cap (4 MiB). Real OCI manifests are a few KB; even a configured tenant OCI
+    // limit is sized for image layers, orders of magnitude too large to bound a manifest PUT.
+    // The manifest body is fully buffered (it must be parsed and digest-verified), so it is
+    // capped before buffering — independently of the layer-sized per-tenant limit — so a hostile
+    // near-2 GiB manifest PUT cannot OOM the process before any size check runs.
+    private const long OciManifestMaxBytes = 4L * 1024 * 1024;
+
     // Referrer scan cap: repositories with more manifests return an incomplete list (valid per OCI 1.1).
     private const int OciReferrersScanCap = 10000;
 
@@ -107,6 +114,13 @@ public sealed class OciController : OrgScopedControllerBase
     [RequestSizeLimit(OciUploadSizeLimitBytes)] // hard ceiling matching the 2048 MB OCI default; UploadSizeLimitMiddleware + the cumulative check enforce tighter per-tenant caps
     public async Task<IActionResult> Post(string? path, CancellationToken ct)
     {
+        // Fail-closed on an edge node: OCI stages uploads outside the shared publish service, so
+        // upload-initiation (POST /v2/.../blobs/uploads/) is refused here at the choke point.
+        if (_svc.EdgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
         var route = string.IsNullOrEmpty(path) ? null : OciRoute.Parse(path);
         return route is null
             ? OciError(StatusCodes.Status404NotFound, OciErrorCode.UNSUPPORTED, "Unsupported v2 path.")
@@ -123,6 +137,13 @@ public sealed class OciController : OrgScopedControllerBase
     [RequestSizeLimit(OciUploadSizeLimitBytes)] // hard ceiling matching the 2048 MB OCI default; UploadSizeLimitMiddleware + the cumulative check enforce tighter per-tenant caps
     public async Task<IActionResult> Patch(string? path, CancellationToken ct)
     {
+        // Fail-closed on an edge node: a chunk PATCH streams blob bytes to staging disk toward a
+        // registry-tier finalize, so the whole upload surface is refused here at the choke point.
+        if (_svc.EdgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
         var route = string.IsNullOrEmpty(path) ? null : OciRoute.Parse(path);
         return route is null
             ? OciError(StatusCodes.Status404NotFound, OciErrorCode.UNSUPPORTED, "Unsupported v2 path.")
@@ -142,6 +163,13 @@ public sealed class OciController : OrgScopedControllerBase
     [RequestSizeLimit(OciUploadSizeLimitBytes)] // hard ceiling matching the 2048 MB OCI default; UploadSizeLimitMiddleware + the cumulative check enforce tighter per-tenant caps
     public async Task<IActionResult> Put(string? path, CancellationToken ct)
     {
+        // Fail-closed on an edge node: manifest PUT and blob finalize both write the registry
+        // tier, so the whole upload-finalize surface is refused here at the choke point.
+        if (_svc.EdgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
         var route = string.IsNullOrEmpty(path) ? null : OciRoute.Parse(path);
         return route is null
             ? OciError(StatusCodes.Status404NotFound, OciErrorCode.UNSUPPORTED, "Unsupported v2 path.")
@@ -161,6 +189,13 @@ public sealed class OciController : OrgScopedControllerBase
     [EnableRateLimiting("push")]
     public async Task<IActionResult> Delete(string? path, CancellationToken ct)
     {
+        // Fail-closed on an edge node: a cache edge holds no authoritative manifest to remove, so
+        // the delete surface is refused here before any lookup or mutation.
+        if (_svc.EdgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
         var route = string.IsNullOrEmpty(path) ? null : OciRoute.Parse(path);
         return route is null
             ? OciError(StatusCodes.Status404NotFound, OciErrorCode.UNSUPPORTED, "Unsupported v2 path.")
@@ -203,6 +238,16 @@ public sealed class OciController : OrgScopedControllerBase
     /// manifest is not available locally (unresolved tag, no blob record, or the blob has
     /// been evicted from the store), signalling the caller to fall through to upstream.
     /// </summary>
+    // BlockGateService is deliberately not evaluated on the OCI serve path. Every language
+    // ecosystem stores proxy artefacts on the global cache plane (cache_artifact +
+    // tenant_artifact_access) whose per-version supply-chain fact columns — deprecated,
+    // revoked_at, vuln_checked_at, provenance_status, manual_block_state — are exactly what the
+    // block gate reads. OCI has its own storage plane (oci_blobs, keyed by (digest, org_id))
+    // that carries none of those columns, and OCI images are not run through the OSV scan or the
+    // manual-block endpoint that populate them. There is therefore no block state for the gate
+    // to enforce here; wiring it in would require a separate design that scans OCI images and
+    // adds the fact columns to the OCI plane. Access is still governed by the auth/anonymous-pull
+    // gate above.
     private async Task<IActionResult?> TryServeLocalManifestAsync(
         string orgId, string name, OciCoordinates coords, bool headOnly, TokenRecord? token, CancellationToken ct)
     {
@@ -1167,13 +1212,28 @@ public sealed class OciController : OrgScopedControllerBase
 
         string orgId = CurrentTenantId();
 
+        // Cap the manifest body BEFORE buffering it. Wrapping Request.Body in a LimitedReadStream
+        // means a hostile chunked (or over-large declared) body is aborted at 4 MiB instead of
+        // being copied into a growing MemoryStream that could reach ~2 GiB (plus the ToArray
+        // copy) before any size check ran. Pre-size the buffer from Content-Length when it is
+        // present and within the cap so a well-formed manifest allocates exactly once.
         byte[] bytes;
-        await using (var ms = new MemoryStream())
+        long? declared = Request.ContentLength;
+        int initialCapacity = declared is > 0 and <= OciManifestMaxBytes ? (int)declared.Value : 0;
+        try
         {
-            await Request.Body.CopyToAsync(ms, ct);
+            await using var ms = initialCapacity > 0 ? new MemoryStream(initialCapacity) : new MemoryStream();
+            await using var limited = new LimitedReadStream(Request.Body, OciManifestMaxBytes, "OCI manifest body");
+            await limited.CopyToAsync(ms, ct);
             bytes = ms.ToArray();
         }
+        catch (InvalidDataException)
+        {
+            return OciError(StatusCodes.Status413RequestEntityTooLarge, OciErrorCode.MANIFEST_INVALID,
+                $"Manifest exceeds the {OciManifestMaxBytes}-byte limit.");
+        }
 
+        // Defence in depth: a tenant OCI limit tighter than 4 MiB still rejects here.
         var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
         long limit = await _svc.Orgs.GetUploadLimitAsync(settings, "oci", ct);
         if (bytes.Length > limit)
@@ -1371,4 +1431,5 @@ public sealed record OciControllerServices(
     TieredBlobStorage BlobStore,
     IMetadataStore Db,
     OciUpstreamResolver Upstream,
-    OciUploadService Uploads);
+    OciUploadService Uploads,
+    Dependably.Infrastructure.Edge.EdgePublishGuard EdgeGuard);

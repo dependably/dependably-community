@@ -1,6 +1,7 @@
 using Cronos;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Redis;
 
 namespace Dependably.Background;
 
@@ -20,20 +21,32 @@ namespace Dependably.Background;
 /// </summary>
 public sealed class TenantHardDeleteService : BackgroundService
 {
+    // In a multi-replica (HA) deployment every replica runs this cron; without coordination each
+    // would list the same expired orgs, race the DELETE, and write its own tenant.hard_deleted
+    // audit row. Only the sweep-lock winner runs the pass. Standalone always wins the in-process lock.
+    private static readonly TimeSpan SweepLockTtl = TimeSpan.FromMinutes(5);
+    private const string SweepLockName = "tenant-hard-delete:sweep";
+
     private readonly OrgRepository _orgs;
     private readonly AuditRepository _audit;
     private readonly IMetadataStore _db;
     private readonly BannerRepository _banners;
     private readonly IConfiguration _config;
+    private readonly IAirGapMode _airGap;
+    private readonly IDistributedLock _locks;
     private readonly ILogger<TenantHardDeleteService> _logger;
     private readonly TimeProvider _time;
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Dependency-injection constructor: the parameter list is the declared dependency set.")]
     public TenantHardDeleteService(
         OrgRepository orgs,
         AuditRepository audit,
         IMetadataStore db,
         BannerRepository banners,
         IConfiguration config,
+        IAirGapMode airGap,
+        IDistributedLock locks,
         ILogger<TenantHardDeleteService> logger,
         TimeProvider time)
     {
@@ -42,6 +55,8 @@ public sealed class TenantHardDeleteService : BackgroundService
         _db = db;
         _banners = banners;
         _config = config;
+        _airGap = airGap;
+        _locks = locks;
         _logger = logger;
         _time = time;
     }
@@ -78,32 +93,70 @@ public sealed class TenantHardDeleteService : BackgroundService
 
     public async Task RunPassAsync(CancellationToken ct)
     {
-        int graceDays = int.TryParse(_config["TENANT_HARD_DELETE_GRACE_DAYS"], out int g) ? g : 30;
-        var expired = await _orgs.ListExpiredSoftDeletedOrgIdsAsync(graceDays, ct);
-        if (expired.Count == 0)
+        // A headless edge node has one implicit org and never soft-deletes tenants, so this sweep
+        // is inert there — edge mode force-disables tenant-hard-delete (not in the allowlist).
+        if (_airGap.IsJobDisabled("tenant-hard-delete"))
         {
             return;
         }
 
-        _logger.LogInformation(
-            "TenantHardDelete: {Count} tenant(s) past {Days}-day grace.",
-            expired.Count, graceDays);
-
-        await using var conn = await _db.OpenAsync(ct);
-        foreach (string orgId in expired)
+        // Coordinate across replicas: only the lock winner performs the destructive sweep and
+        // writes the tenant.hard_deleted audit rows. In standalone mode the in-process lock always
+        // grants on first acquire, so the single node sweeps normally.
+        ILockHandle? sweepLock;
+        try
         {
-            // Banners carry no FK to orgs, so delete them explicitly before the org row goes.
-            await _banners.DeleteForOrgAsync(orgId, ct);
+            sweepLock = await _locks.TryAcquireAsync(SweepLockName, SweepLockTtl, ct);
+        }
+        catch (Exception ex)
+        {
+            // ExecuteAsync's cron loop has no catch around RunPassAsync, so an uncaught exception
+            // here escapes and — under BackgroundService's default StopHost behavior — takes the
+            // whole replica down on a routine distributed-lock backend blip (e.g. Redis
+            // failover). Treat it exactly like "another instance holds the lock": skip this pass.
+            _logger.LogError(ex, "TenantHardDelete sweep skipped — sweep lock acquire failed.");
+            return;
+        }
 
-            // Single statement; FK cascades remove per-tenant data.
-            await conn.ExecuteAsync("DELETE FROM orgs WHERE id = @id", new { id = orgId });
+        if (sweepLock is null)
+        {
+            _logger.LogDebug("TenantHardDelete sweep skipped — another instance holds the sweep lock.");
+            return;
+        }
 
-            // Audit on the same connection — the DELETE doesn't take a write lock past the
-            // statement, so a fresh INSERT here doesn't risk the BEGIN IMMEDIATE deadlock.
-            await _audit.LogSystemAsync(
-                action: "tenant.hard_deleted",
-                orgId: orgId,
-                ct: ct);
+        try
+        {
+            int graceDays = int.TryParse(_config["TENANT_HARD_DELETE_GRACE_DAYS"], out int g) ? g : 30;
+            var expired = await _orgs.ListExpiredSoftDeletedOrgIdsAsync(graceDays, ct);
+            if (expired.Count == 0)
+            {
+                return;
+            }
+
+            _logger.LogInformation(
+                "TenantHardDelete: {Count} tenant(s) past {Days}-day grace.",
+                expired.Count, graceDays);
+
+            await using var conn = await _db.OpenAsync(ct);
+            foreach (string orgId in expired)
+            {
+                // Banners carry no FK to orgs, so delete them explicitly before the org row goes.
+                await _banners.DeleteForOrgAsync(orgId, ct);
+
+                // Single statement; FK cascades remove per-tenant data.
+                await conn.ExecuteAsync("DELETE FROM orgs WHERE id = @id", new { id = orgId });
+
+                // Audit on the same connection — the DELETE doesn't take a write lock past the
+                // statement, so a fresh INSERT here doesn't risk the BEGIN IMMEDIATE deadlock.
+                await _audit.LogSystemAsync(
+                    action: "tenant.hard_deleted",
+                    orgId: orgId,
+                    ct: ct);
+            }
+        }
+        finally
+        {
+            await sweepLock.DisposeAsync();
         }
     }
 }

@@ -12,6 +12,7 @@
   import { onMount, onDestroy } from 'svelte'
   import { t } from 'svelte-i18n'
   import { api } from '../api.js'
+  import Toggle from '../Toggle.svelte'
 
   let authConfig = null
   let metadataUploading = false, authSaving = false
@@ -283,12 +284,10 @@
           <p class="name">{$t('settings.auth.formsLogin')}</p>
           <p class="desc">{$t('settings.auth.formsLoginHint')}</p>
         </div>
-        <label class="toggle">
-          <input type="checkbox"
-                 checked={authConfig.formsLoginEnabled}
-                 on:change={(e) => saveAuthMethod('formsLoginEnabled', e.currentTarget.checked)} />
-          <span class="track"></span>
-        </label>
+        <Toggle
+          checked={authConfig.formsLoginEnabled}
+          ariaLabel={$t('settings.auth.formsLogin')}
+          on:change={() => saveAuthMethod('formsLoginEnabled', !authConfig.formsLoginEnabled)} />
       </div>
 
       <div class="method">
@@ -317,14 +316,12 @@
             {/if}
           </p>
         </div>
-        <label class="toggle">
-          <input type="checkbox"
-                 data-testid="saml-toggle"
-                 checked={authConfig.enabled}
-                 disabled={!authConfig.idpEntityId || (!authConfig.enabled && !recentTestOk(authConfig.lastTestAt))}
-                 on:change={(e) => saveAuthMethod('enabled', e.currentTarget.checked)} />
-          <span class="track"></span>
-        </label>
+        <Toggle
+          checked={authConfig.enabled}
+          disabled={!authConfig.idpEntityId || (!authConfig.enabled && !recentTestOk(authConfig.lastTestAt))}
+          ariaLabel={$t('settings.auth.samlLogin')}
+          testId="saml-toggle"
+          on:change={() => saveAuthMethod('enabled', !authConfig.enabled)} />
       </div>
     </div>
 

@@ -34,11 +34,56 @@ public sealed class OciUpstreamAuthService : IDisposable
 
     // Token cache: (orgId, host, repository, scope) → CachedToken.
     // orgId ensures different tenants with different credentials for the same host
-    // get separate cache entries and cannot observe each other's tokens.
+    // get separate cache entries and cannot observe each other's tokens. Bounded at
+    // MaxCachedTokens with expiry-ordered eviction so a client minting unlimited distinct
+    // repository keys under a matching upstream prefix cannot grow the map without bound.
     private readonly ConcurrentDictionary<(string, string, string, string), CachedToken> _tokens = new();
+    private const int MaxCachedTokens = 512;
 
-    // Per-key semaphores to prevent thundering herd on token exchange.
-    private readonly ConcurrentDictionary<(string, string, string, string), SemaphoreSlim> _sems = new();
+    // Fixed pool of striped semaphores to prevent thundering herd on token exchange.
+    // The repository component of the token key is a client-controlled route path, so a
+    // per-key semaphore map would grow without bound on hostile enumeration. Indexing a
+    // fixed array by key hash bounds the lock footprint to StripeCount: distinct keys may
+    // share a stripe (harmless extra serialization), but the double-checked cache lookup
+    // inside the critical section still keys on the exact quad.
+    private const int StripeCount = 64;
+    private readonly SemaphoreSlim[] _sems =
+        Enumerable.Range(0, StripeCount).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+
+    private SemaphoreSlim StripeFor((string, string, string, string) key)
+        => _sems[(int)((uint)key.GetHashCode() % StripeCount)];
+
+    // Store a freshly exchanged token, pruning the cache first when it reaches the cap so
+    // the map stays bounded. Prune drops expired entries, then evicts soonest-to-expire
+    // entries if still at capacity.
+    private void StoreToken((string, string, string, string) key, CachedToken token)
+    {
+        if (_tokens.Count >= MaxCachedTokens)
+        {
+            PruneTokens();
+        }
+        _tokens[key] = token;
+    }
+
+    private void PruneTokens()
+    {
+        var now = _time.GetUtcNow();
+        foreach (var kv in _tokens)
+        {
+            if (kv.Value.ExpiresAt <= now)
+            {
+                _tokens.TryRemove(kv.Key, out _);
+            }
+        }
+        int overBy = _tokens.Count - MaxCachedTokens + 1;
+        if (overBy > 0)
+        {
+            foreach (var kv in _tokens.OrderBy(e => e.Value.ExpiresAt).Take(overBy))
+            {
+                _tokens.TryRemove(kv.Key, out _);
+            }
+        }
+    }
 
     private sealed record CachedToken(string Value, DateTimeOffset ExpiresAt);
 
@@ -99,7 +144,7 @@ public sealed class OciUpstreamAuthService : IDisposable
         CancellationToken ct)
     {
         var key = (orgId, upstream.Host, repository, scope);
-        var sem = _sems.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        var sem = StripeFor(key);
 
         // Check cache before acquiring semaphore.
         if (_tokens.TryGetValue(key, out var cached) &&
@@ -163,14 +208,17 @@ public sealed class OciUpstreamAuthService : IDisposable
                     "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{upstream.Username}:{upstream.Password}")));
             }
 
-            using var tokenResponse = await client.SendAsync(tokenRequest, ct);
+            // ResponseHeadersRead is load-bearing: the default (ResponseContentRead) would have
+            // HttpClient buffer the whole body before the cap check below ever runs, defeating it.
+            using var tokenResponse = await client.SendAsync(tokenRequest, HttpCompletionOption.ResponseHeadersRead, ct);
             if (!tokenResponse.IsSuccessStatusCode)
             {
                 throw new OciUnauthorizedException($"Token exchange failed for {upstream.Host}: {tokenResponse.StatusCode}");
             }
 
-            string json = await tokenResponse.Content.ReadAsStringAsync(ct);
-            var doc = JsonDocument.Parse(json);
+            byte[] body = await UpstreamClient.ReadBodyCappedAsync(
+                tokenResponse, UpstreamClient.MaxMetadataResponseBytes, tokenUrl, ct);
+            var doc = JsonDocument.Parse(body);
             string? token = null;
             if (doc.RootElement.TryGetProperty("token", out var tp))
             {
@@ -190,7 +238,7 @@ public sealed class OciUpstreamAuthService : IDisposable
             var expiresAt = _time.GetUtcNow() + TimeSpan.FromSeconds(
                 Math.Min(expiresIn, (int)_options.Value.TokenCacheDuration.TotalSeconds));
 
-            _tokens[key] = new CachedToken(token, expiresAt);
+            StoreToken(key, new CachedToken(token, expiresAt));
             return "Bearer " + token;
         }
         finally
@@ -209,7 +257,7 @@ public sealed class OciUpstreamAuthService : IDisposable
         // ECR tokens are expensive to exchange (AWS API call). Cache them keyed by org so
         // different tenants with different ECR credentials get separate entries.
         var key = (orgId, upstream.Host, "", "ecr");
-        var sem = _sems.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        var sem = StripeFor(key);
 
         if (_tokens.TryGetValue(key, out var cached) &&
             cached.ExpiresAt > _time.GetUtcNow() + TimeSpan.FromMinutes(1))
@@ -308,7 +356,7 @@ public sealed class OciUpstreamAuthService : IDisposable
 
     public void Dispose()
     {
-        foreach (var sem in _sems.Values)
+        foreach (var sem in _sems)
         {
             sem.Dispose();
         }

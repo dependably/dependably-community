@@ -30,12 +30,14 @@ public sealed class NpmPackumentHandler(
     UpstreamRegistryResolver registries,
     NpmDistTagRepository distTags,
     RenderedResponseCache<NpmPackumentKey> cache,
+    RenderedMetadataCacheOptions cacheOptions,
     TimeProvider time)
 {
     // TTL for proxy-merged packuments (upstream can change); local-only packuments use
-    // a longer TTL because invalidation on mutation is the primary expiry mechanism.
-    private static readonly TimeSpan PackumentProxyTtl = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan PackumentLocalTtl = TimeSpan.FromMinutes(10);
+    // a longer TTL because invalidation on mutation is the primary expiry mechanism. Both are
+    // operator-tunable via METADATA_PROXY/LOCAL_CACHE_TTL_SECONDS (see RenderedMetadataCacheOptions).
+    private TimeSpan PackumentProxyTtl => cacheOptions.ProxyTtl;
+    private TimeSpan PackumentLocalTtl => cacheOptions.LocalTtl;
 
     public async Task<IActionResult> GetPackageAsync(
         HttpContext httpContext, string orgId, string package, CancellationToken ct)
@@ -495,26 +497,102 @@ public sealed class NpmPackumentHandler(
                 continue;
             }
 
-            string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
-            var dist = new JsonObject
+            versionsObj[v.Version] = BuildVersionObject(localPkg.Name, v, tarballBase);
+        }
+    }
+
+    /// <summary>
+    /// Builds the per-version packument object for a locally-stored version: the
+    /// registry-authoritative core (name, version, dist.tarball) plus the stored
+    /// install-manifest fields (bin, dependencies, engines, …), dist.shasum/dist.integrity,
+    /// hasInstallScript, and deprecated. Shared by the fully-local build and the
+    /// proxy-merge splice so both paths emit an identical shape. Legacy rows with no
+    /// stored manifest render the historical minimal shape.
+    /// </summary>
+    private static JsonObject BuildVersionObject(string packageName, PackageVersion v, string tarballBase)
+    {
+        string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
+        var dist = new JsonObject
+        {
+            ["tarball"] = $"{tarballBase}/{packageName}/{filename}"
+        };
+        // dist.shasum is hex SHA-1 by spec — emit only when we have a real SHA-1
+        // (populated at publish time / captured from upstream packuments on first-fetch).
+        // Omit rather than fall back to SHA-256: clients that verify shasum would reject
+        // the tarball, and clients that trust it would write the wrong hash to lockfiles.
+        if (v.ChecksumSha1 is not null)
+        {
+            dist["shasum"] = v.ChecksumSha1;
+        }
+
+        // dist.integrity is the sha512 SRI npm verifies on install and writes to lockfiles.
+        // Stored at hosted publish (publisher-declared or server-computed) and captured from
+        // upstream packuments on proxy first-fetch; only the SRI encoding is emittable.
+        if (v.UpstreamIntegrityAlgorithm == "sha512-sri" && v.UpstreamIntegrityValue is not null)
+        {
+            dist["integrity"] = v.UpstreamIntegrityValue;
+        }
+
+        var verObj = new JsonObject
+        {
+            ["name"] = packageName,
+            ["version"] = v.Version,
+            ["dist"] = dist
+        };
+
+        MergeStoredManifestFields(verObj, v.ManifestJson);
+
+        // npm's abbreviated packument advertises install scripts so clients can prompt/skip;
+        // the flag is detected at publish/first-fetch and stored on the row.
+        if (v.HasInstallScript)
+        {
+            verObj["hasInstallScript"] = true;
+        }
+
+        // Surface the deprecation message in the per-version packument object so
+        // npm CLI shows the deprecation warning when the package is installed.
+        if (v.Deprecated is not null)
+        {
+            verObj["deprecated"] = v.Deprecated;
+        }
+
+        return verObj;
+    }
+
+    // Merges the install-relevant fields persisted at publish (package_versions.manifest_json)
+    // into the version object. name/version/dist stay registry-authoritative regardless of
+    // stored content, and a NULL or unparseable stored value degrades to the minimal shape —
+    // a corrupt row must never take down the packument.
+    private static void MergeStoredManifestFields(JsonObject verObj, string? manifestJson)
+    {
+        if (manifestJson is null)
+        {
+            return;
+        }
+
+        JsonObject? manifest;
+        try
+        {
+            manifest = JsonNode.Parse(manifestJson) as JsonObject;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return;
+        }
+
+        if (manifest is null)
+        {
+            return;
+        }
+
+        foreach (var (key, node) in manifest)
+        {
+            if (key is "name" or "version" or "dist")
             {
-                ["tarball"] = $"{tarballBase}/{localPkg.Name}/{filename}"
-            };
-            // dist.shasum is hex SHA-1 by spec — emit only when we have a real SHA-1
-            // (populated at publish time / captured from upstream packuments on first-fetch).
-            // Omit rather than fall back to SHA-256: clients that verify shasum would reject
-            // the tarball, and clients that trust it would write the wrong hash to lockfiles.
-            if (v.ChecksumSha1 is not null)
-            {
-                dist["shasum"] = v.ChecksumSha1;
+                continue;
             }
 
-            versionsObj[v.Version] = new JsonObject
-            {
-                ["name"] = localPkg.Name,
-                ["version"] = v.Version,
-                ["dist"] = dist
-            };
+            verObj[key] = node?.DeepClone();
         }
     }
 
@@ -623,33 +701,7 @@ public sealed class NpmPackumentHandler(
 
         foreach (var v in activeVersions)
         {
-            string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
-            var dist = new JsonObject
-            {
-                ["tarball"] = $"{tarballBase}/{pkg.Name}/{filename}"
-            };
-            // dist.shasum is hex SHA-1 by spec — see MergeLocalVersionsIntoPackument for why
-            // we omit the field when no SHA-1 is recorded instead of substituting SHA-256.
-            if (v.ChecksumSha1 is not null)
-            {
-                dist["shasum"] = v.ChecksumSha1;
-            }
-
-            var verObj = new JsonObject
-            {
-                ["name"] = pkg.Name,
-                ["version"] = v.Version,
-                ["dist"] = dist
-            };
-
-            // Surface the deprecation message in the per-version packument object so
-            // npm CLI shows the deprecation warning when the package is installed.
-            if (v.Deprecated is not null)
-            {
-                verObj["deprecated"] = v.Deprecated;
-            }
-
-            versionsObj[v.Version] = verObj;
+            versionsObj[v.Version] = BuildVersionObject(pkg.Name, v, tarballBase);
         }
 
         // Dist-tags from persisted rows take priority. If no tags are persisted (e.g. a

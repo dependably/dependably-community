@@ -14,6 +14,9 @@ public sealed class InMemoryBlobStore : IBlobStore
     /// </summary>
     public InMemoryBlobStore(TimeProvider? time = null) => _time = time ?? TimeProvider.System;
 
+    /// <summary>Test seam: the set of stored blob keys, for assertions on what was cached.</summary>
+    public IReadOnlyCollection<string> Keys => _blobs.Keys.ToArray();
+
     /// <summary>
     /// Test seam: callers (notably the orphan-reconciler tests) need to plant a blob with
     /// a backdated <c>LastModified</c> so the grace-window gate evaluates the way the test

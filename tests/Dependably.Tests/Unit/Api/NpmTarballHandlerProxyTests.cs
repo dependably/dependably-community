@@ -2,6 +2,8 @@ using System.Text;
 using Dapper;
 using Dependably.Api.NpmProtocol;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
 using Dependably.Protocol.Provenance;
 using Dependably.Security;
@@ -136,7 +138,9 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
            .Returns(Task.FromResult(new List<OsvAdvisory>()));
         var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
             _db, osv, vulns, _audit, config, new StubAirGapMode(),
-            NullLogger<VulnerabilityScanService>.Instance, TimeProvider.System));
+            NullLogger<VulnerabilityScanService>.Instance, TimeProvider.System,
+            new OrgRepository(_db),
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
 
         var cacheArtifact = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
@@ -151,7 +155,8 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
             cacheArtifact, tenantAccess, NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         var proxyFetch = new ProxyFetchService(
             cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate,
-            _packages, _audit, TimeProvider.System);
+            _packages, _audit, TimeProvider.System,
+            new Dependably.Infrastructure.SourcePinRepository(_db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()));
 
         var allowlist = new AllowlistService(_db, _audit);
         var blocklist = new BlocklistRepository(_db, new MemoryCache(new MemoryCacheOptions()), TimeProvider.System);
@@ -246,8 +251,8 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
 
     private sealed class AllowAllValidator : IUpstreamUrlValidator
     {
-        public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
-            => Task.FromResult(true);
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
+            => Task.FromResult(UpstreamUrlBlock.None);
     }
 
     private sealed class StaticHttpClientFactory : IHttpClientFactory

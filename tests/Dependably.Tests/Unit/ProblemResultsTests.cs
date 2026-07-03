@@ -1,6 +1,5 @@
 using System.Globalization;
 using Dependably.Api;
-using Dependably.Resources;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;

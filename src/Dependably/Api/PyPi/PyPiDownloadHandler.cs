@@ -88,7 +88,7 @@ public sealed class PyPiDownloadHandler(
         }
 
         httpContext.Response.Headers["X-Cache"] = "HIT";
-        httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(v.Purl);
+        httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(v.Purl);
         httpContext.Response.ContentType = "application/octet-stream";
         httpContext.Response.Headers["Content-Length"] = v.SizeBytes.ToString();
         if (v.ChecksumSha256 is not null)
@@ -125,7 +125,7 @@ public sealed class PyPiDownloadHandler(
 
         string? sourceIpHead = httpContext.GetNormalizedRemoteIp();
         if (await blockGate.EvaluateAsync(
-                BuildProxyBlockGateRequest(orgId, caFacts, token, settings, sourceIpHead), ct)
+                BlockGateRequest.ForProxyCacheFacts(orgId, "pypi", caFacts, token, settings, sourceIpHead), ct)
             == BlockDecision.Blocked)
         {
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
@@ -141,7 +141,7 @@ public sealed class PyPiDownloadHandler(
         httpContext.Response.Headers["X-Cache"] = "HIT";
         if (caFacts.Purl is not null)
         {
-            httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(caFacts.Purl);
+            httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(caFacts.Purl);
         }
         httpContext.Response.ContentType = "application/octet-stream";
         httpContext.Response.Headers["Content-Length"] = caFacts.SizeBytes.ToString();
@@ -258,7 +258,7 @@ public sealed class PyPiDownloadHandler(
 
         // Ternary form satisfies IDE0046: last guard before a single return expression.
         return await (await blockGate.EvaluateAsync(
-                BuildProxyBlockGateRequest(orgId, caFacts, token, settings, sourceIp), ct)
+                BlockGateRequest.ForProxyCacheFacts(orgId, "pypi", caFacts, token, settings, sourceIp), ct)
             == BlockDecision.Blocked
             ? Task.FromResult<IActionResult?>(new StatusCodeResult(StatusCodes.Status403Forbidden))
             : TryServeProxyCachedBlobAsync(httpContext, caFacts, file, orgId, token, sourceIp, ct));
@@ -320,35 +320,23 @@ public sealed class PyPiDownloadHandler(
         return token is not null && !token.HasCapability(Capabilities.ReadMetadata) ? new ForbidResult() : (IActionResult?)null;
     }
 
-    // Builds a BlockGateRequest for a proxy artifact from global-plane serve facts.
-    private static BlockGateRequest BuildProxyBlockGateRequest(
-        string orgId, CacheArtifactServeFacts caFacts, TokenRecord? token,
-        OrgSettings settings, string? sourceIp) =>
-        new(orgId, "pypi", caFacts.Purl ?? string.Empty, string.Empty,
-            caFacts.ManualBlockState, caFacts.VulnCheckedAt,
-            token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
-            MinReleaseAgeHours: settings.MinReleaseAgeHours,
-            PublishedAt: caFacts.PublishedAt,
-            ActorKind: token?.ActorKind,
-            Deprecated: caFacts.Deprecated,
-            BlockDeprecatedMode: settings.BlockDeprecated,
-            RevokedAt: caFacts.RevokedAt,
-            BlockRevokedMode: settings.BlockRevoked,
-            BlockMaliciousMode: settings.BlockMalicious,
-            BlockKevMode: settings.BlockKev,
-            MaxEpssTolerance: settings.MaxEpssTolerance,
-            Origin: "proxy",
-            HasInstallScript: caFacts.HasInstallScript,
-            InstallScriptKind: caFacts.InstallScriptKind,
-            BlockInstallScriptsMode: settings.BlockInstallScripts,
-            ProvenanceStatus: caFacts.ProvenanceStatus,
-            CacheArtifactId: caFacts.Id);
-
     private async Task<IActionResult?> TryServeCachedBlobAsync(
         HttpContext httpContext,
         (Package Package, PackageVersion Version) pkgVer, string file, string orgId,
         TokenRecord? token, string? sourceIp, CancellationToken ct)
     {
+        // 304 short-circuit: check the client's cached copy before opening the blob stream.
+        if (pkgVer.Version.ChecksumSha256 is not null)
+        {
+            string uploadedEtag = $"\"sha256:{pkgVer.Version.ChecksumSha256}\"";
+            if (ConditionalRequestHelper.IfNoneMatchHits(httpContext.Request.Headers, uploadedEtag))
+            {
+                httpContext.Response.Headers.ETag = uploadedEtag;
+                httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+                return new StatusCodeResult(StatusCodes.Status304NotModified);
+            }
+        }
+
         var blob = await blobs.GetAsync(BlobKeys.StoreKey(pkgVer.Version.BlobKey), ct);
         if (blob is null)
         {
@@ -356,7 +344,7 @@ public sealed class PyPiDownloadHandler(
         }
 
         httpContext.Response.Headers["X-Cache"] = "HIT";
-        httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVer.Version.Purl);
+        httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVer.Version.Purl);
         if (pkgVer.Version.ChecksumSha256 is not null)
         {
             httpContext.Response.Headers.ETag = $"\"sha256:{pkgVer.Version.ChecksumSha256}\"";
@@ -373,6 +361,18 @@ public sealed class PyPiDownloadHandler(
         CacheArtifactServeFacts caFacts, string file, string orgId,
         TokenRecord? token, string? sourceIp, CancellationToken ct)
     {
+        // 304 short-circuit: check the client's cached copy before opening the blob stream.
+        if (!string.IsNullOrEmpty(caFacts.ContentHash))
+        {
+            string cachedEtag = $"\"sha256:{caFacts.ContentHash}\"";
+            if (ConditionalRequestHelper.IfNoneMatchHits(httpContext.Request.Headers, cachedEtag))
+            {
+                httpContext.Response.Headers.ETag = cachedEtag;
+                httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+                return new StatusCodeResult(StatusCodes.Status304NotModified);
+            }
+        }
+
         // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to the cache tier.
         var blob = await blobs.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
         if (blob is null)
@@ -383,7 +383,7 @@ public sealed class PyPiDownloadHandler(
         httpContext.Response.Headers["X-Cache"] = "HIT";
         if (caFacts.Purl is not null)
         {
-            httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(caFacts.Purl);
+            httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(caFacts.Purl);
         }
         if (!string.IsNullOrEmpty(caFacts.ContentHash))
         {
@@ -395,11 +395,9 @@ public sealed class PyPiDownloadHandler(
             await audit.LogActivityAsync(orgId, "pypi", caFacts.Purl, "download", token?.UserId,
                 actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         }
-        // Increment per-tenant download count on the global plane.
-        await tenantAccess.UpsertStateAsync(orgId, caFacts.Id, time.GetUtcNow(), ct);
+        // Increment per-tenant download count on the global plane. Enqueued off the request
+        // path — the row already exists (seeded durably at first-fetch).
+        await tenantAccess.RecordDownloadHitAsync(orgId, caFacts.Id, time.GetUtcNow(), ct);
         return new FileStreamResult(blob, "application/octet-stream") { FileDownloadName = file };
     }
-
-    private static string SanitizeHeader(string value)
-        => value.Replace("\r", "").Replace("\n", "").Replace("\0", "");
 }

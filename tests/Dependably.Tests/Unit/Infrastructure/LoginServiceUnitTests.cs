@@ -331,7 +331,9 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         await EnsureJwtSecretAsync();
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         string email = $"link-{Guid.NewGuid():N}@x.test";
-        await UserSeeder.InsertAsync(_fixture.Store, orgId, email);
+        // Passwordless (SSO-only): a password-backed account is never auto-linked by email
+        // (see the email-link privilege-escalation gate tests below).
+        await UserSeeder.InsertAsync(_fixture.Store, orgId, email, password: null);
 
         var result = await NewSut().LoginSamlAsync(
             orgId, "https://idp", "saml-name-link", email);
@@ -487,6 +489,8 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
     /// Owner account is never silently linked via email: no external_identities row is
     /// created and the attempt is audited as a login failure with reason
     /// "email_link_privileged_account_blocked". The owner's role is unchanged.
+    /// Seeded passwordless so this pins the role-ceiling guard specifically, in isolation
+    /// from the password-backed-account guard covered separately below.
     /// </summary>
     [Fact]
     public async Task LoginSamlAsync_EmailLinkPath_OwnerAccount_Blocked_NotLinked_Audited()
@@ -494,7 +498,7 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         await EnsureJwtSecretAsync();
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         string ownerEmail = $"owner-elink-{Guid.NewGuid():N}@x.test";
-        string ownerId = await UserSeeder.InsertAsync(_fixture.Store, orgId, ownerEmail, role: "owner");
+        string ownerId = await UserSeeder.InsertAsync(_fixture.Store, orgId, ownerEmail, role: "owner", password: null);
 
         var result = await NewSut().LoginSamlAsync(orgId, "https://idp", "new-nameid-owner", ownerEmail);
 
@@ -528,7 +532,8 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
     }
 
     /// <summary>
-    /// Admin account is blocked without the idp_can_assign_admin opt-in.
+    /// Admin account is blocked without the idp_can_assign_admin opt-in. Seeded passwordless
+    /// to isolate the role-ceiling guard from the password-backed-account guard.
     /// </summary>
     [Fact]
     public async Task LoginSamlAsync_EmailLinkPath_AdminAccount_WithoutOptIn_Blocked()
@@ -536,7 +541,7 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         await EnsureJwtSecretAsync();
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         string adminEmail = $"admin-elink-{Guid.NewGuid():N}@x.test";
-        string adminId = await UserSeeder.InsertAsync(_fixture.Store, orgId, adminEmail, role: "admin");
+        string adminId = await UserSeeder.InsertAsync(_fixture.Store, orgId, adminEmail, role: "admin", password: null);
 
         var result = await NewSut().LoginSamlAsync(orgId, "https://idp", "new-nameid-admin", adminEmail);
 
@@ -551,7 +556,9 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
     }
 
     /// <summary>
-    /// Admin account is allowed when idp_can_assign_admin is set — parallels the JIT ceiling test.
+    /// Admin account is allowed when idp_can_assign_admin is set — parallels the JIT ceiling
+    /// test. Seeded passwordless: a password-backed account is never auto-linked regardless
+    /// of the ceiling opt-in (see <see cref="LoginSamlAsync_EmailLinkPath_PasswordBackedAccount_Blocked_NotLinked_Audited"/>).
     /// </summary>
     [Fact]
     public async Task LoginSamlAsync_EmailLinkPath_AdminAccount_WithOptIn_Linked()
@@ -559,7 +566,7 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         await EnsureJwtSecretAsync();
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         string adminEmail = $"admin-elink-optin-{Guid.NewGuid():N}@x.test";
-        await UserSeeder.InsertAsync(_fixture.Store, orgId, adminEmail, role: "admin");
+        await UserSeeder.InsertAsync(_fixture.Store, orgId, adminEmail, role: "admin", password: null);
 
         var result = await NewSut().LoginSamlAsync(
             orgId, "https://idp", "new-nameid-admin-optin", adminEmail,
@@ -570,16 +577,17 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
     }
 
     /// <summary>
-    /// Member/auditor accounts are still silently linked — the fix must not over-block
-    /// non-privileged accounts (regression guard).
+    /// A passwordless (SSO-only) member/auditor account is still silently linked — the
+    /// password-backed-account guard must not over-block accounts that were never
+    /// forms-login capable in the first place.
     /// </summary>
     [Fact]
-    public async Task LoginSamlAsync_EmailLinkPath_MemberAccount_StillLinks()
+    public async Task LoginSamlAsync_EmailLinkPath_PasswordlessMemberAccount_StillLinks()
     {
         await EnsureJwtSecretAsync();
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
         string memberEmail = $"member-elink-{Guid.NewGuid():N}@x.test";
-        string memberId = await UserSeeder.InsertAsync(_fixture.Store, orgId, memberEmail, role: "member");
+        string memberId = await UserSeeder.InsertAsync(_fixture.Store, orgId, memberEmail, role: "member", password: null);
 
         var result = await NewSut().LoginSamlAsync(orgId, "https://idp", "new-nameid-member", memberEmail);
 
@@ -593,9 +601,45 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
     }
 
     /// <summary>
-    /// Mixed scenario (house rule): one tenant has a member and an owner both matching
-    /// different assertions in the same login flow. The member links successfully; the
-    /// owner is blocked. Both are verified in a single test run.
+    /// Regression for the SAML email-link account-takeover gap: a password-backed member
+    /// account (forms-login capable) must never be silently linked and logged into by a SAML
+    /// assertion that merely asserts a matching email. The attempt is audited as a login
+    /// failure with reason "email_link_password_account_blocked" and no external_identities
+    /// row is created. This is a deliberate behavior change — before the fix, only owner/admin
+    /// roles were blocked and a password-backed member account would have linked and logged in.
+    /// </summary>
+    [Fact]
+    public async Task LoginSamlAsync_EmailLinkPath_PasswordBackedAccount_Blocked_NotLinked_Audited()
+    {
+        await EnsureJwtSecretAsync();
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        string memberEmail = $"member-pwlink-{Guid.NewGuid():N}@x.test";
+        string memberId = await UserSeeder.InsertAsync(_fixture.Store, orgId, memberEmail, role: "member");
+
+        var result = await NewSut().LoginSamlAsync(orgId, "https://idp", "new-nameid-pw-member", memberEmail);
+
+        Assert.Null(result.Token);
+        Assert.NotNull(result.Error);
+        Assert.False(result.Provisioned);
+        Assert.False(result.Linked);
+
+        await using var conn = await _fixture.Store.OpenAsync();
+
+        long linked = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM external_identities WHERE user_id = @id", new { id = memberId });
+        Assert.Equal(0, linked);
+
+        string? detail = await conn.ExecuteScalarAsync<string?>(
+            "SELECT detail FROM audit_log WHERE action = 'auth.saml.login.failure' AND actor_id = @actor",
+            new { actor = memberId });
+        Assert.Contains("email_link_password_account_blocked", detail, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Mixed scenario (house rule): one tenant has a passwordless member and a passwordless
+    /// owner both matching different assertions in the same login flow. The member links
+    /// successfully; the owner is blocked by the role ceiling. Both are verified in a single
+    /// test run.
     /// </summary>
     [Fact]
     public async Task LoginSamlAsync_EmailLinkPath_MixedPrivilege_MemberLinksOwnerBlocked()
@@ -604,10 +648,10 @@ public sealed class LoginServiceUnitTests : IClassFixture<InMemoryDbFixture>
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
 
         string memberEmail = $"member-mixed-{Guid.NewGuid():N}@x.test";
-        string memberId = await UserSeeder.InsertAsync(_fixture.Store, orgId, memberEmail, role: "member");
+        string memberId = await UserSeeder.InsertAsync(_fixture.Store, orgId, memberEmail, role: "member", password: null);
 
         string ownerEmail = $"owner-mixed-{Guid.NewGuid():N}@x.test";
-        string ownerId = await UserSeeder.InsertAsync(_fixture.Store, orgId, ownerEmail, role: "owner");
+        string ownerId = await UserSeeder.InsertAsync(_fixture.Store, orgId, ownerEmail, role: "owner", password: null);
 
         var sut = NewSut();
 

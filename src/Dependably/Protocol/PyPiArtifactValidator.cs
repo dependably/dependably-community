@@ -80,11 +80,18 @@ public static partial class PyPiArtifactValidator
     /// inside the archive — no filename involved. Called by EcosystemDetector when the filename
     /// is untrusted.
     /// </summary>
-    public static PyPiArtifactParsed ValidateWheel(byte[] bytes)
+    public static PyPiArtifactParsed ValidateWheel(byte[] bytes) => ValidateWheel(new MemoryStream(bytes, writable: false));
+
+    /// <summary>
+    /// Streaming overload: reads the wheel zip directly from <paramref name="stream"/> (a staged
+    /// file on the bulk-import path) so the artifact is never materialised in a byte[]. The
+    /// source stream is left open for the caller to dispose.
+    /// </summary>
+    public static PyPiArtifactParsed ValidateWheel(Stream archiveStream)
     {
         try
         {
-            using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
+            using var zip = new ZipArchive(archiveStream, ZipArchiveMode.Read, leaveOpen: true);
             var metaEntry = zip.Entries.FirstOrDefault(e =>
                 e.FullName.EndsWith(".dist-info/METADATA", StringComparison.OrdinalIgnoreCase));
             if (metaEntry is null)
@@ -152,11 +159,18 @@ public static partial class PyPiArtifactValidator
     /// the zip — no filename involved. Eggs are a legacy setuptools format supported for
     /// proxying and importing existing artefacts; PyPI no longer accepts egg uploads.
     /// </summary>
-    public static PyPiArtifactParsed ValidateEgg(byte[] bytes)
+    public static PyPiArtifactParsed ValidateEgg(byte[] bytes) => ValidateEgg(new MemoryStream(bytes, writable: false));
+
+    /// <summary>
+    /// Streaming overload: reads the egg zip directly from <paramref name="stream"/> (a staged
+    /// file on the bulk-import path) so the artifact is never materialised in a byte[]. The
+    /// source stream is left open for the caller to dispose.
+    /// </summary>
+    public static PyPiArtifactParsed ValidateEgg(Stream archiveStream)
     {
         try
         {
-            using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
+            using var zip = new ZipArchive(archiveStream, ZipArchiveMode.Read, leaveOpen: true);
             var metaEntry = zip.Entries.FirstOrDefault(e =>
                 e.FullName.EndsWith("EGG-INFO/PKG-INFO", StringComparison.OrdinalIgnoreCase));
             if (metaEntry is null)
@@ -218,12 +232,19 @@ public static partial class PyPiArtifactValidator
     /// level of the gzipped tarball and parses the RFC 822 headers there. Used by both the
     /// extension-dispatch wrapper and the content-based EcosystemDetector.
     /// </summary>
-    public static PyPiArtifactParsed ValidateSdist(byte[] bytes)
+    public static PyPiArtifactParsed ValidateSdist(byte[] bytes) => ValidateSdist(new MemoryStream(bytes, writable: false));
+
+    /// <summary>
+    /// Streaming overload: reads the gzipped tar directly from <paramref name="stream"/> (a
+    /// staged file on the bulk-import path) so the artifact is never materialised in a byte[].
+    /// The source stream is left open for the caller to dispose.
+    /// </summary>
+    public static PyPiArtifactParsed ValidateSdist(Stream stream)
     {
         try
         {
             using var gzip = new LimitedReadStream(
-                new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress),
+                new GZipStream(stream, CompressionMode.Decompress, leaveOpen: true),
                 ArchiveDecompressLimits.MaxDecompressedBytes, "Sdist");
             using var tar = new TarReader(gzip, leaveOpen: false);
 

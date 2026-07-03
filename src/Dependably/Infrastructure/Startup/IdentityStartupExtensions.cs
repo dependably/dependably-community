@@ -33,6 +33,15 @@ internal static class IdentityStartupExtensions
             return new MfaSecretProtector(key);
         });
 
+        builder.Services.AddSingleton<IRecoveryCodeHasher>(sp =>
+        {
+            var keyProvider = sp.GetRequiredService<MfaEncryptionKeyProvider>();
+            // Recovery-code hashing keys on the same per-instance MFA key as the authenticator
+            // secret; resolving it here mirrors the IMfaSecretProtector registration above.
+            byte[] key = keyProvider.GetKeyAsync().GetAwaiter().GetResult();
+            return new RecoveryCodeHasher(key);
+        });
+
         builder.Services.AddSingleton<MfaEncryptionKeyProvider>();
         builder.Services.AddSingleton<SystemAdminTokenVersionStore>();
 

@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
+using Dependably.Infrastructure.Edge;
 using Dependably.Infrastructure.Publish;
 using Dependably.Protocol;
 using Dependably.Security;
@@ -28,6 +29,7 @@ public sealed class NpmPublishHandler(
     IUploadLimitResolver uploadLimits,
     NpmDistTagRepository distTags,
     RenderedResponseCache<NpmPackumentKey> cache,
+    EdgePublishGuard edgeGuard,
     string stagingPath)
 {
     // Route-level hard ceiling for npm publish requests (500 MiB); per-tenant limits are
@@ -70,6 +72,14 @@ public sealed class NpmPublishHandler(
     private async Task<IActionResult> PublishPackageAsync(
         HttpContext httpContext, string orgId, string package, string? scope, CancellationToken ct)
     {
+        // Fail-closed on an edge node: this PUT surface is both publish and deprecate. Publish
+        // funnels through PackagePublishService (which also refuses on edge), but deprecate mutates
+        // the deprecated column directly, so the whole surface is refused here at the choke point.
+        if (edgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
         // [Authorize] above already enforced auth + capability. We still resolve the token
         // for the cross-tenant guard (token.OrgId vs requested org) and to attribute the
         // audit row to the token owner (token.UserId).
@@ -87,11 +97,19 @@ public sealed class NpmPublishHandler(
         // applies regardless of whether the middleware set MaxRequestBodySize.
         long npmBodyCap = (await uploadLimits.ResolveAsync(orgId, "npm", ct)) ?? NpmPublishSizeLimitBytes;
 
-        var (body, parseError) = await ParsePublishBodyAsync(httpContext, npmBodyCap, ct);
-        if (parseError is not null)
+        // Stream-parse the publish body: the raw body is spooled to a staging file, the base64
+        // tarball under _attachments.{key}.data is base64-decoded incrementally straight to a
+        // second staging file, and only a small redacted envelope DOM (name / versions /
+        // dist-tags / _attachments with the data value elided) is materialised. The full tarball
+        // and its base64 encoding never enter managed memory.
+        var parsed = await NpmPublishBodyParser.ParseAsync(httpContext.Request.Body, npmBodyCap, stagingPath, ct);
+        if (parsed.ErrorKind is not NpmPublishBodyParser.NpmParseErrorKind.None)
         {
-            return parseError;
+            return MapParseError(parsed);
         }
+
+        var body = parsed.Envelope;
+        string? attachStagingPath = parsed.TarballPath;
 
         string fullName = scope is not null ? $"{scope}/{package}" : package;
         string plainName = scope is not null ? package : fullName;
@@ -99,28 +117,26 @@ public sealed class NpmPublishHandler(
         var nameError = ValidatePackageName(body, fullName, plainName);
         if (nameError is not null)
         {
+            DeleteNpmStagingFile(attachStagingPath);
             return nameError;
         }
 
         // Detect the no-attachments shape: npm deprecate sends a packument PUT without the
-        // _attachments key at all. Route to the deprecation handler before the attachment
-        // validator rejects the body with 422. An empty _attachments object (key present but
-        // empty) is an invalid publish, not a deprecate — let ExtractAttachment return 422.
+        // _attachments key at all. Route to the deprecation handler. An empty or multi-entry
+        // _attachments object is rejected as a 422 inside the parser, so a body that reaches here
+        // with _attachments present has exactly one staged tarball.
         if (body?["_attachments"] is null)
         {
+            DeleteNpmStagingFile(attachStagingPath);
             return await HandleDeprecateAsync(httpContext, orgId, body, fullName, token, ct);
         }
 
-        var (attachmentKey, attachStagingPath, stagingSize, attachmentError) =
-            await ExtractAttachmentToStagingAsync(body, npmBodyCap);
-        if (attachmentError is not null)
-        {
-            return attachmentError;
-        }
+        string? attachmentKey = parsed.AttachmentKey;
+        long stagingSize = parsed.TarballSize;
 
         try
         {
-            var (innerName, innerVersion, tarballError) =
+            var (innerName, innerVersion, tarballManifest, tarballError) =
                 ValidateTarballAndExtractNameVersionFromFile(attachStagingPath!);
             if (tarballError is not null)
             {
@@ -134,6 +150,14 @@ public sealed class NpmPublishHandler(
             {
                 return matchError;
             }
+
+            // Install-relevant manifest subset from the tarball's package.json (the parse
+            // above — artefact-authoritative, no extra tarball read) plus the publisher's
+            // verbatim dist.integrity claim from the publish body. Persisted on the version
+            // row so the packument can advertise bin/dependencies/engines/dist.integrity.
+            var bodyVersion = versions?[versionKey!];
+            string? manifestJson = NpmInstallManifest.BuildJson(tarballManifest, bodyVersion, fullName);
+            string? declaredIntegrity = NpmInstallManifest.DeclaredIntegritySri(bodyVersion);
 
             string filename = attachmentKey!.Split('/').Last(); // e.g. package-1.0.0.tgz
 
@@ -150,7 +174,8 @@ public sealed class NpmPublishHandler(
             var claim = await claimResolver.ResolveAsync(orgId, "npm", fullName, ct);
             var request = BuildNpmPublishRequest(httpContext, new NpmPublishContext(
                 orgId, fullName, versionKey!, filename, attachStagingPath!, stagingSize,
-                token.UserId, token.ActorKind, orgSettings?.AllowVersionOverwrite ?? false, claim.State));
+                token.UserId, token.ActorKind, orgSettings?.AllowVersionOverwrite ?? false, claim.State,
+                manifestJson, declaredIntegrity));
             var result = await publish.StoreAndRecordAsync(request, ct);
 
             if (result is PublishResult.Rejected rej)
@@ -221,7 +246,8 @@ public sealed class NpmPublishHandler(
     private sealed record NpmPublishContext(
         string OrgId, string FullName, string VersionKey, string Filename,
         string StagingPath, long StagingSize,
-        string? ActorUserId, string? ActorKind, bool AllowOverwrite, string ClaimState);
+        string? ActorUserId, string? ActorKind, bool AllowOverwrite, string ClaimState,
+        string? ManifestJson, string? DeclaredIntegritySri);
 
     private static PublishRequest BuildNpmPublishRequest(HttpContext httpContext, NpmPublishContext ctx)
         => new()
@@ -244,6 +270,8 @@ public sealed class NpmPublishHandler(
             AllowOverwrite = ctx.AllowOverwrite,
             ClaimState = ctx.ClaimState,
             SourceIp = httpContext.GetNormalizedRemoteIp(),
+            ManifestJson = ctx.ManifestJson,
+            DeclaredIntegritySri = ctx.DeclaredIntegritySri,
         };
 
     /// <summary>
@@ -338,33 +366,26 @@ public sealed class NpmPublishHandler(
         _ => new ObjectResult(new ProblemDetails { Detail = rej.Message, Status = rej.HttpStatus }) { StatusCode = rej.HttpStatus },
     };
 
-    private static async Task<(JsonNode? Body, IActionResult? Error)> ParsePublishBodyAsync(
-        HttpContext httpContext, long bodyCap, CancellationToken ct)
+    // Maps a streaming-parser failure to the exact HTTP result the pre-streaming handler produced:
+    // a cap breach or an over-cap declared attachment length → 413; malformed JSON or a bad
+    // _attachments shape → 422.
+    private static IActionResult MapParseError(NpmPublishBodyParser.NpmParseResult parsed)
     {
-        // Wrap the request body in a byte-counting stream so the full JSON string read is
-        // bounded by the resolved npm upload limit before any parsing or allocation occurs.
-        // A cap overflow surfaces as an InvalidDataException from LimitedReadStream.
-        // All other exceptions indicate malformed JSON.
-        var limited = new LimitedReadStream(httpContext.Request.Body, bodyCap, "npm publish body");
-        try
+        string detail = parsed.ErrorDetail ?? "Invalid publish body.";
+        return parsed.ErrorKind switch
         {
-            using var reader = new StreamReader(limited, Encoding.UTF8, leaveOpen: true);
-            string json = await reader.ReadToEndAsync(ct);
-            return (JsonNode.Parse(json), null);
-        }
-        catch (InvalidDataException)
-        {
-            return (null, new ObjectResult(new ProblemDetails
+            NpmPublishBodyParser.NpmParseErrorKind.TooLarge => new ObjectResult(new ProblemDetails
             {
-                Detail = $"Request body exceeds the npm publish limit of {bodyCap} bytes.",
+                Detail = detail,
                 Status = StatusCodes.Status413PayloadTooLarge,
             })
-            { StatusCode = StatusCodes.Status413PayloadTooLarge });
-        }
-        catch
-        {
-            return (null, new UnprocessableEntityObjectResult(new ProblemDetails { Detail = "Invalid JSON body.", Status = StatusCodes.Status422UnprocessableEntity }));
-        }
+            { StatusCode = StatusCodes.Status413PayloadTooLarge },
+            _ => new UnprocessableEntityObjectResult(new ProblemDetails
+            {
+                Detail = detail,
+                Status = StatusCodes.Status422UnprocessableEntity,
+            }),
+        };
     }
 
     private static UnprocessableEntityObjectResult? ValidatePackageName(JsonNode? body, string fullName, string plainName)
@@ -377,77 +398,6 @@ public sealed class NpmPublishHandler(
             : null;
     }
 
-    /// <summary>
-    /// Extracts the tarball from the _attachments JSON field and stages it to a temp file
-    /// under PROXY_STAGING_PATH. Base64-decodes the attachment data to disk so the artifact
-    /// bytes are never simultaneously live in managed memory alongside the JSON envelope.
-    /// Returns (attachmentKey, stagingPath, sizeBytes, null) on success or
-    /// (null, null, 0, error) on validation failure.
-    /// </summary>
-    private async Task<(string? Key, string? StagingPath, long SizeBytes, IActionResult? Error)>
-        ExtractAttachmentToStagingAsync(JsonNode? body, long limit)
-    {
-        var attachments = body?["_attachments"]?.AsObject();
-        if (attachments is null || attachments.Count != 1)
-        {
-            return (null, null, 0, new UnprocessableEntityObjectResult(new ProblemDetails
-            { Detail = "_attachments must contain exactly one entry.", Status = StatusCodes.Status422UnprocessableEntity }));
-        }
-
-        var (attachmentKey, attachmentNode) = attachments.First();
-        string? base64Data = attachmentNode?["data"]?.GetValue<string>();
-        if (base64Data is null)
-        {
-            return (null, null, 0, new UnprocessableEntityObjectResult(new ProblemDetails
-            { Detail = "_attachments.data is required.", Status = StatusCodes.Status422UnprocessableEntity }));
-        }
-
-        // Reject before decoding when the declared decoded size already exceeds the limit —
-        // avoids a ~1.33x allocation for an oversized attachment.
-        long declaredLength = attachmentNode?["length"]?.GetValue<long>() ?? -1;
-        if (declaredLength > limit)
-        {
-            return (null, null, 0, new ObjectResult(new ProblemDetails
-            { Detail = $"Attachment declared length {declaredLength} exceeds the npm publish limit of {limit} bytes.", Status = StatusCodes.Status413PayloadTooLarge })
-            { StatusCode = StatusCodes.Status413PayloadTooLarge });
-        }
-
-        // Decode base64 → staging file so the decoded bytes are not held in managed memory.
-        // deepcode ignore PT: staging file name is "publish-stage-{server-guid}" under the operator-configured staging root — no user input reaches the path.
-        string tempPath = System.IO.Path.Combine(stagingPath, $"publish-stage-{Guid.NewGuid():N}.tmp");
-        bool succeeded = false;
-        try
-        {
-            byte[] decoded;
-            try { decoded = Convert.FromBase64String(base64Data); }
-            catch
-            {
-                return (null, null, 0, new UnprocessableEntityObjectResult(new ProblemDetails
-                { Detail = "Invalid base64 in _attachments.data.", Status = StatusCodes.Status422UnprocessableEntity }));
-            }
-
-            if (declaredLength >= 0 && decoded.Length != declaredLength)
-            {
-                return (null, null, 0, new UnprocessableEntityObjectResult(new ProblemDetails
-                { Detail = $"Attachment length mismatch: declared {declaredLength}, actual {decoded.Length}.", Status = StatusCodes.Status422UnprocessableEntity }));
-            }
-
-            // Write decoded bytes to the staging file. After the write, the byte[] is no
-            // longer referenced and can be GC'd, leaving only the file on disk.
-            await System.IO.File.WriteAllBytesAsync(tempPath, decoded);
-            long sizeBytes = decoded.LongLength;
-            succeeded = true;
-            return (attachmentKey, tempPath, sizeBytes, null);
-        }
-        finally
-        {
-            if (!succeeded)
-            {
-                DeleteNpmStagingFile(tempPath);
-            }
-        }
-    }
-
     private async Task<IActionResult?> CheckUploadSizeFromFileAsync(string orgId, long sizeBytes, CancellationToken ct)
     {
         var settings = await orgs.GetSettingsAsync(orgId, ct);
@@ -458,15 +408,19 @@ public sealed class NpmPublishHandler(
             : null;
     }
 
-    private static (string? InnerName, string? InnerVersion, IActionResult? Error)
+    private static (string? InnerName, string? InnerVersion, JsonObject? Manifest, IActionResult? Error)
         ValidateTarballAndExtractNameVersionFromFile(string fileStagingPath)
     {
-        // deepcode ignore PT: stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
-        byte[] tarball = System.IO.File.ReadAllBytes(fileStagingPath);
+        // Stream the staged tarball through the validator rather than reading the whole artifact
+        // back into a byte[] — the gzip/tar decompression is already bounded by TarScanLimits.
+        // deepcode ignore PT: fileStagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        using var tarball = new System.IO.FileStream(
+            fileStagingPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read,
+            bufferSize: 81920, useAsync: false);
         var parsed = NpmTarballValidator.Validate(tarball);
         return parsed.Validation.IsValid
-            ? (parsed.Name, parsed.Version, null)
-            : (null, null, new UnprocessableEntityObjectResult(new ProblemDetails { Detail = parsed.Validation.Message, Status = StatusCodes.Status422UnprocessableEntity }));
+            ? (parsed.Name, parsed.Version, parsed.Manifest, null)
+            : (null, null, null, new UnprocessableEntityObjectResult(new ProblemDetails { Detail = parsed.Validation.Message, Status = StatusCodes.Status422UnprocessableEntity }));
     }
 
     private static void DeleteNpmStagingFile(string? path)
@@ -508,6 +462,13 @@ public sealed class NpmPublishHandler(
     private async Task<IActionResult> UnpublishImplAsync(
         HttpContext httpContext, string orgId, string fullName, string rev, CancellationToken ct)
     {
+        // Fail-closed on an edge node: unpublish deletes an authoritative artifact + DB rows a
+        // cache edge does not own, so it is refused here before any lookup.
+        if (edgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
         var token = await httpContext.Request.ResolveTokenAsync(tokens, ct);
         if (token is null || token.OrgId != orgId)
         {

@@ -74,6 +74,18 @@ public sealed class PackageRepository
             new { orgId, ecosystem, purlName });
     }
 
+    /// <summary>
+    /// The exact INSERT statement <see cref="GetOrCreateAsync"/> runs for a new package.
+    /// Internal (not private) so the race-safety test can execute this literal statement a
+    /// second time against a seeded coordinate and assert the ON CONFLICT no-op directly,
+    /// instead of a test-owned copy that could silently drift from the production statement.
+    /// </summary>
+    internal const string InsertPackageSql = """
+        INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy)
+        VALUES (@id, @orgId, @ecosystem, @name, @purlName, @isProxy)
+        ON CONFLICT (org_id, ecosystem, purl_name) DO NOTHING
+        """;
+
     /// <summary>Gets or creates a package row; returns the resolved Package.</summary>
     public async Task<Package> GetOrCreateAsync(string orgId, string ecosystem, string name, string purlName, bool isProxy, CancellationToken ct = default)
     {
@@ -93,20 +105,22 @@ public sealed class PackageRepository
         }
 
         string id = Guid.NewGuid().ToString("N");
+        // ON CONFLICT (org_id, ecosystem, purl_name) DO NOTHING lets concurrent first
+        // publish / first-fetch races converge on a single winner row instead of the loser
+        // throwing a UNIQUE-constraint violation. When the INSERT is a no-op (another request
+        // won the race) the locally generated id was never persisted, so the winner is fetched
+        // back by coordinate, never by @id.
         await conn.ExecuteAsync(
-            """
-            INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy)
-            VALUES (@id, @orgId, @ecosystem, @name, @purlName, @isProxy)
-            """,
+            InsertPackageSql,
             new { id, orgId, ecosystem, name, purlName, isProxy = isProxy ? 1 : 0 });
 
         return (await conn.QuerySingleOrDefaultAsync<Package>(
             """
             SELECT id, org_id as OrgId, ecosystem, name, purl_name as PurlName, is_proxy as IsProxy,
                    created_at as CreatedAt, same_version_push_override as SameVersionPushOverride
-            FROM packages WHERE id = @id
+            FROM packages WHERE org_id = @orgId AND ecosystem = @ecosystem AND purl_name = @purlName
             """,
-            new { id }))!;
+            new { orgId, ecosystem, purlName }))!;
     }
 
     /// <summary>
@@ -202,6 +216,7 @@ public sealed class PackageRepository
                    pv.filename as Filename,
                    pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
                    pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.download_count as DownloadCount, pv.created_at as CreatedAt,
+                   pv.updated_at as UpdatedAt,
                    pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
                    pv.deprecated as Deprecated, pv.revoked_at as RevokedAt, pv.origin as Origin, pv.published_at as PublishedAt,
                    pv.checksum_sha1 as ChecksumSha1,
@@ -211,6 +226,7 @@ public sealed class PackageRepository
                    pv.install_script_kind as InstallScriptKind,
                    pv.provenance_status as ProvenanceStatus,
                    pv.provenance_signer as ProvenanceSigner,
+                   pv.manifest_json as ManifestJson,
                    EXISTS (SELECT 1 FROM package_version_vulns pvv
                            JOIN vulnerabilities v ON v.id = pvv.vuln_id
                            WHERE pvv.package_version_id = pv.id
@@ -234,6 +250,7 @@ public sealed class PackageRepository
             SELECT id, package_id as PackageId, version, purl, blob_key as BlobKey,
                    size_bytes as SizeBytes, checksum_sha256 as ChecksumSha256,
                    yanked, yank_reason as YankReason, first_fetch as FirstFetch, download_count as DownloadCount, created_at as CreatedAt,
+                   updated_at as UpdatedAt,
                    vuln_checked_at as VulnCheckedAt, manual_block_state as ManualBlockState,
                    deprecated as Deprecated, revoked_at as RevokedAt, origin as Origin, published_at as PublishedAt,
                    checksum_sha1 as ChecksumSha1,
@@ -242,7 +259,8 @@ public sealed class PackageRepository
                    has_install_script as HasInstallScript,
                    install_script_kind as InstallScriptKind,
                    provenance_status as ProvenanceStatus,
-                   provenance_signer as ProvenanceSigner
+                   provenance_signer as ProvenanceSigner,
+                   manifest_json as ManifestJson
             FROM package_versions
             WHERE package_id = @packageId AND version = @version
             """,
@@ -264,6 +282,7 @@ public sealed class PackageRepository
                    pv.filename as Filename,
                    pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
                    pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.download_count as DownloadCount, pv.created_at as CreatedAt,
+                   pv.updated_at as UpdatedAt,
                    pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
                    pv.deprecated as Deprecated, pv.revoked_at as RevokedAt, pv.origin as Origin, pv.published_at as PublishedAt,
                    pv.checksum_sha1 as ChecksumSha1,
@@ -272,7 +291,8 @@ public sealed class PackageRepository
                    pv.has_install_script as HasInstallScript,
                    pv.install_script_kind as InstallScriptKind,
                    pv.provenance_status as ProvenanceStatus,
-                   pv.provenance_signer as ProvenanceSigner
+                   pv.provenance_signer as ProvenanceSigner,
+                   pv.manifest_json as ManifestJson
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE pv.blob_key = @blobKey AND p.org_id = @orgId
@@ -294,11 +314,13 @@ public sealed class PackageRepository
             INSERT INTO package_versions
                 (id, package_id, version, purl, blob_key, filename, size_bytes,
                  checksum_sha256, first_fetch, origin, published_at,
-                 checksum_sha1, upstream_integrity_value, upstream_integrity_algorithm)
+                 checksum_sha1, upstream_integrity_value, upstream_integrity_algorithm,
+                 manifest_json)
             VALUES
                 (@id, @packageId, @version, @purl, @blobKey, @filename, @sizeBytes,
                  @checksumSha256, @firstFetch, @origin, @publishedAt,
-                 @checksumSha1, @upstreamIntegrityValue, @upstreamIntegrityAlgorithm)
+                 @checksumSha1, @upstreamIntegrityValue, @upstreamIntegrityAlgorithm,
+                 @manifestJson)
             """,
             new
             {
@@ -316,6 +338,7 @@ public sealed class PackageRepository
                 checksumSha1 = data.ChecksumSha1,
                 upstreamIntegrityValue = data.UpstreamIntegrityValue,
                 upstreamIntegrityAlgorithm = data.UpstreamIntegrityAlgorithm,
+                manifestJson = data.ManifestJson,
             });
 
         // xtenant: keyed by version id (globally unique UUID, already org-scoped via FK)
@@ -333,7 +356,8 @@ public sealed class PackageRepository
                    has_install_script as HasInstallScript,
                    install_script_kind as InstallScriptKind,
                    provenance_status as ProvenanceStatus,
-                   provenance_signer as ProvenanceSigner
+                   provenance_signer as ProvenanceSigner,
+                   manifest_json as ManifestJson
             FROM package_versions WHERE id = @id
             """,
             new { id }))!;
@@ -453,13 +477,20 @@ public sealed class PackageRepository
     /// Replacement-policy update: rewrites blob_key/size/checksum/origin on an existing
     /// row when allow_version_overwrite is on. The package_version id is preserved so vuln
     /// scans, license rows, and existing FKs follow the new artefact without re-stitching.
+    /// Stamps updated_at to now (the "Pushed" date the frontend renders for a re-push) and
+    /// clears provenance_status/provenance_signer, since new bytes invalidate any prior
+    /// provenance verdict — mirroring the vuln_checked_at reset.
     /// </summary>
     public async Task UpdateVersionForOverwriteAsync(
         string versionId, string blobKey, long sizeBytes, string sha256, string origin,
-        string? sha1, CancellationToken ct = default)
+        string? sha1, string? integrityValue = null, string? integrityAlgorithm = null,
+        string? manifestJson = null, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
         // xtenant: UPDATE by version_id; caller obtained the id from an org-scoped lookup.
+        // Integrity + manifest follow the new bytes: a stale value from the prior artefact
+        // (including a proxy row overwritten by a hosted push) must never survive the overwrite.
         await conn.ExecuteAsync(
             """
             UPDATE package_versions
@@ -468,10 +499,16 @@ public sealed class PackageRepository
                    checksum_sha256 = @sha256,
                    checksum_sha1 = @sha1,
                    origin = @origin,
-                   vuln_checked_at = NULL
+                   vuln_checked_at = NULL,
+                   updated_at = @now,
+                   provenance_status = NULL,
+                   provenance_signer = NULL,
+                   upstream_integrity_value = @integrityValue,
+                   upstream_integrity_algorithm = @integrityAlgorithm,
+                   manifest_json = @manifestJson
              WHERE id = @id
             """,
-            new { id = versionId, blobKey, sizeBytes, sha256, sha1, origin });
+            new { id = versionId, blobKey, sizeBytes, sha256, sha1, origin, now, integrityValue, integrityAlgorithm, manifestJson });
     }
 
     public async Task<(IReadOnlyList<Package> Items, int Total)> ListPaginatedAsync(
@@ -484,7 +521,35 @@ public sealed class PackageRepository
         int total = await conn.ExecuteScalarAsync<int>(CountSql,
             new { orgId = query.OrgId, ecosystem = query.Ecosystem, searchPattern });
 
-        var rows = await conn.QueryAsync<Package>(SelectSqlFor(query.SortBy, query.SortDir),
+        // Plain-column sorts (name/purl/ecosystem/created — the defaults) never depend on the
+        // aggregate columns, so page the ids cheaply on the packages table first, then compute
+        // the ~14 correlated aggregate subqueries only for the page's ids. This keeps a 25-row
+        // page from evaluating the full projection for every package in the org before LIMIT.
+        // Aggregate sorts (vulns/versions/downloads) rank on a computed column and cannot be
+        // paged before it exists, so they keep the single full-CTE shape.
+        string? plainOrderBy = PlainOrderByOrNull(query.SortBy, query.SortDir);
+        if (plainOrderBy is not null)
+        {
+            // rawsql: plainOrderBy is one of PlainOrderByOrNull's fixed literal ORDER BY
+            // fragments (no caller input reaches it); every value is a bound parameter.
+#pragma warning disable S2077 // Query built from a whitelisted ORDER BY fragment, not user input.
+            var pageIds = (await conn.QueryAsync<string>(
+                PageIdSql + " " + plainOrderBy + SelectSqlSuffix,
+                new { orgId = query.OrgId, ecosystem = query.Ecosystem, searchPattern, limit = query.Limit, offset = query.Offset })).ToList();
+#pragma warning restore S2077
+
+            if (pageIds.Count == 0)
+            {
+                return (new List<Package>(), total);
+            }
+
+            var pageRows = await conn.QueryAsync<Package>(
+                PageHydrateSqlFor(plainOrderBy),
+                new { orgId = query.OrgId, pageIds });
+            return (pageRows.ToList(), total);
+        }
+
+        var rows = await conn.QueryAsync<Package>(FullCteSqlFor(query.SortBy, query.SortDir),
             new { orgId = query.OrgId, ecosystem = query.Ecosystem, searchPattern, limit = query.Limit, offset = query.Offset });
         return (rows.ToList(), total);
     }
@@ -494,8 +559,11 @@ public sealed class PackageRepository
         " AND (@ecosystem IS NULL OR p.ecosystem = @ecosystem)" +
         " AND (@searchPattern IS NULL OR p.name LIKE @searchPattern ESCAPE '\\')";
 
-    private const string SelectSqlPrefix = """
-        WITH pkg_data AS (
+    // Shared CTE projection body: the SELECT ... FROM packages p that computes every aggregate
+    // column for whatever set of packages the appended WHERE clause selects. The trailing WHERE,
+    // the ORDER BY, and the LIMIT/OFFSET are appended by the query shapes below. Every fragment
+    // is a compile-time constant — user input only ever arrives as bound @parameters.
+    private const string PkgDataSelect = """
             SELECT p.id, p.org_id as OrgId, p.ecosystem, p.name, p.purl_name as PurlName,
                    p.is_proxy as IsProxy, p.created_at as CreatedAt,
                    p.same_version_push_override as SameVersionPushOverride,
@@ -597,31 +665,80 @@ public sealed class PackageRepository
                      ) THEN 'current'
                      ELSE 'stale'
                    END as LatestState
-            FROM packages p WHERE p.org_id = @orgId
-              AND (@ecosystem IS NULL OR p.ecosystem = @ecosystem)
-              AND (@searchPattern IS NULL OR p.name LIKE @searchPattern ESCAPE '\')
-        )
-        SELECT * FROM pkg_data ORDER BY
+            FROM packages p
         """;
+
+    private const string CteOpen = "WITH pkg_data AS (";
+    private const string CteOrderTail = ") SELECT * FROM pkg_data ORDER BY ";
+
+    // The org/ecosystem/search filter used by the full-CTE path and by CountSql. ESCAPE '\'
+    // matches the wildcard-escaping ListPaginatedAsync applies to the search term.
+    private const string FullFilterClause =
+        " WHERE p.org_id = @orgId" +
+        " AND (@ecosystem IS NULL OR p.ecosystem = @ecosystem)" +
+        " AND (@searchPattern IS NULL OR p.name LIKE @searchPattern ESCAPE '\\')";
+
+    // The page-hydrate filter: the page's ids are already resolved and org-scoped by phase 1,
+    // so hydrate exactly those rows. org_id stays in the predicate as the tenancy invariant.
+    private const string PageFilterClause = " WHERE p.org_id = @orgId AND p.id IN @pageIds";
 
     private const string SelectSqlSuffix = " LIMIT @limit OFFSET @offset";
 
-    // Static (sortBy, sortDir) → ORDER BY clauses. Bounded whitelist; never composes user input.
-    private static string SelectSqlFor(string sortBy, string sortDir)
+    // Phase 1 of the two-phase plain-column path: pick the page's ids from the packages table
+    // alone, no aggregate subqueries. The sort-key columns are aliased to the same names the
+    // full-CTE projection exposes so a single ORDER BY fragment drives both phases identically.
+    private const string PageIdSql = """
+        SELECT p.id AS id, p.name AS name, p.purl_name AS PurlName,
+               p.ecosystem AS ecosystem, p.created_at AS CreatedAt
+        FROM packages p
+        WHERE p.org_id = @orgId
+          AND (@ecosystem IS NULL OR p.ecosystem = @ecosystem)
+          AND (@searchPattern IS NULL OR p.name LIKE @searchPattern ESCAPE '\')
+        ORDER BY
+        """;
+
+    // Plain-column sorts resolve to a packages-table ORDER BY with an `id` tiebreaker so the
+    // phase-1 id page and the phase-2 aggregate hydrate agree on row order exactly, even when
+    // the sort key ties. Aggregate sorts (vulns/versions/downloads) rank on a computed column
+    // and return null → the caller takes the single full-CTE path instead.
+    private static string? PlainOrderByOrNull(string sortBy, string sortDir)
     {
         bool desc = sortDir == "desc";
         return sortBy switch
         {
-            "name" => SelectSqlPrefix + (desc ? " name DESC" : " name ASC") + SelectSqlSuffix,
-            "purl" => SelectSqlPrefix + (desc ? " PurlName DESC" : " PurlName ASC") + SelectSqlSuffix,
-            "vulns" => SelectSqlPrefix + (desc
-                ? " (CriticalCount * 1000 + HighCount * 100 + MediumCount * 10 + LowCount) DESC"
-                : " (CriticalCount * 1000 + HighCount * 100 + MediumCount * 10 + LowCount) ASC") + SelectSqlSuffix,
-            "ecosystem" => SelectSqlPrefix + (desc ? " ecosystem DESC" : " ecosystem ASC") + SelectSqlSuffix,
-            "versions" => SelectSqlPrefix + (desc ? " VersionCount DESC" : " VersionCount ASC") + SelectSqlSuffix,
-            "downloads" => SelectSqlPrefix + (desc ? " TotalDownloads DESC" : " TotalDownloads ASC") + SelectSqlSuffix,
-            _ => SelectSqlPrefix + (desc ? " CreatedAt DESC" : " CreatedAt ASC") + SelectSqlSuffix,
+            "name" => (desc ? "name DESC" : "name ASC") + ", id ASC",
+            "purl" => (desc ? "PurlName DESC" : "PurlName ASC") + ", id ASC",
+            "ecosystem" => (desc ? "ecosystem DESC" : "ecosystem ASC") + ", id ASC",
+            "vulns" or "versions" or "downloads" => null,
+            _ => (desc ? "CreatedAt DESC" : "CreatedAt ASC") + ", id ASC",
         };
+    }
+
+    // Phase 2 of the two-phase plain-column path: compute the aggregate columns only for the
+    // already-paged ids, re-applying the identical ORDER BY so the hydrated rows keep phase 1's
+    // order. No LIMIT/OFFSET — the id set is already the page.
+    private static string PageHydrateSqlFor(string plainOrderBy)
+        => CteOpen + PkgDataSelect + PageFilterClause + CteOrderTail + plainOrderBy;
+
+    // Single full-CTE query: evaluates the aggregate projection for every package matching the
+    // org/ecosystem/search filter, then sorts and pages. Used for the aggregate sorts and as the
+    // faithful parity reference for the plain sorts. Bounded whitelist; never composes user input.
+    internal static string FullCteSqlFor(string sortBy, string sortDir)
+    {
+        bool desc = sortDir == "desc";
+        string orderBy = sortBy switch
+        {
+            "name" => desc ? "name DESC" : "name ASC",
+            "purl" => desc ? "PurlName DESC" : "PurlName ASC",
+            "vulns" => desc
+                ? "(CriticalCount * 1000 + HighCount * 100 + MediumCount * 10 + LowCount) DESC"
+                : "(CriticalCount * 1000 + HighCount * 100 + MediumCount * 10 + LowCount) ASC",
+            "ecosystem" => desc ? "ecosystem DESC" : "ecosystem ASC",
+            "versions" => desc ? "VersionCount DESC" : "VersionCount ASC",
+            "downloads" => desc ? "TotalDownloads DESC" : "TotalDownloads ASC",
+            _ => desc ? "CreatedAt DESC" : "CreatedAt ASC",
+        };
+        return CteOpen + PkgDataSelect + FullFilterClause + CteOrderTail + orderBy + SelectSqlSuffix;
     }
 
     /// <summary>
@@ -638,6 +755,7 @@ public sealed class PackageRepository
                    pv.filename as Filename,
                    pv.size_bytes as SizeBytes, pv.checksum_sha256 as ChecksumSha256,
                    pv.yanked, pv.yank_reason as YankReason, pv.first_fetch as FirstFetch, pv.download_count as DownloadCount, pv.created_at as CreatedAt,
+                   pv.updated_at as UpdatedAt,
                    pv.vuln_checked_at as VulnCheckedAt, pv.manual_block_state as ManualBlockState,
                    pv.deprecated as Deprecated, pv.revoked_at as RevokedAt, pv.origin as Origin, pv.published_at as PublishedAt,
                    pv.checksum_sha1 as ChecksumSha1,
@@ -646,7 +764,8 @@ public sealed class PackageRepository
                    pv.has_install_script as HasInstallScript,
                    pv.install_script_kind as InstallScriptKind,
                    pv.provenance_status as ProvenanceStatus,
-                   pv.provenance_signer as ProvenanceSigner
+                   pv.provenance_signer as ProvenanceSigner,
+                   pv.manifest_json as ManifestJson
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE pv.id = @versionId AND p.org_id = @orgId
@@ -778,10 +897,9 @@ public sealed class PackageRepository
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.QueryAsync<string>(
+        await foreach (string key in conn.QueryUnbufferedAsync<string>(
             "SELECT blob_key FROM package_versions",
-            commandTimeout: 0);
-        foreach (string key in rows)
+            commandTimeout: 0))
         {
             if (ct.IsCancellationRequested)
             {
@@ -1110,4 +1228,5 @@ public sealed record NewPackageVersion(
     DateTimeOffset? PublishedAt = null,  // upstream first-publish timestamp; null on capture failure or for uploaded versions
     string? ChecksumSha1 = null,         // hex SHA-1 (npm only — for packument dist.shasum); null elsewhere
     string? UpstreamIntegrityValue = null,      // upstream's published hash, verbatim in its native encoding
-    string? UpstreamIntegrityAlgorithm = null); // 'sha256' | 'sha512-sri' | 'sha512-b64'
+    string? UpstreamIntegrityAlgorithm = null,  // 'sha256' | 'sha512-sri' | 'sha512-b64'
+    string? ManifestJson = null);        // install-relevant manifest subset (hosted npm publish); null elsewhere

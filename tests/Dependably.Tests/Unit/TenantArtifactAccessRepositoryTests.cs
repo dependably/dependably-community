@@ -74,4 +74,70 @@ public class TenantArtifactAccessRepositoryTests : IAsyncLifetime
         var tenants = await repo.ListAffectedTenantsAsync("npm", "ghost", "9.9.9");
         Assert.Empty(tenants);
     }
+
+    // ── RecordDownloadHitAsync — cache-hit serve path ────────────────────────
+    // The row is seeded via UpsertStateAsync first (the first-fetch durable insert this
+    // repository still performs synchronously), mirroring how the real serve path only ever
+    // calls RecordDownloadHitAsync after a prior first-fetch created the row.
+
+    [Fact]
+    public async Task RecordDownloadHitAsync_WithoutWriter_WritesSynchronously()
+    {
+        string caId = await InsertCacheArtifact("2.0.0");
+        var repo = new TenantArtifactAccessRepository(_db);
+        var t = TestTime.KnownNow;
+
+        await repo.UpsertStateAsync("o1", caId, t); // first-fetch seed — download_count = 1
+        await repo.RecordDownloadHitAsync("o1", caId, t.AddMinutes(1));
+
+        await using var conn = await _db.OpenAsync();
+        int count = await conn.ExecuteScalarAsync<int>(
+            "SELECT download_count FROM tenant_artifact_access WHERE org_id = 'o1' AND cache_artifact_id = @caId",
+            new { caId });
+        Assert.Equal(2, count);
+    }
+
+    [Fact]
+    public async Task RecordDownloadHitAsync_WithWriter_DoesNotWriteSynchronously()
+    {
+        string caId = await InsertCacheArtifact("2.0.1");
+        var writer = new DownloadCountWriter();
+        var repo = new TenantArtifactAccessRepository(_db, writer);
+        var t = TestTime.KnownNow;
+
+        await repo.UpsertStateAsync("o1", caId, t); // first-fetch seed — download_count = 1
+        await repo.RecordDownloadHitAsync("o1", caId, t.AddMinutes(1));
+
+        await using var conn = await _db.OpenAsync();
+        int count = await conn.ExecuteScalarAsync<int>(
+            "SELECT download_count FROM tenant_artifact_access WHERE org_id = 'o1' AND cache_artifact_id = @caId",
+            new { caId });
+        Assert.Equal(1, count); // hit not yet flushed by the drainer
+    }
+
+    [Fact]
+    public async Task RecordDownloadHitAsync_WithWriter_DrainerAppliesBatchedUpdate()
+    {
+        string caId = await InsertCacheArtifact("2.0.2");
+        var writer = new DownloadCountWriter();
+        var repo = new TenantArtifactAccessRepository(_db, writer);
+        var service = new DownloadCountWriterHostedService(writer, _db,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<DownloadCountWriterHostedService>.Instance,
+            TimeProvider.System);
+        var t = TestTime.KnownNow;
+
+        await repo.UpsertStateAsync("o1", caId, t); // first-fetch seed — download_count = 1
+        for (int i = 0; i < 4; i++)
+        {
+            await repo.RecordDownloadHitAsync("o1", caId, t.AddMinutes(i + 1));
+        }
+
+        await service.DrainPendingAsync();
+
+        await using var conn = await _db.OpenAsync();
+        int count = await conn.ExecuteScalarAsync<int>(
+            "SELECT download_count FROM tenant_artifact_access WHERE org_id = 'o1' AND cache_artifact_id = @caId",
+            new { caId });
+        Assert.Equal(5, count); // 1 seeded + 4 batched hits
+    }
 }

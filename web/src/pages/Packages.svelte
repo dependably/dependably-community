@@ -66,9 +66,9 @@
     { key: 'name',      label: $t('packages.columns.name'),      sortable: true,  width: '200px' },
     { key: 'ecosystem', label: $t('packages.columns.ecosystem'), sortable: true,  width: '90px' },
     { key: 'purl',      label: $t('packages.columns.purl'),      sortable: true },
-    { key: 'versions',  label: $t('packages.columns.versions'),  sortable: true,  width: '80px' },
-    { key: 'downloads', label: $t('packages.columns.downloads'), sortable: true,  width: '100px', defaultDir: 'desc' },
-    { key: 'latest',    label: $t('packages.columns.latest'),    sortable: false, width: '70px' },
+    { key: 'versions',  label: $t('packages.columns.versions'),  sortable: true,  width: '80px',  align: 'right' },
+    { key: 'downloads', label: $t('packages.columns.downloads'), sortable: true,  width: '100px', defaultDir: 'desc', align: 'right' },
+    { key: 'latest',    label: $t('packages.columns.latest'),    sortable: false, width: '70px',  align: 'center' },
     { key: 'vulns',     label: $t('packages.columns.vulns'),     sortable: true,  width: '130px', defaultDir: 'desc' },
     { key: 'created',   label: $t('packages.columns.created'),   sortable: true,  width: '120px' },
     ...(versionOverwritePolicy !== 'block'
@@ -173,6 +173,7 @@
         {#if (pkg.highCount ?? 0) > 0}<span class="sev sev-high" aria-label="{pkg.highCount} high">{pkg.highCount}</span>{/if}
         {#if (pkg.mediumCount ?? 0) > 0}<span class="sev sev-medium" aria-label="{pkg.mediumCount} medium">{pkg.mediumCount}</span>{/if}
         {#if (pkg.lowCount ?? 0) > 0}<span class="sev sev-low" aria-label="{pkg.lowCount} low">{pkg.lowCount}</span>{/if}
+        {#if ((pkg.criticalCount ?? 0) + (pkg.highCount ?? 0) + (pkg.mediumCount ?? 0) + (pkg.lowCount ?? 0)) === 0}<span class="text-muted" aria-label={$t('packages.vulns.none')}>—</span>{/if}
       </td>
       <td class="nowrap text-muted">{$formatDateShort(pkg.createdAt)}</td>
       {#if versionOverwritePolicy !== 'block'}

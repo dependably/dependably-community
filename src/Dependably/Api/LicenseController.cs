@@ -107,7 +107,7 @@ public sealed class LicenseController : ControllerBase
 
         if (req.Mode is not ("off" or "warn" or "block"))
         {
-            return _problems.ValidationErrorAction("mode", "Mode must be 'off', 'warn', or 'block'.");
+            return _problems.ValidationErrorActionKey("mode", "error.license.modeInvalid");
         }
 
         string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
@@ -115,7 +115,7 @@ public sealed class LicenseController : ControllerBase
         await _orgs.UpsertLicensePolicyModeAsync(orgId, req.Mode, ct);
 
         await _audit.LogAsync("license_policy_mode_changed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { mode = req.Mode }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { mode = req.Mode }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return Ok(new { mode = req.Mode });
     }
@@ -151,7 +151,7 @@ public sealed class LicenseController : ControllerBase
 
         if (string.IsNullOrWhiteSpace(req.LicenseSpdx))
         {
-            return _problems.ValidationErrorAction("license_spdx", "SPDX identifier is required.");
+            return _problems.ValidationErrorActionKey("license_spdx", "error.license.spdxRequired");
         }
 
         string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
@@ -159,11 +159,11 @@ public sealed class LicenseController : ControllerBase
         var entry = await _licenses.AddAllowlistAsync(orgId, req.LicenseSpdx.Trim(), ct);
         if (entry is null)
         {
-            return _problems.ConflictAction($"'{req.LicenseSpdx}' is already on the allowlist.");
+            return _problems.ConflictActionKeyFormat("error.license.allowlistDuplicate", req.LicenseSpdx);
         }
 
         await _audit.LogAsync("license_allowlist_added", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx = req.LicenseSpdx.Trim() }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx = req.LicenseSpdx.Trim() }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return CreatedAtAction(nameof(GetAllowlist), null, entry);
     }
@@ -188,7 +188,7 @@ public sealed class LicenseController : ControllerBase
         }
 
         await _audit.LogAsync("license_allowlist_removed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return NoContent();
     }
@@ -224,7 +224,7 @@ public sealed class LicenseController : ControllerBase
 
         if (string.IsNullOrWhiteSpace(req.LicenseSpdx))
         {
-            return _problems.ValidationErrorAction("license_spdx", "SPDX identifier is required.");
+            return _problems.ValidationErrorActionKey("license_spdx", "error.license.spdxRequired");
         }
 
         string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
@@ -232,11 +232,11 @@ public sealed class LicenseController : ControllerBase
         var entry = await _licenses.AddBlocklistAsync(orgId, req.LicenseSpdx.Trim(), ct);
         if (entry is null)
         {
-            return _problems.ConflictAction($"'{req.LicenseSpdx}' is already on the blocklist.");
+            return _problems.ConflictActionKeyFormat("error.license.blocklistDuplicate", req.LicenseSpdx);
         }
 
         await _audit.LogAsync("license_blocklist_added", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx = req.LicenseSpdx.Trim() }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx = req.LicenseSpdx.Trim() }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return CreatedAtAction(nameof(GetBlocklist), null, entry);
     }
@@ -261,7 +261,7 @@ public sealed class LicenseController : ControllerBase
         }
 
         await _audit.LogAsync("license_blocklist_removed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { spdx }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return NoContent();
     }

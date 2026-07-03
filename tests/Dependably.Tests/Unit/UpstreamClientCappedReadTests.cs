@@ -66,6 +66,24 @@ public class UpstreamClientCappedReadTests
     }
 
     [Fact]
+    public async Task ReadBodyCappedAsync_ChunkedUnderCap_ReturnsBytesIntact()
+    {
+        // No Content-Length (chunked / auto-decompressed transfer): the buffer can't be pre-sized,
+        // so it grows past the final length and the return path must fall back to a right-sized
+        // copy rather than handing back an over-allocated GetBuffer().
+        byte[] body = new byte[100_000];
+        Random.Shared.NextBytes(body);
+        using var response = OkResponse(body);
+        response.Content.Headers.ContentLength = null;
+
+        byte[] read = await UpstreamClient.ReadBodyCappedAsync(
+            response, maxBytes: 200_000, "http://upstream.test/chunked", CancellationToken.None);
+
+        Assert.Equal(body, read);
+        Assert.Equal(body.Length, read.Length);
+    }
+
+    [Fact]
     public async Task ReadBodyCappedAsync_ExactlyAtCap_ReturnsBytesIntact()
     {
         byte[] body = new byte[1024];
@@ -202,8 +220,8 @@ public class UpstreamClientCappedReadTests
 
     private sealed class PermissiveValidator : IUpstreamUrlValidator
     {
-        public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
-            => Task.FromResult(true);
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
+            => Task.FromResult(UpstreamUrlBlock.None);
     }
 
     private sealed class DisabledAirGap : IAirGapMode

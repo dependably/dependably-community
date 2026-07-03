@@ -75,4 +75,78 @@ public sealed class SiemControllerSecurityTests : IClassFixture<DependablyFactor
         Assert.Contains("home-user", body);
         Assert.DoesNotContain("foreign-user", body);
     }
+
+    /// <summary>
+    /// Regression for the <c>[AllowAnonymous]</c> guard-bypass: a JWT-session caller flagged
+    /// <c>must_change_password</c> must not be able to pull SIEM data. Before the fix,
+    /// <c>SiemController</c> carried <c>[AllowAnonymous]</c>, which made both
+    /// <c>RouteScopeFilter</c> and <c>PasswordRotationGuard</c> skip the endpoint entirely
+    /// (they early-return on <c>IAllowAnonymous</c> metadata), so a session mid-forced-rotation
+    /// could still read audit/vuln data through this surface even though every other
+    /// <c>/api/v1/</c> route was locked down to the password-change flow.
+    /// </summary>
+    [Fact]
+    public async Task GetAuthEvents_JwtMustChangePassword_Returns403PasswordChangeRequired()
+    {
+        string email = $"siem-pwrotate-{Guid.NewGuid():N}@example.com";
+        string userId = await _factory.CreateUser(email, "pw", role: "auditor"); // auditor: read:audit only
+
+        await using (var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE users SET must_change_password = 1 WHERE id = @id", new { id = userId });
+        }
+
+        string jwt = await _factory.CreateUserJwt(userId, "auditor");
+        using var c = _factory.CreateClient();
+        c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+        var resp = await c.GetAsync("/api/v1/siem/events/auth");
+
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+        string body = await resp.Content.ReadAsStringAsync();
+        Assert.Contains("password_change_required", body);
+    }
+
+    /// <summary>
+    /// Companion regression: with <c>require_mfa</c> on and the caller unenrolled,
+    /// <c>MfaEnrollmentGuard</c> must also apply to the SIEM surface — the same
+    /// <c>[AllowAnonymous]</c>-bypass class of bug as the password-rotation case above.
+    /// </summary>
+    [Fact]
+    public async Task GetAuthEvents_JwtMfaRequiredUnenrolled_Returns403MfaEnrollmentRequired()
+    {
+        string email = $"siem-mfarequired-{Guid.NewGuid():N}@example.com";
+        string userId = await _factory.CreateUser(email, "pw", role: "auditor");
+
+        var db = _factory.Services.GetRequiredService<IMetadataStore>();
+        string orgId;
+        await using (var conn = await db.OpenAsync())
+        {
+            orgId = await conn.ExecuteScalarAsync<string>(
+                "SELECT tenant_id FROM users WHERE id = @id", new { id = userId })
+                ?? throw new InvalidOperationException("User not found.");
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET require_mfa = 1 WHERE org_id = @orgId", new { orgId });
+        }
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+
+        try
+        {
+            string jwt = await _factory.CreateUserJwt(userId, "auditor");
+            using var c = _factory.CreateClient();
+            c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+            var resp = await c.GetAsync("/api/v1/siem/events/auth");
+
+            Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+            string body = await resp.Content.ReadAsStringAsync();
+            Assert.Contains("mfa_enrollment_required", body);
+        }
+        finally
+        {
+            await using var conn = await db.OpenAsync();
+            await conn.ExecuteAsync(
+                "UPDATE org_settings SET require_mfa = 0 WHERE org_id = @orgId", new { orgId });
+            _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        }
+    }
 }

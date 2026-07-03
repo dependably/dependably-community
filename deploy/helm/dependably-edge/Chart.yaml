@@ -1,0 +1,14 @@
+apiVersion: v2
+name: dependably-edge
+description: Headless cache-only dependably edge node — a pull-through cache for every ecosystem whose sole upstream is a central master instance.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - dependably
+  - artifact-cache
+  - pull-through
+  - edge
+home: https://gitlab.com/moonlitlabs/dependably-community
+sources:
+  - https://gitlab.com/moonlitlabs/dependably-community

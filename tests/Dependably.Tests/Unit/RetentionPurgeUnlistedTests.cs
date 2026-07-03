@@ -31,7 +31,8 @@ public sealed class RetentionPurgeUnlistedTests : IAsyncLifetime
         var invites = new InviteRepository(_db, clock);
         var samlConfig = new SamlConfigRepository(_db, clock);
         return new RetentionService(new RetentionService.Dependencies(
-            _db, _blobs, jwt, invites, samlConfig, cfg, NullLogger<RetentionService>.Instance, clock));
+            _db, _blobs, jwt, invites, samlConfig, cfg, new AirGapMode(cfg), NullLogger<RetentionService>.Instance, clock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(clock)));
     }
 
     // Seeds a package + version (one package per version so purl_name stays unique), puts a

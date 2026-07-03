@@ -182,7 +182,8 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
                 new StagingOptions(Path.GetTempPath(), FloorBytes: 0),
                 new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<OciUploadService>.Instance,
-                TimeProvider.System)));
+                TimeProvider.System)),
+            EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard());
 
         return new OciController(svc, NullLogger<OciController>.Instance)
         {
@@ -216,7 +217,8 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
                 new StagingOptions(Path.GetTempPath(), FloorBytes: 0),
                 new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<OciUploadService>.Instance,
-                TimeProvider.System)));
+                TimeProvider.System)),
+            EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard());
 
         return new OciController(svc, NullLogger<OciController>.Instance)
         {

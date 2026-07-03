@@ -19,10 +19,12 @@ namespace Dependably.Protocol;
 /// <summary>
 /// Result from an upstream repodata fetch. <see cref="NotModified"/> is true when the
 /// caller's <c>If-None-Match</c> matched the upstream <c>ETag</c> (or the cached copy
-/// was still fresh and the caller already has it).
+/// was still fresh and the caller already has it). <see cref="Body"/> is a stream so a
+/// blob-store cache hit for a hash-prefixed file (potentially 100+ MB) can be piped
+/// straight to the HTTP response instead of buffering it into managed memory first.
 /// </summary>
 public sealed record RepodataResult(
-    byte[] Body,
+    Stream Body,
     string ContentType,
     string? ETag,
     string? LastModified,
@@ -45,6 +47,47 @@ public sealed record PackageResolution(
     string? Summary,
     string? Description,
     string? License);
+
+/// <summary>
+/// Dedicated, size-bounded <see cref="IMemoryCache"/> for parsed <c>primary.xml.gz</c> package
+/// maps, kept separate from the shared metadata <see cref="IMemoryCache"/> that also holds npm
+/// packuments, PyPI simple indices, NuGet registration pages, and RPM repomd/asc/hash-prefixed
+/// blobs. A Fedora/EPEL-scale primary map is tens to 100+ MB of managed memory once its
+/// <c>Size</c> reflects a real estimate rather than a placeholder — far larger than any other
+/// entry the shared cache holds, and larger than the shared cache's entire budget. Sharing that
+/// budget means either the map silently fails to insert (<see cref="IMemoryCache"/> does not
+/// admit an entry whose <c>Size</c> exceeds <see cref="MemoryCacheOptions.SizeLimit"/> — it is
+/// not cached, not evicted, just dropped) or, for a smaller map that does fit, evicts the rest
+/// of the shared cache. The bound is configurable via
+/// <c>Rpm:PrimaryMapCacheSizeLimitBytes</c> (default <see cref="DefaultSizeLimitBytes"/>) so a
+/// deployment mirroring several large distro repos can size it up.
+/// </summary>
+public sealed class RpmPrimaryMapCache : IDisposable
+{
+    /// <summary>Default size bound (300 MiB) when <c>Rpm:PrimaryMapCacheSizeLimitBytes</c> is unset —
+    /// comfortably holds several Fedora/EPEL-scale primary maps at once.</summary>
+    public const long DefaultSizeLimitBytes = 300L * 1024 * 1024;
+
+    public IMemoryCache Cache { get; }
+
+    public RpmPrimaryMapCache(IConfiguration configuration)
+        : this(configuration.GetValue<long?>("Rpm:PrimaryMapCacheSizeLimitBytes") ?? DefaultSizeLimitBytes)
+    {
+    }
+
+    public RpmPrimaryMapCache(long sizeLimitBytes)
+    {
+        Cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = sizeLimitBytes });
+    }
+
+    public void Dispose()
+    {
+        if (Cache is IDisposable disposable)
+        {
+            disposable.Dispose();
+        }
+    }
+}
 
 // ── Proxy ─────────────────────────────────────────────────────────────────────
 
@@ -113,6 +156,9 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     private readonly IBlobStore _cacheStore;  // blobs.Cache
     private readonly IMetadataStore _db;
     private readonly IMemoryCache _memCache;
+    // Dedicated, size-bounded cache for parsed primary.xml.gz package maps — see
+    // RpmPrimaryMapCache for why these are not stored in the shared metadata _memCache.
+    private readonly IMemoryCache _primaryMapCache;
     private readonly IAirGapMode _airGap;
     private readonly IUpstreamUrlValidator _urlValidator;
     private readonly ILogger<RpmUpstreamProxy> _logger;
@@ -154,6 +200,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         _cacheStore = svc.Blobs.Cache;
         _db = svc.Db;
         _memCache = svc.MemoryCache;
+        _primaryMapCache = svc.PrimaryMapCache.Cache;
         _airGap = svc.AirGap;
         _urlValidator = svc.UrlValidator;
         _logger = svc.Logger;
@@ -223,30 +270,82 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
             throw new AirGappedException($"rpm:resolve:{filename}");
         }
 
-        var primary = await GetUpstreamPrimaryGzAsync(orgId, upstreamBase, ct);
-        if (primary is null)
+        // The primary.xml.gz sha256 is derivable from the (memory-cached, ~4 KB) repomd.xml
+        // alone. Check the parsed-map cache with only that sha256 before paying for the full
+        // blob load/decompress — a map hit then does zero blob I/O.
+        var location = await GetPrimaryLocationAsync(orgId, upstreamBase, ct);
+        if (location is null)
         {
             return null;
         }
 
-        var (primaryGzBytes, primarySha256) = primary.Value;
-
-        // Parse primary.xml.gz (cached by sha256 so it automatically tracks repodata rotation)
+        var (primaryFilename, primarySha256) = location.Value;
         string mapKey = $"rpm:primary-map:{primarySha256}";
-        if (!_memCache.TryGetValue<Dictionary<string, PackageResolution>>(mapKey, out var packageMap))
+        // The parsed map is stored in the dedicated _primaryMapCache, not the shared metadata
+        // _memCache: a Fedora/EPEL-scale map's real Size estimate can run tens to 100+ MB, which
+        // would exceed the shared cache's much smaller budget and either get silently dropped
+        // (never cached) or evict every other tenant's npm/PyPI/NuGet metadata.
+        if (!_primaryMapCache.TryGetValue<Dictionary<string, PackageResolution>>(mapKey, out var packageMap) || packageMap is null)
         {
+            byte[]? primaryGzBytes = await GetOrFetchRepodataBlobAsync(upstreamBase, primaryFilename, primarySha256, ct);
+            if (primaryGzBytes is null)
+            {
+                return null;
+            }
+
             packageMap = ParsePrimaryXmlGz(primaryGzBytes, upstreamBase);
             // Long TTL is fine — the map invalidates naturally when repomd.xml rotates to a
             // new primary.xml.gz sha256, creating a new cache slot and letting the old one GC.
-            _memCache.Set(mapKey, packageMap, new MemoryCacheEntryOptions
+            // Size is a real estimate of the map's managed-memory footprint (not a placeholder
+            // 1) so the dedicated byte-denominated cache accounts for it and can evict under
+            // pressure without touching the shared metadata cache.
+            _primaryMapCache.Set(mapKey, packageMap, new MemoryCacheEntryOptions
             {
                 AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(4),
-                Size = 1,
+                Size = EstimatePackageMapBytes(packageMap),
             });
         }
 
-        return packageMap!.GetValueOrDefault(filename);
+        return packageMap.GetValueOrDefault(filename);
     }
+
+    /// <summary>
+    /// Estimates the managed-memory footprint of a parsed primary.xml.gz package map: per-entry
+    /// string field lengths (as UTF-16 byte counts, the in-memory representation) plus a fixed
+    /// overhead per dictionary entry / <see cref="PackageResolution"/> record instance. Used as
+    /// the <see cref="MemoryCacheEntryOptions.Size"/> for <c>rpm:primary-map:*</c> cache entries
+    /// so the shared byte-denominated <c>IMemoryCache</c> (bounded by
+    /// <c>MetadataCacheSizeLimitBytes</c>) evicts proportionally to actual size instead of
+    /// treating every map as 1 byte.
+    /// </summary>
+    internal static long EstimatePackageMapBytes(Dictionary<string, PackageResolution> map)
+    {
+        // Approximate per-entry overhead: dictionary bucket/entry slot + PackageResolution
+        // record object header and field storage, rounded up generously rather than exactly.
+        const int perEntryOverheadBytes = 200;
+
+        long total = 0;
+        foreach (var (key, r) in map)
+        {
+            total += perEntryOverheadBytes;
+            total += EstimateStringBytes(key);
+            total += EstimateStringBytes(r.PackageUrl);
+            total += EstimateStringBytes(r.Sha256);
+            total += EstimateStringBytes(r.Name);
+            total += EstimateStringBytes(r.Version);
+            total += EstimateStringBytes(r.Release);
+            total += EstimateStringBytes(r.Arch);
+            total += EstimateStringBytes(r.Summary);
+            total += EstimateStringBytes(r.Description);
+            total += EstimateStringBytes(r.License);
+        }
+
+        return Math.Max(total, 1);
+    }
+
+    // .NET strings are UTF-16 (2 bytes/char) plus a small object header; this is an estimate,
+    // not an exact CLR object-size computation.
+    private static long EstimateStringBytes(string? s) => s is null ? 0 : (s.Length * 2L) + 24;
 
     /// <inheritdoc />
     public async Task<byte[]?> GetUpstreamPrimaryXmlGzAsync(string orgId, string upstreamBase, CancellationToken ct)
@@ -303,6 +402,25 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
     /// </summary>
     private async Task<(byte[] Bytes, string Sha256)?> GetUpstreamPrimaryGzAsync(string orgId, string upstreamBase, CancellationToken ct)
     {
+        var location = await GetPrimaryLocationAsync(orgId, upstreamBase, ct);
+        if (location is null)
+        {
+            return null;
+        }
+
+        var (primaryFilename, primarySha256) = location.Value;
+        byte[]? primaryGzBytes = await GetOrFetchRepodataBlobAsync(upstreamBase, primaryFilename, primarySha256, ct);
+        return primaryGzBytes is null ? null : (primaryGzBytes, primarySha256);
+    }
+
+    /// <summary>
+    /// Resolves the primary.xml.gz filename + sha256 from <c>repomd.xml</c> alone (memory-cached
+    /// or a single upstream fetch), without loading the primary.xml.gz blob itself. Callers that
+    /// only need the sha256 to check a downstream cache (e.g. the parsed package map in
+    /// <see cref="ResolvePackageUrlAsync"/>) can then skip the blob load entirely on a cache hit.
+    /// </summary>
+    private async Task<(string Filename, string Sha256)?> GetPrimaryLocationAsync(string orgId, string upstreamBase, CancellationToken ct)
+    {
         byte[]? repomdBytes = await GetRepomdBodyAsync(orgId, upstreamBase, ct);
         if (repomdBytes is null)
         {
@@ -310,13 +428,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         }
 
         var (primaryFilename, primarySha256) = ParsePrimaryFromRepomd(repomdBytes);
-        if (primaryFilename is null || primarySha256 is null)
-        {
-            return null;
-        }
-
-        byte[]? primaryGzBytes = await GetOrFetchRepodataBlobAsync(upstreamBase, primaryFilename, primarySha256, ct);
-        return primaryGzBytes is null ? null : (primaryGzBytes, primarySha256);
+        return primaryFilename is null || primarySha256 is null ? null : (primaryFilename, primarySha256);
     }
 
     // ── GPG key ────────────────────────────────────────────────────────────────
@@ -436,8 +548,8 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         {
             return ifNoneMatch is not null && cached!.ETag is not null &&
                 ifNoneMatch.Contains(cached.ETag)
-                ? new RepodataResult([], ContentTypeFor(filename), cached.ETag, cached.LastModified, NotModified: true)
-                : new RepodataResult(cached!.Body, ContentTypeFor(filename), cached.ETag, cached.LastModified, NotModified: false);
+                ? new RepodataResult(Stream.Null, ContentTypeFor(filename), cached.ETag, cached.LastModified, NotModified: true)
+                : new RepodataResult(new MemoryStream(cached!.Body), ContentTypeFor(filename), cached.ETag, cached.LastModified, NotModified: false);
         }
 
         // Cache miss — single-flight fetch to avoid thundering herd.
@@ -461,7 +573,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
             // Upstream returned 304 (or 404). Don't cache.
             return result.etag is null
                 ? null  // 404
-                : new RepodataResult([], ContentTypeFor(filename), result.etag, result.lastModified, NotModified: true);
+                : new RepodataResult(Stream.Null, ContentTypeFor(filename), result.etag, result.lastModified, NotModified: true);
         }
 
         _memCache.Set(cacheKey, new CachedRepomd(result.body, result.etag, result.lastModified), new MemoryCacheEntryOptions
@@ -469,7 +581,7 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
             AbsoluteExpirationRelativeToNow = _repomdTtl,
             Size = result.body.Length,
         });
-        return new RepodataResult(result.body, ContentTypeFor(filename), result.etag, result.lastModified, NotModified: false);
+        return new RepodataResult(new MemoryStream(result.body), ContentTypeFor(filename), result.etag, result.lastModified, NotModified: false);
     }
 
     private async Task<(byte[] Body, string? ETag, string? LastModified)> FetchRepomdFromUpstreamAsync(
@@ -546,7 +658,9 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
         else
         {
             var result = await GetRepomdAsync(upstreamBase, "repomd.xml", null, null, ct);
-            body = result?.NotModified == false ? result.Body : null;
+            // repomd.xml is small (capped by MaxMetadataResponseBytes) and this method needs the
+            // raw bytes for signature verification, so materializing here is cheap and localized.
+            body = result?.NotModified == false ? await ReadStreamAsync(result.Body, ct) : null;
         }
         if (body is null)
         {
@@ -692,17 +806,21 @@ public sealed class RpmUpstreamProxy : IRpmUpstreamProxy
 
         string blobKey = BlobKeys.RpmRepodataProxy(sha256);
 
-        // Blob store hit — serve from cache tier forever (content-addressed = immutable).
+        // Blob store hit — stream directly from the cache tier forever (content-addressed =
+        // immutable) rather than buffering the whole file into a managed byte[] first. These
+        // files reach 100+ MB on real distro repos, so this is the difference between one
+        // response-sized allocation and zero.
         var existing = await _cacheStore.GetAsync(blobKey, ct);
         if (existing is not null)
         {
-            byte[] bytes = await ReadStreamAsync(existing, ct);
-            return new RepodataResult(bytes, ContentTypeFor(filename), ETag: null, LastModified: null, NotModified: false);
+            return new RepodataResult(existing, ContentTypeFor(filename), ETag: null, LastModified: null, NotModified: false);
         }
 
-        // Fetch from upstream, cache, serve.
+        // Fetch from upstream, cache, serve. The checksum verification in
+        // GetOrFetchRepodataBlobAsync requires the full body in memory, so this miss path still
+        // buffers — only the (far more common, steady-state) cache-hit path above is streamed.
         byte[]? body = await GetOrFetchRepodataBlobAsync(upstreamBase, filename, sha256, ct);
-        return body is null ? null : new RepodataResult(body, ContentTypeFor(filename), ETag: null, LastModified: null, NotModified: false);
+        return body is null ? null : new RepodataResult(new MemoryStream(body), ContentTypeFor(filename), ETag: null, LastModified: null, NotModified: false);
     }
 
     /// <summary>
@@ -1012,4 +1130,5 @@ public sealed record RpmUpstreamProxyServices(
     IUpstreamUrlValidator UrlValidator,
     ILogger<RpmUpstreamProxy> Logger,
     TimeProvider Time,
-    IPerOrgTrustAnchorStore TrustStore);
+    IPerOrgTrustAnchorStore TrustStore,
+    RpmPrimaryMapCache PrimaryMapCache);

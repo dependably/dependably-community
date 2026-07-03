@@ -21,9 +21,6 @@ internal static class NpmSharedHelpers
         return "\"" + Convert.ToHexString(hash)[..ETagHexPrefixLength].ToLowerInvariant() + "\"";
     }
 
-    internal static string SanitizeHeader(string value)
-        => value.Replace("\r", "").Replace("\n", "").Replace("\0", "");
-
     /// <summary>
     /// True when a decoded npm name ("name" or "@scope/name") is safe to embed in an
     /// upstream proxy URL: at most two path segments, each passing

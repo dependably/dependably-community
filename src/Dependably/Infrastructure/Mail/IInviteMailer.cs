@@ -12,6 +12,9 @@ public interface IInviteMailer
     /// failure so the caller can fall back to returning the link in the response body.
     /// The invite link and raw token are never included in any exception message or
     /// structured log property — see the caller for the fail-open fallback.
+    /// <paramref name="language"/> selects the SharedResource culture for the subject
+    /// and body — the recipient has no account yet, so callers pass the tenant's
+    /// default language; unsupported codes fall back to English.
     /// </summary>
-    Task SendInviteAsync(string toAddress, string orgName, string inviteLink, DateTimeOffset expiresAt, CancellationToken ct = default);
+    Task SendInviteAsync(string toAddress, string orgName, string inviteLink, DateTimeOffset expiresAt, string language, CancellationToken ct = default);
 }

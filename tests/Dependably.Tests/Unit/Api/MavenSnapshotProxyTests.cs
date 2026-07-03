@@ -3,6 +3,8 @@ using System.Text;
 using Dapper;
 using Dependably.Api;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -205,7 +207,9 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
             _db, osv, vulns, _audit, config,
             new StubAirGapMode(false),
             NullLogger<VulnerabilityScanService>.Instance,
-            TimeProvider.System));
+            TimeProvider.System,
+            new OrgRepository(_db),
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
         var cacheArtifact = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var proxyVersions = new ProxyVersionRecorder(_packages, _audit, licenses, cacheArtifact,
@@ -215,7 +219,8 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
             cacheArtifact, tenantAccess,
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         var proxyFetch = new ProxyFetchService(
-            cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, _packages, _audit, TimeProvider.System);
+            cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, _packages, _audit, TimeProvider.System,
+            new Dependably.Infrastructure.SourcePinRepository(_db, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()));
 
         var svc = new MavenControllerServices(
             Packages: _packages, Tokens: _tokens, Audit: _audit, Orgs: _orgs,
@@ -226,6 +231,8 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System),
             Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
             MetadataCache: _metadataCache,
+            CacheOptions: new Dependably.Infrastructure.RenderedMetadataCacheOptions(
+                TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(5)),
             Log: NullLogger<MavenController>.Instance,
             CacheArtifacts: cacheArtifact,
             TenantAccess: tenantAccess,
@@ -234,7 +241,9 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
             // No Maven trust anchors configured — IsConfiguredForAsync returns false, provenance skipped.
             MavenProvenance: new Dependably.Protocol.Provenance.MavenProvenanceVerifier(
                 new Dependably.Tests.Infrastructure.StubPerOrgTrustAnchorStore(),
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance));
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance),
+            EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
+            Staging: new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0));
 
         return new MavenController(svc)
         {
@@ -272,7 +281,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
         var ctl = BuildController(CleanOsv());
         var result = await ctl.Download($"{groupPath}/{artifactId}/{version}/{artifactId}-{version}.jar", CancellationToken.None);
 
-        var file = Assert.IsType<FileContentResult>(result);
+        var file = Dependably.Tests.Infrastructure.MavenServe.File(result);
         Assert.Equal(bytes, file.FileContents);
         Assert.Equal("MISS", ctl.Response.Headers["X-Cache"].ToString());
     }
@@ -355,7 +364,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
 
         var ctl1 = BuildController(CleanOsv());
         var firstResult = await ctl1.Download($"{groupPath}/{artifactId}/{version}/{literalFilename}", CancellationToken.None);
-        var firstFile = Assert.IsType<FileContentResult>(firstResult);
+        var firstFile = Dependably.Tests.Infrastructure.MavenServe.File(firstResult);
         Assert.Equal(bytesN, firstFile.FileContents);
         Assert.Equal("MISS", ctl1.Response.Headers["X-Cache"].ToString());
 
@@ -371,7 +380,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
 
         var ctl2 = BuildController(CleanOsv());
         var secondResult = await ctl2.Download($"{groupPath}/{artifactId}/{version}/{literalFilename}", CancellationToken.None);
-        var secondFile = Assert.IsType<FileContentResult>(secondResult);
+        var secondFile = Dependably.Tests.Infrastructure.MavenServe.File(secondResult);
 
         // Must serve N+1 bytes, NOT the stale N bytes.
         Assert.Equal(bytesNplus1, secondFile.FileContents);
@@ -454,7 +463,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
         // First GET using the LITERAL -SNAPSHOT filename → upstream fetch + cache write.
         var ctl1 = BuildController(CleanOsv());
         var first = await ctl1.Download($"{groupPath}/{artifactId}/{version}/{literalFilename}", CancellationToken.None);
-        Assert.IsType<FileContentResult>(first);
+        Dependably.Tests.Infrastructure.MavenServe.File(first);
         Assert.Equal("MISS", ctl1.Response.Headers["X-Cache"].ToString());
 
         long artifactCallsAfterMiss = _server.LogEntries.Count(
@@ -533,7 +542,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
         var ctl = BuildController(CleanOsv());
         var result = await ctl.Download($"{groupPath}/{artifactId}/{version}/{literalFilename}", CancellationToken.None);
 
-        var file = Assert.IsType<FileContentResult>(result);
+        var file = Dependably.Tests.Infrastructure.MavenServe.File(result);
         Assert.Equal(bytes, file.FileContents);
     }
 
@@ -629,7 +638,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
         // Step 1: Warm artifact A's cache.
         var ctl0 = BuildController(CleanOsv());
         var warmA = await ctl0.Download(pathA, CancellationToken.None);
-        Assert.IsType<FileContentResult>(warmA);
+        Dependably.Tests.Infrastructure.MavenServe.File(warmA);
 
         // Step 2: Artifact A — cached primary (HIT).
         var ctl1 = BuildController(CleanOsv());
@@ -645,7 +654,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
 
         // Step 4: Artifact B — upstream MISS primary.
         var ctl3 = BuildController(CleanOsv());
-        var resultB = Assert.IsType<FileContentResult>(
+        var resultB = Dependably.Tests.Infrastructure.MavenServe.File(
             await ctl3.Download(pathB, CancellationToken.None));
         Assert.Equal(bytesB, resultB.FileContents);
         Assert.Equal("MISS", ctl3.Response.Headers["X-Cache"].ToString());
@@ -658,7 +667,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
 
         // Step 6: Artifact C — SNAPSHOT upstream MISS via LITERAL name; resolves via metadata.
         var ctl5 = BuildController(CleanOsv());
-        var resultC = Assert.IsType<FileContentResult>(
+        var resultC = Dependably.Tests.Infrastructure.MavenServe.File(
             await ctl5.Download(literalPathC, CancellationToken.None));
         Assert.Equal(bytesC, resultC.FileContents);
         Assert.Equal("MISS", ctl5.Response.Headers["X-Cache"].ToString());
@@ -992,7 +1001,7 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
         // Step 3: Proxy SNAPSHOT (normal path) fetches from upstream.
         var ctlP = BuildController(CleanOsv());
         var resultP = await ctlP.Download($"{groupPathP}/{artifactIdP}/{versionP}/{literalFilenameP}", CancellationToken.None);
-        var fileP = Assert.IsType<FileContentResult>(resultP);
+        var fileP = Dependably.Tests.Infrastructure.MavenServe.File(resultP);
         Assert.Equal(upstreamBytesP, fileP.FileContents);
         Assert.Equal("MISS", ctlP.Response.Headers["X-Cache"].ToString());
     }
@@ -1009,8 +1018,8 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
 
     private sealed class AllowAllValidator : IUpstreamUrlValidator
     {
-        public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
-            => Task.FromResult(true);
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
+            => Task.FromResult(UpstreamUrlBlock.None);
     }
 
     private sealed class StaticHttpClientFactory : IHttpClientFactory

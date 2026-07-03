@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
+using Dependably.Infrastructure.Edge;
 using Dependably.Protocol;
 using Dependably.Security;
 using Microsoft.AspNetCore.Http;
@@ -22,7 +23,8 @@ public sealed class NpmDistTagsHandler(
     AuditRepository audit,
     NpmDistTagRepository distTags,
     RenderedResponseCache<NpmPackumentKey> cache,
-    TimeProvider time)
+    TimeProvider time,
+    EdgePublishGuard edgeGuard)
 {
     // Maximum packages returned per search page (per npm search specification).
     private const int MaxSearchPageSize = 50;
@@ -107,6 +109,13 @@ public sealed class NpmDistTagsHandler(
     private async Task<IActionResult> PutDistTagImplAsync(
         HttpContext httpContext, string orgId, string fullName, string tag, CancellationToken ct)
     {
+        // Fail-closed on an edge node: a dist-tag PUT mutates authoritative tag state a cache edge
+        // does not own, so it is refused here before any lookup.
+        if (edgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
         var token = await httpContext.Request.ResolveTokenAsync(tokens, ct);
         if (token is null || token.OrgId != orgId)
         {
@@ -167,6 +176,13 @@ public sealed class NpmDistTagsHandler(
     private async Task<IActionResult> DeleteDistTagImplAsync(
         HttpContext httpContext, string orgId, string fullName, string tag, CancellationToken ct)
     {
+        // Fail-closed on an edge node: a dist-tag DELETE mutates authoritative tag state a cache
+        // edge does not own, so it is refused here before any other check.
+        if (edgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
         // npm refuses to delete the 'latest' tag — it must always point somewhere.
         if (tag == "latest")
         {

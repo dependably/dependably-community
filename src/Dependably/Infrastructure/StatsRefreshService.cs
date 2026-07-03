@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Dependably.Infrastructure.Redis;
 
 namespace Dependably.Infrastructure;
 
@@ -16,14 +17,16 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed class StatsRefreshService : BackgroundService
 {
-    // Match the MVC pipeline's camelCase output so the cached JSON returned verbatim by
-    // GetStats is byte-compatible with the live Ok(stats) path the frontend already consumes.
-    private static readonly JsonSerializerOptions SnapshotJson = new(JsonSerializerDefaults.Web);
+    // In a multi-replica (HA) deployment every replica runs this timer; the snapshot recompute is
+    // the same fleet-wide work, so only the instance that wins the sweep lock does it per pass.
+    private static readonly TimeSpan RefreshLockTtl = TimeSpan.FromMinutes(5);
+    private const string RefreshLockName = "stats-refresh:sweep";
 
     private readonly StatsSnapshotRepository _snapshots;
     private readonly PackageAnalyticsRepository _analytics;
     private readonly IConfiguration _config;
     private readonly IAirGapMode _airGap;
+    private readonly IDistributedLock _locks;
     private readonly ILogger<StatsRefreshService> _logger;
     private readonly TimeProvider _time;
 
@@ -32,6 +35,7 @@ public sealed class StatsRefreshService : BackgroundService
         PackageAnalyticsRepository analytics,
         IConfiguration config,
         IAirGapMode airGap,
+        IDistributedLock locks,
         ILogger<StatsRefreshService> logger,
         TimeProvider time)
     {
@@ -39,6 +43,7 @@ public sealed class StatsRefreshService : BackgroundService
         _analytics = analytics;
         _config = config;
         _airGap = airGap;
+        _locks = locks;
         _logger = logger;
         _time = time;
     }
@@ -86,37 +91,68 @@ public sealed class StatsRefreshService : BackgroundService
             return;
         }
 
-        var sw = Stopwatch.StartNew();
-        var orgIds = await _snapshots.ListActiveOrgIdsAsync(ct);
-        int refreshed = 0;
-
-        foreach (string orgId in orgIds)
+        // Coordinate across replicas: only the lock winner recomputes the shared snapshots this
+        // pass. In standalone mode the in-process lock always grants, so the single node refreshes.
+        ILockHandle? sweepLock;
+        try
         {
-            if (ct.IsCancellationRequested)
-            {
-                break;
-            }
-
-            try
-            {
-                var orgSw = Stopwatch.StartNew();
-                var stats = await _analytics.GetOrgStatsAsync(orgId, ct);
-                orgSw.Stop();
-
-                string json = JsonSerializer.Serialize(stats, SnapshotJson);
-                string computedAt = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
-                await _snapshots.UpsertSnapshotAsync(orgId, json, computedAt, orgSw.ElapsedMilliseconds, ct);
-                refreshed++;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to refresh stats snapshot for org {OrgId}.", orgId);
-            }
+            sweepLock = await _locks.TryAcquireAsync(RefreshLockName, RefreshLockTtl, ct);
+        }
+        catch (Exception ex)
+        {
+            // RunRefreshPassAsync rethrows on failure and ExecuteAsync's loop has no catch around
+            // it, so an uncaught exception here escapes and — under BackgroundService's default
+            // StopHost behavior — takes the whole replica down on a routine distributed-lock
+            // backend blip (e.g. Redis failover). Treat it exactly like "another instance holds
+            // the lock": skip this pass.
+            _logger.LogError(ex, "Stats refresh pass skipped — sweep lock acquire failed.");
+            return;
         }
 
-        sw.Stop();
-        _logger.LogDebug(
-            "Stats refresh pass complete. Refreshed {Refreshed}/{Total} org(s) in {ElapsedMs}ms.",
-            refreshed, orgIds.Count, sw.ElapsedMilliseconds);
+        if (sweepLock is null)
+        {
+            _logger.LogDebug("Stats refresh pass skipped — another instance holds the sweep lock.");
+            return;
+        }
+
+        try
+        {
+            var sw = Stopwatch.StartNew();
+            var orgIds = await _snapshots.ListActiveOrgIdsAsync(ct);
+            int refreshed = 0;
+
+            foreach (string orgId in orgIds)
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                try
+                {
+                    var orgSw = Stopwatch.StartNew();
+                    var stats = await _analytics.GetOrgStatsAsync(orgId, ct);
+                    orgSw.Stop();
+
+                    string json = JsonSerializer.Serialize(stats, JsonContracts.Web);
+                    string computedAt = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    await _snapshots.UpsertSnapshotAsync(orgId, json, computedAt, orgSw.ElapsedMilliseconds, ct);
+                    refreshed++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to refresh stats snapshot for org {OrgId}.", orgId);
+                }
+            }
+
+            sw.Stop();
+            _logger.LogDebug(
+                "Stats refresh pass complete. Refreshed {Refreshed}/{Total} org(s) in {ElapsedMs}ms.",
+                refreshed, orgIds.Count, sw.ElapsedMilliseconds);
+        }
+        finally
+        {
+            await sweepLock.DisposeAsync();
+        }
     }
 }

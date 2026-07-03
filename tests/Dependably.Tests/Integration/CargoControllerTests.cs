@@ -254,6 +254,85 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
         }
     }
 
+    /// <summary>
+    /// A hosted (published) crate implicitly resolves to local_only via the ClaimResolver
+    /// hosted-name shadowing guard, so the sparse index must not merge upstream versions for
+    /// that name — the dependency-confusion window npm/pypi/nuget close automatically.
+    ///
+    /// Fail-before/pass-after: the cargo index read previously gated the upstream merge only on
+    /// ReservedNamespaceService, so a higher upstream version of a hosted crate WAS merged and
+    /// advertised. The added ClaimResolver check closes it without an operator-curated reserved
+    /// entry. Mixed shape: the local 1.0.0 line stays, the upstream 9.9.9 line is suppressed.
+    /// </summary>
+    [Fact]
+    public async Task GetIndex_HostedCrate_DoesNotMergeUpstreamLines()
+    {
+        string name = $"acmecore{Guid.NewGuid():N}"[..15].ToLowerInvariant();
+        string localLine = $$"""{"name":"{{name}}","vers":"1.0.0","deps":[],"cksum":"abc","features":{},"yanked":false}""";
+        string upstreamLine = $$"""{"name":"{{name}}","vers":"9.9.9","deps":[],"cksum":"def","features":{},"yanked":false}""";
+
+        // Publish a local crate version (origin='uploaded') so the shadowing guard trips.
+        await SeedLocalCrateAsync(name, "1.0.0", localLine);
+
+        string mockBase = _factory.MockUpstream.Urls[0];
+        string indexPath = Dependably.Api.CargoController.IndexPath(name);
+        _factory.MockUpstream
+            .Given(Request.Create().WithPath($"/{indexPath}").UsingGet())
+            .RespondWith(Response.Create()
+                .WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "text/plain")
+                .WithBody(upstreamLine));
+
+        await SeedCargoUpstreamAsync(mockBase);
+        await SetAnonymousPullAsync(true);
+        try
+        {
+            string token = await _factory.CreateToken("pull");
+            using var client = _factory.CreateClientWithBearer(token);
+            var resp = await client.GetAsync($"/cargo/{indexPath}");
+
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            string body = await resp.Content.ReadAsStringAsync();
+            Assert.Contains("1.0.0", body);         // local version served
+            Assert.DoesNotContain("9.9.9", body);   // upstream shadowed by implicit local_only
+        }
+        finally
+        {
+            await SetAnonymousPullAsync(false);
+            await RemoveCargoUpstreamsAsync();
+        }
+    }
+
+    /// <summary>
+    /// A hosted crate implicitly resolves to local_only, so a proxy crate-download MISS for that
+    /// name must refuse to fetch upstream (404) rather than pull crates.io's shadowing version.
+    /// Fail-before/pass-after: the MISS gate previously consulted only ReservedNamespaceService.
+    /// </summary>
+    [Fact]
+    public async Task GetCrate_HostedNameMiss_RefusesUpstreamFetch()
+    {
+        string name = $"acmedl{Guid.NewGuid():N}"[..14].ToLowerInvariant();
+        string localLine = $$"""{"name":"{{name}}","vers":"1.0.0","deps":[],"cksum":"abc","features":{},"yanked":false}""";
+        await SeedLocalCrateAsync(name, "1.0.0", localLine);
+
+        // Upstream would serve 9.9.9, but the shadowing guard must prevent the fetch.
+        string mockBase = _factory.MockUpstream.Urls[0];
+        StubCrateDownload(name, "9.9.9", "upstream-bytes"u8.ToArray());
+        await SeedCargoUpstreamAsync(mockBase);
+        await SetAnonymousPullAsync(true);
+        try
+        {
+            using var client = _factory.CreateClient();
+            var resp = await client.GetAsync($"/cargo/api/v1/crates/{name}/9.9.9/download");
+            Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        }
+        finally
+        {
+            await SetAnonymousPullAsync(false);
+            await RemoveCargoUpstreamsAsync();
+        }
+    }
+
     // ── Crate download ────────────────────────────────────────────────────────
 
     [Fact]
@@ -1306,8 +1385,8 @@ file sealed class CargoSingleClientFactory : IHttpClientFactory
 /// <summary>Allows every URL — the size-cap path under test is upstream of any SSRF check here.</summary>
 file sealed class CargoAllowAllValidator : IUpstreamUrlValidator
 {
-    public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
-        => Task.FromResult(true);
+    public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
+        => Task.FromResult(UpstreamUrlBlock.None);
 }
 
 /// <summary>Air-gap disabled so the fetch proceeds to the size-cap check.</summary>

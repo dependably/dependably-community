@@ -14,12 +14,14 @@ namespace Dependably.Infrastructure.Observability;
 public sealed class TenantCountPoller : BackgroundService
 {
     private readonly IMetadataStore _db;
+    private readonly IAirGapMode _airGap;
     private readonly TimeSpan _interval;
     private readonly ILogger<TenantCountPoller> _logger;
 
-    public TenantCountPoller(IMetadataStore db, IConfiguration config, ILogger<TenantCountPoller> logger)
+    public TenantCountPoller(IMetadataStore db, IConfiguration config, IAirGapMode airGap, ILogger<TenantCountPoller> logger)
     {
         _db = db;
+        _airGap = airGap;
         _logger = logger;
         int seconds = int.TryParse(config["TENANT_COUNT_POLL_INTERVAL_SECONDS"], out int s) && s > 0
             ? s
@@ -44,6 +46,13 @@ public sealed class TenantCountPoller : BackgroundService
 
     internal async Task PollOnceAsync(CancellationToken ct)
     {
+        // A headless edge node has one implicit org and no tenant lifecycle, so this gauge is
+        // inert there — edge mode force-disables tenant-count-poller (not in the allowlist).
+        if (_airGap.IsJobDisabled("tenant-count-poller"))
+        {
+            return;
+        }
+
         try
         {
             await using var conn = await _db.OpenAsync(ct);

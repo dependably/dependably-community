@@ -238,6 +238,64 @@ public sealed class RateLimitPartitionsTests
     }
 
     /// <summary>
+    /// Regression: an unauthenticated request (no scheme validated the credential — either
+    /// the endpoint is anonymous-accessible, or authentication failed) must not mint its own
+    /// "token:" partition from the raw Authorization header. Many distinct bogus tokens from
+    /// the same source IP all collapse into that IP's single bucket — the unlimited-partition
+    /// bypass this test pins. Must fail on the pre-fix implementation (which hashed the raw
+    /// header unconditionally) and pass once the token/user branches gate on
+    /// <c>User.Identity.IsAuthenticated</c>.
+    /// </summary>
+    [Fact]
+    public void GetManagementPartitionKey_UnauthenticatedRequest_ManyBogusTokens_SameIp_CollapseToOnePartition()
+    {
+        var keys = new HashSet<string>();
+        for (int i = 0; i < 25; i++)
+        {
+            var ctx = new DefaultHttpContext();
+            ctx.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("198.51.100.42");
+            ctx.Request.Headers.Authorization = $"Bearer forged-token-{i}-{Guid.NewGuid():N}";
+            // ctx.User left at its default, unauthenticated ClaimsPrincipal — no scheme
+            // ever validated this header.
+            keys.Add(RateLimitPartitions.GetManagementPartitionKey(ctx));
+        }
+
+        Assert.Single(keys);
+        Assert.Equal("ip:198.51.100.42", keys.Single());
+    }
+
+    /// <summary>
+    /// Mixed scenario in one pass: an authenticated API-token client keeps its own
+    /// "token:" partition, while an unauthenticated request bearing a bogus Authorization
+    /// header (same source IP) collapses to the IP bucket rather than minting a fresh one.
+    /// </summary>
+    [Fact]
+    public void GetManagementPartitionKey_MixedAuthenticatedAndForged_SameIp_DoNotShareOrMultiply()
+    {
+        var authenticatedCtx = new DefaultHttpContext();
+        authenticatedCtx.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("10.1.1.1");
+        authenticatedCtx.Request.Headers.Authorization = "Bearer legit-ci-token";
+        authenticatedCtx.User = MakePrincipal("ci-service-token");
+
+        var forgedCtx1 = new DefaultHttpContext();
+        forgedCtx1.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("10.1.1.1");
+        forgedCtx1.Request.Headers.Authorization = "Bearer forged-1";
+
+        var forgedCtx2 = new DefaultHttpContext();
+        forgedCtx2.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("10.1.1.1");
+        forgedCtx2.Request.Headers.Authorization = "Bearer forged-2";
+
+        string authenticatedKey = RateLimitPartitions.GetManagementPartitionKey(authenticatedCtx);
+        string forgedKey1 = RateLimitPartitions.GetManagementPartitionKey(forgedCtx1);
+        string forgedKey2 = RateLimitPartitions.GetManagementPartitionKey(forgedCtx2);
+
+        Assert.StartsWith("token:", authenticatedKey);
+        Assert.Equal("ip:10.1.1.1", forgedKey1);
+        Assert.Equal(forgedKey1, forgedKey2);
+        Assert.NotEqual(authenticatedKey, forgedKey1);
+    }
+
+    /// <summary>
     /// The NameIdentifier claim type (used by auth schemes that map claims to URIs)
     /// is also accepted as the user identity when "sub" is absent.
     /// </summary>

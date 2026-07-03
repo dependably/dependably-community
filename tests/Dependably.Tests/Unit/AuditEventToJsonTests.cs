@@ -211,4 +211,59 @@ public sealed class AuditEventToJsonTests
     {
         Assert.Equal(expected, actual);
     }
+
+    // ── Relaxed-encoder regression coverage ──────────────────────────────────
+    //
+    // The default JsonSerializer encoder HTML-escapes '+', '&', '<', '>', and others as
+    // \uXXXX sequences. Audit/activity detail is rendered as plain text (never interpolated
+    // into HTML or JS), so that escaping only produces confusing literal escape sequences in
+    // the Audit UI. EventJsonOptions.Snake (typed *Events records) and EventJsonOptions.Detail
+    // (inline anonymous-object detail payloads) both opt into the relaxed encoder — these tests
+    // pin the raw serialized text, not just the parsed value, since JsonElement.GetString()
+    // would silently unescape either form and hide a regression.
+
+    [Fact]
+    public void AuthEvents_LoginSuccess_Snake_DoesNotHtmlEscapeMethodValue()
+    {
+        var ev = new AuthEvents.LoginSuccess(Realm: "tenant", Method: "forms+trusted_device");
+
+        string json = ev.ToJson();
+
+        Assert.Contains("forms+trusted_device", json);
+        Assert.DoesNotContain("\\u002B", json);
+        var root = Parse(json);
+        Assert.Equal("forms+trusted_device", root.GetProperty("method").GetString());
+    }
+
+    [Fact]
+    public void EventJsonOptions_Detail_DoesNotHtmlEscapeSpecialCharacters()
+    {
+        string json = JsonSerializer.Serialize(
+            new { email = "user+tag@x.com", note = "A & B <script>" },
+            EventJsonOptions.Detail);
+
+        Assert.Contains("user+tag@x.com", json);
+        Assert.Contains("A & B <script>", json);
+        Assert.DoesNotContain("\\u002B", json);
+        Assert.DoesNotContain("\\u0026", json);
+        Assert.DoesNotContain("\\u003C", json);
+        Assert.DoesNotContain("\\u003E", json);
+
+        var root = Parse(json);
+        Assert.Equal("user+tag@x.com", root.GetProperty("email").GetString());
+        Assert.Equal("A & B <script>", root.GetProperty("note").GetString());
+    }
+
+    [Fact]
+    public void EventJsonOptions_Detail_StillProducesValidJson()
+    {
+        string json = JsonSerializer.Serialize(
+            new { url = "https://example.com/x?a=1&b=2" },
+            EventJsonOptions.Detail);
+
+        // Round-trips cleanly even though '&' is left unescaped — JSON string escaping only
+        // requires quotes/backslash/control-chars to be escaped, not HTML-special characters.
+        var root = Parse(json);
+        Assert.Equal("https://example.com/x?a=1&b=2", root.GetProperty("url").GetString());
+    }
 }

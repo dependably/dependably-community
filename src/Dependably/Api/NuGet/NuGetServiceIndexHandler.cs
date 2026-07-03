@@ -33,7 +33,11 @@ public sealed class NuGetServiceIndexHandler(IPublicUrlBuilder urls)
                 R($"{baseUrl}/registration5-gz-semver2",    "RegistrationsBaseUrl/3.6.0"),
                 R($"{baseUrl}/flatcontainer",               "PackageBaseAddress/3.0.0"),
                 R($"{baseUrl}/publish",                     "PackagePublish/2.0.0"),
-                R($"{baseUrl}/symbols",                     "SymbolPackagePublish/4.9.0")
+                R($"{baseUrl}/symbols",                     "SymbolPackagePublish/4.9.0"),
+                // Symbol-server (SSQP) base URL. Debuggers add this as a symbol source to fetch
+                // individual PDBs by debug-id; the SSQP GET is served under the same /nuget/symbols
+                // prefix. Advertised so tooling can discover it from the service index.
+                R($"{baseUrl}/symbols",                     "SymbolServer/1.0.0")
             }
         });
     }

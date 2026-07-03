@@ -1,3 +1,4 @@
+using Dependably.Infrastructure.Redis;
 using Dependably.Storage;
 
 namespace Dependably.Infrastructure;
@@ -25,6 +26,7 @@ public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
     private readonly TieredBlobStorage _blobs;
     private readonly PackageRepository _packages;
     private readonly IConfiguration _config;
+    private readonly IAirGapMode _airGap;
     private readonly ILogger<OrphanBlobReconcilerService> _logger;
     private readonly TimeProvider _time;
 
@@ -34,17 +36,23 @@ public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
     protected override string ScopeMetricName => "blob_store.reconcile";
     protected override bool DisableOnInvalidCron => true;
 
+    // Deletes shared registry-tier blobs — must run on only one replica per tick in HA mode.
+    protected override bool RequiresLeaderLock => true;
+
     public OrphanBlobReconcilerService(
         TieredBlobStorage blobs,
         PackageRepository packages,
         IConfiguration config,
+        IAirGapMode airGap,
         ILogger<OrphanBlobReconcilerService> logger,
-        TimeProvider time)
-        : base(config, logger, time)
+        TimeProvider time,
+        IDistributedLock locks)
+        : base(config, logger, time, locks)
     {
         _blobs = blobs;
         _packages = packages;
         _config = config;
+        _airGap = airGap;
         _logger = logger;
         _time = time;
     }
@@ -57,6 +65,13 @@ public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
     /// </summary>
     public async Task<ReconcileSummary> RunOnceAsync(CancellationToken ct = default)
     {
+        if (_airGap.IsJobDisabled("orphan-reconciler"))
+        {
+            _logger.LogInformation(
+                "Orphan-blob reconcile skipped (disabled by AIR_GAPPED, DISABLE_BACKGROUND_JOBS, or edge mode).");
+            return default;
+        }
+
         int graceMinutes = int.TryParse(_config["ORPHAN_RECONCILE_GRACE_MINUTES"], out int g) && g > 0
             ? g : 30;
         var cutoff = _time.GetUtcNow() - TimeSpan.FromMinutes(graceMinutes);

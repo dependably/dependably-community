@@ -1,5 +1,6 @@
 using System.Formats.Tar;
 using System.IO.Compression;
+using Dependably.Api.NuGetProtocol;
 
 namespace Dependably.Protocol;
 
@@ -17,20 +18,43 @@ namespace Dependably.Protocol;
 /// </summary>
 public static class EcosystemDetector
 {
+    /// <summary>
+    /// <paramref name="NpmManifestJson"/> is the install-relevant manifest subset
+    /// (see <see cref="NpmInstallManifest"/>) extracted from an npm tarball's package.json
+    /// during detection; null for every other ecosystem.
+    /// </summary>
     public sealed record DetectionResult(
-        string Ecosystem, string Name, string PurlName, string Version);
+        string Ecosystem, string Name, string PurlName, string Version,
+        string? NpmManifestJson = null);
 
     public sealed record DetectionFailure(string Code, string Message);
 
     public static (DetectionResult? Ok, DetectionFailure? Err) Detect(string filename, byte[] bytes)
     {
-        var format = ArchiveExtractor.Detect(bytes);
+        using var stream = new MemoryStream(bytes, writable: false);
+        return Detect(filename, stream);
+    }
+
+    /// <summary>
+    /// Streaming overload: sniffs the archive format and inspects entries directly from
+    /// <paramref name="stream"/> (a staged file on the bulk-import path) so the artifact is
+    /// never materialised in a byte[]. Requires a seekable stream — the header peek and each
+    /// format-specific pass rewind to the start. The source stream is left open for the
+    /// caller to dispose.
+    /// </summary>
+    public static (DetectionResult? Ok, DetectionFailure? Err) Detect(string filename, Stream stream)
+    {
         try
         {
+            byte[] header = new byte[ArchiveExtractor.HeaderPeekLength];
+            int read = ReadFully(stream, header);
+            stream.Seek(0, SeekOrigin.Begin);
+            var format = ArchiveExtractor.Detect(read == header.Length ? header : header[..read]);
+
             return format switch
             {
-                ArchiveExtractor.ArchiveFormat.Zip => DetectZip(filename, bytes),
-                ArchiveExtractor.ArchiveFormat.GzippedTar => DetectGzippedTar(bytes),
+                ArchiveExtractor.ArchiveFormat.Zip => DetectZip(filename, stream),
+                ArchiveExtractor.ArchiveFormat.GzippedTar => DetectGzippedTar(stream),
                 _ => Fail("unrecognised_format",
                     "File is neither a ZIP (PK header) nor a gzipped tar (1F 8B header)."),
             };
@@ -41,16 +65,40 @@ public static class EcosystemDetector
         }
     }
 
-    private static (DetectionResult?, DetectionFailure?) DetectZip(string filename, byte[] bytes)
+    // Reads up to buffer.Length bytes, looping over short reads (a single Stream.Read call
+    // is not guaranteed to fill the buffer even when more data is available). Returns the
+    // number of bytes actually read, which is less than buffer.Length only at end of stream.
+    private static int ReadFully(Stream stream, byte[] buffer)
     {
-        using var zip = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
+        int total = 0;
+        int read;
+        while (total < buffer.Length && (read = stream.Read(buffer, total, buffer.Length - total)) > 0)
+        {
+            total += read;
+        }
+        return total;
+    }
 
-        bool hasRootNuspec = zip.Entries.Any(e =>
-            e.Name.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase)
-            && !e.FullName.Contains('/'));
+    private static (DetectionResult?, DetectionFailure?) DetectZip(string filename, Stream stream)
+    {
+        bool hasRootNuspec;
+        bool hasDistInfo;
+        bool hasEggInfo;
+        using (var zip = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true))
+        {
+            hasRootNuspec = zip.Entries.Any(e =>
+                e.Name.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase)
+                && !e.FullName.Contains('/'));
+            hasDistInfo = zip.Entries.Any(e =>
+                e.FullName.EndsWith(".dist-info/METADATA", StringComparison.OrdinalIgnoreCase));
+            hasEggInfo = zip.Entries.Any(e =>
+                e.FullName.EndsWith("EGG-INFO/PKG-INFO", StringComparison.OrdinalIgnoreCase));
+        }
+
         if (hasRootNuspec)
         {
-            var (parseResult, id, version) = NuGetNupkgValidator.Parse(bytes, isSymbol: false);
+            stream.Seek(0, SeekOrigin.Begin);
+            var (parseResult, id, version) = NuGetNupkgValidator.ParseFromStream(stream, isSymbol: false);
             if (!parseResult.IsValid)
             {
                 return Fail("nupkg_invalid", parseResult.Message ?? "Invalid .nupkg.");
@@ -66,15 +114,18 @@ public static class EcosystemDetector
             }
 
             string purlName = id!.ToLowerInvariant();
-            string normalizedVersion = PurlNormalizer.NormalizeNuGetVersionString(version!);
+            // Lowercased canonical form — matches the form every NuGet read path
+            // (flatcontainer/registration/symbols) resolves against. Detection is one of the
+            // hosted-write surfaces (alongside NuGetPublishHandler), so it must store under the
+            // same form or an imported mixed-case prerelease becomes undownloadable.
+            string normalizedVersion = NuGetNormalization.NormalizeVersion(version!);
             return Ok("nuget", id, purlName, normalizedVersion);
         }
 
-        bool hasDistInfo = zip.Entries.Any(e =>
-            e.FullName.EndsWith(".dist-info/METADATA", StringComparison.OrdinalIgnoreCase));
         if (hasDistInfo)
         {
-            var wheel = PyPiArtifactValidator.ValidateWheel(bytes);
+            stream.Seek(0, SeekOrigin.Begin);
+            var wheel = PyPiArtifactValidator.ValidateWheel(stream);
             if (!wheel.Validation.IsValid)
             {
                 return Fail("artifact_invalid", wheel.Validation.Message ?? "Invalid PyPI wheel.");
@@ -91,11 +142,10 @@ public static class EcosystemDetector
             return Ok("pypi", wheel.Name!, wheel.Name!, version!);
         }
 
-        bool hasEggInfo = zip.Entries.Any(e =>
-            e.FullName.EndsWith("EGG-INFO/PKG-INFO", StringComparison.OrdinalIgnoreCase));
         if (hasEggInfo)
         {
-            var egg = PyPiArtifactValidator.ValidateEgg(bytes);
+            stream.Seek(0, SeekOrigin.Begin);
+            var egg = PyPiArtifactValidator.ValidateEgg(stream);
             return !egg.Validation.IsValid
                 ? Fail("artifact_invalid", egg.Validation.Message ?? "Invalid PyPI egg.")
                 : Ok("pypi", egg.Name!, egg.Name!, egg.Version!);
@@ -105,21 +155,23 @@ public static class EcosystemDetector
             "ZIP archive contains no root .nuspec, *.dist-info/METADATA, or EGG-INFO/PKG-INFO — not a NuGet or PyPI package.");
     }
 
-    private static (DetectionResult?, DetectionFailure?) DetectGzippedTar(byte[] bytes)
+    private static (DetectionResult?, DetectionFailure?) DetectGzippedTar(Stream stream)
     {
-        var marker = ScanGzippedTar(bytes);
+        var marker = ScanGzippedTar(stream);
+        stream.Seek(0, SeekOrigin.Begin);
         switch (marker)
         {
             case TarMarker.NpmPackageJson:
                 {
-                    var npm = NpmTarballValidator.Validate(bytes);
+                    var npm = NpmTarballValidator.Validate(stream);
                     return !npm.Validation.IsValid
                         ? Fail("tarball_invalid", npm.Validation.Message ?? "Invalid npm tarball.")
-                        : Ok("npm", npm.Name!, npm.Name!, npm.Version!);
+                        : (new DetectionResult("npm", npm.Name!, npm.Name!, npm.Version!,
+                            NpmInstallManifest.BuildJson(npm.Manifest, publishBodyVersion: null, npm.Name!)), null);
                 }
             case TarMarker.PyPiSdist:
                 {
-                    var sdist = PyPiArtifactValidator.ValidateSdist(bytes);
+                    var sdist = PyPiArtifactValidator.ValidateSdist(stream);
                     return !sdist.Validation.IsValid
                         ? Fail("artifact_invalid", sdist.Validation.Message ?? "Invalid PyPI sdist.")
                         : Ok("pypi", sdist.Name!, sdist.Name!, sdist.Version!);
@@ -132,13 +184,13 @@ public static class EcosystemDetector
 
     private enum TarMarker { None, NpmPackageJson, PyPiSdist }
 
-    private static TarMarker ScanGzippedTar(byte[] bytes)
+    private static TarMarker ScanGzippedTar(Stream stream)
     {
         // Zip-bomb guard: cap total decompressed bytes and entry count. Skipping past
         // entries still decompresses their payloads, so an uncapped scan over a crafted
         // high-ratio gzip would burn unbounded CPU before any marker match.
         using var gzip = new LimitedReadStream(
-            new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress),
+            new GZipStream(stream, CompressionMode.Decompress, leaveOpen: true),
             TarScanLimits.MaxTotalDecompressedBytes, "Archive");
         using var tar = new TarReader(gzip, leaveOpen: false);
         int entryCount = 0;

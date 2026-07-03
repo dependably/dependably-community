@@ -1,6 +1,6 @@
 # Dependably
 
-Self-hosted private artifact repository for **npm**, **PyPI**, **NuGet**, **Maven**, **RPM**, and **OCI** images.
+Self-hosted private artifact repository for **npm**, **PyPI**, **NuGet**, **Maven**, **RPM**, **OCI** images, **Go** modules, and **Cargo** crates.
 
 Every package your team pulls from the internet is a supply chain risk. Dependably sits between your developers and the public registries, caching what they pull, verifying checksums, blocking packages that don't belong, and giving you a full audit trail — without requiring a cloud account or a per-seat licence.
 
@@ -8,7 +8,7 @@ Every package your team pulls from the internet is a supply chain risk. Dependab
 
 ## Features
 
-- **Proxy cache** — pull-through cache for npm, PyPI, NuGet, Maven, RPM, and OCI; verified by SHA-256 before storage, served locally on every subsequent request
+- **Proxy cache** — pull-through cache for npm, PyPI, NuGet, Maven, RPM, OCI, Go, and Cargo; verified by SHA-256 before storage, served locally on every subsequent request. Go is proxy-only (no hosted push).
 - **Supply chain tracking** — first-fetch detection, per-version checksum verification, CycloneDX 1.6 SBOM generation
 - **Allowlisting** — per-org PURL pattern allowlists to restrict which packages can be fetched or pushed
 - **Multitenancy** — multiple orgs, scoped tokens, role-based access, full org isolation
@@ -138,6 +138,22 @@ dotnet nuget push MyPackage.1.0.0.nupkg \
   --api-key <token>
 ```
 
+A `.snupkg` pushed alongside a package (`dotnet nuget push MyPackage.1.0.0.snupkg ...`, same
+source/API key) is indexed automatically: every Portable PDB it contains becomes fetchable by
+debug-id over the [Simple Symbol Query Protocol](https://github.com/dotnet/symstore/blob/main/docs/specs/Simple_Symbol_Query_Protocol.md)
+at `https://dependably.example.com/nuget/symbols`. Add that URL as a symbol source in Visual
+Studio (**Options → Debugging → Symbols → Symbol file (.pdb) locations**) or point
+[`dotnet-symbol`](https://github.com/dotnet/symstore) at it to download PDBs for a built assembly:
+
+```bash
+dotnet symbol --symbols --microsoft-symbol-server \
+  --server-path https://dependably.example.com/nuget/symbols \
+  MyApp.dll
+```
+
+Symbol reads follow the same auth posture as every other NuGet read: a token is required unless
+the org has AnonymousPull enabled.
+
 ---
 
 ## Health probes
@@ -160,7 +176,7 @@ GET /api/v1/licenses    → third-party attribution data (CycloneDX subset)
 
 Both API surfaces are documented as live OpenAPI documents served by the running instance:
 
-- `/docs/` — protocol surfaces (PyPI `/simple/`, npm, NuGet v3, Maven, RPM, OCI `/v2/`); spec at `/openapi/protocol.json`
+- `/docs/` — protocol surfaces (PyPI `/simple/`, npm, NuGet v3, Maven, RPM, OCI `/v2/`, Go `/go/`, Cargo `/cargo/`); spec at `/openapi/protocol.json`
 - `/api/v1/docs/` — management API; spec at `/openapi/management.json`
 
 The full route surface is contract-tested against [`tests/Contracts/openapi.contract.json`](tests/Contracts/openapi.contract.json) — any route change fails CI until the contract is regenerated.

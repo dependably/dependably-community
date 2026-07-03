@@ -229,7 +229,7 @@ public sealed class NuGetFlatContainerHandler(
 
         string? sourceIpCa = httpContext.GetNormalizedRemoteIp();
         return await blockGate.EvaluateAsync(
-                BuildProxyBlockGateRequest(orgId, caFacts, token, settings, sourceIpCa), ct)
+                BlockGateRequest.ForProxyCacheFacts(orgId, "nuget", caFacts, token, settings, sourceIpCa), ct)
             == BlockDecision.Blocked
             ? new StatusCodeResult(StatusCodes.Status403Forbidden)
             : await TryServeProxyCachedNupkgAsync(httpContext, caFacts, file, orgId, token, sourceIpCa, ct);
@@ -251,7 +251,7 @@ public sealed class NuGetFlatContainerHandler(
             return new UnauthorizedResult();
         }
 
-        string purlCheck = $"pkg:nuget/{normalizedId}";
+        string purlCheck = PurlNormalizer.NameOnly("nuget", normalizedId);
         if (settings.AllowlistMode && !await allowlist.IsAllowedAsync(orgId, purlCheck, ct))
         {
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
@@ -334,7 +334,7 @@ public sealed class NuGetFlatContainerHandler(
         }
 
         httpContext.Response.Headers["X-Cache"] = "HIT";
-        httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
+        httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVersion.Purl);
         httpContext.Response.ContentType = "application/octet-stream";
         httpContext.Response.Headers["Content-Length"] = pkgVersion.SizeBytes.ToString();
         if (pkgVersion.ChecksumSha256 is not null)
@@ -370,7 +370,7 @@ public sealed class NuGetFlatContainerHandler(
 
         string? sourceIp = httpContext.GetNormalizedRemoteIp();
         if (await blockGate.EvaluateAsync(
-                BuildProxyBlockGateRequest(orgId, caFacts, token, settings, sourceIp), ct)
+                BlockGateRequest.ForProxyCacheFacts(orgId, "nuget", caFacts, token, settings, sourceIp), ct)
             == BlockDecision.Blocked)
         {
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
@@ -386,7 +386,7 @@ public sealed class NuGetFlatContainerHandler(
         httpContext.Response.Headers["X-Cache"] = "HIT";
         if (caFacts.Purl is not null)
         {
-            httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(caFacts.Purl);
+            httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(caFacts.Purl);
         }
         httpContext.Response.ContentType = "application/octet-stream";
         httpContext.Response.Headers["Content-Length"] = caFacts.SizeBytes.ToString();
@@ -439,7 +439,7 @@ public sealed class NuGetFlatContainerHandler(
         }
 
         httpContext.Response.Headers["X-Cache"] = "HIT";
-        httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(pkgVersion.Purl);
+        httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVersion.Purl);
         if (pkgVersion.ChecksumSha256 is not null)
         {
             httpContext.Response.Headers.ETag = $"\"sha256:{pkgVersion.ChecksumSha256}\"";
@@ -450,28 +450,6 @@ public sealed class NuGetFlatContainerHandler(
         await packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
         return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
     }
-
-    // Builds a BlockGateRequest for a proxy artifact from global-plane serve facts.
-    private static BlockGateRequest BuildProxyBlockGateRequest(
-        string orgId, CacheArtifactServeFacts caFacts, TokenRecord? token,
-        OrgSettings settings, string? sourceIp) =>
-        new(orgId, "nuget", caFacts.Purl ?? string.Empty, string.Empty,
-            caFacts.ManualBlockState, caFacts.VulnCheckedAt,
-            token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
-            MinReleaseAgeHours: settings.MinReleaseAgeHours,
-            PublishedAt: caFacts.PublishedAt,
-            ActorKind: token?.ActorKind,
-            Deprecated: caFacts.Deprecated,
-            BlockDeprecatedMode: settings.BlockDeprecated,
-            BlockMaliciousMode: settings.BlockMalicious,
-            BlockKevMode: settings.BlockKev,
-            MaxEpssTolerance: settings.MaxEpssTolerance,
-            Origin: "proxy",
-            HasInstallScript: caFacts.HasInstallScript,
-            InstallScriptKind: caFacts.InstallScriptKind,
-            BlockInstallScriptsMode: settings.BlockInstallScripts,
-            ProvenanceStatus: caFacts.ProvenanceStatus,
-            CacheArtifactId: caFacts.Id);
 
     // Serves a proxy NuGet artifact from the global-plane cache. Each NuGet file type
     // (.nupkg, .nuspec, .sha512) is stored as a separate cache_artifact row keyed by
@@ -491,7 +469,7 @@ public sealed class NuGetFlatContainerHandler(
         httpContext.Response.Headers["X-Cache"] = "HIT";
         if (caFacts.Purl is not null)
         {
-            httpContext.Response.Headers["X-Dependably-PURL"] = SanitizeHeader(caFacts.Purl);
+            httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(caFacts.Purl);
         }
         if (!string.IsNullOrEmpty(caFacts.ContentHash))
         {
@@ -503,8 +481,9 @@ public sealed class NuGetFlatContainerHandler(
             await audit.LogActivityAsync(orgId, "nuget", caFacts.Purl, "download", token?.UserId,
                 actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         }
-        // Increment per-tenant download count on the global plane.
-        await tenantAccess.UpsertStateAsync(orgId, caFacts.Id, time.GetUtcNow(), ct);
+        // Increment per-tenant download count on the global plane. Enqueued off the request
+        // path — the row already exists (seeded durably at first-fetch).
+        await tenantAccess.RecordDownloadHitAsync(orgId, caFacts.Id, time.GetUtcNow(), ct);
         return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
     }
 
@@ -746,9 +725,6 @@ public sealed class NuGetFlatContainerHandler(
 
     private static bool AreUpstreamSafeNuGetSegments(params string[] values)
         => Array.TrueForAll(values, v => PathSafeValidator.ValidateUpstreamSegment(v, "segment").IsValid);
-
-    private static string SanitizeHeader(string value)
-        => value.Replace("\r", "").Replace("\n", "").Replace("\0", "");
 }
 
 // Tenant + caller context for NuGet download operations. Bundles the three per-request

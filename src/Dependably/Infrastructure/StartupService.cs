@@ -26,7 +26,11 @@ public sealed class StartupService : IHostedService
     private readonly ILogger<StartupService> _logger;
     private readonly EnvelopeProtector _envelope;
     private readonly IMetadataStore _db;
+    private readonly IEdgeMode _edge;
+    private readonly InstanceLock _instanceLock;
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Dependency-injection constructor: the parameter list is the declared dependency set; grouping it into an aggregate would hide dependencies without adding cohesion.")]
     public StartupService(
         SchemaInitializer schema,
         FirstBootService firstBoot,
@@ -36,7 +40,9 @@ public sealed class StartupService : IHostedService
         StagingOptions staging,
         ILogger<StartupService> logger,
         EnvelopeProtector envelope,
-        IMetadataStore db)
+        IMetadataStore db,
+        IEdgeMode edge,
+        InstanceLock instanceLock)
     {
         _schema = schema;
         _firstBoot = firstBoot;
@@ -47,6 +53,8 @@ public sealed class StartupService : IHostedService
         _logger = logger;
         _envelope = envelope;
         _db = db;
+        _edge = edge;
+        _instanceLock = instanceLock;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -63,8 +71,16 @@ public sealed class StartupService : IHostedService
             version, dbPath, storage);
 
         await _schema.InitializeAsync(cancellationToken);
+
+        // Claim the shared-SQLite single-writer lock before doing any further work or accepting
+        // traffic. A live foreign holder throws here (fail-fast, message names the peer); a stale
+        // holder is taken over. No-op for Postgres and in-memory SQLite (the guard self-skips).
+        await _instanceLock.TryAcquireAsync(cancellationToken);
+
         await _firstBoot.RunAsync(cancellationToken);
         await MigrateSecretsToEnvelopeAsync(cancellationToken);
+        await ReseedEdgeUpstreamsAsync(cancellationToken);
+        await ReseedEdgeAccessTokenAsync(cancellationToken);
 
         LogEnvironmentWarnings();
         string? baseUrl = _config["BASE_URL"];
@@ -104,8 +120,8 @@ public sealed class StartupService : IHostedService
     /// <summary>
     /// Idempotent startup migration: when a master key is configured, wraps any plaintext
     /// instance secrets with the envelope so they are encrypted at rest going forward. Secrets
-    /// that already carry the <c>enc:v1:</c> prefix are skipped. Runs inside BEGIN IMMEDIATE
-    /// so concurrent replica restarts cannot produce partial states.
+    /// that already carry the <c>enc:v1:</c> prefix are skipped. Runs inside a provider-aware
+    /// serialized transaction so concurrent replica restarts cannot produce partial states.
     ///
     /// When no master key is configured, probes the raw stored values and THROWS if either
     /// secret is already prefixed (lost-key scenario) — the operator must supply the key used
@@ -125,12 +141,101 @@ public sealed class StartupService : IHostedService
         }
     }
 
+    // Re-seeds the edge node's single-upstream rows on every boot so a changed EDGE_MASTER_URL or
+    // EDGE_MASTER_TOKEN takes effect on restart. First boot creates the org and the initial rows;
+    // this rewrites them idempotently to the current master. No-op outside edge mode.
+    private async Task ReseedEdgeUpstreamsAsync(CancellationToken ct)
+    {
+        if (!_edge.IsEdge)
+        {
+            return;
+        }
+
+        var (orgs, _) = await _orgs.ListOrgsAsync(1, 0, includeDeleted: false, ct);
+        string? orgId = orgs.FirstOrDefault()?.Id;
+        if (orgId is null)
+        {
+            // First-boot always seeds the edge org; a missing org here means a partial restore.
+            _logger.LogWarning(
+                "Edge mode is active but no org exists to anchor upstream rows. Upstream re-seed skipped.");
+            return;
+        }
+
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.BeginSerializedAsync(_db.Provider, ct);
+        try
+        {
+            await EdgeUpstreamSeeder.SeedForEdgeAsync(
+                conn, orgId, _edge.MasterUrl, _edge.MasterToken, _envelope, ct: ct);
+            await conn.ExecuteAsync("COMMIT");
+        }
+        catch
+        {
+            await conn.ExecuteAsync("ROLLBACK");
+            throw;
+        }
+
+        _logger.LogInformation(
+            "Edge mode: seeded single-upstream registry rows pointing at master {MasterHost}",
+            _edge.MasterHost);
+    }
+
+    // Re-seeds the edge node's inbound client-auth state on every boot so a rotated
+    // EDGE_ACCESS_TOKEN takes effect on restart (old row deleted, new hash inserted) and the
+    // anonymous/tokened mode always matches the current env. No-op outside edge mode. The token
+    // value is never logged.
+    private async Task ReseedEdgeAccessTokenAsync(CancellationToken ct)
+    {
+        if (!_edge.IsEdge)
+        {
+            return;
+        }
+
+        var (orgs, _) = await _orgs.ListOrgsAsync(1, 0, includeDeleted: false, ct);
+        string? orgId = orgs.FirstOrDefault()?.Id;
+        if (orgId is null)
+        {
+            _logger.LogWarning(
+                "Edge mode is active but no org exists to anchor the access token. Inbound-auth re-seed skipped.");
+            return;
+        }
+
+        string? accessToken = _config["EDGE_ACCESS_TOKEN"];
+
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.BeginSerializedAsync(_db.Provider, ct);
+        EdgeAccessTokenSeeder.SeedOutcome outcome;
+        try
+        {
+            outcome = await EdgeAccessTokenSeeder.SeedForEdgeAsync(conn, orgId, accessToken, ct: ct);
+            await conn.ExecuteAsync("COMMIT");
+        }
+        catch
+        {
+            await conn.ExecuteAsync("ROLLBACK");
+            throw;
+        }
+
+        if (outcome == EdgeAccessTokenSeeder.SeedOutcome.Anonymous)
+        {
+            _logger.LogWarning(
+                "edge node accepting anonymous clients — intended for trusted networks only");
+        }
+        else
+        {
+            _logger.LogInformation(
+                "Edge mode: seeded inbound reader access token; anonymous pull disabled.");
+        }
+    }
+
     // Wraps any plaintext instance secrets with the envelope so they are encrypted at rest going
-    // forward. Secrets that already carry the enc:v1: prefix are skipped. Runs inside
-    // BEGIN IMMEDIATE so concurrent replica restarts cannot produce partial states.
+    // forward. Secrets that already carry the enc:v1: prefix are skipped. Runs inside a
+    // provider-aware serialized transaction so concurrent replica restarts cannot produce partial states. Also
+    // retrofits the per-org secret-bearing tables (upstream registry auth secrets, webhook HMAC
+    // secrets) whose pre-retrofit rows were written in plaintext.
     private async Task EncryptPlaintextInstanceSecretsAsync(System.Data.Common.DbConnection conn)
     {
-        await conn.ExecuteAsync("BEGIN IMMEDIATE");
+        await conn.BeginSerializedAsync(_db.Provider);
         try
         {
             foreach (string key in OrgRepository.SecretKeys)
@@ -154,6 +259,35 @@ public sealed class StartupService : IHostedService
                     "Envelope-encrypted instance secret {Key} at rest", key);
             }
 
+            int upstreamMigrated = await EncryptPlaintextColumnSecretsAsync(
+                conn,
+                // xtenant: one-shot instance-wide secret migration across every org's upstream rows.
+                """
+                SELECT id AS Id, secret AS Secret FROM upstream_registry WHERE secret IS NOT NULL
+                """,
+                // xtenant: keyed by the globally-unique primary key during a one-shot migration.
+                """
+                UPDATE upstream_registry SET secret = @value WHERE id = @id
+                """);
+
+            int webhookMigrated = await EncryptPlaintextColumnSecretsAsync(
+                conn,
+                // xtenant: one-shot instance-wide secret migration across every org's webhook rows.
+                """
+                SELECT id AS Id, secret AS Secret FROM webhook_subscription WHERE secret IS NOT NULL
+                """,
+                // xtenant: keyed by the globally-unique primary key during a one-shot migration.
+                """
+                UPDATE webhook_subscription SET secret = @value WHERE id = @id
+                """);
+
+            if (upstreamMigrated > 0 || webhookMigrated > 0)
+            {
+                _logger.LogInformation(
+                    "Envelope-encrypted plaintext secrets at rest: {Upstream} upstream-registry, {Webhook} webhook",
+                    upstreamMigrated, webhookMigrated);
+            }
+
             await conn.ExecuteAsync("COMMIT");
         }
         catch
@@ -163,8 +297,33 @@ public sealed class StartupService : IHostedService
         }
     }
 
-    // Fail closed: if either secret was written by an envelope-configured instance, starting
-    // without the master key would yield an unusable JWT signing key.
+    // Encrypts any plaintext (non-enc:v1:) secret values in a per-org secret-bearing column.
+    // The select yields (Id, Secret); each plaintext row is re-written to its Protect()ed form
+    // keyed by its primary key. Returns the number of rows migrated.
+    private async Task<int> EncryptPlaintextColumnSecretsAsync(
+        System.Data.Common.DbConnection conn, string selectSql, string updateSql)
+    {
+        var rows = (await conn.QueryAsync<SecretRow>(selectSql)).ToList();
+        int migrated = 0;
+        foreach (var row in rows)
+        {
+            if (string.IsNullOrEmpty(row.Secret) || _envelope.IsEncrypted(row.Secret))
+            {
+                continue;
+            }
+
+            await conn.ExecuteAsync(
+                updateSql, new { value = _envelope.Protect(row.Secret), id = row.Id });
+            migrated++;
+        }
+
+        return migrated;
+    }
+
+    // Fail closed: if any secret was written by an envelope-configured instance, starting
+    // without the master key would yield an unusable JWT signing key or unusable upstream/webhook
+    // credentials. Probing the per-org secret columns keeps the boot-time refusal intact for them
+    // too, rather than deferring the failure to a runtime proxy fetch / webhook delivery.
     private async Task VerifyNoOrphanedEncryptedSecretsAsync(System.Data.Common.DbConnection conn)
     {
         foreach (string key in OrgRepository.SecretKeys)
@@ -176,39 +335,100 @@ public sealed class StartupService : IHostedService
 
             if (raw is not null && _envelope.IsEncrypted(raw))
             {
-                throw new InvalidOperationException(
-                    $"Instance secrets are envelope-encrypted at rest but DEPENDABLY_MASTER_KEY is not configured. " +
-                    $"Set the master key to the value used when they were encrypted, or restore the " +
-                    $"unencrypted DB. Refusing to start.");
+                throw OrphanedSecretException();
             }
         }
 
+        // xtenant: instance-wide fail-closed probe across every org's stored upstream/webhook secrets.
+        bool anyUpstreamEncrypted = await AnyEncryptedSecretAsync(
+            conn,
+            // xtenant: instance-wide fail-closed probe, not tenant-scoped.
+            """
+            SELECT secret FROM upstream_registry WHERE secret IS NOT NULL
+            """);
+        bool anyWebhookEncrypted = await AnyEncryptedSecretAsync(
+            conn,
+            // xtenant: instance-wide fail-closed probe, not tenant-scoped.
+            """
+            SELECT secret FROM webhook_subscription WHERE secret IS NOT NULL
+            """);
+
+        if (anyUpstreamEncrypted || anyWebhookEncrypted)
+        {
+            throw OrphanedSecretException();
+        }
+
         _logger.LogWarning(
-            "Instance secrets (jwt_secret, mfa_encryption_key) are stored unencrypted. " +
-            "Set DEPENDABLY_MASTER_KEY to envelope-encrypt them at rest, or ensure the " +
-            "database is on an OS-encrypted volume.");
+            "Instance secrets (jwt_secret, mfa_encryption_key) and any upstream/webhook secrets are " +
+            "stored unencrypted. Set DEPENDABLY_MASTER_KEY to envelope-encrypt them at rest, or " +
+            "ensure the database is on an OS-encrypted volume.");
     }
+
+    // Returns true when any row returned by the probe carries the enc:v1: envelope prefix.
+    private async Task<bool> AnyEncryptedSecretAsync(
+        System.Data.Common.DbConnection conn, string probeSql)
+    {
+        var secrets = await conn.QueryAsync<string?>(probeSql);
+        return secrets.Any(s => s is not null && _envelope.IsEncrypted(s));
+    }
+
+    private static InvalidOperationException OrphanedSecretException() =>
+        new("Secrets are envelope-encrypted at rest but DEPENDABLY_MASTER_KEY is not configured. "
+            + "Set the master key to the value used when they were encrypted, or restore the "
+            + "unencrypted DB. Refusing to start.");
+
+    private sealed record SecretRow(string Id, string? Secret);
 
     // Logs operator-facing warnings for missing or misconfigured environment variables.
     // None of these abort startup — they surface as LogWarning so the operator can act
     // without a restart. Called once per startup after schema init and first-boot.
     private void LogEnvironmentWarnings()
     {
+        bool requireSecureCookies = string.Equals(_config["REQUIRE_SECURE_COOKIES"], "true", StringComparison.OrdinalIgnoreCase);
         string? baseUrl = _config["BASE_URL"];
         if (baseUrl is null)
         {
-            _logger.LogWarning(
-                "BASE_URL is not set. Session cookies will not be marked Secure. " +
-                "UseForwardedHeaders is enabled — if a TLS-terminating proxy is in front, " +
-                "ensure it forwards X-Forwarded-Proto: https and set BASE_URL to https://...");
+            if (requireSecureCookies)
+            {
+                _logger.LogWarning(
+                    "REQUIRE_SECURE_COOKIES is set but BASE_URL is not. Cookies will still be " +
+                    "marked Secure on every request (REQUIRE_SECURE_COOKIES wins unconditionally), " +
+                    "but browsers refuse Secure cookies over plain HTTP — if this deployment is not " +
+                    "actually served over HTTPS, login will silently fail to persist a session. " +
+                    "Set BASE_URL to https://... once a TLS-terminating proxy is in front.");
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "BASE_URL is not set. Session cookies will not be marked Secure — a MITM on " +
+                    "plain HTTP can capture the session JWT. UseForwardedHeaders is enabled — if a " +
+                    "TLS-terminating proxy is in front, ensure it forwards X-Forwarded-Proto: https " +
+                    "and set BASE_URL to https://..., or set REQUIRE_SECURE_COOKIES=true once this " +
+                    "deployment is HTTPS-only.");
+            }
         }
         else if (!baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
-            _logger.LogWarning(
-                "BASE_URL {BaseUrl} is plain HTTP. Session cookies will not be marked Secure. " +
-                "UseForwardedHeaders is enabled — if a TLS-terminating proxy is in front, " +
-                "ensure it forwards X-Forwarded-Proto: https and update BASE_URL to https://...",
-                baseUrl);
+            if (requireSecureCookies)
+            {
+                _logger.LogWarning(
+                    "REQUIRE_SECURE_COOKIES is set but BASE_URL {BaseUrl} is plain HTTP. Cookies " +
+                    "will still be marked Secure on every request, but browsers refuse Secure " +
+                    "cookies over plain HTTP — if this deployment is not actually served over " +
+                    "HTTPS, login will silently fail to persist a session. Update BASE_URL to " +
+                    "https://... once a TLS-terminating proxy is in front.",
+                    baseUrl);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "BASE_URL {BaseUrl} is plain HTTP. Session cookies will not be marked Secure — " +
+                    "a MITM on plain HTTP can capture the session JWT. UseForwardedHeaders is " +
+                    "enabled — if a TLS-terminating proxy is in front, ensure it forwards " +
+                    "X-Forwarded-Proto: https and update BASE_URL to https://..., or set " +
+                    "REQUIRE_SECURE_COOKIES=true once this deployment is HTTPS-only.",
+                    baseUrl);
+            }
         }
 
         if (string.IsNullOrWhiteSpace(_config["TRUSTED_PROXIES"]))
@@ -244,6 +464,18 @@ public sealed class StartupService : IHostedService
                 "PATCH requests for an active upload session must reach the same replica that " +
                 "issued the session UUID. Configure session affinity on your load balancer keyed " +
                 "on the upload UUID path segment before routing OCI push traffic.");
+        }
+
+        string deploymentMode = (_config["DEPENDABLY_DEPLOYMENT_MODE"] ?? "standalone").ToLowerInvariant();
+        string storageBackend = (_config["STORAGE_BACKEND"] ?? "local").ToLowerInvariant();
+        if (deploymentMode == "ha" && storageBackend == "local"
+            && string.IsNullOrWhiteSpace(_config["STORAGE_BACKEND_REGISTRY"]))
+        {
+            _logger.LogWarning(
+                "DEPENDABLY_DEPLOYMENT_MODE=ha with STORAGE_BACKEND=local: the local blob store is "
+                + "node-local, so replicas will not see each other's published artefacts unless the "
+                + "path is a shared volume. Use a shared object store (STORAGE_BACKEND=s3 or azure, "
+                + "or the per-tier _REGISTRY override) for the durable registry tier in HA.");
         }
 
         if (_staging.FloorBytes == 0)

@@ -56,6 +56,8 @@ public sealed partial class OrgIdFilteringComplianceTests
         "license_allowlist",
         "license_blocklist",
         "upstream_registry",
+        "upstream_source_pin",
+        "nuget_symbol_index",
         "oci_blobs",
         "oci_tags",
         "rpm_repodata_state",

@@ -197,6 +197,10 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         }
     }
 
+    // Deliberately distinct from PurlParser.TryParse: this index key is matched case-insensitively
+    // against OSV dump data (whose ecosystem/name casing conventions differ from purl-spec), so the
+    // "pkg:" prefix check and the extracted name are case-insensitive here, and the ecosystem is
+    // re-mapped to OSV's own ecosystem vocabulary by NormalizeEcosystem below.
     private static (string Ecosystem, string Name, string Version)? ParsePurl(string purl)
     {
         // pkg:{ecosystem}/{name}@{version}

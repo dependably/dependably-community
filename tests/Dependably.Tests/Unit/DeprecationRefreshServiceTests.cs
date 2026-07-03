@@ -652,7 +652,8 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         return new DeprecationRefreshService(
             packages, cacheArtifacts, audit, upstream, latestResolver, airGap, config,
             NullLogger<DeprecationRefreshService>.Instance,
-            _clock);
+            _clock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
     }
 
     /// <summary>
@@ -836,8 +837,8 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 
     private sealed class AllowAllValidator : IUpstreamUrlValidator
     {
-        public Task<bool> IsAllowedAsync(string url, string? orgId = null, CancellationToken ct = default)
-            => Task.FromResult(true);
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId = null, CancellationToken ct = default)
+            => Task.FromResult(UpstreamUrlBlock.None);
     }
 
     private sealed class StubAirGap : IAirGapMode

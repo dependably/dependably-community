@@ -299,11 +299,15 @@ public sealed class SamlController : ControllerBase
                 .GroupBy(c => c.Type)
                 .Select(g => new { type = g.Key, values = g.Select(c => c.Value).ToArray() })
                 .ToList();
+            // NameID is not itself a claim, but the admin still needs to see the value the IdP
+            // asserted — persist it as a synthetic entry in the same JSON blob rather than
+            // reflecting it into the test-result redirect URL (see RedirectToTestResult).
+            claimsDict.Insert(0, new { type = Dependably.Infrastructure.Saml.SamlTestClaimTypes.NameId, values = new[] { nameId } });
             string claimsJson = System.Text.Json.JsonSerializer.Serialize(claimsDict);
 
             await _login.RecordSamlTestAsync(tenant.TenantId!, cfg!.IdpEntityId!, nameId, email, testActorId, ct);
             await _samlConfig.RecordTestSuccessAsync(tenant.TenantId!, email ?? "", claimsJson, ct);
-            return RedirectToTestResult(email: email, nameId: nameId);
+            return RedirectToTestResult();
         }
 
         // Production login hardening (the admin test path above is exempt — it has its own
@@ -513,20 +517,16 @@ public sealed class SamlController : ControllerBase
         && !string.IsNullOrWhiteSpace(cfg.IdpSsoUrl)
         && (!string.IsNullOrWhiteSpace(cfg.IdpSigningCert) || !string.IsNullOrWhiteSpace(cfg.IdpSigningCertOverride));
 
-    private RedirectResult RedirectToTestResult(
-        string? email = null, string? nameId = null, string? error = null, string? detail = null)
+    // Deliberately takes no email/NameID parameter: assertion-controlled values are never
+    // reflected into this redirect's query string. The admin-facing /saml-test-result page
+    // reads the last test's email/NameID/claims from the authenticated GET /api/v1/auth-config
+    // endpoint (server-persisted by RecordTestSuccessAsync), not from the URL — so a hostile or
+    // malformed IdP response being tested can never inject data into a browser-rendered page via
+    // this redirect. error/detail stay: they are drawn from a closed set of server-chosen reason
+    // codes, not copied verbatim from assertion content.
+    private RedirectResult RedirectToTestResult(string? error = null, string? detail = null)
     {
         var qs = new QueryString();
-        if (!string.IsNullOrEmpty(email))
-        {
-            qs = qs.Add("email", email);
-        }
-
-        if (!string.IsNullOrEmpty(nameId))
-        {
-            qs = qs.Add("nameid", nameId);
-        }
-
         if (!string.IsNullOrEmpty(error))
         {
             qs = qs.Add("error", error);

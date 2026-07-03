@@ -1,4 +1,5 @@
 using Dependably.Infrastructure.Observability;
+using Dependably.Infrastructure.Redis;
 using Dependably.Storage;
 
 namespace Dependably.Infrastructure;
@@ -15,8 +16,8 @@ namespace Dependably.Infrastructure;
 /// any one cap suppresses the default.
 ///
 /// Schedule via <c>CACHE_EVICT_SCHEDULE</c> (cron, default hourly). The job is idempotent and
-/// holds no state across runs; the leader election in <see cref="LeaderElectedScheduler"/>
-/// is what prevents two replicas evicting the same row twice.
+/// holds no state across runs; in a multi-replica (HA) deployment the per-tick leader lock (see
+/// <see cref="RequiresLeaderLock"/>) ensures only one replica evicts each row per pass.
 ///
 /// Eviction always cascades: deleting a <c>cache_artifact</c> row drops the FK-cascade
 /// <c>tenant_artifact_access</c> rows automatically (keep/cascade decision: cascade by
@@ -35,13 +36,17 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
     protected override string ScopeJobName => "cache-eviction";
     protected override string ScopeMetricName => "cache.evict";
 
+    // Deletes shared cache_artifact rows and cache-tier blobs — one replica per tick in HA mode.
+    protected override bool RequiresLeaderLock => true;
+
     public CacheEvictionService(
         CacheArtifactRepository cache,
         TieredBlobStorage blobs,
         IConfiguration config,
         ILogger<CacheEvictionService> logger,
-        TimeProvider time)
-        : base(config, logger, time)
+        TimeProvider time,
+        IDistributedLock locks)
+        : base(config, logger, time, locks)
     {
         _cache = cache;
         // Eviction is cache-only. In split-tier deployments the registry tier is durable

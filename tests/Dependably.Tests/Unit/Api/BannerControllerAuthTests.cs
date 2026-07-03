@@ -2,7 +2,6 @@ using System.Security.Claims;
 using Dapper;
 using Dependably.Api;
 using Dependably.Infrastructure;
-using Dependably.Resources;
 using Dependably.Security;
 using Dependably.Tests.Infrastructure;
 using Microsoft.AspNetCore.Http;

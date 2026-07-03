@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
+  import Toggle from '../Toggle.svelte'
 
   // /metrics access editor, shared by the multi-mode system SPA and the single-mode tenant
   // Settings page. The two surfaces differ only in which endpoints back it, so the caller
@@ -99,11 +100,11 @@
       <label for="metrics-enabled">{$t('system.settings.metrics.enabled')}</label>
       <div class="field">
         <div class="input-row">
-          <input
+          <Toggle
             id="metrics-enabled"
-            type="checkbox"
             bind:checked={accessEnabled}
             disabled={access.enabledLockedByEnv}
+            ariaLabel={$t('system.settings.metrics.enabled')}
           />
           <span class="source-tag source-tag-{access.enabledSource}">{access.enabledSource}</span>
         </div>
@@ -180,7 +181,6 @@
   .form-row label { font-size: 13px; color: var(--text2); padding-top: 8px; }
   .field { display: flex; flex-direction: column; gap: 4px; }
   .input-row { display: flex; align-items: center; gap: 6px; }
-  .input-row input { flex: 1; }
   .hint { font-size: 11px; color: var(--text2); }
   .warn { font-size: 11px; color: orange; }
   .saved { color: var(--text2); font-size: 13px; margin-left: 12px; }

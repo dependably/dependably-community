@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**dependably** is a self-hosted private artifact repository for npm, PyPI, NuGet, Maven, RPM, and OCI images. Core design priorities: supply chain awareness (first-fetch tracking, checksum verification, SBOM generation) and multitenancy (org isolation, scoped tokens, BOLA protection).
+**dependably** is a self-hosted private artifact repository for npm, PyPI, NuGet, Maven, RPM, OCI images, Go modules, and Cargo crates. Core design priorities: supply chain awareness (first-fetch tracking, checksum verification, SBOM generation) and multitenancy (org isolation, scoped tokens, BOLA protection).
 
 Tech stack: **ASP.NET Core 10 / C#**, **Dapper** (parameterized SQL only — no string interpolation), **SQLite** (`IMetadataStore` / `SqliteMetadataStore`), **Serilog** structured JSON logging, **JWT** sessions, **BCrypt** passwords, **NuGet.Versioning** for NuGet version normalization. **ASP.NET Core Identity Core** (`AddIdentityCore` only, no SignInManager/cookie scheme) over custom Dapper `IUserStore` implementations supplies the MFA and credential primitives (TOTP, recovery codes, BCrypt hashing, security_stamp); the first-factor login, lockout, JWT session, and per-request session-invalidation layers are bespoke for security reasons documented in `docs/adr/0001-auth-identity-hybrid.md`.
 
@@ -59,11 +59,11 @@ npm run build    # production build into src/Dependably/wwwroot — wipes ALL of
 src/Dependably/
   Program.cs              — app bootstrap, DI wiring, graceful shutdown (30s SIGTERM drain)
   Infrastructure/
-    IMetadataStore.cs     — returns SqliteConnection; all queries via Dapper
+    IMetadataStore.cs     — returns DbConnection (SQLite or Postgres per DB_PROVIDER)
     SqliteMetadataStore.cs
-    SchemaInitializer.cs  — applies embedded Schema.sql on startup (idempotent)
+    SchemaInitializer.cs  — applies the provider-selected schema on startup (idempotent)
     FirstBootService.cs   — creates default org, JWT secret, admin password on first run
-    Schema.sql            — embedded resource; full DB schema (CREATE TABLE IF NOT EXISTS)
+    schema/Schema.sql + schema/Schema.pg.sql — embedded resources; provider-selected full DB schema (CREATE TABLE IF NOT EXISTS)
   Storage/
     IBlobStore.cs         — PutAsync/GetAsync/ExistsAsync/DeleteAsync/GetTotalSizeAsync
     BlobKeys.cs           — single source of truth for key construction
@@ -112,10 +112,10 @@ tests/Dependably.Tests/
 - **Architectural invariants are enforced by `Category=Compliance` static-scan tests, not just docs.** The family (`OrgIdFilteringComplianceTests`, `NoInterpolatedSqlComplianceTests`, `BlobKeyConstructionComplianceTests`, `CommentProvenanceComplianceTests`, `ProjectFileCommentComplianceTests`, `NoDebugOutputComplianceTests`, `NoFocusedOrSkippedTestComplianceTests`, plus the `Schema*ComplianceTests`) reads source, regexes for a banned pattern, and fails with the full list — so violations surface locally and on every MR. Production code uses Serilog (no `Console`/`Debug` output outside the allowlisted first-boot banner) and ships no `NotImplementedException` stubs; no committed test is focused (`.only`/`fit`/`fdescribe`) or skipped (`.skip`/`[Fact(Skip=…)]`, opt out a deliberate skip with `// skip-ok: <reason>`). Prefer adding a compliance test over a CI grep when codifying a new rule.
 - **`IMetadataStore` returns raw connections.** Callers use Dapper extension methods and are responsible for `await using`.
 - **PURLs are the canonical package identity.** `PurlNormalizer` is the single source of truth — used by push handlers, proxy handlers, simple index generator, and npm metadata rewriter.
-- Registry routes: `/simple/`, `/npm/`, `/nuget/v3/index.json`, `/maven/`, `/rpm/`. Tenancy is host-resolved: `DEPLOYMENT_MODE=single` (default) serves the one org from the bare host; `DEPLOYMENT_MODE=multi` routes each org by subdomain (`my-org.apex/simple/` etc.). OCI has no org prefix — the Distribution Spec mandates `/v2/`.
+- Registry routes: `/simple/`, `/npm/`, `/nuget/v3/index.json`, `/maven/`, `/rpm/`, `/go/`, `/cargo/`. Tenancy is host-resolved: `DEPLOYMENT_MODE=single` (default) serves the one org from the bare host; `DEPLOYMENT_MODE=multi` routes each org by subdomain (`my-org.apex/simple/` etc.). OCI has no org prefix — the Distribution Spec mandates `/v2/`. Go is proxy-only (no hosted push path).
 - **Token auth**: npm uses `Authorization: Bearer <token>`; PyPI and NuGet use `Authorization: Basic base64(user:<token>)`. Resolution in `TokenAuthExtensions.ResolveTokenAsync`. Token stored as SHA-256 hash in DB.
 - **NuGet push** uses `X-NuGet-ApiKey` header, not Authorization.
-- **Proxy cache miss** path: check `BlobKeys.Proxy(sha256)` in blob store → if absent, fetch from upstream, verify checksum, store, serve. Configured via `PyPI:Upstream`, `Npm:Upstream`, `NuGet:Upstream` settings.
+- **Proxy cache miss** path: check `BlobKeys.Proxy(sha256)` in blob store → if absent, fetch from upstream, verify checksum, store, serve. Upstreams are per-org, DB-backed (`upstream_registry` table), and managed from Settings → Proxy; the `PyPI:Upstream`/`Npm:Upstream`/`NuGet:Upstream` settings only seed the initial row for newly created orgs.
 - **Upload size limits**: checked in order — org ecosystem limit → org global limit → instance ecosystem limit. Returned as 413 before any blob is written.
 - **OpenAPI is split into two named documents.** Management endpoints (`/api/v1/…`) are documented at `/api/v1/docs/` (spec: `/openapi/management.json`); protocol surfaces (`/v2/`, `/simple/`, `/npm/`, `/nuget/v3/`, …) are documented at `/docs/` (spec: `/openapi/protocol.json`). The split is route-prefix-driven (via `OpenApiOptions.ShouldInclude` against `ApiDescription.RelativePath`), not attribute-driven — new controllers land in the right document automatically based on where they route.
 - **Protocol surfaces follow upstream ecosystem specifications, not Dependably API versioning.** OCI is at `/v2/` because the Distribution Spec mandates it; PyPI is at `/simple/` because PEP 503 mandates it; npm and NuGet are at the paths their clients hardcode. Do not add internal version segments to these routes.

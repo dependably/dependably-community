@@ -193,6 +193,7 @@ public sealed class OrgController : OrgScopedControllerBase
             v.FirstFetch,
             v.DownloadCount,
             v.CreatedAt,
+            v.UpdatedAt,
             v.VulnCheckedAt,
             v.PublishedAt,
             v.ManualBlockState,
@@ -441,7 +442,8 @@ public sealed class OrgController : OrgScopedControllerBase
             await _audit.LogActivityAsync(orgId, ecosystem, facts.Purl, "download", GetUserId(),
                 actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         }
-        await _tenantAccess.UpsertStateAsync(orgId, facts.Id, _time.GetUtcNow(), ct);
+        // Enqueued off the request path — the row already exists (seeded durably at first-fetch).
+        await _tenantAccess.RecordDownloadHitAsync(orgId, facts.Id, _time.GetUtcNow(), ct);
 
         // Proxy blob keys are content-addressed (last segment is the SHA-256), so the download
         // filename comes from the recorded artifact filename, not the blob-key suffix.
@@ -489,7 +491,7 @@ public sealed class OrgController : OrgScopedControllerBase
             ecosystem,
             purl_name = pkg.PurlName,
             override_value = req.Override,
-        });
+        }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogAsync("package.override.set", orgId, actorId, ActorKinds.User,
             ecosystem, pkg.PurlName, detail, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         await _audit.LogActivityAsync(orgId, ecosystem, pkg.PurlName, "package.override.set",
@@ -524,7 +526,7 @@ public sealed class OrgController : OrgScopedControllerBase
             try
             {
                 var cached = System.Text.Json.JsonSerializer.Deserialize<OrgStats>(
-                    snapshot.StatsJson, StatsJsonOptions);
+                    snapshot.StatsJson, JsonContracts.Web);
                 if (cached is not null)
                 {
                     return Ok(cached);
@@ -544,9 +546,6 @@ public sealed class OrgController : OrgScopedControllerBase
         var stats = await _packageAnalytics.GetOrgStatsAsync(orgId, ct);
         return Ok(stats);
     }
-
-    private static readonly System.Text.Json.JsonSerializerOptions StatsJsonOptions =
-        new(System.Text.Json.JsonSerializerDefaults.Web);
 
     // ── Setup snippets ────────────────────────────────────────────────────────
 
@@ -639,11 +638,68 @@ public sealed class OrgController : OrgScopedControllerBase
     }
 
     // Maven snippet bundles both publish (distributionManagement, used by `mvn deploy`) and
-    // consume (repositories, used at resolution time). A registry is no use if onboarding only
-    // covers one half of the workflow.
+    // consume (repositories, used at resolution time). A Gradle variant follows the Maven XML
+    // section; credentials are stored once in gradle.properties and referenced by both DSLs.
     private static string GenerateMavenSnippet(string baseUrl, string slug)
     {
         _ = slug;
+        // Gradle DSL blocks contain literal { }, so use $$ raw strings where {{ }} are literal
+        // braces and {{baseUrl}} interpolates the variable.
+        string gradleFragment = $$"""
+
+
+            # --- Gradle (Groovy DSL) ---
+
+            # ~/.gradle/gradle.properties — store credentials outside build scripts:
+            dependablyUser=your-username
+            dependablyToken=your-token
+
+            # build.gradle — consume and publish:
+            repositories {
+                maven {
+                    url '{{baseUrl}}/maven/'
+                    credentials {
+                        username = findProperty('dependablyUser')
+                        password = findProperty('dependablyToken')
+                    }
+                }
+            }
+            publishing {
+                repositories {
+                    maven {
+                        url '{{baseUrl}}/maven/'
+                        credentials {
+                            username = findProperty('dependablyUser')
+                            password = findProperty('dependablyToken')
+                        }
+                    }
+                }
+            }
+
+            # --- Gradle (Kotlin DSL) ---
+
+            # build.gradle.kts — same gradle.properties credentials; only syntax differs:
+            repositories {
+                maven {
+                    url = uri("{{baseUrl}}/maven/")
+                    credentials {
+                        username = findProperty("dependablyUser") as String?
+                        password = findProperty("dependablyToken") as String?
+                    }
+                }
+            }
+            publishing {
+                repositories {
+                    maven {
+                        url = uri("{{baseUrl}}/maven/")
+                        credentials {
+                            username = findProperty("dependablyUser") as String?
+                            password = findProperty("dependablyToken") as String?
+                        }
+                    }
+                }
+            }
+            """;
         return $"""
             <!-- ~/.m2/settings.xml — publish + consume -->
             <settings>
@@ -675,7 +731,7 @@ public sealed class OrgController : OrgScopedControllerBase
                 <url>{baseUrl}/maven/</url>
               </repository>
             </distributionManagement>
-            """;
+            """ + gradleFragment;
     }
 
     // RPM .repo file pointing at the yum/dnf-compatible directory layout, plus a curl one-liner
@@ -701,13 +757,23 @@ public sealed class OrgController : OrgScopedControllerBase
     private static string GenerateOciSnippet(string baseUrl, string slug)
     {
         _ = slug;
-        string host = new Uri(baseUrl).Host;
+        var uri = new Uri(baseUrl);
+        string host = uri.Host;
+        // Plain-HTTP registries require an insecure-registries entry in the Docker daemon config;
+        // HTTPS registries use the default TLS trust chain and need no extra daemon configuration.
+        string daemonFragment = uri.Scheme == "http" ? $$"""
+
+
+            # /etc/docker/daemon.json — Docker needs this to use a plain-HTTP registry:
+            { "insecure-registries": ["{{host}}"] }
+            # Restart the daemon after editing (systemctl restart docker).
+            """ : "";
         return $"""
             # Docker / OCI — login, pull, push
             docker login {host}
             docker pull  {host}/<image>:<tag>
             docker push  {host}/<image>:<tag>
-            """;
+            """ + daemonFragment;
     }
 
     // Go is proxy-only (no hosted publish) — GOPROXY points the toolchain at the registry, and a

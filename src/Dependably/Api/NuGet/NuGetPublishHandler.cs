@@ -1,13 +1,16 @@
+using System.IO.Compression;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Audit.Events;
 using Dependably.Infrastructure.Caching;
+using Dependably.Infrastructure.Edge;
 using Dependably.Infrastructure.Publish;
+using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using NuGet.Versioning;
 
 namespace Dependably.Api.NuGetProtocol;
 
@@ -26,10 +29,14 @@ public sealed class NuGetPublishHandler(
     IPackagePublishService publish,
     ClaimResolver claimResolver,
     LicenseRepository licenses,
+    NuGetSymbolIndexRepository symbolIndex,
     RenderedResponseCache<NuGetRegistrationKey> cache,
     ILogger<NuGetPublishHandler> logger,
     TimeProvider time,
-    string stagingPath)
+    string stagingPath,
+    AuditRepository audit,
+    IPackageEventSink eventSink,
+    EdgePublishGuard edgeGuard)
 {
     public Task<IActionResult> PushAsync(HttpContext httpContext, string orgId, CancellationToken ct)
         => PushPackageAsync(httpContext, orgId, isSymbol: false, ct);
@@ -76,6 +83,13 @@ public sealed class NuGetPublishHandler(
     public async Task<IActionResult> UnlistAsync(
         HttpContext httpContext, string orgId, string id, string version, CancellationToken ct)
     {
+        // Fail-closed on an edge node: unlist writes yanked=1 on an authoritative version row a
+        // cache edge does not own, so it is refused here before any lookup.
+        if (edgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
         // [Authorize] + [RequireCapability(YankNuget)] enforce auth + capability on the action.
         // Resolve the token here only for the cross-tenant guard.
         string? apiKey = httpContext.Request.Headers["X-NuGet-ApiKey"].FirstOrDefault();
@@ -97,7 +111,10 @@ public sealed class NuGetPublishHandler(
             return new NotFoundResult();
         }
 
-        var pkgVersion = await packages.GetVersionAsync(pkg.Id, version, ct);
+        // Resolve against the same lowercased canonical form the version is stored under, so
+        // unlisting a mixed-case prerelease (e.g. "1.0.0-Beta1") matches regardless of the
+        // casing the client puts in the route.
+        var pkgVersion = await packages.GetVersionAsync(pkg.Id, NuGetNormalization.NormalizeVersion(version), ct);
         if (pkgVersion is null)
         {
             return new NotFoundResult();
@@ -118,6 +135,29 @@ public sealed class NuGetPublishHandler(
         cache.Evict(new NuGetRegistrationKey(orgId, normalizedPurl, SemVer2: true));
         cache.Evict(new NuGetRegistrationKey(orgId, normalizedPurl, SemVer2: false) { IsProxy = true });
         cache.Evict(new NuGetRegistrationKey(orgId, normalizedPurl, SemVer2: true) { IsProxy = true });
+
+        // Per-version operator action → activity (audit gap: unlist had no activity row before).
+        string? actorId = token?.UserId;
+        string? actorKind = token?.ActorKind;
+        await audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "unlist",
+            actorId, actorKind: actorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        // Webhook dispatch: notify subscribers of the package.unlist event.
+        var orgRecord = await orgs.GetByIdAsync(orgId, ct);
+        string orgSlug = orgRecord?.Slug ?? orgId;
+        string unlistPayload = new PackageEvents.Unlist("nuget", id, version, pkgVersion.Purl).ToJson();
+        eventSink.Dispatch(new PackageEventEnvelope(
+            EventType: PackageEvents.TypeUnlist,
+            OrgId: orgId,
+            OrgSlug: orgSlug,
+            Ecosystem: "nuget",
+            Name: id,
+            Version: version,
+            Purl: pkgVersion.Purl,
+            ArtifactHash: pkgVersion.ChecksumSha256 is null ? null : "sha256:" + pkgVersion.ChecksumSha256,
+            Actor: actorId,
+            OccurredAt: time.GetUtcNow(),
+            DataJson: unlistPayload));
 
         return new NoContentResult();
     }
@@ -141,8 +181,10 @@ public sealed class NuGetPublishHandler(
         }
 
         var versions = await packages.GetVersionsAsync(pkg.Id, ct);
-        string normalizedSymbolVersion = NuGetVersion.TryParse(version, out var snv)
-            ? snv.ToNormalizedString() : version;
+        // Resolve against the same lowercased canonical form the version is stored under
+        // (see PublishNuspecAsync) so a mixed-case route segment (e.g. "1.0.0-Beta1") still
+        // matches the stored "1.0.0-beta1" row.
+        string normalizedSymbolVersion = NuGetNormalization.NormalizeVersion(version);
         var match = versions.FirstOrDefault(v => v.Version == normalizedSymbolVersion && v.BlobKey.EndsWith(".snupkg"));
         if (match is null)
         {
@@ -153,6 +195,176 @@ public sealed class NuGetPublishHandler(
         return stream is null
             ? new NotFoundResult()
             : new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
+    }
+
+    /// <summary>
+    /// Simple Symbol Query Protocol (SSQP) read endpoint. A debugger requests
+    /// <c>GET /nuget/symbols/{pdbName}/{key}/{pdbName}</c> where <paramref name="key"/> is the
+    /// Portable-PDB debug-id (GUID + <c>ffffffff</c> age). Resolves the key through the per-org
+    /// symbol index to the stored <c>.snupkg</c>, extracts the single PDB entry, and streams its
+    /// raw bytes as <c>application/octet-stream</c>. Filename + key are matched case-insensitively
+    /// (debuggers lowercase them). Honours the same AnonymousPull gate as the <c>.snupkg</c> read
+    /// surface; an unindexed key returns 404, and a key belonging to another tenant is never served.
+    /// </summary>
+    public async Task<IActionResult> GetSymbolFileAsync(
+        HttpContext httpContext, string orgId, string pdbName, string key, CancellationToken ct)
+    {
+        var settings = await orgs.GetSettingsAsync(orgId, ct);
+        // Org-scoped resolve: cross-org tokens are coerced to null so AnonymousPull governs.
+        var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
+        if (!settings!.AnonymousPull && token is null)
+        {
+            httpContext.Response.Headers.WWWAuthenticate = "Basic realm=\"dependably\"";
+            return new UnauthorizedResult();
+        }
+
+        var row = await symbolIndex.ResolveAsync(orgId, pdbName, key, ct);
+        if (row is null)
+        {
+            return new NotFoundResult();
+        }
+
+        var blobStream = await blobs.GetAsync(BlobKeys.StoreKey(row.SnupkgBlobKey), ct);
+        if (blobStream is null)
+        {
+            return new NotFoundResult();
+        }
+
+        // ZipArchive needs a seekable stream to read the central directory. Every in-process blob
+        // backend (local disk, in-memory) already returns one; only a genuinely non-seekable source
+        // (e.g. a live network response stream) needs buffering first. Buffering the *compressed*
+        // archive here carries no amplification risk on its own — the real decompression-bomb risk
+        // is the entry's *decompressed* read, which LimitedReadStream caps below.
+        var archiveSource = (Stream)blobStream;
+        if (!blobStream.CanSeek)
+        {
+            var buffered = new MemoryStream();
+            await blobStream.CopyToAsync(buffered, ct);
+            await blobStream.DisposeAsync();
+            buffered.Position = 0;
+            archiveSource = buffered;
+        }
+
+        ZipArchive zip;
+        ZipArchiveEntry? entry;
+        try
+        {
+            // leaveOpen:false — disposing the archive also disposes archiveSource (the buffer, or
+            // the original seekable blob stream), so callers only need to track the archive.
+            zip = new ZipArchive(archiveSource, ZipArchiveMode.Read, leaveOpen: false);
+            entry = zip.GetEntry(row.EntryPath);
+        }
+        catch (InvalidDataException)
+        {
+            // The stored .snupkg is no longer a well-formed ZIP (corrupted at rest since indexing).
+            await archiveSource.DisposeAsync();
+            return new NotFoundResult();
+        }
+
+        if (entry is null)
+        {
+            zip.Dispose();
+            return new NotFoundResult();
+        }
+
+        Stream entryStream;
+        try
+        {
+            entryStream = new LimitedReadStream(entry.Open(), ZipEntryLimits.MaxPdbEntryBytes, "PDB entry");
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException)
+        {
+            zip.Dispose();
+            return new NotFoundResult();
+        }
+
+        // Stream the entry straight to the response instead of buffering the decompressed PDB
+        // into a byte[] first. The archive must stay open for the lifetime of the streamed read,
+        // so the response stream disposes both the entry stream and the owning archive together.
+        var responseStream = new ZipEntryResponseStream(entryStream, zip);
+        return new FileStreamResult(responseStream, "application/octet-stream")
+        {
+            FileDownloadName = pdbName,
+        };
+    }
+
+    /// <summary>
+    /// Wraps a ZIP entry's (already decompression-bomb-guarded) read stream together with the
+    /// owning <see cref="ZipArchive"/> so both are disposed together once the streamed response
+    /// finishes. The archive — and, when the blob source needed buffering to seek, its in-memory
+    /// buffer, since <see cref="ZipArchive"/> disposes its underlying stream when opened with
+    /// <c>leaveOpen: false</c> — must stay alive for the whole streamed read, not just until
+    /// <see cref="GetSymbolFileAsync"/> returns.
+    /// </summary>
+    private sealed class ZipEntryResponseStream(Stream inner, IDisposable owner) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            inner.ReadAsync(buffer, offset, count, cancellationToken);
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            inner.ReadAsync(buffer, cancellationToken);
+
+        public override void Flush()
+        {
+            // Read-only stream: nothing to flush.
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                inner.Dispose();
+                owner.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    /// <summary>
+    /// Extracts each Portable PDB from the staged <c>.snupkg</c> and records its SSQP key in the
+    /// per-org symbol index. Re-reads the staged archive from disk (symbol-push path only) so the
+    /// PDBs are parsed without materialising them in managed memory on the hot push path.
+    /// Non-Portable / unreadable PDBs are skipped by the extractor.
+    /// </summary>
+    private async Task IndexSymbolPdbsAsync(
+        string orgId, string versionId, string purlName, string version, string filename,
+        string stagedPath, CancellationToken ct)
+    {
+        IReadOnlyList<PdbSymbol> symbols;
+        // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        using (var fs = new FileStream(
+            stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 81920, useAsync: false))
+        {
+            symbols = NuGetSymbolKey.ExtractPortablePdbs(fs);
+        }
+
+        if (symbols.Count == 0)
+        {
+            logger.LogInformation(
+                "Symbol package {Filename} for org {OrgId} contained no indexable Portable PDBs.",
+                filename, orgId);
+            return;
+        }
+
+        string blobKey = BlobKeys.Hosted(orgId, "nuget", purlName, version, filename);
+        await symbolIndex.IndexAsync(orgId, versionId, blobKey, symbols, ct);
     }
 
     /// <summary>
@@ -271,9 +483,14 @@ public sealed class NuGetPublishHandler(
         string stagedPath = nupkg.StagedPath;
         long sizeBytes = nupkg.SizeBytes;
 
-        string normalizedVersion = PurlNormalizer.NormalizeNuGetVersionString(nuspecVersion);
+        // Store the same lowercased canonical form every read path resolves against
+        // (NuGetNormalization.NormalizeVersion). NuGet clients always lowercase the version
+        // segment in flatcontainer/registration URLs, and GetVersionAsync compares against a
+        // BINARY-collated version column — a case-preserving stored form (e.g. "1.0.0-Beta1")
+        // would never match the lowercased lookup, making mixed-case prereleases undownloadable.
+        string normalizedVersion = NuGetNormalization.NormalizeVersion(nuspecVersion);
         string purlName = nuspecId.ToLowerInvariant();
-        string filename = $"{purlName}.{normalizedVersion.ToLowerInvariant()}.{(isSymbol ? "snupkg" : "nupkg")}";
+        string filename = $"{purlName}.{normalizedVersion}.{(isSymbol ? "snupkg" : "nupkg")}";
 
         if (ValidateNuspecCoordinates(nuspecId, nuspecVersion, filename) is { } pathError)
         {
@@ -308,6 +525,30 @@ public sealed class NuGetPublishHandler(
 
         string versionId = ((PublishResult.Accepted)publishResult).VersionId;
         await EmitNuspecLicensesAsync(versionId, stagedPath, ct);
+
+        // Symbol packages: index each contained Portable PDB by its SSQP debug-id key so a
+        // debugger can later fetch the single PDB via GET /nuget/symbols/{pdb}/{key}/{pdb}. The
+        // version row is already committed at this point, so a failure here (corrupt PDB entry,
+        // I/O error) must never fail the push or skip the cache eviction below — it is logged and
+        // swallowed; the .snupkg itself is still stored and downloadable via GetSymbolsAsync, just
+        // not resolvable by debug-id key until a future re-index.
+        if (isSymbol)
+        {
+            try
+            {
+                await IndexSymbolPdbsAsync(ctx.OrgId, versionId, purlName, normalizedVersion, filename, stagedPath, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "Failed to index symbol package {Filename} for org {OrgId}: {ExceptionType}",
+                    filename, ctx.OrgId, ex.GetType().Name);
+            }
+        }
 
         // Evict all four registration cache entries (semver1/2 × local/proxy) so the
         // newly-pushed version appears immediately on the next registration index request.

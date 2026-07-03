@@ -27,9 +27,12 @@ public interface IPublicUrlBuilder
     /// <summary>
     /// Returns CookieOptions for a session cookie. Secure is set when either the runtime
     /// request is HTTPS or the operator declared BASE_URL as https — blending both signals
-    /// so neither proxy misconfiguration nor stale config causes a silent regression.
-    /// SameSite defaults to Strict; pass Lax for SAML flows where the IdP redirect must
-    /// deliver the cookie on the first cross-site request.
+    /// so neither proxy misconfiguration nor stale config causes a silent regression. When
+    /// <c>REQUIRE_SECURE_COOKIES</c> is set, Secure is forced true unconditionally, so a
+    /// credential-serving deployment that has declared itself HTTPS-only never ships a
+    /// session/MFA/device cookie without Secure. SameSite defaults to Strict; pass Lax for
+    /// SAML flows where the IdP redirect must deliver the cookie on the first cross-site
+    /// request.
     /// </summary>
     CookieOptions SessionCookieOptions(HttpContext ctx, SameSiteMode sameSite = SameSiteMode.Strict);
 }

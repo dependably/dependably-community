@@ -28,6 +28,13 @@ public static class ArchiveExtractor
 
     public enum ArchiveFormat { Unknown, Zip, GzippedTar }
 
+    /// <summary>
+    /// Bytes needed to distinguish every supported format — the larger of the gzip (2-byte)
+    /// and ZIP (4-byte) magic headers. Stream-based callers peek this many bytes rather than
+    /// buffering the whole artifact just to sniff the format.
+    /// </summary>
+    public const int HeaderPeekLength = ZipHeaderMinLength;
+
     public static ArchiveFormat Detect(byte[] bytes)
     {
         return bytes.Length >= GzipHeaderMinLength && bytes[0] == GzipMagic1 && bytes[1] == GzipMagic2

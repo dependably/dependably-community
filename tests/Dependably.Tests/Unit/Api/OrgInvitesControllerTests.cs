@@ -79,7 +79,7 @@ public sealed class OrgInvitesControllerTests
     public async Task CreateInvite_SmtpPresent_SendSucceeds_ReturnsNullLink()
     {
         var mailer = Substitute.For<IInviteMailer>();
-        mailer.SendInviteAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<DateTimeOffset>(), Arg.Any<CancellationToken>())
+        mailer.SendInviteAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<DateTimeOffset>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
         await using var s = await ControllerScenario.CreateAsync();
@@ -102,6 +102,7 @@ public sealed class OrgInvitesControllerTests
             Arg.Any<string>(),
             Arg.Any<string>(),
             Arg.Any<DateTimeOffset>(),
+            "en",
             Arg.Any<CancellationToken>());
     }
 
@@ -111,7 +112,7 @@ public sealed class OrgInvitesControllerTests
     public async Task CreateInvite_SmtpPresent_SendThrows_FallsBackToLink()
     {
         var mailer = Substitute.For<IInviteMailer>();
-        mailer.SendInviteAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<DateTimeOffset>(), Arg.Any<CancellationToken>())
+        mailer.SendInviteAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<DateTimeOffset>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("SMTP relay rejected connection"));
 
         await using var s = await ControllerScenario.CreateAsync();

@@ -37,7 +37,8 @@ public sealed class LocalBlobStore : IBlobStore
     public async Task PutAsync(string key, Stream data, CancellationToken ct = default)
     {
         string path = FullPath(key);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        string directory = Path.GetDirectoryName(path)!;
+        Directory.CreateDirectory(directory);
 
         // Overwrites are a real case (allow_version_overwrite flow). Subtract the prior
         // size before replacing the file so the counter doesn't double-count an overwrite.
@@ -47,9 +48,24 @@ public sealed class LocalBlobStore : IBlobStore
             try { previousSize = new FileInfo(path).Length; } catch { /* ignore */ }
         }
 
-        await using (var file = File.Create(path))
+        // Write to a same-directory temp file, then atomically rename into place. A
+        // reader's File.Exists/File.OpenRead on the final path only ever observes an
+        // absent file or a complete one — never a partial write mid-copy or a truncated
+        // file left by a crash/cancellation during the copy.
+        string tempPath = Path.Combine(directory, $".tmp-{Guid.NewGuid():N}");
+        try
         {
-            await data.CopyToAsync(file, ct);
+            await using (var file = File.Create(tempPath))
+            {
+                await data.CopyToAsync(file, ct);
+            }
+
+            File.Move(tempPath, path, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(tempPath); } catch { /* best-effort cleanup */ }
+            throw;
         }
 
         long newSize;
@@ -70,7 +86,15 @@ public sealed class LocalBlobStore : IBlobStore
     public Task<Stream?> GetAsync(string key, CancellationToken ct = default)
     {
         string path = FullPath(key);
-        return !File.Exists(path) ? Task.FromResult<Stream?>(null) : Task.FromResult<Stream?>(File.OpenRead(path));
+        if (!File.Exists(path))
+        {
+            return Task.FromResult<Stream?>(null);
+        }
+
+        Stream stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 1, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        return Task.FromResult<Stream?>(stream);
     }
 
     public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
@@ -95,7 +119,9 @@ public sealed class LocalBlobStore : IBlobStore
 
         // Open the file, seek to `from`, and wrap in a length-capped stream so the
         // client receives exactly the bytes in [from, effectiveTo].
-        var fs = File.OpenRead(path);
+        var fs = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 1, FileOptions.Asynchronous | FileOptions.SequentialScan);
         fs.Seek(from, SeekOrigin.Begin);
         long rangeLength = effectiveTo - from + 1;
         // deepcode ignore PT: key is validated by BlobKeys before reaching this method; no user input.

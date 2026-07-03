@@ -1,3 +1,4 @@
+using Dependably.Infrastructure.Edge;
 using Dependably.Infrastructure.OpenApi;
 using Dependably.Security;
 
@@ -14,6 +15,16 @@ internal static class ControllersStartupExtensions
         // Controllers + OpenAPI
         // Explicit application part ensures controllers are found even when ConfigureBuilder
         // is called from a different entry assembly (e.g. the test project).
+        // In edge mode, strip every management-classified controller from routing so the
+        // headless cache node exposes only registry protocol surfaces (management routes 404).
+        // Read straight from configuration at wiring time — IEdgeMode reads the same key and is
+        // not resolvable during service registration. Fail-closed: unclassified controllers are
+        // treated as management and stripped (the compliance gate turns that into a build error).
+        bool isEdge = string.Equals(
+            (builder.Configuration["DEPLOYMENT_MODE"] ?? "single").Trim(),
+            "edge",
+            StringComparison.OrdinalIgnoreCase);
+
         builder.Services.AddControllers(options =>
             {
                 options.Filters.AddService<RouteScopeFilter>();
@@ -21,6 +32,11 @@ internal static class ControllersStartupExtensions
                 options.Filters.AddService<PasswordRotationGuard>();
                 // After PasswordRotationGuard (rotation wins), block unenrolled users when MFA is required.
                 options.Filters.AddService<MfaEnrollmentGuard>();
+
+                if (isEdge)
+                {
+                    options.Conventions.Add(new EdgeManagementStrippingConvention());
+                }
             })
             .AddApplicationPart(typeof(Program).Assembly)
             .AddDataAnnotationsLocalization()

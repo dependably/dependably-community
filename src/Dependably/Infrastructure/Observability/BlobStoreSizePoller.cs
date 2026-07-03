@@ -21,15 +21,18 @@ namespace Dependably.Infrastructure.Observability;
 public sealed class BlobStoreSizePoller : BackgroundService
 {
     private readonly TieredBlobStorage _tiers;
+    private readonly IAirGapMode _airGap;
     private readonly TimeSpan _interval;
     private readonly ILogger<BlobStoreSizePoller> _logger;
 
     public BlobStoreSizePoller(
         TieredBlobStorage tiers,
         IConfiguration config,
+        IAirGapMode airGap,
         ILogger<BlobStoreSizePoller> logger)
     {
         _tiers = tiers;
+        _airGap = airGap;
         _logger = logger;
         int seconds = int.TryParse(config["BLOB_STORE_SIZE_POLL_INTERVAL_SECONDS"], out int s) && s > 0
             ? s
@@ -55,6 +58,13 @@ public sealed class BlobStoreSizePoller : BackgroundService
 
     internal async Task PollOnceAsync(CancellationToken ct)
     {
+        // blob-size-poller runs on an edge node (it is in the edge allowlist); this guard only
+        // bites when an operator names it explicitly in DISABLE_BACKGROUND_JOBS or air-gaps.
+        if (_airGap.IsJobDisabled("blob-size-poller"))
+        {
+            return;
+        }
+
         await PollTierAsync("registry", _tiers.Registry, ct);
 
         // Skip the second walk when both tiers share a backing store —

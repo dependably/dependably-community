@@ -163,6 +163,59 @@ public sealed partial class SamlAcsHardeningTests : IClassFixture<DependablyFact
         Assert.Equal(HttpStatusCode.Unauthorized, second.StatusCode);
     }
 
+    /// <summary>
+    /// Regression for the SAML test-flow reflected-XSS finding: a hostile NameID/email
+    /// asserted by the IdP under test must never be echoed into the <c>/saml-test-result</c>
+    /// redirect's query string. Before the fix, <c>RedirectToTestResult(email:, nameId:)</c>
+    /// placed the raw assertion values directly into the Location header. The server now
+    /// persists them (via <c>RecordTestSuccessAsync</c>) and the admin reads them back from
+    /// the authenticated <c>GET /api/v1/auth-config</c> endpoint instead.
+    /// </summary>
+    [Fact]
+    public async Task Acs_TestMode_HostileNameIdAndEmail_NeverReflectedInRedirect_ButRecoverableFromAuthConfig()
+    {
+        const string hostilePayload = "\"><script>alert(document.cookie)</script>";
+        string orgId = await GetDefaultOrgIdAsync();
+        string cid = Guid.NewGuid().ToString("N");
+        // now-ok: the DI-resolved repository consumes this window against the host's real
+        // clock during the ACS round-trip, so the expiry must be future relative to real now.
+        await _factory.Services.GetRequiredService<SamlConfigRepository>()
+            .IssueTestRunAsync(cid, orgId, actorId: null, DateTimeOffset.UtcNow.AddMinutes(10));
+
+        string samlResponse = BuildSignedSamlResponse(inResponseTo: null, nameId: hostilePayload);
+
+        using var client = CreateNoRedirectClient();
+        var form = new FormUrlEncodedContent(new[]
+        {
+            new KeyValuePair<string, string>("SAMLResponse", samlResponse),
+            new KeyValuePair<string, string>("RelayState", "test:" + cid),
+        });
+        var resp = await client.PostAsync("/saml/acs", form);
+
+        Assert.Equal(HttpStatusCode.Redirect, resp.StatusCode);
+        string location = resp.Headers.Location?.OriginalString ?? "";
+        Assert.Contains("/saml-test-result", location);
+
+        // The hostile payload, in any form (raw or URL-encoded), never appears in the redirect.
+        Assert.DoesNotContain("script", location, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(Uri.EscapeDataString(hostilePayload), location, StringComparison.Ordinal);
+        Assert.DoesNotContain("email=", location, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("nameid=", location, StringComparison.OrdinalIgnoreCase);
+
+        // The value is still recoverable — but only via the authenticated settings read, not
+        // the redirect URL a browser would actually navigate to.
+        string adminJwt = await _factory.CreateAdminJwt();
+        using var adminClient = _factory.CreateClient();
+        adminClient.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", adminJwt);
+        var cfgResp = await adminClient.GetAsync("/api/v1/auth-config");
+        cfgResp.EnsureSuccessStatusCode();
+        var cfgJson = System.Text.Json.JsonDocument.Parse(await cfgResp.Content.ReadAsStringAsync()).RootElement;
+
+        Assert.Equal(hostilePayload, cfgJson.GetProperty("lastTestEmail").GetString());
+        Assert.Equal(hostilePayload, cfgJson.GetProperty("lastTestNameId").GetString());
+    }
+
     [Fact]
     public async Task Acs_UnknownInResponseTo_Returns401()
     {

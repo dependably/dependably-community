@@ -26,14 +26,32 @@
   }
 
   onMount(async () => {
+    // error/detail are the only fields the redirect carries — both are drawn from a closed
+    // set of server-chosen reason codes, never copied verbatim from assertion content.
+    // email/nameId/claims are NEVER read from the URL: the IdP assertion those values come
+    // from is untrusted input (this is a "test a new/unverified IdP" flow), so they are
+    // fetched from the authenticated GET /api/v1/auth-config endpoint below instead — the
+    // server persists them there rather than reflecting them into a browser-rendered redirect.
     const search = new URLSearchParams(window.location.search)
-    email = search.get('email') || ''
-    nameId = search.get('nameid') || ''
     error = search.get('error') || ''
     detail = search.get('detail') || ''
     testTime = new Date()
     success = !error
     isPopup = !!(window.opener && !window.opener.closed)
+
+    // Fetch email/nameId/claims from the server (stored from the last test run) before
+    // notifying the opener, so the opener also only ever sees server-sourced values.
+    if (success) {
+      try {
+        const res = await fetch('/api/v1/auth-config', { credentials: 'include' })
+        if (res.ok) {
+          const data = await res.json()
+          email = data.lastTestEmail || ''
+          nameId = data.lastTestNameId || ''
+          claims = data.lastTestClaims || []
+        }
+      } catch { /* claims unavailable — show empty state */ }
+    }
 
     if (isPopup) {
       try {
@@ -42,17 +60,6 @@
           window.location.origin)
       } catch { /* opener may have navigated; nothing to do */ }
       // No auto-close — admin needs to read the claims at their own pace.
-    }
-
-    // Fetch claims from the server (stored from the last test run).
-    if (success) {
-      try {
-        const res = await fetch('/api/v1/auth-config', { credentials: 'include' })
-        if (res.ok) {
-          const data = await res.json()
-          claims = data.lastTestClaims || []
-        }
-      } catch { /* claims unavailable — show empty state */ }
     }
   })
 

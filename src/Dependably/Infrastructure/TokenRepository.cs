@@ -1,28 +1,65 @@
 using System.Security.Cryptography;
 using System.Text;
 using Dapper;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace Dependably.Infrastructure;
 
-public sealed class TokenRepository
+public class TokenRepository
 {
+    // 1-second sliding TTL on token-resolve reads, mirroring OrgRepository.SettingsCacheTtl.
+    // Every authenticated request on every protocol surface resolves its bearer/basic token
+    // through this indexed lookup; at sustained RPS (a CI-install burst hammering the same
+    // service token) that serializes through SQLite's single-writer WAL readers the same way
+    // the org-settings hot path did before it was cached. The cache key is the resolved token's
+    // own SHA-256 hash, so a hit can only ever return the resolution computed for that exact
+    // token — two distinct raw tokens never share a hash, so there is no path for one tenant's
+    // resolution to be served from another tenant's cache entry.
+    //
+    // Only a confirmed <see cref="TokenSource.Service"/> resolution is ever cached — never a
+    // user-token hit, and never a miss. A user token's validity is entangled with state that
+    // must take effect on the very next request, not after a TTL: account lock/disable cuts
+    // off its tokens immediately (the account_status join below; see
+    // TokenAccountStatusTests.DisabledUser_TokenRejected_ReactivationRestoresIt), and a
+    // password change deletes the user's rows outright (see
+    // PasswordChangeTests.ChangePassword_InvalidatesOtherSessionsAndPreChangeApiTokens). A
+    // cached miss is just as unsafe here as a cached hit: caching "unauthenticated" for a
+    // user token that resolved to null because the account was disabled would keep denying it
+    // for up to the TTL after the account is re-activated. Service tokens carry none of that
+    // entanglement (no owning user, no account_status join, no password-change cascade), and a
+    // reused CI/service token across a burst of rapid installs is exactly the scenario this
+    // cache exists for — so caching stays scoped to that one safe case.
+    private static readonly TimeSpan TokenResolveCacheTtl = TimeSpan.FromSeconds(1);
+
     private readonly IMetadataStore _db;
     private readonly TimeProvider _time;
+    private readonly IMemoryCache? _cache;
 
-    public TokenRepository(IMetadataStore db, TimeProvider time)
+    public TokenRepository(IMetadataStore db, TimeProvider time, IMemoryCache? cache = null)
     {
         _db = db;
         _time = time;
+        _cache = cache;
     }
+
+    private static string TokenResolveCacheKey(string tokenHashHex) => "token-resolve:" + tokenHashHex;
 
     /// <summary>
     /// Resolves a raw token string to a TokenRecord via indexed lookup on the stored SHA-256 hash.
-    /// Returns null if not found or expired.
+    /// Returns null if not found or expired. A confirmed service-token hit is cached for
+    /// <see cref="TokenResolveCacheTtl"/> keyed on the token's own hash; user-token hits and every
+    /// miss always re-query — see the class-level remarks for why.
     /// </summary>
     public async Task<TokenRecord?> ResolveAsync(string rawToken, CancellationToken ct = default)
     {
         byte[] incomingHashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
         string incomingHex = Convert.ToHexString(incomingHashBytes).ToLowerInvariant();
+
+        string cacheKey = TokenResolveCacheKey(incomingHex);
+        if (_cache is not null && _cache.TryGetValue(cacheKey, out TokenRecord? cachedRecord))
+        {
+            return cachedRecord;
+        }
 
         await using var conn = await _db.OpenAsync(ct);
 
@@ -60,7 +97,7 @@ public sealed class TokenRepository
             """,
             new { hash = incomingHex, now });
 
-        return Id is null
+        var resolved = Id is null
             ? null
             : new TokenRecord
             {
@@ -74,6 +111,21 @@ public sealed class TokenRepository
                 LastUsedAt = LastUsedAt is not null ? DateTimeOffset.Parse(LastUsedAt) : null,
                 Source = Source == "service" ? TokenSource.Service : TokenSource.User,
             };
+
+        // Only cache a confirmed service-token resolution — see the class-level remarks for
+        // why user-token hits and misses are deliberately excluded. Size = 1 counts as one
+        // logical slot against the global memory-cache SizeLimit.
+        if (_cache is not null && resolved is { Source: TokenSource.Service })
+        {
+            _cache.Set(cacheKey, resolved, new MemoryCacheEntryOptions
+            {
+                SlidingExpiration = TokenResolveCacheTtl,
+                AbsoluteExpirationRelativeToNow = TokenResolveCacheTtl,
+                Size = 1,
+            });
+        }
+
+        return resolved;
     }
 
     public static string HashToken(string rawToken)
@@ -261,12 +313,26 @@ public sealed class TokenRepository
     }
 
     /// <summary>
+    /// Decides in-process whether a <see cref="TouchLastUsedAsync"/> write is warranted for a
+    /// token whose current <c>last_used_at</c> is <paramref name="lastUsedAt"/> (already carried
+    /// on the <see cref="TokenRecord"/> from the resolve query). Returns <c>true</c> when the
+    /// value is NULL or older than <paramref name="minIntervalSeconds"/> — the same predicate the
+    /// in-SQL guard applies. Callers on the authenticated hot path skip the write entirely when
+    /// this returns <c>false</c> so a semantically-no-op UPDATE never opens a WAL write
+    /// transaction and contends the single SQLite writer; the in-SQL guard remains as the
+    /// cross-process race protection.
+    /// </summary>
+    public bool ShouldTouchLastUsed(DateTimeOffset? lastUsedAt, int minIntervalSeconds = 60)
+        => lastUsedAt is not { } last || last < _time.GetUtcNow().AddSeconds(-minIntervalSeconds);
+
+    /// <summary>
     /// Records a successful auth against <paramref name="tokenId"/> in the appropriate table.
     /// Throttled in-SQL: the UPDATE is a no-op unless the existing <c>last_used_at</c> is NULL
     /// or older than <paramref name="minIntervalSeconds"/> (default 60s). One indexed write
-    /// keyed on PK; cheap to call on every authenticated request.
+    /// keyed on PK. Hot-path callers gate this behind <see cref="ShouldTouchLastUsed"/> so the
+    /// no-op case never opens a write transaction; the in-SQL guard stays for cross-process races.
     /// </summary>
-    public async Task TouchLastUsedAsync(
+    public virtual async Task TouchLastUsedAsync(
         string tokenId,
         TokenSource source,
         int minIntervalSeconds = 60,

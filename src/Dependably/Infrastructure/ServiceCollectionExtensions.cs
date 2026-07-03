@@ -1,7 +1,9 @@
 using Dependably.Infrastructure.Audit;
 using Dependably.Infrastructure.Mail;
 using Dependably.Infrastructure.Siem;
+using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
+using Dependably.Security;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Dependably.Infrastructure;
@@ -29,6 +31,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<OrgSettingsRepository>();
         services.AddSingleton<SystemAdminRepository>();
         services.AddSingleton<PackageRepository>();
+        services.AddSingleton<NuGetSymbolIndexRepository>();
         services.AddSingleton<PackageAnalyticsRepository>();
         services.AddSingleton<StatsSnapshotRepository>();
         services.AddSingleton<UserService>();
@@ -70,8 +73,10 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<SamlConfigRepository>();
         services.AddSingleton<ExternalIdentityRepository>();
         services.AddSingleton<ProxyVersionRecorder>();
+        services.AddSingleton<SourcePinRepository>();
         services.AddSingleton<Dependably.Storage.ProxyFetchService>();
         services.AddSingleton<BannerRepository>();
+        services.AddSingleton<Dependably.Infrastructure.Webhooks.WebhookSubscriptionRepository>();
 
         // Two-tier storage formalisation
         services.AddSingleton<CacheArtifactRepository>();
@@ -202,8 +207,11 @@ public static class ServiceCollectionExtensions
             // SSRF defense-in-depth: OSV_BASE_URL is operator-supplied, but it must not
             // be routable to private/link-local ranges — same shared connect-time gate
             // as the upstream proxy clients. Public endpoints (api.osv.dev) pass.
+            // AllowAutoRedirect=false so an upstream 3xx cannot forward the request to a
+            // different host without re-validation, matching every sibling outbound client.
             .ConfigurePrimaryHttpMessageHandler(sp => new SocketsHttpHandler
             {
+                AllowAutoRedirect = false,
                 ConnectCallback = sp.GetRequiredService<Dependably.Security.SsrfConnectCallback>().ConnectAsync,
             });
         }
@@ -227,9 +235,11 @@ public static class ServiceCollectionExtensions
         services.AddHttpClient("threatfeed", client => client.Timeout = TimeSpan.FromSeconds(60))
         // SSRF defense-in-depth: KEV_FEED_URL / EPSS_API_URL are operator-supplied, but they
         // must not be routable to private/link-local ranges — same shared connect-time gate
-        // as the OSV and upstream proxy clients.
+        // as the OSV and upstream proxy clients. AllowAutoRedirect=false so an upstream 3xx
+        // cannot forward the request to a different host without re-validation.
         .ConfigurePrimaryHttpMessageHandler(sp => new SocketsHttpHandler
         {
+            AllowAutoRedirect = false,
             ConnectCallback = sp.GetRequiredService<Dependably.Security.SsrfConnectCallback>().ConnectAsync,
         });
 
@@ -285,4 +295,37 @@ public static class ServiceCollectionExtensions
         System.Net.IPAddress.TryParse(uri.Host, out var ip) && Dependably.Security.SsrfGuard.IsBlockedIpExcludingPrivate(ip)
             ? $"Upstream URL resolves to a blocked IP range: {ip}"
             : null;
+
+    /// <summary>
+    /// Registers the per-org webhook dispatcher: <see cref="WebhookDeliveryClient"/> (typed
+    /// HTTP client with SSRF connect-time guard), <see cref="WebhookDispatchQueue"/> as both
+    /// the <see cref="IPackageEventSink"/> singleton and a hosted background service.
+    ///
+    /// <c>WEBHOOK_ALLOW_PRIVATE</c> defaults to <c>false</c> — tenant-user-supplied URLs are
+    /// higher risk than operator SIEM URLs. Loopback, link-local, and cloud-metadata ranges
+    /// remain blocked regardless of this setting.
+    /// </summary>
+    public static IServiceCollection AddDependablyWebhookDispatcher(
+        this IServiceCollection services, IConfiguration config)
+    {
+        bool allowPrivate = string.Equals(
+            config["WEBHOOK_ALLOW_PRIVATE"], "true", StringComparison.OrdinalIgnoreCase);
+
+        Func<System.Net.IPAddress, bool> ssrfPredicate = allowPrivate
+            ? SsrfGuard.IsBlockedIpExcludingPrivate
+            : SsrfGuard.IsBlockedIp;
+
+        var webhookCallback = new SsrfConnectCallback(ssrfPredicate);
+        services.AddHttpClient<WebhookDeliveryClient>()
+            .ConfigurePrimaryHttpMessageHandler(_ => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                ConnectCallback = webhookCallback.ConnectAsync,
+            });
+
+        services.AddSingleton<WebhookDispatchQueue>();
+        services.AddSingleton<IPackageEventSink>(sp => sp.GetRequiredService<WebhookDispatchQueue>());
+        services.AddHostedService(sp => sp.GetRequiredService<WebhookDispatchQueue>());
+        return services;
+    }
 }

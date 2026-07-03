@@ -124,6 +124,8 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
                 new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions { SizeLimit = 8 * 1024 * 1024 }),
                 Dependably.Infrastructure.Caching.MetadataCacheKeys.MavenMetadata),
+            CacheOptions: new Dependably.Infrastructure.RenderedMetadataCacheOptions(
+                TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(5)),
             Log: Microsoft.Extensions.Logging.Abstractions.NullLogger<MavenController>.Instance,
             CacheArtifacts: new CacheArtifactRepository(_db),
             TenantAccess: new TenantArtifactAccessRepository(_db),
@@ -136,7 +138,9 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             // No Maven trust anchors configured — IsConfiguredForAsync returns false, provenance skipped.
             MavenProvenance: new Dependably.Protocol.Provenance.MavenProvenanceVerifier(
                 new Dependably.Tests.Infrastructure.StubPerOrgTrustAnchorStore(),
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance));
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance),
+            EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
+            Staging: new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0));
 
         return new MavenController(svc)
         {
@@ -776,6 +780,28 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         // request path layout (which uses g/a/v/file form) by design.
         string blobKey = BlobKeys.Hosted(_orgId, "maven", "com.example/newlib", "1.0", "newlib-1.0.jar");
         Assert.True(await _blobs.ExistsAsync(blobKey, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Publish_ExceedsTenantSizeCap_Returns413_BeforeStoringBlob()
+    {
+        // The cap is resolved before the body is read, and the body is streamed through a
+        // LimitedReadStream at that cap — so an oversize upload is rejected (413) while streaming,
+        // before any blob is written.
+        await SetMaxUploadMavenAsync(8);
+        string raw = await IssueTokenAsync(_orgId, _userId);
+        byte[] bytes = Encoding.UTF8.GetBytes("this-jar-body-is-well-over-eight-bytes");
+
+        var ctl = BuildController(authHeader: $"Bearer {raw}");
+        SetBody(ctl.HttpContext, bytes);
+
+        var result = await ctl.Publish("com/example/toobig/1.0/toobig-1.0.jar", CancellationToken.None);
+
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(413, status.StatusCode);
+
+        string blobKey = BlobKeys.Hosted(_orgId, "maven", "com.example/toobig", "1.0", "toobig-1.0.jar");
+        Assert.False(await _blobs.ExistsAsync(blobKey, CancellationToken.None));
     }
 
     [Fact]

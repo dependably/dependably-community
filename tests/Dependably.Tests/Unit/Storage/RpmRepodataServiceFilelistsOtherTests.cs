@@ -13,7 +13,7 @@ namespace Dependably.Tests.Unit.Storage;
 /// Unit coverage for <see cref="RpmRepodataService.BuildFilelistsAsync"/>,
 /// <see cref="RpmRepodataService.BuildOtherAsync"/>, the updated
 /// <see cref="RpmRepodataService.BuildRepomd"/> multi-document overload, and
-/// <see cref="RpmRepodataService.BuildMergedFilelistsAsync"/>. Tests confirm the XML shape
+/// <see cref="RpmRepodataService.BuildMergedFilelistsGzAsync"/>. Tests confirm the XML shape
 /// that dnf/yum requires, gz round-trip fidelity, repomd checksum consistency, and tenant
 /// isolation.
 /// </summary>
@@ -335,7 +335,8 @@ public sealed class RpmRepodataServiceFilelistsOtherTests : IClassFixture<InMemo
             ("tree", "2.1.1", "1.el9", "x86_64", new[] { "/usr/bin/tree" }));
 
         var svc = MakeSvc();
-        string xml = await svc.BuildMergedFilelistsAsync(orgId, upstreamFilelistsGz, CancellationToken.None);
+        byte[] gz = await svc.BuildMergedFilelistsGzAsync(orgId, upstreamFilelistsGz, CancellationToken.None);
+        string xml = System.Text.Encoding.UTF8.GetString(Gunzip(gz));
 
         var doc = XDocument.Parse(xml);
         var packages = doc.Root!.Elements(Fl + "package").ToList();
@@ -363,7 +364,8 @@ public sealed class RpmRepodataServiceFilelistsOtherTests : IClassFixture<InMemo
             ("tree", "2.1.1", "1.el9", "x86_64", new[] { "/usr/bin/tree" }));
 
         var svc = MakeSvc();
-        string xml = await svc.BuildMergedFilelistsAsync(orgId, upstreamFilelistsGz, CancellationToken.None);
+        byte[] gz = await svc.BuildMergedFilelistsGzAsync(orgId, upstreamFilelistsGz, CancellationToken.None);
+        string xml = System.Text.Encoding.UTF8.GetString(Gunzip(gz));
 
         var doc = XDocument.Parse(xml);
         Assert.Equal("2", doc.Root!.Attribute("packages")!.Value);

@@ -1,5 +1,6 @@
 using Cronos;
 using Dependably.Infrastructure.Observability;
+using Dependably.Infrastructure.Redis;
 
 namespace Dependably.Infrastructure;
 
@@ -78,22 +79,49 @@ public abstract class ScheduledBackgroundService : BackgroundService
     /// </summary>
     protected virtual bool DisableOnInvalidCron => false;
 
+    /// <summary>
+    /// When true, each tick first tries to acquire a distributed lock named
+    /// <see cref="LeaderLockName"/>; only the instance that wins the lock runs the work, the
+    /// rest skip the tick. This coordinates jobs that mutate shared state (the database or the
+    /// blob store) across replicas so a multi-replica (HA) deployment does not run them N times.
+    /// In standalone mode the in-process lock always grants on first acquire, so the single
+    /// instance runs everything exactly as before. Default is false — keep per-node work
+    /// (local staging-file sweeps, disk pollers) ungated so every replica maintains its own state.
+    /// </summary>
+    protected virtual bool RequiresLeaderLock => false;
+
+    /// <summary>
+    /// Name of the distributed lock acquired per tick when <see cref="RequiresLeaderLock"/> is
+    /// true. Defaults to a per-job name derived from the concrete type so each coordinated job
+    /// contends independently (rather than one global scheduler lock serialising unrelated jobs).
+    /// </summary>
+    protected virtual string LeaderLockName => $"job:{GetType().Name}";
+
+    /// <summary>
+    /// TTL held on the leader lock for the duration of a tick. Sized well above a normal pass so
+    /// the lock is not lost mid-run; it is released as soon as the tick completes. Default 5 min.
+    /// </summary>
+    protected virtual TimeSpan LeaderLockTtl => TimeSpan.FromMinutes(5);
+
     private readonly IConfiguration _config;
     private readonly ILogger _logger;
     private readonly TimeProvider _time;
+    private readonly IDistributedLock _locks;
 
     /// <summary>
-    /// Constructs the base with the three DI services it needs directly.
+    /// Constructs the base with the DI services it needs directly.
     /// Subclasses pass these through their own constructors.
     /// </summary>
     protected ScheduledBackgroundService(
         IConfiguration config,
         ILogger logger,
-        TimeProvider time)
+        TimeProvider time,
+        IDistributedLock locks)
     {
         _config = config;
         _logger = logger;
         _time = time;
+        _locks = locks;
     }
 
     /// <summary>
@@ -199,6 +227,51 @@ public abstract class ScheduledBackgroundService : BackgroundService
     }
 
     private async Task RunTickGuardedAsync(CancellationToken ct)
+    {
+        if (RequiresLeaderLock)
+        {
+            ILockHandle? leaderLock;
+            try
+            {
+                leaderLock = await _locks.TryAcquireAsync(LeaderLockName, LeaderLockTtl, ct);
+            }
+            catch (Exception ex)
+            {
+                // A distributed-lock backend failure (e.g. a Redis connection blip/failover) is an
+                // infrastructure-layer failure orthogonal to ContinueOnTickError, which governs the
+                // job body's own failures. Left uncaught, this escapes ExecuteAsync and — under
+                // BackgroundService's default StopHost behavior — takes the whole replica down on
+                // a routine Redis hiccup. Treat it exactly like "another instance holds the lock":
+                // skip this tick and let the next scheduled occurrence retry.
+                _logger.LogError(ex,
+                    "{ServiceType} tick skipped — leader lock acquire for {LockName} failed.",
+                    GetType().Name, LeaderLockName);
+                return;
+            }
+
+            if (leaderLock is null)
+            {
+                _logger.LogDebug(
+                    "{ServiceType} tick skipped — another instance holds the {LockName} leader lock.",
+                    GetType().Name, LeaderLockName);
+                return;
+            }
+
+            try
+            {
+                await RunTickCoreAsync(ct);
+            }
+            finally
+            {
+                await leaderLock.DisposeAsync();
+            }
+            return;
+        }
+
+        await RunTickCoreAsync(ct);
+    }
+
+    private async Task RunTickCoreAsync(CancellationToken ct)
     {
         if (ScopeJobName is { } jobName && ScopeMetricName is { } metricName)
         {

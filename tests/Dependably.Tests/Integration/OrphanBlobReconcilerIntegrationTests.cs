@@ -72,9 +72,12 @@ public sealed class OrphanBlobReconcilerIntegrationTests : IClassFixture<Dependa
                 ["ORPHAN_RECONCILE_GRACE_MINUTES"] = "5",
             })
             .Build();
+        var testClock = TestTime.Frozen();
         var sut = new OrphanBlobReconcilerService(tiered, packages, cfg,
+            new AirGapMode(cfg),
             NullLogger<OrphanBlobReconcilerService>.Instance,
-            TestTime.Frozen());
+            testClock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(testClock));
 
         var summary = await sut.RunOnceAsync();
 

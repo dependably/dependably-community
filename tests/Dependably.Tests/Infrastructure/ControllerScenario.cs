@@ -3,8 +3,8 @@ using System.Security.Claims;
 using Dependably.Api;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Mail;
+using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
-using Dependably.Resources;
 using Dependably.Security;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.AspNetCore.Http;
@@ -313,12 +313,16 @@ public sealed class ControllerScenario : IAsyncDisposable
         noAirGap.IsEnabled.Returns(false);
         noAirGap.DisabledJobs.Returns(new System.Collections.Generic.HashSet<string>());
         noAirGap.IsJobDisabled(Arg.Any<string>()).Returns(false);
+        var noOpEventSink = Substitute.For<IPackageEventSink>();
         var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
             db, osv, vulns, audit,
             new ConfigurationBuilder().Build(),
             noAirGap,
             NullLogger<VulnerabilityScanService>.Instance,
-            Clock));
+            Clock,
+            orgs,
+            noOpEventSink,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(Clock)));
 
         var systemAdmins = new SystemAdminRepository(db);
         var tokens = new TokenRepository(db, Clock);
@@ -334,6 +338,17 @@ public sealed class ControllerScenario : IAsyncDisposable
         var blobs = new Dependably.Storage.InMemoryBlobStore();
         var publicUrl = new RequestPublicUrlBuilder(new ConfigurationBuilder().Build());
         var orgAuditEmitter = Substitute.For<Dependably.Infrastructure.Audit.IAuditEmitter>();
+        var login = new LoginService(new LoginService.Dependencies(
+            Db: db,
+            Orgs: orgs,
+            SystemAdmins: systemAdmins,
+            Lockout: Substitute.For<ILockoutStore>(),
+            Audit: audit,
+            ExternalIdentities: new ExternalIdentityRepository(db, Clock),
+            AuditEmitter: orgAuditEmitter,
+            Time: Clock,
+            Mfa: Substitute.For<Dependably.Infrastructure.Identity.IMfaEnrollmentService>(),
+            SystemMfa: Substitute.For<Dependably.Infrastructure.Identity.ISystemMfaEnrollmentService>()));
 
         var license = new LicenseController(licenses, orgs, guard, problems, audit) { ControllerContext = ctx };
         var jobRuns = new BackgroundJobRunRepository(db);
@@ -408,7 +423,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             mailer: mailer)
         { ControllerContext = ctx };
         var orgUsers = new OrgUsersController(
-            orgs, guard, audit, problems)
+            orgs, guard, audit, problems, login, publicUrl)
         { ControllerContext = ctx };
         var orgLists = new OrgListsController(
             allowlist, blocklist, reservedNamespaces, installScriptAllowlist, guard, audit, problems)

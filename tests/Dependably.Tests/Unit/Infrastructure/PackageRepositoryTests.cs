@@ -2,6 +2,7 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
+using Microsoft.Extensions.Time.Testing;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -74,6 +75,36 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
         await using var conn = await _fixture.Store.OpenAsync();
         long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM packages WHERE org_id = @orgId AND purl_name = 'acme'",
+            new { orgId });
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
+    public async Task InsertPackageSql_LoserRaceAgainstSeededCoordinate_NoOpsAndConvergesOnWinner()
+    {
+        // Pins the PRODUCTION statement GetOrCreateAsync actually executes
+        // (PackageRepository.InsertPackageSql), not a test-owned copy that could silently drift.
+        // Reproduces the loser's exact branch: a second INSERT lands at a coordinate a winner row
+        // already occupies. If ON CONFLICT (org_id, ecosystem, purl_name) DO NOTHING is ever
+        // dropped from the const, this INSERT throws SqliteException instead of no-op'ing, and
+        // the assertion below on `affected` never runs — the test goes red.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string winnerId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "raced", purlName: "raced");
+
+        string loserId = Guid.NewGuid().ToString("N");
+        await using var conn = await _fixture.Store.OpenAsync();
+        int affected = await conn.ExecuteAsync(
+            PackageRepository.InsertPackageSql,
+            new { id = loserId, orgId, ecosystem = "npm", name = "raced", purlName = "raced", isProxy = 0 });
+
+        Assert.Equal(0, affected);
+
+        var converged = await _repo.GetOrCreateAsync(orgId, "npm", "raced", "raced", isProxy: false);
+        Assert.Equal(winnerId, converged.Id);
+        Assert.NotEqual(loserId, converged.Id);
+
+        long count = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM packages WHERE org_id = @orgId AND ecosystem = 'npm' AND purl_name = 'raced'",
             new { orgId });
         Assert.Equal(1, count);
     }
@@ -257,6 +288,79 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal("new-sha1", v.ChecksumSha1);
         Assert.Equal("uploaded", v.Origin);
         Assert.Null(v.VulnCheckedAt);
+    }
+
+    [Fact]
+    public async Task UpdateVersionForOverwriteAsync_StampsUpdatedAt_PreservesCreatedAt_AndClearsProvenance()
+    {
+        var clock = TestTime.Frozen();
+        var repo = new PackageRepository(_fixture.Store, time: clock);
+
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(
+            _fixture.Store, pkgId, "1.0.0", Purl(), blobKey: $"old-{Guid.NewGuid():N}", sizeBytes: 100, checksumSha256: "old-sha");
+
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                UPDATE package_versions
+                   SET provenance_status = 'verified', provenance_signer = 'trust-anchor-1'
+                 WHERE id = @id
+                """,
+                new { id = verId });
+        }
+
+        var before = (await repo.GetVersionByIdAsync(orgId, verId))!;
+        Assert.Null(before.UpdatedAt);
+        Assert.Equal("verified", before.ProvenanceStatus);
+
+        clock.Advance(TimeSpan.FromHours(3));
+
+        await repo.UpdateVersionForOverwriteAsync(verId, "new-blob", 200, "new-sha", "uploaded", sha1: "new-sha1");
+
+        var after = (await repo.GetVersionByIdAsync(orgId, verId))!;
+        Assert.Equal("new-blob", after.BlobKey);
+        Assert.Equal(200, after.SizeBytes);
+        Assert.Equal("new-sha", after.ChecksumSha256);
+        Assert.Equal("new-sha1", after.ChecksumSha1);
+        Assert.Equal(before.CreatedAt, after.CreatedAt);
+        Assert.Equal(clock.GetUtcNow(), after.UpdatedAt);
+        Assert.NotEqual(after.CreatedAt, after.UpdatedAt);
+        Assert.Null(after.ProvenanceStatus);
+        Assert.Null(after.ProvenanceSigner);
+    }
+
+    /// <summary>
+    /// A same-version re-push must refresh the stored install manifest and integrity SRI to
+    /// the new artefact's values, and clear them when the new push carries none — a stale
+    /// manifest or integrity describing the replaced bytes must never survive an overwrite.
+    /// </summary>
+    [Fact]
+    public async Task UpdateVersionForOverwriteAsync_RefreshesManifestAndIntegrity_AndClearsWhenAbsent()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string verId = await PackageSeeder.InsertVersionAsync(
+            _fixture.Store, pkgId, "1.0.0", Purl(), blobKey: $"old-{Guid.NewGuid():N}", sizeBytes: 100, checksumSha256: "old-sha");
+
+        await _repo.UpdateVersionForOverwriteAsync(verId, "new-blob", 200, "new-sha", "uploaded",
+            sha1: "new-sha1", integrityValue: "sha512-new==", integrityAlgorithm: "sha512-sri",
+            manifestJson: """{"dependencies":{"yaml":"^2.0.0"}}""");
+
+        var v = (await _repo.GetVersionByIdAsync(orgId, verId))!;
+        Assert.Equal("sha512-new==", v.UpstreamIntegrityValue);
+        Assert.Equal("sha512-sri", v.UpstreamIntegrityAlgorithm);
+        Assert.Equal("""{"dependencies":{"yaml":"^2.0.0"}}""", v.ManifestJson);
+
+        // A subsequent overwrite with no manifest/integrity clears the stored values.
+        await _repo.UpdateVersionForOverwriteAsync(verId, "new-blob-2", 300, "new-sha-2", "uploaded", sha1: null);
+
+        var cleared = (await _repo.GetVersionByIdAsync(orgId, verId))!;
+        Assert.Null(cleared.UpstreamIntegrityValue);
+        Assert.Null(cleared.UpstreamIntegrityAlgorithm);
+        Assert.Null(cleared.ManifestJson);
     }
 
     // ── Pagination ───────────────────────────────────────────────────────────

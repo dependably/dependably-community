@@ -1,5 +1,7 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Mail;
+using Microsoft.Extensions.Localization;
 
 namespace Dependably.Infrastructure.Mail;
 
@@ -24,6 +26,7 @@ public sealed class SmtpInviteMailer : IInviteMailer
     private readonly string _from;
     private readonly bool _enableSsl;
     private readonly ILogger<SmtpInviteMailer> _logger;
+    private readonly IStringLocalizer<SharedResource> _localizer;
 
     // SmtpClient.SendMailAsync honours the client-level Timeout only for synchronous
     // operations; the async path uses the cancellation token passed to SendMailAsync.
@@ -34,9 +37,10 @@ public sealed class SmtpInviteMailer : IInviteMailer
     // Default SMTP submission port (RFC 6409 / RFC 8314 — STARTTLS on 587).
     private const int DefaultSmtpPort = 587;
 
-    public SmtpInviteMailer(IConfiguration config, ILogger<SmtpInviteMailer> logger)
+    public SmtpInviteMailer(IConfiguration config, ILogger<SmtpInviteMailer> logger, IStringLocalizer<SharedResource> localizer)
     {
         _logger = logger;
+        _localizer = localizer;
 
         _host = config["SMTP_HOST"]
             ?? throw new InvalidOperationException("SMTP_HOST is required for SmtpInviteMailer.");
@@ -57,19 +61,14 @@ public sealed class SmtpInviteMailer : IInviteMailer
                  || string.Equals(startTls, "0", StringComparison.OrdinalIgnoreCase));
     }
 
-    public async Task SendInviteAsync(string toAddress, string orgName, string inviteLink, DateTimeOffset expiresAt, CancellationToken ct = default)
+    public async Task SendInviteAsync(string toAddress, string orgName, string inviteLink, DateTimeOffset expiresAt, string language, CancellationToken ct = default)
     {
-        string body =
-            $"You have been invited to join {orgName} on Dependably.\n\n" +
-            $"Accept your invitation using the link below. " +
-            $"The link expires at {expiresAt:yyyy-MM-dd HH:mm} UTC.\n\n" +
-            $"{inviteLink}\n\n" +
-            "If you were not expecting this invitation, you can ignore this email.\n";
+        (string subject, string body) = ComposeInvite(_localizer, language, orgName, inviteLink, expiresAt);
 
         using var client = BuildClient();
         using var message = new MailMessage(_from, toAddress)
         {
-            Subject = $"You've been invited to {orgName} on Dependably",
+            Subject = subject,
             Body = body,
             IsBodyHtml = false,
         };
@@ -83,6 +82,36 @@ public sealed class SmtpInviteMailer : IInviteMailer
             "Invite email delivered via SMTP to {RecipientDomain} for org {OrgName}.",
             ExtractDomain(toAddress),
             orgName);
+    }
+
+    /// <summary>
+    /// Renders the invite subject and body in <paramref name="language"/> (unsupported
+    /// codes fall back to English). IStringLocalizer resolves via CurrentUICulture, so the
+    /// culture is scoped around the lookups — the expiry stays in the locale-neutral
+    /// ISO yyyy-MM-dd HH:mm form regardless of the recipient's language.
+    /// </summary>
+    internal static (string Subject, string Body) ComposeInvite(
+        IStringLocalizer<SharedResource> localizer,
+        string language,
+        string orgName,
+        string inviteLink,
+        DateTimeOffset expiresAt)
+    {
+        var culture = new CultureInfo(
+            LanguageCodes.IsSupported(language) ? language : LanguageCodes.Default);
+        string expiry = expiresAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+
+        var original = CultureInfo.CurrentUICulture;
+        try
+        {
+            CultureInfo.CurrentUICulture = culture;
+            return (localizer["email.invite.subject", orgName],
+                    localizer["email.invite.body", orgName, expiry, inviteLink]);
+        }
+        finally
+        {
+            CultureInfo.CurrentUICulture = original;
+        }
     }
 
     private SmtpClient BuildClient()

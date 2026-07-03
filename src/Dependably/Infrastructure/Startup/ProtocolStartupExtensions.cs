@@ -26,6 +26,18 @@ internal static class ProtocolStartupExtensions
 
     internal static void AddDependablyProtocolServices(this WebApplicationBuilder builder)
     {
+        // TTL cache for buffered upstream metadata. Disabled by default on a standard instance
+        // (positive TTL 0 = pure single-flight pass-through, current behaviour); defaults on in
+        // edge mode so a headless pull-through node absorbs metadata load and survives a brief
+        // master outage. Explicit Proxy:MetadataCache* config always overrides the mode default.
+        builder.Services.AddSingleton(sp =>
+            MetadataCacheOptions.Resolve(
+                sp.GetRequiredService<IConfiguration>(),
+                sp.GetRequiredService<IEdgeMode>()));
+        builder.Services.AddSingleton(sp =>
+            new MetadataResponseCache(
+                sp.GetRequiredService<MetadataCacheOptions>(),
+                sp.GetRequiredService<TimeProvider>()));
         builder.Services.AddSingleton<UpstreamClient>();
         builder.Services.AddSingleton<UpstreamRegistryResolver>();
         builder.Services.AddSingleton<IUpstreamLatestVersionResolver, UpstreamLatestVersionResolver>();
@@ -33,7 +45,14 @@ internal static class ProtocolStartupExtensions
         // Connect-time SSRF gate shared by the upstream HTTP handlers. Validates the IP
         // actually dialed (every connection + every redirect hop), closing the DNS-rebinding
         // window the URL-level pre-check cannot. Predicate is the same SsrfGuard block-list.
-        builder.Services.AddSingleton(new SsrfConnectCallback(SsrfGuard.IsBlockedIp));
+        // In edge mode the exact master host is allowlisted so an internal master over a LAN
+        // link is reachable; every other private/internal host stays blocked.
+        builder.Services.AddSingleton(sp =>
+        {
+            var edge = sp.GetRequiredService<IEdgeMode>();
+            return new SsrfConnectCallback(
+                SsrfGuard.IsBlockedIp, edge.IsEdge ? edge.MasterHost : null);
+        });
         builder.Services.AddSingleton<AllowlistService>();
         builder.Services.AddSingleton<BlockGateService>();
 
@@ -51,7 +70,11 @@ internal static class ProtocolStartupExtensions
         // Maven upstream proxy
         builder.Services.AddSingleton<MavenUpstreamFetcher>();
 
-        // RPM upstream proxy
+        // RPM upstream proxy. RpmPrimaryMapCache is a dedicated, size-bounded IMemoryCache for
+        // parsed primary.xml.gz package maps — separate from the shared metadata cache because a
+        // Fedora/EPEL-scale map (tens to 100+ MB with accurate Size accounting) would otherwise
+        // blow the shared cache's much smaller budget or evict every other tenant's metadata.
+        builder.Services.AddSingleton<RpmPrimaryMapCache>();
         builder.Services.AddSingleton<RpmUpstreamProxyServices>();
         builder.Services.AddSingleton<RpmUpstreamProxy>();
 

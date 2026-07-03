@@ -66,6 +66,7 @@ public sealed partial class SchemaInitializer
         await RunOnceAsync(conn, "fix_npm_version_purl_slash_encoding", FixNpmVersionPurlSlashEncodingAsync);
         await RunOnceAsync(conn, "fix_npm_activity_purl_encoding", FixNpmActivityPurlEncodingAsync);
         await RunOnceAsync(conn, "fix_nuget_proxy_purl_names", FixNuGetProxyPurlNamesAsync);
+        await RunOnceAsync(conn, "lowercase_nuget_hosted_versions", LowercaseNuGetHostedVersionsAsync);
         await RunOnceAsync(conn, "backfill_users_account_type_saml", BackfillUsersAccountTypeSamlAsync);
         // transactional: false — ExpandRoleCheckSqliteAsync drives PRAGMA writable_schema + a
         // schema_version bump that don't compose with an enclosing transaction. Safe because the
@@ -214,6 +215,51 @@ public sealed partial class SchemaInitializer
         // column is kept but dual-written going forward. Idempotent via the applied-migrations ledger.
         // xtenant: one-shot data migration across every tenant on the instance.
         await RunOnceAsync(conn, "migrate_allow_version_overwrite_to_policy", MigrateAllowVersionOverwriteToPolicyAsync);
+
+        // Normalize existing claim.name values to the per-ecosystem canonical key
+        // (PurlNormalizer.CanonicalName). Claims were stored with only ToLowerInvariant, so a
+        // PyPI claim created for 'typing_extensions' never matched the enforcement sites that
+        // resolve by the PEP 503 name 'typing-extensions'. Rewrites each row to its canonical
+        // name; when a canonical row already occupies the (org, ecosystem, name) slot the
+        // non-canonical duplicate is soft-deleted so the resolvers read the canonical one.
+        await RunOnceAsync(conn, "normalize_claim_names_canonical", NormalizeClaimNamesCanonicalAsync);
+    }
+
+    // Rewrites claim.name to the canonical per-ecosystem key so admin-created claims match the
+    // name every enforcement site resolves by. Runs on both providers via the same C# path
+    // (PurlNormalizer.CanonicalName); the UPDATE statements are provider-specific only for the
+    // now() timestamp expression. Idempotent: already-canonical rows are skipped.
+    private async Task NormalizeClaimNamesCanonicalAsync(DbConnection conn)
+    {
+        var rows = (await conn.QueryAsync<(string Id, string OrgId, string Ecosystem, string Name)>(
+            "SELECT id AS Id, org_id AS OrgId, ecosystem AS Ecosystem, name AS Name FROM claim WHERE deleted_at IS NULL")).ToList();
+
+        bool pg = _db.Provider == DbProvider.Postgres;
+        // xtenant: one-shot normalization keyed by each claim row's own PK id; the loop visits
+        // every tenant's rows and rewrites only the row it read.
+        string renameSql = pg
+            ? "UPDATE claim SET name = @canonical, updated_at = to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') WHERE id = @id"
+            : "UPDATE claim SET name = @canonical, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = @id";
+        // xtenant: soft-deletes the row identified by its own PK id when a canonical twin exists.
+        string softDeleteSql = pg
+            ? "UPDATE claim SET deleted_at = to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), updated_at = to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') WHERE id = @id"
+            : "UPDATE claim SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = @id";
+
+        foreach (var (Id, OrgId, Ecosystem, Name) in rows)
+        {
+            string canonical = PurlNormalizer.CanonicalName(Ecosystem, Name);
+            if (string.Equals(canonical, Name, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // xtenant: existence probe scoped to the claim row's own org_id.
+            int occupied = await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM claim WHERE org_id = @orgId AND ecosystem = @eco AND name = @canonical",
+                new { orgId = OrgId, eco = Ecosystem, canonical });
+
+            await conn.ExecuteAsync(occupied > 0 ? softDeleteSql : renameSql, new { id = Id, canonical });
+        }
     }
 
     // Copies each entry of the legacy org_settings.maven_reserved_prefixes JSON column into a
@@ -1042,6 +1088,37 @@ public sealed partial class SchemaInitializer
             // fresh installs get it from the CREATE TABLE block, upgraded DBs rely on controller
             // validation.
             "ALTER TABLE org_settings ADD COLUMN block_revoked TEXT NOT NULL DEFAULT 'warn'",
+            // Same-version-repush timestamp on package_versions: stamped when a hosted version
+            // is overwritten at the same version number. NULL = never overwritten, so the
+            // effective pushed date falls back to created_at.
+            "ALTER TABLE package_versions ADD COLUMN updated_at TEXT",
+            // NuGet symbol-server (SSQP) index. New table; created here on upgraded databases
+            // (fresh installs pick it up from the Schema.sql / Schema.pg.sql CREATE blocks). The
+            // TEXT primary key needs no provider-specific dialect, so the CREATE runs verbatim on
+            // both providers; created_at is supplied explicitly at insert, so no DEFAULT is needed.
+            "CREATE TABLE IF NOT EXISTS nuget_symbol_index (" +
+                "id TEXT PRIMARY KEY, " +
+                "org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE, " +
+                "package_version_id TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE, " +
+                "pdb_filename TEXT NOT NULL, ssqp_key TEXT NOT NULL, snupkg_blob_key TEXT NOT NULL, " +
+                "entry_path TEXT NOT NULL, created_at TEXT NOT NULL, " +
+                "UNIQUE (org_id, ssqp_key, pdb_filename, package_version_id))",
+            "CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_lookup ON nuget_symbol_index(org_id, ssqp_key, pdb_filename)",
+            "CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_pv ON nuget_symbol_index(package_version_id)",
+            // Install-relevant manifest subset (bin, dependencies, engines, …) captured at
+            // hosted npm publish from the tarball's package.json and merged into the
+            // packument's per-version objects. NULL for proxy rows, non-npm rows, and hosted
+            // rows published before the column existed (those keep the legacy minimal shape).
+            "ALTER TABLE package_versions ADD COLUMN manifest_json TEXT",
+            // Per-tenant RPM hosted-publishing posture override. Nullable, no DEFAULT: NULL means
+            // "inherit the instance Rpm:UpstreamMode env value" and must stay distinguishable from
+            // an explicit 'passthrough' — a NOT NULL DEFAULT would materialize 'passthrough' into
+            // every existing row and permanently destroy that distinction. An explicit org value
+            // overrides the env value in EITHER direction (see RpmController.IsRpmPassthroughEffective).
+            // SQLite's ADD COLUMN restriction is on PRIMARY KEY/UNIQUE and non-constant DEFAULT, not
+            // CHECK, so the CHECK ships here too (mirrors the users.account_type migration above).
+            "ALTER TABLE org_settings ADD COLUMN rpm_upstream_mode TEXT " +
+                "CHECK (rpm_upstream_mode IS NULL OR rpm_upstream_mode IN ('passthrough','merged'))",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)
@@ -1371,6 +1448,45 @@ public sealed partial class SchemaInitializer
         await conn.ExecuteAsync(
             "UPDATE packages SET purl_name = name WHERE ecosystem = 'nuget' AND is_proxy = 1 AND purl_name LIKE 'pkg:%'");
     }
+
+    // NuGet hosted versions are now stored in the lowercased canonical form
+    // (NuGetNormalization.NormalizeVersion) every read path resolves against. Existing rows
+    // published under the earlier case-preserving normalization (e.g. "1.0.0-Beta1") can never
+    // match the lowercased flatcontainer/registration lookup, so this one-shot lowercases them.
+    //
+    // Two independent guards keep this collision-proof against UNIQUE(package_id, version):
+    //   1. The NOT EXISTS clause skips a row whose lowercased slot is already taken by a
+    //      separate, already-lowercase row (e.g. "beta1" published alongside a stale "Beta1").
+    //   2. The id = (SELECT MIN(id) ...) clause picks exactly one deterministic winner when
+    //      TWO OR MORE non-lowercase rows collide on the same lowercased target (e.g. "Beta1"
+    //      and "BETA1" with no separate lowercase row already present). Without this, a single
+    //      UPDATE statement evaluates its WHERE clause against the pre-update snapshot, so both
+    //      colliding rows' NOT EXISTS checks pass simultaneously and both attempt to write the
+    //      same lowercase value — a UNIQUE violation that fails the surrounding transaction and
+    //      leaves the migration permanently unrecorded (a boot loop, since RunOnceAsync retries
+    //      an unrecorded migration on every startup). Only the smallest-id row among the
+    //      colliding group is updated; the rest are silently left mixed-case (unreachable, no
+    //      worse than pre-fix) rather than crashing. LOWER(), NOT EXISTS, and MIN() are
+    //      provider-agnostic.
+    // xtenant: one-shot data migration keyed on ecosystem; runs across every tenant on the instance.
+    private static Task LowercaseNuGetHostedVersionsAsync(DbConnection conn) =>
+        conn.ExecuteAsync("""
+            UPDATE package_versions
+            SET version = LOWER(version)
+            WHERE version <> LOWER(version)
+              AND package_id IN (SELECT id FROM packages WHERE ecosystem = 'nuget')
+              AND NOT EXISTS (
+                SELECT 1 FROM package_versions pv2
+                WHERE pv2.package_id = package_versions.package_id
+                  AND pv2.version = LOWER(package_versions.version)
+              )
+              AND id = (
+                SELECT MIN(pv3.id) FROM package_versions pv3
+                WHERE pv3.package_id = package_versions.package_id
+                  AND LOWER(pv3.version) = LOWER(package_versions.version)
+                  AND pv3.version <> LOWER(pv3.version)
+              )
+            """);
 
     // Extend the users.role + invites.role CHECK constraint to include 'auditor'.
     // New databases pick this up from the CREATE TABLE statements in Schema.sql /

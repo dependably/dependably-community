@@ -20,17 +20,23 @@ public sealed class OrgUsersController : OrgScopedControllerBase
     private readonly OrgAccessGuard _guard;
     private readonly AuditRepository _audit;
     private readonly ProblemResults _problems;
+    private readonly LoginService _login;
+    private readonly IPublicUrlBuilder _urls;
 
     public OrgUsersController(
         OrgRepository orgs,
         OrgAccessGuard guard,
         AuditRepository audit,
-        ProblemResults problems)
+        ProblemResults problems,
+        LoginService login,
+        IPublicUrlBuilder urls)
     {
         _orgs = orgs;
         _guard = guard;
         _audit = audit;
         _problems = problems;
+        _login = login;
+        _urls = urls;
     }
 
     /// <summary>GET /api/v1/orgs/{org}/users</summary>
@@ -63,7 +69,7 @@ public sealed class OrgUsersController : OrgScopedControllerBase
 
         if (req.Role is not ("member" or "admin" or "owner" or "auditor"))
         {
-            return _problems.ValidationErrorAction("role", "Role must be 'member', 'admin', 'owner', or 'auditor'.");
+            return _problems.ValidationErrorActionKey("role", "error.member.roleInvalid");
         }
 
         string orgId = CurrentTenantId();
@@ -93,12 +99,31 @@ public sealed class OrgUsersController : OrgScopedControllerBase
         if (req.Role != "owner" && target.Role == "owner"
             && await _orgs.CountOwnersAsync(orgId, ct) <= 1)
         {
-            return _problems.ConflictAction("Cannot demote the last owner of an org.");
+            return _problems.ConflictActionKey("error.member.lastOwnerDemote");
         }
 
-        await _orgs.UpdateMemberRoleAsync(orgId, userId, req.Role, ct);
+        // A same-role PATCH is a no-op: skip the token_version bump — which would otherwise
+        // force-log-out every one of the target's sessions — and the role-change audit event.
+        if (target.Role == req.Role)
+        {
+            return NoContent();
+        }
+
+        // Bumps token_version and evicts the version cache, so the target's outstanding session
+        // JWTs (which snapshot the old role) fail the tver check on their next request — a demotion
+        // takes effect immediately rather than persisting for the 8h token lifetime.
+        long newTokenVersion = await _orgs.UpdateMemberRoleAsync(orgId, userId, req.Role, ct);
         await _audit.LogAsync("member_role_changed", orgId, callerId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { user_id = userId, new_role = req.Role }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { user_id = userId, new_role = req.Role }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
+
+        // Self role change: the caller's own session JWT was just staled by the token_version bump.
+        // Re-issue their cookie at the new role and version so they stay logged in with the updated
+        // (typically lower) privileges rather than being bounced to the login screen.
+        if (userId == callerId)
+        {
+            string fresh = await _login.IssueTenantSessionAsync(callerId, orgId, req.Role, newTokenVersion, ct);
+            Response.Cookies.Append("dependably_session", fresh, _urls.SessionCookieOptions(HttpContext));
+        }
 
         return NoContent();
     }
@@ -139,12 +164,12 @@ public sealed class OrgUsersController : OrgScopedControllerBase
         // Last-owner invariant: tenant must always have at least one owner.
         if (target.Role == "owner" && await _orgs.CountOwnersAsync(orgId, ct) <= 1)
         {
-            return _problems.ConflictAction("Cannot remove the last owner of an org.");
+            return _problems.ConflictActionKey("error.member.lastOwnerRemove");
         }
 
         await _orgs.RemoveOrgMemberAsync(orgId, userId, ct);
         await _audit.LogAsync("member_removed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { user_id = userId }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { user_id = userId }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
         return NoContent();
     }
 }

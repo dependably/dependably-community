@@ -26,9 +26,8 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
     private readonly ProblemResults _problems;
     private readonly IInviteMailer? _mailer;
 
-    // Dependency-injection constructor; the parameter list is the controller's declared
-    // dependency set and grouping it into an aggregate would hide dependencies without
-    // adding cohesion.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Dependency-injection constructor: the parameter list is the declared dependency set; grouping it into an aggregate would hide dependencies without adding cohesion.")]
     public OrgInvitesController(
         InviteRepository invites,
         OrgRepository orgs,
@@ -77,7 +76,7 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
 
         if (string.IsNullOrWhiteSpace(req.Email))
         {
-            return _problems.ValidationErrorAction("email", "Email is required.");
+            return _problems.ValidationErrorActionKey("email", "error.invite.emailRequired");
         }
 
         string orgId = CurrentTenantId();
@@ -85,7 +84,7 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
         string role = string.IsNullOrWhiteSpace(req.Role) ? "member" : req.Role.Trim().ToLowerInvariant();
         if (role is not ("member" or "admin" or "owner" or "auditor"))
         {
-            return _problems.ValidationErrorAction("role", "Role must be 'member', 'admin', 'owner', or 'auditor'.");
+            return _problems.ValidationErrorActionKey("role", "error.member.roleInvalid");
         }
 
         // Inviting at owner is an owner-only operation, matching PatchMemberRole. Admins
@@ -108,8 +107,7 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
         int cap = await _orgs.GetMaxPendingInvitesPerTenantAsync(ct);
         if (pendingCount >= cap)
         {
-            return _problems.ValidationErrorAction("invites",
-                $"Pending invite limit ({cap}) reached for this tenant. Cancel unused invites before creating new ones.");
+            return _problems.ValidationErrorActionKey("invites", "error.invite.limitReached", cap);
         }
 
         var (raw, record) = await _invites.CreateAsync(orgId, req.Email, userId!, role, ct);
@@ -121,7 +119,7 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
                 email = record.Email,
                 role = record.Role,
                 expires_at = record.ExpiresAt,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         // Join is served by the tenant SPA at the request host: single-mode → the bare host IS the
         // tenant; multi-mode → the admin issuing the invite is already on the tenant subdomain
@@ -148,7 +146,13 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
         try
         {
             string orgSlug = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantSlug ?? orgId;
-            await _mailer.SendInviteAsync(record.Email, orgSlug, inviteLink, record.ExpiresAt, ct);
+            // The invitee has no account (and no language preference) yet — the tenant's
+            // default language is the best signal for the email locale.
+            var settings = await _orgs.GetSettingsAsync(orgId, ct);
+            string inviteLanguage = settings?.DefaultLanguage ?? LanguageCodes.Default;
+            // deepcode ignore PrivateInformationExposure: the mailer logs only the recipient's domain
+            // (ExtractDomain) — the email local-part, invite link, and token never reach a log sink.
+            await _mailer.SendInviteAsync(record.Email, orgSlug, inviteLink, record.ExpiresAt, inviteLanguage, ct);
             return Ok(new { record, invite_link = (string?)null, delivered_via = "email" });
         }
         catch (Exception ex)
@@ -181,7 +185,7 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
         if (await _invites.DeleteAsync(orgId, id, ct) > 0)
         {
             await _audit.LogAsync("invite_deleted", orgId, GetUserId(),
-                detail: System.Text.Json.JsonSerializer.Serialize(new { invite_id = id }), ct: ct);
+                detail: System.Text.Json.JsonSerializer.Serialize(new { invite_id = id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
         }
 
         return NoContent();

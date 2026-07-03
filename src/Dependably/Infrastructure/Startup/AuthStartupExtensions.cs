@@ -70,6 +70,12 @@ internal static class AuthStartupExtensions
             case "bound":
                 builder.Services.AddScoped<ITenantResolver, DeploymentBoundTenantResolver>();
                 break;
+            case "edge":
+                // Edge is a headless cache-only node serving one logical cache: it collapses to a
+                // single implicit realm, so it reuses the single-tenant resolver (the one seeded
+                // edge org). There is no per-request tenant routing on an edge.
+                builder.Services.AddScoped<ITenantResolver, SingleTenantResolver>();
+                break;
             default:
                 builder.Services.AddScoped<ITenantResolver, SingleTenantResolver>();
                 break;
@@ -215,6 +221,23 @@ internal static class AuthStartupExtensions
         {
             throw new InvalidOperationException(
                 "DEPENDABLY_DEPLOYMENT_MODE=ha requires REDIS_CONNECTION_STRING to be set.");
+        }
+
+        // HA is multi-replica: SQLite cannot be shared across replicas (its file locking is
+        // unsupported over NFS/CIFS and produces write-lock corruption, WAL divergence, and silent
+        // data loss). Fail closed here — mirroring the Redis check — rather than boot into the
+        // documented-forbidden SQLite+HA configuration with no error. DB_PROVIDER defaults to
+        // sqlite when unset, so an operator who sets ha + Redis but leaves the default provider is
+        // caught here.
+        string dbProvider = (builder.Configuration["DB_PROVIDER"] ?? "sqlite").ToLowerInvariant();
+        if (deploymentMode == "ha" && dbProvider != "postgres")
+        {
+            throw new InvalidOperationException(
+                $"DEPENDABLY_DEPLOYMENT_MODE=ha requires DB_PROVIDER=postgres (got "
+                + $"'{(string.IsNullOrWhiteSpace(dbProvider) ? "sqlite (default)" : dbProvider)}'). "
+                + "SQLite does not support multi-instance access — sharing one database file across "
+                + "replicas causes write-lock corruption, WAL divergence, and silent data loss. "
+                + "See CONTRIBUTING.md -> High-availability deployment.");
         }
 
         if (string.IsNullOrWhiteSpace(redisConnStr))

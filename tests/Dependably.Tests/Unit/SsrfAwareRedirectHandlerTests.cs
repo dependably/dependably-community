@@ -272,11 +272,12 @@ file sealed class StubValidator : IUpstreamUrlValidator
     public List<string> ValidatedUrls { get; } = [];
     public List<(string Url, string? OrgId)> ValidatedCalls { get; } = [];
 
-    public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
+    public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
     {
         ValidatedUrls.Add(url);
         ValidatedCalls.Add((url, orgId));
-        return Task.FromResult(!BlockedUrls.Contains(url));
+        return Task.FromResult(
+            BlockedUrls.Contains(url) ? UpstreamUrlBlock.BlockedRange : UpstreamUrlBlock.None);
     }
 }
 

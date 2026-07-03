@@ -167,6 +167,28 @@ public sealed class OciPushTests : IClassFixture<DependablyFactory>, IAsyncLifet
         Assert.Contains("MANIFEST_INVALID", await put.Content.ReadAsStringAsync());
     }
 
+    [Fact]
+    public async Task ManifestPut_OverManifestCap_Returns413_BeforeStoring()
+    {
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        // A manifest body larger than the 4 MiB manifest cap is rejected while streaming, before
+        // it is fully buffered and before any store attempt. Real manifests are a few KB; this
+        // guards the process against a hostile multi-hundred-MB manifest PUT.
+        byte[] tooBig = RandomBytes(5 * 1024 * 1024);
+
+        using (var put = await PutManifestAsync(client, "toobig", tooBig))
+        {
+            Assert.Equal(HttpStatusCode.RequestEntityTooLarge, put.StatusCode);
+            Assert.Contains("MANIFEST_INVALID", await put.Content.ReadAsStringAsync());
+        }
+
+        // The oversize manifest must not have been stored under its tag.
+        using var get = await client.GetAsync($"/v2/{Repo}/manifests/toobig");
+        Assert.Equal(HttpStatusCode.NotFound, get.StatusCode);
+    }
+
     // ── Cumulative size enforcement ──────────────────────────────────────────────────
 
     [Fact]

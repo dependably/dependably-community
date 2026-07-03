@@ -101,7 +101,7 @@ public sealed class InstanceController : ControllerBase
             {
                 keys = settings.Keys.ToArray(),
                 values = settings,
-            }),
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return NoContent();
@@ -162,7 +162,7 @@ public sealed class InstanceController : ControllerBase
 
         if (req is null)
         {
-            return problems.ValidationErrorAction("body", "Request body required.");
+            return problems.ValidationErrorActionKey("body", "error.common.requestBodyRequired");
         }
 
         var resolved = await access.ResolveAsync(ct);
@@ -183,7 +183,7 @@ public sealed class InstanceController : ControllerBase
             string? invalid = MetricsAccessEditing.FindInvalidEntry(req.AllowedIps, warnings);
             if (invalid is not null)
             {
-                return problems.ValidationErrorAction("allowedIps", $"\"{invalid}\" is not a valid IP or CIDR.");
+                return problems.ValidationErrorActionKey("allowedIps", "error.common.invalidIpOrCidr", invalid);
             }
         }
 
@@ -211,7 +211,7 @@ public sealed class InstanceController : ControllerBase
             {
                 enabled = req.Enabled,
                 allowedIps = req.AllowedIps,
-            }),
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             ct: ct);
 
         return Ok(new { warnings });

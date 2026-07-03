@@ -10,6 +10,6 @@ namespace Dependably.Tests.Infrastructure;
 /// </summary>
 public sealed class PermissiveUpstreamUrlValidator : IUpstreamUrlValidator
 {
-    public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
-        => Task.FromResult(true);
+    public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
+        => Task.FromResult(UpstreamUrlBlock.None);
 }

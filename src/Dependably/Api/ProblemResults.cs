@@ -1,4 +1,3 @@
-using Dependably.Resources;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Localization;
 
@@ -101,6 +100,33 @@ public sealed class ProblemResults
         problem.Extensions["field"] = fieldName;
         return new ObjectResult(problem) { StatusCode = StatusCodes.Status422UnprocessableEntity };
     }
+
+    /// <summary>Variant of <see cref="ValidationErrorAction"/> whose detail is a SharedResource
+    /// key, resolved against the per-request culture. Optional args are applied as
+    /// string.Format placeholders ({0}, {1}, …) in the resource value.</summary>
+    public IActionResult ValidationErrorActionKey(string fieldName, string resourceKey, params object[] args)
+        => ValidationErrorAction(fieldName, Localize(resourceKey, args));
+
+    /// <summary>Variant of <see cref="ConflictAction"/> whose detail is a SharedResource
+    /// key, resolved against the per-request culture.</summary>
+    public IActionResult ConflictActionKey(string resourceKey, string? reason = null)
+        => ConflictAction(_localizer[resourceKey], reason);
+
+    /// <summary>Like <see cref="ConflictActionKey"/> but with string.Format placeholders.
+    /// Separate name because a params overload would bind a lone string argument to the
+    /// reason parameter of <see cref="ConflictActionKey"/> instead.</summary>
+    public IActionResult ConflictActionKeyFormat(string resourceKey, params object[] args)
+        => ConflictAction(Localize(resourceKey, args));
+
+    /// <summary>Variant of <see cref="ForbiddenAction"/> whose detail is a SharedResource
+    /// key, resolved against the per-request culture.</summary>
+    public IActionResult ForbiddenActionKey(string resourceKey, string? reason = null)
+        => ForbiddenAction(_localizer[resourceKey], reason);
+
+    // The two-arg localizer indexer always runs string.Format; route zero-arg lookups
+    // through the plain indexer so resource values may contain literal braces.
+    private string Localize(string resourceKey, object[] args)
+        => args.Length == 0 ? _localizer[resourceKey] : _localizer[resourceKey, args];
 
     public IActionResult ConflictAction(string detail, string? reason = null)
     {

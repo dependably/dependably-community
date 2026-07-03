@@ -127,6 +127,26 @@ describe('setupI18n - locale resolution', () => {
     })
   })
 
+  it('sets document.documentElement.lang to the resolved locale on boot', async () => {
+    document.cookie = `.AspNetCore.Culture=${encodeURIComponent('c=fr|uic=fr')}; path=/`
+    document.documentElement.lang = 'en'
+
+    const { setupI18n } = await import('./index.js')
+    setupI18n()
+
+    expect(document.documentElement.lang).toBe('fr')
+  })
+
+  it('sets document.documentElement.lang from the navigator fallback on boot', async () => {
+    getLocaleFromNavigatorSpy.mockReturnValue('fr-CA')
+    document.documentElement.lang = 'en'
+
+    const { setupI18n } = await import('./index.js')
+    setupI18n()
+
+    expect(document.documentElement.lang).toBe('fr')
+  })
+
   it('returns the init() promise to the caller', async () => {
     const sentinel = Promise.resolve('init-done')
     initSpy.mockReturnValueOnce(sentinel)

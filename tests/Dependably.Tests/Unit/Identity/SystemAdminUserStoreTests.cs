@@ -18,6 +18,7 @@ public sealed class SystemAdminUserStoreTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
     private readonly MfaSecretProtector _protector = new(RandomNumberGenerator.GetBytes(32));
+    private readonly RecoveryCodeHasher _recoveryHasher = new(RandomNumberGenerator.GetBytes(32));
 
     public async Task InitializeAsync()
     {
@@ -34,7 +35,7 @@ public sealed class SystemAdminUserStoreTests : IAsyncLifetime
         await _db.DisposeAsync();
     }
 
-    private SystemAdminUserStore Store() => new(_db, _protector);
+    private SystemAdminUserStore Store() => new(_db, _protector, _recoveryHasher);
 
     // ── FindByIdAsync ─────────────────────────────────────────────────────────
 
@@ -126,7 +127,7 @@ public sealed class SystemAdminUserStoreTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ReplaceCodesAsync_StoredColumnHoldsHashesNotPlaintext()
+    public async Task ReplaceCodesAsync_StoredColumnHoldsKeyedHashesNotPlaintextNorBareSha256()
     {
         var store = Store();
         var user = new SystemAdminUser { Id = "sa1", Email = "admin@example.com" };
@@ -138,9 +139,27 @@ public sealed class SystemAdminUserStoreTests : IAsyncLifetime
         Assert.DoesNotContain(plainCode, user.RecoveryCodes!);
 
         var hashes = JsonSerializer.Deserialize<List<string>>(user.RecoveryCodes!);
-        string expectedHash = Convert.ToHexString(
+        Assert.All(hashes!, h => Assert.StartsWith("hmac:v1:", h));
+        string bareSha256 = Convert.ToHexString(
             SHA256.HashData(Encoding.UTF8.GetBytes(plainCode))).ToLowerInvariant();
-        Assert.Contains(expectedHash, hashes!);
+        Assert.DoesNotContain(bareSha256, hashes!);
+    }
+
+    [Fact]
+    public async Task RedeemCodeAsync_LegacyBareSha256Code_StillRedeems()
+    {
+        var store = Store();
+        var user = new SystemAdminUser { Id = "sa1", Email = "admin@example.com" };
+        const string legacyCode = "LEGACY-SA-CODE";
+
+        string legacyHash = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(legacyCode))).ToLowerInvariant();
+        user.RecoveryCodes = JsonSerializer.Serialize(new List<string> { legacyHash });
+        await store.UpdateAsync(user, CancellationToken.None);
+
+        Assert.True(await store.RedeemCodeAsync(user, legacyCode, CancellationToken.None));
+        Assert.Equal(0, await store.CountCodesAsync(user, CancellationToken.None));
+        Assert.False(await store.RedeemCodeAsync(user, legacyCode, CancellationToken.None));
     }
 
     [Fact]

@@ -102,6 +102,38 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
             NullLogger<MavenUpstreamFetcher>.Instance, TimeProvider.System);
     }
 
+    // A fetcher whose upstream HttpClient throws a transport-level HttpRequestException (null
+    // StatusCode) — the shape a DNS failure / connection reset / TLS error takes, distinct from an
+    // upstream HTTP status.
+    private MavenUpstreamFetcher BuildFaultingFetcher()
+    {
+        var blobs = new InMemoryBlobStore();
+        var tiered = new TieredBlobStorage(blobs, blobs);
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Maven:VerifyWithUpstreamSha256"] = "false",
+                ["PROXY_STAGING_PATH"] = Path.Combine(Path.GetTempPath(),
+                    $"dependably-maven-test-{Guid.NewGuid():N}"),
+            })
+            .Build();
+        var httpFactory = new StaticHttpClientFactory(new HttpClient(new ConnectionFaultHandler()));
+        var upstreamClient = new UpstreamClient(
+            httpFactory, tiered, new AuditRepository(_db), new AllowAllValidator(), new StubAirGapMode(false),
+            new Dependably.Infrastructure.DriveInfoStagingDiskInfo(Path.GetTempPath()),
+            Dependably.Infrastructure.StagingOptions.Resolve(config),
+            NullLogger<UpstreamClient>.Instance);
+        return new MavenUpstreamFetcher(
+            upstreamClient, tiered, _db, config,
+            NullLogger<MavenUpstreamFetcher>.Instance, TimeProvider.System);
+    }
+
+    private sealed class ConnectionFaultHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            => throw new HttpRequestException("simulated transport failure (connection reset)");
+    }
+
     private static string Sha256Hex(byte[] data)
         => Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
 
@@ -116,6 +148,18 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         _server.Given(Request.Create().WithPath("/" + path + ".sha256").UsingGet())
                .RespondWith(Response.Create().WithStatusCode(200)
                    .WithBody(sha256 + "  some-file.jar\n"));
+    }
+
+    // The fetch result no longer carries the artifact bytes (they live in the cache tier under
+    // BlobKey and are streamed to the client); read them back from the blob store to assert
+    // round-trip integrity.
+    private static async Task<byte[]> ReadBlobAsync(InMemoryBlobStore blobs, string blobKey)
+    {
+        await using var s = await blobs.GetAsync(blobKey, default)
+            ?? throw new Xunit.Sdk.XunitException($"blob {blobKey} not found");
+        using var ms = new MemoryStream();
+        await s.CopyToAsync(ms);
+        return ms.ToArray();
     }
 
     private static string Sha1Hex(byte[] data)
@@ -155,7 +199,8 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         var result = await fetcher.FetchArtifactAsync(_upstream, path, default);
 
         Assert.NotNull(result);
-        Assert.Equal(bytes, result!.Bytes);
+        Assert.Equal(bytes.Length, result!.SizeBytes);
+        Assert.Equal(bytes, await ReadBlobAsync(blobs, result.BlobKey));
         Assert.Equal(sha, result.Sha256);
         Assert.Equal(BlobKeys.Proxy(sha), result.BlobKey);
         Assert.False(result.IsFromCache);
@@ -210,7 +255,8 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         var result = await fetcher.FetchArtifactAsync(_upstream, path, default);
 
         Assert.NotNull(result);
-        Assert.Equal(bytes, result!.Bytes);
+        Assert.Equal(bytes.Length, result!.SizeBytes);
+        Assert.Equal(bytes, await ReadBlobAsync(blobs, result.BlobKey));
         Assert.Equal(Sha256Hex(bytes), result.Sha256);
         Assert.Equal(Sha1Hex(bytes), result.Sha1);
         Assert.Equal(BlobKeys.Proxy(Sha256Hex(bytes)), result.BlobKey);
@@ -327,7 +373,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
 
         Assert.NotNull(result);
         Assert.True(result!.IsFromCache);
-        Assert.Equal(bytes, result.Bytes);
+        Assert.Equal(bytes, await ReadBlobAsync(blobs, result.BlobKey));
         Assert.Equal(sha, result.Sha256);
 
         // Primary URL must not have been contacted.
@@ -401,7 +447,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         var result = await fetcher.FetchArtifactAsync(_upstream, path, default);
 
         Assert.NotNull(result);
-        Assert.Equal(bytes, result!.Bytes);
+        Assert.Equal(bytes, await ReadBlobAsync(blobs, result!.BlobKey));
         Assert.True(await blobs.ExistsAsync(BlobKeys.Proxy(Sha256Hex(bytes)), default));
     }
 
@@ -425,6 +471,22 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         int afterSecond = _server.LogEntries.Count(
             e => e.RequestMessage?.Path?.EndsWith("fbd404-1.0.jar") == true);
         Assert.Equal(afterFirst, afterSecond);
+    }
+
+    [Fact]
+    public async Task FetchArtifactAsync_TransportFailure_ReturnsNull_AndDoesNotNegativeCache()
+    {
+        // A transport-level failure (DNS/connection reset/TLS) surfaces as HttpRequestException with
+        // a null StatusCode. It must NOT be negative-cached — doing so would poison the path into a
+        // sticky 404 for the negative-cache TTL. The caller gets a non-sticky null and a later
+        // request re-attempts the upstream.
+        var fetcher = BuildFaultingFetcher();
+        const string path = "com/example/transport/1.0/transport-1.0.jar";
+
+        var result = await fetcher.FetchArtifactAsync(_upstream, path, default);
+
+        Assert.Null(result);
+        Assert.False(await fetcher.IsNegativelyCachedAsync(path, default));
     }
 
     [Fact]
@@ -561,8 +623,8 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
 
     private sealed class AllowAllValidator : IUpstreamUrlValidator
     {
-        public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
-            => Task.FromResult(true);
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
+            => Task.FromResult(UpstreamUrlBlock.None);
     }
 
     private sealed class StaticHttpClientFactory : IHttpClientFactory

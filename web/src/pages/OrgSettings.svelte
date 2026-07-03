@@ -6,17 +6,19 @@
   import { user, bootstrapInfo } from '../lib/store.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { formatDateShort } from '../lib/format.js'
-  import Claims from './Claims.svelte'
   import SpdxPicker from '../lib/SpdxPicker.svelte'
   import SettingsAuth from '../lib/settings/SettingsAuth.svelte'
   import SettingsGeneral from '../lib/settings/SettingsGeneral.svelte'
-  import SettingsUpload from '../lib/settings/SettingsUpload.svelte'
-  import SettingsRetention from '../lib/settings/SettingsRetention.svelte'
-  import SettingsProxy from '../lib/settings/SettingsProxy.svelte'
+  import SettingsStorage from '../lib/settings/SettingsStorage.svelte'
+  import SettingsGates from '../lib/settings/SettingsGates.svelte'
+  import SettingsSignatures from '../lib/settings/SettingsSignatures.svelte'
+  import SettingsProxyRouting from '../lib/settings/SettingsProxyRouting.svelte'
+  import SettingsNamespaceOwnership from '../lib/settings/SettingsNamespaceOwnership.svelte'
   import SettingsServiceTokens from '../lib/settings/SettingsServiceTokens.svelte'
+  import SettingsWebhooks from '../lib/settings/SettingsWebhooks.svelte'
   import SettingsInstance from '../lib/settings/SettingsInstance.svelte'
   import SettingsMetrics from '../lib/settings/SettingsMetrics.svelte'
-  import SettingsTrustAnchors from '../lib/settings/SettingsTrustAnchors.svelte'
+  import Toggle from '../lib/Toggle.svelte'
 
   let tab = 'general'
   let settings = null, retention = null, instanceMax = null, proxySettings = null
@@ -98,8 +100,12 @@
     if (key === 'proxy') {
       if (!allowlistLoaded) loadAllowlist()
       if (!blocklistLoaded) loadBlocklist()
-      if (!reservedLoaded) loadReserved()
+    }
+    if (key === 'gates') {
       if (!installScriptAllowlistLoaded) loadInstallScriptAllowlist()
+    }
+    if (key === 'namespaces') {
+      if (!reservedLoaded) loadReserved()
     }
     if (key === 'licenses' && !licensePolicyLoaded) await loadLicensePolicy()
     if (key === 'banners') loadBanners()
@@ -209,39 +215,66 @@
     })
   }
 
-  // Proxy save: persists the proxy form *and* the allowlistMode gate together. The mode
-  // toggle lives in the same tab now but the value still rides on the /settings
-  // payload, so we fire both endpoints in parallel.
-  async function saveProxySettings() {
-    success = ''
-    // Convert the value+unit pair back to canonical hours. Empty value = null (policy off);
-    // a positive value in days multiplies to hours. Math.floor guards against the user
-    // pasting decimals into a numeric input on browsers that don't enforce the pattern.
+  // Build the full proxy settings payload from current proxySettings state.
+  // Converts the value+unit pair back to canonical hours (empty = null, policy off),
+  // and normalises the EPSS field (empty = null). All three proxy-touching save handlers
+  // call this so the whole-object PUT always carries the true current state.
+  function buildProxyPayload() {
     const raw = String(proxySettings.min_release_age_value ?? '').trim()
     const num = raw === '' ? null : Math.floor(Number(raw))
     const minReleaseAgeHours = num === null || isNaN(num) || num <= 0
       ? null
       : (proxySettings.min_release_age_unit === 'days' ? num * 24 : num)
-    // Empty EPSS field = policy off (null on the wire); anything else is a 0..1 probability.
     const epssRaw = String(proxySettings.max_epss_tolerance ?? '').trim()
     const maxEpssTolerance = epssRaw === '' || isNaN(Number(epssRaw)) ? null : Number(epssRaw)
+    return {
+      proxyPassthroughEnabled: proxySettings.proxy_passthrough_enabled,
+      maxOsvScoreTolerance:    Number(proxySettings.max_osv_score_tolerance),
+      minReleaseAgeHours,
+      blockDeprecated:         proxySettings.block_deprecated,
+      blockRevoked:            proxySettings.block_revoked,
+      blockMalicious:          proxySettings.block_malicious,
+      blockKev:                proxySettings.block_kev,
+      maxEpssTolerance,
+      blockInstallScripts:     proxySettings.block_install_scripts,
+      verifyNpmSignatures:     proxySettings.verify_npm_signatures,
+      verifyNuGetSignatures:   proxySettings.verify_nuget_signatures,
+      verifyPyPiAttestations:  proxySettings.verify_pypi_attestations,
+      verifyRpmSignatures:     proxySettings.verify_rpm_signatures,
+      verifyMavenSignatures:   proxySettings.verify_maven_signatures,
+    }
+  }
+
+  // Gates save: dual-fires because versionOverwritePolicy rides /settings while
+  // the block gates ride /proxy-settings.
+  async function saveGatesSettings() {
+    success = ''
     await submitForm(() => Promise.all([
-      api.updateProxySettings({
-        proxyPassthroughEnabled: proxySettings.proxy_passthrough_enabled,
-        maxOsvScoreTolerance:    Number(proxySettings.max_osv_score_tolerance),
-        minReleaseAgeHours,
-        blockDeprecated:         proxySettings.block_deprecated,
-        blockRevoked:            proxySettings.block_revoked,
-        blockMalicious:          proxySettings.block_malicious,
-        blockKev:                proxySettings.block_kev,
-        maxEpssTolerance,
-        blockInstallScripts:     proxySettings.block_install_scripts,
-        verifyNpmSignatures:     proxySettings.verify_npm_signatures,
-        verifyNuGetSignatures:   proxySettings.verify_nuget_signatures,
-        verifyPyPiAttestations:  proxySettings.verify_pypi_attestations,
-        verifyRpmSignatures:     proxySettings.verify_rpm_signatures,
-        verifyMavenSignatures:   proxySettings.verify_maven_signatures,
-      }),
+      api.updateProxySettings(buildProxyPayload()),
+      api.updateOrgSettings(settings),
+    ]), {
+      setSaving: v => saving = v,
+      setError:  v => error  = v,
+      onSuccess: () => { success = $t('settings.saved') },
+    })
+  }
+
+  // Signatures save: verify toggles are proxy-settings-only fields.
+  async function saveSignaturesSettings() {
+    success = ''
+    await submitForm(() => api.updateProxySettings(buildProxyPayload()), {
+      setSaving: v => saving = v,
+      setError:  v => error  = v,
+      onSuccess: () => { success = $t('settings.saved') },
+    })
+  }
+
+  // Proxy (routing) save: dual-fires because allowlistMode rides /settings
+  // while proxy_passthrough_enabled rides /proxy-settings.
+  async function saveProxyRoutingSettings() {
+    success = ''
+    await submitForm(() => Promise.all([
+      api.updateProxySettings(buildProxyPayload()),
       api.updateOrgSettings(settings),
     ]), {
       setSaving: v => saving = v,
@@ -370,14 +403,15 @@
   $: tabKeys = [
     { key: 'general',        label: 'settings.tabs.general' },
     { key: 'authentication', label: 'settings.tabs.authentication' },
-    { key: 'upload-limits',  label: 'settings.tabs.uploadLimits' },
-    { key: 'retention',      label: 'settings.tabs.retention' },
+    { key: 'storage',        label: 'settings.tabs.storage' },
     { key: 'proxy',          label: 'settings.tabs.proxy' },
-    { key: 'security',       label: 'settings.tabs.security' },
+    { key: 'gates',          label: 'settings.tabs.gates' },
+    { key: 'signatures',     label: 'settings.tabs.signatures' },
+    { key: 'namespaces',     label: 'settings.tabs.namespaces' },
     { key: 'licenses',       label: 'settings.tabs.licenses' },
-    { key: 'claims',         label: 'settings.tabs.claims' },
     ...(viewerIsAdmin ? [
       { key: 'service-tokens', label: 'settings.tabs.serviceTokens' },
+      { key: 'webhooks',       label: 'settings.tabs.webhooks' },
       { key: 'banners',        label: 'settings.tabs.banners' },
     ] : []),
     ...(showInstanceTabs ? [
@@ -452,14 +486,17 @@
     {:else if tab === 'authentication'}
       <SettingsAuth />
 
-    {:else if tab === 'upload-limits'}
-      <SettingsUpload {settings} {instanceMax} {saving} onSave={saveSettings} />
-
-    {:else if tab === 'retention'}
-      <SettingsRetention {retention} {saving} onSave={saveRetention} />
+    {:else if tab === 'storage'}
+      <SettingsStorage
+        {settings}
+        {retention}
+        {instanceMax}
+        {saving}
+        onSaveUpload={saveSettings}
+        onSaveRetention={saveRetention} />
 
     {:else if tab === 'proxy'}
-      <SettingsProxy
+      <SettingsProxyRouting
         {proxySettings}
         airGapped={settings.airGapped}
         bind:allowlistMode={settings.allowlistMode}
@@ -469,17 +506,30 @@
         onRemoveAllowlist={removeAllowlist}
         onAddBlocklist={() => showAddBlocklist = true}
         onRemoveBlocklist={removeBlocklist}
-        {reservedEntries} {reservedLoaded}
-        onAddReserved={() => showAddReserved = true}
-        onRemoveReserved={removeReserved}
+        {saving}
+        onSave={saveProxyRoutingSettings} />
+
+    {:else if tab === 'gates'}
+      <SettingsGates
+        {proxySettings}
+        {settings}
         {installScriptAllowlistEntries} {installScriptAllowlistLoaded}
         onAddInstallScriptAllowlist={() => showAddInstallScriptAllowlist = true}
         onRemoveInstallScriptAllowlist={removeInstallScriptAllowlist}
         {saving}
-        onSave={saveProxySettings} />
+        onSave={saveGatesSettings} />
 
-    {:else if tab === 'security'}
-      <SettingsTrustAnchors />
+    {:else if tab === 'signatures'}
+      <SettingsSignatures
+        {proxySettings}
+        {saving}
+        onSave={saveSignaturesSettings} />
+
+    {:else if tab === 'namespaces'}
+      <SettingsNamespaceOwnership
+        {reservedEntries} {reservedLoaded}
+        onAddReserved={() => showAddReserved = true}
+        onRemoveReserved={removeReserved} />
 
     {:else if tab === 'licenses'}
       <p class="tab-intro">{$t('settings.licenses.intro')}</p>
@@ -513,11 +563,12 @@
 
       <div class="page-header list-header mt-4">
         <h3 class="section-h">{$t('settings.licenses.review.title')}</h3>
-        <label class="checkbox-inline">
-          <input type="checkbox" checked={licenseReviewIncludeDeprecated}
-                 on:change={toggleReviewIncludeDeprecated} />
+        <span class="checkbox-inline">
+          <Toggle checked={licenseReviewIncludeDeprecated}
+                  ariaLabel={$t('settings.licenses.review.includeDeprecated')}
+                  on:change={toggleReviewIncludeDeprecated} />
           {$t('settings.licenses.review.includeDeprecated')}
-        </label>
+        </span>
       </div>
       <p class="section-hint">{$t('settings.licenses.review.intro')}</p>
       <table class="list-table">
@@ -617,9 +668,6 @@
         </tbody>
       </table>
 
-    {:else if tab === 'claims'}
-      <Claims />
-
     {:else if tab === 'banners' && viewerIsAdmin}
       {#if bannerError}<p class="banner-tab-error">{bannerError}</p>{/if}
       {#if bannerSuccess}<p class="banner-tab-success">{bannerSuccess}</p>{/if}
@@ -670,10 +718,10 @@
           </div>
         </div>
         <div class="form-row checkbox-row">
-          <label class="checkbox-label">
-            <input type="checkbox" bind:checked={newBanner.enabled} />
+          <span class="checkbox-label">
+            <Toggle bind:checked={newBanner.enabled} ariaLabel={$t('settings.banners.enabled')} />
             {$t('settings.banners.enabled')}
-          </label>
+          </span>
         </div>
         <button on:click={createBanner} disabled={bannerSaving}>{$t('settings.banners.create')}</button>
       </section>
@@ -717,6 +765,9 @@
 
     {:else if tab === 'service-tokens' && viewerIsAdmin}
       <SettingsServiceTokens />
+
+    {:else if tab === 'webhooks' && viewerIsAdmin}
+      <SettingsWebhooks />
 
     {:else if tab === 'instance' && showInstanceTabs}
       <p class="tab-intro">{$t('settings.instance.intro')}</p>
@@ -775,12 +826,6 @@
     font-weight: 500;
     color: var(--text2);
     cursor: pointer;
-  }
-  .checkbox-label input[type="checkbox"] {
-    width: auto;
-    min-height: 0;
-    margin: 0;
-    flex-shrink: 0;
   }
 </style>
 

@@ -85,8 +85,10 @@ public sealed class UpstreamClientShutdownTests
         var completed = await Task.WhenAny(fetch1, Task.Delay(TimeSpan.FromSeconds(5)));
         Assert.Same(fetch1, completed);
 
-        // The first caller's own awaiting path may still observe its cancelled token after
-        // the shared work finishes — tolerate that, but no other failure is acceptable.
+        // The first caller's own awaiting path detaches via WaitAsync(ct) on its own token —
+        // it may observe the cancellation before the shared work (still running with
+        // CancellationToken.None) finishes, so fetch1 completing does not itself prove the
+        // shared fetch is done. Tolerate the cancellation, but no other failure is acceptable.
         var ex = await Record.ExceptionAsync(async () =>
         {
             var (body, _) = await fetch1;
@@ -97,8 +99,19 @@ public sealed class UpstreamClientShutdownTests
             Assert.IsAssignableFrom<OperationCanceledException>(ex);
         }
 
-        // The cached blob is the proof the shared fetch survived the disconnect.
-        Assert.True(await store.ExistsAsync("blobs/disconnect-test"));
+        // The cached blob is the proof the shared fetch survived the disconnect. Poll briefly —
+        // the shared fetch's PutAsync may still be completing after fetch1's own (cancelled)
+        // wait has already returned.
+        bool cached = false;
+        for (int i = 0; i < 100 && !cached; i++)
+        {
+            cached = await store.ExistsAsync("blobs/disconnect-test");
+            if (!cached)
+            {
+                await Task.Delay(20); // now-ok: polling for real async completion, not a deadline
+            }
+        }
+        Assert.True(cached);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -174,8 +187,8 @@ public sealed class UpstreamClientShutdownTests
 
     private sealed class PermitAll : IUpstreamUrlValidator
     {
-        public Task<bool> IsAllowedAsync(string url, string? orgId = null, CancellationToken ct = default)
-            => Task.FromResult(true);
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId = null, CancellationToken ct = default)
+            => Task.FromResult(UpstreamUrlBlock.None);
     }
 
     private sealed class NotAirGapped : IAirGapMode

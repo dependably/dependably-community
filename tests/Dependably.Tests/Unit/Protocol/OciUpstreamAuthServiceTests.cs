@@ -193,6 +193,63 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         Assert.Null(result);
     }
 
+    // ── Token response size cap ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Regression: the token-exchange response body must route through the same bounded
+    /// read every other buffered upstream fetch uses, not an unbounded
+    /// <c>ReadAsStringAsync</c>. This covers the chunked / no-Content-Length streaming
+    /// branch — the counted-copy loop, not the declared-length fast path, has to enforce
+    /// the cap, since a hostile or compromised token endpoint can simply omit
+    /// Content-Length.
+    /// </summary>
+    [Fact]
+    public async Task GetAuthorizationAsync_DockerHub_ChunkedTokenBodyOverCap_ThrowsTooLarge()
+    {
+        var probeResp = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+        probeResp.Headers.WwwAuthenticate.ParseAdd(
+            "Bearer realm=\"https://auth.docker.io/token\",service=\"registry.docker.io\",scope=\"\"");
+
+        byte[] oversized = new byte[UpstreamClient.MaxMetadataResponseBytes + 1024];
+        var tokenResp = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(oversized) };
+        tokenResp.Content.Headers.ContentLength = null; // force the counted-copy path
+
+        _factory.Enqueue(probeResp, tokenResp);
+
+        using var svc = Build();
+        var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io",
+            tokenEndpoint: "https://auth.docker.io/token");
+
+        await Assert.ThrowsAsync<UpstreamResponseTooLargeException>(() =>
+            svc.GetAuthorizationAsync("test-org", upstream, "library/ubuntu", "pull", default));
+    }
+
+    /// <summary>
+    /// Regression: a token endpoint that declares an over-cap Content-Length must be
+    /// rejected before its body is ever read (the declared-length fast path).
+    /// </summary>
+    [Fact]
+    public async Task GetAuthorizationAsync_DockerHub_DeclaredOversizeTokenBody_FailsBeforeReadingBody()
+    {
+        var probeResp = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+        probeResp.Headers.WwwAuthenticate.ParseAdd(
+            "Bearer realm=\"https://auth.docker.io/token\",service=\"registry.docker.io\",scope=\"\"");
+
+        var content = new PoisonContent(UpstreamClient.MaxMetadataResponseBytes + 1);
+        var tokenResp = new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+
+        _factory.Enqueue(probeResp, tokenResp);
+
+        using var svc = Build();
+        var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry-1.docker.io",
+            tokenEndpoint: "https://auth.docker.io/token");
+
+        await Assert.ThrowsAsync<UpstreamResponseTooLargeException>(() =>
+            svc.GetAuthorizationAsync("test-org", upstream, "library/ubuntu", "pull", default));
+
+        Assert.False(content.StreamOpened);
+    }
+
     // ── Realm-redirect credential leak protection ──────────────────────────────
 
     /// <summary>
@@ -329,5 +386,27 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
         public bool IsEnabled { get; }
         public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
         public bool IsJobDisabled(string jobName) => IsEnabled;
+    }
+
+    /// <summary>HttpContent that declares a Content-Length but throws if its body is ever read.</summary>
+    private sealed class PoisonContent : HttpContent
+    {
+        private readonly long _declaredLength;
+
+        public PoisonContent(long declaredLength) => _declaredLength = declaredLength;
+
+        public bool StreamOpened { get; private set; }
+
+        protected override Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context)
+        {
+            StreamOpened = true;
+            throw new InvalidOperationException("Body must not be read when Content-Length exceeds the cap.");
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = _declaredLength;
+            return true;
+        }
     }
 }

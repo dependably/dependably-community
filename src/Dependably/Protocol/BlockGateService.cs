@@ -248,7 +248,7 @@ public sealed class BlockGateService
         var malIds = request.CacheArtifactId is not null
             ? await _vulns.GetMaliciousOsvIdsForCacheArtifactAsync(request.CacheArtifactId, ct)
             : await _vulns.GetMaliciousOsvIdsForVersionAsync(request.VersionId, ct);
-        string malDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = malIds });
+        string malDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = malIds }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
             "blocked_malicious", request.UserId, actorKind: request.ActorKind,
@@ -267,7 +267,7 @@ public sealed class BlockGateService
         var kevIds = request.CacheArtifactId is not null
             ? await _vulns.GetKevOsvIdsForCacheArtifactAsync(request.CacheArtifactId, ct)
             : await _vulns.GetKevOsvIdsForVersionAsync(request.VersionId, ct);
-        string kevDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = kevIds });
+        string kevDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = kevIds }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
             "blocked_kev", request.UserId, actorKind: request.ActorKind,
@@ -316,7 +316,7 @@ public sealed class BlockGateService
         DependablyMeter.InstallScriptBlocks.Add(1,
             new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
         string scriptDetail = System.Text.Json.JsonSerializer.Serialize(
-            new { install_script_kind = request.InstallScriptKind });
+            new { install_script_kind = request.InstallScriptKind }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
             "blocked_install_script", request.UserId, actorKind: request.ActorKind,
@@ -361,7 +361,7 @@ public sealed class BlockGateService
         DependablyMeter.ProvenanceBlocks.Add(1,
             new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
         string provDetail = System.Text.Json.JsonSerializer.Serialize(
-            new { provenance_status = request.ProvenanceStatus });
+            new { provenance_status = request.ProvenanceStatus }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         // Tenant-level security event: forwarded to SIEM via the audit_log path.
         await _audit.LogAsync(
             "provenance_verification_failed",
@@ -388,7 +388,7 @@ public sealed class BlockGateService
     {
         DependablyMeter.DeprecatedBlocks.Add(1,
             new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
-        string detail = $"{{\"deprecated\":{System.Text.Json.JsonSerializer.Serialize(request.Deprecated)}}}";
+        string detail = $"{{\"deprecated\":{System.Text.Json.JsonSerializer.Serialize(request.Deprecated, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail)}}}";
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
             "blocked_deprecated", request.UserId, actorKind: request.ActorKind,
@@ -406,7 +406,7 @@ public sealed class BlockGateService
         DependablyMeter.RevokedBlocks.Add(1,
             new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
         string detail = System.Text.Json.JsonSerializer.Serialize(
-            new { revoked_at = request.RevokedAt?.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+            new { revoked_at = request.RevokedAt?.ToString("yyyy-MM-ddTHH:mm:ssZ") }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         await _audit.LogActivityAsync(
             request.OrgId, request.Ecosystem, request.Purl,
             "blocked_revoked", request.UserId, actorKind: request.ActorKind,
@@ -535,17 +535,7 @@ public sealed class BlockGateService
     // Extracts the ecosystem segment from a canonical PURL ("pkg:nuget/name@version" → "nuget").
     // Returns an empty string when the value is not PURL-shaped, which maps to an 'off' provenance
     // policy (never blocks) — a safe default for a malformed or legacy row.
-    private static string EcosystemFromPurl(string purl)
-    {
-        const string prefix = "pkg:";
-        if (!purl.StartsWith(prefix, StringComparison.Ordinal))
-        {
-            return string.Empty;
-        }
-
-        int slash = purl.IndexOf('/', prefix.Length);
-        return slash < 0 ? string.Empty : purl[prefix.Length..slash];
-    }
+    private static string EcosystemFromPurl(string purl) => PurlParser.TryGetEcosystem(purl) ?? string.Empty;
 
     /// <summary>
     /// Pure policy core: maps <see cref="VersionFacts"/> + <see cref="BlockPolicy"/> to a
@@ -893,4 +883,40 @@ public sealed record BlockGateRequest(
             BlockInstallScriptsMode: settings?.BlockInstallScripts,
             RevokedAt: version.RevokedAt,
             BlockRevokedMode: settings?.BlockRevoked);
+
+    /// <summary>
+    /// Constructs a <see cref="BlockGateRequest"/> for a proxy artifact served from the global
+    /// plane (<c>cache_artifact</c> + <c>tenant_artifact_access</c>) from the per-tenant serve
+    /// facts. The single home for the proxy cache-hit gate inputs: every ecosystem download
+    /// handler builds the request here rather than cloning the field-by-field projection, so a
+    /// new gate signal is threaded once. <paramref name="settings"/> is nullable to accommodate
+    /// callers whose settings lookup returns null (e.g. Maven); absent settings fall back to the
+    /// policy-off defaults on each field.
+    /// </summary>
+    public static BlockGateRequest ForProxyCacheFacts(
+        string orgId,
+        string ecosystem,
+        Infrastructure.CacheArtifactServeFacts caFacts,
+        TokenRecord? token,
+        OrgSettings? settings,
+        string? sourceIp) =>
+        new(orgId, ecosystem, caFacts.Purl ?? string.Empty, string.Empty,
+            caFacts.ManualBlockState, caFacts.VulnCheckedAt,
+            token?.UserId, settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScore, sourceIp,
+            MinReleaseAgeHours: settings?.MinReleaseAgeHours,
+            PublishedAt: caFacts.PublishedAt,
+            ActorKind: token?.ActorKind,
+            Deprecated: caFacts.Deprecated,
+            BlockDeprecatedMode: settings?.BlockDeprecated,
+            BlockMaliciousMode: settings?.BlockMalicious,
+            BlockKevMode: settings?.BlockKev,
+            MaxEpssTolerance: settings?.MaxEpssTolerance,
+            Origin: "proxy",
+            HasInstallScript: caFacts.HasInstallScript,
+            InstallScriptKind: caFacts.InstallScriptKind,
+            BlockInstallScriptsMode: settings?.BlockInstallScripts,
+            ProvenanceStatus: caFacts.ProvenanceStatus,
+            RevokedAt: caFacts.RevokedAt,
+            BlockRevokedMode: settings?.BlockRevoked,
+            CacheArtifactId: caFacts.Id);
 }

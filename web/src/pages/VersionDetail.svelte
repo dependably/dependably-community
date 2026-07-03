@@ -125,7 +125,7 @@
   $: isAdmin = $user?.role === 'admin' || $user?.role === 'owner'
 </script>
 
-<div class="page page-wide">
+<div class="page page-fluid">
   <div class="page-header">
     <div>
       <button on:click={() => {

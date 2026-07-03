@@ -1,3 +1,4 @@
+using Dependably.Infrastructure.Redis;
 using Dependably.Protocol;
 
 namespace Dependably.Infrastructure;
@@ -26,14 +27,19 @@ public sealed class ThreatFeedRefreshService : ScheduledBackgroundService
     protected override bool RunOnStartup => true;
     protected override bool ContinueOnTickError => false;
 
+    // Enriches shared vulnerabilities rows and fetches external KEV/EPSS feeds — RunOnStartup=true
+    // means a rolling deploy would otherwise fire N simultaneous feed pulls and racing writers.
+    protected override bool RequiresLeaderLock => true;
+
     public ThreatFeedRefreshService(
         VulnerabilityRepository vulns,
         IThreatFeedSource source,
         IConfiguration config,
         IAirGapMode airGap,
         ILogger<ThreatFeedRefreshService> logger,
-        TimeProvider time)
-        : base(config, logger, time)
+        TimeProvider time,
+        IDistributedLock locks)
+        : base(config, logger, time, locks)
     {
         _vulns = vulns;
         _source = source;

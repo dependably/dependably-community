@@ -34,6 +34,9 @@ public sealed class TenantCountPollerTests : IAsyncLifetime
             .AddInMemoryCollection(values ?? new Dictionary<string, string?>())
             .Build();
 
+    // Non-edge, non-air-gapped: nothing is disabled, so the poller runs.
+    private static IAirGapMode NoAirGap() => new AirGapMode(Config());
+
     [Fact]
     public async Task PollOnceAsync_RecordsActiveTenantCount()
     {
@@ -44,7 +47,7 @@ public sealed class TenantCountPollerTests : IAsyncLifetime
         await conn.ExecuteAsync(
             "INSERT INTO orgs (id, slug, deleted_at) VALUES ('o3', 'old', CURRENT_TIMESTAMP)");
 
-        var poller = new TenantCountPoller(_db, Config(), NullLogger<TenantCountPoller>.Instance);
+        var poller = new TenantCountPoller(_db, Config(), NoAirGap(), NullLogger<TenantCountPoller>.Instance);
         await poller.PollOnceAsync(CancellationToken.None);
 
         Assert.Equal(2L, DependablyMeter.ReadTenantCount());
@@ -60,7 +63,7 @@ public sealed class TenantCountPollerTests : IAsyncLifetime
             .ThrowsAsync(new InvalidOperationException("simulated DB failure"));
         var logger = Substitute.For<ILogger<TenantCountPoller>>();
 
-        var poller = new TenantCountPoller(failingStore, Config(), logger);
+        var poller = new TenantCountPoller(failingStore, Config(), NoAirGap(), logger);
         await poller.PollOnceAsync(CancellationToken.None);
 
         logger.Received(1).Log(
@@ -76,7 +79,7 @@ public sealed class TenantCountPollerTests : IAsyncLifetime
     {
         // OperationCanceledException must propagate so the ExecuteAsync loop can exit cleanly
         // rather than being swallowed by the generic Exception catch.
-        var poller = new TenantCountPoller(_db, Config(), NullLogger<TenantCountPoller>.Instance);
+        var poller = new TenantCountPoller(_db, Config(), NoAirGap(), NullLogger<TenantCountPoller>.Instance);
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
@@ -90,7 +93,7 @@ public sealed class TenantCountPollerTests : IAsyncLifetime
         // Pre-cancelling the stopping token makes the initial Task.Delay throw at the start,
         // exercising the `catch (OperationCanceledException) { return; }` branch without
         // having to wait through the full 5-second startup wait.
-        var poller = new TenantCountPoller(_db, Config(), NullLogger<TenantCountPoller>.Instance);
+        var poller = new TenantCountPoller(_db, Config(), NoAirGap(), NullLogger<TenantCountPoller>.Instance);
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 

@@ -6,14 +6,14 @@ namespace Dependably.Security;
 
 /// <summary>
 /// A <see cref="DelegatingHandler"/> that follows HTTP redirects while validating each
-/// redirect target URL through <see cref="IUpstreamUrlValidator.IsAllowedAsync"/> before
+/// redirect target URL through <see cref="IUpstreamUrlValidator.CheckAsync"/> before
 /// opening a connection. The underlying <see cref="System.Net.Http.SocketsHttpHandler"/>
 /// must be configured with <c>AllowAutoRedirect = false</c> so that this handler controls
 /// every hop rather than delegating silently to the transport layer.
 ///
 /// For each 3xx response the handler:
 ///   1. Extracts the <c>Location</c> header and resolves it against the request URI.
-///   2. Calls <see cref="IUpstreamUrlValidator.IsAllowedAsync"/> — which re-resolves
+///   2. Calls <see cref="IUpstreamUrlValidator.CheckAsync"/> — which re-resolves
 ///      the target host via DNS and checks the result against <see cref="SsrfGuard"/>.
 ///   3. Throws <see cref="SsrfBlockedException"/> if the target is in a blocked range,
 ///      or proceeds with a new GET request if allowed.
@@ -81,15 +81,17 @@ public sealed class SsrfAwareRedirectHandler : DelegatingHandler
                 ? location
                 : new Uri(request.RequestUri!, location);
 
-            // Validate the redirect target before connecting. Throws SsrfBlockedException
-            // when the resolved host falls inside a blocked range; throws on DNS failure
-            // (fails closed). This is the defense-in-depth layer that catches redirect-based
-            // SSRF attacks targeting cloud metadata endpoints.
-            if (!await _urlValidator.IsAllowedAsync(redirectUri.AbsoluteUri, orgId, cancellationToken)
-                    .ConfigureAwait(false))
+            // Validate the redirect target before connecting. Emits the
+            // redirect_to_internal reason on the upstream_url_blocks counter when blocked.
+            // This is the defense-in-depth layer that catches redirect-based SSRF attacks
+            // targeting cloud metadata endpoints.
+            var redirectBlock = await _urlValidator.CheckAsync(redirectUri.AbsoluteUri, orgId, cancellationToken)
+                    .ConfigureAwait(false);
+            if (redirectBlock != UpstreamUrlBlock.None)
             {
                 response.Dispose();
-                DependablyMeter.UpstreamUrlBlocks.Add(1);
+                DependablyMeter.UpstreamUrlBlocks.Add(1,
+                    new KeyValuePair<string, object?>("reason", "redirect_to_internal"));
                 throw new SsrfBlockedException(redirectUri.AbsoluteUri);
             }
 

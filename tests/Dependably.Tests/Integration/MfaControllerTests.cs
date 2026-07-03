@@ -129,6 +129,55 @@ public sealed class MfaControllerTests : IClassFixture<DependablyFactory>, IAsyn
         Assert.False(statusDoc.GetProperty("enabled").GetBoolean());
     }
 
+    // ── Re-enrollment guard (step-up / no silent key rotation) ────────────────
+
+    [Fact]
+    public async Task SetupBegin_AlreadyEnrolled_Returns409AndDoesNotRotateKey()
+    {
+        var (userId, _, client) = await SeedUserAsync();
+        await EnrollAsync(client);
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        string? keyBefore;
+        {
+            await using var conn = await store.OpenAsync();
+            keyBefore = await conn.ExecuteScalarAsync<string?>(
+                "SELECT mfa_authenticator_key FROM users WHERE id = @id", new { id = userId });
+        }
+
+        // A second setup/begin on an enrolled account must be refused, not silently rotate the
+        // authenticator key (which would invalidate the victim's existing TOTP).
+        var resp = await client.PostAsync("/api/v1/mfa/setup/begin", null);
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+
+        string? keyAfter;
+        {
+            await using var conn = await store.OpenAsync();
+            keyAfter = await conn.ExecuteScalarAsync<string?>(
+                "SELECT mfa_authenticator_key FROM users WHERE id = @id", new { id = userId });
+        }
+
+        Assert.Equal(keyBefore, keyAfter);
+
+        // MFA is still enabled — the account was not degraded.
+        var statusResp = await client.GetAsync("/api/v1/mfa/status");
+        var statusDoc = JsonDocument.Parse(await statusResp.Content.ReadAsStringAsync()).RootElement;
+        Assert.True(statusDoc.GetProperty("enabled").GetBoolean());
+    }
+
+    [Fact]
+    public async Task SetupVerify_AlreadyEnrolled_Returns409()
+    {
+        var (_, _, client) = await SeedUserAsync();
+        string manualKey = await EnrollAsync(client);
+
+        // Re-verify against an already-enrolled account is refused; re-enrollment requires the
+        // password-gated disable flow first.
+        string code = TotpTestHelper.Compute(manualKey);
+        var resp = await client.PostAsJsonAsync("/api/v1/mfa/setup/verify", new { code });
+        Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+    }
+
     // ── Disable ───────────────────────────────────────────────────────────────
 
     [Fact]

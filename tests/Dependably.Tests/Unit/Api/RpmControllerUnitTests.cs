@@ -68,7 +68,10 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
             cacheRecorder,
             cacheArtifacts,
             tenantAccess,
-            rpmProvenance);
+            rpmProvenance,
+            Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
+            Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, _clock),
+            new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0));
         _controller = new RpmController(svc)
         {
             ControllerContext = BuildContext(_orgId),
@@ -191,6 +194,11 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
 
         var status = Assert.IsType<ObjectResult>(result);
         Assert.Equal(413, status.StatusCode);
+
+        // Cap-before-write: the 413 is raised while streaming the body (LimitedReadStream at the
+        // resolved 50-byte cap), so no blob is ever written for the oversize upload.
+        string blobKey = BlobKeys.Hosted(_orgId, "rpm", "foo", "1.0-1", "foo-1.0-1.x86_64.rpm");
+        Assert.False(await _blobs.ExistsAsync(BlobKeys.StoreKey(blobKey), CancellationToken.None));
     }
 
     [Fact]

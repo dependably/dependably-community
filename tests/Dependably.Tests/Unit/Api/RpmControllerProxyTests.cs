@@ -90,6 +90,18 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             new { id = Guid.NewGuid().ToString("N"), orgId = _orgId });
     }
 
+    /// <summary>
+    /// Sets the per-org RPM upstream mode override directly in the DB. null clears the override
+    /// back to "inherit the instance Rpm:UpstreamMode env value".
+    /// </summary>
+    private async Task SetRpmUpstreamModeAsync(string? mode)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET rpm_upstream_mode = @mode WHERE org_id = @orgId",
+            new { mode, orgId = _orgId });
+    }
+
     // ── Package proxy ─────────────────────────────────────────────────────────
 
     [Fact]
@@ -375,14 +387,14 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         await EnableAnonPullAsync();
         await SeedRpmRegistryAsync();
         byte[] repomdBytes = System.Text.Encoding.UTF8.GetBytes("<repomd/>");
-        var repodata = new RepodataResult(repomdBytes, "application/xml", "\"abc\"", null, NotModified: false);
+        var repodata = new RepodataResult(new MemoryStream(repomdBytes), "application/xml", "\"abc\"", null, NotModified: false);
         var stubProxy = new StubProxy(repodataResult: repodata);
         var ctl = BuildController(proxy: stubProxy);
 
         var result = await ctl.Repodata("repomd.xml", default);
 
-        var fc = Assert.IsType<FileContentResult>(result);
-        Assert.Equal(repomdBytes, fc.FileContents);
+        var fc = Assert.IsType<FileStreamResult>(result);
+        Assert.Equal(repomdBytes, await ReadAllAsync(fc.FileStream));
         Assert.Equal("application/xml", fc.ContentType);
     }
 
@@ -391,7 +403,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
     {
         await EnableAnonPullAsync();
         await SeedRpmRegistryAsync();
-        var repodata = new RepodataResult([], "application/xml", "\"abc\"", null, NotModified: true);
+        var repodata = new RepodataResult(Stream.Null, "application/xml", "\"abc\"", null, NotModified: true);
         var stubProxy = new StubProxy(repodataResult: repodata);
         var ctl = BuildController(proxy: stubProxy);
         ctl.ControllerContext.HttpContext.Request.Headers.IfNoneMatch = "\"abc\"";
@@ -409,14 +421,14 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         string sha256 = new('a', 64);
         string filename = $"{sha256}-primary.xml.gz";
         byte[] body = new byte[] { 1, 2, 3 };
-        var repodata = new RepodataResult(body, "application/x-gzip", null, null, NotModified: false);
+        var repodata = new RepodataResult(new MemoryStream(body), "application/x-gzip", null, null, NotModified: false);
         var stubProxy = new StubProxy(repodataResult: repodata);
         var ctl = BuildController(proxy: stubProxy);
 
         var result = await ctl.Repodata(filename, default);
 
-        var fc = Assert.IsType<FileContentResult>(result);
-        Assert.Equal(body, fc.FileContents);
+        var fc = Assert.IsType<FileStreamResult>(result);
+        Assert.Equal(body, await ReadAllAsync(fc.FileStream));
         Assert.Equal("application/x-gzip", fc.ContentType);
     }
 
@@ -474,7 +486,107 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         var problem = Assert.IsType<ProblemDetails>(conflict.Value);
         Assert.Equal(409, problem.Status);
         Assert.Contains("passthrough", problem.Detail, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Rpm:UpstreamMode", problem.Detail);
+        // The detail points the operator at the per-org Settings → Proxy control, not the env var.
+        Assert.Contains("Settings", problem.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("merged", problem.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── Per-org upstream-mode override ───────────────────────────────────────────
+
+    [Fact]
+    public async Task Upload_InstancePassthrough_OrgMerged_NotBlockedByPassthroughGuard()
+    {
+        // The instance env mode is passthrough (stub IsPassthroughModeSelected=true), yet the org
+        // has opted into 'merged' via its per-org setting. The publish guard must honor the per-org
+        // setting and let the request through — hosted publish enabled without an instance restart.
+        await SeedRpmRegistryAsync();
+        await SetRpmUpstreamModeAsync("merged");
+        string raw = await SeedPublishTokenAsync();
+        var stubProxy = new StubProxy(isPassthrough: true, isMerged: false);
+        var ctl = BuildController(proxy: stubProxy);
+        ctl.ControllerContext.HttpContext.Request.Headers.Authorization = $"Bearer {raw}";
+        ctl.ControllerContext.HttpContext.Request.Body = new MemoryStream(new byte[10]);
+
+        var result = await ctl.Upload(default);
+
+        Assert.IsNotType<ConflictObjectResult>(result);
+        var bad = Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Contains("too small", bad.Value?.ToString() ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Upload_InstancePassthrough_OrgPassthrough_Returns409()
+    {
+        // Both the instance env and the per-org setting are passthrough with an upstream configured
+        // — the guard returns 409. Setting the org back to passthrough re-arms the block.
+        await SeedRpmRegistryAsync();
+        await SetRpmUpstreamModeAsync("passthrough");
+        var stubProxy = new StubProxy(isPassthrough: true, isMerged: false);
+        var ctl = BuildController(proxy: stubProxy);
+        ctl.ControllerContext.HttpContext.Request.Body = new MemoryStream();
+
+        var result = await ctl.Upload(default);
+
+        var conflict = Assert.IsType<ConflictObjectResult>(result);
+        Assert.Equal(409, Assert.IsType<ProblemDetails>(conflict.Value).Status);
+    }
+
+    [Fact]
+    public async Task Upload_InstanceMerged_OrgPassthrough_Returns409()
+    {
+        // Pins the override-not-floor semantics: the instance env is 'merged' (stub
+        // IsMergedModeSelected=true), yet the org has explicitly overridden to 'passthrough'. The
+        // explicit org value must win in EITHER direction, so hosted publish is refused here even
+        // though the instance-wide default is merged. Under the old OR-floor composition
+        // (effective = env-merged OR org-merged) this returned success — the org could never
+        // downgrade below a merged instance. That is the regression this test pins.
+        await SeedRpmRegistryAsync();
+        await SetRpmUpstreamModeAsync("passthrough");
+        var stubProxy = new StubProxy(isPassthrough: false, isMerged: true);
+        var ctl = BuildController(proxy: stubProxy);
+        ctl.ControllerContext.HttpContext.Request.Body = new MemoryStream();
+
+        var result = await ctl.Upload(default);
+
+        var conflict = Assert.IsType<ConflictObjectResult>(result);
+        Assert.Equal(409, Assert.IsType<ProblemDetails>(conflict.Value).Status);
+    }
+
+    [Fact]
+    public async Task Upload_InstanceMerged_OrgUnset_InheritsEnv_NotBlocked()
+    {
+        // No per-org override (NULL) on a merged instance inherits the env value — hosted
+        // publish succeeds. Confirms NULL means "inherit", not "passthrough".
+        await SeedRpmRegistryAsync();
+        await SetRpmUpstreamModeAsync(null);
+        string raw = await SeedPublishTokenAsync();
+        var stubProxy = new StubProxy(isPassthrough: false, isMerged: true);
+        var ctl = BuildController(proxy: stubProxy);
+        ctl.ControllerContext.HttpContext.Request.Headers.Authorization = $"Bearer {raw}";
+        ctl.ControllerContext.HttpContext.Request.Body = new MemoryStream(new byte[10]);
+
+        var result = await ctl.Upload(default);
+
+        Assert.IsNotType<ConflictObjectResult>(result);
+        var bad = Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Contains("too small", bad.Value?.ToString() ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Upload_InstancePassthrough_OrgUnset_InheritsEnv_Returns409()
+    {
+        // No per-org override (NULL) on a passthrough instance inherits the env value — hosted
+        // publish is refused, matching pre-migration behaviour for an org that never opts in.
+        await SeedRpmRegistryAsync();
+        await SetRpmUpstreamModeAsync(null);
+        var stubProxy = new StubProxy(isPassthrough: true, isMerged: false);
+        var ctl = BuildController(proxy: stubProxy);
+        ctl.ControllerContext.HttpContext.Request.Body = new MemoryStream();
+
+        var result = await ctl.Upload(default);
+
+        var conflict = Assert.IsType<ConflictObjectResult>(result);
+        Assert.Equal(409, Assert.IsType<ProblemDetails>(conflict.Value).Status);
     }
 
     // ── Merged mode ─────────────────────────────────────────────────────────────
@@ -620,7 +732,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
 
         // The stub returns the updateinfo bytes for hash-prefixed GetRepodataAsync calls only,
         // mirroring the real proxy's filename gate.
-        var repodataResult = new RepodataResult(updateinfoBytes, "application/x-gzip", null, null, NotModified: false);
+        var repodataResult = new RepodataResult(new MemoryStream(updateinfoBytes), "application/x-gzip", null, null, NotModified: false);
         var stubProxy = new StubProxy(
             isPassthrough: false,
             isMerged: true,
@@ -646,9 +758,9 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
         }
 
         // The advertised updateinfo href serves the upstream stub's exact bytes.
-        var result = Assert.IsType<FileContentResult>(await ctl.Repodata(updateinfoFilename, default));
+        var result = Assert.IsType<FileStreamResult>(await ctl.Repodata(updateinfoFilename, default));
         Assert.Equal("application/x-gzip", result.ContentType);
-        Assert.Equal(updateinfoBytes, result.FileContents);
+        Assert.Equal(updateinfoBytes, await ReadAllAsync(result.FileStream));
     }
 
     [Fact]
@@ -964,6 +1076,9 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             RpmProvenance: new Dependably.Protocol.Provenance.RpmProvenanceVerifier(
                 new StubPerOrgTrustAnchorStore(),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.RpmProvenanceVerifier>.Instance),
+            EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
+            BlockGate: Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, TimeProvider.System),
+            Staging: new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0),
             UpstreamClient: upstreamClient,
             Proxy: proxy);
 
@@ -997,6 +1112,13 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
 
     private static string Sha256Hex(byte[] d)
         => Convert.ToHexString(SHA256.HashData(d)).ToLowerInvariant();
+
+    private static async Task<byte[]> ReadAllAsync(Stream stream)
+    {
+        using var ms = new MemoryStream();
+        await stream.CopyToAsync(ms);
+        return ms.ToArray();
+    }
 
     // ── Test doubles ──────────────────────────────────────────────────────────
 
@@ -1119,7 +1241,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
 
     private sealed class AllowAllValidator : IUpstreamUrlValidator
     {
-        public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
-            => Task.FromResult(true);
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
+            => Task.FromResult(UpstreamUrlBlock.None);
     }
 }

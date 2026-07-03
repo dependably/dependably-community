@@ -50,11 +50,11 @@ registry host, add it to `.dependably-check`:
 ### Docker
 
 ```bash
-# Build for the current machine's architecture (default: x64)
+# Build for the current machine's architecture (default: the host platform)
 docker build -t dependably .
 
 # Build for ARM64
-docker build --build-arg RID=linux-musl-arm64 -t dependably .
+docker build --platform linux/arm64 -t dependably .
 
 # Build and start via compose
 docker compose up -d --build
@@ -70,7 +70,8 @@ docker compose up -d --build
 # Unit, compliance, and security tests (no external dependencies)
 dotnet test --filter "Category!=Integration"
 
-# All tests including integration (requires LocalStack + Azurite)
+# All tests including integration (self-contained — in-memory blob + SQLite stores).
+# A bare run also selects Category=SchemaPostgres tests, which need TEST_POSTGRES_CONNECTION.
 dotnet test
 
 # Single test class
@@ -242,17 +243,20 @@ For a release `0.x.y`:
 
 1. Edit `Directory.Build.props` — set `<Version>0.x.y</Version>`.
 2. Edit `web/package.json` — set `"version": "0.x.y"`.
-3. Commit:
+3. Commit the bump on a branch and land it through an MR (`main` is protected — no direct push):
    ```bash
    git commit -am "chore: bump version to 0.x.y"
    ```
-4. Tag and push:
+4. After the MR merges, pull the merged `main` and tag that commit — not the branch tip:
    ```bash
-   git tag v0.x.y
-   git push && git push --tags
+   git checkout main && git pull
+   git tag -a v0.x.y -m "v0.x.y"
+   git push --tags
    ```
 
 CI's `publish` job triggers on `v*.*.*` tags, extracts `0.x.y` from the tag, passes it as the Docker `VERSION` build arg, and pushes both `:latest` and `:0.x.y` images to GHCR. The two source files and the git tag must agree — keep them in lockstep.
+
+`validate-release-tag` requires the tag to be **annotated** (`git tag -a`, not lightweight), its commit to be an **ancestor of `main`**, and its version to match `Directory.Build.props` `<Version>`. Tagging the branch tip before the version-bump MR merges fails the annotated and ancestor-of-main checks.
 
 ### Verifying the stamp
 
@@ -304,8 +308,18 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 | `DB_PROVIDER` | `sqlite` | Database backend: `sqlite` (default, uses `DB_PATH`) or `postgres` (requires `DB_CONNECTION_STRING`). |
 | `DB_CONNECTION_STRING` | — | Postgres connection string. Required when `DB_PROVIDER=postgres`; ignored for SQLite. |
 | `DEFAULT_ORG_SLUG` | `default` | Slug of the org created on first boot |
-| `DEPLOYMENT_MODE` | `single` | Tenancy mode: `single` or `multi`. `multi` requires a non-localhost `BASE_URL` (the host portion is the apex domain). `bound` pins every request to `BOUND_TENANT_SLUG` regardless of host (single-tenant intercept mode). |
+| `DEFAULT_TENANT_SLUG` | — | Preferred spelling of `DEFAULT_ORG_SLUG`; when both are set, `DEFAULT_TENANT_SLUG` takes precedence. |
+| `DEPLOYMENT_MODE` | `single` | Tenancy mode: `single` or `multi`. `multi` requires a non-localhost `BASE_URL` (the host portion is the apex domain). `bound` pins every request to `BOUND_TENANT_SLUG` regardless of host (single-tenant intercept mode). `edge` runs a headless cache-only node whose sole upstream for every ecosystem is one central master (requires `EDGE_MASTER_URL` + `EDGE_MASTER_TOKEN`; collapses to one implicit realm; no admin user is created). |
 | `BOUND_TENANT_SLUG` | — | Required when `DEPLOYMENT_MODE=bound`. Every request resolves to this tenant slug; the request host is ignored. |
+| `EDGE_MASTER_URL` | — | Required when `DEPLOYMENT_MODE=edge`. Base URL of the central master dependably instance the edge pulls through to for every ecosystem. First boot seeds one upstream registry row per ecosystem pointing at this URL; a changed value is re-applied on the next restart. The host is admitted through the SSRF guard so an internal/private master over a LAN link is reachable (only this exact host is exempted). Missing in edge mode is a hard startup error. |
+| `EDGE_MASTER_TOKEN` | — | Required when `DEPLOYMENT_MODE=edge`. A reader-scoped service token minted on the master (in the org whose packages this edge serves), presented on every upstream fetch. Stored encrypted at rest in the seeded upstream rows when `DEPENDABLY_MASTER_KEY` is set. Revoking it on the master takes the edge cold-only immediately. Missing in edge mode is a hard startup error. |
+| `EDGE_ACCESS_TOKEN` | — | Optional, `DEPLOYMENT_MODE=edge` only. Pre-shared token that inbound edge clients present to the edge node. When set, it is seeded as a reader-scoped service token in the edge's own DB and anonymous pull is turned off, so clients must authenticate (`Authorization: Bearer <token>`, or Basic for PyPI/NuGet); rotating the value replaces the row on the next restart. When **unset**, the edge accepts anonymous reads (anonymous pull on) and logs a startup warning — intended for trusted networks only. Never logged. |
+| `Proxy__MetadataCacheTtlSeconds` | `0` (disabled), `120` in edge mode | Positive TTL for the upstream-metadata cache (packuments, PyPI simple-index/JSON, NuGet registration, maven-metadata). `0` disables it — the default on a standard instance, where every metadata request forwards upstream as before. Edge mode defaults to `120` so a headless pull-through node absorbs metadata load and keeps resolving versions during a brief master outage; an explicit value (including `0`) overrides the edge default. |
+| `Proxy__MetadataCacheMaxStaleSeconds` | `86400` | Serve-stale window: how long past its TTL an expired cached metadata document may still be served when the refresh fetch fails with a *transient* upstream failure (network error, timeout, 5xx). Only meaningful when the cache is enabled. A 404 is not transient and is never served stale. |
+| `Proxy__MetadataCacheNegativeTtlSeconds` | `60` | TTL for cached upstream 404s, so repeated misses for a missing package don't stampede the master. `0` disables negative caching. Only meaningful when the cache is enabled. |
+| `Proxy__MetadataCacheMaxBytes` | `134217728` (128 MB) | Total memory bound for cached metadata bodies. Entry size is the buffered body length plus a small overhead constant; the byte-bounded cache evicts least-recently-used entries under pressure. A single document larger than the 32 MB metadata cap passes through uncached rather than evicting the cache. |
+| `METADATA_LOCAL_CACHE_TTL_SECONDS` | `600` | TTL for the rendered-response cache of **locally-owned** metadata (npm packument, NuGet registration, PyPI simple index, Maven metadata) — distinct from the `Proxy__MetadataCache*` family above, which caches the *upstream-fetch* result. Invalidated on publish/unpublish on the node that served the mutation; other replicas keep serving their cached copy for up to this TTL. Lower this (e.g. `30`) in a multi-instance deployment where post-push staleness on non-publishing replicas matters — see [Metadata caches are per-instance](#metadata-caches-are-per-instance). |
+| `METADATA_PROXY_CACHE_TTL_SECONDS` | `300` | TTL for the rendered-response cache of **proxy-merged** metadata (same four ecosystems), shorter than the local TTL because the upstream can change independently of any local publish. |
 | `RESERVED_SUBDOMAINS` | — | Comma-separated slugs to add to the built-in reserved list (e.g. `api,status,docs`). Prevents those subdomains from being claimed as tenant slugs in multi-tenant mode. |
 | `DEPENDABLY_DEPLOYMENT_MODE` | `standalone` | Set to `ha` to require Redis and enable distributed locking |
 | `DEPENDABLY_INSTANCE_ROLE` | `single` | Attached to OTel resource attributes as `dependably.instance.role`. Use to distinguish control-plane vs data-plane replicas in distributed traces. |
@@ -323,8 +337,12 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 | `AIR_GAPPED` | `false` | Set `true` (or `1`) to declare the instance air-gapped. Skips all outbound network calls (OSV queries, deprecation refresh, threat-feed, healthcheck pings) and logs a warning if any network-dependent setting is configured. Also see `OSV_MODE=local`. |
 | `DISABLE_BACKGROUND_JOBS` | — | Comma-separated list of background job names to disable without fully air-gapping the instance (e.g. `vuln-scan,deprecation-refresh`). Known names are logged on startup. `AIR_GAPPED=true` disables all background jobs and takes precedence. |
 | `REQUIRE_MFA` | — | Set `true` (or `1`) to enforce MFA enrollment instance-wide. When set, every authenticated user (tenant and system_admin) must complete TOTP enrollment before accessing any API endpoint. Composes with the per-tenant `require_mfa` setting in org_settings: either signal triggers enforcement. |
+| `REQUIRE_SECURE_COOKIES` | — | Set `true` to force the `Secure` flag on the session/MFA/trusted-device cookies unconditionally, regardless of the inbound request's scheme or `BASE_URL`. Without it, `Secure` is set only when the live request is HTTPS or `BASE_URL` declares an https scheme — a plain-HTTP deployment ships the session cookie without `Secure`, letting a MITM capture the session JWT. A startup warning is logged whenever cookies may be issued without `Secure` on a non-HTTPS-declared deployment. Do not set this on local plain-HTTP dev — the browser will refuse to store a `Secure` cookie over `http://`, and login will silently fail to persist a session. |
+| `TRUSTED_DEVICE_TTL_DAYS` | `30` | Days a "remember this device" MFA cookie remains valid before re-prompting for a TOTP code. |
 | `SHUTDOWN_GRACE_PERIOD` | `30` | Seconds the host waits for in-flight requests to drain after SIGTERM before forcefully exiting. Passed to ASP.NET Core's `ShutdownTimeout`. |
 | `SHUTDOWN_PRESTOP_DELAY` | `10` | Seconds to sleep after SIGTERM and before draining. Gives load balancers time to remove this replica from rotation before the server stops accepting new connections. |
+| `INSTANCE_LOCK_STALE_SECONDS` | `90` | SQLite-only. Staleness window for the shared-database single-writer guard. On startup a file-backed SQLite deployment claims a heartbeat lock; a second process whose peer's heartbeat is fresher than this window fails fast, while an older heartbeat (a crashed predecessor) is taken over. The heartbeat refreshes every third of this window. The lock is released on graceful shutdown. No effect on Postgres (legitimately multi-writer) or in-memory stores. |
+| `REPLICA_HINT` / `INSTANCE_ROLE` | — | Set `REPLICA_HINT=true` (or `INSTANCE_ROLE=replica`) on each multi-replica instance so Dependably logs a startup warning reminding operators that OCI chunked-upload session affinity is required — see "OCI chunked uploads — session affinity required" under [High-availability deployment](#high-availability-deployment). |
 
 ### First boot
 
@@ -352,6 +370,7 @@ Storage has two tiers: **cache** (proxy artefacts, eviction-friendly) and **regi
 | `PROXY_STAGING_PATH` | OS temp dir | Hash-and-stage directory for the proxy-fetch MISS path. Container deployments expecting large artefacts should set this to a disk-backed volume (e.g. `/data/staging`) — `/tmp` is often tmpfs (RAM-backed), which defeats the memory-bounding goal. |
 | `STAGING_DISK_WARN_THRESHOLD_PERCENT` | `10` | Serilog `Warning` is emitted when available space on the staging volume falls below this percentage of total volume size. Set `0` to disable the warning. |
 | `STAGING_DISK_FLOOR_BYTES` | `536870912` (512 MiB) | Hard floor: proxy fetches are rejected with 507 Insufficient Storage when available staging disk space falls below this value. When `Content-Length` is present the effective floor is `max(STAGING_DISK_FLOOR_BYTES, 2 × Content-Length)`. An explicit `0` is a deliberate opt-out that disables the guardrail entirely — both the absolute floor and the dynamic `2 × Content-Length` floor are skipped, and a startup `Warning` is logged (not recommended). A negative or unparseable value falls back to the default rather than disabling. |
+| `STAGING_DISK_POLL_INTERVAL_SECONDS` | `60` | How often the background staging-disk monitor samples free/used space on the staging volume and evaluates `STAGING_DISK_WARN_THRESHOLD_PERCENT`. Independent of the per-request `STAGING_DISK_FLOOR_BYTES` check, which is evaluated live on each proxy fetch. |
 | `DOTNET_GCHeapHardLimit` | — | Hex byte count; caps the .NET GC heap to protect the host from OOM-kill on memory-constrained hosts (Raspberry Pi, small ARM64 containers). Set to ~75 % of the container `mem_limit`; for a 1 GiB host use `0x30000000` (768 MiB), for 2 GiB use `0x60000000` (1.5 GiB), for 4 GiB use `0xC0000000` (3 GiB). See the `docker-compose.yml` environment block for a ready-to-uncomment example. This is a runtime hint — no code reads it; it is consumed by the .NET runtime before the process starts. |
 | `CACHE_EVICT_SCHEDULE` | `0 * * * *` | Cron schedule (standard 5-field) for the cache eviction pass. Defaults to hourly. When none of the three cap variables are set, a default 30-day age cap applies. |
 | `CACHE_MAX_AGE_DAYS` | `30` (when all three caps unset) | Evict proxy-cache artefacts not accessed within this many days. Setting this variable (or either of the two below) takes full control and suppresses the default 30-day cap. |
@@ -368,14 +387,25 @@ Storage has two tiers: **cache** (proxy artefacts, eviction-friendly) and **regi
 | `MAX_UPLOAD_BYTES_NPM` | — | npm-specific upload size limit (bytes) |
 | `MAX_UPLOAD_BYTES_NUGET` | — | NuGet-specific upload size limit (bytes) |
 
+### Tenant limits
+
+Instance-wide defaults for per-tenant caps.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEFAULT_STORAGE_QUOTA_BYTES` | — (unlimited) | Default aggregate hosted-storage quota (bytes) applied to every tenant that has no explicit per-tenant override. Seeded into `instance_settings` at first boot, and only when set — upgrading an existing install does not suddenly impose a ceiling. Editable afterward from the system_admin Settings page. |
+| `MAX_ACTIVE_TOKENS_PER_TENANT` | `1000` | Maximum number of active (non-revoked) tokens a single tenant may hold at once. Seeded into `instance_settings` at first boot; editable afterward from the system_admin Settings page. |
+| `MAX_CONCURRENT_OCI_UPLOADS_PER_TENANT` | `32` | Maximum number of concurrent OCI chunked-upload sessions a single tenant may have open. Bounds staging-volume exposure from abandoned `docker push` sessions. Seeded into `instance_settings` at first boot; editable afterward from the system_admin Settings page. |
+| `OCI_UPLOAD_TTL_MINUTES` | `60` | Age (minutes) after which an OCI upload session's `created_at` makes it eligible for cleanup by the staging janitor. Read directly from configuration on every janitor pass — not an `instance_settings` value, so it can be changed by restarting with a new value. |
+
 ### Upstream proxies
 
 | Variable | Default | Description |
 |---|---|---|
-| `PyPI__Upstream` | `https://pypi.org` | Upstream PyPI registry for proxy cache |
-| `Npm__Upstream` | `https://registry.npmjs.org` | Upstream npm registry for proxy cache |
-| `NuGet__Upstream` | `https://api.nuget.org/v3` | Upstream NuGet registry for proxy cache |
-| `Maven__Upstream` | `https://repo1.maven.org/maven2` | Upstream Maven registry (Maven Central) for proxy cache |
+| `PyPI__Upstream` | `https://pypi.org` | Upstream PyPI registry for proxy cache, seeded for new orgs. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. |
+| `Npm__Upstream` | `https://registry.npmjs.org` | Upstream npm registry for proxy cache, seeded for new orgs. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. |
+| `NuGet__Upstream` | `https://api.nuget.org/v3` | Upstream NuGet registry for proxy cache, seeded for new orgs. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. |
+| `Maven__Upstream` | `https://repo1.maven.org/maven2` | Upstream Maven registry (Maven Central) for proxy cache, seeded for new orgs. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. |
 | `Maven__NegativeCacheTtl` | `01:00:00` | TTL (`TimeSpan` format) for negative (not-found) cache entries in the Maven proxy |
 | `Maven__VerifyWithUpstreamSha256` | `true` | Verify Maven artifacts against the upstream-published `.sha256` sidecar |
 | `Go__Upstream` | `https://proxy.golang.org` | Upstream Go module proxy (GOPROXY) seeded for new orgs. Override to point at a corporate mirror or GOPROXY-compatible proxy (e.g. `https://goproxy.cn`). Per-org registries are managed from the web UI; this value seeds the initial row. |
@@ -395,6 +425,7 @@ Storage has two tiers: **cache** (proxy artefacts, eviction-friendly) and **regi
 | `OTEL_SERVICE_NAME` | `dependably` | OTel `service.name` resource attribute. Override when running multiple Dependably instances in the same trace backend. |
 | `OTEL_TRACES_SAMPLER_ARG` | `0.1` | Head-sampling ratio passed to `TraceIdRatioBasedSampler` (0.0–1.0). `1.0` records every trace; `0.0` disables tracing. |
 | `TENANT_COUNT_POLL_INTERVAL_SECONDS` | `60` | How often the tenant-count metric is refreshed. Set `0` to disable the background poller. |
+| `ADVISORY_INVENTORY_POLL_INTERVAL_SECONDS` | `300` | How often the advisory-inventory metric (`dependably.advisories.tracked`, grouped by ecosystem/severity) is refreshed. Set `0` to disable the background poller. |
 
 **Local collector quickstart.** The base `docker-compose.yml` ships no telemetry plumbing. To bring up a local OpenTelemetry Collector and route the app's logs/traces/metrics to it, add the opt-in overlay:
 
@@ -444,6 +475,16 @@ The overlay sets `OTEL_EXPORTER_OTLP_ENDPOINT` for you and runs a collector whos
 | `DEPRECATION_REFRESH_BATCH_SIZE` | `500` | Maximum number of packages to refresh per pass. |
 | `DEPRECATION_REFRESH_BATCH_DELAY_MS` | `500` | Delay (ms) between batches within one pass. |
 
+### SAML certificate expiry
+
+Daily background sweep that checks the effective IdP signing certificate expiry for every tenant with SAML configured and emits `audit_log` events at configurable day-to-expiry thresholds.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SAML_CERT_EXPIRY_SCHEDULE` | `0 6 * * *` | Cron schedule for the SAML certificate expiry sweep (06:00 UTC daily). |
+| `SAML_CERT_EXPIRY_JITTER_SECONDS` | `1800` | Random offset (0..N seconds) added to each scheduled sweep to spread load. |
+| `SAML_CERT_EXPIRY_WARN_DAYS` | `30,14,7,1` | Comma-separated days-to-expiry thresholds at which an alert event is emitted. Progression is forward-only per certificate — a tenant that received a "30d" alert only gets "14d" once the window shrinks past 14. |
+
 ### SIEM forwarding
 
 Dependably can forward audit events to an external SIEM collector in real time. Configure either the webhook or the syslog forwarder (not both). When neither is configured the SIEM queue is not started and `SIEM_QUEUE_CAPACITY` has no effect.
@@ -459,6 +500,15 @@ Dependably can forward audit events to an external SIEM collector in real time. 
 | `SIEM_SYSLOG_PROTO` | `udp` | Transport: `udp`, `tcp`, or `tls`. |
 | `SIEM_SYSLOG_FORMAT` | `cef` | Message format: `cef` (ArcSight Common Event Format) or `rfc5424`. |
 | `SIEM_QUEUE_CAPACITY` | `1024` | In-memory queue depth for outbound SIEM events. Events are dropped (with a metric) when the queue is full. Increase for high-audit-volume deployments or a slow collector. |
+
+### Webhook subscriptions (package events)
+
+Per-org outbound webhooks deliver signed JSON payloads to subscriber URLs when package events occur (publish, yank, vulnerability, etc.). Subscriptions are managed in Settings → Webhooks.
+
+| Variable | Default | Description |
+|---|---|---|
+| `WEBHOOK_ALLOW_PRIVATE` | — | When `true`, RFC 1918 addresses (10/8, 172.16/12, 192.168/16) are allowed as webhook endpoint targets — for example, self-hosted receivers on a private network. Loopback, link-local (169.254/16), and cloud-metadata addresses remain blocked regardless. Unset or `false` requires a public IP or hostname. |
+| `WEBHOOK_QUEUE_CAPACITY` | `1024` | In-memory queue depth for outbound webhook deliveries. Events are dropped (with a log warning) when the queue is full. |
 
 ### Healthcheck pinging
 
@@ -565,13 +615,15 @@ Two token types are available per org:
 - **User tokens** — tied to a user account, appear in audit logs with the user's identity
 - **Service tokens** — named machine tokens with no user association, ideal for pipelines
 
-Both support `pull` and `push` scopes. `push` implies `pull`. Tokens are stored as SHA-256 hashes; the raw value is shown only once on creation.
+Both carry an explicit **capability** subset chosen at creation — fine-grained permission strings like `read:artifact`, `publish:npm`, or the family wildcard `publish:*` — rather than a coarse scope. A token can only be minted with capabilities the caller's own role already grants (no privilege escalation); a mint request asking for more returns 400. At request time, a token used against a route requiring a capability it wasn't minted with returns 403, not 401. Capabilities are the single source of truth for permission checks. Tokens are stored as SHA-256 hashes; the raw value is shown only once on creation.
+
+Which capabilities a role can grant to a token it mints follows the role→capability mapping below (see [Multitenancy](#multitenancy) for the full role list): `member` gets read-only capabilities, `admin` adds publish/import/yank and tenant:configure, `owner` adds tenant:admin, and `auditor` is limited to audit-read.
 
 ---
 
 ## Multitenancy
 
-Each org has independent package namespaces, its own member list with roles (`admin`, `member`), per-ecosystem upload size limits, optional anonymous pull, and an optional PURL allowlist to restrict proxied packages.
+Each org has independent package namespaces, its own member list with roles (`owner`, `admin`, `member`, `auditor`), per-ecosystem upload size limits, optional anonymous pull, and an optional PURL allowlist to restrict proxied packages. `owner` is the only role that holds `tenant:admin`; `auditor` is a read-only role limited to audit-log access.
 
 Registry URLs are ecosystem-path-only: `/simple/`, `/npm/`, `/nuget/v3/index.json`, `/maven/`, `/rpm/`. Tenancy is host-resolved — in `DEPLOYMENT_MODE=single` (default) the bare host serves the one org; in `DEPLOYMENT_MODE=multi` each org is a subdomain of the apex host (`my-org.apex/simple/` etc.). OCI is at `/v2/` per the Distribution Spec.
 
@@ -581,7 +633,7 @@ Registry URLs are ecosystem-path-only: `/simple/`, `/npm/`, `/nuget/v3/index.jso
 
 On a cache miss, Dependably fetches from the configured upstream, verifies the SHA-256 checksum, stores the blob, and records the package as a proxy entry. Subsequent requests are served from the local blob store. Packages with a checksum mismatch are rejected and never stored.
 
-Upstreams can be configured per org from the web UI, or globally via environment variables.
+Upstreams are per-org and DB-backed (the `upstream_registry` table) — the resolver is deliberately DB-only, with no `IConfiguration` fallback. They are managed per org from Settings → Proxy. The `<Eco>__Upstream` environment variables (below) only **seed the initial row** for newly created orgs; changing one on an existing install has no effect on that org's already-seeded upstream — update the row from Settings → Proxy instead.
 
 ---
 
@@ -594,6 +646,8 @@ The sections below call out constraints that are silent data-loss or security ri
 ### SQLite metadata store — do not share over NFS
 
 `SqliteMetadataStore` opens a single SQLite file (configured via `DB_PATH`). SQLite uses file-system locking for its write-serialization guarantee. **Network file systems (NFS, CIFS/SMB, most distributed POSIX mounts) do not implement POSIX advisory locks correctly**, and SQLite's documentation explicitly states that its locking is unsupported over NFS. Running two or more Dependably instances pointed at the same SQLite file over NFS risks write-lock corruption, WAL file divergence, and silent data loss.
+
+A startup guard enforces single-writer semantics on file-backed SQLite: each process claims a heartbeat lock (the `instance_lock` table) and a second process started against the same file **fails fast** while the first is alive, naming the holder. A crashed predecessor's stale heartbeat is taken over automatically; the lock is released on graceful shutdown so a normal restart does not wait. Tune the staleness window with `INSTANCE_LOCK_STALE_SECONDS`. To recover from a false positive after an unclean crash, wait out the window or `DELETE FROM instance_lock` before restarting. The guard does not run on Postgres (legitimately multi-writer).
 
 **Do not:**
 - Point multiple instances at a shared `DB_PATH` on an NFS/CIFS mount.
@@ -644,7 +698,15 @@ See [`DOWNLOAD_RATE_LIMIT_PERMITS`](#rate-limiting), [`PUSH_RATE_LIMIT_PERMITS`]
 
 ### Metadata caches are per-instance
 
-Ecosystem metadata responses (the npm/PyPI/NuGet/Maven index and registration documents) are cached in an in-process `MemoryCache` on each instance. The cache is not shared across replicas and there is no cross-instance invalidation. After a push that lands on one instance, other instances continue serving their own cached metadata until that entry's TTL expires, so a client routed to a different replica can briefly see a stale index. Convergence relies on the short cache TTLs rather than active invalidation. Out-of-process cache invalidation (for example, a Redis pub/sub fan-out on push) is future work; until then, keep metadata TTLs short in multi-instance deployments where post-push staleness matters.
+Ecosystem metadata responses (the npm/PyPI/NuGet/Maven index and registration documents) are cached in an in-process `MemoryCache` on each instance. The cache is not shared across replicas and there is no cross-instance invalidation. After a push that lands on one instance, other instances continue serving their own cached metadata until that entry's TTL expires, so a client routed to a different replica can briefly see a stale index. Convergence relies on the short cache TTLs rather than active invalidation. Out-of-process cache invalidation (for example, a Redis pub/sub fan-out on push) is future work; until then, keep metadata TTLs short in multi-instance deployments where post-push staleness matters by setting [`METADATA_LOCAL_CACHE_TTL_SECONDS`](#core) (default `600`) and [`METADATA_PROXY_CACHE_TTL_SECONDS`](#core) (default `300`) — for example `30`/`15` if a rolling deploy's post-push staleness window needs to be tight.
+
+### Scheduled background jobs — leader-coordinated per job
+
+Scheduled background jobs that mutate shared state (the database or the shared cache tier) acquire a per-job distributed lock before each tick, so a multi-replica deployment runs each of these exactly once per scheduled occurrence rather than once per replica: `CacheEvictionService`, `RetentionService`, `DeprecationRefreshService`, `ThreatFeedRefreshService`, `VulnerabilityScanService`, `OrphanBlobReconcilerService`, `TenantHardDeleteService`, and `StatsRefreshService`. In standalone mode the in-process lock always grants, so a single instance still runs every job on every tick.
+
+`OciStagingJanitorService` is deliberately **not** leader-coordinated — it sweeps this replica's own local staging directory, and its shared-row cleanup is an idempotent no-op on a losing race, so every replica must run its own pass.
+
+A distributed-lock backend failure (a Redis connection blip or failover, not a clean "lock held by another instance" response) is treated as a skipped tick rather than a fatal error, so a transient Redis hiccup does not stop a replica.
 
 ---
 
@@ -652,7 +714,7 @@ Ecosystem metadata responses (the npm/PyPI/NuGet/Maven index and registration do
 
 - **OWASP API Security Top 10** alignment: BOLA/IDOR protection, SSRF protection with DNS rebinding re-validation, path traversal rejection, CRLF injection prevention
 - **Authentication**: JWT HS256 sessions (8h, HttpOnly SameSite=Strict cookie); BCrypt-12 passwords; CSPRNG token generation; constant-time comparison
-- **Scope enforcement**: `pull` and `push` scopes enforced at the HTTP handler level; scope mismatch returns 403, not 401
+- **Capability enforcement**: tokens carry an explicit capability subset (e.g. `read:artifact`, `publish:npm`), checked at the HTTP handler level; capability mismatch returns 403, not 401 — see [Tokens](#tokens)
 - **Account lockout**: 10 failed login attempts → 15-minute lockout with `Retry-After` header
 - **Security headers**: `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Content-Security-Policy` (management API), `Strict-Transport-Security` (when behind HTTPS proxy)
 - **Trusted proxy / host hardening**: Forwarded-header processing is fail-closed — when `TRUSTED_PROXIES` is unset, `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` are ignored entirely so caller-supplied values cannot spoof `RemoteIpAddress`, scheme, or host. When `TRUSTED_PROXIES` is set, those headers are processed only from the listed IPs/CIDRs. Host-header filtering is derived at startup from the host portion of `BASE_URL`: when that host is non-localhost, only that host (plus `*.apex` in multi mode) and localhost are accepted; unknown `Host` headers are rejected before tenant resolution, preventing Host injection into SAML SP URLs, absolute links, and CSRF Origin comparisons. When `BASE_URL` is unset or localhost (dev/local), filtering is permissive and a startup warning is logged.
@@ -671,7 +733,7 @@ The UI and API error messages are localized. English (`en`) is the source langua
 | `src/Dependably/Resources/SharedResource.resx` | Backend error strings — English source |
 | `src/Dependably/Resources/SharedResource.fr.resx` | Backend error strings — French translation |
 
-Adding a string: add the key to `en.json` / `SharedResource.resx`, add the translation to each locale file, then run `node i18n/scripts/i18n-validate.js` to catch missing keys.
+Adding a string: add the key to `en.json` / `SharedResource.resx` (backend entries include a translator `<comment>`), add the translation to each locale file, run `bash i18n/scripts/i18n-export.sh` to refresh the translator handoff package (`i18n/handoff/*.xlf`), then `node i18n/scripts/i18n-validate.js` — it fails on missing keys **and** on a handoff that was not regenerated.
 
 Adding a locale: see [i18n/adding-a-locale.md](i18n/adding-a-locale.md).
 

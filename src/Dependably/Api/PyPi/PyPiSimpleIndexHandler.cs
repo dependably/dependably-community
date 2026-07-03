@@ -25,6 +25,7 @@ public sealed class PyPiSimpleIndexHandler(
     ClaimResolver claimResolver,
     ReservedNamespaceService reserved,
     RenderedResponseCache<PyPiSimpleIndexKey> cache,
+    RenderedMetadataCacheOptions cacheOptions,
     TimeProvider time)
 {
     public async Task<IActionResult> SimpleIndexAsync(
@@ -110,7 +111,7 @@ public sealed class PyPiSimpleIndexHandler(
         }
 
         // Single-flight: collapse concurrent rebuilds for the same proxy simple index.
-        byte[]? proxyBytes = await cache.GetOrRebuildAsync(cacheKey, PyPiConstants.SimpleIndexProxyTtl, async rebuildCt =>
+        byte[]? proxyBytes = await cache.GetOrRebuildAsync(cacheKey, cacheOptions.ProxyTtl, async rebuildCt =>
         {
             var result = await ProxyUpstreamSimpleIndexAsync(httpContext, orgId, purlName, pkg, settings, token, rebuildCt);
             return result is ContentResult cr && cr.Content is not null
@@ -142,7 +143,7 @@ public sealed class PyPiSimpleIndexHandler(
         var signals = await LoadVulnSignalsAsync(allVersions, ct);
         string localHtml = PyPiSimpleIndexHelper.RenderLocalSimpleIndex(pkg.PurlName, allVersions, settings, signals, time.GetUtcNow());
         byte[] localBytes = Encoding.UTF8.GetBytes(localHtml);
-        cache.Set(localCacheKey, localBytes, PyPiConstants.SimpleIndexLocalTtl);
+        cache.Set(localCacheKey, localBytes, cacheOptions.LocalTtl);
         return ServeNotModifiedOrSetCacheHeaders(httpContext, localBytes, "private, max-age=300")
             ?? (IActionResult)new ContentResult { Content = localHtml, ContentType = "text/html; charset=utf-8", StatusCode = StatusCodes.Status200OK };
     }
@@ -168,7 +169,8 @@ public sealed class PyPiSimpleIndexHandler(
         // No configured upstream ⇒ proxying is disabled for this ecosystem, so fall through to
         // local-only below.
         var bases = await registries.ResolveAsync(orgId, "pypi", ct);
-        string? upstreamHtml = null;
+        bool upstreamOk = false;
+        List<PyPiSimpleIndexHelper.UpstreamSimpleIndexEntry> upstreamEntries = [];
         foreach (var source in bases)
         {
             try
@@ -181,7 +183,12 @@ public sealed class PyPiSimpleIndexHandler(
                     continue;
                 }
 
-                upstreamHtml = PyPiSimpleIndexHelper.RewriteUpstreamSimpleIndexHtml(response.BodyAsString());
+                // Parse only the anchor filename/sha256 pairs out of the upstream page — the
+                // served index is rendered from this parsed data below, never from the raw
+                // upstream body, so hostile upstream markup (inside or outside an anchor) never
+                // reaches the client.
+                upstreamEntries = PyPiSimpleIndexHelper.ParseUpstreamSimpleIndexLinks(response.BodyAsString());
+                upstreamOk = true;
                 break;
             }
             catch
@@ -191,11 +198,11 @@ public sealed class PyPiSimpleIndexHandler(
         }
 
         // Load vuln gate signals for all local versions in one batch query. Used by both the
-        // fallback renderer and the merge helper so neither fans out N per-version I/O calls.
+        // fallback renderer and the merged renderer so neither fans out N per-version I/O calls.
         var signals = await LoadVulnSignalsAsync(localVersions, ct);
         var now = time.GetUtcNow();
 
-        if (upstreamHtml is null)
+        if (!upstreamOk)
         {
             if (localVersions.Count == 0)
             {
@@ -208,10 +215,10 @@ public sealed class PyPiSimpleIndexHandler(
                 ?? (IActionResult)new ContentResult { Content = fallbackHtml, ContentType = "text/html; charset=utf-8", StatusCode = StatusCodes.Status200OK };
         }
 
-        // Splice local-only filenames into the upstream index so mixed-origin namespaces
-        // expose private versions alongside upstream. Filenames already present in the
-        // upstream HTML are skipped to avoid duplicates.
-        string merged = PyPiSimpleIndexHelper.MergeLocalVersionsIntoUpstreamIndex(upstreamHtml, localVersions, settings, signals, now);
+        // Render the merged index entirely from parsed upstream entries + local versions —
+        // mixed-origin namespaces expose private versions alongside upstream, with filenames
+        // already present upstream skipped to avoid duplicates.
+        string merged = PyPiSimpleIndexHelper.RenderMergedSimpleIndex(purlName, upstreamEntries, localVersions, settings, signals, now);
         byte[] mergedBytes = Encoding.UTF8.GetBytes(merged);
         return ServeNotModifiedOrSetCacheHeaders(httpContext, mergedBytes, "private, max-age=60")
             ?? (IActionResult)new ContentResult { Content = merged, ContentType = "text/html; charset=utf-8", StatusCode = StatusCodes.Status200OK };

@@ -28,12 +28,12 @@ XLIFF 1.2 tools will not parse these files correctly. Verify your tool supports 
 
 ## How to translate
 
-Each string is a `<unit>` element with a `<source>` (the English original) and an empty `<target/>`. Fill in the `<target>` element with the French translation:
+Each string is a `<unit>` element with a `<source>` (the English original) and a `<target>`. Existing translations are pre-filled with `state="translated"` — treat them as the current baseline and revise only where the source changed or the translation is wrong. A new, untranslated string arrives as `state="initial"` with an empty `<target/>`; fill it in:
 
 **Before:**
 ```xml
 <unit id="packages.list.empty.title">
-  <segment>
+  <segment state="initial">
     <source>No packages found</source>
     <target/>
   </segment>
@@ -43,7 +43,7 @@ Each string is a `<unit>` element with a `<source>` (the English original) and a
 **After:**
 ```xml
 <unit id="packages.list.empty.title">
-  <segment>
+  <segment state="translated">
     <source>No packages found</source>
     <target>Aucun paquet trouvé</target>
   </segment>

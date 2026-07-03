@@ -20,6 +20,10 @@ public sealed class BlobStoreSizePollerTests
     private static IConfiguration Config() =>
         new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>()).Build();
 
+    // Non-edge, non-air-gapped: nothing is disabled, so the poller runs.
+    private static Dependably.Infrastructure.IAirGapMode NoAirGap() =>
+        new Dependably.Infrastructure.AirGapMode(Config());
+
     [Fact]
     public async Task PollOnceAsync_SharedTier_PollsRegistryOnly()
     {
@@ -29,7 +33,7 @@ public sealed class BlobStoreSizePollerTests
         await store.PutAsync("k1", new MemoryStream(new byte[100]));
         var tiers = new TieredBlobStorage(store, store);
 
-        var poller = new BlobStoreSizePoller(tiers, Config(), NullLogger<BlobStoreSizePoller>.Instance);
+        var poller = new BlobStoreSizePoller(tiers, Config(), NoAirGap(), NullLogger<BlobStoreSizePoller>.Instance);
         await poller.PollOnceAsync(CancellationToken.None);
 
         var sizes = DependablyMeter.ReadBlobStoreSizes();
@@ -45,7 +49,7 @@ public sealed class BlobStoreSizePollerTests
         await registry.PutAsync("r1", new MemoryStream(new byte[200]));
         var tiers = new TieredBlobStorage(cache, registry);
 
-        var poller = new BlobStoreSizePoller(tiers, Config(), NullLogger<BlobStoreSizePoller>.Instance);
+        var poller = new BlobStoreSizePoller(tiers, Config(), NoAirGap(), NullLogger<BlobStoreSizePoller>.Instance);
         await poller.PollOnceAsync(CancellationToken.None);
 
         var sizes = DependablyMeter.ReadBlobStoreSizes();
@@ -66,7 +70,7 @@ public sealed class BlobStoreSizePollerTests
         var tiers = new TieredBlobStorage(ok, failing);
         var logger = Substitute.For<ILogger<BlobStoreSizePoller>>();
 
-        var poller = new BlobStoreSizePoller(tiers, Config(), logger);
+        var poller = new BlobStoreSizePoller(tiers, Config(), NoAirGap(), logger);
         await poller.PollOnceAsync(CancellationToken.None);
 
         // Registry (failing) logged a warning; cache (ok) still recorded.
@@ -88,7 +92,7 @@ public sealed class BlobStoreSizePollerTests
         store.GetTotalSizeAsync(Arg.Any<CancellationToken>())
             .ThrowsAsync(callInfo => new OperationCanceledException(callInfo.Arg<CancellationToken>()));
         var tiers = new TieredBlobStorage(store, store);
-        var poller = new BlobStoreSizePoller(tiers, Config(), NullLogger<BlobStoreSizePoller>.Instance);
+        var poller = new BlobStoreSizePoller(tiers, Config(), NoAirGap(), NullLogger<BlobStoreSizePoller>.Instance);
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
@@ -103,7 +107,7 @@ public sealed class BlobStoreSizePollerTests
         // `catch (OperationCanceledException) { return; }` on the 30-second startup delay
         // without waiting through it.
         var tiers = new TieredBlobStorage(new InMemoryBlobStore(), new InMemoryBlobStore());
-        var poller = new BlobStoreSizePoller(tiers, Config(), NullLogger<BlobStoreSizePoller>.Instance);
+        var poller = new BlobStoreSizePoller(tiers, Config(), NoAirGap(), NullLogger<BlobStoreSizePoller>.Instance);
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 

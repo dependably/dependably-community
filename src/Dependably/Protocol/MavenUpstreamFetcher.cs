@@ -180,21 +180,21 @@ public sealed class MavenUpstreamFetcher
                 ct: ct,
                 authorizationHeader: authorizationHeader);
 
-            byte[] bytes;
+            // Compute the .sha1/.md5 sidecar digests by streaming the already-staged/cached blob
+            // once — no full-artifact byte[] is materialised even to derive the sidecar hashes.
+            string sha1, md5;
+            long size;
             await using (body.ConfigureAwait(false))
             {
-                bytes = await ReadStreamAsync(body, ct);
+                (sha1, md5, size) = await ComputeSidecarDigestsAsync(body, ct);
             }
 
-            string sha1 = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
-            string md5 = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
-
             return new MavenArtifactFetchResult(
-                Bytes: bytes,
                 BlobKey: blobKey,
                 Sha256: expectedSha256,
                 Sha1: sha1,
                 Md5: md5,
+                SizeBytes: size,
                 IsFromCache: isHit);
         }
         catch (ChecksumException)
@@ -238,57 +238,17 @@ public sealed class MavenUpstreamFetcher
     private async Task<MavenArtifactFetchResult?> FetchThenHashAsync(
         string upstreamBase, string upstreamPath, string upstreamUrl, string? authorizationHeader, CancellationToken ct)
     {
-        byte[] bytes;
+        // Route through the shared hash-and-stage disk pipeline: FetchAndCacheByUrlAsync streams
+        // the body to a staging temp file (SHA-256 computed inline), stores it under
+        // BlobKeys.Proxy(sha), retries transient upstream failures, and single-flights concurrent
+        // first-fetches of the same URL. No full-artifact byte[] is ever materialised — this
+        // replaces the old buffered metadata-path fetch that held the whole JAR on the LOH.
+        UpstreamFetchResult fetched;
         try
         {
-            // Artifact bytes flow through the buffered path here, so the cap is the artifact
-            // limit, not the (much smaller) default metadata limit.
-            //
-            // The buffered metadata path does not itself classify/retry transient upstream
-            // statuses, so this loop does it — mirroring the blob-fetch paths in UpstreamClient.
-            // A transient CDN error (403/429/5xx) on a Maven cache-miss must be retried and,
-            // on exhaustion, surfaced as the retryable UpstreamFetchFailedException (the
-            // middleware maps it to 503/502). It must NOT be negative-cached or returned as a
-            // sticky 404: that would poison the artefact into a 404 (short-circuiting upstream
-            // on every later request) until the negative-cache entry expires. Only a genuine
-            // absence (404/410/…) is negative-cached.
-            const int MaxUpstreamFetchAttempts = 3;
-            // Initial backoff delay before first retry; doubled on each subsequent attempt.
-            const int RetryBackoffBaseMs = 200;
-            const double RetryBackoffExponent = 2.0;
-            UpstreamMetadataResponse resp;
-            int attempt = 0;
-            while (true)
-            {
-                resp = await _upstream.GetOrFetchMetadataAsync(
-                    upstreamUrl, UpstreamClient.MaxUpstreamResponseBytes, authorizationHeader, ct);
-                if (resp.IsSuccessStatusCode)
-                {
-                    break;
-                }
-
-                bool transient = resp.StatusCode is 429 or 403 or >= 500;
-                if (transient && attempt < MaxUpstreamFetchAttempts - 1)
-                {
-                    attempt++;
-                    await Task.Delay(TimeSpan.FromMilliseconds(RetryBackoffBaseMs * Math.Pow(RetryBackoffExponent, attempt - 1)), ct);
-                    continue;
-                }
-                if (transient)
-                {
-                    throw new UpstreamFetchFailedException
-                    {
-                        Url = upstreamUrl,
-                        StatusCode = resp.StatusCode,
-                        RetryAfter = null,
-                        Transient = true,
-                    };
-                }
-
-                await RecordNegativeAsync(upstreamPath, ct);
-                return null;
-            }
-            bytes = resp.Body;
+            fetched = await _upstream.FetchAndCacheByUrlAsync(
+                upstreamUrl, checksumSpec: null, ecosystem: "maven",
+                orgId: null, authorizationHeader: authorizationHeader, ct);
         }
         catch (AirGappedException)
         {
@@ -298,6 +258,17 @@ public sealed class MavenUpstreamFetcher
         {
             throw; // middleware maps transient exhaustion to 503/502
         }
+        catch (HttpRequestException ex) when (ex.StatusCode is not null)
+        {
+            // Genuine upstream absence (404/410/…): FetchWithRetryAsync surfaces it as an
+            // HttpRequestException carrying the response StatusCode after EnsureSuccessStatusCode.
+            // Only a real HTTP status is negative-cached. Transport-level failures (DNS, connection
+            // reset, TLS) surface as HttpRequestException with a null StatusCode; those fall through
+            // to the log-and-return-null path below so a one-off network blip is never poisoned into
+            // a sticky 404 for the negative-cache TTL.
+            await RecordNegativeAsync(upstreamPath, ct);
+            return null;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex,
@@ -306,30 +277,29 @@ public sealed class MavenUpstreamFetcher
             return null;
         }
 
-        string sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        string sha1 = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
-        string md5 = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
+        // Derive the .sha1/.md5 sidecar digests by streaming the freshly-cached blob once.
+        string sha1, md5;
+        await using (var blob = await _blobs.GetAsync(fetched.BlobKey, ct)
+            ?? throw new InvalidOperationException($"Blob {fetched.BlobKey} vanished after caching."))
+        {
+            (sha1, md5, _) = await ComputeSidecarDigestsAsync(blob, ct);
+        }
 
-        // Verify the downloaded bytes against the checksum upstream ADVERTISES, before we
-        // pass the artefact along. We already know .sha256 is absent here (the caller falls
-        // back to this path precisely when no .sha256 sidecar exists), so check the strongest
-        // remaining advertised digest: .sha1 (universal on Maven Central), then .md5. A
-        // mismatch is a supply-chain integrity failure — caller maps ChecksumException → 502
-        // and the artefact is never served or cached. The advertised digest is recorded as
-        // provenance via the computed columns (computed == advertised once verified).
+        // Verify the cached bytes against the checksum upstream ADVERTISES. We already know
+        // .sha256 is absent here (this path is the no-.sha256-sidecar fallback), so check the
+        // strongest remaining advertised digest: .sha1 (universal on Maven Central), then .md5.
+        // A mismatch is a supply-chain integrity failure — caller maps ChecksumException → 502
+        // and the artefact is never served. The content-addressed blob is keyed by its true
+        // SHA-256 (computed inline during staging), so an advertised-sidecar mismatch never
+        // serves; it only leaves an evictable, correctly-content-addressed cache entry.
         if (VerifyWithUpstreamSha256)
         {
             await VerifyAgainstSidecarsAsync(upstreamBase, upstreamPath, upstreamUrl, sha1, md5, authorizationHeader, ct);
         }
 
-        string blobKey = BlobKeys.Proxy(sha256);
-        if (!await _blobs.ExistsAsync(blobKey, ct))
-        {
-            await _blobs.PutAsync(blobKey, new MemoryStream(bytes), ct);
-        }
-
         return new MavenArtifactFetchResult(
-            Bytes: bytes, BlobKey: blobKey, Sha256: sha256, Sha1: sha1, Md5: md5, IsFromCache: false);
+            BlobKey: fetched.BlobKey, Sha256: fetched.Sha256Hex, Sha1: sha1, Md5: md5,
+            SizeBytes: fetched.SizeBytes, IsFromCache: false);
     }
 
     /// <summary>
@@ -587,40 +557,48 @@ public sealed class MavenUpstreamFetcher
         return sb.Length > 0 ? sb.ToString().ToLowerInvariant() : null;
     }
 
-    private static async Task<byte[]> ReadStreamAsync(Stream stream, CancellationToken ct)
+    // Streams an artifact once to compute the Maven .sha1/.md5 sidecar digests (and the byte
+    // count) without ever holding the full artifact in managed memory. SHA-1/MD5 are Maven
+    // client-compatibility sidecars only — the integrity gate and cache key are SHA-256.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "SCS0006",
+        Justification = "MD5/SHA-1 used only for Maven sidecar compatibility, not authentication.")]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA5350",
+        Justification = "SHA-1 used only for Maven sidecar compatibility, not a security decision.")]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA5351",
+        Justification = "MD5 used only for Maven sidecar compatibility, not a security decision.")]
+    private static async Task<(string Sha1, string Md5, long Size)> ComputeSidecarDigestsAsync(
+        Stream stream, CancellationToken ct)
     {
-        if (stream.CanSeek && stream.Length > 0)
+        using var sha1 = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
+        using var md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
+        byte[] buffer = new byte[81920];
+        long total = 0;
+        int read;
+        while ((read = await stream.ReadAsync(buffer, ct)) > 0)
         {
-            byte[] buf = new byte[stream.Length];
-            int total = 0;
-            while (total < buf.Length)
-            {
-                int n = await stream.ReadAsync(buf.AsMemory(total), ct);
-                if (n == 0)
-                {
-                    break;
-                }
-
-                total += n;
-            }
-            return total == buf.Length ? buf : buf.AsSpan(0, total).ToArray();
+            sha1.AppendData(buffer, 0, read);
+            md5.AppendData(buffer, 0, read);
+            total += read;
         }
-
-        using var ms = new MemoryStream();
-        await stream.CopyToAsync(ms, ct);
-        return ms.ToArray();
+        return (
+            Convert.ToHexString(sha1.GetHashAndReset()).ToLowerInvariant(),
+            Convert.ToHexString(md5.GetHashAndReset()).ToLowerInvariant(),
+            total);
     }
 }
 
 /// <summary>
-/// Result of a Maven upstream artifact fetch attempt.
+/// Result of a Maven upstream artifact fetch attempt. The artifact itself is never carried as a
+/// byte[]; it lives in the cache tier under <see cref="BlobKey"/> (hash-and-staged to disk during
+/// the fetch), and the controller opens a fresh blob stream to serve it. Only the small digest
+/// triple and byte count travel with the result, so a 300 MB shaded JAR never sits on the LOH.
 /// </summary>
 public sealed record MavenArtifactFetchResult(
-    byte[] Bytes,
     string BlobKey,
     string Sha256,
     string Sha1,
     string Md5,
+    long SizeBytes,
     bool IsFromCache);
 
 /// <summary>

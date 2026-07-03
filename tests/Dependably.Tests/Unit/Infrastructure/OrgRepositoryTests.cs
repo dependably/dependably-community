@@ -381,6 +381,7 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"a-{Guid.NewGuid():N}");
         string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
         string aliceA = await UserSeeder.InsertAsync(_fixture.Store, orgA, "alice@a.test", role: "member");
+        long versionBefore = await ReadTokenVersionAsync(aliceA);
         // Update for a user that exists but in a *different* org — must be a no-op.
         await _repo.UpdateMemberRoleAsync(orgB, aliceA, "admin");
 
@@ -388,6 +389,51 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         string? role = await conn.ExecuteScalarAsync<string>(
             "SELECT role FROM users WHERE id = @id", new { id = aliceA });
         Assert.Equal("member", role);
+        // The WHERE clause matched no row, so token_version must not move for a cross-org miss.
+        Assert.Equal(versionBefore, await ReadTokenVersionAsync(aliceA));
+    }
+
+    [Fact]
+    public async Task UpdateMemberRoleAsync_Demotion_BumpsTokenVersion_AndReturnsNewVersion()
+    {
+        // Regression: a role change must bump token_version so the demoted user's outstanding
+        // session JWTs (which snapshot the old role) fail the tver check on their next request.
+        // The returned value is the post-bump version, used to re-issue a session in the same flow.
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"role-bump-{Guid.NewGuid():N}");
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId, "admin@x.test", role: "admin");
+        long versionBefore = await ReadTokenVersionAsync(userId);
+
+        long returned = await _repo.UpdateMemberRoleAsync(orgId, userId, "member");
+
+        Assert.Equal(versionBefore + 1, returned);
+        Assert.Equal(versionBefore + 1, await ReadTokenVersionAsync(userId));
+
+        await using var conn = await _fixture.Store.OpenAsync();
+        string? role = await conn.ExecuteScalarAsync<string>(
+            "SELECT role FROM users WHERE id = @id", new { id = userId });
+        Assert.Equal("member", role);
+    }
+
+    [Fact]
+    public async Task UpdateMemberRoleAsync_EvictsTokenVersionCache()
+    {
+        // Regression: bumping token_version without evicting the cache leaves a stale cached
+        // version; OnTokenValidated reads the cached value and keeps honouring the demoted user's
+        // elevated session for up to the 60s cache TTL.
+        using var memCache = new MemoryCache(new MemoryCacheOptions());
+        var store = new UserTokenVersionStore(_fixture.Store, memCache);
+        var repo = RepoWithVersionStore(store);
+
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"role-ev-{Guid.NewGuid():N}");
+        string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId, "admin@x.test", role: "admin");
+
+        // Prime the cache with the current (pre-demotion) version.
+        long versionBefore = (await store.GetCurrentVersionAsync(userId))!.Value;
+
+        await repo.UpdateMemberRoleAsync(orgId, userId, "member");
+
+        long versionAfter = (await store.GetCurrentVersionAsync(userId))!.Value;
+        Assert.Equal(versionBefore + 1, versionAfter);
     }
 
     // ── UpdateOrgStatusAsync — sysadmin lifecycle-gate toggle ────────────────

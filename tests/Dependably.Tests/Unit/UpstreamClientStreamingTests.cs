@@ -215,8 +215,8 @@ public sealed class UpstreamClientStreamingTests
 
     private sealed class AllowAll : IUpstreamUrlValidator
     {
-        public Task<bool> IsAllowedAsync(string url, string? orgId = null, CancellationToken ct = default)
-            => Task.FromResult(true);
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId = null, CancellationToken ct = default)
+            => Task.FromResult(UpstreamUrlBlock.None);
     }
 
     private sealed class AirGap : IAirGapMode

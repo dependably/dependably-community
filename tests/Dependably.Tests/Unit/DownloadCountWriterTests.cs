@@ -267,6 +267,58 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
         Assert.Equal(1, count);
     }
 
+    // ── Mixed partial-failure scenario, all three key strategies ─────────────
+    // A burst rotating through all three DownloadCountRecord shapes (versionId, orgId+purl,
+    // orgId+cacheArtifactId) that partially exceeds capacity: under-capacity writes persist
+    // after drain, split correctly across their target planes; only overflow is dropped.
+
+    [Fact]
+    public async Task MixedBurst_AllThreeKeyStrategies_PartiallyExceedsCapacity_OnlyOverflowDropped()
+    {
+        const int cap = 6;
+        const int burst = 9;
+        const int expectedDrops = burst - cap;
+
+        var writer = new DownloadCountWriter(capacity: cap);
+        var service = new DownloadCountWriterHostedService(writer, _db,
+            NullLogger<DownloadCountWriterHostedService>.Instance,
+            TimeProvider.System);
+
+        long drops = 0;
+        using var listener = DropMeterListener(delta => drops += delta);
+
+        int successCount = 0;
+        for (int i = 0; i < burst; i++)
+        {
+            var record = (i % 3) switch
+            {
+                0 => new DownloadCountRecord(VersionId: _versionId, Purl: null),
+                1 => new DownloadCountRecord(VersionId: null, Purl: _purl, OrgId: _orgId),
+                _ => new DownloadCountRecord(VersionId: null, Purl: null, OrgId: _orgId, CacheArtifactId: _cacheArtifactId),
+            };
+            if (writer.TryEnqueue(record))
+            {
+                successCount++;
+            }
+        }
+
+        Assert.Equal(cap, successCount);
+        Assert.Equal(expectedDrops, drops);
+
+        await service.DrainPendingAsync();
+
+        await using var conn = await _db.OpenAsync();
+        int pvCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT download_count FROM package_versions WHERE id = @id", new { id = _versionId });
+        // The purl-keyed and cacheArtifactId-keyed arms both resolve to the same underlying row
+        // for this seeded cache_artifact, so their contributions land on the same counter.
+        int taaCount = await conn.ExecuteScalarAsync<int>(
+            "SELECT download_count FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @caId",
+            new { orgId = _orgId, caId = _cacheArtifactId });
+
+        Assert.Equal(cap, pvCount + taaCount);
+    }
+
     // ── DrainPendingAsync — aggregation and flush ─────────────────────────────
 
     [Fact]
@@ -311,6 +363,32 @@ public sealed class DownloadCountWriterTests : IAsyncLifetime
 
         await using var conn = await _db.OpenAsync();
         // By-purl increments land in tenant_artifact_access.download_count (global plane).
+        int count = await conn.ExecuteScalarAsync<int>(
+            "SELECT download_count FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @caId",
+            new { orgId = _orgId, caId = _cacheArtifactId });
+        Assert.Equal(3, count);
+    }
+
+    [Fact]
+    public async Task DrainPendingAsync_ByCacheArtifactId_AggregatesMultipleIncrementsIntoSingleUpdate()
+    {
+        // Cache-hit serve paths enqueue directly by (orgId, cacheArtifactId) — the direct-id
+        // analog of the by-purl arm, used when the caller already holds the id and would
+        // otherwise need an extra purl lookup just to enqueue the counter.
+        var writer = new DownloadCountWriter();
+        var service = new DownloadCountWriterHostedService(writer, _db,
+            NullLogger<DownloadCountWriterHostedService>.Instance,
+            TimeProvider.System);
+
+        for (int i = 0; i < 3; i++)
+        {
+            writer.TryEnqueue(new DownloadCountRecord(
+                VersionId: null, Purl: null, OrgId: _orgId, CacheArtifactId: _cacheArtifactId));
+        }
+
+        await service.DrainPendingAsync();
+
+        await using var conn = await _db.OpenAsync();
         int count = await conn.ExecuteScalarAsync<int>(
             "SELECT download_count FROM tenant_artifact_access WHERE org_id = @orgId AND cache_artifact_id = @caId",
             new { orgId = _orgId, caId = _cacheArtifactId });

@@ -60,33 +60,46 @@ public static class RateLimitPartitions
     ///   <item><c>token:HHHHHHHHHHHH</c> — an API token in the Authorization header gives
     ///     each automation client its own bucket, independent of the originating IP.</item>
     ///   <item><c>user:{sub}</c> — a cookie-session SPA user is identified by the JWT
-    ///     <c>sub</c> claim on <c>ctx.User</c> (populated by <c>UseAuthentication</c> before
-    ///     the GlobalLimiter runs). Each tenant user gets a private budget; NAT'd offices
-    ///     sharing one egress IP no longer collapse into a single bucket.</item>
+    ///     <c>sub</c> claim on <c>ctx.User</c> (populated by <c>UseAuthentication</c>/
+    ///     <c>UseAuthorization</c> before the GlobalLimiter runs). Each tenant user gets a
+    ///     private budget; NAT'd offices sharing one egress IP no longer collapse into a
+    ///     single bucket.</item>
     ///   <item><c>ip:1.2.3.4</c> — unauthenticated requests fall back to the remote IP.</item>
     ///   <item><c>unknown</c> — no Authorization header, no authenticated principal, and no
     ///     resolvable IP (in-process test probes).</item>
     /// </list>
+    /// The token and user branches only apply once <c>ctx.User.Identity.IsAuthenticated</c>
+    /// is true — i.e. an endpoint-declared scheme (JWT or ApiToken) already validated the
+    /// credential earlier in the pipeline (<c>UseAuthorization</c> runs before the
+    /// GlobalLimiter and 401s an invalid credential before it ever reaches here). Anonymous-
+    /// accessible <c>/api/v1/</c> routes never invoke a scheme at all, so without this gate a
+    /// single attacker could mint unlimited fresh <c>token:</c> partitions by varying an
+    /// unvalidated Authorization header — every unauthenticated request, garbage token or
+    /// not, shares its caller's IP bucket instead.
     /// </summary>
     public static string GetManagementPartitionKey(HttpContext httpContext)
     {
-        // API token in Authorization header — highest priority so CI automation clients
-        // get their own per-token budget regardless of whether a session is also present.
-        string? raw = ExtractRawTokenIfAny(httpContext);
-        if (raw is not null)
+        if (httpContext.User.Identity?.IsAuthenticated == true)
         {
-            byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
-            return "token:" + Convert.ToHexString(hashBytes, 0, TokenHashPrefixBytes).ToLowerInvariant();
-        }
+            // API token in Authorization header — highest priority so CI automation clients
+            // get their own per-token budget regardless of whether a session is also present.
+            // Reached only for a credential a scheme has already validated (see above), so
+            // the raw header value here is exactly the token that authenticated this request.
+            string? raw = ExtractRawTokenIfAny(httpContext);
+            if (raw is not null)
+            {
+                byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
+                return "token:" + Convert.ToHexString(hashBytes, 0, TokenHashPrefixBytes).ToLowerInvariant();
+            }
 
-        // Authenticated SPA session: UseAuthentication runs before the GlobalLimiter, so
-        // ctx.User is populated. MapInboundClaims=false keeps the JWT "sub" as-is; the
-        // NameIdentifier fallback covers any scheme that does map to the URI claim type.
-        string? sub = httpContext.User.FindFirst("sub")?.Value
-            ?? httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-        if (!string.IsNullOrEmpty(sub))
-        {
-            return "user:" + sub;
+            // Authenticated SPA session: MapInboundClaims=false keeps the JWT "sub" as-is;
+            // the NameIdentifier fallback covers any scheme that does map to the URI claim type.
+            string? sub = httpContext.User.FindFirst("sub")?.Value
+                ?? httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (!string.IsNullOrEmpty(sub))
+            {
+                return "user:" + sub;
+            }
         }
 
         string? ip = httpContext.GetNormalizedRemoteIp();

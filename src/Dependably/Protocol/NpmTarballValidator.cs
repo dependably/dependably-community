@@ -19,12 +19,23 @@ namespace Dependably.Protocol;
 /// <summary>
 /// Combines the validation outcome with the extracted package name and version so
 /// callers receive all three values in a single return without out-parameters.
+/// <see cref="Manifest"/> is the parsed <c>package.json</c> object on success — the
+/// artefact-authoritative source for the install-relevant manifest subset persisted at
+/// publish (see <see cref="NpmInstallManifest"/>) — and null on validation failure.
 /// </summary>
-public sealed record NpmTarballParsed(ValidationResult Validation, string? Name, string? Version);
+public sealed record NpmTarballParsed(
+    ValidationResult Validation, string? Name, string? Version, JsonObject? Manifest = null);
 
 public static class NpmTarballValidator
 {
-    public static NpmTarballParsed Validate(byte[] bytes)
+    public static NpmTarballParsed Validate(byte[] bytes) => Validate(new MemoryStream(bytes));
+
+    /// <summary>
+    /// Streaming overload: reads the gzipped tar directly from <paramref name="gzipSource"/> (a
+    /// staged file on the publish path) so the artifact is never materialised in a byte[]. The
+    /// same zip-bomb guards apply. The source stream is left open for the caller to dispose.
+    /// </summary>
+    public static NpmTarballParsed Validate(Stream gzipSource)
     {
         try
         {
@@ -32,7 +43,7 @@ public static class NpmTarballValidator
             // decompressed size is attacker-controlled. Cap total decompressed bytes, the
             // entry count, and the size of the package.json entry we parse into memory.
             using var gzip = new LimitedReadStream(
-                new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress),
+                new GZipStream(gzipSource, CompressionMode.Decompress, leaveOpen: true),
                 TarScanLimits.MaxTotalDecompressedBytes, "Tarball");
             using var tar = new TarReader(gzip, leaveOpen: false);
 
@@ -73,6 +84,7 @@ public static class NpmTarballValidator
         using var entryStream = new LimitedReadStream(
             entry.DataStream!, TarScanLimits.MaxManifestBytes, "package.json");
         var json = JsonNode.Parse(entryStream);
+        var manifest = json as JsonObject;
         string? name = json?["name"]?.GetValue<string>();
         string? version = json?["version"]?.GetValue<string>();
 
@@ -105,7 +117,7 @@ public static class NpmTarballValidator
             version = labelled;
         }
 
-        return new NpmTarballParsed(ValidationResult.Ok(), name, version);
+        return new NpmTarballParsed(ValidationResult.Ok(), name, version, manifest);
     }
 
     // Matches `package.json` at the root or inside exactly one wrapper directory of any name.

@@ -44,9 +44,10 @@ public sealed partial class MavenController : OrgScopedControllerBase
 {
     // Proxy-merged metadata may include upstream versions; short TTL so new upstream releases
     // propagate. Local-only metadata is stable; a longer TTL is appropriate. These bound the
-    // in-memory rendered-body cache and match the npm/PyPI/NuGet metadata-cache TTLs.
-    private static readonly TimeSpan MetadataProxyTtl = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan MetadataLocalTtl = TimeSpan.FromMinutes(10);
+    // in-memory rendered-body cache and match the npm/PyPI/NuGet metadata-cache TTLs, and are
+    // operator-tunable via METADATA_PROXY/LOCAL_CACHE_TTL_SECONDS (see RenderedMetadataCacheOptions).
+    private TimeSpan MetadataProxyTtl => _svc.CacheOptions.ProxyTtl;
+    private TimeSpan MetadataLocalTtl => _svc.CacheOptions.LocalTtl;
 
     // SHA-256 hex digest prefix length used for ETags (16 hex chars = 64 bits of entropy).
     private const int ETagHexPrefixLength = 16;
@@ -120,6 +121,13 @@ public sealed partial class MavenController : OrgScopedControllerBase
     [RequestSizeLimit(MavenUploadSizeLimitBytes)]
     public async Task<IActionResult> Publish(string path, CancellationToken ct)
     {
+        // Fail-closed on an edge node: Maven publishes write the registry tier directly (outside
+        // the shared publish service), so the edge guard is applied here at the choke point.
+        if (_svc.EdgeGuard.UploadRejection() is { } edgeReject)
+        {
+            return edgeReject;
+        }
+
         if (string.IsNullOrWhiteSpace(path))
         {
             return BadRequest();
@@ -156,24 +164,41 @@ public sealed partial class MavenController : OrgScopedControllerBase
             }
         }
 
-        // Buffer the request body. Maven uploads are typically small — JARs a few MB,
-        // POMs a few KB. The 500 MB ceiling above is the absolute cap.
-        using var ms = new MemoryStream();
-        await Request.Body.CopyToAsync(ms, ct);
-        byte[] bytes = ms.ToArray();
-
-        // Per-tenant Maven cap → instance Maven cap → instance global cap → reject.
+        // Per-tenant Maven cap → instance Maven cap → instance global cap. Resolve BEFORE
+        // reading the body so the cap gates the stream itself; the route ceiling bounds it when
+        // no tenant/instance cap is configured.
         long? sizeCap = await ResolveSizeCapAsync(orgId, ct);
-        if (sizeCap is { } cap && bytes.LongLength > cap)
+        long effectiveCap = sizeCap ?? MavenUploadSizeLimitBytes;
+
+        // Stream the request body to a staging temp file with SHA-256/SHA-1/MD5 computed inline,
+        // instead of the old growing-MemoryStream + ToArray double buffer that peaked at ~2x the
+        // body and only checked the cap afterward. The primary JAR is the large payload; sidecars
+        // and metadata are tiny and share the same bounded path.
+        RequestBodyStager.StagedBody staged;
+        try
         {
-            return StatusCode(StatusCodes.Status413PayloadTooLarge, $"Maven upload exceeds size limit ({cap} bytes).");
+            staged = await RequestBodyStager.StageAsync(
+                Request.Body, _svc.Staging.Path, effectiveCap, withMavenDigests: true, ct);
+        }
+        catch (InvalidDataException)
+        {
+            return StatusCode(StatusCodes.Status413PayloadTooLarge, $"Maven upload exceeds size limit ({effectiveCap} bytes).");
         }
 
-        // Metadata uploads (maven-metadata.xml) are deploy-time bookkeeping the client
-        // computes locally. We accept and discard — the metadata we serve is generated
-        // server-side from package_versions / maven_version_files so trusting client
-        // input here would let a misbehaving client poison the index for everyone.
-        return coords.IsMetadata ? StatusCode(StatusCodes.Status201Created) : await StoreFileAsync(orgId, coords!, bytes, token, ct);
+        try
+        {
+            // Metadata uploads (maven-metadata.xml) are deploy-time bookkeeping the client
+            // computes locally. We accept and discard — the metadata we serve is generated
+            // server-side from package_versions / maven_version_files so trusting client
+            // input here would let a misbehaving client poison the index for everyone.
+            return coords.IsMetadata
+                ? StatusCode(StatusCodes.Status201Created)
+                : await StoreFileAsync(orgId, coords!, staged, token, ct);
+        }
+        finally
+        {
+            RequestBodyStager.TryDelete(staged.Path);
+        }
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -405,24 +430,8 @@ public sealed partial class MavenController : OrgScopedControllerBase
         }
 
         if (await _svc.BlockGate.EvaluateAsync(
-                new BlockGateRequest(orgId, "maven", caFacts.Purl ?? string.Empty, string.Empty,
-                    caFacts.ManualBlockState, caFacts.VulnCheckedAt,
-                    token?.UserId, settings?.MaxOsvScoreTolerance ?? DefaultMaxOsvScoreTolerance,
-                    HttpContext.GetNormalizedRemoteIp(),
-                    MinReleaseAgeHours: settings?.MinReleaseAgeHours,
-                    PublishedAt: caFacts.PublishedAt,
-                    ActorKind: token?.ActorKind,
-                    Deprecated: caFacts.Deprecated,
-                    BlockDeprecatedMode: settings?.BlockDeprecated,
-                    BlockMaliciousMode: settings?.BlockMalicious,
-                    BlockKevMode: settings?.BlockKev,
-                    MaxEpssTolerance: settings?.MaxEpssTolerance,
-                    Origin: "proxy",
-                    HasInstallScript: caFacts.HasInstallScript,
-                    InstallScriptKind: caFacts.InstallScriptKind,
-                    BlockInstallScriptsMode: settings?.BlockInstallScripts,
-                    ProvenanceStatus: caFacts.ProvenanceStatus,
-                    CacheArtifactId: caFacts.Id), ct)
+                BlockGateRequest.ForProxyCacheFacts(
+                    orgId, "maven", caFacts, token, settings, HttpContext.GetNormalizedRemoteIp()), ct)
             == BlockDecision.Blocked)
         {
             return StatusCode(StatusCodes.Status403Forbidden);
@@ -436,6 +445,20 @@ public sealed partial class MavenController : OrgScopedControllerBase
             return await ServeGlobalPlaneChecksumSidecarAsync(coords, caFacts, ct);
         }
 
+        // 304 short-circuit: check the client's cached copy before opening the blob stream.
+        string? globalEtag = !string.IsNullOrEmpty(caFacts.ContentHash)
+            ? $"\"sha256:{caFacts.ContentHash[..Math.Min(ETagHexPrefixLength, caFacts.ContentHash.Length)]}\""
+            : null;
+        string globalCacheControl = coords.IsSnapshot
+            ? "private, max-age=60"
+            : "private, max-age=31536000, immutable";
+        if (globalEtag is not null && ConditionalRequestHelper.IfNoneMatchHits(Request.Headers, globalEtag))
+        {
+            Response.Headers.ETag = globalEtag;
+            Response.Headers.CacheControl = globalCacheControl;
+            return StatusCode(StatusCodes.Status304NotModified);
+        }
+
         // Primary artifact: stream from blob store.
         // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to cache tier.
         var stream = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
@@ -444,18 +467,17 @@ public sealed partial class MavenController : OrgScopedControllerBase
             return NotFound();
         }
 
-        if (!string.IsNullOrEmpty(caFacts.ContentHash))
+        if (globalEtag is not null)
         {
-            Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash[..Math.Min(ETagHexPrefixLength, caFacts.ContentHash.Length)]}\"";
-            Response.Headers.CacheControl = coords.IsSnapshot
-                ? "private, max-age=60"
-                : "private, max-age=31536000, immutable";
+            Response.Headers.ETag = globalEtag;
+            Response.Headers.CacheControl = globalCacheControl;
         }
         string purl = caFacts.Purl ?? PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version ?? "unknown");
         await _svc.Audit.LogActivityAsync(orgId, "maven", purl, "download", token?.UserId,
             actorKind: token?.ActorKind, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-        // Increment per-tenant download count on the global plane.
-        await _svc.TenantAccess.UpsertStateAsync(orgId, caFacts.Id, _svc.Time.GetUtcNow(), ct);
+        // Increment per-tenant download count on the global plane. Enqueued off the request
+        // path — the row already exists (seeded durably at first-fetch).
+        await _svc.TenantAccess.RecordDownloadHitAsync(orgId, caFacts.Id, _svc.Time.GetUtcNow(), ct);
         return File(stream, ContentTypeFor(coords.Extension), coords.Filename);
     }
 
@@ -528,6 +550,18 @@ public sealed partial class MavenController : OrgScopedControllerBase
     private async Task<IActionResult> ServePrimaryFromCacheAsync(
         string orgId, MavenCoordinates coords, string? actorId, MavenFileRow row, CancellationToken ct)
     {
+        // 304 short-circuit: check the client's cached copy before opening the blob stream.
+        string? uploadedEtag = row.ChecksumSha256 is not null ? $"\"sha256:{row.ChecksumSha256}\"" : null;
+        string uploadedCacheControl = coords.IsSnapshot
+            ? "private, max-age=60"
+            : "private, max-age=31536000, immutable";
+        if (uploadedEtag is not null && ConditionalRequestHelper.IfNoneMatchHits(Request.Headers, uploadedEtag))
+        {
+            Response.Headers.ETag = uploadedEtag;
+            Response.Headers.CacheControl = uploadedCacheControl;
+            return StatusCode(StatusCodes.Status304NotModified);
+        }
+
         var stream = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(row.BlobKey), ct);
         if (stream is null)
         {
@@ -535,12 +569,10 @@ public sealed partial class MavenController : OrgScopedControllerBase
         }
 
         string purl = PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version ?? "unknown");
-        if (row.ChecksumSha256 is not null)
+        if (uploadedEtag is not null)
         {
-            Response.Headers.ETag = $"\"sha256:{row.ChecksumSha256}\"";
-            Response.Headers.CacheControl = coords.IsSnapshot
-                ? "private, max-age=60"
-                : "private, max-age=31536000, immutable";
+            Response.Headers.ETag = uploadedEtag;
+            Response.Headers.CacheControl = uploadedCacheControl;
         }
         await _svc.Audit.LogActivityAsync(
             orgId, "maven", purl,
@@ -653,7 +685,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // NotApplicable (off or no anchor) leaves provenance_status NULL (no gate effect).
         string? mavenVerifyMode = settings?.VerifyMavenSignatures;
         (string? mavenProvenanceStatus, string? mavenProvenanceSigner) =
-            await VerifyMavenSignatureAsync(orgId, mavenVerifyMode, bases, upstreamPath, result.Bytes, ct);
+            await VerifyMavenSignatureAsync(orgId, mavenVerifyMode, bases, upstreamPath, result, ct);
 
         return await RecordScanAndServeAsync(orgId, resolvedCoords, result, settings, token,
             snapshotLiteralFilename, mavenProvenanceStatus, mavenProvenanceSigner, mavenVerifyMode, ct);
@@ -667,11 +699,27 @@ public sealed partial class MavenController : OrgScopedControllerBase
     // anchor is configured, leaving the provenance status column unset with no gate effect.
     private async Task<(string? Status, string? Signer)> VerifyMavenSignatureAsync(
         string orgId, string? verifyMode, IReadOnlyList<UpstreamSource> bases, string upstreamPath,
-        byte[] artifactBytes, CancellationToken ct)
+        MavenArtifactFetchResult result, CancellationToken ct)
     {
         if (verifyMode == "off" || !await _svc.MavenProvenance.IsConfiguredForAsync(orgId, ct))
         {
             return (null, null);
+        }
+
+        // Signature verification is active for this tenant — read the cached artifact (bounded by
+        // the upstream fetch cap, already SHA-256-verified and content-addressed) to hand the
+        // bytes to BouncyCastle. This is the only Maven serve path that materialises the artifact,
+        // and only when the operator opted into PGP verification.
+        byte[] artifactBytes;
+        // blobkey-ok: result.BlobKey is BlobKeys.Proxy(sha256) from the fetch; StoreKey routes it.
+        await using (var blob = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(result.BlobKey), ct)
+            ?? throw new InvalidOperationException($"Blob {result.BlobKey} vanished before signature verification."))
+        {
+            using var ms = result.SizeBytes is > 0 and <= int.MaxValue
+                ? new MemoryStream((int)result.SizeBytes)
+                : new MemoryStream();
+            await blob.CopyToAsync(ms, ct);
+            artifactBytes = ms.ToArray();
         }
 
         byte[]? ascBytes = null;
@@ -717,9 +765,10 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // blob already lives at result.BlobKey (UpstreamClient hash-and-staged it during
         // FetchArtifactAsync); OpenAsync is only consulted for licence extraction or a
         // non-sha256 re-verify, neither of which Maven requests, so it stays unused here.
-        var blob = new BlobHandle(result.BlobKey, result.Sha256, result.Bytes.LongLength,
+        var blob = new BlobHandle(result.BlobKey, result.Sha256, result.SizeBytes,
             async openCt => await _svc.Blobs.GetAsync(BlobKeys.StoreKey(result.BlobKey), openCt)
-                ?? (Stream)new MemoryStream(result.Bytes, writable: false));
+                ?? throw new InvalidOperationException(
+                    $"Blob {result.BlobKey} vanished between fetch and serve."));
 
         var fetch = await _svc.ProxyFetch.RecordAndScanAsync(new ProxyFetchRequest(
             OrgId: orgId, Ecosystem: "maven",
@@ -767,13 +816,18 @@ public sealed partial class MavenController : OrgScopedControllerBase
                 orgId, "maven", resolvedCoords.PackageName,
                 resolvedCoords.Version!, snapshotLiteralFilename,
                 Sha256: result.Sha256,
-                SizeBytes: result.Bytes.LongLength,
+                SizeBytes: result.SizeBytes,
                 BlobKey: result.BlobKey,
                 UpstreamUrl: null), ct);
         }
 
+        // Serve by streaming the cached blob straight to the response — the artifact never
+        // re-enters managed memory on the serve path.
+        // blobkey-ok: result.BlobKey is BlobKeys.Proxy(sha256) from the fetch; StoreKey routes it.
+        var serveStream = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(result.BlobKey), ct)
+            ?? throw new InvalidOperationException($"Blob {result.BlobKey} vanished between fetch and serve.");
         Response.Headers["X-Cache"] = "MISS";
-        return File(result.Bytes, ContentTypeFor(resolvedCoords.Extension), resolvedCoords.Filename);
+        return File(serveStream, ContentTypeFor(resolvedCoords.Extension), resolvedCoords.Filename);
     }
 
     // Sidecar-before-primary path: the primary artifact is fetched and cached first (via a
@@ -879,7 +933,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
                 classifier = coords.Classifier,
                 extension = coords.Extension ?? "",
                 blobKey = result.BlobKey,
-                sizeBytes = (long)result.Bytes.Length,
+                sizeBytes = result.SizeBytes,
                 sha256 = result.Sha256,
                 sha1 = result.Sha1,
                 md5 = result.Md5,
@@ -922,7 +976,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
                         classifier = coords.Classifier,
                         extension = coords.Extension,
                         blobKey = result.BlobKey,
-                        sizeBytes = (long)result.Bytes.Length,
+                        sizeBytes = result.SizeBytes,
                         sha256 = result.Sha256,
                         sha1 = result.Sha1,
                         md5 = result.Md5,
@@ -932,25 +986,32 @@ public sealed partial class MavenController : OrgScopedControllerBase
     }
 
 
+    // The staged file path is a server-generated GUID under the operator-configured staging root;
+    // the request body reaches the file content, not the file name. SCS's taint from Request.Body
+    // into staged.Path is a false positive.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "SCS0018",
+        Justification = "Staging path is a server-generated GUID under the operator-configured root, not user input.")]
     private async Task<IActionResult> StoreFileAsync(
-        string orgId, MavenCoordinates coords, byte[] bytes, TokenRecord token, CancellationToken ct)
+        string orgId, MavenCoordinates coords, RequestBodyStager.StagedBody staged, TokenRecord token, CancellationToken ct)
     {
         // Sidecar checksums: clients upload them next to the primary. We don't store the
         // sidecar bytes — we accept, validate that the hex matches what we'd compute,
-        // and discard. This keeps sidecars consistent with the primary artifact in the
-        // happy case and rejects a deliberately mismatched upload.
+        // and discard. Sidecars are tiny (a hex digest), so reading the staged file back is
+        // cheap. This keeps sidecars consistent with the primary artifact in the happy case
+        // and rejects a deliberately mismatched upload.
         if (coords.IsChecksumSidecar)
         {
-            return await ValidateAndAcknowledgeSidecarAsync(orgId, coords, bytes, ct);
+            // deepcode ignore PT: staged.Path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+            byte[] sidecarBytes = await System.IO.File.ReadAllBytesAsync(staged.Path, ct);
+            return await ValidateAndAcknowledgeSidecarAsync(orgId, coords, sidecarBytes, ct);
         }
 
         string purl = PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version!);
-        string sha256Hex = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        // deepcode ignore InsecureHash: Maven repo spec requires .sha1/.md5 sidecar files for
-        // mvn/gradle client compatibility — these are not used for security decisions.
-        string sha1Hex = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
-        // deepcode ignore InsecureHash: Maven repo spec requires .md5 sidecar files.
-        string md5Hex = Convert.ToHexString(MD5.HashData(bytes)).ToLowerInvariant();
+        // Digests were computed inline while streaming the body to disk — no re-hash of a
+        // fully-buffered artifact.
+        string sha256Hex = staged.Sha256;
+        string sha1Hex = staged.Sha1!;
+        string md5Hex = staged.Md5!;
 
         string blobKey = BlobKeys.Hosted(
             orgId, "maven",
@@ -964,7 +1025,14 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // files of a version; maven_version_files carries the per-file mapping.
         var pkg = await _svc.Packages.GetOrCreateAsync(orgId, "maven", coords.PackageName, coords.PackageName, isProxy: false, ct);
 
-        await _svc.Blobs.PutAsync(blobKey, new MemoryStream(bytes), ct);
+        // Store the artifact by streaming the staged file into the blob store — the cap was
+        // already enforced during staging, so no blob is ever written for an oversize upload.
+        // deepcode ignore PT: staged.Path is under the operator-configured staging root — no user input reaches the path.
+        await using (var artifactStream = new FileStream(
+            staged.Path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true))
+        {
+            await _svc.Blobs.PutAsync(blobKey, artifactStream, ct);
+        }
 
         await using var conn = await _svc.Db.OpenAsync(ct);
 
@@ -995,7 +1063,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
                     purl,
                     blobKey,
                     filename = coords.Filename,
-                    sizeBytes = (long)bytes.Length,
+                    sizeBytes = staged.Size,
                     sha256 = sha256Hex,
                     sha1 = sha1Hex,
                 });
@@ -1032,7 +1100,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
                 classifier = coords.Classifier,
                 extension = coords.Extension ?? "",
                 blobKey,
-                sizeBytes = (long)bytes.Length,
+                sizeBytes = staged.Size,
                 sha256 = sha256Hex,
                 sha1 = sha1Hex,
                 md5 = md5Hex,
@@ -1217,9 +1285,12 @@ public sealed record MavenControllerServices(
     ReservedNamespaceService ReservedNamespaces,
     UpstreamRegistryResolver Registries,
     RenderedResponseCache<MavenMetadataKey> MetadataCache,
+    RenderedMetadataCacheOptions CacheOptions,
     ILogger<MavenController> Log,
     CacheArtifactRepository CacheArtifacts,
     TenantArtifactAccessRepository TenantAccess,
     TimeProvider Time,
     CacheAccessRecorder CacheRecorder,
-    Dependably.Protocol.Provenance.MavenProvenanceVerifier MavenProvenance);
+    Dependably.Protocol.Provenance.MavenProvenanceVerifier MavenProvenance,
+    Dependably.Infrastructure.Edge.EdgePublishGuard EdgeGuard,
+    Dependably.Infrastructure.StagingOptions Staging);

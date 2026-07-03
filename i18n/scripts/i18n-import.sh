@@ -66,14 +66,29 @@ const [,, xliffPath, jsonPath] = process.argv;
 const xml = fs.readFileSync(xliffPath, 'utf8');
 const json = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
 
-// Extract all <unit id="..."> with non-empty <target>
-const unitRe = /<unit\s+id="([^"]+)"[\s\S]*?<target>([\s\S]*?)<\/target>/g;
+// Extract all <unit id="..."> with a non-empty <target>. The target lookup is bounded
+// to each unit's own body — a lazy cross-unit scan would attribute the NEXT unit's
+// target to a unit whose own <target/> is empty (state="initial").
+// XLIFF targets are XML-escaped; decode before writing into JSON.
+function unescapeXml(str) {
+  return str
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+const unitRe = /<unit\s+id="([^"]+)"([\s\S]*?)<\/unit>/g;
 let match;
 const translations = {};
 while ((match = unitRe.exec(xml)) !== null) {
-  const [, id, target] = match;
-  const text = target.trim();
-  if (text) translations[id] = text;
+  const [, id, body] = match;
+  const t = body.match(/<target>([\s\S]*?)<\/target>/);
+  // Whitespace inside <target> is content (the invite email body ends with a
+  // newline) — trim only to decide emptiness, write the raw text.
+  const raw = t ? t[1] : '';
+  if (raw.trim()) translations[unescapeXml(id)] = unescapeXml(raw);
 }
 
 const count = Object.keys(translations).length;
@@ -83,12 +98,33 @@ if (count === 0) {
 }
 console.log(`Found ${count} translated units.`);
 
-// Set nested key in object
+// Set a key addressed by its flattened dotted path. The existing JSON shape wins:
+// some sections hold literal dotted keys (e.g. audit.actions["claim.transition"]),
+// which flatten to the same path as nested objects — blindly splitting on '.' would
+// duplicate those entries as nested objects. Only a genuinely new key falls back to
+// creating nested objects (the en.json convention).
 function setKey(obj, dotPath, value) {
+  function walk(cur, path) {
+    if (Object.prototype.hasOwnProperty.call(cur, path) && typeof cur[path] !== 'object') {
+      cur[path] = value;
+      return true;
+    }
+    const parts = path.split('.');
+    for (let i = parts.length - 1; i >= 1; i--) {
+      const head = parts.slice(0, i).join('.');
+      if (Object.prototype.hasOwnProperty.call(cur, head)
+          && typeof cur[head] === 'object' && cur[head] !== null) {
+        if (walk(cur[head], parts.slice(i).join('.'))) return true;
+      }
+    }
+    return false;
+  }
+  if (walk(obj, dotPath)) return;
+
   const parts = dotPath.split('.');
   let cur = obj;
   for (let i = 0; i < parts.length - 1; i++) {
-    if (typeof cur[parts[i]] !== 'object') cur[parts[i]] = {};
+    if (typeof cur[parts[i]] !== 'object' || cur[parts[i]] === null) cur[parts[i]] = {};
     cur = cur[parts[i]];
   }
   cur[parts[parts.length - 1]] = value;
@@ -124,13 +160,33 @@ const [,, xliffPath, resxPath] = process.argv;
 const xml = fs.readFileSync(xliffPath, 'utf8');
 let resx = fs.readFileSync(resxPath, 'utf8');
 
-const unitRe = /<unit\s+id="([^"]+)"[\s\S]*?<target>([\s\S]*?)<\/target>/g;
+// XLIFF targets are XML-escaped; resx <value> needs only &, <, > escaped (quotes and
+// apostrophes are stored raw, matching the committed fr.resx style). Decode fully,
+// then re-encode the minimal set so entities are not doubled.
+function xliffToResx(str) {
+  return str
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+// Bounded per-unit target lookup — see the frontend block for why the lazy
+// cross-unit form misattributes translations when a <target/> is empty.
+const unitRe = /<unit\s+id="([^"]+)"([\s\S]*?)<\/unit>/g;
 let match;
 let updated = 0;
 while ((match = unitRe.exec(xml)) !== null) {
-  const [, id, target] = match;
-  const text = target.trim();
-  if (!text) continue;
+  const [, id, body] = match;
+  const t = body.match(/<target>([\s\S]*?)<\/target>/);
+  // Whitespace inside <target> is content — trim only to decide emptiness.
+  const raw = t ? t[1] : '';
+  if (!raw.trim()) continue;
+  const text = xliffToResx(raw);
   // Replace the value for this key in the resx
   const dataRe = new RegExp(
     `(<data\\s+name="${id.replace(/\./g, '\\.')}[^"]*"[^>]*>\\s*<value>)[^<]*(</value>)`,

@@ -752,6 +752,16 @@
         }
       }
     },
+    "/api/v1/rpm-upstream-mode": {
+      "operations": {
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "204"
+          ]
+        }
+      }
+    },
     "/api/v1/search": {
       "operations": {
         "get": {
@@ -1414,6 +1424,62 @@
           ],
           "responseCodes": [
             "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/webhooks": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "201"
+          ]
+        }
+      }
+    },
+    "/api/v1/webhooks/{id}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "204"
+          ]
+        },
+        "get": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/webhooks/{id}/test": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "204"
           ]
         }
       }
@@ -2130,6 +2196,20 @@
             "file",
             "id",
             "version"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/nuget/symbols/{pdbName}/{key}/{pdbNameEcho}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "key",
+            "pdbName",
+            "pdbNameEcho"
           ],
           "responseCodes": [
             "200"

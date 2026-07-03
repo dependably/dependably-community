@@ -43,6 +43,7 @@ public sealed class IdentityDiTests : IAsyncLifetime
 
         // ── Identity registrations (mirrors AddDependablyIdentity output) ─────
         services.AddSingleton<IMfaSecretProtector>(protector);
+        services.AddSingleton<IRecoveryCodeHasher>(new RecoveryCodeHasher(key));
         services.AddSingleton<MfaEncryptionKeyProvider>();
         services.AddSingleton<SystemAdminTokenVersionStore>();
 

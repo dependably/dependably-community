@@ -85,12 +85,14 @@ public static class TokenAuthExtensions
         var resolved = await tokens.ResolveAsync(raw, ct);
         Dependably.Infrastructure.Observability.DependablyMeter.TokenAuthRequests.Add(
             1, new KeyValuePair<string, object?>("outcome", resolved is null ? "invalid" : "success"));
-        if (resolved is not null)
+        if (resolved is not null && tokens.ShouldTouchLastUsed(resolved.LastUsedAt))
         {
-            // Update last_used_at on every successful resolution. The repository throttles
-            // the write in-SQL (no-op unless > ~60s since the previous touch), so this stays
-            // cheap on registry hot paths like npm/pypi install where one client run fires
-            // many authenticated requests in a tight burst.
+            // Update last_used_at only when the value carried on the resolved record is stale
+            // enough to matter. Registry hot paths like npm/pypi install fire many authenticated
+            // requests in a tight burst; skipping the write in-process when the timestamp is
+            // fresh keeps the semantic no-op from opening a WAL write transaction and queueing
+            // behind the single SQLite writer. The in-SQL throttle stays as the cross-process
+            // race guard for the write that does go through.
             await tokens.TouchLastUsedAsync(resolved.Id, resolved.Source, ct: ct);
         }
         return resolved;

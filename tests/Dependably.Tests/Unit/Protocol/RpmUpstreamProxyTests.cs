@@ -75,7 +75,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
         Assert.NotNull(result);
         Assert.False(result!.NotModified);
-        Assert.Equal(repomdBytes, result.Body);
+        Assert.Equal(repomdBytes, await ReadAllAsync(result.Body));
         Assert.Equal("\"abc123\"", result.ETag);
         Assert.Equal("application/xml", result.ContentType);
     }
@@ -110,7 +110,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
         Assert.NotNull(result);
         Assert.True(result!.NotModified);
-        Assert.Empty(result.Body);
+        Assert.Empty(await ReadAllAsync(result.Body));
     }
 
     [Fact]
@@ -125,7 +125,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
         Assert.NotNull(result);
         Assert.False(result!.NotModified);
-        Assert.Equal(ascBytes, result.Body);
+        Assert.Equal(ascBytes, await ReadAllAsync(result.Body));
         Assert.Equal("application/pgp-keys", result.ContentType);
     }
 
@@ -145,7 +145,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
         var result1 = await proxy.GetRepodataAsync(_upstream, filename, null, null, default);
         Assert.NotNull(result1);
-        Assert.Equal(body, result1!.Body);
+        Assert.Equal(body, await ReadAllAsync(result1!.Body));
 
         // After first fetch the blob should be in the cache tier.
         var stored = await blobs.GetAsync(BlobKeys.RpmRepodataProxy(sha256));
@@ -154,7 +154,7 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         // Second request must NOT hit the server.
         var result2 = await proxy.GetRepodataAsync(_upstream, filename, null, null, default);
         Assert.NotNull(result2);
-        Assert.Equal(body, result2!.Body);
+        Assert.Equal(body, await ReadAllAsync(result2!.Body));
 
         Assert.Equal(1, _server.LogEntries.Count(e =>
             e.RequestMessage?.Path?.Contains(sha256) == true));
@@ -344,6 +344,135 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         var result = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "nonexistent-1.0-1.fc40.x86_64.rpm", default);
 
         Assert.Null(result);
+    }
+
+    // ── Package map cache: hit avoids blob load, real size accounting ──────────
+
+    [Fact]
+    public async Task ResolvePackageUrlAsync_MapCacheHit_SkipsBlobStoreLoad()
+    {
+        // The primary.xml.gz sha256 is derivable from repomd.xml alone. Once the parsed map is
+        // memory-cached, a second resolution for a different filename in the same primary must
+        // not touch the blob store at all — not even a cache-hit GetAsync — because the map
+        // answers the query directly.
+        string packageSha256 = new('e', 64);
+        byte[] primaryGzBytes = BuildPrimaryXmlGz(new[]
+        {
+            ("curl", 0, "8.6.0", "1.fc40", "x86_64", packageSha256,
+             "Packages/c/curl-8.6.0-1.fc40.x86_64.rpm", (string?)"HTTP client", (string?)null),
+            ("tree", 0, "2.1.1", "1.fc40", "x86_64", new string('f', 64),
+             "Packages/t/tree-2.1.1-1.fc40.x86_64.rpm", (string?)"directory listing", (string?)null),
+        });
+        string primarySha256 = Convert.ToHexString(SHA256.HashData(primaryGzBytes)).ToLowerInvariant();
+        string primaryFilename = $"{primarySha256}-primary.xml.gz";
+        byte[] repomdBytes = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
+
+        _server.Given(Request.Create().WithPath("/repodata/repomd.xml").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(repomdBytes));
+        _server.Given(Request.Create().WithPath($"/repodata/{primaryFilename}").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGzBytes));
+
+        var countingBlobs = new CountingBlobStore(new InMemoryBlobStore());
+        var proxy = BuildProxy(blobs: countingBlobs);
+
+        var first = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "curl-8.6.0-1.fc40.x86_64.rpm", default);
+        Assert.NotNull(first);
+        Assert.Equal(1, countingBlobs.GetCallCount);
+
+        // Second resolution — different filename, same primary sha256 (same repomd, memory-cached).
+        var second = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "tree-2.1.1-1.fc40.x86_64.rpm", default);
+        Assert.NotNull(second);
+        Assert.Equal("tree", second!.Name);
+
+        // No additional blob-store GetAsync call: the map cache answered directly.
+        Assert.Equal(1, countingBlobs.GetCallCount);
+        // No additional HTTP fetch either.
+        Assert.Equal(1, _server.LogEntries.Count(e => e.RequestMessage?.Path?.Contains(primarySha256) == true));
+    }
+
+    [Fact]
+    public void EstimatePackageMapBytes_ReflectsRealFootprint_ScalesWithContent()
+    {
+        // The cache Size scales with the map's actual content instead of being a flat constant —
+        // a byte-denominated IMemoryCache can only account for an entry whose declared Size
+        // reflects its real managed-memory footprint.
+        var small = new Dictionary<string, PackageResolution>
+        {
+            ["a-1-1.x86_64.rpm"] = new("https://x/a", new string('a', 64), "a", 0, "1", "1", "x86_64", "s", "d", "MIT"),
+        };
+        var large = new Dictionary<string, PackageResolution>();
+        for (int i = 0; i < 500; i++)
+        {
+            string name = $"package-{i}";
+            large[$"{name}-1.0-1.x86_64.rpm"] = new(
+                $"https://mirror.example.com/Packages/p/{name}-1.0-1.x86_64.rpm",
+                new string((char)('a' + (i % 26)), 64),
+                name, 0, "1.0", "1",
+                "x86_64",
+                $"Summary for {name}",
+                $"A much longer description of {name} repeated for realism. ".PadRight(200, '.'),
+                "GPL-3.0-or-later");
+        }
+
+        long smallSize = RpmUpstreamProxy.EstimatePackageMapBytes(small);
+        long largeSize = RpmUpstreamProxy.EstimatePackageMapBytes(large);
+
+        // A 500-entry map with long descriptions weighs in at least in the hundreds of KB and
+        // scales with entry count/content, not a fixed value regardless of map size.
+        Assert.True(largeSize > 200_000, $"expected a substantial estimate, got {largeSize}");
+        Assert.True(largeSize > smallSize * 100);
+    }
+
+    [Fact]
+    public async Task ResolvePackageUrlAsync_LargeMap_ExceedingSharedCacheBudget_StillCachedAndServedFromCache()
+    {
+        // A Fedora/EPEL-scale primary map's real Size estimate reaches tens to 100+ MB — here
+        // engineered to exceed the production shared metadata cache's SizeLimit (50 MB; see
+        // InfrastructureStartupExtensions.MetadataCacheSizeLimitBytes) while staying comfortably
+        // under the dedicated primary-map cache's default. IMemoryCache admits no entry whose
+        // Size exceeds the cache's SizeLimit, so a cache sized at that 50 MB shared-cache budget
+        // cannot hold this map at all; the dedicated primary-map cache (its own, much larger
+        // budget) holds it, and the second resolution below is served from that cache with no
+        // additional blob-store read.
+        const long sharedCacheLimitBytes = 50L * 1024 * 1024;
+        const int packageCount = 40;
+        const int summaryLength = 700_000;
+
+        var packages = new (string name, int epoch, string ver, string rel, string arch, string sha256, string href, string? summary, string? license)[packageCount];
+        for (int i = 0; i < packageCount; i++)
+        {
+            packages[i] = ($"pkg{i}", 0, "1.0", "1", "x86_64", new string((char)('a' + (i % 26)), 64),
+                $"Packages/p/pkg{i}-1.0-1.x86_64.rpm", new string('s', summaryLength), null);
+        }
+
+        byte[] primaryGzBytes = BuildPrimaryXmlGz(packages);
+        string primarySha256 = Convert.ToHexString(SHA256.HashData(primaryGzBytes)).ToLowerInvariant();
+        string primaryFilename = $"{primarySha256}-primary.xml.gz";
+        byte[] repomdBytes = Encoding.UTF8.GetBytes(BuildRepomdWithPrimary(primarySha256, primaryFilename));
+
+        _server.Given(Request.Create().WithPath("/repodata/repomd.xml").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(repomdBytes));
+        _server.Given(Request.Create().WithPath($"/repodata/{primaryFilename}").UsingGet())
+               .RespondWith(Response.Create().WithStatusCode(200).WithBody(primaryGzBytes));
+
+        var countingBlobs = new CountingBlobStore(new InMemoryBlobStore());
+        var proxy = BuildProxy(blobs: countingBlobs, sharedCacheSizeLimitBytes: sharedCacheLimitBytes);
+
+        var first = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "pkg0-1.0-1.x86_64.rpm", default);
+        Assert.NotNull(first);
+        Assert.Equal(1, countingBlobs.GetCallCount);
+
+        // Sanity: the parsed map's real Size estimate does exceed the shared-cache-sized bound
+        // this test configures — otherwise this test wouldn't exercise the scenario at all.
+        Assert.True(RpmUpstreamProxy.EstimatePackageMapBytes(RpmUpstreamProxy.ParsePrimaryXmlGz(primaryGzBytes, _upstream))
+            > sharedCacheLimitBytes);
+
+        // Second resolution for a different package in the same (large) primary map is served
+        // entirely from the dedicated cache — zero additional blob-store reads.
+        var second = await proxy.ResolvePackageUrlAsync(TestOrgId, _upstream, "pkg39-1.0-1.x86_64.rpm", default);
+        Assert.NotNull(second);
+        Assert.Equal("pkg39", second!.Name);
+        Assert.Equal(1, countingBlobs.GetCallCount);
     }
 
     // ── Negative cache ────────────────────────────────────────────────────────
@@ -637,8 +766,9 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
     }
 
     private RpmUpstreamProxy BuildProxy(
-        InMemoryBlobStore? blobs = null, bool airGapped = false,
-        string? gpgKey = null, string? verifyFlag = null)
+        IBlobStore? blobs = null, bool airGapped = false,
+        string? gpgKey = null, string? verifyFlag = null,
+        long? sharedCacheSizeLimitBytes = null, long? primaryMapCacheSizeLimitBytes = null)
     {
         blobs ??= new InMemoryBlobStore();
         var settings = new Dictionary<string, string?>
@@ -658,7 +788,16 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
         var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
 
         var httpFactory = new StaticHttpClientFactory(new HttpClient(new WireMockHandler(_server)));
-        var memCache = new MemoryCache(new MemoryCacheOptions());
+        // sharedCacheSizeLimitBytes is unset (unbounded) by default, matching most tests' focus on
+        // functional behavior rather than eviction; individual tests that need to reproduce a
+        // size-bounded shared cache (mirroring the production 50 MB metadata cache) pass it explicitly.
+        var memCacheOptions = new MemoryCacheOptions();
+        if (sharedCacheSizeLimitBytes is { } sharedLimit)
+        {
+            memCacheOptions.SizeLimit = sharedLimit;
+        }
+        var memCache = new MemoryCache(memCacheOptions);
+        var primaryMapCache = new RpmPrimaryMapCache(primaryMapCacheSizeLimitBytes ?? RpmPrimaryMapCache.DefaultSizeLimitBytes);
         var airGapMode = new StubAirGapMode(airGapped);
         var urlValidator = new AllowAllValidator();
 
@@ -685,7 +824,8 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
             urlValidator,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<RpmUpstreamProxy>.Instance,
             TimeProvider.System,
-            trustStore));
+            trustStore,
+            primaryMapCache));
     }
 
     private const string TestOrgId = "test-org";
@@ -754,6 +894,39 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
     // ── Test doubles ──────────────────────────────────────────────────────────
 
+    private static async Task<byte[]> ReadAllAsync(Stream stream)
+    {
+        using var ms = new MemoryStream();
+        await stream.CopyToAsync(ms);
+        return ms.ToArray();
+    }
+
+    /// <summary>Wraps an <see cref="IBlobStore"/>, counting <see cref="GetAsync"/> calls so tests
+    /// can assert a cache hit skipped the blob store entirely.</summary>
+    private sealed class CountingBlobStore : IBlobStore
+    {
+        private readonly IBlobStore _inner;
+        public int GetCallCount { get; private set; }
+
+        public CountingBlobStore(IBlobStore inner) => _inner = inner;
+
+        public Task PutAsync(string key, Stream data, CancellationToken ct = default) => _inner.PutAsync(key, data, ct);
+
+        public Task<Stream?> GetAsync(string key, CancellationToken ct = default)
+        {
+            GetCallCount++;
+            return _inner.GetAsync(key, ct);
+        }
+
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => _inner.ExistsAsync(key, ct);
+        public Task DeleteAsync(string key, CancellationToken ct = default) => _inner.DeleteAsync(key, ct);
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => _inner.GetTotalSizeAsync(ct);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default) =>
+            _inner.GetRangeAsync(key, from, to, ct);
+        public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default) =>
+            _inner.ListAsync(prefix, ct);
+    }
+
     private sealed class StubAirGapMode : IAirGapMode
     {
         public bool IsEnabled { get; }
@@ -764,8 +937,8 @@ public sealed class RpmUpstreamProxyTests : IAsyncLifetime
 
     private sealed class AllowAllValidator : IUpstreamUrlValidator
     {
-        public Task<bool> IsAllowedAsync(string url, string? orgId, CancellationToken ct = default)
-            => Task.FromResult(true);
+        public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
+            => Task.FromResult(UpstreamUrlBlock.None);
     }
 
     private sealed class StaticHttpClientFactory : IHttpClientFactory

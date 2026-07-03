@@ -226,23 +226,19 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
         string ecosystem = req.Ecosystem?.Trim().ToLowerInvariant() ?? "";
         if (!TrustAnchorRepository.IsSupportedEcosystem(ecosystem))
         {
-            return _problems.ValidationErrorAction(
-                "ecosystem",
-                $"Must be one of: {string.Join(", ", TrustAnchorRepository.SupportedEcosystems)}.");
+            return _problems.ValidationErrorActionKey("ecosystem", "error.common.mustBeOneOf", string.Join(", ", TrustAnchorRepository.SupportedEcosystems));
         }
 
         string anchorKind = req.AnchorKind?.Trim().ToLowerInvariant() ?? "";
         if (!TrustAnchorRepository.IsAllowedAnchorKind(anchorKind))
         {
-            return _problems.ValidationErrorAction(
-                "anchorKind",
-                $"Must be one of: {string.Join(", ", TrustAnchorRepository.AllowedAnchorKinds)}.");
+            return _problems.ValidationErrorActionKey("anchorKind", "error.common.mustBeOneOf", string.Join(", ", TrustAnchorRepository.AllowedAnchorKinds));
         }
 
         string? material = req.Material?.Trim();
         if (string.IsNullOrEmpty(material))
         {
-            return _problems.ValidationErrorAction("material", "material must not be empty.");
+            return _problems.ValidationErrorActionKey("material", "error.trustAnchor.materialEmpty");
         }
 
         string orgId = CurrentTenantId();
@@ -290,7 +286,7 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
                 anchorKind,
                 label,
                 keyId,
-            }), ct: ct);
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return CreatedAtAction(nameof(List), null, entry);
     }
@@ -312,7 +308,7 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
 
         await _audit.LogAsync(
             "trust_anchor_removed", orgId, GetUserId(),
-            detail: System.Text.Json.JsonSerializer.Serialize(new { id }), ct: ct);
+            detail: System.Text.Json.JsonSerializer.Serialize(new { id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail), ct: ct);
 
         return NoContent();
     }

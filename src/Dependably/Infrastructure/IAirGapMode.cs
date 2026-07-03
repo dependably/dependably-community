@@ -10,8 +10,10 @@ namespace Dependably.Infrastructure;
 ///
 /// <c>DISABLE_BACKGROUND_JOBS</c> allows disabling individual background workers
 /// (comma-separated job names) without full air-gap mode. <see cref="IsJobDisabled"/> merges
-/// both signals — a full air-gap suppresses all outbound jobs, and individual names in
-/// <see cref="DisabledJobs"/> suppress specific ones in any deployment mode.
+/// three signals — a full air-gap suppresses all outbound jobs, individual names in
+/// <see cref="DisabledJobs"/> suppress specific ones in any deployment mode, and edge mode
+/// (<c>DEPLOYMENT_MODE=edge</c>) force-disables every job outside the cache-only allowlist
+/// (<see cref="BackgroundJobs.EdgeAllowed"/>) while still honoring explicit denylist entries on top.
 /// </summary>
 public interface IAirGapMode
 {
@@ -46,6 +48,22 @@ internal static class BackgroundJobs
             "stats-refresh",
             "saml-cert-expiry",
         };
+
+    /// <summary>
+    /// The only background jobs a headless edge node runs. Edge mode is an allowlist inversion of
+    /// the <c>DISABLE_BACKGROUND_JOBS</c> denylist: everything in <see cref="Known"/> that is NOT
+    /// in this set is force-disabled. A cache node needs only disk-bounding, staging cleanup, the
+    /// size gauge, and the healthcheck ping — all the tenant-management, scanning, and refresh
+    /// jobs are inert on a node that creates nothing authoritative.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> EdgeAllowed =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "cache-eviction",
+            "oci-staging-janitor",
+            "blob-size-poller",
+            "healthcheck-pinger",
+        };
 }
 
 public sealed class AirGapMode : IAirGapMode
@@ -57,11 +75,20 @@ public sealed class AirGapMode : IAirGapMode
     public bool IsEnabled { get; }
     public IReadOnlySet<string> DisabledJobs { get; }
 
+    // True when DEPLOYMENT_MODE=edge — flips IsJobDisabled from a pure denylist to an
+    // allowlist inversion (only BackgroundJobs.EdgeAllowed run; every other Known job is off).
+    private readonly bool _isEdge;
+
     public AirGapMode(IConfiguration config, ILogger<AirGapMode>? logger = null)
     {
         string? raw = config["AIR_GAPPED"];
         IsEnabled = string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase)
                  || string.Equals(raw, "1", StringComparison.OrdinalIgnoreCase);
+
+        _isEdge = string.Equals(
+            (config["DEPLOYMENT_MODE"] ?? "single").Trim(),
+            "edge",
+            StringComparison.OrdinalIgnoreCase);
 
         string disableRaw = config["DISABLE_BACKGROUND_JOBS"] ?? "";
         var parsed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -91,5 +118,10 @@ public sealed class AirGapMode : IAirGapMode
     }
 
     public bool IsJobDisabled(string jobName) =>
-        IsEnabled || DisabledJobs.Contains(jobName);
+        // Air-gap disables every outbound job; the explicit denylist disables named jobs in any
+        // mode; edge mode additionally force-disables everything outside the cache-only allowlist.
+        // Explicit DISABLE_BACKGROUND_JOBS entries still add on top of the edge allowlist.
+        IsEnabled
+        || DisabledJobs.Contains(jobName)
+        || (_isEdge && !BackgroundJobs.EdgeAllowed.Contains(jobName));
 }

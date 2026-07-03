@@ -56,9 +56,19 @@ public static class MavenMetadataBuilder
                         : new XElement("lastUpdated",
                             lastUpdated.Value.UtcDateTime.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)))));
 
-        using var sw = new StringWriter();
+        using var sw = new Utf8StringWriter();
         doc.Save(sw, SaveOptions.None);
         return sw.ToString();
+    }
+
+    // XDocument.Save derives the XML declaration's `encoding` from the writer's Encoding
+    // property. A plain StringWriter reports UTF-16, so saving to it emits
+    // <?xml version="1.0" encoding="utf-16"?> even though the XDeclaration says UTF-8 — which
+    // then lies about the UTF-8 bytes MavenController serves, and encoding-sniffing XML readers
+    // (plexus/Xerces) either throw or garble the document, breaking LATEST/RELEASE resolution.
+    private sealed class Utf8StringWriter : StringWriter
+    {
+        public override System.Text.Encoding Encoding => System.Text.Encoding.UTF8;
     }
 
     private static XElement? LatestElement(IReadOnlyList<string> versions, bool releaseOnly)

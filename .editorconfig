@@ -37,6 +37,19 @@ dotnet_diagnostic.CA1873.severity = none
 # extraction into a re-flagged ternary.
 dotnet_diagnostic.S3358.severity = none
 
+# S125 "Remove this commented-out code": SonarAnalyzer's heuristic systematically
+# misfires on this repo's house style. It flags XML doc comments (`/// <summary>`),
+# ordinary explanatory comments that contain code-like tokens (character literals
+# such as '"' / '\' / '/', `\uXXXX` escapes, SQL or JSON fragments), and even the
+# live declaration lines directly beneath such comments — none of which is
+# commented-out code. This codebase deliberately carries dense present-tense
+# explanatory comments (mandated by CLAUDE.md), so the rule's noise vastly
+# outweighs its signal and every flagged line is a false positive. The
+# build-integrated SonarScanner honours this .editorconfig (the single source of
+# truth for repo style), so deactivate S125 here. Genuinely dead code is removed
+# in review, not left commented.
+dotnet_diagnostic.S125.severity = none
+
 # === C# code-style ruleset ===
 # These IDExxxx rules are enforced as warnings, which EnforceCodeStyleInBuild
 # (Directory.Build.props) surfaces during `dotnet build` — so with the CI

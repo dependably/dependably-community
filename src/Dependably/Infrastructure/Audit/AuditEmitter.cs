@@ -1,5 +1,8 @@
+using System.Text.Json;
+using Dependably.Infrastructure.Audit.Events;
 using Dependably.Infrastructure.Observability;
 using Dependably.Infrastructure.Siem;
+using Dependably.Infrastructure.Webhooks;
 using Dependably.Security;
 
 namespace Dependably.Infrastructure.Audit;
@@ -14,6 +17,10 @@ namespace Dependably.Infrastructure.Audit;
 /// <c>dependably.audit.emit_failures</c> (Prom: <c>dependably_audit_emit_failures_total</c>).
 /// Ops alerts on a non-zero rate — audit gaps are a security concern but they must
 /// never break the originating request.
+///
+/// For the package-event family (publish, replace, import) the audit record is also
+/// dispatched to the <see cref="IPackageEventSink"/> for outbound webhook delivery, if
+/// any webhook subscriptions match the event type and org.
 /// </summary>
 public sealed class AuditEmitter : IAuditEmitter
 {
@@ -24,6 +31,8 @@ public sealed class AuditEmitter : IAuditEmitter
     // SIEM forwarder is opt-in. Resolved at construction so the call path stays a
     // single null check; null when no forwarder is configured.
     private readonly SiemForwarderQueue? _siemQueue;
+    private readonly IPackageEventSink? _webhookSink;
+    private readonly OrgRepository _orgs;
     private readonly TimeProvider _time;
 
     public AuditEmitter(
@@ -32,6 +41,7 @@ public sealed class AuditEmitter : IAuditEmitter
         ILogger<AuditEmitter> logger,
         IConfiguration config,
         IServiceProvider sp,
+        OrgRepository orgs,
         TimeProvider time)
     {
         _repo = repo;
@@ -39,6 +49,8 @@ public sealed class AuditEmitter : IAuditEmitter
         _logger = logger;
         _resolverMode = (config["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
         _siemQueue = sp.GetService<SiemForwarderQueue>();
+        _webhookSink = sp.GetService<IPackageEventSink>();
+        _orgs = orgs;
         _time = time;
     }
 
@@ -88,6 +100,13 @@ public sealed class AuditEmitter : IAuditEmitter
                 Purl: null,
                 Detail: ev.Payload,
                 CreatedAt: ev.OccurredAt));
+
+            // Outbound webhook dispatch for the package-event family. Non-blocking: Dispatch
+            // returns immediately; the queue handles delivery asynchronously.
+            if (_webhookSink is not null && orgId is not null && IsPackageEventType(eventType))
+            {
+                await DispatchPackageEventAsync(ev, orgId, actorId, payloadJson, ct);
+            }
         }
         catch (Exception ex)
         {
@@ -100,6 +119,57 @@ public sealed class AuditEmitter : IAuditEmitter
                 eventType, orgId, actorId);
         }
     }
+
+    // Builds a PackageEventEnvelope from a publish/replace/import audit payload JSON and
+    // dispatches it to the webhook sink. Parses the JSON payload to recover the structured
+    // fields — the payload already carries everything needed for the envelope. Failure is
+    // swallowed: webhook dispatch is best-effort and must not break the publish path.
+    private async Task DispatchPackageEventAsync(
+        AuditEvent ev, string orgId, string? actorId, string payloadJson, CancellationToken ct)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payloadJson);
+            var root = doc.RootElement;
+
+            string ecosystem = GetString(root, "ecosystem") ?? "";
+            string name = GetString(root, "name") ?? "";
+            string version = GetString(root, "version") ?? "";
+            string? artifactHash = GetString(root, "artifact_hash");
+            string purl = GetString(root, "purl") ?? $"pkg:{ecosystem}/{name}@{version}";
+
+            var org = await _orgs.GetByIdAsync(orgId, ct);
+            string orgSlug = org?.Slug ?? orgId;
+
+            _webhookSink!.Dispatch(new PackageEventEnvelope(
+                EventType: ev.EventType,
+                OrgId: orgId,
+                OrgSlug: orgSlug,
+                Ecosystem: ecosystem,
+                Name: name,
+                Version: version,
+                Purl: purl,
+                ArtifactHash: artifactHash,
+                Actor: actorId,
+                OccurredAt: ev.OccurredAt,
+                DataJson: payloadJson));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to dispatch webhook for {EventType} (org {OrgId}); delivery skipped.",
+                ev.EventType, orgId);
+        }
+    }
+
+    private static bool IsPackageEventType(string eventType) =>
+        eventType is PackageEvents.TypePublish
+            or PackageEvents.TypeReplace
+            or PackageEvents.TypeImport;
+
+    private static string? GetString(JsonElement root, string propertyName) =>
+        root.TryGetProperty(propertyName, out var el) && el.ValueKind == JsonValueKind.String
+            ? el.GetString() : null;
 
     private static string? Truncate(string? s, int max)
     {

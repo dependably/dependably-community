@@ -78,15 +78,21 @@
 </script>
 
 <div class="login-page">
-  {#if step === 'credentials'}
+  <div class="login-card">
+    <div class="brand login-brand">
+      <svg viewBox="0 0 64 64" width="32" height="32" fill="none" aria-hidden="true">
+        <path d="M32 32L14 14M32 32L50 14M32 32L32 54" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
+        <circle cx="14" cy="14" r="5" fill="currentColor"/>
+        <circle cx="50" cy="14" r="5" fill="currentColor"/>
+        <circle cx="32" cy="54" r="5" fill="currentColor"/>
+        <circle cx="32" cy="32" r="9" fill="var(--accent)"/>
+      </svg>
+    </div>
+
+    {#if step === 'credentials'}
     <form on:submit|preventDefault={submit}>
       <h1>{$t('system.login.title')}</h1>
-
-      <label>{$t('system.login.email')}</label>
-      <input type="email" bind:value={email} required autocomplete="username" />
-
-      <label>{$t('system.login.password')}</label>
-      <input type="password" bind:value={password} required autocomplete="current-password" />
+      <p class="login-subtitle">{$t('system.login.subtitle')}</p>
 
       {#if $sessionExpired}
         <div class="session-expired-notice" role="alert">
@@ -96,6 +102,12 @@
       {/if}
 
       {#if error}<div class="error-msg">{error}</div>{/if}
+
+      <label>{$t('system.login.email')}</label>
+      <input type="email" bind:value={email} required autocomplete="username" />
+
+      <label>{$t('system.login.password')}</label>
+      <input type="password" bind:value={password} required autocomplete="current-password" />
 
       <button type="submit" class="primary" disabled={loading}>
         {loading ? $t('system.login.submitting') : $t('system.login.submit')}
@@ -153,7 +165,8 @@
         </button>
       </div>
     </form>
-  {/if}
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -176,17 +189,21 @@
     min-height: 100vh;
     background: var(--bg);
   }
-  form {
+  .login-card {
     background: var(--bg2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 24px;
     width: 320px;
+  }
+  .login-brand { display: flex; justify-content: center; margin-bottom: 18px; }
+  form {
     display: flex;
     flex-direction: column;
     gap: 12px;
   }
-  h1 { margin: 0 0 8px; font-size: 22px; }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  .login-subtitle { color: var(--text2); margin: 0 0 8px; }
   label { font-size: 13px; color: var(--text2); }
   input[type="email"],
   input[type="password"],

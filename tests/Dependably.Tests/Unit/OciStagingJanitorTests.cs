@@ -76,7 +76,8 @@ public sealed class OciStagingJanitorTests : IAsyncLifetime
             })
             .Build();
         return new OciStagingJanitorService(
-            _db, cfg, NullLogger<OciStagingJanitorService>.Instance, _clock);
+            _db, cfg, NullLogger<OciStagingJanitorService>.Instance, _clock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
     }
 
     private OciUploadService BuildUploadService(IStagingDiskInfo? disk = null)
@@ -333,6 +334,50 @@ public sealed class OciStagingJanitorTests : IAsyncLifetime
         // orgId2 is completely unaffected — its count is 0.
         var s2 = await svc.StartUploadAsync(_orgId2, "repo/a", default);
         Assert.NotNull(s2);
+    }
+
+    /// <summary>
+    /// Concurrency regression for the count-then-insert TOCTOU: N concurrent
+    /// <see cref="OciUploadService.StartUploadAsync"/> calls for the same tenant must never
+    /// admit more sessions than the cap, even though each call opens its own DB connection
+    /// (matching real concurrent <c>docker push</c> sessions). Before the fix, the count and
+    /// insert ran as separate statements with no lock between them, so multiple concurrent
+    /// callers could all observe a count under the cap and all insert, exceeding it.
+    /// </summary>
+    [Fact]
+    public async Task CapEnforced_ConcurrentStarts_NeverExceedCap()
+    {
+        const int cap = 3;
+        const int attempts = 8;
+        await SetCapAsync(cap);
+
+        var svc = BuildUploadService();
+
+        var tasks = Enumerable.Range(0, attempts)
+            .Select(i => svc.StartUploadAsync(_orgId, $"repo/{i}", default))
+            .ToArray();
+
+        var results = await Task.WhenAll(tasks.Select(async t =>
+        {
+            try
+            {
+                await t;
+                return (Succeeded: true, Exception: (Exception?)null);
+            }
+            catch (OciSessionCapExceededException ex)
+            {
+                return (Succeeded: false, Exception: (Exception?)ex);
+            }
+        }));
+
+        int succeeded = results.Count(r => r.Succeeded);
+        int rejected = results.Count(r => !r.Succeeded);
+
+        Assert.Equal(cap, succeeded);
+        Assert.Equal(attempts - cap, rejected);
+
+        // The authoritative DB row count must match the cap exactly — never more.
+        Assert.Equal(cap, await CountSessionsAsync(_orgId));
     }
 
     // ── Disk-floor pre-check ──────────────────────────────────────────────────

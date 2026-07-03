@@ -8,6 +8,10 @@ instance. Pick the cell in the table that matches your ecosystem and scope.
 | **npm**   | [npm-configure-project](./npm-configure-project/SKILL.md)   | [npm-configure-global](./npm-configure-global/SKILL.md)   |
 | **PyPI**  | [pypi-configure-project](./pypi-configure-project/SKILL.md) | [pypi-configure-global](./pypi-configure-global/SKILL.md) |
 | **NuGet** | [nuget-configure-project](./nuget-configure-project/SKILL.md) | [nuget-configure-global](./nuget-configure-global/SKILL.md) |
+| **Maven** | [maven-configure-project](./maven-configure-project/SKILL.md) | [maven-configure-global](./maven-configure-global/SKILL.md) |
+| **Go**    | [go-configure-project](./go-configure-project/SKILL.md)     | [go-configure-global](./go-configure-global/SKILL.md)     |
+| **Cargo** | [cargo-configure-project](./cargo-configure-project/SKILL.md) | [cargo-configure-global](./cargo-configure-global/SKILL.md) |
+| **Docker / OCI** | — (host-level login, no project scope) | [docker-configure-global](./docker-configure-global/SKILL.md) |
 
 Each skill prompts for two inputs, in order:
 

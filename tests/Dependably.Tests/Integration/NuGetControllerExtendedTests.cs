@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
@@ -744,6 +745,48 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
+    // ── Mixed-case prerelease round-trip: push → list → download ─────────────
+
+    [Fact]
+    public async Task MixedCasePrereleasePush_ListsAndDownloadsViaLowercasedRoute()
+    {
+        // A hosted mixed-case prerelease version (e.g. "1.0.0-Beta1") must be stored under the
+        // same lowercased canonical form every read path resolves against — NuGet clients always
+        // lowercase the version segment in flatcontainer/registration URLs. Push it, confirm the
+        // flatcontainer index lists it lowercased, then download it via the lowercased route.
+        string id = $"MixedCase{Guid.NewGuid():N}"[..16];
+        const string pushedVersion = "1.0.0-Beta1";
+        const string lowercased = "1.0.0-beta1";
+
+        await _factory.PushNuGetPackage(id, pushedVersion);
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(token);
+        string lowerId = id.ToLowerInvariant();
+
+        // List: flatcontainer index must contain the lowercased version.
+        var indexResp = await client.GetAsync($"/nuget/flatcontainer/{lowerId}/index.json");
+        Assert.Equal(HttpStatusCode.OK, indexResp.StatusCode);
+        using (var doc = JsonDocument.Parse(await indexResp.Content.ReadAsStringAsync()))
+        {
+            var versions = doc.RootElement.GetProperty("versions").EnumerateArray()
+                .Select(e => e.GetString()).ToList();
+            Assert.Contains(lowercased, versions);
+        }
+
+        // Download: flatcontainer .nupkg at the lowercased route must succeed — this is the
+        // exact request shape a real NuGet client sends (it always lowercases the version).
+        var downloadResp = await client.GetAsync(
+            $"/nuget/flatcontainer/{lowerId}/{lowercased}/{lowerId}.{lowercased}.nupkg");
+        Assert.Equal(HttpStatusCode.OK, downloadResp.StatusCode);
+        byte[] downloaded = await downloadResp.Content.ReadAsByteArrayAsync();
+        Assert.True(downloaded.Length > 0);
+
+        // Registration leaf must also resolve at the lowercased version.
+        var leafResp = await client.GetAsync($"/nuget/registration/{lowerId}/{lowercased}.json");
+        Assert.Equal(HttpStatusCode.OK, leafResp.StatusCode);
+    }
+
     // ── GetSymbols: success + missing snupkg blob ─────────────────────────────
 
     [Fact]
@@ -851,6 +894,140 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
                 "UPDATE org_settings SET anonymous_pull = 0 WHERE org_id = @orgId", new { orgId });
             _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId!);
         }
+    }
+
+    // ── Symbol server (SSQP): index-on-push + serve PDB by debug-id key ────────
+
+    private async Task PushSnupkgAsync(byte[] snupkg, string id, string version)
+    {
+        string pushToken = await _factory.CreateToken("push");
+        using var pushClient = _factory.CreateClient();
+        pushClient.DefaultRequestHeaders.Add("X-NuGet-ApiKey", pushToken);
+        using var content = new MultipartFormDataContent();
+        var fc = new ByteArrayContent(snupkg);
+        fc.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        content.Add(fc, "package", $"{id}.{version}.snupkg");
+        var resp = await pushClient.PutAsync("/nuget/symbols", content);
+        Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task SsqpGet_AfterSymbolPush_ServesExactPdbBytes()
+    {
+        // Push a .snupkg carrying a real Portable PDB with a known signature, then fetch that PDB
+        // over SSQP by its debug-id key. The served bytes must equal the PDB entry in the archive.
+        var signature = new Guid(0x497B72F6, 0x390A, 0x44FC, 0x87, 0x8E, 0x5A, 0x2D, 0x63, 0xB6, 0xCC, 0x4B);
+        byte[] pdb = NuGetFixtures.BuildPortablePdb(signature);
+        string id = $"SsqpPkg{Guid.NewGuid():N}"[..16];
+        byte[] snupkg = NuGetFixtures.BuildSnupkgWithPdbs(id, "1.0.0", ("mylib.pdb", pdb));
+        await PushSnupkgAsync(snupkg, id, "1.0.0");
+
+        string key = NuGetSymbolKey.PortableKey(signature);
+        string pullToken = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(pullToken);
+
+        var resp = await client.GetAsync($"/nuget/symbols/mylib.pdb/{key}/mylib.pdb");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal("application/octet-stream", resp.Content.Headers.ContentType?.MediaType);
+        byte[] served = await resp.Content.ReadAsByteArrayAsync();
+        Assert.Equal(pdb, served);
+    }
+
+    [Fact]
+    public async Task SsqpGet_KeyIsCaseInsensitive()
+    {
+        // Debuggers send mixed casing; the server lowercases both the filename and the key.
+        var signature = Guid.Parse("a1b2c3d4-e5f6-4788-99aa-bbccddeeff00");
+        byte[] pdb = NuGetFixtures.BuildPortablePdb(signature);
+        string id = $"SsqpCase{Guid.NewGuid():N}"[..16];
+        byte[] snupkg = NuGetFixtures.BuildSnupkgWithPdbs(id, "1.0.0", ("caseLib.pdb", pdb));
+        await PushSnupkgAsync(snupkg, id, "1.0.0");
+
+        string key = NuGetSymbolKey.PortableKey(signature);
+        string pullToken = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(pullToken);
+
+        var resp = await client.GetAsync(
+            $"/nuget/symbols/CaseLib.PDB/{key.ToUpperInvariant()}/CaseLib.PDB");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal(pdb, await resp.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task SsqpGet_UnknownKey_Returns404()
+    {
+        string pullToken = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(pullToken);
+
+        string bogusKey = new string('a', 32) + "ffffffff";
+        var resp = await client.GetAsync($"/nuget/symbols/ghost.pdb/{bogusKey}/ghost.pdb");
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task SsqpGet_AnonymousPullDisabled_NoToken_Returns401()
+    {
+        // Same auth posture as the .snupkg read surface: no anonymous read when AnonymousPull off.
+        using var client = _factory.CreateClient();
+        string bogusKey = new string('a', 32) + "ffffffff";
+        var resp = await client.GetAsync($"/nuget/symbols/whatever.pdb/{bogusKey}/whatever.pdb");
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task SsqpGet_MixedSnupkg_ServesValidPdb_And404sTheUnreadableOne()
+    {
+        // A .snupkg with one valid Portable PDB and one unreadable PDB entry: the valid one is
+        // indexed and served; the unreadable one is skipped at push, so any key for it 404s.
+        var signature = Guid.Parse("11112222-3333-4444-5555-666677778888");
+        byte[] validPdb = NuGetFixtures.BuildPortablePdb(signature);
+        byte[] junk = "this is not a portable pdb"u8.ToArray();
+        string id = $"SsqpMix{Guid.NewGuid():N}"[..16];
+        byte[] snupkg = NuGetFixtures.BuildSnupkgWithPdbs(
+            id, "1.0.0", ("good.pdb", validPdb), ("bad.pdb", junk));
+        await PushSnupkgAsync(snupkg, id, "1.0.0");
+
+        string pullToken = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBasic(pullToken);
+
+        string goodKey = NuGetSymbolKey.PortableKey(signature);
+        var goodResp = await client.GetAsync($"/nuget/symbols/good.pdb/{goodKey}/good.pdb");
+        Assert.Equal(HttpStatusCode.OK, goodResp.StatusCode);
+        Assert.Equal(validPdb, await goodResp.Content.ReadAsByteArrayAsync());
+
+        // The unreadable PDB was never indexed — no key resolves it.
+        string madeUpKey = new string('b', 32) + "ffffffff";
+        var badResp = await client.GetAsync($"/nuget/symbols/bad.pdb/{madeUpKey}/bad.pdb");
+        Assert.Equal(HttpStatusCode.NotFound, badResp.StatusCode);
+    }
+
+    [Fact]
+    public async Task PushSymbols_CorruptPdbEntry_StillReturns201_AndGoodEntryStillIndexes()
+    {
+        // A .snupkg with a well-formed ZIP structure but one .pdb entry whose compression method
+        // has been corrupted to an unsupported value: NuGetNupkgValidator only inspects entry
+        // NAMES (never opens the .pdb), so this passes push validation and the version row
+        // commits. Indexing must then survive the bad entry — the pusher gets 201, and the good
+        // entry in the same archive is still indexed and servable over SSQP.
+        var signature = Guid.Parse("55556666-7777-4888-9999-aaaabbbbcccc");
+        byte[] goodPdb = NuGetFixtures.BuildPortablePdb(signature);
+        string id = $"SsqpCorrupt{Guid.NewGuid():N}"[..16];
+        byte[] archive = NuGetFixtures.BuildSnupkgWithPdbs(
+            id, "1.0.0", ("good.pdb", goodPdb), ("corrupt.pdb", "placeholder bytes"u8.ToArray()));
+        byte[] snupkg = NuGetFixtures.CorruptEntryCompressionMethod(
+            archive, "lib/netstandard2.0/corrupt.pdb");
+
+        await PushSnupkgAsync(snupkg, id, "1.0.0");
+
+        string key = NuGetSymbolKey.PortableKey(signature);
+        string pullToken = await _factory.CreateToken("pull");
+        using var pullClient = _factory.CreateClientWithBasic(pullToken);
+        var getResp = await pullClient.GetAsync($"/nuget/symbols/good.pdb/{key}/good.pdb");
+        Assert.Equal(HttpStatusCode.OK, getResp.StatusCode);
+        Assert.Equal(goodPdb, await getResp.Content.ReadAsByteArrayAsync());
     }
 
     // ── Registration: upstream merge not poisoned by stale local-only cache ──────

@@ -136,7 +136,7 @@ public sealed class NpmTarballHandler(
         }
 
         httpContext.Response.Headers["X-Cache"] = "HIT";
-        httpContext.Response.Headers["X-Dependably-PURL"] = NpmSharedHelpers.SanitizeHeader(pkgVersion.Purl);
+        httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVersion.Purl);
         httpContext.Response.ContentType = "application/octet-stream";
         httpContext.Response.Headers["Content-Length"] = pkgVersion.SizeBytes.ToString();
         if (pkgVersion.ChecksumSha256 is not null)
@@ -178,7 +178,7 @@ public sealed class NpmTarballHandler(
 
         string? sourceIp = httpContext.GetNormalizedRemoteIp();
         if (await blockGate.EvaluateAsync(
-                BuildProxyBlockGateRequest(orgId, caFacts, token, settings, sourceIp), ct)
+                BlockGateRequest.ForProxyCacheFacts(orgId, "npm", caFacts, token, settings, sourceIp), ct)
             == BlockDecision.Blocked)
         {
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
@@ -194,7 +194,7 @@ public sealed class NpmTarballHandler(
         httpContext.Response.Headers["X-Cache"] = "HIT";
         if (caFacts.Purl is not null)
         {
-            httpContext.Response.Headers["X-Dependably-PURL"] = NpmSharedHelpers.SanitizeHeader(caFacts.Purl);
+            httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(caFacts.Purl);
         }
         httpContext.Response.ContentType = "application/octet-stream";
         httpContext.Response.Headers["Content-Length"] = caFacts.SizeBytes.ToString();
@@ -288,7 +288,7 @@ public sealed class NpmTarballHandler(
 
         string? sourceIpProxy = httpContext.GetNormalizedRemoteIp();
         return await blockGate.EvaluateAsync(
-                BuildProxyBlockGateRequest(key.OrgId, caFacts, token, settings, sourceIpProxy), ct)
+                BlockGateRequest.ForProxyCacheFacts(key.OrgId, "npm", caFacts, token, settings, sourceIpProxy), ct)
             == BlockDecision.Blocked
             ? new StatusCodeResult(StatusCodes.Status403Forbidden)
             : await TryServeProxyCachedTarballAsync(httpContext, caFacts, key.File, key.OrgId, token, sourceIpProxy, ct);
@@ -311,30 +311,6 @@ public sealed class NpmTarballHandler(
         return v?.Origin == "uploaded" ? v : null;
     }
 
-    // Builds a BlockGateRequest for a proxy artifact from global-plane serve facts.
-    private static BlockGateRequest BuildProxyBlockGateRequest(
-        string orgId, CacheArtifactServeFacts caFacts, TokenRecord? token,
-        OrgSettings settings, string? sourceIp) =>
-        new(orgId, "npm", caFacts.Purl ?? string.Empty, string.Empty,
-            caFacts.ManualBlockState, caFacts.VulnCheckedAt,
-            token?.UserId, settings.MaxOsvScoreTolerance, sourceIp,
-            MinReleaseAgeHours: settings.MinReleaseAgeHours,
-            PublishedAt: caFacts.PublishedAt,
-            ActorKind: token?.ActorKind,
-            Deprecated: caFacts.Deprecated,
-            BlockDeprecatedMode: settings.BlockDeprecated,
-            RevokedAt: caFacts.RevokedAt,
-            BlockRevokedMode: settings.BlockRevoked,
-            BlockMaliciousMode: settings.BlockMalicious,
-            BlockKevMode: settings.BlockKev,
-            MaxEpssTolerance: settings.MaxEpssTolerance,
-            Origin: "proxy",
-            HasInstallScript: caFacts.HasInstallScript,
-            InstallScriptKind: caFacts.InstallScriptKind,
-            BlockInstallScriptsMode: settings.BlockInstallScripts,
-            ProvenanceStatus: caFacts.ProvenanceStatus,
-            CacheArtifactId: caFacts.Id);
-
     // Serves a proxy tarball from the global-plane cache. Increments per-tenant download count
     // via tenant_artifact_access. Returns null when the blob is not yet in the store (the
     // caller falls through to the upstream proxy fetch).
@@ -342,6 +318,19 @@ public sealed class NpmTarballHandler(
         HttpContext httpContext, CacheArtifactServeFacts caFacts, string file, string orgId,
         TokenRecord? token, string? sourceIp, CancellationToken ct)
     {
+        // 304 short-circuit: an unchanged proxy artifact never needs its bytes re-read from
+        // the blob store — check the client's cached copy before opening the stream.
+        if (!string.IsNullOrEmpty(caFacts.ContentHash))
+        {
+            string cachedEtag = $"\"sha256:{caFacts.ContentHash}\"";
+            if (ConditionalRequestHelper.IfNoneMatchHits(httpContext.Request.Headers, cachedEtag))
+            {
+                httpContext.Response.Headers.ETag = cachedEtag;
+                httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+                return new StatusCodeResult(StatusCodes.Status304NotModified);
+            }
+        }
+
         // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to the cache tier.
         var stream = await blobs.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
         if (stream is null)
@@ -352,7 +341,7 @@ public sealed class NpmTarballHandler(
         httpContext.Response.Headers["X-Cache"] = "HIT";
         if (caFacts.Purl is not null)
         {
-            httpContext.Response.Headers["X-Dependably-PURL"] = NpmSharedHelpers.SanitizeHeader(caFacts.Purl);
+            httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(caFacts.Purl);
         }
         if (!string.IsNullOrEmpty(caFacts.ContentHash))
         {
@@ -364,8 +353,9 @@ public sealed class NpmTarballHandler(
             await audit.LogActivityAsync(orgId, "npm", caFacts.Purl, "download", token?.UserId,
                 actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         }
-        // Increment per-tenant download count on the global plane.
-        await tenantAccess.UpsertStateAsync(orgId, caFacts.Id, time.GetUtcNow(), ct);
+        // Increment per-tenant download count on the global plane. Enqueued off the request
+        // path — the row already exists (seeded durably at first-fetch).
+        await tenantAccess.RecordDownloadHitAsync(orgId, caFacts.Id, time.GetUtcNow(), ct);
         return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
     }
 
@@ -424,6 +414,18 @@ public sealed class NpmTarballHandler(
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
 
+        // 304 short-circuit: check the client's cached copy before opening the blob stream.
+        if (pkgVersion.ChecksumSha256 is not null)
+        {
+            string hostedEtag = $"\"sha256:{pkgVersion.ChecksumSha256}\"";
+            if (ConditionalRequestHelper.IfNoneMatchHits(httpContext.Request.Headers, hostedEtag))
+            {
+                httpContext.Response.Headers.ETag = hostedEtag;
+                httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+                return new StatusCodeResult(StatusCodes.Status304NotModified);
+            }
+        }
+
         var stream = await blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
         if (stream is null)
         {
@@ -431,7 +433,7 @@ public sealed class NpmTarballHandler(
         }
 
         httpContext.Response.Headers["X-Cache"] = "HIT";
-        httpContext.Response.Headers["X-Dependably-PURL"] = NpmSharedHelpers.SanitizeHeader(pkgVersion.Purl);
+        httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVersion.Purl);
         if (pkgVersion.ChecksumSha256 is not null)
         {
             httpContext.Response.Headers.ETag = $"\"sha256:{pkgVersion.ChecksumSha256}\"";
@@ -598,6 +600,7 @@ public sealed class NpmTarballHandler(
             MinReleaseAgeHours: settings.MinReleaseAgeHours,
             CacheAccess: new CacheAccess(orgId, "npm", fullName, version, file,
                 Sha256: "", SizeBytes: 0, BlobKey: "", UpstreamUrl: upstreamUrl),
+            UpstreamUrl: upstreamUrl,
             PublishedAt: meta.PublishedAt,
             UpstreamChecksum: meta.Checksum,
             Sha1Hex: meta.Sha1Hex,

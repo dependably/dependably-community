@@ -22,6 +22,31 @@ public static partial class PurlNormalizer
         return $"pkg:pypi/{normalized}@{version}";
     }
 
+    /// <summary>
+    /// Canonical package-name key for a given ecosystem — the single form every claim writer and
+    /// every enforcement site must agree on so an admin claim keyed by the raw name still matches
+    /// the name the download/publish handlers resolve by. PyPI collapses <c>[-_.]+</c> to <c>-</c>
+    /// and lowercases (PEP 503, matching <see cref="PyPiName"/>); npm, NuGet, RPM, and OCI names
+    /// are case-insensitive so they lowercase; Maven, Cargo, and Go names are case-sensitive and
+    /// stored as published, so they pass through unchanged. Mirrors the normalization each
+    /// ecosystem's <c>purl_name</c>/resolver call site already applies.
+    /// </summary>
+    public static string CanonicalName(string ecosystem, string name) => ecosystem switch
+    {
+        "pypi" => PyPiName(name),
+        "npm" or "nuget" or "rpm" or "oci" => name.ToLowerInvariant(),
+        _ => name,
+    };
+
+    /// <summary>
+    /// Canonical versionless PURL: <c>pkg:{ecosystem}/{name}</c>. Used for allowlist/blocklist
+    /// wildcard entries and claim-management audit/activity keys, where no single version applies.
+    /// Callers pass an already-ecosystem-normalized <paramref name="name"/> (e.g. the result of
+    /// <see cref="CanonicalName"/> or an ecosystem-specific normalizer) — this method performs no
+    /// further normalization of its own.
+    /// </summary>
+    public static string NameOnly(string ecosystem, string name) => $"pkg:{ecosystem}/{name}";
+
     public static string Npm(string name, string version)
         => $"pkg:npm/{name}@{version}";
 

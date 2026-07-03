@@ -145,7 +145,16 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- SUM(package_versions.size_bytes) on first access when the counter is 0 and the real
     -- sum is positive. Used in place of a live aggregate query to close the TOCTOU race
     -- in concurrent publish quota checks.
-    storage_used_bytes        INTEGER NOT NULL DEFAULT 0
+    storage_used_bytes        INTEGER NOT NULL DEFAULT 0,
+    -- Per-tenant RPM hosted-publishing posture override. NULL (default) inherits the instance
+    -- Rpm:UpstreamMode env value; an explicit 'passthrough' or 'merged' overrides the env value
+    -- in EITHER direction (an org can opt out of an instance-wide 'merged' just as it can opt
+    -- into one). 'passthrough' refuses hosted RPM publish when the org has an rpm upstream
+    -- registry configured (a local package would silently shadow upstream and break dnf
+    -- resolution); 'merged' serves local ∪ upstream repodata (local shadows on NEVRA collision)
+    -- and allows hosted publish. Resolved in RpmController.IsRpmPassthroughEffective, settable
+    -- from Settings → Proxy without an instance restart.
+    rpm_upstream_mode         TEXT    CHECK (rpm_upstream_mode IS NULL OR rpm_upstream_mode IN ('passthrough','merged'))
 );
 
 CREATE TABLE IF NOT EXISTS instance_settings (
@@ -281,8 +290,11 @@ CREATE TABLE IF NOT EXISTS package_versions (
     --   npm   → 'sha512-{base64}' (the SRI form printed on npmjs.com)
     --   NuGet → '{base64}'        (packageHash as written in the registration leaf)
     --   PyPI  → '{hex}'           (sha256 from the #sha256= simple-index fragment)
-    -- Algorithm column tags how to interpret the value. NULL for uploaded versions (no
-    -- upstream claim to compare against) and for legacy rows pre-dating the column.
+    -- Algorithm column tags how to interpret the value. For hosted npm publishes the same
+    -- pair carries the artefact's sha512 SRI ('sha512-sri') — the publisher's dist.integrity
+    -- claim when the client sent one, otherwise computed server-side from the uploaded
+    -- bytes — so the packument can emit dist.integrity. NULL for non-npm uploaded versions
+    -- and for legacy rows pre-dating the column.
     upstream_integrity_value TEXT,
     upstream_integrity_algorithm TEXT,  -- 'sha256' | 'sha512-sri' | 'sha512-b64'
     -- Trailing path segment of blob_key. Populated at insert time by the repository so
@@ -318,7 +330,18 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- Identity of the verifying signer (the trust-anchor keyid) when provenance_status is
     -- 'verified'. NULL for every other status.
     provenance_signer TEXT,
+    -- Install-relevant manifest subset captured at hosted npm publish from the tarball's
+    -- package.json (bin, dependencies, optionalDependencies, peerDependencies,
+    -- peerDependenciesMeta, bundleDependencies, engines, os, cpu, libc, directories,
+    -- _hasShrinkwrap), stored as one JSON object. Merged into the packument's per-version
+    -- objects so npm/npx can resolve bin links and transitive dependencies. NULL for proxy
+    -- rows (the upstream packument is served directly), for non-npm rows, and for hosted
+    -- rows published before the column existed (those render the legacy minimal shape).
+    manifest_json TEXT,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    -- ISO 8601 UTC; stamped when a same-version re-push overwrites this row's bytes.
+    -- NULL means never overwritten, in which case the effective pushed date is created_at.
+    updated_at  TEXT,
     UNIQUE (package_id, version)
 );
 
@@ -445,6 +468,42 @@ CREATE TABLE IF NOT EXISTS upstream_registry (
 );
 CREATE INDEX IF NOT EXISTS idx_upstream_registry_org_eco
     ON upstream_registry(org_id, ecosystem, position);
+
+-- Per-(org, ecosystem, package name) upstream source pin. The first upstream to successfully
+-- serve a proxied name binds that name to that upstream host; a later proxy fetch resolving the
+-- same name from a DIFFERENT upstream host is refused. This is the non-OCI analogue of OCI
+-- repository-prefix routing and closes the dependency-confusion window where a private-upstream
+-- miss silently falls through to a public upstream squatting the same name. upstream_host is the
+-- scheme+authority (e.g. https://registry.npmjs.org) of the serving upstream.
+CREATE TABLE IF NOT EXISTS upstream_source_pin (
+    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem     TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    upstream_host TEXT NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    PRIMARY KEY (org_id, ecosystem, name)
+);
+
+-- NuGet symbol-server (SSQP) index. Maps a Portable-PDB debug-id key to the exact PDB entry
+-- inside a stored .snupkg so a debugger can fetch a single PDB by GUID+age via
+-- GET /nuget/symbols/{pdb}/{key}/{pdb}. Populated on symbol push (one row per contained PDB).
+-- ssqp_key and pdb_filename are stored lowercased and matched case-insensitively per the SSQP
+-- protocol. Tenant-scoped on org_id; each row references the owning package_versions row.
+CREATE TABLE IF NOT EXISTS nuget_symbol_index (
+    id                 TEXT PRIMARY KEY,
+    org_id             TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    package_version_id TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    pdb_filename       TEXT NOT NULL,   -- lowercased PDB file name (e.g. mylib.pdb)
+    ssqp_key           TEXT NOT NULL,   -- lowercased 40-hex key: GUID (N format) + 'ffffffff' age
+    snupkg_blob_key    TEXT NOT NULL,   -- blob key of the stored .snupkg holding this PDB
+    entry_path         TEXT NOT NULL,   -- path of the PDB entry within the .snupkg ZIP
+    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    UNIQUE (org_id, ssqp_key, pdb_filename, package_version_id)
+);
+-- Primary SSQP resolution path: (org, key, filename) lookup.
+CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_lookup ON nuget_symbol_index(org_id, ssqp_key, pdb_filename);
+-- FK-column index so cascade delete on package_versions does not table-scan.
+CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_pv ON nuget_symbol_index(package_version_id);
 
 -- Per-org operator-pinned signature trust anchors. Each row is one trust anchor
 -- (PGP public key, X.509 cert, npm SPKI key, Sigstore root, Rekor key, or publisher
@@ -1119,6 +1178,10 @@ CREATE TABLE IF NOT EXISTS audit_event (
 CREATE INDEX IF NOT EXISTS idx_audit_event_org_time ON audit_event (org_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_event_org_type ON audit_event (org_id, event_type, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_event_actor ON audit_event (org_id, actor_id, occurred_at DESC);
+-- Retention-sweep index: the reaper's DELETE filters on a bare occurred_at range with no
+-- org_id, so none of the org-scoped indexes above can serve it — this one exists purely to
+-- keep that sweep an index range scan instead of a full-table scan.
+CREATE INDEX IF NOT EXISTS idx_audit_event_occurred_at ON audit_event (occurred_at);
 
 -- Per-tenant registry bucket binding. Dormant in community: a NULL/absent row means "use
 -- the global STORAGE_BACKEND_REGISTRY env vars" — which is how community's LocalBlobStore
@@ -1308,6 +1371,62 @@ CREATE TABLE IF NOT EXISTS banner_dismissals (
 );
 -- FK-column index: cascade deletes on users scan this table without it.
 CREATE INDEX IF NOT EXISTS idx_banner_dismissals_user ON banner_dismissals(user_id);
+
+-- User-configured outbound webhooks for package events (publish, yank, vuln). Each row is
+-- one endpoint subscription for an org. The HMAC signing secret is encrypted at rest via
+-- EnvelopeProtector (enc:v1: prefix) when DEPENDABLY_MASTER_KEY is configured; plaintext
+-- is rejected at save time. Secret is write-only: GET responses never return the value.
+-- The dispatcher auto-disables a subscription after 20 consecutive failures OR when it has
+-- been failing continuously for 48 hours, whichever comes first. Re-enable resets all
+-- failure counters.
+CREATE TABLE IF NOT EXISTS webhook_subscription (
+    id                   TEXT PRIMARY KEY,
+    org_id               TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    url                  TEXT NOT NULL,
+    -- HMAC signing secret (enc:v1: envelope-encrypted at rest). NULL when no secret is set.
+    secret               TEXT,
+    -- JSON array of event type strings, e.g. ["package.publish","package.yank"].
+    event_types          TEXT NOT NULL DEFAULT '[]',
+    enabled              INTEGER NOT NULL DEFAULT 1,
+    description          TEXT,
+    -- ISO 8601 UTC; set after every terminal delivery attempt (success or all retries exhausted).
+    last_delivery_at     TEXT,
+    -- 'ok' | 'failed' | NULL (never delivered). Only updated after terminal outcome.
+    last_status          TEXT,
+    -- Running count of consecutive delivery failures. Reset to 0 on success.
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    -- ISO 8601 UTC; set when the first failure in the current consecutive-failure run
+    -- is recorded. Reset to NULL on success.
+    failing_since        TEXT,
+    -- Free-text last error string; recorded on terminal failure and cleared on success.
+    last_error           TEXT,
+    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+-- Delivery fan-out query: enabled subscriptions for an org, indexed for fast event-type matching.
+CREATE INDEX IF NOT EXISTS idx_webhook_sub_org_enabled ON webhook_subscription(org_id, enabled);
+
+-- Single-writer mutual-exclusion lock over a shared SQLite database file. SQLite tolerates
+-- exactly one writing process; two dependably processes pointed at one shared volume corrupt
+-- each other's assumptions. On startup a file-backed SQLite deployment claims the sole row
+-- (id = 'primary'): a live foreign heartbeat fails startup fast, a stale one (crashed
+-- predecessor) is taken over, and a running node refreshes heartbeat_at on a timer. The row is
+-- deleted on graceful shutdown so an immediate restart need not wait out the staleness window.
+-- Instance-global (one lock for the whole file), so there is no org_id column. Postgres carries
+-- the table for schema parity but never writes it — Postgres is a legitimately multi-writer store
+-- and the guard is SQLite-only.
+CREATE TABLE IF NOT EXISTS instance_lock (
+    -- Fixed sentinel 'primary' so the table holds at most one row.
+    id           TEXT PRIMARY KEY,
+    -- Random GUID minted once per process at startup; identifies the lock holder.
+    instance_id  TEXT NOT NULL,
+    -- Operator-facing label for the holder (container hostname) in the takeover error message.
+    hostname     TEXT,
+    -- ISO 8601 UTC of the last heartbeat refresh; freshness is measured against this.
+    heartbeat_at TEXT NOT NULL,
+    -- ISO 8601 UTC of when this holder first acquired the lock.
+    acquired_at  TEXT NOT NULL
+);
 
 -- NOTE: SchemaInitializer also runs ALTER TABLE statements for the columns above.
 -- Those are no-ops on fresh installs (duplicate column error is swallowed / IF NOT EXISTS).
