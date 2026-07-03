@@ -416,7 +416,7 @@ public sealed class ScheduledBackgroundServiceTests
     private sealed class DenyThenGrantLock : IDistributedLock
     {
         private readonly int _denyCount;
-        private readonly IDistributedLock _inner;
+        private readonly InProcessDistributedLock _inner;
 
         public int Attempts { get; private set; }
 
@@ -537,7 +537,7 @@ public sealed class ScheduledBackgroundServiceTests
     private sealed class ThrowThenGrantLock : IDistributedLock
     {
         private readonly int _throwCount;
-        private readonly IDistributedLock _inner;
+        private readonly InProcessDistributedLock _inner;
 
         public int Attempts { get; private set; }
 

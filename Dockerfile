@@ -36,6 +36,9 @@ WORKDIR /src
 COPY Dependably.sln .
 COPY Directory.Build.props .
 COPY src/Dependably/Dependably.csproj src/Dependably/
+COPY src/Dependably.Core/Dependably.Core.csproj src/Dependably.Core/
+COPY src/Dependably.Management/Dependably.Management.csproj src/Dependably.Management/
+COPY src/Dependably.Edge/Dependably.Edge.csproj src/Dependably.Edge/
 ARG TARGETARCH
 ARG VERSION=0.1.0
 ARG REGISTRY_URL=
@@ -75,7 +78,10 @@ RUN --mount=type=secret,id=registry_key \
         --exclude-dev
 
 COPY src/Dependably/ src/Dependably/
-COPY --from=frontend /src/Dependably/wwwroot/ src/Dependably/wwwroot/
+COPY src/Dependably.Core/ src/Dependably.Core/
+COPY src/Dependably.Management/ src/Dependably.Management/
+COPY src/Dependably.Edge/ src/Dependably.Edge/
+COPY --from=frontend /src/Dependably.Management/wwwroot/ src/Dependably.Management/wwwroot/
 RUN --mount=type=secret,id=registry_key \
     if [ -s /run/secrets/registry_key ]; then \
       NUGET_CREDS="Username=ci;Password=$(cat /run/secrets/registry_key)"; \

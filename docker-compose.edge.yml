@@ -3,7 +3,8 @@
 # (no admin UI, no orgs/users, no first-boot wizard) and publishes nothing — publish attempts
 # fail closed with a 405 pointing at the master.
 #
-# Bring it up with the three edge variables set in the environment (or an .env file):
+# Uses the prebuilt dependably/edge image. Bring it up with the two required edge variables set in
+# the environment (or an .env file):
 #   EDGE_MASTER_URL=https://dependably.example.com \
 #   EDGE_MASTER_TOKEN=<reader service token minted on the master> \
 #   docker compose -f docker-compose.edge.yml up -d
@@ -11,12 +12,12 @@
 # See docs/edge-node.md for enrollment, the trusted-LAN anonymous-access note, and recovery.
 services:
   dependably-edge:
-    build:
-      context: .
-      args:
-        REGISTRY_URL: ${REGISTRY_URL:-}
-      secrets:
-        - registry_key
+    # The prebuilt slim edge image. It ships no management plane — the assembly reference graph
+    # (Dependably.Edge references only Dependably.Core) excludes the admin/auth/SAML/SPA closure,
+    # so the reduction is structural, not runtime stripping. Pull it from the Dependably registry;
+    # docs/edge-node.md covers logging in and the community-image-with-DEPLOYMENT_MODE=edge
+    # alternative for operators who build locally.
+    image: dependably.northwardlabs.ca/dependably/edge:latest
     ports:
       - "8080:8080"
     volumes:
@@ -25,9 +26,14 @@ services:
       # cache is all cold misses and saves nothing. This named volume MUST be persistent.
       - dependably-edge-cache:/cache
     environment:
-      # Selects headless cache-only edge mode. Collapses tenancy to one implicit realm, strips
-      # the management/auth plane, and forces the cache-only background-job set.
-      DEPLOYMENT_MODE: edge
+      # No DEPLOYMENT_MODE here: the edge image is constitutionally an edge (its composition root
+      # pins DEPLOYMENT_MODE=edge internally and rejects any tenancy value), so the variable is
+      # neither read nor needed. Leaving it unset is the cleanest form.
+      # No load balancer fronts a single-node edge, so the pre-stop drain sleep
+      # (app default 10s) buys nothing here and eats into the stop grace period
+      # before the SQLite instance-lock row is released. Zero it so shutdown
+      # proceeds straight to the drain + lock release.
+      SHUTDOWN_PRESTOP_DELAY: ${SHUTDOWN_PRESTOP_DELAY:-0}
       # The master base URL — the edge's sole upstream for every ecosystem. Required.
       EDGE_MASTER_URL: ${EDGE_MASTER_URL:?set EDGE_MASTER_URL to the central master base URL}
       # Reader-scoped service token minted on the master for this edge node. Required.
@@ -75,11 +81,13 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+    # Must cover SHUTDOWN_PRESTOP_DELAY + SHUTDOWN_GRACE_PERIOD (30s in-flight
+    # drain) so graceful shutdown finishes and the SQLite instance-lock row is
+    # deleted. Docker's default 10s SIGKILLs mid-shutdown, orphaning the lock;
+    # the replacement container then crash-loops until the 90s staleness window
+    # expires.
+    stop_grace_period: 45s
 
 volumes:
   # Persistent warm-cache volume — durable across restarts by design.
   dependably-edge-cache:
-
-secrets:
-  registry_key:
-    environment: REGISTRY_KEY

@@ -47,18 +47,9 @@ public sealed partial class NoInterpolatedSqlComplianceTests
     [Fact]
     public void NoSqlIsBuiltByStringInterpolation()
     {
-        string srcRoot = LocateSourceRoot();
-        Assert.True(Directory.Exists(srcRoot), $"src root not found at {srcRoot}");
-
         var violations = new List<string>();
-        foreach (string file in Directory.EnumerateFiles(srcRoot, "*.cs", SearchOption.AllDirectories))
+        foreach (string file in SourceRoots.AllCSharpFiles())
         {
-            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
-                || file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
-            {
-                continue;
-            }
-
             string[] lines = File.ReadAllLines(file);
             string source = string.Join('\n', lines);
 
@@ -75,7 +66,7 @@ public sealed partial class NoInterpolatedSqlComplianceTests
                     continue;
                 }
 
-                string rel = Path.GetRelativePath(srcRoot, file);
+                string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
                 violations.Add(
                     $"{rel}:{lineNumber + 1}: SQL built by string interpolation. Use a parameterized " +
                     $"Dapper query (@name placeholders). If the interpolated fragment is a compile-time " +
@@ -94,22 +85,6 @@ public sealed partial class NoInterpolatedSqlComplianceTests
             Assert.Fail($"{violations.Count} interpolated SQL literal(s) found. " +
                         $"See test output for the full list and remediation hint.");
         }
-    }
-
-    private static string LocateSourceRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "Dependably");
-            if (Directory.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            dir = dir.Parent;
-        }
-        return string.Empty;
     }
 
     private record struct SqlMatch(string Sql, int StartIndex);

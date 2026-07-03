@@ -249,9 +249,11 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         Assert.Equal(firstResult.VersionId, accepted.VersionId);
         Assert.NotEqual(firstHash, accepted.Sha256);
 
+        // package.replace is a per-version operator action — it belongs in `activity`,
+        // not `audit_log`.
         await using var conn = await _db.OpenAsync();
-        var replaceRows = (await conn.QueryAsync<(string Action, string Detail)>(
-            "SELECT action, detail FROM audit_log WHERE org_id = 'o1' AND action = 'package.replace'"))
+        var replaceRows = (await conn.QueryAsync<(string EventType, string Detail)>(
+            "SELECT event_type, detail FROM activity WHERE org_id = 'o1' AND event_type = 'package.replace'"))
             .ToList();
         Assert.Single(replaceRows);
         Assert.Contains("sha256:" + firstHash, replaceRows[0].Detail);
@@ -269,7 +271,7 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
 
         await using var conn = await _db.OpenAsync();
         long count = await conn.ExecuteScalarAsync<long>(
-            "SELECT COUNT(*) FROM audit_log WHERE org_id = 'o1' AND action = 'package.replace' AND purl LIKE '%fresh-pkg%'");
+            "SELECT COUNT(*) FROM activity WHERE org_id = 'o1' AND event_type = 'package.replace' AND purl LIKE '%fresh-pkg%'");
         Assert.Equal(0, count);
     }
 

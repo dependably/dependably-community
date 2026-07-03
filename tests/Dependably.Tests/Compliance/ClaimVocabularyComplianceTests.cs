@@ -30,18 +30,9 @@ public sealed partial class ClaimVocabularyComplianceTests
     [Fact]
     public void EnforcedVocabularyMatchesClaimResolverCallSites()
     {
-        string srcRoot = LocateSourceRoot();
-        Assert.True(Directory.Exists(srcRoot), $"src root not found at {srcRoot}");
-
         var callSiteEcosystems = new HashSet<string>(StringComparer.Ordinal);
-        foreach (string file in Directory.EnumerateFiles(srcRoot, "*.cs", SearchOption.AllDirectories))
+        foreach (string file in SourceRoots.AllCSharpFiles())
         {
-            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
-                || file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
-            {
-                continue;
-            }
-
             string source = File.ReadAllText(file);
             foreach (Match m in ClaimResolverCallRegex().Matches(source))
             {
@@ -68,21 +59,5 @@ public sealed partial class ClaimVocabularyComplianceTests
         Assert.True(
             missingFromVocab.Count == 0 && unconsulted.Count == 0,
             "ClaimEcosystems.Enforced drifted from the ClaimResolver call sites. See test output.");
-    }
-
-    private static string LocateSourceRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "Dependably");
-            if (Directory.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            dir = dir.Parent;
-        }
-        return string.Empty;
     }
 }

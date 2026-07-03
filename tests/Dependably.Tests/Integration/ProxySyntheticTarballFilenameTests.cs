@@ -120,8 +120,9 @@ public sealed class ProxySyntheticTarballFilenameTests : IClassFixture<Dependabl
             string sha256v1 = await SeedProxyCacheEntryAsync(defaultOrgId, "npm", name, v1, file1);
             string sha256v2 = await SeedProxyCacheEntryAsync(defaultOrgId, "npm", name, v2, file2);
 
-            _factory.Services.GetRequiredService<RenderedResponseCache<NpmPackumentKey>>()
-                .Evict(new NpmPackumentKey(defaultOrgId, name));
+            var packumentCache = _factory.Services.GetRequiredService<RenderedResponseCache<NpmPackumentKey>>();
+            packumentCache.Evict(new NpmPackumentKey(defaultOrgId, name));
+            packumentCache.Evict(new NpmPackumentKey(defaultOrgId, name) { IsProxy = true });
 
             string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBearer(token);

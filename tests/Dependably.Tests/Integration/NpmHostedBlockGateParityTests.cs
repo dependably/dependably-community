@@ -165,9 +165,9 @@ public sealed class NpmHostedBlockGateParityTests : IAsyncLifetime
     private async Task EvictPackumentCacheAsync(string pkgName)
     {
         string orgId = await DefaultOrgIdAsync();
-        _factory.Services
-            .GetRequiredService<RenderedResponseCache<NpmPackumentKey>>()
-            .Evict(new NpmPackumentKey(orgId, pkgName));
+        var packumentCache = _factory.Services.GetRequiredService<RenderedResponseCache<NpmPackumentKey>>();
+        packumentCache.Evict(new NpmPackumentKey(orgId, pkgName));
+        packumentCache.Evict(new NpmPackumentKey(orgId, pkgName) { IsProxy = true });
     }
 
     private async Task DisableProxyPassthroughAsync()

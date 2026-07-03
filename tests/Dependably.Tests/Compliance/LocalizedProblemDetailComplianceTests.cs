@@ -38,18 +38,9 @@ public sealed partial class LocalizedProblemDetailComplianceTests
     [Fact]
     public void ProblemDetailsAreNeverInlineEnglishLiterals()
     {
-        string srcRoot = LocateSourceRoot();
-        Assert.True(Directory.Exists(srcRoot), $"src root not found at {srcRoot}");
-
         var violations = new List<string>();
-        foreach (string file in Directory.EnumerateFiles(srcRoot, "*.cs", SearchOption.AllDirectories))
+        foreach (string file in SourceRoots.AllCSharpFiles())
         {
-            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
-                || file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
-            {
-                continue;
-            }
-
             string src = File.ReadAllText(file);
             string[] lines = src.Split('\n');
 
@@ -63,7 +54,7 @@ public sealed partial class LocalizedProblemDetailComplianceTests
                         continue;
                     }
 
-                    string rel = Path.GetRelativePath(srcRoot, file);
+                    string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
                     violations.Add(
                         $"{rel}:{lineIndex + 1}: inline literal problem detail. Add the message to " +
                         $"SharedResource.resx (en + fr, with a translator <comment>) and call the " +
@@ -83,22 +74,6 @@ public sealed partial class LocalizedProblemDetailComplianceTests
             Assert.Fail($"{violations.Count} inline-literal problem-detail site(s) found. " +
                         $"See test output for the full list and remediation hint.");
         }
-    }
-
-    private static string LocateSourceRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "Dependably");
-            if (Directory.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            dir = dir.Parent;
-        }
-        return string.Empty;
     }
 
     private static bool HasOptOutComment(string[] lines, int lineIndex)

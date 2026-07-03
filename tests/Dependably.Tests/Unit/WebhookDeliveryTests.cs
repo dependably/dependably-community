@@ -57,7 +57,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
             OccurredAt: Clock.GetUtcNow(),
             DataJson: """{"ecosystem":"npm","name":"lodash","version":"4.17.21"}""");
 
-    private EnvelopeProtector MakeProtector()
+    private static EnvelopeProtector MakeProtector()
     {
         byte[] key = RandomNumberGenerator.GetBytes(32);
         var config = new ConfigurationBuilder()
@@ -526,7 +526,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         var mockClient = BuildPartialFailureClient();
 
         var queue = new WebhookDispatchQueue(
-            repo, mockClient, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance, Clock);
+            repo, mockClient, BuildCfg(), NullLogger<WebhookDispatchQueue>.Instance);
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
 
@@ -559,7 +559,7 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
             .Build();
 
         var queue = new WebhookDispatchQueue(repo, client, cfg,
-            NullLogger<WebhookDispatchQueue>.Instance, Clock);
+            NullLogger<WebhookDispatchQueue>.Instance);
 
         // Enqueue 5 without starting the consumer (channel capacity = 1)
         for (int i = 0; i < 5; i++)

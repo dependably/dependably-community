@@ -143,7 +143,10 @@ EOF
 
 elif [[ "$ORIGINAL" == *"SharedResource"* ]] || [[ "$ORIGINAL" == *"backend"* ]]; then
   # ── Backend import (XLIFF → ResX) ─────────────────────────────────────────
-  TARGET_RESX="$REPO_ROOT/src/Dependably/Resources/SharedResource.${LOCALE}.resx"
+  # Resolve the project root that owns the backend resources by content rather
+  # than hardcoding a project name.
+  RESOURCES_DIR="$(dirname "$(ls "$REPO_ROOT"/src/Dependably*/Resources/SharedResource.resx 2>/dev/null | head -1)")"
+  TARGET_RESX="$RESOURCES_DIR/SharedResource.${LOCALE}.resx"
 
   if [[ ! -f "$TARGET_RESX" ]]; then
     echo "Error: target file not found: $TARGET_RESX" >&2

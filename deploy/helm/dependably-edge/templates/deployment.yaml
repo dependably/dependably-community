@@ -22,6 +22,12 @@ spec:
       labels:
         {{- include "dependably-edge.selectorLabels" . | nindent 8 }}
     spec:
+      # Must cover the pre-stop drain sleep (10s) + SHUTDOWN_GRACE_PERIOD (30s
+      # in-flight drain) so graceful shutdown finishes and the SQLite
+      # instance-lock row is released. The Kubernetes default of 30s can SIGKILL
+      # mid-shutdown, orphaning the lock; the replacement pod then crash-loops
+      # until the 90s staleness window expires.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       containers:
         - name: dependably-edge
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -30,8 +36,9 @@ spec:
             - name: http
               containerPort: 8080
           env:
-            - name: DEPLOYMENT_MODE
-              value: edge
+            # No DEPLOYMENT_MODE: the edge image is constitutionally an edge (its composition root
+            # pins DEPLOYMENT_MODE=edge internally and rejects any tenancy value), so the variable
+            # is neither read nor needed.
             - name: EDGE_MASTER_URL
               value: {{ required "edge.masterUrl is required" .Values.edge.masterUrl | quote }}
             - name: EDGE_MASTER_TOKEN

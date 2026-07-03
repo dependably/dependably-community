@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using Dapper;
+using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -124,12 +125,15 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
         var resp = await client.PutAsync("/npm/acme-overwrite-on", content);
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        // package.replace audit row exists for the coordinate.
+        // package.replace is a per-version operator action — the row lands in
+        // `activity`, not `audit_log`. Activity rows are written through the async
+        // batching writer — drain before asserting.
+        await _factory.Services.GetRequiredService<ActivityWriterHostedService>().WaitForIdleAsync();
         await using var conn2 = await db.OpenAsync();
         var replaceRows = (await conn2.QueryAsync<(string Detail, string Purl)>(
             """
-            SELECT detail, purl FROM audit_log
-            WHERE action = 'package.replace' AND purl LIKE '%acme-overwrite-on@1.0.0%'
+            SELECT detail, purl FROM activity
+            WHERE event_type = 'package.replace' AND purl LIKE '%acme-overwrite-on@1.0.0%'
             """))
             .ToList();
         Assert.NotEmpty(replaceRows);
@@ -175,13 +179,16 @@ public sealed class AllowVersionOverwriteTests : IClassFixture<DependablyFactory
         var resp = await client.PutAsync("/npm/acme-overwrite-exception", content);
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
-        // package.replace audit row exists for the coordinate.
+        // package.replace is a per-version operator action — the row lands in
+        // `activity`, not `audit_log`. Activity rows are written through the async
+        // batching writer — drain before asserting.
         var db = _factory.Services.GetRequiredService<Dependably.Infrastructure.IMetadataStore>();
+        await _factory.Services.GetRequiredService<ActivityWriterHostedService>().WaitForIdleAsync();
         await using var conn = await db.OpenAsync();
         var replaceRows = (await conn.QueryAsync<(string Detail, string Purl)>(
             """
-            SELECT detail, purl FROM audit_log
-            WHERE action = 'package.replace' AND purl LIKE '%acme-overwrite-exception@1.0.0%'
+            SELECT detail, purl FROM activity
+            WHERE event_type = 'package.replace' AND purl LIKE '%acme-overwrite-exception@1.0.0%'
             """))
             .ToList();
         Assert.NotEmpty(replaceRows);

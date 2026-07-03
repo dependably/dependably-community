@@ -44,18 +44,9 @@ public sealed partial class CommentProvenanceComplianceTests
     [Fact]
     public void NoDevelopmentProvenanceInComments()
     {
-        string srcRoot = LocateSourceRoot();
-        Assert.True(Directory.Exists(srcRoot), $"src root not found at {srcRoot}");
-
         var violations = new List<string>();
-        foreach (string file in Directory.EnumerateFiles(srcRoot, "*.cs", SearchOption.AllDirectories))
+        foreach (string file in SourceRoots.AllCSharpFiles())
         {
-            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
-                || file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
-            {
-                continue;
-            }
-
             string[] lines = File.ReadAllLines(file);
             for (int i = 0; i < lines.Length; i++)
             {
@@ -69,7 +60,7 @@ public sealed partial class CommentProvenanceComplianceTests
                 {
                     if (pattern.IsMatch(comment))
                     {
-                        string rel = Path.GetRelativePath(srcRoot, file);
+                        string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
                         violations.Add($"{rel}:{i + 1}: {label}. Comment: {comment.Trim()}");
                     }
                 }
@@ -118,21 +109,5 @@ public sealed partial class CommentProvenanceComplianceTests
             }
         }
         return null;
-    }
-
-    private static string LocateSourceRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "Dependably");
-            if (Directory.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            dir = dir.Parent;
-        }
-        return string.Empty;
     }
 }

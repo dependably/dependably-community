@@ -157,8 +157,8 @@ public class PyPiSimpleIndexRewriteTests
             $"Parse took {sw.Elapsed.TotalMilliseconds:F0}ms — expected linear-time matching.");
     }
 
-    private static IReadOnlyDictionary<string, Dependably.Infrastructure.VulnGateSignals> EmptySignals()
-        => new Dictionary<string, Dependably.Infrastructure.VulnGateSignals>();
+    private static Dictionary<string, Dependably.Infrastructure.VulnGateSignals> EmptySignals()
+        => new();
 }
 
 /// <summary>Minimal default <see cref="Dependably.Infrastructure.OrgSettings"/> for renderer tests.</summary>

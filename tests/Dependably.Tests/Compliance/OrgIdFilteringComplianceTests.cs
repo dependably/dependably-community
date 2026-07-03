@@ -92,19 +92,9 @@ public sealed partial class OrgIdFilteringComplianceTests
     [Fact]
     public void EverySqlAgainstTenantScopedTable_FiltersOnOrgId_OrIsExplicitlyOptedOut()
     {
-        string srcRoot = LocateSourceRoot();
-        Assert.True(Directory.Exists(srcRoot), $"src root not found at {srcRoot}");
-
         var violations = new List<string>();
-        foreach (string file in Directory.EnumerateFiles(srcRoot, "*.cs", SearchOption.AllDirectories))
+        foreach (string file in SourceRoots.AllCSharpFiles())
         {
-            // Skip generated / obj / bin trees defensively.
-            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
-                || file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
-            {
-                continue;
-            }
-
             string[] lines = File.ReadAllLines(file);
             string source = string.Join('\n', lines);
 
@@ -133,7 +123,7 @@ public sealed partial class OrgIdFilteringComplianceTests
                     continue;
                 }
 
-                string rel = Path.GetRelativePath(srcRoot, file);
+                string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
                 violations.Add(
                     $"{rel}:{lineNumber + 1}: SQL touches tenant-scoped table(s) " +
                     $"[{string.Join(", ", touchedTenantTables)}] without org_id / tenant_id filter. " +
@@ -152,23 +142,6 @@ public sealed partial class OrgIdFilteringComplianceTests
             Assert.Fail($"{violations.Count} SQL literal(s) touch tenant-scoped tables without org_id/tenant_id filtering. " +
                         $"See test output for the full list and remediation hint.");
         }
-    }
-
-    private static string LocateSourceRoot()
-    {
-        // Tests run from the test bin/ directory; walk up to the repo root and into src/.
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "Dependably");
-            if (Directory.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            dir = dir.Parent;
-        }
-        return string.Empty;
     }
 
     private record struct SqlMatch(string Sql, int StartIndex);

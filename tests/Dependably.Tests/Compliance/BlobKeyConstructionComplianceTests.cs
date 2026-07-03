@@ -35,18 +35,9 @@ public sealed partial class BlobKeyConstructionComplianceTests
     [Fact]
     public void BlobKeysAreNeverConstructedInline()
     {
-        string srcRoot = LocateSourceRoot();
-        Assert.True(Directory.Exists(srcRoot), $"src root not found at {srcRoot}");
-
         var violations = new List<string>();
-        foreach (string file in Directory.EnumerateFiles(srcRoot, "*.cs", SearchOption.AllDirectories))
+        foreach (string file in SourceRoots.AllCSharpFiles())
         {
-            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
-                || file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
-            {
-                continue;
-            }
-
             // BlobKeys.cs is the one place keys are legitimately built.
             if (Path.GetFileName(file).Equals("BlobKeys.cs", StringComparison.Ordinal))
             {
@@ -69,7 +60,7 @@ public sealed partial class BlobKeyConstructionComplianceTests
                         continue;
                     }
 
-                    string rel = Path.GetRelativePath(srcRoot, file);
+                    string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
                     violations.Add(
                         $"{rel}:{i + 1}: blob key built inline at an IBlobStore call. Construct the key " +
                         $"via BlobKeys.… instead. If this is intentionally not a namespaced key (e.g. a " +
@@ -103,22 +94,6 @@ public sealed partial class BlobKeyConstructionComplianceTests
         return value.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
             || value.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
             || value.StartsWith("file:", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string LocateSourceRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "Dependably");
-            if (Directory.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            dir = dir.Parent;
-        }
-        return string.Empty;
     }
 
     private static bool HasOptOutComment(string[] lines, int lineIndex)

@@ -9,7 +9,7 @@ There are exactly **two runtime translation stores**, one per layer, plus one ge
 | Store | Files | Consumed by |
 |-------|-------|-------------|
 | Frontend | `web/src/locales/en.json`, `fr.json` | Svelte UI via `svelte-i18n` |
-| Backend | `src/Dependably/Resources/SharedResource.resx`, `SharedResource.fr.resx` | API problem details and emails via `IStringLocalizer<SharedResource>` |
+| Backend | `src/Dependably.Core/Resources/SharedResource.resx`, `SharedResource.fr.resx` | API problem details and emails via `IStringLocalizer<SharedResource>` |
 | Handoff (generated) | `i18n/handoff/{frontend,backend}.en.xlf` | External translators / CAT tools — **never read at runtime** |
 
 The handoff package is regenerated from both stores by `i18n/scripts/i18n-export.sh`: English sources, existing French pre-filled as `<target>` (`state="translated"`), and resx `<comment>` context emitted as translator notes. `i18n/scripts/i18n-validate.js` (a blocking CI job) enforces en↔fr key parity in both stores **and** that the handoff unit set matches the source keys — a key add/rename/remove without re-running the export fails the pipeline.
@@ -31,10 +31,10 @@ Adding a new locale requires updating both backend and frontend registration. Se
 
 ### Backend — .NET ResX
 
-Backend-facing strings (validation messages, server-rendered error text, log-facing labels) live in `.resx` XML resource files under `src/Dependably/Resources/`.
+Backend-facing strings (validation messages, server-rendered error text, log-facing labels) live in `.resx` XML resource files under `src/Dependably.Core/Resources/`.
 
 ```
-src/Dependably/Resources/
+src/Dependably.Core/Resources/
   SharedResource.resx          # English source (authoritative)
   SharedResource.fr.resx       # French translation
 ```
@@ -86,7 +86,7 @@ Export files are placed in `i18n/handoff/`:
 ```
 i18n/handoff/
   frontend.en.xlf     # Exported from web/src/locales/en.json
-  backend.en.xlf      # Exported from src/Dependably/Resources/SharedResource.resx
+  backend.en.xlf      # Exported from src/Dependably.Core/Resources/SharedResource.resx
   README.md           # Instructions for translators
 ```
 
@@ -282,7 +282,7 @@ node i18n/scripts/i18n-validate.js
 
 ### Adding a new string
 
-1. Add the key and English value to `web/src/locales/en.json` (frontend) or `src/Dependably/Resources/SharedResource.resx` (backend). For backend strings, include a `<comment>` with translator context (where the string appears, which terms are API literals).
+1. Add the key and English value to `web/src/locales/en.json` (frontend) or `src/Dependably.Core/Resources/SharedResource.resx` (backend). For backend strings, include a `<comment>` with translator context (where the string appears, which terms are API literals).
 2. Add the translated value to every locale file (`fr.json`, `SharedResource.fr.resx`, etc.).
 3. Run `node i18n/scripts/i18n-validate.js` — the script exits non-zero if any locale is missing the new key.
 

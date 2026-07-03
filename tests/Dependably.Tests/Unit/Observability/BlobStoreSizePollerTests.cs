@@ -21,8 +21,8 @@ public sealed class BlobStoreSizePollerTests
         new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>()).Build();
 
     // Non-edge, non-air-gapped: nothing is disabled, so the poller runs.
-    private static Dependably.Infrastructure.IAirGapMode NoAirGap() =>
-        new Dependably.Infrastructure.AirGapMode(Config());
+    private static Dependably.Infrastructure.AirGapMode NoAirGap() =>
+        new(Config());
 
     [Fact]
     public async Task PollOnceAsync_SharedTier_PollsRegistryOnly()

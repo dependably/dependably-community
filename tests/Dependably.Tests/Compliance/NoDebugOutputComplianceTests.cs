@@ -9,7 +9,7 @@ namespace Dependably.Tests.Compliance;
 /// bypasses structured logging; <c>throw new NotImplementedException()</c> is a stub that
 /// compiled but does nothing — both are classic AI artifacts that pass the build silently.
 ///
-/// One legitimate console writer is allowlisted: <see cref="Dependably.Infrastructure.FirstBootService"/>
+/// One legitimate console writer is allowlisted: <see cref="Dependably.Infrastructure.AdminBootstrapper"/>
 /// prints the generated admin credentials to stdout exactly once on first boot, by design
 /// (they are shown once and never logged). New console output is a violation; if another such
 /// deliberate case arises, add the file to <see cref="ConsoleOutputAllowed"/> with a comment.
@@ -24,7 +24,7 @@ public sealed partial class NoDebugOutputComplianceTests
     private static readonly HashSet<string> ConsoleOutputAllowed = new(StringComparer.Ordinal)
     {
         // First-boot admin credential banner: printed once to stdout, deliberately never logged.
-        "FirstBootService.cs",
+        "AdminBootstrapper.cs",
     };
 
     [GeneratedRegex(@"\bConsole\.(Write|WriteLine|Error|Out)\b|\bDebug\.(Write|WriteLine)\b")]
@@ -36,18 +36,9 @@ public sealed partial class NoDebugOutputComplianceTests
     [Fact]
     public void NoConsoleOrDebugOutputOrUnimplementedStubs()
     {
-        string srcRoot = LocateSourceRoot();
-        Assert.True(Directory.Exists(srcRoot), $"src root not found at {srcRoot}");
-
         var violations = new List<string>();
-        foreach (string file in Directory.EnumerateFiles(srcRoot, "*.cs", SearchOption.AllDirectories))
+        foreach (string file in SourceRoots.AllCSharpFiles())
         {
-            if (file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
-                || file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
-            {
-                continue;
-            }
-
             string fileName = Path.GetFileName(file);
             bool consoleAllowed = ConsoleOutputAllowed.Contains(fileName);
             string[] lines = File.ReadAllLines(file);
@@ -55,7 +46,7 @@ public sealed partial class NoDebugOutputComplianceTests
             for (int i = 0; i < lines.Length; i++)
             {
                 string line = lines[i];
-                string rel = Path.GetRelativePath(srcRoot, file);
+                string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
 
                 if (!consoleAllowed && ConsoleOrDebugRegex().IsMatch(line))
                 {
@@ -79,21 +70,5 @@ public sealed partial class NoDebugOutputComplianceTests
             Assert.Fail($"{violations.Count} debug-output / unimplemented-stub violation(s) found. " +
                         $"See test output for the full list.");
         }
-    }
-
-    private static string LocateSourceRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "Dependably");
-            if (Directory.Exists(candidate))
-            {
-                return candidate;
-            }
-
-            dir = dir.Parent;
-        }
-        return string.Empty;
     }
 }

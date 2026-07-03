@@ -95,7 +95,7 @@ EOF
 ### Backend
 
 ```bash
-cp src/Dependably/Resources/SharedResource.resx src/Dependably/Resources/SharedResource.xx.resx
+cp src/Dependably.Core/Resources/SharedResource.resx src/Dependably.Core/Resources/SharedResource.xx.resx
 ```
 
 Then open `SharedResource.xx.resx` in an editor and add `[XX] ` as a prefix to every `<value>` element. For example:
@@ -132,7 +132,7 @@ Validating frontend locales (source: web/src/locales/en.json)
   Source key count: N
   xx: OK (N keys)
 
-Validating backend resources (source: src/Dependably/Resources/SharedResource.resx)
+Validating backend resources (source: src/Dependably.Core/Resources/SharedResource.resx)
 ────────────────────────────────────────────────────────────
   Source key count: N
   xx: OK (N keys)
@@ -175,7 +175,7 @@ i18n/scripts/i18n-import.sh path/to/backend.xx.xlf
 
 The import script:
 1. Parses the `<target>` elements from the XLIFF file.
-2. Writes the translated values into `web/src/locales/xx.json` (replacing `[XX]` placeholder values) and `src/Dependably/Resources/SharedResource.xx.resx`.
+2. Writes the translated values into `web/src/locales/xx.json` (replacing `[XX]` placeholder values) and `src/Dependably.Core/Resources/SharedResource.xx.resx`.
 
 After import, run the validator again to confirm no keys are missing:
 
@@ -209,7 +209,7 @@ Once QA is complete:
 
 1. Open a merge request with all changed files:
    - `src/Dependably/Program.cs` (locale registration)
-   - `src/Dependably/Resources/SharedResource.xx.resx` (backend translations)
+   - `src/Dependably.Core/Resources/SharedResource.xx.resx` (backend translations)
    - `web/src/locales/xx.json` (frontend translations)
    - `web/src/i18n/index.js` (locale registration)
    - `web/src/lib/locale.js` (switcher entry)

@@ -1,6 +1,5 @@
 using System.Reflection;
 using Dependably.Infrastructure;
-using Dependably.Infrastructure.Health;
 using Dependably.Infrastructure.Startup;
 using Dependably.Security;
 using Microsoft.Extensions.FileProviders;
@@ -64,12 +63,16 @@ public partial class Program
         // TimeDeterminismComplianceTests so tests can substitute a frozen clock.
         builder.Services.AddSingleton(TimeProvider.System);
 
+        // ── Core wiring (protocol + storage + infrastructure) ───────────────────
         builder.AddDependablyLogging();
         builder.AddDependablyOpenTelemetry();
         builder.AddDependablyGracefulShutdown();
         builder.AddDependablyMetadataStore();
         builder.AddDependablyBlobStore();
+
+        // ── Management wiring: HA Redis + Data Protection key ring ───────────────
         builder.AddDependablyRedisAndDataProtection();
+
         builder.ConfigureDependablyKestrel();
         builder.ConfigureDependablyForwardedHeaders();
         builder.ConfigureDependablyHostFiltering();
@@ -90,9 +93,11 @@ public partial class Program
 
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddDependablyRepositories(builder.Configuration);
+        builder.Services.AddDependablyManagementRepositories();
 
         builder.AddDependablyPublishPipeline();
 
+        // ── Management wiring: SIEM / webhook / invite-mail delivery ─────────────
         // SIEM push (opt-in via env vars). Webhook and syslog both sit behind
         // ISiemForwarder; webhook wins when both are set. No-op when neither is configured.
         builder.Services.AddDependablySiemForwarding(builder.Configuration);
@@ -119,18 +124,19 @@ public partial class Program
         // ingests; the block gate reads the resulting is_kev / epss_score columns.
         builder.Services.AddDependablyThreatFeeds();
 
-        // Retention background service registers its own Dependencies record separately.
-        builder.Services.AddSingleton<RetentionService.Dependencies>();
-
-        builder.AddDependablyAuthServices();
+        // ── Management wiring: first-factor auth, JWT, MFA identity, background jobs ──
+        builder.AddDependablyManagementAuthServices();
         builder.AddDependablyTenantResolution();
         builder.AddDependablyJwt();
         builder.AddDependablyIdentity();
+        builder.AddDependablyManagementBackgroundServices();
         builder.AddDependablyRateLimiter();
+        builder.AddDependablyRedisRateLimitPolicies();
         builder.AddDependablyCors();
         builder.AddDependablyHttpClients();
         builder.AddDependablyLocalization();
         builder.AddDependablyControllerAggregates();
+        builder.AddDependablyManagementControllerAggregates();
         builder.AddDependablyControllers();
         builder.AddDependablyOpenApi();
         builder.AddDependablyCompression();
@@ -376,8 +382,9 @@ public partial class Program
 
         // Liveness / readiness probes. All carry the per-IP "anon" rate-limit policy:
         // generous enough for orchestrator probes, but an unauthenticated flood can no
-        // longer amplify load onto the backing stores via /ready's fan-out checks.
-        app.MapGet("/health", () => Results.Ok(new { status = "ok" })).RequireRateLimiting("anon");
+        // longer amplify load onto the backing stores via /ready's fan-out checks. The
+        // mapping is shared with the headless edge root via the Core HealthEndpoints helper.
+        Dependably.Infrastructure.Health.HealthEndpoints.MapHealthAndReady(app);
         string version = typeof(Program).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
             ?? typeof(Program).Assembly.GetName().Version?.ToString()
@@ -398,7 +405,6 @@ public partial class Program
             }
             return Results.Ok(new { version });
         }).RequireRateLimiting("anon");
-        app.MapGet("/ready", BuildReadyHandler()).RequireRateLimiting("anon");
 
         // Edge-only, anonymous read-only status surface. Mapped only when DEPLOYMENT_MODE=edge;
         // in every other mode the route is never registered (404) and stays out of the OpenAPI
@@ -412,7 +418,11 @@ public partial class Program
         Microsoft.Extensions.FileProviders.IFileProvider embeddedProvider;
         try
         {
-            embeddedProvider = new ManifestEmbeddedFileProvider(typeof(Program).Assembly, "wwwroot");
+            // The embedded SPA + swagger assets ship in Dependably.Management (the wwwroot tree
+            // moved there with the management plane). Anchor the manifest provider on a management
+            // type so the build-time wwwroot manifest is read from that assembly, not the root.
+            embeddedProvider = new ManifestEmbeddedFileProvider(
+                typeof(Dependably.Infrastructure.ManagementAssemblyMarker).Assembly, "wwwroot");
         }
         catch (InvalidOperationException)
         {
@@ -612,30 +622,5 @@ public partial class Program
                 ctx.Response.ContentType = "text/html";
                 await ctx.Response.SendFileAsync(file);
             }
-        };
-
-    private static Func<ReadinessAggregator, ShutdownState, CancellationToken, Task<IResult>> BuildReadyHandler() =>
-        async (aggregator, shutdown, ct) =>
-        {
-            if (shutdown.IsShuttingDown)
-            {
-                return Results.Json(new { status = "draining" }, statusCode: StatusCodes.Status503ServiceUnavailable);
-            }
-
-            var checks = await aggregator.CheckAsync(ct);
-            bool allOk = checks.Values.All(v => v is null);
-
-            // Per-check ok/error only. Raw failure detail (file paths, Redis endpoints,
-            // driver error text) is logged server-side by ReadinessAggregator and never
-            // returned to the anonymous caller.
-            var body = new
-            {
-                status = allOk ? "ready" : "degraded",
-                checks = checks.ToDictionary(kv => kv.Key, kv => kv.Value is null ? "ok" : "error"),
-            };
-
-            return allOk
-                ? Results.Ok(body)
-                : Results.Json(body, statusCode: StatusCodes.Status503ServiceUnavailable);
         };
 }

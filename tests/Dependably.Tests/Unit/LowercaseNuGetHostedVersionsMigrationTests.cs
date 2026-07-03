@@ -29,7 +29,7 @@ public sealed class LowercaseNuGetHostedVersionsMigrationTests : IAsyncLifetime
 
     private const string MigrationName = "lowercase_nuget_hosted_versions";
 
-    private async Task<string> SeedPackageAsync(DbConnection conn, string orgId, string purlName)
+    private static async Task<string> SeedPackageAsync(DbConnection conn, string orgId, string purlName)
     {
         await conn.ExecuteAsync(
             "INSERT OR IGNORE INTO orgs (id, slug) VALUES (@id, @slug)",
@@ -42,18 +42,18 @@ public sealed class LowercaseNuGetHostedVersionsMigrationTests : IAsyncLifetime
         return packageId;
     }
 
-    private static Task SeedVersionAsync(
+    private static Task<int> SeedVersionAsync(
         DbConnection conn, string versionId, string packageId, string version, string blobKey)
         => conn.ExecuteAsync(
             "INSERT INTO package_versions (id, package_id, version, purl, blob_key) " +
             "VALUES (@id, @packageId, @version, @purl, @blobKey)",
             new { id = versionId, packageId, version, purl = $"pkg:nuget/{packageId}@{version}", blobKey });
 
-    private static Task RearmMigrationAsync(DbConnection conn) =>
+    private static Task<int> RearmMigrationAsync(DbConnection conn) =>
         conn.ExecuteAsync(
             "DELETE FROM _applied_migrations WHERE name = @name", new { name = MigrationName });
 
-    private async Task<bool> IsMigrationRecordedAsync(DbConnection conn) =>
+    private static async Task<bool> IsMigrationRecordedAsync(DbConnection conn) =>
         await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM _applied_migrations WHERE name = @name", new { name = MigrationName }) > 0;
 

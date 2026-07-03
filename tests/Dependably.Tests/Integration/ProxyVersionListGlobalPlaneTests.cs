@@ -227,9 +227,10 @@ public sealed class ProxyVersionListGlobalPlaneTests : IClassFixture<DependablyF
         // Seed a global-plane entry for tenant A's org.
         await SeedGlobalPlaneEntryAsync(defaultOrgId, "npm", name, version, filename);
 
-        // Evict any cached packument so the renderer rebuilds.
-        _factory.Services.GetRequiredService<RenderedResponseCache<NpmPackumentKey>>()
-            .Evict(new NpmPackumentKey(defaultOrgId, name));
+        // Evict any cached packument (both path variants) so the renderer rebuilds.
+        var packumentCache = _factory.Services.GetRequiredService<RenderedResponseCache<NpmPackumentKey>>();
+        packumentCache.Evict(new NpmPackumentKey(defaultOrgId, name));
+        packumentCache.Evict(new NpmPackumentKey(defaultOrgId, name) { IsProxy = true });
 
         // After seeding, the version must appear in the packument.
         var afterResp = await client.GetAsync($"/npm/{name}");

@@ -30,7 +30,8 @@ public sealed class FirstBootServiceTests
         new(new EnvFileMasterKeyProvider(new ConfigurationBuilder().Build()));
 
     private static FirstBootService NewSut(InMemoryDbFixture fx, IConfiguration config, EnvelopeProtector? envelope = null) =>
-        new(fx.Store, config, NullLogger<FirstBootService>.Instance, envelope ?? UnconfiguredEnvelope());
+        new(fx.Store, config, NullLogger<FirstBootService>.Instance, envelope ?? UnconfiguredEnvelope(),
+            new AdminBootstrapper());
 
     private static IConfiguration Cfg(params (string K, string? V)[] entries) =>
         new ConfigurationBuilder().AddInMemoryCollection(

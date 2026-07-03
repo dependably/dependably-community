@@ -18,8 +18,7 @@ public sealed partial class VersionLockstepComplianceTests
     [Fact]
     public void DirectoryBuildPropsAndPackageJsonVersionsMatch()
     {
-        string repoRoot = LocateRepoRoot();
-        Assert.True(Directory.Exists(repoRoot), $"repo root not found at {repoRoot}");
+        string repoRoot = SourceRoots.RepoRoot();
 
         string propsPath = Path.Combine(repoRoot, "Directory.Build.props");
         string packageJsonPath = Path.Combine(repoRoot, "web", "package.json");
@@ -47,20 +46,5 @@ public sealed partial class VersionLockstepComplianceTests
                 $"Both files must be bumped together. " +
                 $"Use the `release` skill or follow CONTRIBUTING.md → Versioning to update both in lockstep.");
         }
-    }
-
-    private static string LocateRepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            if (Directory.Exists(Path.Combine(dir.FullName, "src", "Dependably")))
-            {
-                return dir.FullName;
-            }
-
-            dir = dir.Parent;
-        }
-        return string.Empty;
     }
 }

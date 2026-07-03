@@ -38,8 +38,7 @@ public sealed partial class NoFocusedOrSkippedTestComplianceTests
     [Fact]
     public void NoTestIsFocusedOrSkipped()
     {
-        string repoRoot = LocateRepoRoot();
-        Assert.False(string.IsNullOrEmpty(repoRoot), "repo root not found");
+        string repoRoot = SourceRoots.RepoRoot();
 
         var violations = new List<string>();
 
@@ -135,21 +134,6 @@ public sealed partial class NoFocusedOrSkippedTestComplianceTests
                 yield return file;
             }
         }
-    }
-
-    private static string LocateRepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            if (Directory.Exists(Path.Combine(dir.FullName, "src", "Dependably")))
-            {
-                return dir.FullName;
-            }
-
-            dir = dir.Parent;
-        }
-        return string.Empty;
     }
 
     private static string Rel(string root, string file) => Path.GetRelativePath(root, file);

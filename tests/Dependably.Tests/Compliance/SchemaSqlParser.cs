@@ -235,27 +235,47 @@ internal static partial class SchemaSqlParser
 }
 
 /// <summary>Locates the live source tree (not embedded resources) so the static schema checks can
-/// read both provider files regardless of which one the running provider would load.</summary>
+/// read both provider files regardless of which one the running provider would load. The one
+/// shared <c>Infrastructure/schema/</c> directory and the <c>SchemaInitializer.cs</c> migration
+/// source live in exactly one source root; each is discovered across <see cref="SourceRoots.All"/>
+/// so the schema gates survive the assembly split, and an accidental second copy fails loudly.</summary>
 internal static class SchemaTestPaths
 {
-    public static string SourceRoot()
-    {
-        // Tests run from the test bin/ directory; walk up to the repo root and into src/Dependably.
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "Dependably");
-            if (Directory.Exists(candidate))
-            {
-                return candidate;
-            }
+    /// <summary>
+    /// The source root owning the schema DDL. <see cref="SourceRoot"/> preserves the historical
+    /// call shape (the gates combine it with the relative schema/initializer paths below), while
+    /// resolving to whichever root actually holds <c>Infrastructure/schema/</c>.
+    /// </summary>
+    public static string SourceRoot() => SchemaDirOwningRoot();
 
-            dir = dir.Parent;
-        }
-        throw new DirectoryNotFoundException($"Could not locate src/Dependably from {AppContext.BaseDirectory}");
+    // The single root that contains Infrastructure/schema/. Exactly one must — a future duplicate
+    // schema directory across roots is a correctness hazard and fails here rather than silently.
+    private static string SchemaDirOwningRoot() => SingleOwningRoot(
+        root => Directory.Exists(Path.Combine(root, "Infrastructure", "schema")),
+        "Infrastructure/schema/");
+
+    // The single root that contains the SchemaInitializer migration source.
+    private static string SchemaInitializerOwningRoot() => SingleOwningRoot(
+        root => File.Exists(Path.Combine(root, "Infrastructure", "SchemaInitializer.cs")),
+        "Infrastructure/SchemaInitializer.cs");
+
+    private static string SingleOwningRoot(Func<string, bool> predicate, string what)
+    {
+        var matches = SourceRoots.All().Where(predicate).ToList();
+        return matches.Count switch
+        {
+            1 => matches[0],
+            0 => throw new DirectoryNotFoundException(
+                $"No source root under src/ contains {what}."),
+            _ => throw new InvalidOperationException(
+                $"{matches.Count} source roots contain {what} (expected exactly one): "
+                + string.Join(", ", matches)),
+        };
     }
 
-    public static string SchemaInitializer(string srcRoot) => Path.Combine(srcRoot, "Infrastructure", "SchemaInitializer.cs");
+    public static string SchemaInitializer() =>
+        Path.Combine(SchemaInitializerOwningRoot(), "Infrastructure", "SchemaInitializer.cs");
+
     public static string SqliteSchema(string srcRoot) => Path.Combine(srcRoot, "Infrastructure", "schema", "Schema.sql");
     public static string PostgresSchema(string srcRoot) => Path.Combine(srcRoot, "Infrastructure", "schema", "Schema.pg.sql");
 }

@@ -32,8 +32,7 @@ public sealed class ProjectFileCommentComplianceTests
     [Fact]
     public void NoCommentsInProjectFiles()
     {
-        string repoRoot = LocateRepoRoot();
-        Assert.True(Directory.Exists(repoRoot), $"repo root not found at {repoRoot}");
+        string repoRoot = SourceRoots.RepoRoot();
 
         var violations = new List<string>();
         foreach ((string file, string rel) in EnumerateProjectFiles(repoRoot))
@@ -100,20 +99,5 @@ public sealed class ProjectFileCommentComplianceTests
         int nl = block.IndexOf('\n');
         string first = (nl < 0 ? block : block[..nl]).Trim();
         return first.Length > 100 ? first[..100] + "…" : first;
-    }
-
-    private static string LocateRepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            if (Directory.Exists(Path.Combine(dir.FullName, "src", "Dependably")))
-            {
-                return dir.FullName;
-            }
-
-            dir = dir.Parent;
-        }
-        return string.Empty;
     }
 }

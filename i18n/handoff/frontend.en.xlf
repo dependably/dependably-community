@@ -487,12 +487,6 @@
         <target>Paramètres d&apos;org. mis à jour</target>
       </segment>
     </unit>
-    <unit id="audit.actions.package.replace">
-      <segment state="translated">
-        <source>Package version replaced</source>
-        <target>Version de paquet remplacée</target>
-      </segment>
-    </unit>
     <unit id="audit.actions.proxy_settings_updated">
       <segment state="translated">
         <source>Proxy settings updated</source>

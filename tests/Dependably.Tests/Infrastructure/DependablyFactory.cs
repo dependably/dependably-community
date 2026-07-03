@@ -431,6 +431,54 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     }
 
     /// <summary>
+    /// Issues a tenant JWT for an arbitrary <paramref name="userId"/> carrying explicit
+    /// <c>cap</c> claims instead of a role. <see cref="Security.OrgAccessGuard.ResolveCallerCapabilities"/>
+    /// prefers explicit token-narrowed <c>cap</c> claims over the DB role when present, so this
+    /// mints a session with exactly the requested capability set — narrower than any fixed role
+    /// grants (e.g. read:tenant without tenant:configure) — under the JWT ("Bearer") scheme that
+    /// class-level <c>[Authorize]</c> controllers validate.
+    /// </summary>
+    public async Task<string> CreateUserJwtWithCaps(string userId, IEnumerable<string> capabilities)
+    {
+        await using var conn = await _metadataStore.OpenAsync();
+
+        string orgId = await conn.ExecuteScalarAsync<string>(
+            "SELECT tenant_id FROM users WHERE id = @userId",
+            new { userId })
+            ?? throw new InvalidOperationException($"User '{userId}' not found.");
+
+        string jwtSecretStored = await conn.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = 'jwt_secret' LIMIT 1")
+            ?? throw new InvalidOperationException("JWT secret not found.");
+        string jwtSecret = MasterKey is null
+            ? jwtSecretStored
+            : TestEnvelope.Configured(Convert.FromBase64String(MasterKey)).Unprotect(jwtSecretStored);
+
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
+        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        // now-ok: mints a JWT the host validates against its (default: real) clock.
+        var now = DateTime.UtcNow;
+
+        var claims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Sub, userId),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N")),
+            new("org_id", orgId),
+            new("tid", orgId),
+            new("scope", "tenant"),
+        };
+        claims.AddRange(capabilities.Select(c => new Claim("cap", c)));
+
+        var token = new JwtSecurityToken(
+            claims: claims,
+            notBefore: now,
+            expires: now.AddHours(8),
+            signingCredentials: creds);
+
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    /// <summary>
     /// Creates a member user in the default tenant with the given email and password.
     /// Returns the user ID.
     /// </summary>

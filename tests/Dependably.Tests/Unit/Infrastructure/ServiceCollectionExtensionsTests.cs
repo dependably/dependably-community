@@ -48,27 +48,19 @@ public sealed class ServiceCollectionExtensionsTests
         var result = services.AddDependablyRepositories(BuildConfig());
 
         Assert.Same(services, result);
-        // Spot-check across the registration list — these cover the conditional
-        // path-free body, every Add call must show up.
-        Assert.True(HasSingleton<JwtRevocationRepository>(services));
+        // Spot-check across the Core registration list — these cover the conditional
+        // path-free body, every Add call must show up. The management-plane repositories
+        // (org settings, system admin, SAML config, invites, …) moved to
+        // AddDependablyManagementRepositories and are asserted separately below.
         Assert.True(HasSingleton<OrgRepository>(services));
-        Assert.True(HasSingleton<OrgSettingsRepository>(services));
-        Assert.True(HasSingleton<SystemAdminRepository>(services));
         Assert.True(HasSingleton<PackageRepository>(services));
-        Assert.True(HasSingleton<PackageAnalyticsRepository>(services));
-        Assert.True(HasSingleton<UserService>(services));
         Assert.True(HasSingleton<TokenRepository>(services));
         Assert.True(HasSingleton<AuditRepository>(services));
         Assert.True(HasSingleton<AuditEventRepository>(services));
-        Assert.True(HasSingleton<IAuditEmitter, AuditEmitter>(services));
-        Assert.True(HasSingleton<InviteRepository>(services));
         Assert.True(HasSingleton<AllowlistRepository>(services));
         Assert.True(HasSingleton<BlocklistRepository>(services));
         Assert.True(HasSingleton<LicenseRepository>(services));
-        Assert.True(HasSingleton<SpdxLicenseRepository>(services));
         Assert.True(HasSingleton<SpdxLicenseSeeder>(services));
-        Assert.True(HasSingleton<SamlConfigRepository>(services));
-        Assert.True(HasSingleton<ExternalIdentityRepository>(services));
         Assert.True(HasSingleton<ProxyVersionRecorder>(services));
         Assert.True(HasSingleton<Dependably.Storage.ProxyFetchService>(services));
 
@@ -80,6 +72,32 @@ public sealed class ServiceCollectionExtensionsTests
         // Name-claim mechanism
         Assert.True(HasSingleton<ClaimRepository>(services));
         Assert.True(HasSingleton<ClaimResolver>(services));
+
+        // The management-plane repositories must NOT be registered by the Core method.
+        Assert.False(HasSingleton<OrgSettingsRepository>(services));
+        Assert.False(HasSingleton<SamlConfigRepository>(services));
+    }
+
+    [Fact]
+    public void AddDependablyManagementRepositories_RegistersManagementRepositoriesAsSingletons()
+    {
+        var services = new ServiceCollection();
+
+        var result = services.AddDependablyManagementRepositories();
+
+        Assert.Same(services, result);
+        // The management-plane repository set, extracted from AddDependablyRepositories when the
+        // management plane moved to Dependably.Management. Every Add call must show up.
+        Assert.True(HasSingleton<JwtRevocationRepository>(services));
+        Assert.True(HasSingleton<OrgSettingsRepository>(services));
+        Assert.True(HasSingleton<SystemAdminRepository>(services));
+        Assert.True(HasSingleton<PackageAnalyticsRepository>(services));
+        Assert.True(HasSingleton<UserService>(services));
+        Assert.True(HasSingleton<IAuditEmitter, AuditEmitter>(services));
+        Assert.True(HasSingleton<InviteRepository>(services));
+        Assert.True(HasSingleton<SpdxLicenseRepository>(services));
+        Assert.True(HasSingleton<SamlConfigRepository>(services));
+        Assert.True(HasSingleton<ExternalIdentityRepository>(services));
     }
 
     // ── AddDependablySiemForwarding ──────────────────────────────────────────

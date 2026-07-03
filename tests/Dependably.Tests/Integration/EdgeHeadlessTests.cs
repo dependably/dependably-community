@@ -19,15 +19,15 @@ public sealed class EdgeHeadlessTests
     private const string EdgeToken = DependablyFactory.DefaultEdgeToken;
 
     // Management routes that must 404 on an edge node (routing convention strips the controller).
-    public static IEnumerable<object[]> ManagementRoutes()
+    public static TheoryData<string, string> ManagementRoutes() => new()
     {
-        yield return ["GET", "/api/v1/orgs"];
-        yield return ["POST", "/api/v1/auth/login"];
-        yield return ["GET", "/api/v1/system/tenants"];
-        yield return ["GET", "/saml/metadata"];
-        yield return ["POST", "/api/v1/bootstrap"];
-        yield return ["GET", "/api/v1/instance/settings"];
-    }
+        { "GET", "/api/v1/orgs" },
+        { "POST", "/api/v1/auth/login" },
+        { "GET", "/api/v1/system/tenants" },
+        { "GET", "/saml/metadata" },
+        { "POST", "/api/v1/bootstrap" },
+        { "GET", "/api/v1/instance/settings" },
+    };
 
     [Theory]
     [MemberData(nameof(ManagementRoutes))]

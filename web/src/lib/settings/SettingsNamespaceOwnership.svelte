@@ -29,4 +29,12 @@
   onAdd={onAddReserved}
   onRemove={onRemoveReserved} />
 
-<Claims />
+<div class="claims-section">
+  <Claims />
+</div>
+
+<style>
+  /* Claims renders as a bare section (no page wrapper); restore the gap that
+     separates it from the reserved-namespaces table above. */
+  .claims-section { margin-top: 28px; }
+</style>

@@ -8,13 +8,13 @@ npm install
 # Dev server (Vite, hot reload)
 npm run dev
 
-# Production build — outputs into ../src/Dependably/wwwroot
+# Production build — outputs into ../src/Dependably.Management/wwwroot
 npm run build
 ```
 
-> **Build gotcha:** `npm run build` empties **all** of `src/Dependably/wwwroot`,
+> **Build gotcha:** `npm run build` empties **all** of `src/Dependably.Management/wwwroot`,
 > including the tracked `wwwroot/swagger/` assets. Restore them after building:
-> `git checkout -- src/Dependably/wwwroot/swagger`
+> `git checkout -- src/Dependably.Management/wwwroot/swagger`
 
 ## Quality checks
 

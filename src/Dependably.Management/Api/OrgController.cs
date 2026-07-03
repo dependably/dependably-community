@@ -1,0 +1,835 @@
+using Dependably.Infrastructure;
+using Dependably.Infrastructure.Caching;
+using Dependably.Protocol;
+using Dependably.Security;
+using Dependably.Storage;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Caching.Memory;
+
+namespace Dependably.Api;
+
+/// <summary>
+/// Slim tenant-scoped controller for the resources that didn't fit a dedicated controller:
+/// packages, stats, and the setup-snippet generator. Most tenant-scoped surface has been
+/// split out into <see cref="OrgSettingsController"/>, <see cref="OrgTokensController"/>,
+/// <see cref="OrgInvitesController"/>, <see cref="OrgUsersController"/>,
+/// <see cref="OrgListsController"/>, <see cref="OrgAuditController"/>, and
+/// <c>OrgAuthConfigController</c>.
+/// </summary>
+[ApiController]
+[Authorize]
+public sealed class OrgController : OrgScopedControllerBase
+{
+    // Maximum page size for package list responses.
+    private const int MaxPackagePageSize = 200;
+
+    private readonly OrgRepository _orgs;
+    private readonly PackageRepository _packages;
+    private readonly PackageAnalyticsRepository _packageAnalytics;
+    private readonly StatsSnapshotRepository _statsSnapshots;
+    private readonly AuditRepository _audit;
+    private readonly OrgAccessGuard _guard;
+    private readonly IBlobStore _blobs;
+    private readonly TieredBlobStorage _blobStorage;
+    private readonly LicenseRepository _licenses;
+    private readonly VulnerabilityRepository _vulns;
+    private readonly IPublicUrlBuilder _urls;
+    private readonly ILogger<OrgController> _logger;
+    private readonly IMemoryCache _cache;
+    private readonly MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> _rpmMergedCache;
+    private readonly RenderedResponseCache<RpmLocalRepodataKey> _rpmLocalCache;
+    private readonly CacheArtifactRepository _cacheArtifacts;
+    private readonly TenantArtifactAccessRepository _tenantAccess;
+    private readonly TimeProvider _time;
+
+    public OrgController(OrgControllerServices svc)
+    {
+        _orgs = svc.Orgs;
+        _packages = svc.Packages;
+        _packageAnalytics = svc.PackageAnalytics;
+        _statsSnapshots = svc.StatsSnapshots;
+        _audit = svc.Audit;
+        _guard = svc.Guard;
+        _blobs = svc.Blobs;
+        _blobStorage = svc.BlobStorage;
+        _licenses = svc.Licenses;
+        _vulns = svc.Vulns;
+        _urls = svc.Urls;
+        _logger = svc.Logger;
+        _cache = svc.Cache;
+        _rpmMergedCache = svc.RpmMergedCache;
+        _rpmLocalCache = svc.RpmLocalCache;
+        _cacheArtifacts = svc.CacheArtifacts;
+        _tenantAccess = svc.TenantAccess;
+        _time = svc.Time;
+    }
+
+    // Org CRUD lives on SystemController (/api/v1/system/tenants). Tenant users have no
+    // authority to list, create, or delete orgs — those are operator concerns.
+
+    // ── Packages ──────────────────────────────────────────────────────────────
+
+    /// <summary>GET /api/v1/orgs/{org}/packages</summary>
+    [HttpGet("api/v1/packages")]
+    public async Task<IActionResult> ListPackages(
+        [FromQuery] int limit = 50,
+        [FromQuery] int page = 1,
+        [FromQuery] string? ecosystem = null,
+        [FromQuery] string? search = null,
+        [FromQuery] string sortBy = "created",
+        [FromQuery] string sortDir = "asc",
+        CancellationToken ct = default)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        string orgId = CurrentTenantId();
+        limit = Math.Clamp(limit, 1, MaxPackagePageSize);
+        page = Math.Max(page, 1);
+        int offset = (page - 1) * limit;
+
+        var (items, total) = await _packages.ListPaginatedAsync(
+            new PackageListQuery(orgId, limit, offset, ecosystem, search, sortBy, sortDir), ct);
+        var settings = await _orgs.GetSettingsAsync(orgId, ct);
+        string versionOverwritePolicy = settings?.VersionOverwritePolicy ?? "block";
+        return Ok(new { items, total, limit, offset, versionOverwritePolicy });
+    }
+
+    /// <summary>GET /api/v1/orgs/{org}/packages/{ecosystem}/{name}</summary>
+    [HttpGet("api/v1/packages/{ecosystem}/{name}")]
+    public async Task<IActionResult> GetPackage(string ecosystem, string name, CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        string orgId = CurrentTenantId();
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
+        if (pkg is null)
+        {
+            return NotFound();
+        }
+
+        var versions = await LoadCombinedVersionsForOrgAsync(orgId, pkg.Id, ecosystem, AsPurlName(ecosystem, name), ct);
+        // OCI: load the digest → tags lookup so each version row surfaces its associated tags.
+        var ociTagsByDigest = ecosystem == "oci"
+            ? await _packages.GetOciTagsByDigestAsync(orgId, pkg.PurlName, ct)
+            : null;
+        // License map: uploaded versions key by package_version_id; proxy versions key by
+        // cache_artifact_id. Merge both lookups into one dictionary.
+        var uploadedIds = versions.Where(v => v.Origin != "proxy").Select(v => v.Id).ToList();
+        var proxyIds = versions.Where(v => v.Origin == "proxy").Select(v => v.Id).ToList();
+        var uploadedLicenses = uploadedIds.Count > 0
+            ? await _licenses.GetSpdxForVersionsAsync(uploadedIds, ct)
+            : Enumerable.Empty<(string, string)>().ToLookup(r => r.Item1, r => r.Item2);
+        var proxyLicenses = proxyIds.Count > 0
+            ? await _licenses.GetSpdxForCacheArtifactsAsync(proxyIds, ct)
+            : Enumerable.Empty<(string, string)>().ToLookup(r => r.Item1, r => r.Item2);
+        var scoreMap = await BuildVersionScoreMapAsync(uploadedIds, proxyIds, ct);
+        var settings = await _orgs.GetSettingsAsync(orgId, ct);
+        double tolerance = settings?.MaxOsvScoreTolerance ?? 10.0;
+        string blockDeprecatedMode = settings?.BlockDeprecated ?? "off";
+
+        var versionsWithLicenses = versions.Select(v =>
+            ProjectVersionView(v, scoreMap, tolerance, blockDeprecatedMode, uploadedLicenses, proxyLicenses, ociTagsByDigest));
+        return Ok(new { package = pkg, versions = versionsWithLicenses });
+    }
+
+    // Merges per-version OSV scores from uploaded versions (keyed by package_version_id) and proxy
+    // versions (keyed by cache_artifact_id) into a single id → max-CVSS map.
+    private async Task<Dictionary<string, double>> BuildVersionScoreMapAsync(
+        List<string> uploadedIds, List<string> proxyIds, CancellationToken ct)
+    {
+        var uploadedScores = uploadedIds.Count > 0
+            ? await _vulns.GetMaxScoresForVersionsAsync(uploadedIds, ct)
+            : new Dictionary<string, double>();
+        var proxySignals = proxyIds.Count > 0
+            ? await _vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxyIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+        var scoreMap = new Dictionary<string, double>(uploadedScores);
+        foreach (var (id, sig) in proxySignals)
+        {
+            if (sig.MaxCvss.HasValue)
+            {
+                scoreMap[id] = sig.MaxCvss.Value;
+            }
+        }
+        return scoreMap;
+    }
+
+    // Projects a package version into the API view model: merges its license lookup, OSV score,
+    // computed gate status, and (for OCI) the tags pointing at its digest.
+    private static object ProjectVersionView(
+        PackageVersion v,
+        Dictionary<string, double> scoreMap,
+        double tolerance,
+        string blockDeprecatedMode,
+        ILookup<string, string> uploadedLicenses,
+        ILookup<string, string> proxyLicenses,
+        ILookup<string, string>? ociTagsByDigest)
+    {
+        bool hasMax = scoreMap.TryGetValue(v.Id, out double maxScore);
+        string status = ComputeVersionStatus(v, hasMax ? maxScore : (double?)null, tolerance, blockDeprecatedMode);
+        return new
+        {
+            v.Id,
+            v.PackageId,
+            v.Version,
+            v.Purl,
+            v.BlobKey,
+            v.Filename,
+            v.SizeBytes,
+            v.ChecksumSha256,
+            v.ChecksumSha1,
+            v.Yanked,
+            v.YankReason,
+            v.FirstFetch,
+            v.DownloadCount,
+            v.CreatedAt,
+            v.UpdatedAt,
+            v.VulnCheckedAt,
+            v.PublishedAt,
+            v.ManualBlockState,
+            v.Deprecated,
+            v.RevokedAt,
+            v.Origin,
+            v.UpstreamIntegrityValue,
+            v.UpstreamIntegrityAlgorithm,
+            v.IsMalicious,
+            v.HasInstallScript,
+            v.InstallScriptKind,
+            v.ProvenanceStatus,
+            v.ProvenanceSigner,
+            MaxOsvScore = hasMax ? maxScore : (double?)null,
+            Status = status,
+            Licenses = (v.Origin == "proxy" ? proxyLicenses[v.Id] : uploadedLicenses[v.Id]).ToArray(),
+            Tags = ociTagsByDigest != null && ociTagsByDigest.Contains(v.Version)
+                ? ociTagsByDigest[v.Version].ToArray()
+                : Array.Empty<string>()
+        };
+    }
+
+    // Combines uploaded (package_versions) and global-plane proxy (cache_artifact) versions for
+    // a package. Proxy entries whose version already appears in uploaded versions are
+    // deduplicated so a name that was cached before upload does not double-list a version.
+    // The synthesized proxy PackageVersion rows carry per-tenant download_count from
+    // tenant_artifact_access via CacheArtifactIndexFacts.DownloadCount.
+    private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsForOrgAsync(
+        string orgId, string packageId, string ecosystem, string purlName, CancellationToken ct)
+    {
+        var uploadedVersions = await _packages.GetVersionsAsync(packageId, ct);
+        var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, purlName, ct);
+
+        if (proxyEntries.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var uploadedVersionSet = uploadedVersions
+            .Select(v => v.Version)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Load proxy signals once to populate IsMalicious on the synthetic PackageVersion.
+        var proxySignalIds = proxyEntries.Select(e => e.Id).ToList();
+        var proxySignals = proxySignalIds.Count > 0
+            ? await _vulns.GetGateSignalsBatchForCacheArtifactsAsync(proxySignalIds, ct)
+            : new Dictionary<string, VulnGateSignals>();
+
+        var synthetic = proxyEntries
+            .Where(e => !uploadedVersionSet.Contains(e.Version))
+            .Select(e => e.ToPackageVersionSynthetic(proxySignals))
+            .ToList();
+
+        if (synthetic.Count == 0)
+        {
+            return uploadedVersions;
+        }
+
+        var combined = new List<PackageVersion>(uploadedVersions.Count + synthetic.Count);
+        combined.AddRange(uploadedVersions);
+        combined.AddRange(synthetic);
+        return combined;
+    }
+
+    private static string ComputeVersionStatus(PackageVersion v, double? maxScore, double tolerance, string blockDeprecatedMode = "off")
+    {
+        if (v.ManualBlockState == "blocked")
+        {
+            return "blocked";
+        }
+        // Only block_all denies an already-cached deprecated version; under block_new the cached
+        // version keeps serving, so it surfaces as "deprecated" below. Legacy 'block' == block_all.
+        if (v.Deprecated is not null && blockDeprecatedMode is "block_all" or "block")
+        {
+            return "blocked";
+        }
+
+        bool autoBlocked = v.VulnCheckedAt is not null && maxScore.HasValue && maxScore.Value > tolerance;
+        return (v.ManualBlockState, autoBlocked) switch
+        {
+            // Manual allow over an advisory the gate would otherwise auto-block.
+            ("allowed", true) => "allowed",
+            // Any non-allowed version above tolerance is auto-blocked.
+            (_, true) => "blocked",
+            _ when v.Deprecated is not null => "deprecated",
+            _ when v.VulnCheckedAt is null => "unscanned",
+            // Scanned and servable, but carries at least one advisory below the block
+            // tolerance (or an unscored/MAL advisory the score aggregate never saw). Reported
+            // distinctly so it is never labelled "clean" — only an advisory-free scanned
+            // version earns that label.
+            _ when v.HasAdvisory => "vulnerable",
+            _ => "clean",
+        };
+    }
+
+    /// <summary>DELETE /api/v1/orgs/{org}/packages/{ecosystem}/{name}/{version}</summary>
+    // Delete accepts both JWT sessions (UI) and API tokens (automation/scripted yank).
+    // The class-level [Authorize] covers JWT; this method-level override unions in the
+    // ApiToken scheme so a PAT carrying the per-ecosystem yank cap can reach the endpoint.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
+    [HttpDelete("api/v1/packages/{ecosystem}/{name}/{version}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> DeleteVersion(string ecosystem, string name, string version, CancellationToken ct)
+    {
+        // Per-ecosystem yank capability — admin/owner role sets enumerate yank:* leaves.
+        // Unknown ecosystem names fail the lookup below, but we 404 here so an invalid path
+        // doesn't read as 403. Authorisation outcomes for *known* ecosystems remain semantic:
+        // missing capability → 403 (via AuthorizeCapAsync), missing package/version → 404.
+        string? yankCap = ecosystem switch
+        {
+            "npm" => Capabilities.YankNpm,
+            "pypi" => Capabilities.YankPypi,
+            "nuget" => Capabilities.YankNuget,
+            "maven" => Capabilities.YankMaven,
+            "rpm" => Capabilities.YankRpm,
+            "oci" => Capabilities.YankOci,
+            _ => null
+        };
+        if (yankCap is null)
+        {
+            return NotFound();
+        }
+
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, yankCap, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        string orgId = CurrentTenantId();
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
+        if (pkg is null)
+        {
+            return NotFound();
+        }
+
+        var ver = await _packages.GetVersionAsync(pkg.Id, version, ct);
+        if (ver is null)
+        {
+            return NotFound();
+        }
+
+        await _blobs.DeleteAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
+        await _packages.DeleteVersionAsync(ver.Id, ct);
+        // GC the parent row when this was the last version. Orphan packages rows otherwise
+        // accumulate across delete/republish cycles and cause "empty package" UI cards.
+        // Atomic NOT EXISTS guard handles the race against a concurrent publish.
+        await _packages.DeletePackageIfEmptyAsync(pkg.Id, ct);
+
+        // Evict any cached metadata so the deleted version is not served from cache.
+        switch (ecosystem)
+        {
+            case "npm":
+                _cache.Remove($"metadata:{orgId}:npm:{pkg.Name}");
+                break;
+            case "pypi":
+                _cache.Remove($"metadata:{orgId}:pypi:{pkg.Name}");
+                break;
+            case "nuget":
+                string nugetId = pkg.Name.ToLowerInvariant();
+                _cache.Remove($"metadata:{orgId}:nuget:{nugetId}:sv1");
+                _cache.Remove($"metadata:{orgId}:nuget:{nugetId}:sv2");
+                break;
+            case "rpm":
+                // Evict the local per-document cache (primary, filelists, other) and the
+                // merged-repodata tuple so a yanked package no longer appears in repodata.
+                _rpmLocalCache.Evict(new RpmLocalRepodataKey(orgId, "primary"));
+                _rpmLocalCache.Evict(new RpmLocalRepodataKey(orgId, "filelists"));
+                _rpmLocalCache.Evict(new RpmLocalRepodataKey(orgId, "other"));
+                _rpmMergedCache.Evict(new RpmMergedRepodataKey(orgId));
+                break;
+        }
+
+        // Activity is the right sink for a per-version operator action — audit_log is for
+        // tenant-level config/security events. Never dual-write the same event to both.
+        await _audit.LogActivityAsync(orgId, ecosystem, ver.Purl, "delete", GetUserId(),
+            actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        return NoContent();
+    }
+
+    /// <summary>GET /api/v1/packages/{ecosystem}/{name}/{version}/download — stream one artifact to the UI</summary>
+    // The optional `file` query selects one artifact when a version maps to several files (Maven
+    // ships a .jar + .pom + sidecars under one coordinate; PyPI a wheel + sdist per release). When
+    // omitted, the first cached file for the version is served — preserving the single-file default.
+    [HttpGet("api/v1/packages/{ecosystem}/{name}/{version}/download")]
+    public async Task<IActionResult> DownloadVersion(string ecosystem, string name, string version, CancellationToken ct, [FromQuery] string? file = null)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadArtifact, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        string orgId = CurrentTenantId();
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
+        if (pkg is null)
+        {
+            return NotFound();
+        }
+
+        var ver = await _packages.GetVersionAsync(pkg.Id, version, ct);
+        if (ver is not null)
+        {
+            // Route by per-version origin: proxy artifacts live on the eviction-friendly cache
+            // tier, uploaded artifacts on the durable registry tier. Under split storage these
+            // are distinct backends, so picking the wrong tier would 404 or serve wrong bytes.
+            var store = ver.Origin == "proxy" ? _blobStorage.Cache : _blobStorage.Registry;
+            var stream = await store.GetAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
+            if (stream is null)
+            {
+                return NotFound();
+            }
+
+            // Count the UI download the same way protocol pulls are counted, and log it as a
+            // 'download' activity so it also appears on the dashboard chart — the UI is just
+            // another download surface.
+            await _audit.LogActivityAsync(orgId, ecosystem, ver.Purl, "download", GetUserId(),
+                actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+            await _packages.IncrementDownloadCountAsync(ver.Id, ct);
+
+            string filename = ver.BlobKey.Split('/').Last();
+            return File(stream, "application/octet-stream", filename);
+        }
+
+        // Global-plane fallback: proxy versions no longer have a package_versions row.
+        // Look up the artifact in cache_artifact (joined to tenant_artifact_access for org
+        // scoping) and serve from the cache tier.
+        var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
+        var facts = proxyEntries.FirstOrDefault(
+            e => string.Equals(e.Version, version, StringComparison.OrdinalIgnoreCase)
+                 && (string.IsNullOrEmpty(file) || string.Equals(e.Filename, file, StringComparison.OrdinalIgnoreCase)));
+        if (facts is null)
+        {
+            return NotFound();
+        }
+
+        var proxyStream = await _blobStorage.Cache.GetAsync(BlobKeys.StoreKey(facts.BlobKey), ct);
+        if (proxyStream is null)
+        {
+            return NotFound();
+        }
+
+        if (facts.Purl is not null)
+        {
+            await _audit.LogActivityAsync(orgId, ecosystem, facts.Purl, "download", GetUserId(),
+                actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        }
+        // Enqueued off the request path — the row already exists (seeded durably at first-fetch).
+        await _tenantAccess.RecordDownloadHitAsync(orgId, facts.Id, _time.GetUtcNow(), ct);
+
+        // Proxy blob keys are content-addressed (last segment is the SHA-256), so the download
+        // filename comes from the recorded artifact filename, not the blob-key suffix.
+        string proxyFilename = string.IsNullOrEmpty(facts.Filename)
+            ? facts.BlobKey.Split('/').Last()
+            : facts.Filename;
+        return File(proxyStream, "application/octet-stream", proxyFilename);
+    }
+
+    /// <summary>
+    /// PATCH /api/v1/packages/{ecosystem}/{name}/version-overwrite
+    /// Sets or clears the per-package same-version-push override. Requires TenantConfigure.
+    /// Body: { "override": "allow" | "block" | null }
+    /// </summary>
+    [HttpPatch("api/v1/packages/{ecosystem}/{name}/version-overwrite")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> SetPackageVersionOverwrite(
+        string ecosystem, string name,
+        [FromBody] SetPackageVersionOverwriteRequest req,
+        CancellationToken ct)
+    {
+        var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (authResult is not null)
+        {
+            return authResult;
+        }
+
+        if (req.Override is { } ov && ov is not ("allow" or "block"))
+        {
+            return BadRequest(new { error = "override", detail = "Must be 'allow', 'block', or null." });
+        }
+
+        string orgId = CurrentTenantId();
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
+        if (pkg is null)
+        {
+            return NotFound();
+        }
+
+        await _packages.SetSameVersionPushOverrideAsync(pkg.Id, orgId, req.Override, ct);
+
+        string? actorId = GetUserId();
+        string detail = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            ecosystem,
+            purl_name = pkg.PurlName,
+            override_value = req.Override,
+        }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
+        await _audit.LogAsync("package.override.set", orgId, actorId, ActorKinds.User,
+            ecosystem, pkg.PurlName, detail, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+        await _audit.LogActivityAsync(orgId, ecosystem, pkg.PurlName, "package.override.set",
+            actorId, actorKind: ActorKinds.User, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
+
+        return NoContent();
+    }
+
+    // ── Stats ─────────────────────────────────────────────────────────────────
+
+    /// <summary>GET /api/v1/orgs/{org}/stats</summary>
+    [HttpGet("api/v1/stats")]
+    public async Task<IActionResult> GetStats(CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        string orgId = CurrentTenantId();
+
+        // Serve the pre-computed snapshot kept warm by StatsRefreshService rather than running
+        // the live aggregate queries per request. Deserialize and return through Ok() so
+        // the MVC pipeline is the single serialization authority — the cached and live paths
+        // produce byte-identical shape/casing, and the read tolerates any stored casing. Cache
+        // miss (new org, or before the first refresh pass) falls back to a live compute so the
+        // first load is never blank.
+        var snapshot = await _statsSnapshots.GetSnapshotAsync(orgId, ct);
+        if (snapshot is not null)
+        {
+            try
+            {
+                var cached = System.Text.Json.JsonSerializer.Deserialize<OrgStats>(
+                    snapshot.StatsJson, JsonContracts.Web);
+                if (cached is not null)
+                {
+                    return Ok(cached);
+                }
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                // A corrupt snapshot row (truncated write, hand-edited DB, format drift) must not
+                // 500 the dashboard — fall through to a live compute, which also overwrites the
+                // bad row on the next refresh pass.
+                _logger.LogWarning(ex,
+                    "Discarding malformed stats snapshot for org {OrgId}; recomputing live. TraceId={TraceId}",
+                    orgId, System.Diagnostics.Activity.Current?.TraceId);
+            }
+        }
+
+        var stats = await _packageAnalytics.GetOrgStatsAsync(orgId, ct);
+        return Ok(stats);
+    }
+
+    // ── Setup snippets ────────────────────────────────────────────────────────
+
+    /// <summary>GET /api/v1/orgs/{org}/setup/{ecosystem}</summary>
+    [HttpGet("api/v1/setup/{ecosystem}")]
+    public async Task<IActionResult> GetSetup(string ecosystem, CancellationToken ct)
+    {
+        var result = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        // Tenant-implicit URLs: every request is already on the tenant's host (multi mode) or
+        // the single-tenant install. Snippets use the request's host directly.
+        string baseUrl = _urls.BaseUrl(HttpContext);
+        string slug = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantSlug ?? "";
+
+        string? snippet = ecosystem switch
+        {
+            "pypi" => GeneratePyPiSnippet(baseUrl, slug),
+            "npm" => GenerateNpmSnippet(baseUrl, slug),
+            "nuget" => GenerateNuGetSnippet(baseUrl, slug),
+            "maven" => GenerateMavenSnippet(baseUrl, slug),
+            "rpm" => GenerateRpmSnippet(baseUrl, slug),
+            "oci" => GenerateOciSnippet(baseUrl, slug),
+            "golang" => GenerateGoSnippet(baseUrl, slug),
+            "cargo" => GenerateCargoSnippet(baseUrl, slug),
+            _ => null
+        };
+
+        return snippet is null ? NotFound() : Ok(new { ecosystem, snippet });
+    }
+
+    // Snippet generators emit tenant-implicit URLs (host-relative). The slug parameter is
+    // unused at the URL level today but kept so the future-multi-mode form `slug.apex/simple/`
+    // could be reconstructed if needed; the request's host already carries the tenant.
+    private static string GeneratePyPiSnippet(string baseUrl, string slug)
+    {
+        _ = slug;
+        var uri = new Uri(baseUrl);
+        string trustedHost = uri.Scheme == "http" ? $" --trusted-host {uri.Host}" : "";
+        string indexUrl = $"{baseUrl}/simple/";
+        return $"""
+            # pip.conf / pyproject.toml
+            [global]
+            index-url = {indexUrl}
+
+            # ~/.netrc — auth (the username is ignored; the token is the password):
+            machine {uri.Host} login <user> password <token>
+
+            # One-liner install example:
+            pip install <package>==<version> --index-url {indexUrl}{trustedHost} --no-deps
+            """;
+    }
+
+    private static string GenerateNpmSnippet(string baseUrl, string slug)
+    {
+        _ = slug;
+        string registryUrl = $"{baseUrl}/npm/";
+        // npm keys the auth token by the registry URL with the scheme stripped.
+        string authKey = registryUrl[(registryUrl.IndexOf("://", StringComparison.Ordinal) + 3)..];
+        return $"""
+            # .npmrc
+            registry={registryUrl}
+            //{authKey}:_authToken=<token>
+            """;
+    }
+
+    private static string GenerateNuGetSnippet(string baseUrl, string slug)
+    {
+        _ = slug;
+        return $"""
+            <!-- nuget.config -->
+            <configuration>
+              <packageSources>
+                <add key="dependably" value="{baseUrl}/nuget/v3/index.json" />
+              </packageSources>
+              <packageSourceCredentials>
+                <dependably>
+                  <add key="Username" value="your-username" />
+                  <add key="ClearTextPassword" value="your-token" />
+                </dependably>
+              </packageSourceCredentials>
+            </configuration>
+
+            <!-- Publish (push uses an API key, not the credentials above): -->
+            <!-- dotnet nuget push pkg.nupkg --api-key your-token --source dependably -->
+            """;
+    }
+
+    // Maven snippet bundles both publish (distributionManagement, used by `mvn deploy`) and
+    // consume (repositories, used at resolution time). A Gradle variant follows the Maven XML
+    // section; credentials are stored once in gradle.properties and referenced by both DSLs.
+    private static string GenerateMavenSnippet(string baseUrl, string slug)
+    {
+        _ = slug;
+        return GenerateMavenXmlSnippet(baseUrl) + GenerateGradleFragment(baseUrl);
+    }
+
+    // Gradle DSL blocks contain literal { }, so use $$ raw strings where {{ }} are literal
+    // braces and {{baseUrl}} interpolates the variable.
+    private static string GenerateGradleFragment(string baseUrl) => $$"""
+
+
+            # --- Gradle (Groovy DSL) ---
+
+            # ~/.gradle/gradle.properties — store credentials outside build scripts:
+            dependablyUser=your-username
+            dependablyToken=your-token
+
+            # build.gradle — consume and publish:
+            repositories {
+                maven {
+                    url '{{baseUrl}}/maven/'
+                    credentials {
+                        username = findProperty('dependablyUser')
+                        password = findProperty('dependablyToken')
+                    }
+                }
+            }
+            publishing {
+                repositories {
+                    maven {
+                        url '{{baseUrl}}/maven/'
+                        credentials {
+                            username = findProperty('dependablyUser')
+                            password = findProperty('dependablyToken')
+                        }
+                    }
+                }
+            }
+
+            # --- Gradle (Kotlin DSL) ---
+
+            # build.gradle.kts — same gradle.properties credentials; only syntax differs:
+            repositories {
+                maven {
+                    url = uri("{{baseUrl}}/maven/")
+                    credentials {
+                        username = findProperty("dependablyUser") as String?
+                        password = findProperty("dependablyToken") as String?
+                    }
+                }
+            }
+            publishing {
+                repositories {
+                    maven {
+                        url = uri("{{baseUrl}}/maven/")
+                        credentials {
+                            username = findProperty("dependablyUser") as String?
+                            password = findProperty("dependablyToken") as String?
+                        }
+                    }
+                }
+            }
+            """;
+
+    private static string GenerateMavenXmlSnippet(string baseUrl) => $"""
+        <!-- ~/.m2/settings.xml — publish + consume -->
+        <settings>
+          <servers>
+            <server>
+              <id>dependably</id>
+              <username>your-username</username>
+              <password>your-token</password>
+            </server>
+          </servers>
+          <profiles>
+            <profile>
+              <id>dependably</id>
+              <repositories>
+                <repository>
+                  <id>dependably</id>
+                  <url>{baseUrl}/maven/</url>
+                </repository>
+              </repositories>
+            </profile>
+          </profiles>
+          <activeProfiles><activeProfile>dependably</activeProfile></activeProfiles>
+        </settings>
+
+        <!-- In your project pom.xml, for `mvn deploy`: -->
+        <distributionManagement>
+          <repository>
+            <id>dependably</id>
+            <url>{baseUrl}/maven/</url>
+          </repository>
+        </distributionManagement>
+        """;
+
+    // RPM .repo file pointing at the yum/dnf-compatible directory layout, plus a curl one-liner
+    // for the push side. gpgcheck=0 by default — operators turn it on once signing is wired.
+    private static string GenerateRpmSnippet(string baseUrl, string slug)
+    {
+        _ = slug;
+        return $"""
+            # /etc/yum.repos.d/dependably.repo
+            [dependably]
+            name=dependably
+            baseurl={baseUrl}/rpm/
+            enabled=1
+            gpgcheck=0
+            username=<user>
+            password=<token>
+
+            # Push an RPM:
+            curl -u <user>:<token> --upload-file pkg.rpm {baseUrl}/rpm/upload
+            """;
+    }
+
+    private static string GenerateOciSnippet(string baseUrl, string slug)
+    {
+        _ = slug;
+        var uri = new Uri(baseUrl);
+        string host = uri.Host;
+        // Plain-HTTP registries require an insecure-registries entry in the Docker daemon config;
+        // HTTPS registries use the default TLS trust chain and need no extra daemon configuration.
+        string daemonFragment = uri.Scheme == "http" ? $$"""
+
+
+            # /etc/docker/daemon.json — Docker needs this to use a plain-HTTP registry:
+            { "insecure-registries": ["{{host}}"] }
+            # Restart the daemon after editing (systemctl restart docker).
+            """ : "";
+        return $"""
+            # Docker / OCI — login, pull, push
+            docker login {host}
+            docker pull  {host}/<image>:<tag>
+            docker push  {host}/<image>:<tag>
+            """ + daemonFragment;
+    }
+
+    // Go is proxy-only (no hosted publish) — GOPROXY points the toolchain at the registry, and a
+    // .netrc entry carries credentials for authenticated proxies. GOPRIVATE/GONOSUMDB exempt a
+    // private module path from the public checksum database.
+    private static string GenerateGoSnippet(string baseUrl, string slug)
+    {
+        _ = slug;
+        string host = new Uri(baseUrl).Host;
+        return $"""
+            # Point the Go toolchain at the registry proxy:
+            export GOPROXY={baseUrl}/go
+
+            # ~/.netrc — credentials for an authenticated proxy:
+            machine {host} login <user> password <token>
+
+            # For a private module path, skip the public checksum DB:
+            export GONOSUMDB=example.com/private/*
+            export GOPRIVATE=example.com/private/*
+            """;
+    }
+
+    // Cargo snippet covers both consume (sparse index in config.toml) and publish (`cargo publish
+    // --registry dependably`).
+    private static string GenerateCargoSnippet(string baseUrl, string slug)
+    {
+        _ = slug;
+        return $"""
+            # ~/.cargo/config.toml — consume + publish
+            [registries.dependably]
+            index = "sparse+{baseUrl}/cargo/"
+
+            # Authenticate (writes the token into Cargo's credentials store):
+            cargo login --registry dependably
+            # ...or set it directly in config.toml / credentials.toml:
+            [registries.dependably]
+            token = "<token>"
+
+            # Publish a crate:
+            cargo publish --registry dependably
+            """;
+    }
+
+    // The UI encodes '/' as %2F for every ecosystem (npm scopes, OCI image
+    // namespaces like library/ubuntu, etc.); ASP.NET keeps %2F encoded in route
+    // values to prevent path splitting, so decode it back before lookup. PyPI
+    // additionally requires PEP 503 normalization (case, -/_/. all equivalent) since
+    // that's the form package rows are stored under (PurlNormalizer.PyPiName, applied
+    // by every PyPI publish/lookup path) — without it, a non-canonical spelling here
+    // resolves to a different (or no) package row than the one a publish matches.
+    private static string AsPurlName(string ecosystem, string name)
+    {
+        string decoded = NpmRouteHelper.DecodeRouteName(name);
+        return ecosystem == "pypi" ? PurlNormalizer.PyPiName(decoded) : decoded;
+    }
+}

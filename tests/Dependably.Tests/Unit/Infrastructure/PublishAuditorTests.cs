@@ -11,7 +11,8 @@ namespace Dependably.Tests.Unit.Infrastructure;
 /// <summary>
 /// Covers <see cref="PublishAuditor"/>'s branching: import vs push vs replace,
 /// system vs user actorType, batch_id/import_mode extraction edge cases, and the
-/// "import never dual-writes audit_log" guard (per the 5f6e1f0 invariant).
+/// invariant that import and replace are per-version operator actions and never
+/// dual-write into audit_log.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class PublishAuditorTests : IAsyncLifetime
@@ -210,26 +211,34 @@ public sealed class PublishAuditorTests : IAsyncLifetime
     // ─── replace branch (existing != null) ──────────────────────────────────────
 
     [Fact]
-    public async Task Push_with_existing_emits_replace_event_and_writes_replace_audit()
+    public async Task Push_with_existing_emits_replace_event_and_writes_replace_activity()
     {
         var auditor = Build();
         var existing = new PackageVersion { ChecksumSha256 = "oldhash" };
         await auditor.RecordAsync(Sample(auditAction: "push"),
             sha256: "newhash", existing: existing, sizeBytes: 42L, ct: default);
 
-        // Two audit_log rows: 'push' + 'package.replace'. activity stays at 1.
+        // 'package.replace' is a per-version operator action: it belongs in activity
+        // only. audit_log keeps just the 'push' row (still dual-writing pending a
+        // separate sweep); activity gets both 'push' and 'package.replace'.
         var audit = await AuditRowsAsync();
-        Assert.Equal(2, audit.Count);
-        Assert.Contains(audit, a => a.Action == "push");
-        var replace = audit.Single(a => a.Action == "package.replace");
+        Assert.Equal(1, await CountAsync("audit_log"));
+        Assert.Equal("push", audit.Single().Action);
+
+        var activity = await ActivityRowsAsync();
+        Assert.Equal(2, activity.Count);
+        Assert.Contains(activity, a => a.EventType == "push");
+        var (_, Detail, SourceIp, ActorId) = activity.Single(a => a.EventType == "package.replace");
 
         // replace detail is a JSON blob; the keys are stable.
-        using (var doc = JsonDocument.Parse(replace.Detail!))
+        using (var doc = JsonDocument.Parse(Detail!))
         {
             Assert.Equal("sha256:oldhash", doc.RootElement.GetProperty("prior_artifact_hash").GetString());
             Assert.Equal("sha256:newhash", doc.RootElement.GetProperty("artifact_hash").GetString());
             Assert.Equal("uploaded", doc.RootElement.GetProperty("origin").GetString());
         }
+        Assert.Equal("10.0.0.1", SourceIp);
+        Assert.Equal("u1", ActorId);
 
         // Two typed events: publish + replace.
         Assert.Equal(2, _emitter.Emitted.Count);
@@ -248,9 +257,10 @@ public sealed class PublishAuditorTests : IAsyncLifetime
         await auditor.RecordAsync(Sample(auditAction: "push", actorUserId: null),
             sha256: "newhash", existing: existing, sizeBytes: 42L, ct: default);
 
-        var replace = (await AuditRowsAsync()).Single(a => a.Action == "package.replace");
-        using var doc = JsonDocument.Parse(replace.Detail!);
+        var (_, Detail, _, ActorId) = (await ActivityRowsAsync()).Single(a => a.EventType == "package.replace");
+        using var doc = JsonDocument.Parse(Detail!);
         Assert.Equal("sha256:", doc.RootElement.GetProperty("prior_artifact_hash").GetString());
+        Assert.Null(ActorId);
 
         // Null actor → system actorType propagates into the typed replace event too.
         var typedReplace = _emitter.Emitted.Single(e => e.EventType == PackageEvents.TypeReplace);
@@ -261,16 +271,20 @@ public sealed class PublishAuditorTests : IAsyncLifetime
     [Fact]
     public async Task Import_with_existing_emits_both_import_and_replace_events()
     {
-        // Import + replace: confirms RecordReplaceAsync fires for imports too,
-        // but audit_log only sees the package.replace row (no 'import' row).
+        // Import + replace: confirms RecordReplaceAsync fires for imports too.
+        // Both import and replace are per-version operator actions, so audit_log
+        // stays empty and activity carries both rows.
         var auditor = Build();
         var existing = new PackageVersion { ChecksumSha256 = "prior" };
         await auditor.RecordAsync(Sample(auditAction: "import", auditDetail: null),
             sha256: "newer", existing: existing, sizeBytes: 42L, ct: default);
 
-        var audit = await AuditRowsAsync();
-        Assert.Single(audit);
-        Assert.Equal("package.replace", audit[0].Action);
+        Assert.Equal(0, await CountAsync("audit_log"));
+
+        var activity = await ActivityRowsAsync();
+        Assert.Equal(2, activity.Count);
+        Assert.Contains(activity, a => a.EventType == "import");
+        Assert.Contains(activity, a => a.EventType == "package.replace");
 
         Assert.Equal(2, _emitter.Emitted.Count);
         Assert.Contains(_emitter.Emitted, e => e.EventType == PackageEvents.TypeImport);

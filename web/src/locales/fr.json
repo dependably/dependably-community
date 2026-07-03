@@ -435,7 +435,6 @@
       "claim.create": "Revendication créée",
       "claim.transition": "État de la revendication modifié",
       "claim.release": "Revendication libérée",
-      "package.replace": "Version de paquet remplacée",
       "allowlist_blocked": "PURL bloqué par la liste d'autorisation",
       "conflict_resolved": "Conflit résolu",
       "upstream_response_too_large": "Réponse amont trop volumineuse",

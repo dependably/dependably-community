@@ -43,7 +43,7 @@ public sealed class TenantHardDeleteServiceResilienceTests : IClassFixture<InMem
     // lock so the next attempt succeeds — models the backend recovering before the next tick.
     private sealed class ThrowOnceThenGrantLock : IDistributedLock
     {
-        private readonly IDistributedLock _inner;
+        private readonly InProcessDistributedLock _inner;
         private int _attempts;
 
         public ThrowOnceThenGrantLock(TimeProvider time) => _inner = new InProcessDistributedLock(time);

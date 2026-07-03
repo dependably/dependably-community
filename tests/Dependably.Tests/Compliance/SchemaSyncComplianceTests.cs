@@ -43,7 +43,7 @@ public sealed partial class SchemaSyncComplianceTests
     public void EveryAdditiveColumn_IsDeclaredInBothCreateTableBlocks()
     {
         string src = SchemaTestPaths.SourceRoot();
-        var adds = ParseAdditiveColumns(src);
+        var adds = ParseAdditiveColumns();
         Assert.NotEmpty(adds); // guard: the regex + path must actually find the migration array
 
         var sqlite = SchemaSqlParser.ParseTables(File.ReadAllText(SchemaTestPaths.SqliteSchema(src)));
@@ -62,7 +62,7 @@ public sealed partial class SchemaSyncComplianceTests
     public void NoAdditiveColumn_IsNotNullWithoutDefault()
     {
         var violations = new List<string>();
-        foreach (var add in ParseAdditiveColumns(SchemaTestPaths.SourceRoot()))
+        foreach (var add in ParseAdditiveColumns())
         {
             bool notNull = NotNullRegex().IsMatch(add.Rest);
             bool hasDefault = DefaultRegex().IsMatch(add.Rest);
@@ -87,9 +87,9 @@ public sealed partial class SchemaSyncComplianceTests
         Report(violations, $"duplicate object declaration(s) in {file}");
     }
 
-    private static List<AddColumn> ParseAdditiveColumns(string src)
+    private static List<AddColumn> ParseAdditiveColumns()
     {
-        string initializer = File.ReadAllText(SchemaTestPaths.SchemaInitializer(src));
+        string initializer = File.ReadAllText(SchemaTestPaths.SchemaInitializer());
         return AddColumnRegex().Matches(initializer)
             .Select(m => new AddColumn(m.Groups["table"].Value, m.Groups["col"].Value, m.Groups["rest"].Value))
             .ToList();

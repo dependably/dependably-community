@@ -1910,24 +1910,23 @@
       "dependably": {
         "type": "Project",
         "dependencies": {
+          "Dependably.Core": "[0.2.1, )",
+          "Dependably.Management": "[0.2.1, )",
+          "Serilog.AspNetCore": "[10.0.0, )"
+        }
+      },
+      "dependably.core": {
+        "type": "Project",
+        "dependencies": {
           "AWSSDK.S3": "[4.0.20.3, )",
           "Azure.Storage.Blobs": "[12.27.0, )",
-          "BCrypt.Net-Next": "[4.1.0, )",
           "BouncyCastle.Cryptography": "[2.5.1, )",
           "Cronos": "[0.11.1, )",
           "Dapper": "[2.1.72, )",
           "Elastic.CommonSchema.Serilog": "[9.0.0, )",
           "IPAddressRange": "[6.3.0, )",
-          "ITfoxtec.Identity.Saml2.MvcCore": "[4.17.0, )",
-          "Microsoft.AspNetCore.Authentication.JwtBearer": "[10.0.8, )",
-          "Microsoft.AspNetCore.DataProtection.StackExchangeRedis": "[10.0.8, )",
-          "Microsoft.AspNetCore.OpenApi": "[10.0.8, )",
           "Microsoft.Data.Sqlite": "[10.0.8, )",
           "Microsoft.IO.RecyclableMemoryStream": "[3.0.1, )",
-          "Microsoft.IdentityModel.JsonWebTokens": "[8.15.0, )",
-          "Microsoft.IdentityModel.Protocols": "[8.15.0, )",
-          "Microsoft.IdentityModel.Protocols.OpenIdConnect": "[8.15.0, )",
-          "Microsoft.OpenApi": "[2.7.5, )",
           "Npgsql": "[8.0.7, )",
           "NuGet.Versioning": "[7.3.0, )",
           "OpenTelemetry.Exporter.OpenTelemetryProtocol": "[1.15.3, )",
@@ -1938,10 +1937,35 @@
           "SQLitePCLRaw.lib.e_sqlite3": "[3.50.3, )",
           "Serilog.AspNetCore": "[10.0.0, )",
           "Serilog.Sinks.OpenTelemetry": "[4.2.0, )",
+          "System.Security.Cryptography.Pkcs": "[10.0.8, )",
+          "Tomlyn": "[2.4.2, )"
+        }
+      },
+      "dependably.edge": {
+        "type": "Project",
+        "dependencies": {
+          "Dependably.Core": "[0.2.1, )",
+          "Serilog.AspNetCore": "[10.0.0, )"
+        }
+      },
+      "dependably.management": {
+        "type": "Project",
+        "dependencies": {
+          "BCrypt.Net-Next": "[4.1.0, )",
+          "Dapper": "[2.1.72, )",
+          "Dependably.Core": "[0.2.1, )",
+          "IPAddressRange": "[6.3.0, )",
+          "ITfoxtec.Identity.Saml2.MvcCore": "[4.17.0, )",
+          "Microsoft.AspNetCore.Authentication.JwtBearer": "[10.0.8, )",
+          "Microsoft.AspNetCore.DataProtection.StackExchangeRedis": "[10.0.8, )",
+          "Microsoft.AspNetCore.OpenApi": "[10.0.8, )",
+          "Microsoft.IdentityModel.JsonWebTokens": "[8.15.0, )",
+          "Microsoft.IdentityModel.Protocols": "[8.15.0, )",
+          "Microsoft.IdentityModel.Protocols.OpenIdConnect": "[8.15.0, )",
+          "Microsoft.OpenApi": "[2.7.5, )",
+          "Serilog.AspNetCore": "[10.0.0, )",
           "StackExchange.Redis": "[2.8.41, )",
           "System.IdentityModel.Tokens.Jwt": "[8.15.0, )",
-          "System.Security.Cryptography.Pkcs": "[10.0.8, )",
-          "Tomlyn": "[2.4.2, )",
           "zxcvbn-core": "[7.0.92, )"
         }
       }

@@ -3,8 +3,8 @@
 //
 // Checks:
 //   1. Frontend: web/src/locales/en.json (source) vs all other locale JSON files.
-//   2. Backend:  src/Dependably/Resources/SharedResource.resx (source) vs
-//               all src/Dependably/Resources/SharedResource.*.resx files.
+//   2. Backend:  the SharedResource.resx in the owning src/Dependably* root (source) vs
+//               its sibling SharedResource.*.resx locale files.
 //
 // Exit codes:
 //   0 — no missing keys (warnings about orphaned keys are non-fatal)
@@ -133,13 +133,23 @@ if (!fs.existsSync(sourceJsonPath)) {
 
 // ── Backend validation ─────────────────────────────────────────────────────────
 
-const resourcesDir = path.join(REPO_ROOT, 'src', 'Dependably', 'Resources');
+// The backend resources live in exactly one of the src/Dependably* project roots
+// (the assembly that defines SharedResource); resolve the owning root by content
+// rather than hardcoding a project name.
+const srcDir = path.join(REPO_ROOT, 'src');
+const owningRoot = fs.readdirSync(srcDir)
+  .filter((d) => d.startsWith('Dependably'))
+  .map((d) => path.join(srcDir, d))
+  .find((root) => fs.existsSync(path.join(root, 'Resources', 'SharedResource.resx')));
+const resourcesDir = owningRoot
+  ? path.join(owningRoot, 'Resources')
+  : path.join(srcDir, 'Dependably', 'Resources');
 const sourceResxPath = path.join(resourcesDir, 'SharedResource.resx');
 
 if (!fs.existsSync(sourceResxPath)) {
   error(`${sourceResxPath} not found — backend source resource is required.`);
 } else {
-  console.log(`\nValidating backend resources (source: src/Dependably/Resources/SharedResource.resx)`);
+  console.log(`\nValidating backend resources (source: ${path.relative(REPO_ROOT, sourceResxPath)})`);
   console.log('─'.repeat(60));
 
   const sourceXml = fs.readFileSync(sourceResxPath, 'utf8');

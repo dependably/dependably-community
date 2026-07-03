@@ -60,7 +60,8 @@ public sealed class FirstBootServicePostgresBootTests
             .Build();
 
         var sut = new FirstBootService(
-            store, config, NullLogger<FirstBootService>.Instance, UnconfiguredEnvelope());
+            store, config, NullLogger<FirstBootService>.Instance, UnconfiguredEnvelope(),
+            new AdminBootstrapper());
 
         // Pre-fix: this throws PostgresException (42601 syntax error at or near "IMMEDIATE")
         // because RunAsync opens its serializing transaction with SQLite's BEGIN IMMEDIATE
@@ -90,7 +91,8 @@ public sealed class FirstBootServicePostgresBootTests
             .Build();
 
         var sut = new FirstBootService(
-            store, config, NullLogger<FirstBootService>.Instance, UnconfiguredEnvelope());
+            store, config, NullLogger<FirstBootService>.Instance, UnconfiguredEnvelope(),
+            new AdminBootstrapper());
 
         await sut.RunAsync();
 

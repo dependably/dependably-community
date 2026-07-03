@@ -31,10 +31,15 @@ public sealed partial class TimeDeterminismComplianceTests
     [Fact]
     public void SrcUsesInjectedTimeProvider()
     {
-        string repoRoot = LocateRepoRoot();
-        Assert.False(string.IsNullOrEmpty(repoRoot), "repo root not found");
+        string repoRoot = SourceRoots.RepoRoot();
 
-        var violations = ScanTree(Path.Combine(repoRoot, "src", "Dependably"), repoRoot);
+        // One combined scan across every src/Dependably* source root, so a wall-clock read that
+        // moves into Core/Management/Edge is still caught. Paths remain repo-root-relative.
+        var violations = new List<string>();
+        foreach (string root in SourceRoots.All())
+        {
+            violations.AddRange(ScanTree(root, repoRoot));
+        }
 
         if (violations.Count > 0)
         {
@@ -52,8 +57,7 @@ public sealed partial class TimeDeterminismComplianceTests
     [Fact]
     public void TestsUseFakeTimeProvider()
     {
-        string repoRoot = LocateRepoRoot();
-        Assert.False(string.IsNullOrEmpty(repoRoot), "repo root not found");
+        string repoRoot = SourceRoots.RepoRoot();
 
         var violations = ScanTree(Path.Combine(repoRoot, "tests"), repoRoot);
 
@@ -131,20 +135,5 @@ public sealed partial class TimeDeterminismComplianceTests
 
             yield return file;
         }
-    }
-
-    private static string LocateRepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
-        {
-            if (Directory.Exists(Path.Combine(dir.FullName, "src", "Dependably")))
-            {
-                return dir.FullName;
-            }
-
-            dir = dir.Parent;
-        }
-        return string.Empty;
     }
 }

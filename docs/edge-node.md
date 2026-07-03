@@ -7,6 +7,17 @@ first miss by pulling from the master, and ships no management plane. It is the 
 Edge Node / Docker registry pull-through mirror pattern: a thin, disposable cache close to the
 consumers (a CI fleet, a branch office, a data center).
 
+The edge deployment artifacts run the dedicated **`dependably/edge`** image. That image contains
+**no management plane at all** — not disabled, absent. The admin/auth/SAML/SPA/OpenAPI closure is
+excluded by two mechanisms: (1) the **assembly reference graph** — the edge composition root
+(`Dependably.Edge`) references only `Dependably.Core`, never `Dependably.Management`, so the
+management-plane packages (SAML, the IdentityModel/JWT stack, BCrypt, zxcvbn, Redis, OpenApi) never
+enter the publish closure; and (2) a **per-MR closure guard** in CI (`edge-closure-guard`) that
+scans the edge SBOM and fails the pipeline if any excluded package reappears. The community image
+run with `DEPLOYMENT_MODE=edge` remains a fully supported alternative (see the fallback below); that
+path strips the management surface at runtime rather than by absence, and its stripping convention
+stays tested.
+
 ## What an edge does — and does not
 
 An edge node:
@@ -33,10 +44,9 @@ An edge node does **not**:
    identity; revoking it later takes the edge cold-only immediately. One token per edge node gives
    per-node revocation and audit attribution.
 
-2. **Set the three edge variables** in the edge node's environment:
+2. **Set the edge variables** in the edge node's environment:
 
    ```
-   DEPLOYMENT_MODE=edge
    EDGE_MASTER_URL=https://dependably.example.com
    EDGE_MASTER_TOKEN=<the reader service token from step 1>
    ```
@@ -44,7 +54,15 @@ An edge node does **not**:
    `EDGE_MASTER_URL` and `EDGE_MASTER_TOKEN` are both required — the node refuses to start without
    them. The token is held in memory from the environment; do not commit it.
 
-3. **Start the node.**
+   You do **not** set `DEPLOYMENT_MODE` on the `dependably/edge` image: that image is
+   constitutionally an edge (its composition root pins edge mode internally and rejects any tenancy
+   value), so the variable is neither read nor needed. Setting `DEPLOYMENT_MODE=edge` is still
+   accepted; any other value (`single`/`multi`/…) fails fast as a misconfiguration. On the
+   community-image fallback below, `DEPLOYMENT_MODE=edge` is **required** — that is what selects
+   edge mode on the full image.
+
+3. **Start the node.** The compose and Helm defaults pull the prebuilt `dependably/edge` image, so
+   `up -d` pulls it on first start:
 
    ```
    docker compose -f docker-compose.edge.yml up -d
@@ -52,6 +70,48 @@ An edge node does **not**:
 
    or `helm install my-edge deploy/helm/dependably-edge --set edge.masterUrl=… --set
    edge.existingSecret=… ` (see the chart's `values.yaml`).
+
+   The image is multi-arch (linux/amd64 + linux/arm64). If your registry mirror requires
+   authentication for the pull, log in first:
+
+   ```
+   docker login dependably.northwardlabs.ca   # any username; password = a reader token
+   ```
+
+   The username is ignored — Basic auth takes everything after the first colon as the
+   token, so put a reader-scoped token in the password field. When the org's
+   `AnonymousPull` is enabled, the pull needs no login at all.
+
+   **Bare `docker run` alternative (direct testing).** For a quick one-off node without the
+   compose file — for example to smoke-test enrollment — run the image directly:
+
+   ```
+   docker run -d --name dependably-edge -p 8080:8080 \
+     -v dependably-edge-data:/data \
+     -e EDGE_MASTER_URL=https://dependably.example.com \
+     -e EDGE_MASTER_TOKEN=<reader token> \
+     dependably.northwardlabs.ca/dependably/edge:latest
+   ```
+
+   The image exposes port **8080** and declares `VOLUME /data`. Because this invocation sets no
+   `DB_PATH` / `LOCAL_STORAGE_PATH` / `PROXY_STAGING_PATH`, the cache index, cached blobs, and the
+   staging directory all default under `/data` — so the single mounted `dependably-edge-data`
+   volume holds everything and survives `docker rm` + recreate. This is the simplest durable shape;
+   the compose file instead co-locates all of that under a single named `/cache` volume (it points
+   `DB_PATH`, `LOCAL_STORAGE_PATH`, and `PROXY_STAGING_PATH` there explicitly), which stays the
+   recommended production layout because it names the cache tier the whole edge value depends on.
+   Either way the rule is the same: **one persistent volume, one edge process** (see the
+   single-writer guard below).
+
+### Fallback — the community image with `DEPLOYMENT_MODE=edge`
+
+If you build locally, or standardize on the single `dependably/community` image everywhere, the
+full community image run with `DEPLOYMENT_MODE=edge` is a fully supported alternative. It selects
+the same headless cache-only behavior and strips the management surface at runtime (rather than the
+`dependably/edge` image's by-absence exclusion), and that stripping convention stays tested. To use
+it, point the compose/Helm image at `dependably.northwardlabs.ca/dependably/community:latest` (or a
+local build) and add `DEPLOYMENT_MODE=edge` to the environment. The behavior an edge client sees is
+identical; only the image contents and the enforcement mechanism differ.
 
 ## Inbound client auth — anonymous vs pre-shared token
 
@@ -66,6 +126,47 @@ see private/hosted content. When set, the edge seeds it as a reader token in its
 disables anonymous pull, and requires clients to authenticate (`Authorization: Bearer <token>`,
 or Basic for PyPI/NuGet). Rotating the value replaces the row on the next restart.
 
+## Hardening a fresh node
+
+A fresh edge with only the two required variables set logs a handful of first-boot warnings. Each
+one is accurate for an edge and points at exactly one setting. None abort startup — an edge on a
+trusted LAN can run with all of them unset — but here is what each means **on an edge** and what to
+set to clear it:
+
+- **`edge node accepting anonymous clients — intended for trusted networks only`.** No
+  `EDGE_ACCESS_TOKEN` is set, so anyone who can reach the edge pulls whatever the master token can
+  see (including that org's private packages). Set **`EDGE_ACCESS_TOKEN`** whenever the edge is
+  reachable beyond a trusted LAN or the master token can see private/hosted content (see *Inbound
+  client auth* above).
+- **`BASE_URL is not set` → permissive host filtering.** With no `BASE_URL`, `AllowedHosts` is `*`
+  and any `Host` header is accepted, which allows Host-header injection into absolute links. (The
+  edge issues no session cookies and runs no login, so the cookie half of this warning does not
+  apply to an edge and is not emitted.) Set **`BASE_URL`** to the URL clients use to reach the edge
+  (e.g. `https://edge.internal.example.com`) so unknown `Host` values are rejected.
+- **`TRUSTED_PROXIES is not set` → forwarded headers ignored (fail-closed).** `X-Forwarded-For` /
+  `-Proto` / `-Host` are discarded, so the edge sees the reverse proxy's socket address as the
+  client, not the real caller. Set **`TRUSTED_PROXIES`** to your reverse proxy's IP(s)/CIDR(s) when
+  one fronts the edge, so real client IPs are visible for rate limiting and logs.
+- **`DEPENDABLY_MASTER_KEY not set` → the master enrollment token is stored unencrypted.** On an
+  edge the only recoverable secret held at rest is the seeded `EDGE_MASTER_TOKEN` (in the cache
+  database's `upstream_registry` secret column), used to authenticate upstream fetches from the
+  master. Set **`DEPENDABLY_MASTER_KEY`** to envelope-encrypt it at rest, or put the database file
+  on an OS-encrypted volume (LUKS/dm-crypt, encrypted EBS) instead. The key format and behavior
+  (inline base64-encoded 32-byte key or a path to a file containing one, fail-closed if encrypted
+  secrets exist without the key) are documented in
+  [CONTRIBUTING.md → Environment variables](../CONTRIBUTING.md#environment-variables) and
+  [ADR 0002](adr/0002-envelope-encryption-db-secrets.md); generate the value per that convention.
+  The edge stores no `jwt_secret` or `mfa_encryption_key` (it runs no login or MFA), so — unlike the
+  full host — those are not among what this key protects on an edge.
+- **DataProtection keys in the container filesystem.** ASP.NET Core logs that the DataProtection key
+  ring is not persisted. On an edge this is harmless: the durable DataProtection ring is a
+  management-plane feature (it lives in `Dependably.Management`, which the edge image does not
+  contain), so an edge configures no persistent ring and holds no DataProtection-protected durable
+  state. The edge protects its one at-rest secret with `DEPENDABLY_MASTER_KEY` (envelope
+  encryption), not with the DataProtection ring, and it re-seeds `EDGE_MASTER_TOKEN` from the
+  environment and re-protects it on every boot. Recreating the container therefore loses only an
+  ephemeral in-memory ring that nothing durable depends on — no action needed.
+
 ## Central revocation
 
 The edge holds no authoritative data. To cut an edge off, revoke its `EDGE_MASTER_TOKEN` on the
@@ -73,6 +174,15 @@ master (Settings → Service Tokens → delete). The edge can still serve whatev
 its cache, but every cache miss to the master then fails auth — the edge goes **cold-only** until
 re-enrolled with a fresh token. This is the blast-radius control: a compromised edge box never
 holds anything durable and is revoked with one token operation on the master.
+
+## Outbound traffic beyond the master (OSV)
+
+The scheduled vulnerability-scan job is off on an edge node, but the **inline first-fetch scan**
+still runs on every cache miss: with the default remote OSV source, each newly fetched artifact
+triggers an outbound query to `api.osv.dev` (an observer on that path sees the package names the
+edge fetches). Edge nodes on private networks that should talk **only** to the master can set
+`OSV_MODE=local` (with a local OSV mirror) or `AIR_GAPPED=true` to remove that egress; the block
+gate then enforces from whatever advisory data is already ingested.
 
 ## Persistent cache volume (required)
 

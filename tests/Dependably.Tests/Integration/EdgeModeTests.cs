@@ -185,6 +185,6 @@ public sealed class EdgeModeTests
 
     // The in-memory blob store keys proxy blobs by their content-addressed SHA-256 (last path
     // segment). Returns the stored SHAs so tests can assert a verified cache-tier write.
-    private static IReadOnlyList<string> AllCacheShas(DependablyFactory f) =>
-        f.BlobStore.Keys.Select(k => k.Split('/').Last()).ToList();
+    private static List<string> AllCacheShas(DependablyFactory f) =>
+        f.BlobStore.GetKeys().Select(k => k.Split('/').Last()).ToList();
 }

@@ -1,5 +1,5 @@
 image:
-  repository: dependably
+  repository: dependably.northwardlabs.ca/dependably/edge
   tag: latest
   pullPolicy: IfNotPresent
 
@@ -48,6 +48,11 @@ resources: {}
 extraEnv: []
   # - name: CACHE_MAX_SIZE_BYTES
   #   value: "10737418240"
+
+# Pod termination grace. Sized to cover the app's pre-stop drain sleep (10s) plus the
+# SHUTDOWN_GRACE_PERIOD in-flight drain (30s) so the SQLite instance-lock row is released
+# on shutdown instead of being orphaned for the 90s staleness window.
+terminationGracePeriodSeconds: 45
 
 nodeSelector: {}
 tolerations: []

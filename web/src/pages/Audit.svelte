@@ -117,7 +117,7 @@
     { labelKey: 'audit.groups.lists',        actions: ['allowlist_added', 'allowlist_removed', 'blocklist_added', 'blocklist_removed'] },
     { labelKey: 'audit.groups.licenses',     actions: ['license_policy_mode_changed', 'license_allowlist_added', 'license_allowlist_removed', 'license_blocklist_added', 'license_blocklist_removed'] },
     { labelKey: 'audit.groups.claims',       actions: ['claim.create', 'claim.transition', 'claim.release'] },
-    { labelKey: 'audit.groups.supplyChain',  actions: ['package.replace', 'allowlist_blocked', 'conflict_resolved'] },
+    { labelKey: 'audit.groups.supplyChain',  actions: ['allowlist_blocked', 'conflict_resolved'] },
     { labelKey: 'audit.groups.upstream',     actions: ['upstream_response_too_large', 'ssrf_blocked', 'checksum_failure'] },
   ]
 

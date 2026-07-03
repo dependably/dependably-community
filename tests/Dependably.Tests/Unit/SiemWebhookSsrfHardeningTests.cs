@@ -36,7 +36,7 @@ public sealed class SiemWebhookSsrfHardeningTests
     [InlineData("data:text/html,<script>alert(1)</script>")]
     public void ValidateSiemWebhookUrl_DisallowedScheme_ReturnsError(string url)
     {
-        string? error = ServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: false);
+        string? error = ManagementServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: false);
 
         Assert.NotNull(error);
         Assert.Contains("scheme", error, StringComparison.OrdinalIgnoreCase);
@@ -48,7 +48,7 @@ public sealed class SiemWebhookSsrfHardeningTests
     public void ValidateSiemWebhookUrl_DisallowedScheme_StillRejectedWhenAllowPrivate(string url)
     {
         // Scheme check must fire even when RFC 1918 addresses are allowed.
-        string? error = ServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: true);
+        string? error = ManagementServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: true);
 
         Assert.NotNull(error);
         Assert.Contains("scheme", error, StringComparison.OrdinalIgnoreCase);
@@ -64,8 +64,8 @@ public sealed class SiemWebhookSsrfHardeningTests
     {
         // Loopback and link-local are always blocked — the ALLOW_PRIVATE flag must not
         // open them up.
-        string? errorFull = ServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: false);
-        string? errorAllowPrivate = ServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: true);
+        string? errorFull = ManagementServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: false);
+        string? errorAllowPrivate = ManagementServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: true);
 
         Assert.NotNull(errorFull);
         Assert.NotNull(errorAllowPrivate);
@@ -79,7 +79,7 @@ public sealed class SiemWebhookSsrfHardeningTests
     [InlineData("http://172.16.5.10/collect")]
     public void ValidateSiemWebhookUrl_PrivateIp_RejectedWhenAllowPrivateFalse(string url)
     {
-        string? error = ServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: false);
+        string? error = ManagementServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: false);
 
         Assert.NotNull(error);
     }
@@ -95,7 +95,7 @@ public sealed class SiemWebhookSsrfHardeningTests
     public void ValidateSiemWebhookUrl_PrivateIp_AllowedWhenAllowPrivateTrue(string url)
     {
         // Self-hosted SIEM on a private network is a legitimate deployment.
-        string? error = ServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: true);
+        string? error = ManagementServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: true);
 
         Assert.Null(error);
     }
@@ -108,7 +108,7 @@ public sealed class SiemWebhookSsrfHardeningTests
     [InlineData("https://8.8.8.8/collect")]
     public void ValidateSiemWebhookUrl_PublicOrHostname_ReturnsNull(string url)
     {
-        string? error = ServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: false);
+        string? error = ManagementServiceCollectionExtensions.ValidateSiemWebhookUrl(url, allowPrivate: false);
 
         Assert.Null(error);
     }
@@ -116,7 +116,7 @@ public sealed class SiemWebhookSsrfHardeningTests
     [Fact]
     public void ValidateSiemWebhookUrl_InvalidFormat_ReturnsError()
     {
-        string? error = ServiceCollectionExtensions.ValidateSiemWebhookUrl("not-a-url", allowPrivate: false);
+        string? error = ManagementServiceCollectionExtensions.ValidateSiemWebhookUrl("not-a-url", allowPrivate: false);
 
         Assert.NotNull(error);
     }

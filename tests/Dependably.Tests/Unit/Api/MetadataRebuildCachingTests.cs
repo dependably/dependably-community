@@ -27,8 +27,10 @@ namespace Dependably.Tests.Unit.Api;
 ///  3. repomd.xml populates primary, filelists, and other caches in one call.
 ///  4. Mixed scenario: some docs warm, some cold in the same burst.
 ///
-/// npm double-serialize test:
-///  5. ServePackumentJson returns FileContentResult (bytes only — no re-serialize on cache store).
+/// npm packument response tests:
+///  5. ServePackumentBytes serves the given bytes verbatim (no re-serialize) and answers a
+///     matching If-None-Match with 304 — the conditional-request decision happens against
+///     cached bytes, never inside the rebuild.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class MetadataRebuildCachingTests : IAsyncLifetime
@@ -196,52 +198,35 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
         Assert.False(_localRepodataCache.TryGet(new RpmLocalRepodataKey(_orgId, "other"), out _));
     }
 
-    // ── npm double-serialize elimination ──────────────────────────────────────
+    // ── npm packument byte serving ────────────────────────────────────────────
 
     [Fact]
-    public void NpmServePackumentJson_ReturnsFileContentResult_NotJsonResult()
+    public void NpmServePackumentBytes_ServesGivenBytesVerbatim()
     {
-        // The rebuild path extracts bytes via FileContentResult.FileContents. If
-        // ServePackumentJson returned JsonResult the rebuild would have to re-serialize.
-        // This test verifies the return type is FileContentResult, pinning the contract.
-        var node = JsonNode.Parse("""{"name":"left-pad","versions":{}}""")!;
-        var http = new DefaultHttpContext();
-        http.Items[TenantContext.HttpItemsKey] = TenantContext.ForTenant("org1", "slug");
-        http.Request.Scheme = "https";
-        http.Request.Host = new HostString("org1.example.test");
-
-        var result = NpmPackumentHandler.ServePackumentJson(http, node, "private, max-age=60");
-
-        // Must be FileContentResult (bytes already serialized once) — not JsonResult
-        // (which would require a second serialize in the rebuild capture path).
-        Assert.IsType<FileContentResult>(result);
-        var fcr = (FileContentResult)result!;
-        Assert.Equal("application/json", fcr.ContentType);
-        Assert.NotEmpty(fcr.FileContents);
-    }
-
-    [Fact]
-    public void NpmServePackumentJson_FileContentBytesMatchUtf8Encoding()
-    {
-        // The bytes in FileContentResult must exactly match UTF-8(metadata.ToJsonString()).
-        // Both the ETag (computed from those bytes) and the cache entry depend on this.
+        // Every packument path serves already-serialized (usually cached) bytes through
+        // ServePackumentBytes. The result must carry those bytes verbatim — a re-serialize
+        // here would desynchronize the response from the cached ETag.
         var node = JsonNode.Parse("""{"name":"lodash","versions":{"4.17.21":{"dist":{}}}}""")!;
+        byte[] bytes = Encoding.UTF8.GetBytes(node.ToJsonString());
         var http = new DefaultHttpContext();
         http.Items[TenantContext.HttpItemsKey] = TenantContext.ForTenant("org1", "slug");
         http.Request.Scheme = "https";
         http.Request.Host = new HostString("org1.example.test");
 
-        var result = (FileContentResult)NpmPackumentHandler.ServePackumentJson(http, node, "private, max-age=60");
+        var result = NpmPackumentHandler.ServePackumentBytes(http, bytes, "private, max-age=60");
 
-        byte[] expected = Encoding.UTF8.GetBytes(node.ToJsonString());
-        Assert.Equal(expected, result.FileContents);
+        var fcr = Assert.IsType<FileContentResult>(result);
+        Assert.Equal("application/json", fcr.ContentType);
+        Assert.Same(bytes, fcr.FileContents);
     }
 
     [Fact]
-    public void NpmServePackumentJson_IfNoneMatchHit_Returns304()
+    public void NpmServePackumentBytes_IfNoneMatchHit_Returns304()
     {
         // When the client's If-None-Match header matches the computed ETag, the response
-        // must be 304 (not the FileContentResult path).
+        // must be 304 (not the FileContentResult path). The 304 decision lives here — after
+        // the bytes exist — so a revalidating client can never prevent a rebuild from
+        // populating the cache.
         var node = JsonNode.Parse("""{"name":"react","versions":{}}""")!;
         byte[] bytes = Encoding.UTF8.GetBytes(node.ToJsonString());
 
@@ -256,7 +241,7 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
         http.Request.Host = new HostString("org1.example.test");
         http.Request.Headers.IfNoneMatch = expectedETag;
 
-        var result = NpmPackumentHandler.ServePackumentJson(http, node, "private, max-age=60");
+        var result = NpmPackumentHandler.ServePackumentBytes(http, bytes, "private, max-age=60");
 
         // ETag match → 304, not the bytes result.
         var status = Assert.IsType<StatusCodeResult>(result);

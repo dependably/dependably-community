@@ -1,0 +1,65 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Infrastructure/seed/spdx-licenses-3.28.0.json" />
+    <EmbeddedResource Include="Infrastructure/seed/spdx-copyleft.json" />
+    <EmbeddedResource Include="Infrastructure/schema/Schema.sql" />
+    <EmbeddedResource Include="Infrastructure/schema/Schema.pg.sql" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Update="Resources/SharedResource.resx" LogicalName="Dependably.Resources.SharedResource.resources" />
+    <EmbeddedResource Update="Resources/SharedResource.fr.resx" LogicalName="Dependably.Resources.SharedResource.fr.resources" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Microsoft.AspNetCore.Builder" />
+    <Using Include="Microsoft.AspNetCore.Http" />
+    <Using Include="Microsoft.Extensions.Configuration" />
+    <Using Include="Microsoft.Extensions.DependencyInjection" />
+    <Using Include="Microsoft.Extensions.Hosting" />
+    <Using Include="Microsoft.Extensions.Logging" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Dependably" />
+    <InternalsVisibleTo Include="Dependably.Edge" />
+    <InternalsVisibleTo Include="Dependably.Management" />
+    <InternalsVisibleTo Include="Dependably.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="4.0.20.3" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.27.0" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
+    <PackageReference Include="Cronos" Version="0.11.1" />
+    <PackageReference Include="Dapper" Version="2.1.72" />
+    <PackageReference Include="IPAddressRange" Version="6.3.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.8" />
+    <PackageReference Include="NuGet.Versioning" Version="7.3.0" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.8" />
+    <PackageReference Include="Tomlyn" Version="2.4.2" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.50.3" />
+    <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" Version="3.0.1" />
+    <PackageReference Include="Npgsql" Version="8.0.7" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.15.2" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.12.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
+    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.12.0-beta.1" />
+    <PackageReference Include="Elastic.CommonSchema.Serilog" Version="9.0.0" />
+    <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+    <PackageReference Include="Serilog.Sinks.OpenTelemetry" Version="4.2.0" />
+  </ItemGroup>
+
+</Project>

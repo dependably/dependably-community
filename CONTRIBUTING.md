@@ -256,6 +256,8 @@ For a release `0.x.y`:
 
 CI's `publish` job triggers on `v*.*.*` tags, extracts `0.x.y` from the tag, passes it as the Docker `VERSION` build arg, and pushes both `:latest` and `:0.x.y` images to GHCR. The two source files and the git tag must agree — keep them in lockstep.
 
+A release tag also publishes two multi-arch (linux/amd64 + linux/arm64) images to the Dependably registry alongside the ghcr.io images, from the GitLab `publish-image` job (a `parallel: matrix` over the two flavors): the full `dependably.northwardlabs.ca/dependably/community` image (built from `Dockerfile`) and the slim, management-plane-free `dependably.northwardlabs.ca/dependably/edge` image (built from `Dockerfile.edge`), each tagged `:0.x.y` and `:latest`.
+
 `validate-release-tag` requires the tag to be **annotated** (`git tag -a`, not lightweight), its commit to be an **ancestor of `main`**, and its version to match `Directory.Build.props` `<Version>`. Tagging the branch tip before the version-bump MR merges fails the annotated and ancestor-of-main checks.
 
 ### Verifying the stamp
@@ -718,7 +720,7 @@ A distributed-lock backend failure (a Redis connection blip or failover, not a c
 - **Account lockout**: 10 failed login attempts → 15-minute lockout with `Retry-After` header
 - **Security headers**: `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Content-Security-Policy` (management API), `Strict-Transport-Security` (when behind HTTPS proxy)
 - **Trusted proxy / host hardening**: Forwarded-header processing is fail-closed — when `TRUSTED_PROXIES` is unset, `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` are ignored entirely so caller-supplied values cannot spoof `RemoteIpAddress`, scheme, or host. When `TRUSTED_PROXIES` is set, those headers are processed only from the listed IPs/CIDRs. Host-header filtering is derived at startup from the host portion of `BASE_URL`: when that host is non-localhost, only that host (plus `*.apex` in multi mode) and localhost are accepted; unknown `Host` headers are rejected before tenant resolution, preventing Host injection into SAML SP URLs, absolute links, and CSRF Origin comparisons. When `BASE_URL` is unset or localhost (dev/local), filtering is permissive and a startup warning is logged.
-- **Schema**: idempotent `CREATE TABLE IF NOT EXISTS` applied on startup; one-shot data migrations are recorded in the `_applied_migrations` ledger (see [src/Dependably/Infrastructure/schema/schema-migrations.md](src/Dependably/Infrastructure/schema/schema-migrations.md))
+- **Schema**: idempotent `CREATE TABLE IF NOT EXISTS` applied on startup; one-shot data migrations are recorded in the `_applied_migrations` ledger (see [src/Dependably.Core/Infrastructure/schema/schema-migrations.md](src/Dependably.Core/Infrastructure/schema/schema-migrations.md))
 
 ---
 
@@ -730,8 +732,8 @@ The UI and API error messages are localized. English (`en`) is the source langua
 |------|---------|
 | `web/src/locales/en.json` | Frontend strings — English source |
 | `web/src/locales/fr.json` | Frontend strings — French translation |
-| `src/Dependably/Resources/SharedResource.resx` | Backend error strings — English source |
-| `src/Dependably/Resources/SharedResource.fr.resx` | Backend error strings — French translation |
+| `src/Dependably.Core/Resources/SharedResource.resx` | Backend error strings — English source |
+| `src/Dependably.Core/Resources/SharedResource.fr.resx` | Backend error strings — French translation |
 
 Adding a string: add the key to `en.json` / `SharedResource.resx` (backend entries include a translator `<comment>`), add the translation to each locale file, run `bash i18n/scripts/i18n-export.sh` to refresh the translator handoff package (`i18n/handoff/*.xlf`), then `node i18n/scripts/i18n-validate.js` — it fails on missing keys **and** on a handoff that was not regenerated.
 

@@ -12,11 +12,14 @@ using Microsoft.IdentityModel.Tokens;
 namespace Dependably.Tests.Unit.Infrastructure;
 
 /// <summary>
-/// Startup-time JWT key handling and envelope-encryption migration. The JwtBearer options ship
-/// with an all-zero placeholder signing key; <see cref="StartupService"/> must replace it from
-/// instance_settings and must refuse to start (fail closed) when the secret is missing on an
-/// already-bootstrapped instance, or when secrets are envelope-encrypted but DEPENDABLY_MASTER_KEY
-/// is absent (lost-key scenario).
+/// Startup-time JWT key handling and envelope-encryption migration. The startup work is split
+/// across two hosted services registered in order: <see cref="CoreStartupService"/> runs schema +
+/// first-boot + envelope-encryption migration, then <see cref="StartupService"/> replaces the
+/// JwtBearer placeholder signing key from instance_settings. Both must fail closed — the JWT
+/// service when the secret is missing on an already-bootstrapped instance, the Core service when
+/// secrets are envelope-encrypted but DEPENDABLY_MASTER_KEY is absent (lost-key scenario). The
+/// <see cref="StartupPair"/> helper starts both in registration order so these tests exercise the
+/// composed behaviour exactly as the host does.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class StartupServiceTests : IAsyncLifetime
@@ -38,22 +41,46 @@ public sealed class StartupServiceTests : IAsyncLifetime
                 { ["DEPENDABLY_MASTER_KEY"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)) })
                 .Build()));
 
-    private StartupService BuildService(IConfiguration? config = null, EnvelopeProtector? envelope = null)
+    private StartupPair BuildService(IConfiguration? config = null, EnvelopeProtector? envelope = null)
     {
         config ??= new ConfigurationBuilder().Build();
         envelope ??= UnconfiguredEnvelope();
-        return new StartupService(
+        var orgs = new OrgRepository(_db, envelope: envelope);
+        var core = new CoreStartupService(
             new SchemaInitializer(_db),
-            new FirstBootService(_db, config, NullLogger<FirstBootService>.Instance, envelope),
-            new OrgRepository(_db, envelope: envelope),
-            _jwtOptions,
+            new FirstBootService(_db, config, NullLogger<FirstBootService>.Instance, envelope,
+                new AdminBootstrapper()),
+            orgs,
             config,
             StagingOptions.Resolve(config),
-            NullLogger<StartupService>.Instance,
+            NullLogger<CoreStartupService>.Instance,
             envelope,
             _db,
             new EdgeMode(config),
             new InstanceLock(_db, config, TestTime.Frozen(), NullLogger<InstanceLock>.Instance));
+        var jwt = new StartupService(orgs, _jwtOptions, NullLogger<StartupService>.Instance);
+        return new StartupPair(core, jwt);
+    }
+
+    // Runs the two startup hosted services in the same order the host registers them:
+    // CoreStartupService (schema + first-boot + envelope migration) then StartupService (JWT key
+    // load). Lets the existing single-call test bodies drive the composed startup path unchanged.
+    private sealed class StartupPair
+    {
+        private readonly CoreStartupService _core;
+        private readonly StartupService _jwt;
+
+        public StartupPair(CoreStartupService core, StartupService jwt)
+        {
+            _core = core;
+            _jwt = jwt;
+        }
+
+        public async Task StartAsync(CancellationToken ct)
+        {
+            await _core.StartAsync(ct);
+            await _jwt.StartAsync(ct);
+        }
     }
 
     // deepcode ignore NoHardcodedCredentials: `key` is a settings-row name passed as a SQL parameter, not a credential.

@@ -3,7 +3,7 @@
 #
 # Outputs:
 #   i18n/handoff/frontend.en.xlf  (from web/src/locales/en.json)
-#   i18n/handoff/backend.en.xlf   (from src/Dependably/Resources/SharedResource.resx)
+#   i18n/handoff/backend.en.xlf   (from the SharedResource.resx in the owning src/Dependably* root)
 #
 # Existing French translations (web/src/locales/fr.json, SharedResource.fr.resx) are
 # pre-filled as <target> with segment state="translated", so CAT tools see the current
@@ -22,8 +22,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 FRONTEND_JSON="$REPO_ROOT/web/src/locales/en.json"
 FRONTEND_FR_JSON="$REPO_ROOT/web/src/locales/fr.json"
-BACKEND_RESX="$REPO_ROOT/src/Dependably/Resources/SharedResource.resx"
-BACKEND_FR_RESX="$REPO_ROOT/src/Dependably/Resources/SharedResource.fr.resx"
+# The backend resources live in exactly one src/Dependably* project root; resolve
+# the owning root by content rather than hardcoding a project name.
+BACKEND_RESX="$(ls "$REPO_ROOT"/src/Dependably*/Resources/SharedResource.resx 2>/dev/null | head -1)"
+BACKEND_FR_RESX="$(dirname "${BACKEND_RESX:-$REPO_ROOT/src/Dependably/Resources/x}")/SharedResource.fr.resx"
+BACKEND_RESX_REL="${BACKEND_RESX#"$REPO_ROOT"/}"
 HANDOFF_DIR="$REPO_ROOT/i18n/handoff"
 
 mkdir -p "$HANDOFF_DIR"
@@ -113,10 +116,10 @@ if [ ! -f "$BACKEND_RESX" ]; then
 else
   echo "Exporting backend strings: $BACKEND_RESX → $BACKEND_XLF"
 
-  node - "$BACKEND_RESX" "$BACKEND_FR_RESX" "$BACKEND_XLF" <<'EOF'
+  node - "$BACKEND_RESX" "$BACKEND_FR_RESX" "$BACKEND_XLF" "$BACKEND_RESX_REL" <<'EOF'
 const fs = require('fs');
 
-const [,, inputPath, frPath, outputPath] = process.argv;
+const [,, inputPath, frPath, outputPath, resxRel] = process.argv;
 
 const xml = fs.readFileSync(inputPath, 'utf8');
 const frXml = fs.existsSync(frPath) ? fs.readFileSync(frPath, 'utf8') : '';
@@ -191,7 +194,7 @@ const units = entries
 
 const xliff = `<?xml version="1.0" encoding="UTF-8"?>
 <xliff version="2.0" xmlns="urn:oasis:names:tc:xliff:document:2.0" srcLang="en" trgLang="fr">
-  <file id="backend" original="src/Dependably/Resources/SharedResource.resx">
+  <file id="backend" original="${resxRel}">
 ${units}
   </file>
 </xliff>

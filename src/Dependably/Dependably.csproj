@@ -4,7 +4,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
@@ -20,59 +19,28 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Infrastructure/schema/Schema.sql" />
-    <EmbeddedResource Include="Infrastructure/schema/Schema.pg.sql" />
-    <EmbeddedResource Include="Infrastructure/seed/spdx-licenses-3.28.0.json" />
-    <EmbeddedResource Include="Infrastructure/seed/spdx-copyleft.json" />
-  </ItemGroup>
-
-  <ItemGroup>
     <InternalsVisibleTo Include="Dependably.Tests" />
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="wwwroot/**" />
+    <ProjectReference Include="..\Dependably.Core\Dependably.Core.csproj" />
+    <ProjectReference Include="..\Dependably.Management\Dependably.Management.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="AWSSDK.S3" Version="4.0.20.3" />
-    <PackageReference Include="StackExchange.Redis" Version="2.8.41" />
-    <PackageReference Include="Microsoft.AspNetCore.DataProtection.StackExchangeRedis" Version="10.0.8" />
-    <PackageReference Include="Azure.Storage.Blobs" Version="12.27.0" />
-    <PackageReference Include="BCrypt.Net-Next" Version="4.1.0" />
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
-    <PackageReference Include="zxcvbn-core" Version="7.0.92" />
-    <PackageReference Include="Cronos" Version="0.11.1" />
-    <PackageReference Include="Dapper" Version="2.1.72" />
-    <PackageReference Include="IPAddressRange" Version="6.3.0" />
-    <PackageReference Include="ITfoxtec.Identity.Saml2.MvcCore" Version="4.17.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.8" />
-    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.15.0" />
-    <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.15.0" />
-    <PackageReference Include="Microsoft.IdentityModel.Protocols" Version="8.15.0" />
-    <PackageReference Include="Microsoft.IdentityModel.Protocols.OpenIdConnect" Version="8.15.0" />
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.8" />
-    <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.8" />
-    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.50.3" />
-    <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" Version="3.0.1" />
-    <PackageReference Include="Npgsql" Version="8.0.7" />
-    <PackageReference Include="NuGet.Versioning" Version="7.3.0" />
-    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.8" />
-    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.15.2" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.12.0" />
-    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
-    <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.12.0-beta.1" />
+    <Content Include="..\Dependably.Management\wwwroot\**"
+             Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
     <PackageReference Include="SecurityCodeScan.VS2019" Version="5.6.7">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
       <DevelopmentDependency>true</DevelopmentDependency>
     </PackageReference>
-    <PackageReference Include="Elastic.CommonSchema.Serilog" Version="9.0.0" />
-    <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
-    <PackageReference Include="Serilog.Sinks.OpenTelemetry" Version="4.2.0" />
-    <PackageReference Include="Tomlyn" Version="2.4.2" />
   </ItemGroup>
 
 </Project>

@@ -435,7 +435,6 @@
       "claim.create": "Claim created",
       "claim.transition": "Claim transitioned",
       "claim.release": "Claim released",
-      "package.replace": "Package version replaced",
       "allowlist_blocked": "Allowlist blocked a PURL",
       "conflict_resolved": "Conflict resolved",
       "upstream_response_too_large": "Upstream response too large",

@@ -25,7 +25,7 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(appVersion()),
   },
   build: {
-    outDir: '../src/Dependably/wwwroot',
+    outDir: '../src/Dependably.Management/wwwroot',
     emptyOutDir: true,
     // esbuild avoids lightningcss's per-platform native binary, whose
     // optional-dep install is unreliable under `npm ci` in cross-platform

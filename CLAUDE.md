@@ -48,16 +48,30 @@ dotnet publish src/Dependably -c Release -r linux-musl-x64 --self-contained true
 # Web frontend (Svelte, from web/)
 cd web && npm install
 npm run dev      # Vite dev server
-npm run build    # production build into src/Dependably/wwwroot — wipes ALL of wwwroot,
+npm run build    # production build into src/Dependably.Management/wwwroot — wipes ALL of wwwroot,
                  # including the tracked wwwroot/swagger/ assets; restore them afterwards
-                 # (git checkout -- src/Dependably/wwwroot/swagger)
+                 # (git checkout -- src/Dependably.Management/wwwroot/swagger)
 ```
 
 ## Project structure
 
+The backend is four assemblies (the assembly split lets a slim edge image ship without the
+management-plane dependency closure):
+
 ```
-src/Dependably/
-  Program.cs              — app bootstrap, DI wiring, graceful shutdown (30s SIGTERM drain)
+src/Dependably/             — thin composition root (Program.cs only); refs Core + Management;
+                              assembly name "Dependably", entrypoint ./Dependably → image dependably/community
+src/Dependably.Core/        — protocol + storage + infrastructure classlib (the shared closure)
+src/Dependably.Management/  — admin/auth/SAML/SPA/docs classlib; management tables dormant on edge
+src/Dependably.Edge/        — edge composition root (Program.cs); refs Core only, never Management;
+                              entrypoint ./Dependably.Edge → image dependably/edge
+```
+
+Most of the tree below lives in `Dependably.Core` (the root and Edge projects are thin Program.cs
+composition roots; the admin/auth surface lives in `Dependably.Management`):
+
+```
+src/Dependably.Core/
   Infrastructure/
     IMetadataStore.cs     — returns DbConnection (SQLite or Postgres per DB_PROVIDER)
     SqliteMetadataStore.cs

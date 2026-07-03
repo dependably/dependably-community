@@ -243,7 +243,8 @@ public sealed class EnvelopeEncryptionTests : IAsyncLifetime
             _db,
             new ConfigurationBuilder().Build(),
             NullLogger<FirstBootService>.Instance,
-            ep);
+            ep,
+            new AdminBootstrapper());
 
         await svc.RunAsync();
 
@@ -264,7 +265,8 @@ public sealed class EnvelopeEncryptionTests : IAsyncLifetime
             _db,
             new ConfigurationBuilder().Build(),
             NullLogger<FirstBootService>.Instance,
-            ep);
+            ep,
+            new AdminBootstrapper());
 
         await svc.RunAsync();
 

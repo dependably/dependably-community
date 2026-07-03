@@ -5,8 +5,24 @@
   import { submitForm, extractErrorMessage } from '../lib/form.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import SearchInput from '../lib/SearchInput.svelte'
+  import DataTable from '../lib/DataTable.svelte'
   import { ECOSYSTEMS, ECO_LABEL } from '../lib/ecosystems.js'
   import { readQuery, writeQuery } from '../lib/tableState.js'
+
+  // Ecosystem column width matches the Reserved-namespaces table above so the
+  // ecosystem badges line up column-for-column across both sections.
+  $: columns = [
+    { key: 'ecosystem', label: $t('claims.ecosystem'), sortable: true,  width: '110px' },
+    { key: 'name',      label: $t('claims.name'),      sortable: true },
+    { key: 'state',     label: $t('claims.state'),     sortable: true,  width: '130px' },
+    { key: 'reason',    label: $t('claims.reason'),    sortable: false },
+    { key: 'actions',   label: $t('claims.actions'),   sortable: false, width: '200px' },
+  ]
+  const comparators = {
+    ecosystem: (a, b) => (a.ecosystem ?? '').localeCompare(b.ecosystem ?? ''),
+    name:      (a, b) => (a.name ?? '').localeCompare(b.name ?? ''),
+    state:     (a, b) => (a.state ?? '').localeCompare(b.state ?? ''),
+  }
 
   // Filter state lives in the URL query string so it survives route changes,
   // reloads, and copied links.
@@ -97,69 +113,56 @@
   }
 </script>
 
-<div class="page page-fluid">
-  <div class="page-header">
-    <h1 class="page-title">{$t('claims.title')}</h1>
-    <button class="primary" on:click={openCreate}>{$t('claims.newClaim')}</button>
-  </div>
-
-  <p class="text-muted desc">{$t('claims.description')}</p>
-
-  <div class="page-toolbar">
-    <SearchInput
-      placeholder={$t('claims.filters.search')}
-      bind:value={search}
-      on:search={onSearch}
-      class="toolbar-search"
-    />
-    <select bind:value={filterEco} on:change={onFilterChange} class="eco-select">
-      <option value="">{$t('claims.filters.ecosystem')}</option>
-      {#each ECOSYSTEMS as eco (eco)}
-        <option value={eco}>{ECO_LABEL[eco]}</option>
-      {/each}
-    </select>
-    <select bind:value={filterState} on:change={onFilterChange} class="state-select">
-      <option value="">{$t('claims.filters.state')}</option>
-      <option value="local_only">{$t('claims.states.local_only')}</option>
-      <option value="mixed">{$t('claims.states.mixed')}</option>
-    </select>
-  </div>
-
-  <ErrorBanner message={error} />
-
-  {#if loading}
-    <span class="spinner"></span>
-  {:else}
-    <table class="table-auto">
-      <thead>
-        <tr>
-          <th>{$t('claims.ecosystem')}</th>
-          <th>{$t('claims.name')}</th>
-          <th>{$t('claims.state')}</th>
-          <th>{$t('claims.reason')}</th>
-          <th class="actions-col">{$t('claims.actions')}</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each claims as c (c.id)}
-          <tr>
-            <td><span class="badge {c.ecosystem}">{ECO_LABEL[c.ecosystem] ?? c.ecosystem}</span></td>
-            <td class="mono">{c.name}</td>
-            <td><span class="badge state-{c.state}">{$t(`claims.states.${c.state}`)}</span></td>
-            <td class="reason-cell text-muted" title={c.reason}>{c.reason}</td>
-            <td class="actions-col">
-              <button class="action-btn" on:click={() => openTransition(c)}>{$t('claims.transition')}</button>
-              <button class="action-btn" on:click={() => openRelease(c)}>{$t('claims.release')}</button>
-            </td>
-          </tr>
-        {/each}
-        {#if claims.length === 0}
-          <tr><td colspan="5" class="text-center text-muted">{$t('claims.empty')}</td></tr>
-        {/if}
-      </tbody>
-    </table>
-  {/if}
+<div class="page-header list-header">
+  <h3 class="section-h">{$t('claims.title')}</h3>
+  <button class="primary" on:click={openCreate}>{$t('claims.newClaim')}</button>
 </div>
+
+<p class="form-hint">{$t('claims.description')}</p>
+
+<div class="page-toolbar">
+  <SearchInput
+    placeholder={$t('claims.filters.search')}
+    bind:value={search}
+    on:search={onSearch}
+    class="toolbar-search"
+  />
+  <select bind:value={filterEco} on:change={onFilterChange} class="eco-select">
+    <option value="">{$t('claims.filters.ecosystem')}</option>
+    {#each ECOSYSTEMS as eco (eco)}
+      <option value={eco}>{ECO_LABEL[eco]}</option>
+    {/each}
+  </select>
+  <select bind:value={filterState} on:change={onFilterChange} class="state-select">
+    <option value="">{$t('claims.filters.state')}</option>
+    <option value="local_only">{$t('claims.states.local_only')}</option>
+    <option value="mixed">{$t('claims.states.mixed')}</option>
+  </select>
+</div>
+
+<ErrorBanner message={error} />
+
+<DataTable
+  {columns}
+  rows={claims}
+  {comparators}
+  {loading}
+  initialSort={{ key: 'name', dir: 'asc' }}
+  emptyText={$t('claims.empty')}
+  tableClass="list-table"
+  let:row={c}
+>
+  <tr>
+    <td><span class="badge {c.ecosystem}">{ECO_LABEL[c.ecosystem] ?? c.ecosystem}</span></td>
+    <td class="mono">{c.name}</td>
+    <td><span class="badge state-{c.state}">{$t(`claims.states.${c.state}`)}</span></td>
+    <td class="reason-cell text-muted" title={c.reason}>{c.reason}</td>
+    <td class="actions-col">
+      <button class="action-btn" on:click={() => openTransition(c)}>{$t('claims.transition')}</button>
+      <button class="action-btn" on:click={() => openRelease(c)}>{$t('claims.release')}</button>
+    </td>
+  </tr>
+</DataTable>
 
 {#if modal}
   <div
@@ -251,10 +254,11 @@
 {/if}
 
 <style>
-  .desc { max-width: 720px; }
   .state-select { width: auto; }
-  .reason-cell { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .actions-col { width: 200px; white-space: nowrap; }
+  /* Column widths come from the DataTable colgroup (fixed layout); the cell
+     just clips overflow to its column. */
+  .reason-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .actions-col { white-space: nowrap; }
   .action-btn { padding: 3px 8px; font-size: 12px; min-height: 28px; margin-right: 4px; }
 
   /* .modal-flex, .warning-card, .info-card are global — see app.css */

@@ -392,7 +392,7 @@ build-web:
     - cd web && npm ci && npm run build
   artifacts:
     paths:
-      - src/Dependably/wwwroot/
+      - src/Dependably.Management/wwwroot/
     expire_in: 1 hour
 
 build:
@@ -647,6 +647,28 @@ docker-lint:
     entrypoint: [""]
   script:
     - hadolint Dockerfile
+    - hadolint Dockerfile.edge
+
+# Machine-checkable exclusion proof for the edge image. The dependably/edge closure
+# must never contain the management-plane packages (SAML/IdentityModel/JWT stack,
+# Redis pair, BCrypt, zxcvbn, OpenApi). This job generates the edge CycloneDX SBOM
+# and fails the MR if any forbidden family appears — closing-the-loop on every MR,
+# which is where a stray reference would poison the closure. BLOCKING (no
+# allow_failure): the guard is the per-MR gate that keeps the closure clean. Not
+# release-required — it gates MRs, and required-set membership is explicit
+# (release-contract-lint reconciles .release-required against release-gate.needs).
+edge-closure-guard:
+  stage: test
+  extends: [.private-registry-setup, .runs-on-ci]
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  script:
+    - dotnet tool restore
+    - dotnet CycloneDX src/Dependably.Edge/Dependably.Edge.csproj -o . -fn sbom-edge.json -F json -spv 1.6 --exclude-dev
+    - ci/edge-closure-guard.sh sbom-edge.json
+  artifacts:
+    paths:
+      - sbom-edge.json
+    expire_in: 30 days
 
 e2e:
   stage: test
@@ -724,7 +746,13 @@ sonarqube-check:
       /d:sonar.issue.ignore.multicriteria.e1.ruleKey="csharpsquid:S5332"
       /d:sonar.issue.ignore.multicriteria.e1.resourceKey="**/RpmRepodataService.cs"
     - dotnet build
-    - dotnet test --filter "Category!=Integration&Category!=ApiContract&Category!=SchemaPostgres" --settings coverlet.runsettings --collect:"XPlat Code Coverage" --logger "trx;LogFileName=tests.trx" --results-directory ./test-results
+    # Integration tests are included in the coverage collection on purpose: they are
+    # self-contained (in-memory blob + SQLite, no external services) and are the only
+    # tests that exercise several controller surfaces (webhooks, MFA, trust anchors,
+    # quarantine), which otherwise report 0% and drag new-code coverage below the gate.
+    # ApiContract (boots the app to diff the live OpenAPI) and SchemaPostgres (needs a
+    # live Postgres) stay excluded — neither runs in this job's environment.
+    - dotnet test --filter "Category!=ApiContract&Category!=SchemaPostgres" --settings coverlet.runsettings --collect:"XPlat Code Coverage" --logger "trx;LogFileName=tests.trx" --results-directory ./test-results
     # coverlet.collector now emits opencover (per coverlet.runsettings <Format>opencover</Format>)
     # at test-results/<guid>/coverage.opencover.xml. Move to a deterministic path so the
     # scanner config can point at a literal filename.
@@ -1223,19 +1251,26 @@ release-to-github:
 
 # === publish (runtime image) ===
 #
-# Build the runtime image and push it to the Dependably OCI registry on every
-# GREEN main push, so dependably-integration-tests can pull it to stand up an
-# ephemeral, permissive instance for the client matrix. Post-merge only
-# (.runs-on-ci-main) and in the `release` stage with NO `needs:`, so it runs
-# only after every earlier stage (build/test/sbom/dast) has passed — i.e. main
-# is green.
+# Build the multi-arch runtime image (linux/amd64 + linux/arm64) and push it to
+# the Dependably OCI registry. Two trigger paths, both post-merge:
+#
+#   * GREEN main push — tags `:main` and `:${FILE_VERSION}-main.<short-sha>`, so
+#     dependably-integration-tests can pull it to stand up an ephemeral,
+#     permissive instance for the client matrix.
+#   * vX.Y.Z release tag — tags `:X.Y.Z` and `:latest`, the durable images edge
+#     nodes and operators pull. validate-release-tag has already confirmed the
+#     tag matches Directory.Build.props <Version>, so the tag drives the stamp.
+#
+# In the `release` stage with NO `needs:`, so it runs only after every earlier
+# stage (build/test/sbom/dast) has passed — i.e. the pipeline is green.
 #
 # NOT .release-required: a side-effect publish, not a release gate, so it stays
 # outside release-contract-lint. Uses buildx because the Dockerfile is
 # `# syntax=docker/dockerfile:1` with `RUN --mount=type=secret` (BuildKit-only,
 # matching the GitHub build) — Kaniko can't build it. This therefore needs a
 # PRIVILEGED, BuildKit-capable runner (same requirement as the rpm/docker test
-# suites).
+# suites). arm64 is cross-compiled by the Dockerfile (TARGETARCH→RID); only the
+# final-stage apk layer runs under QEMU, installed via the binfmt image below.
 #
 # Prereqs (set as masked CI/CD variables):
 #   REGISTRY_KEY  — token for $DEP_IMAGE_REGISTRY. Already used by the build job
@@ -1243,18 +1278,32 @@ release-to-github:
 #                   If it doesn't, add a dedicated publish token var and use it
 #                   for `docker login` below.
 #   DOCKER_AUTH_CONFIG — base-image pull creds (already required pipeline-wide).
-# TODO before enabling: pin docker:27-cli / docker:27-dind by digest like every
-# other image (glsec/supply-chain lint expects it).
+# Two-image publish. `parallel: matrix` fans this one definition into
+# publish-image (community) and publish-image (edge): the community image builds
+# from Dockerfile into dependably/community; the edge image builds from
+# Dockerfile.edge into dependably/edge (the slim, management-plane-free root).
+# Both are multi-arch (amd64+arm64) and share the identical tag logic. IMAGE_FLAVOR
+# selects the Dockerfile, the target repo, and a per-flavor resource_group so the
+# two registry pushes serialize independently rather than blocking each other.
 publish-image:
   stage: release
   extends: .runs-on-ci-main
-  image: ${DEP_IMAGE_REGISTRY}/library/docker:27-cli
+  image: ${DEP_IMAGE_REGISTRY}/library/docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+  parallel:
+    matrix:
+      - IMAGE_FLAVOR: community
+        IMAGE_REPO: ${DEP_IMAGE_REGISTRY}/dependably/community
+        DOCKERFILE: Dockerfile
+      - IMAGE_FLAVOR: edge
+        IMAGE_REPO: ${DEP_IMAGE_REGISTRY}/dependably/edge
+        DOCKERFILE: Dockerfile.edge
   services:
-    - name: ${DEP_IMAGE_REGISTRY}/library/docker:27-dind   # glsec:ignore GL054 -- buildx needs BuildKit (Dockerfile uses RUN --mount=type=secret); privileged/BuildKit runner is the documented, chosen prerequisite
+    - name: ${DEP_IMAGE_REGISTRY}/library/docker:27-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce   # glsec:ignore GL054 -- buildx needs BuildKit (Dockerfiles use RUN --mount=type=secret); privileged/BuildKit runner is the documented, chosen prerequisite
       alias: docker
   tags: [amd64]   # must be a privileged / BuildKit-capable runner
-  # serialize publishes so concurrent main pipelines can't race the registry (GL019)
-  resource_group: publish-image
+  # serialize publishes so concurrent main pipelines can't race the registry (GL019);
+  # per-flavor group so the community and edge pushes don't block each other.
+  resource_group: publish-image-${IMAGE_FLAVOR}
   variables:
     # Talk to the dind service over its plaintext endpoint. TLS (2376) needs the
     # runner to share dind's generated /certs/client volume into the job container;
@@ -1263,10 +1312,10 @@ publish-image:
     # bridge network, which is never reachable outside the job.
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: "" # glsec:ignore GL031 -- TLS on 2376 needs the runner to share dind's /certs/client volume into the job, which these self-hosted runners do not; the docker executor isolates the dind daemon on this job's per-build service network, so 2375 is not reachable by other jobs
-    IMAGE_REPO: ${DEP_IMAGE_REGISTRY}/dependably/community
   # Auth + build-time dep routing reuse the existing REGISTRY_URL / REGISTRY_KEY
   # CI vars (same as the build job); REGISTRY_KEY must carry publish:oci to push.
   script:
+    - echo "Publishing $IMAGE_FLAVOR image from $DOCKERFILE to $IMAGE_REPO"
     - echo "$REGISTRY_KEY" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
     # The dind service daemon comes up a few seconds after the job container, so the
     # first command that talks to it races startup ("Cannot connect to the Docker
@@ -1275,21 +1324,39 @@ publish-image:
     - |
       for i in $(seq 30); do docker info >/dev/null 2>&1 && break; echo "waiting for dind ($i)..."; sleep 1; done
       docker info >/dev/null 2>&1 || { echo "dind daemon did not become ready on $DOCKER_HOST"; exit 1; }
+    # Register the arm64 QEMU emulator on the amd64 dind daemon so the final-stage
+    # apk layer of the arm64 image can run. The build/publish stages themselves are
+    # cross-compiled (TARGETARCH→RID), so only that layer needs emulation.
+    - docker run --privileged --rm ${DEP_IMAGE_REGISTRY}/tonistiigi/binfmt:latest@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64 # glsec:ignore GL056 -- binfmt_misc registration needs privileged (cap-add alone cannot mount /proc/sys/fs/binfmt_misc); one-shot container inside this job's isolated, already-privileged dind daemon
     - docker buildx create --use --name dep-builder
     - printf '%s' "$REGISTRY_KEY" > /tmp/registry_key
-    # Stamp a valid SemVer prerelease (a raw SHA is not a valid .NET version
-    # string); FILE_VERSION is the single source of truth in Directory.Build.props.
+    # Pick the tag set from the trigger. On a vX.Y.Z tag the tag is the source of
+    # truth (validate-release-tag already matched it to Directory.Build.props):
+    # publish the durable :X.Y.Z + :latest. On a main push, stamp a valid SemVer
+    # prerelease (a raw SHA is not a valid .NET version string) from FILE_VERSION,
+    # the source of truth in Directory.Build.props, and publish :main + :$VERSION.
     - |
-      FILE_VERSION=$(grep -oE '<Version>[^<]+</Version>' Directory.Build.props \
-        | sed -E 's|<Version>(.*)</Version>|\1|')
-      BUILD_VERSION="${FILE_VERSION}-main.${CI_COMMIT_SHORT_SHA}"
-      echo "Stamping image version $BUILD_VERSION"
+      if echo "$CI_COMMIT_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+        VERSION="${CI_COMMIT_TAG#v}"
+        VERSION_TAGS="--tag $IMAGE_REPO:$VERSION --tag $IMAGE_REPO:latest"
+      else
+        FILE_VERSION=$(grep -oE '<Version>[^<]+</Version>' Directory.Build.props \
+          | sed -E 's|<Version>(.*)</Version>|\1|')
+        # The "g" prefix keeps the SHA identifier alphanumeric: SemVer forbids leading
+        # zeros in numeric prerelease identifiers, and an all-digit short SHA with a
+        # leading zero is otherwise an invalid version string.
+        VERSION="${FILE_VERSION}-main.g${CI_COMMIT_SHORT_SHA}"
+        VERSION_TAGS="--tag $IMAGE_REPO:main --tag $IMAGE_REPO:$VERSION"
+      fi
+      echo "Stamping image version $VERSION"
     - >-
       docker buildx build
-      --build-arg VERSION="$BUILD_VERSION"
+      -f "$DOCKERFILE"
+      --platform linux/amd64,linux/arm64
+      --provenance=false
+      --build-arg VERSION="$VERSION"
       --build-arg REGISTRY_URL="$REGISTRY_URL"
       --secret id=registry_key,src=/tmp/registry_key
-      --tag "$IMAGE_REPO:main"
-      --tag "$IMAGE_REPO:$BUILD_VERSION"
+      $VERSION_TAGS
       --push .
     - rm -f /tmp/registry_key

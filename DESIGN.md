@@ -211,9 +211,20 @@ table column with versions, counts, durations, or timestamps.
 Forms width-constrained ≤ 480px. Full-width tables live directly inside
 `.page`.
 
-Data-dense pages (Dashboard, Vulnerabilities, Packages, Audit,
-AdminSettings) add `.page-wide` (1320px). 1100 for forms, 1320 for
-data-dense tables; no other widths.
+**Page-width wrappers** — pick exactly one per route root:
+
+| Class         | Max width | Use for                                         |
+| ------------- | --------- | ----------------------------------------------- |
+| `.page`       | 1100px    | forms / narrow reading (the default)            |
+| `.page-wide`  | 1320px    | data-dense pages (Dashboard, Vulnerabilities, Packages, Audit, AdminSettings) |
+| `.page-fluid` | none      | full-bleed list / data-table pages; 24px gutters |
+
+All three carry `padding: 24px`. **The wrapper belongs once, at the route
+root.** A component that is embedded as a sub-section of another page — e.g. a
+settings-tab panel — renders bare (heading via `.section-h`, tables directly);
+it must not re-wrap itself in `.page`/`.page-fluid`, or the gutters stack and
+the section is inset from its siblings. Separate stacked sub-sections with
+`margin-top: 24px`, not nested wrappers.
 
 ### 4.1 Navbar contract
 
@@ -565,7 +576,7 @@ When a component has two independent tables (e.g. Users.svelte members and invit
 **Client-side vs. server-side sort**
 
 - **Server-side sort** (API params, paginated across all pages): Packages.
-- **Client-side sort** (in-memory, all rows loaded at once): Vulnerabilities, VersionDetail, Users, Tokens, SettingsServiceTokens, OrgSettings allowlist/blocklist.
+- **Client-side sort** (in-memory, all rows loaded at once): Vulnerabilities, VersionDetail, Users, Tokens, SettingsServiceTokens, OrgSettings allowlist/blocklist, Claims (server-filtered, client-sorted).
 - **Client-side sort on current page only** (acceptable for admin/audit tables): AdminOrgs, Activity.
 
 **Skip list**

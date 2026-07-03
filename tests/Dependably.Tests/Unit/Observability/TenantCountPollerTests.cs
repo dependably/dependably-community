@@ -35,7 +35,7 @@ public sealed class TenantCountPollerTests : IAsyncLifetime
             .Build();
 
     // Non-edge, non-air-gapped: nothing is disabled, so the poller runs.
-    private static IAirGapMode NoAirGap() => new AirGapMode(Config());
+    private static AirGapMode NoAirGap() => new(Config());
 
     [Fact]
     public async Task PollOnceAsync_RecordsActiveTenantCount()
