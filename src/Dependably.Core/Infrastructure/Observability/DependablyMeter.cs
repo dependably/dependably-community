@@ -265,6 +265,15 @@ public static class DependablyMeter
             description: "Downloads blocked by the block_install_scripts proxy policy. Attributes: ecosystem.");
 
     /// <summary>
+    /// Downloads blocked because the artifact's SPDX license fails the tenant's license policy
+    /// and the tenant's <c>license_enforcement_mode</c> is 'block'. Attributes: <c>ecosystem</c>.
+    /// </summary>
+    public static readonly Counter<long> LicenseBlocks =
+        Meter.CreateCounter<long>(
+            "dependably.security.license_blocks",
+            description: "Downloads blocked by the license_enforcement_mode 'block' policy. Attributes: ecosystem.");
+
+    /// <summary>
     /// Outcome of an artefact-provenance/signature check at proxy ingest. Attributes:
     /// <c>ecosystem</c> and <c>result</c> (<c>verified</c> / <c>failed</c> / <c>unsigned</c>).
     /// Deliberately carries no per-package labels — package name and version would blow the

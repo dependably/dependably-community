@@ -49,7 +49,7 @@ public class PyPiSimpleIndexRewriteTests
     {
         var entries = PyPiSimpleIndexHelper.ParseUpstreamSimpleIndexLinks(FixtureSimpleIndexHtml);
         string rendered = PyPiSimpleIndexHelper.RenderMergedSimpleIndex(
-            "mypy-extensions", entries, [], OrgSettingsFixture.Default(), EmptySignals(), DateTimeOffset.UnixEpoch);
+            "mypy-extensions", entries, [], PyPiSimpleIndexHelper.NoHostedFiles, OrgSettingsFixture.Default(), EmptySignals(), DateTimeOffset.UnixEpoch);
 
         Assert.Contains(
             "href=\"/packages/mypy_extensions-1.0.0-py3-none-any.whl#sha256=4392f6c0eb8a5668a69e23d168ffa70f0be9ccfd32b5cc2d26a34ae5b844552d\"",
@@ -97,7 +97,7 @@ public class PyPiSimpleIndexRewriteTests
 
         var entries = PyPiSimpleIndexHelper.ParseUpstreamSimpleIndexLinks(hostileHtml);
         string rendered = PyPiSimpleIndexHelper.RenderMergedSimpleIndex(
-            "pkg", entries, [], OrgSettingsFixture.Default(), EmptySignals(), DateTimeOffset.UnixEpoch);
+            "pkg", entries, [], PyPiSimpleIndexHelper.NoHostedFiles, OrgSettingsFixture.Default(), EmptySignals(), DateTimeOffset.UnixEpoch);
 
         // Only the two anchor filenames are ever admitted — one from a "hostile" anchor (its
         // filename text alone is harmless and gets HTML-encoded) and one from the legitimate one.
@@ -155,6 +155,66 @@ public class PyPiSimpleIndexRewriteTests
         Assert.Empty(entries);
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2),
             $"Parse took {sw.Elapsed.TotalMilliseconds:F0}ms — expected linear-time matching.");
+    }
+
+    [Fact]
+    public void MultiFileHostedVersion_RendersOneAnchorPerFile_WithPerFileSha256()
+    {
+        // One hosted release holding a wheel AND an sdist: the index lists both files, each
+        // with its own sha256 fragment — never a single anchor from the version row.
+        var version = new Dependably.Infrastructure.PackageVersion
+        {
+            Id = "v1",
+            PackageId = "p1",
+            Version = "1.0.0",
+            Purl = "pkg:pypi/demo@1.0.0",
+            BlobKey = "hosted/o1/pypi/demo/1.0.0/demo-1.0.0-py3-none-any.whl",
+            Filename = "demo-1.0.0-py3-none-any.whl",
+            ChecksumSha256 = "wheelsha",
+            Origin = "uploaded",
+            CreatedAt = DateTimeOffset.UnixEpoch,
+        };
+        var files = new[]
+        {
+            new Dependably.Infrastructure.PackageVersionFile(
+                "f1", "v1", "o1", "demo-1.0.0-py3-none-any.whl",
+                "hosted/o1/pypi/demo/1.0.0/demo-1.0.0-py3-none-any.whl", 100, "wheelsha", DateTimeOffset.UnixEpoch),
+            new Dependably.Infrastructure.PackageVersionFile(
+                "f2", "v1", "o1", "demo-1.0.0.tar.gz",
+                "hosted/o1/pypi/demo/1.0.0/demo-1.0.0.tar.gz", 40, "sdistsha", DateTimeOffset.UnixEpoch),
+        }.ToLookup(f => f.PackageVersionId);
+
+        string rendered = PyPiSimpleIndexHelper.RenderLocalSimpleIndex(
+            "demo", [version], files, OrgSettingsFixture.Default(), EmptySignals(), DateTimeOffset.UnixEpoch);
+
+        Assert.Contains("href=\"/packages/demo-1.0.0-py3-none-any.whl#sha256=wheelsha\"", rendered);
+        Assert.Contains("href=\"/packages/demo-1.0.0.tar.gz#sha256=sdistsha\"", rendered);
+    }
+
+    [Fact]
+    public void HostedVersionWithoutFileRows_FallsBackToVersionRowArtifact()
+    {
+        // Synthetic proxy projections (and any not-yet-backfilled row) carry their single
+        // artifact on the version row and must keep rendering exactly one anchor.
+        var version = new Dependably.Infrastructure.PackageVersion
+        {
+            Id = "v1",
+            PackageId = "p1",
+            Version = "1.0.0",
+            Purl = "pkg:pypi/demo@1.0.0",
+            BlobKey = "proxy/abc/demo-1.0.0.tar.gz",
+            Filename = "demo-1.0.0.tar.gz",
+            ChecksumSha256 = "abc",
+            Origin = "proxy",
+            CreatedAt = DateTimeOffset.UnixEpoch,
+        };
+
+        string rendered = PyPiSimpleIndexHelper.RenderLocalSimpleIndex(
+            "demo", [version], PyPiSimpleIndexHelper.NoHostedFiles,
+            OrgSettingsFixture.Default(), EmptySignals(), DateTimeOffset.UnixEpoch);
+
+        Assert.Contains("href=\"/packages/demo-1.0.0.tar.gz#sha256=abc\"", rendered);
+        Assert.Single(rendered.Split("<a href=").Skip(1));
     }
 
     private static Dictionary<string, Dependably.Infrastructure.VulnGateSignals> EmptySignals()

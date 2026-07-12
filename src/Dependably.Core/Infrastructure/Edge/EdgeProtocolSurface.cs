@@ -24,7 +24,7 @@ public enum EdgeSurface
 
 /// <summary>
 /// The canonical set of protocol-surface controllers — the source of truth for what an edge
-/// cache serves. All eight protocol controllers are Core types, so this classification lives
+/// cache serves. All nine protocol controllers are Core types, so this classification lives
 /// in Core and ships in every host (including the protocol-only edge root). The management-side
 /// registry references this set rather than restating the controller list, keeping one source
 /// of truth for the Protocol⊂Core invariant.
@@ -43,6 +43,7 @@ public static class EdgeProtocolSurface
         typeof(Api.CargoController),
         typeof(Api.GoController),
         typeof(Api.OciController),
+        typeof(Api.ApkController),
     };
 
     /// <summary>True when the controller is a kept protocol surface on an edge node.</summary>

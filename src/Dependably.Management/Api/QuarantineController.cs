@@ -47,6 +47,9 @@ public sealed class QuarantineController : OrgScopedControllerBase
     }
 
     /// <summary>GET /api/v1/quarantine?state=pending&amp;ecosystem=npm&amp;limit=50&amp;offset=0</summary>
+    // Read-only: accepts a PAT/service token carrying read:tenant. The decide action below
+    // stays JWT-only (class-level [Authorize]) — its TenantConfigure gate is unaffected.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/quarantine")]
     public async Task<IActionResult> List(
         [FromQuery] string? state, [FromQuery] string? ecosystem,

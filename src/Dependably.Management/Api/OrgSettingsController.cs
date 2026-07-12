@@ -71,6 +71,9 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     }
 
     /// <summary>GET /api/v1/orgs/{org}/settings</summary>
+    // Read-only: accepts a PAT/service token carrying read:tenant. Returns policy values and
+    // *_configured booleans only — never a secret.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/settings")]
     public async Task<IActionResult> GetOrgSettings(CancellationToken ct)
     {
@@ -211,6 +214,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     }
 
     /// <summary>GET /api/v1/orgs/{org}/retention</summary>
+    // Read-only: accepts a PAT/service token carrying read:tenant.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/retention")]
     public async Task<IActionResult> GetRetention(CancellationToken ct)
     {
@@ -259,6 +264,8 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     }
 
     /// <summary>GET /api/v1/orgs/{org}/proxy-settings</summary>
+    // Read-only: accepts a PAT/service token carrying read:tenant.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/proxy-settings")]
     public async Task<IActionResult> GetProxySettings(CancellationToken ct)
     {

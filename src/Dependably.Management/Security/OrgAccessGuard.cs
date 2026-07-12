@@ -32,6 +32,15 @@ public sealed class OrgAccessGuard
     /// capability set against <paramref name="requiredCapability"/>. Effective set: explicit
     /// <c>cap</c> claims when present (token-narrowed API tokens) else
     /// <see cref="Capabilities.ForRole"/> based on the user's current DB role.
+    ///
+    /// Service/CI tokens have no <c>users</c> row — <c>sub</c> is the token's own id, not a
+    /// user id (<c>TokenAuthenticationHandler.BuildClaims</c>) — so the primary lookup below
+    /// always misses for them. When that happens for an API-token-authenticated principal,
+    /// membership is instead proven by the token's own <c>org_id</c>/<c>tid</c> claim matching
+    /// <paramref name="orgId"/>, mirroring <c>SiemController</c>'s token-auth path; capability
+    /// comes from the token's explicit <c>cap</c> claims exactly like any other API-token
+    /// principal. JWT-session principals never take this fallback — a JWT with no matching
+    /// users row means the user was removed mid-session and correctly 404s.
     /// </summary>
     public async Task<AccessResult> CheckCapAsync(
         ClaimsPrincipal principal,
@@ -47,7 +56,9 @@ public sealed class OrgAccessGuard
 
         if (TenantId is null)
         {
-            return AccessResult.NotFound;
+            return IsApiTokenPrincipal(principal)
+                ? CheckServiceTokenCap(principal, orgId, requiredCapability)
+                : AccessResult.NotFound;
         }
 
         var granted = ResolveCallerCapabilities(principal, Role);
@@ -55,6 +66,31 @@ public sealed class OrgAccessGuard
             ? AccessResult.Allowed
             : AccessResult.Forbidden;
     }
+
+    // Service/CI tokens carry no users-row role — their effective capability set is exactly
+    // their explicit `cap` claims. A token with zero `cap` claims (a legacy token whose
+    // `capabilities` column is NULL/empty) grants nothing here; it must never fall back to a
+    // role-based default, which would silently upgrade a should-be-denied legacy token to
+    // member-level (or higher) reads.
+    private static AccessResult CheckServiceTokenCap(
+        ClaimsPrincipal principal, string orgId, string requiredCapability)
+    {
+        string? tokenOrgId = principal.FindFirst("org_id")?.Value ?? principal.FindFirst("tid")?.Value;
+        if (!string.Equals(tokenOrgId, orgId, StringComparison.Ordinal))
+        {
+            return AccessResult.NotFound;
+        }
+
+        var granted = ResolveExplicitCapClaims(principal);
+        return granted.Count > 0 && Capabilities.Grants(granted, requiredCapability)
+            ? AccessResult.Allowed
+            : AccessResult.Forbidden;
+    }
+
+    // True when the principal was authenticated by the opaque-API-token scheme rather than a
+    // JWT session — the discriminator that gates the service-token membership fallback above.
+    private static bool IsApiTokenPrincipal(ClaimsPrincipal principal) =>
+        principal.Identities.Any(i => i.AuthenticationType == TokenAuthenticationDefaults.Scheme);
 
     /// <summary>
     /// Capability-driven authorization for controllers. Reads the resolved
@@ -128,15 +164,27 @@ public sealed class OrgAccessGuard
     // win when present, otherwise the user's current DB role drives the resolution.
     // system_admin isn't handled here because RouteScopeFilter already blocks operator tokens
     // from tenant routes before they reach this guard.
+    //
+    // Only call this with a real DB role (a users-row principal). A caller with no users row
+    // — a service/CI token — has no role to fall back to; use
+    // <see cref="ResolveExplicitCapClaims"/> instead so an empty claim set denies rather than
+    // silently resolving to <c>Capabilities.ForRole("member")</c>.
     internal static IReadOnlySet<string> ResolveCallerCapabilities(ClaimsPrincipal principal, string? dbRole)
     {
-        var explicitCaps = principal.FindAll("cap")
-            .Select(c => c.Value)
-            .Where(v => !string.IsNullOrWhiteSpace(v))
-            .ToHashSet(StringComparer.Ordinal);
-
+        var explicitCaps = ResolveExplicitCapClaims(principal);
         return explicitCaps.Count > 0
             ? explicitCaps
             : Capabilities.ForRole(dbRole ?? "member");
     }
+
+    // The principal's explicit `cap` claims, verbatim, with no role-based fallback. This is
+    // the correct resolution for any principal that has no users-row role to fall back to
+    // (service/CI tokens, and any other ApiToken-scheme principal being capability-checked
+    // outside a users-row lookup) — an empty result must be treated as zero capabilities, not
+    // coalesced into a role's default grant.
+    internal static IReadOnlySet<string> ResolveExplicitCapClaims(ClaimsPrincipal principal) =>
+        principal.FindAll("cap")
+            .Select(c => c.Value)
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .ToHashSet(StringComparer.Ordinal);
 }

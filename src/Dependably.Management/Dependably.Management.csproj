@@ -16,6 +16,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="../../skills/remediation/fix-vulnerable-dependency/SKILL.md" LogicalName="skills.remediation.fix-vulnerable-dependency.SKILL.md" />
+    <EmbeddedResource Include="../../skills/remediation/fix-injection/SKILL.md" LogicalName="skills.remediation.fix-injection.SKILL.md" />
+    <EmbeddedResource Include="../../skills/remediation/fix-xss/SKILL.md" LogicalName="skills.remediation.fix-xss.SKILL.md" />
+    <EmbeddedResource Include="../../skills/remediation/fix-path-traversal/SKILL.md" LogicalName="skills.remediation.fix-path-traversal.SKILL.md" />
+    <EmbeddedResource Include="../../skills/remediation/fix-unsafe-deserialization/SKILL.md" LogicalName="skills.remediation.fix-unsafe-deserialization.SKILL.md" />
+    <EmbeddedResource Include="../../skills/remediation/fix-ssrf/SKILL.md" LogicalName="skills.remediation.fix-ssrf.SKILL.md" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="Microsoft.AspNetCore.Builder" />
     <Using Include="Microsoft.AspNetCore.Http" />
     <Using Include="Microsoft.Extensions.Configuration" />

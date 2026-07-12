@@ -83,6 +83,18 @@ public static partial class BlobKeys
         => $"cargo/{orgId}/{name}/{version}.crate";
 
     /// <summary>
+    /// Org-scoped key for an Alpine apk repository file — a package (<c>.apk</c>) or an
+    /// index-adjacent file, addressed by its dl-cdn coordinate. Not content-addressed: apk
+    /// artefacts are TOFU (APKINDEX carries no full-file digest, only a control-segment
+    /// checksum), so the key is the repository path rather than a SHA-256, mirroring the Go
+    /// module key. Callers validate each of <paramref name="release"/>, <paramref name="repo"/>,
+    /// <paramref name="arch"/>, and <paramref name="filename"/> with
+    /// <see cref="Dependably.Security.PathSafeValidator"/> before passing them here.
+    /// </summary>
+    public static string Apk(string orgId, string release, string repo, string arch, string filename)
+        => $"apk/{orgId}/{release}/{repo}/{arch}/{filename}";
+
+    /// <summary>
     /// Converts a DB blob key to the actual blob store key.
     /// Proxy DB keys include a filename suffix (proxy/{sha256}/{file}) but blobs are stored at proxy/{sha256}.
     /// Hosted keys are returned unchanged.

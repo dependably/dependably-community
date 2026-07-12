@@ -402,12 +402,14 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task FetchArtifactAsync_FetchThenHash_Persistent403_Throws_AndDoesNotNegativeCache()
+    public async Task FetchArtifactAsync_FetchThenHash_AnonymousPersistent403_TransientThrows_AndDoesNotNegativeCache()
     {
         // The COMMON Maven path: no .sha256 sidecar → fetch-then-hash via the buffered
-        // metadata path. A transient upstream 403 there must be classified as retryable
-        // (UpstreamFetchFailedException → 503), NOT negative-cached. Negative-caching it
-        // would poison the artefact into a sticky 404 until the entry expires.
+        // metadata path. Maven upstream fetches here are anonymous, so a 403 is a transient
+        // CDN condition (bot mitigation), classified as retryable
+        // (UpstreamFetchFailedException, Transient=true → 503) and NOT negative-cached.
+        // Negative-caching it would poison the artefact into a sticky 404 until the entry
+        // expires.
         string path = "com/example/fbd403/1.0/fbd403-1.0.jar";
         _server.Given(Request.Create().WithPath("/" + path).UsingGet())
                .RespondWith(Response.Create().WithStatusCode(403));
@@ -417,6 +419,7 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(
             () => fetcher.FetchArtifactAsync(_upstream, path, default));
         Assert.True(ex.Transient);
+        Assert.False(ex.Refused);
         Assert.Equal(403, ex.StatusCode);
 
         // Not negative-cached: a second request still contacts upstream (throws again),
@@ -428,9 +431,9 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task FetchArtifactAsync_FetchThenHash_Transient403ThenSuccess_RetriesAndReturnsBytes()
+    public async Task FetchArtifactAsync_FetchThenHash_Anonymous403ThenSuccess_RetriesAndReturnsBytes()
     {
-        // A transient 403 that heals within the retry window must be retried in-request,
+        // An anonymous 403 that heals within the retry window must be retried in-request,
         // so the caller never even sees an error: first attempt 403, second attempt 200.
         byte[] bytes = Encoding.UTF8.GetBytes("healed-after-retry");
         string path = "com/example/heal403/1.0/heal403-1.0.jar";

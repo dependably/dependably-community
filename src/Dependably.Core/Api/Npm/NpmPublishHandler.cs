@@ -149,6 +149,8 @@ public sealed class NpmPublishHandler(
     // enforces the per-tenant size cap, then stores + records the version and persists its
     // dist-tags. Split out of PublishPackageAsync, which owns the staging-file lifetime
     // (stream-parse the body, delete the staged tarball in its finally) around this call.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Each argument is a distinct publish-coordinate/staging input threaded from PublishAsync's single caller.")]
     private async Task<IActionResult> PublishAttachmentAsync(
         HttpContext httpContext, string orgId, string fullName, JsonNode? body, TokenRecord token,
         string attachStagingPath, string attachmentKey, long stagingSize, CancellationToken ct)
@@ -189,10 +191,22 @@ public sealed class NpmPublishHandler(
 
         var orgSettings = await orgs.GetSettingsAsync(orgId, ct);
         var claim = await claimResolver.ResolveAsync(orgId, "npm", fullName, ct);
+
+        // License: read the tarball's package.json (canonical, matches the proxy first-fetch
+        // path) before the publish call so the hard-block gate inside StoreAndRecordAsync can
+        // evaluate it before the version row is persisted. Fall back to the packument when the
+        // tarball lacks a parseable package/package.json — many publish clients don't include
+        // license in the packument's version object. Deprecation only ever lives in the
+        // packument (npm deprecate writes there). Reads from the staged temp file — the tarball
+        // is never materialized in managed memory.
+        var fromTarball = ExtractNpmTarballLicense(attachStagingPath);
+        var fromPackument = LicenseExtractor.FromNpmPackumentVersion(bodyVersion);
+        var spdx = fromTarball.Spdx.Count > 0 ? fromTarball.Spdx : fromPackument.Spdx;
+
         var request = BuildNpmPublishRequest(httpContext, new NpmPublishContext(
             orgId, fullName, versionKey!, filename, attachStagingPath, stagingSize,
             token.UserId, token.ActorKind, orgSettings?.AllowVersionOverwrite ?? false, claim.State,
-            manifestJson, declaredIntegrity));
+            manifestJson, declaredIntegrity, spdx.Count > 0 ? spdx : null));
         var result = await publish.StoreAndRecordAsync(request, ct);
 
         if (result is PublishResult.Rejected rej)
@@ -201,7 +215,14 @@ public sealed class NpmPublishHandler(
         }
 
         string versionId = ((PublishResult.Accepted)result).VersionId;
-        await EmitNpmLicensesAndDeprecationAsync(versionId, attachStagingPath, versions?[versionKey!], ct);
+        if (spdx.Count > 0)
+        {
+            await licenses.SetLicensesAsync(versionId, spdx, "upstream", ct);
+        }
+        if (fromPackument.Deprecated is not null)
+        {
+            await packages.UpdateDeprecatedAsync(versionId, fromPackument.Deprecated, ct);
+        }
 
         // Persist dist-tags from the packument. npm sends {"dist-tags":{"beta":"1.0.0-beta.1"}}
         // on `npm publish --tag beta`. When no dist-tags object is present, default to 'latest'.
@@ -260,7 +281,7 @@ public sealed class NpmPublishHandler(
         string OrgId, string FullName, string VersionKey, string Filename,
         string StagingPath, long StagingSize,
         string? ActorUserId, string? ActorKind, bool AllowOverwrite, string ClaimState,
-        string? ManifestJson, string? DeclaredIntegritySri);
+        string? ManifestJson, string? DeclaredIntegritySri, IReadOnlyList<string>? Licenses);
 
     private static PublishRequest BuildNpmPublishRequest(HttpContext httpContext, NpmPublishContext ctx)
         => new()
@@ -285,35 +306,15 @@ public sealed class NpmPublishHandler(
             SourceIp = httpContext.GetNormalizedRemoteIp(),
             ManifestJson = ctx.ManifestJson,
             DeclaredIntegritySri = ctx.DeclaredIntegritySri,
+            Licenses = ctx.Licenses,
         };
 
-    /// <summary>
-    /// License: read the tarball's package.json (canonical, matches the proxy first-fetch
-    /// path). Fall back to the packument when the tarball lacks a parseable
-    /// package/package.json — many publish clients don't include license in the
-    /// packument's version object. Deprecation only ever lives in the packument (npm
-    /// deprecate writes there), so it must always come from the packument extractor.
-    /// Reads from the staged temp file — the tarball is never materialized in managed memory.
-    /// </summary>
-    private async Task EmitNpmLicensesAndDeprecationAsync(
-        string versionId, string fileStagingPath, JsonNode? packumentVersion, CancellationToken ct)
+    // deepcode ignore PT: stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+    private static LicenseExtractor.ExtractedMetadata ExtractNpmTarballLicense(string stagingPath)
     {
-        // deepcode ignore PT: stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
-        await using var fs = new FileStream(
-            fileStagingPath, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: 81920, useAsync: true);
-        var fromTarball = LicenseExtractor.FromNpmTarballPackageJson(fs);
-        var fromPackument = LicenseExtractor.FromNpmPackumentVersion(packumentVersion);
-        var spdx = fromTarball.Spdx.Count > 0 ? fromTarball.Spdx : fromPackument.Spdx;
-        if (spdx.Count > 0)
-        {
-            await licenses.SetLicensesAsync(versionId, spdx, "upstream", ct);
-        }
-
-        if (fromPackument.Deprecated is not null)
-        {
-            await packages.UpdateDeprecatedAsync(versionId, fromPackument.Deprecated, ct);
-        }
+        using var fs = new FileStream(
+            stagingPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: false);
+        return LicenseExtractor.FromNpmTarballPackageJson(fs);
     }
 
     // Handles the no-attachments PUT shape sent by `npm deprecate`. The body contains a

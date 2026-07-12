@@ -41,3 +41,22 @@ Each skill prompts for two inputs, in order:
 - The in-app **Setup** page generates the same snippets pre-filled for the
   current org. Skills are useful when you want a deeper recipe (Poetry, uv,
   global config, etc.) than the one-snippet Setup page covers.
+
+## Remediation skills
+
+`skills/remediation/` is a separate set: curated recipes for **fixing** a
+vulnerability the dependably vuln report surfaced, not for configuring a
+client. The Vulnerabilities detail panel links each finding to the
+applicable skill(s) below and gives a one-liner to install one into
+`~/.claude/skills/`; they are also served directly from a running instance
+at `GET /api/v1/remediation/skills/{id}` (anonymous, so the install
+one-liner works air-gapped, without a token).
+
+| Skill | Covers |
+|-------|--------|
+| [fix-vulnerable-dependency](./remediation/fix-vulnerable-dependency/SKILL.md) | Upgrading a vulnerable npm/PyPI/NuGet/Maven/Go/Cargo/RPM/OCI dependency to its fixed version, lockfile-aware, with transitive-override recipes. Applies to any advisory with a fixed version. |
+| [fix-injection](./remediation/fix-injection/SKILL.md) | SQL, OS command, LDAP, XPath, and code/template injection (CWE-20/77/78/89/90/91/94/95/... — OWASP A05:2025 Injection). |
+| [fix-xss](./remediation/fix-xss/SKILL.md) | Cross-Site Scripting (CWE-79/80/83/86 — OWASP A05:2025 Injection). |
+| [fix-path-traversal](./remediation/fix-path-traversal/SKILL.md) | Path/directory traversal and symlink following (CWE-22/23/36/59/61/65/73 — OWASP A01:2025 Broken Access Control). |
+| [fix-unsafe-deserialization](./remediation/fix-unsafe-deserialization/SKILL.md) | Unsafe deserialization and mass assignment (CWE-502/915 — OWASP A08:2025 Software or Data Integrity Failures). |
+| [fix-ssrf](./remediation/fix-ssrf/SKILL.md) | Server-Side Request Forgery (CWE-918/441 — OWASP A01:2025 Broken Access Control). |

@@ -1,5 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Alerts;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -26,7 +27,15 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
     {
         _fixture = fixture;
         _audit = new AuditRepository(_fixture.Store);
-        _sut = new BlockGateService(new VulnerabilityRepository(_fixture.Store, _clock), _audit, new QuarantineRepository(_fixture.Store, _clock), new InstallScriptAllowlistService(_fixture.Store, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, _clock);
+        _sut = new BlockGateService(
+            new VulnerabilityRepository(_fixture.Store, _clock),
+            _audit,
+            new QuarantineRepository(_fixture.Store, _clock),
+            new AlertService(new AlertRepository(_fixture.Store, _clock), new NoOpAlertNotifier(), Microsoft.Extensions.Logging.Abstractions.NullLogger<AlertService>.Instance),
+            new InstallScriptAllowlistService(_fixture.Store, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock),
+            new LicenseRepository(_fixture.Store, _clock, new LicenseNormalizer(_fixture.Store, Microsoft.Extensions.Logging.Abstractions.NullLogger<LicenseNormalizer>.Instance)),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance,
+            _clock);
     }
 
     // ── manual-block / manual-allow ───────────────────────────────────────────

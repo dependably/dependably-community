@@ -46,7 +46,8 @@ public sealed class BlockGateRequestFactoryTests
             InstallScriptKind: version.InstallScriptKind,
             BlockInstallScriptsMode: settings.BlockInstallScripts,
             RevokedAt: version.RevokedAt,
-            BlockRevokedMode: settings.BlockRevoked);
+            BlockRevokedMode: settings.BlockRevoked,
+            LicenseEnforcementMode: settings.LicenseEnforcementMode);
 
         Assert.Equal(manual, factory);
     }
@@ -81,7 +82,8 @@ public sealed class BlockGateRequestFactoryTests
             InstallScriptKind: version.InstallScriptKind,
             BlockInstallScriptsMode: settings.BlockInstallScripts,
             RevokedAt: version.RevokedAt,
-            BlockRevokedMode: settings.BlockRevoked);
+            BlockRevokedMode: settings.BlockRevoked,
+            LicenseEnforcementMode: settings.LicenseEnforcementMode);
 
         Assert.Equal(manual, factory);
     }
@@ -116,7 +118,8 @@ public sealed class BlockGateRequestFactoryTests
             InstallScriptKind: version.InstallScriptKind,
             BlockInstallScriptsMode: null,
             RevokedAt: version.RevokedAt,
-            BlockRevokedMode: null);
+            BlockRevokedMode: null,
+            LicenseEnforcementMode: null);
 
         Assert.Equal(manual, factory);
     }
@@ -159,7 +162,8 @@ public sealed class BlockGateRequestFactoryTests
             InstallScriptKind: blockedVersion.InstallScriptKind,
             BlockInstallScriptsMode: settings.BlockInstallScripts,
             RevokedAt: blockedVersion.RevokedAt,
-            BlockRevokedMode: settings.BlockRevoked);
+            BlockRevokedMode: settings.BlockRevoked,
+            LicenseEnforcementMode: settings.LicenseEnforcementMode);
 
         var factoryAllowed = BlockGateRequest.For(orgId, ecosystem, allowedVersion, null, settings, null);
         var manualAllowed = new BlockGateRequest(orgId, ecosystem, allowedVersion.Purl, allowedVersion.Id,
@@ -178,7 +182,8 @@ public sealed class BlockGateRequestFactoryTests
             InstallScriptKind: allowedVersion.InstallScriptKind,
             BlockInstallScriptsMode: settings.BlockInstallScripts,
             RevokedAt: allowedVersion.RevokedAt,
-            BlockRevokedMode: settings.BlockRevoked);
+            BlockRevokedMode: settings.BlockRevoked,
+            LicenseEnforcementMode: settings.LicenseEnforcementMode);
 
         // Assert: factory requests are field-identical to manual — mixed results
         // (one blocked, one allowed) confirm both paths are covered.

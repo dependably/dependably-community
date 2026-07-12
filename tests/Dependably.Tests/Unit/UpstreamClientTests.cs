@@ -498,11 +498,15 @@ public class UpstreamClientTests : IAsyncLifetime
 // ── Retry + UpstreamFetchFailedException tests ────────────────────────────────
 
 /// <summary>
-/// Pins the retry contract for transient upstream errors: on a transient non-success
-/// (403/429/5xx) the client retries up to MaxUpstreamFetchAttempts times; if a later
-/// attempt succeeds the artifact is served normally; if retries are exhausted the client
-/// throws <see cref="UpstreamFetchFailedException"/> so the middleware can map it to a
-/// retryable status code instead of a fatal policy block (403) or absence (404).
+/// Pins the retry contract for upstream errors: on a transient non-success (429/5xx, or an
+/// ANONYMOUS 403 — public CDN bot mitigation emits genuinely transient 403s) the client retries
+/// up to MaxUpstreamFetchAttempts times; if a later attempt succeeds the artifact is served
+/// normally; if retries are exhausted the client throws
+/// <see cref="UpstreamFetchFailedException"/> (<c>Transient=true</c>) so the middleware can map
+/// it to a retryable status code instead of absence (404). A 401/403 from an upstream the fetch
+/// AUTHENTICATED to is a deterministic auth/policy refusal of the presented credential, not a
+/// transient condition — it is never retried and fails after exactly one attempt with
+/// <c>Transient=false, Refused=true</c>.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class UpstreamFetchRetryTests : IAsyncLifetime
@@ -559,17 +563,17 @@ public sealed class UpstreamFetchRetryTests : IAsyncLifetime
         return (client, handler);
     }
 
-    // ── GetOrFetchStreamAsync: transient 403, then 200 → succeeds ────────────
+    // ── GetOrFetchStreamAsync: transient 503, then 200 → succeeds ────────────
 
     [Fact]
-    public async Task GetOrFetchStreamAsync_Transient403ThenSuccess_RetriesAndServes()
+    public async Task GetOrFetchStreamAsync_Transient503ThenSuccess_RetriesAndServes()
     {
         byte[] data = RandomBytes();
         var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(data));
         var (client, handler) = BuildRetryClient();
 
-        // First attempt → 403 (transient). Second attempt → 200.
-        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+        // First attempt → 503 (transient). Second attempt → 200.
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
         handler.Enqueue(new HttpResponseMessage(HttpStatusCode.OK)
         { Content = new ByteArrayContent(data) });
 
@@ -581,26 +585,116 @@ public sealed class UpstreamFetchRetryTests : IAsyncLifetime
         Assert.Equal(2, handler.CallCount);
     }
 
-    // ── GetOrFetchStreamAsync: persistent 403 → UpstreamFetchFailedException ─
+    // ── GetOrFetchStreamAsync: persistent 503 → UpstreamFetchFailedException ─
 
     [Fact]
-    public async Task GetOrFetchStreamAsync_Persistent403_ThrowsUpstreamFetchFailed()
+    public async Task GetOrFetchStreamAsync_Persistent503_ThrowsUpstreamFetchFailed()
     {
         var (client, handler) = BuildRetryClient();
 
-        // All three attempts return 403 — retries exhausted.
-        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
-        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
-        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+        // All three attempts return 503 — retries exhausted.
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
 
         var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(() =>
             client.GetOrFetchStreamAsync(
                 "blobs/exhaust-key", "http://upstream.test/blocked.tgz", null, "pypi"));
 
         Assert.True(ex.Transient);
-        Assert.Equal(403, ex.StatusCode);
+        Assert.False(ex.Refused);
+        Assert.Equal(503, ex.StatusCode);
         Assert.Equal("http://upstream.test/blocked.tgz", ex.Url);
         Assert.Equal(3, handler.CallCount);
+    }
+
+    // ── GetOrFetchStreamAsync: authenticated 403/401 refusal → single attempt ─
+
+    [Theory]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    public async Task GetOrFetchStreamAsync_AuthenticatedRefusal_SingleAttempt_ThrowsUpstreamFetchFailedRefused(
+        HttpStatusCode refusalStatus)
+    {
+        var (client, handler) = BuildRetryClient();
+
+        // A deterministic auth/policy refusal of the presented credential must never be
+        // retried — enqueuing a second, successful response proves the client never reaches it.
+        handler.Enqueue(new HttpResponseMessage(refusalStatus));
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.OK)
+        { Content = new ByteArrayContent(RandomBytes()) });
+
+        var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(() =>
+            client.GetOrFetchStreamAsync(
+                "blobs/refused-key", "http://upstream.test/refused.tgz", null, "npm",
+                authorizationHeader: "Bearer edge-master-token"));
+
+        Assert.False(ex.Transient);
+        Assert.True(ex.Refused);
+        Assert.Equal((int)refusalStatus, ex.StatusCode);
+        Assert.Equal("http://upstream.test/refused.tgz", ex.Url);
+        Assert.Equal(1, handler.CallCount);
+    }
+
+    // ── GetOrFetchStreamAsync: ANONYMOUS 403 stays transient (CDN bot mitigation) ─
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_Anonymous403ThenSuccess_RetriesAndServes()
+    {
+        // With no credential attached there is nothing for the upstream to "refuse" — public
+        // registry CDNs emit transient 403s (bot mitigation), so an anonymous 403 that heals
+        // within the retry window must be retried in-request and served normally.
+        byte[] data = RandomBytes();
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(data));
+        var (client, handler) = BuildRetryClient();
+
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.OK)
+        { Content = new ByteArrayContent(data) });
+
+        var (stream, isHit) = await client.GetOrFetchStreamAsync(
+            "blobs/anon403-key", "http://upstream.test/anon403.tgz", spec, "npm");
+
+        Assert.False(isHit);
+        Assert.Equal(data, await DrainAsync(stream));
+        Assert.Equal(2, handler.CallCount);
+    }
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_AnonymousPersistent403_TransientExhausted_NotRefused()
+    {
+        var (client, handler) = BuildRetryClient();
+
+        // All three attempts return 403 anonymously — retries exhausted, still transient
+        // (mapped to a retryable 503 by the middleware), never marked as a refusal.
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+
+        var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(() =>
+            client.GetOrFetchStreamAsync(
+                "blobs/anon403-exhaust-key", "http://upstream.test/anon403-blocked.tgz", null, "npm"));
+
+        Assert.True(ex.Transient);
+        Assert.False(ex.Refused);
+        Assert.Equal(403, ex.StatusCode);
+        Assert.Equal(3, handler.CallCount);
+    }
+
+    [Fact]
+    public async Task GetOrFetchStreamAsync_Anonymous401_ThrowsHttpRequestException_MultiBaseFallthrough()
+    {
+        // An anonymous 401 means "this upstream requires credentials we don't have" — neither a
+        // transient error to retry nor a refusal of a presented credential. It surfaces as
+        // HttpRequestException so the controller's multi-base loop can try the next upstream.
+        var (client, handler) = BuildRetryClient();
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Unauthorized));
+
+        await Assert.ThrowsAsync<HttpRequestException>(() =>
+            client.GetOrFetchStreamAsync(
+                "blobs/anon401-key", "http://upstream.test/anon401.tgz", null, "npm"));
+
+        Assert.Equal(1, handler.CallCount);
     }
 
     // ── GetOrFetchStreamAsync: persistent 429 with Retry-After ──────────────
@@ -667,11 +761,31 @@ public sealed class UpstreamFetchRetryTests : IAsyncLifetime
             "the non-transient (404) response must be disposed so its ResponseHeadersRead connection returns to the pool");
     }
 
-    // ── FetchAndCacheByUrlAsync: persistent 403 → UpstreamFetchFailedException ─
+    // ── FetchAndCacheByUrlAsync: authenticated 403 refusal → single attempt ─
 
     [Fact]
-    public async Task FetchAndCacheByUrlAsync_Persistent403_ThrowsUpstreamFetchFailed()
+    public async Task FetchAndCacheByUrlAsync_AuthenticatedRefused403_SingleAttempt_ThrowsUpstreamFetchFailedRefused()
     {
+        var (client, handler) = BuildRetryClient();
+        // Only one response enqueued — a second dequeue attempt (i.e. a retry) would throw
+        // from an empty queue and fail the test outright.
+        handler.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
+
+        var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(() =>
+            client.FetchAndCacheByUrlAsync("http://upstream.test/blocked.nupkg", null, "nuget",
+                authorizationHeader: "Bearer edge-master-token"));
+
+        Assert.False(ex.Transient);
+        Assert.True(ex.Refused);
+        Assert.Equal(403, ex.StatusCode);
+        Assert.Equal(1, handler.CallCount);
+    }
+
+    [Fact]
+    public async Task FetchAndCacheByUrlAsync_AnonymousPersistent403_TransientExhausted_NotRefused()
+    {
+        // The no-pre-known-SHA path (npm tarballs, NuGet flatcontainer) applies the same
+        // anonymous-403-is-transient contract as the blob-key path.
         var (client, handler) = BuildRetryClient();
         for (int i = 0; i < 3; i++)
         {
@@ -679,37 +793,39 @@ public sealed class UpstreamFetchRetryTests : IAsyncLifetime
         }
 
         var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(() =>
-            client.FetchAndCacheByUrlAsync("http://upstream.test/blocked.nupkg", null, "nuget"));
+            client.FetchAndCacheByUrlAsync("http://upstream.test/anon-blocked.nupkg", null, "nuget"));
 
         Assert.True(ex.Transient);
+        Assert.False(ex.Refused);
         Assert.Equal(403, ex.StatusCode);
         Assert.Equal(3, handler.CallCount);
     }
 
-    // ── Mixed partial-failure: first upstream 403 (transient exhausted), second succeeds ─
+    // ── Mixed partial-failure: first upstream refuses (403, single attempt), second succeeds ─
 
     [Fact]
-    public async Task FetchAndCacheByUrlAsync_MixedPartialFailure_FirstUpstreamExhausted_SecondSucceeds()
+    public async Task FetchAndCacheByUrlAsync_MixedPartialFailure_FirstUpstreamRefused_SecondSucceeds()
     {
-        // Simulates the real multi-base controller loop: first upstream returns persistent 403
-        // (UpstreamFetchFailedException), second upstream returns 200. The exception from the
-        // first must propagate out of FetchAndCacheByUrlAsync; the controller loop catches it
-        // and the controller propagates it to the middleware (which returns 503). To test the
-        // mixed scenario at the UpstreamClient level, we assert that the first call throws and
-        // that a second independent call (simulating the next upstream) succeeds.
+        // Simulates the real multi-base controller loop: first upstream returns a deterministic
+        // 403 refusal (UpstreamFetchFailedException, single attempt), second upstream returns
+        // 200. The exception from the first must propagate out of FetchAndCacheByUrlAsync; the
+        // controller loop propagates it to the middleware (which maps a refusal to 502). To test
+        // the mixed scenario at the UpstreamClient level, we assert that the first call throws
+        // after exactly one attempt and that a second independent call (simulating the next
+        // upstream) succeeds.
         byte[] data = RandomBytes();
         var store = new InMemoryBlobStore();
 
-        // First client: returns 3× 403
+        // First client: returns a single authenticated 403 — never retried.
         var (client1, handler1) = BuildRetryClient(blobs: store);
-        for (int i = 0; i < 3; i++)
-        {
-            handler1.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
-        }
+        handler1.Enqueue(new HttpResponseMessage(HttpStatusCode.Forbidden));
 
         var ex = await Assert.ThrowsAsync<UpstreamFetchFailedException>(() =>
-            client1.FetchAndCacheByUrlAsync("http://upstream-a.test/pkg.nupkg", null, "nuget"));
-        Assert.True(ex.Transient);
+            client1.FetchAndCacheByUrlAsync("http://upstream-a.test/pkg.nupkg", null, "nuget",
+                authorizationHeader: "Basic dXBzdHJlYW06c2VjcmV0"));
+        Assert.False(ex.Transient);
+        Assert.True(ex.Refused);
+        Assert.Equal(1, handler1.CallCount);
 
         // Second client (different upstream base): returns 200 — succeeds.
         var (client2, handler2) = BuildRetryClient(blobs: store);
@@ -789,6 +905,26 @@ public sealed class UpstreamFetchFailedExceptionMiddlewareTests
         ctx.Response.Body.Seek(0, SeekOrigin.Begin);
         string body = await new StreamReader(ctx.Response.Body).ReadToEndAsync();
         Assert.Contains("Upstream fetch failed", body);
+    }
+
+    [Fact]
+    public async Task Refused_MapsTo502_WithDistinctRefusalBody_NotGenericUnreachable()
+    {
+        var middleware = new UpstreamFetchFailedExceptionMiddleware(
+            _ => throw new UpstreamFetchFailedException
+            { Url = "http://upstream.test/pkg.tgz", StatusCode = 403, Transient = false, Refused = true },
+            NullLogger<UpstreamFetchFailedExceptionMiddleware>.Instance);
+
+        var ctx = BuildContext();
+        await middleware.InvokeAsync(ctx);
+
+        Assert.Equal(502, ctx.Response.StatusCode);
+        Assert.True(string.IsNullOrEmpty(ctx.Response.Headers.RetryAfter.ToString()));
+
+        ctx.Response.Body.Seek(0, SeekOrigin.Begin);
+        string body = await new StreamReader(ctx.Response.Body).ReadToEndAsync();
+        Assert.Contains("refused", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Upstream fetch failed", body);
     }
 
     [Fact]

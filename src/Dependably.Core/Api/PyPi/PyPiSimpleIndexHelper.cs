@@ -74,42 +74,30 @@ public static class PyPiSimpleIndexHelper
     }
 
     /// <summary>
+    /// An empty per-version file lookup, for callers rendering versions that carry their single
+    /// artifact directly on the version row (synthetic proxy projections, tests).
+    /// </summary>
+    public static readonly ILookup<string, PackageVersionFile> NoHostedFiles =
+        Array.Empty<PackageVersionFile>().ToLookup(f => f.PackageVersionId);
+
+    /// <summary>
     /// Renders a PEP 503 simple-index HTML page for a set of locally-hosted versions.
     /// Versions blocked by the block gate (manual block, deprecated, KEV, EPSS, CVSS,
     /// release-age) are omitted so the index never advertises an artifact that returns 403.
+    /// A hosted version with rows in <paramref name="hostedFiles"/> renders one anchor per
+    /// distribution file (wheel + sdist + per-platform wheels); versions without file rows
+    /// (synthetic proxy projections) render their single version-row artifact.
     /// </summary>
     public static string RenderLocalSimpleIndex(
-        string purlName, IReadOnlyList<PackageVersion> versions, OrgSettings settings,
-        IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now)
+        string purlName, IReadOnlyList<PackageVersion> versions, ILookup<string, PackageVersionFile> hostedFiles,
+        OrgSettings settings, IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now)
     {
         var sb = new StringBuilder();
         sb.AppendLine("<!DOCTYPE html>");
         sb.AppendLine($"<html><head><title>Links for {System.Web.HttpUtility.HtmlEncode(purlName)}</title></head><body>");
         sb.AppendLine($"<h1>Links for {System.Web.HttpUtility.HtmlEncode(purlName)}</h1>");
-        foreach (var v in versions)
-        {
-            // Omit versions the download path will hard-block so the index never advertises
-            // an artifact that returns 403. The shared predicate mirrors BlockGateService.EvaluateAsync
-            // exactly: manual-block, deprecated (block_all/block only), release-age, malicious,
-            // KEV, EPSS, and CVSS arms. block_new is intentionally excluded — it only fires on
-            // first-fetch, and already-cached deprecated versions still serve under that mode.
-            if (BlockGateService.IsHardBlockedByStoredState(v, settings, signals.GetValueOrDefault(v.Id), now))
-            {
-                continue;
-            }
-
-            string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
-            string href = OrgPath($"packages/{filename}");
-            if (v.ChecksumSha256 is not null)
-            {
-                href += $"#sha256={v.ChecksumSha256}";
-            }
-
-            string yankAttr = v.Yanked
-                ? $" data-yanked=\"{System.Web.HttpUtility.HtmlAttributeEncode(v.YankReason ?? "")}\"" : "";
-
-            sb.AppendLine($"<a href=\"{System.Web.HttpUtility.HtmlAttributeEncode(href)}\"{yankAttr}>{System.Web.HttpUtility.HtmlEncode(filename)}</a><br/>");
-        }
+        var seenFilenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AppendLocalVersions(sb, versions, hostedFiles, settings, signals, now, seenFilenames);
         sb.AppendLine("</body></html>");
         return sb.ToString();
     }
@@ -131,6 +119,7 @@ public static class PyPiSimpleIndexHelper
         string purlName,
         IReadOnlyList<UpstreamSimpleIndexEntry> upstreamEntries,
         IReadOnlyList<PackageVersion> localVersions,
+        ILookup<string, PackageVersionFile> hostedFiles,
         OrgSettings settings,
         IReadOnlyDictionary<string, VulnGateSignals> signals,
         DateTimeOffset now)
@@ -142,7 +131,7 @@ public static class PyPiSimpleIndexHelper
 
         var seenFilenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         AppendUpstreamEntries(sb, upstreamEntries, seenFilenames);
-        AppendLocalVersions(sb, localVersions, settings, signals, now, seenFilenames);
+        AppendLocalVersions(sb, localVersions, hostedFiles, settings, signals, now, seenFilenames);
 
         sb.AppendLine("</body></html>");
         return sb.ToString();
@@ -170,10 +159,13 @@ public static class PyPiSimpleIndexHelper
         }
     }
 
-    // Renders one anchor per locally-hosted version not hard-blocked and not already listed
-    // from the upstream entries.
+    // Renders anchors for each locally-hosted version not hard-blocked and not already listed
+    // from the upstream entries: one anchor per hosted distribution file when the version has
+    // file rows, otherwise the version row's single artifact (synthetic proxy projections).
+    // The block gate and yank state are per-version, so every file of a version shares them.
     private static void AppendLocalVersions(
-        StringBuilder sb, IReadOnlyList<PackageVersion> localVersions, OrgSettings settings,
+        StringBuilder sb, IReadOnlyList<PackageVersion> localVersions,
+        ILookup<string, PackageVersionFile> hostedFiles, OrgSettings settings,
         IReadOnlyDictionary<string, VulnGateSignals> signals, DateTimeOffset now, HashSet<string> seenFilenames)
     {
         foreach (var v in localVersions)
@@ -186,23 +178,41 @@ public static class PyPiSimpleIndexHelper
                 continue;
             }
 
-            string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
-            if (!seenFilenames.Add(filename))
+            var files = hostedFiles[v.Id].ToList();
+            if (files.Count == 0)
             {
-                continue; // already listed from the upstream entries
+                string filename = string.IsNullOrEmpty(v.Filename) ? v.BlobKey.Split('/').Last() : v.Filename;
+                AppendFileAnchor(sb, v, filename, v.ChecksumSha256, seenFilenames);
+                continue;
             }
 
-            string href = OrgPath($"packages/{filename}");
-            if (v.ChecksumSha256 is not null)
+            foreach (var file in files)
             {
-                href += $"#sha256={v.ChecksumSha256}";
+                AppendFileAnchor(sb, v, file.Filename, file.ChecksumSha256, seenFilenames);
             }
-
-            string yankAttr = v.Yanked
-                ? $" data-yanked=\"{System.Web.HttpUtility.HtmlAttributeEncode(v.YankReason ?? "")}\""
-                : "";
-            sb.AppendLine($"<a href=\"{System.Web.HttpUtility.HtmlAttributeEncode(href)}\"{yankAttr}>{System.Web.HttpUtility.HtmlEncode(filename)}</a><br/>");
         }
+    }
+
+    // Renders one file anchor with the per-file sha256 fragment and the owning version's yank
+    // state, skipping filenames already listed (upstream entries win; duplicates collapse).
+    private static void AppendFileAnchor(
+        StringBuilder sb, PackageVersion v, string filename, string? sha256, HashSet<string> seenFilenames)
+    {
+        if (!seenFilenames.Add(filename))
+        {
+            return;
+        }
+
+        string href = OrgPath($"packages/{filename}");
+        if (sha256 is not null)
+        {
+            href += $"#sha256={sha256}";
+        }
+
+        string yankAttr = v.Yanked
+            ? $" data-yanked=\"{System.Web.HttpUtility.HtmlAttributeEncode(v.YankReason ?? "")}\""
+            : "";
+        sb.AppendLine($"<a href=\"{System.Web.HttpUtility.HtmlAttributeEncode(href)}\"{yankAttr}>{System.Web.HttpUtility.HtmlEncode(filename)}</a><br/>");
     }
 
     /// <summary>

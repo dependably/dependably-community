@@ -614,7 +614,8 @@ public sealed class NpmTarballHandler(
             BlockInstallScriptsMode: settings.BlockInstallScripts,
             ProvenanceStatus: ProvenanceStatuses.ToColumn(prov.Status),
             ProvenanceSigner: prov.Signer,
-            VerifyProvenanceMode: settings.VerifyNpmSignatures);
+            VerifyProvenanceMode: settings.VerifyNpmSignatures,
+            LicenseEnforcementMode: settings.LicenseEnforcementMode);
     }
 
     // Runs npm registry-signature verification for a proxy-origin version when the tenant enabled

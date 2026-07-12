@@ -1,4 +1,5 @@
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Alerts;
 using Dependably.Protocol;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -16,7 +17,9 @@ public static class TestBlockGate
             new VulnerabilityRepository(db, clock),
             new AuditRepository(db),
             new QuarantineRepository(db, clock),
+            new AlertService(new AlertRepository(db, clock), new NoOpAlertNotifier(), NullLogger<AlertService>.Instance),
             new InstallScriptAllowlistService(db, new MemoryCache(new MemoryCacheOptions()), clock),
+            new LicenseRepository(db, clock, new LicenseNormalizer(db, NullLogger<LicenseNormalizer>.Instance)),
             NullLogger<BlockGateService>.Instance,
             clock);
 }

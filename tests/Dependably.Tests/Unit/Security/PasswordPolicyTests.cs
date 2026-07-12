@@ -11,7 +11,6 @@ namespace Dependably.Tests.Unit.Security;
 [Trait("Category", "Unit")]
 public sealed class PasswordPolicyTests
 {
-    private static readonly PasswordPolicy Policy = new();
     private static readonly PasswordContext NoContext = new();
 
     [Theory]
@@ -20,7 +19,7 @@ public sealed class PasswordPolicyTests
     [InlineData("eleven-chrs")]  // 11
     public void Rejects_passwords_below_min_length(string pw)
     {
-        var result = Policy.Evaluate(pw, NoContext);
+        var result = PasswordPolicy.Evaluate(pw, NoContext);
         Assert.Equal(PasswordPolicyVerdict.TooShort, result.Verdict);
         Assert.Equal(PasswordPolicy.MinLength, result.DiagnosticValue);
     }
@@ -29,7 +28,7 @@ public sealed class PasswordPolicyTests
     public void Rejects_passwords_exceeding_72_utf8_bytes()
     {
         string pw = new('a', 73);
-        var result = Policy.Evaluate(pw, NoContext);
+        var result = PasswordPolicy.Evaluate(pw, NoContext);
         Assert.Equal(PasswordPolicyVerdict.TooLong, result.Verdict);
     }
 
@@ -38,7 +37,7 @@ public sealed class PasswordPolicyTests
     {
         // 36 four-byte emoji = 144 UTF-8 bytes, still 36 .NET char-pairs
         string pw = string.Concat(Enumerable.Repeat("\U0001F600", 36));
-        var result = Policy.Evaluate(pw, NoContext);
+        var result = PasswordPolicy.Evaluate(pw, NoContext);
         Assert.Equal(PasswordPolicyVerdict.TooLong, result.Verdict);
     }
 
@@ -47,7 +46,7 @@ public sealed class PasswordPolicyTests
     {
         string pw = new string('a', 60) + "-Battery!Staple";  // 75... trim
         pw = pw[..72];  // exactly 72 ASCII bytes
-        var result = Policy.Evaluate(pw, NoContext);
+        var result = PasswordPolicy.Evaluate(pw, NoContext);
         // Length cap is satisfied; entropy depends on zxcvbn — but a 60-char
         // run of 'a' is low entropy. Just assert we cleared the length gate.
         Assert.NotEqual(PasswordPolicyVerdict.TooLong, result.Verdict);
@@ -60,7 +59,7 @@ public sealed class PasswordPolicyTests
     [InlineData("aaaaaaaaaaaa")]   // 12 chars, repetition
     public void Rejects_low_entropy_12_char_passwords(string pw)
     {
-        var result = Policy.Evaluate(pw, NoContext);
+        var result = PasswordPolicy.Evaluate(pw, NoContext);
         Assert.Equal(PasswordPolicyVerdict.LowEntropy, result.Verdict);
     }
 
@@ -71,14 +70,14 @@ public sealed class PasswordPolicyTests
     {
         // No uppercase, no digit, no symbol beyond '-': demonstrates that NIST
         // "no composition rules" guidance is respected.
-        var result = Policy.Evaluate(pw, NoContext);
+        var result = PasswordPolicy.Evaluate(pw, NoContext);
         Assert.Equal(PasswordPolicyVerdict.Ok, result.Verdict);
     }
 
     [Fact]
     public void Blocks_literal_product_name_in_any_case()
     {
-        var result = Policy.Evaluate("DependablyRocks2026", NoContext);
+        var result = PasswordPolicy.Evaluate("DependablyRocks2026", NoContext);
         Assert.Equal(PasswordPolicyVerdict.ContainsContext, result.Verdict);
         Assert.Equal("dependably", result.Detail);
     }
@@ -87,7 +86,7 @@ public sealed class PasswordPolicyTests
     public void Blocks_email_local_part_when_supplied()
     {
         var ctx = new PasswordContext(Email: "alice.dev@acme.example.com");
-        var result = Policy.Evaluate("AliceDevPassphrase!", ctx);
+        var result = PasswordPolicy.Evaluate("AliceDevPassphrase!", ctx);
         Assert.Equal(PasswordPolicyVerdict.ContainsContext, result.Verdict);
         Assert.Equal("alice.dev", result.Detail);
     }
@@ -96,7 +95,7 @@ public sealed class PasswordPolicyTests
     public void Blocks_tenant_slug_when_supplied()
     {
         var ctx = new PasswordContext(TenantSlug: "northwind");
-        var result = Policy.Evaluate("northwindForever!2026", ctx);
+        var result = PasswordPolicy.Evaluate("northwindForever!2026", ctx);
         Assert.Equal(PasswordPolicyVerdict.ContainsContext, result.Verdict);
         Assert.Equal("northwind", result.Detail);
     }
@@ -106,7 +105,7 @@ public sealed class PasswordPolicyTests
     {
         // Local-part shorter than 3 chars would block common letters.
         var ctx = new PasswordContext(Email: "ab@example.com");
-        var result = Policy.Evaluate("correct-horse-battery-staple", ctx);
+        var result = PasswordPolicy.Evaluate("correct-horse-battery-staple", ctx);
         Assert.Equal(PasswordPolicyVerdict.Ok, result.Verdict);
     }
 
@@ -116,7 +115,7 @@ public sealed class PasswordPolicyTests
         // The literal "dependably" rendered with NFD-decomposed accents elsewhere
         // would still match after NFC normalization.
         string pw = "Dependably".Normalize(System.Text.NormalizationForm.FormD) + "-rocks-passphrase";
-        var result = Policy.Evaluate(pw, NoContext);
+        var result = PasswordPolicy.Evaluate(pw, NoContext);
         Assert.Equal(PasswordPolicyVerdict.ContainsContext, result.Verdict);
     }
 

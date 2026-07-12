@@ -548,6 +548,7 @@ public sealed class OrgControllerExtendedTests
     [InlineData("oci")]
     [InlineData("golang")]
     [InlineData("cargo")]
+    [InlineData("apk")]
     public async Task GetSetup_Snippets_OmitMaxUploadLine(string eco)
     {
         // The setup snippets no longer advertise an upload-size limit.

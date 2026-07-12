@@ -65,11 +65,13 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             NullLogger<VulnerabilityScanService>.Instance,
             _clock,
             new OrgRepository(_db),
-            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, _clock)));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
-        return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
+        var licenses = new LicenseRepository(_db, _clock, TestNormalizers.License(_db));
+        return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), new OrgRepository(_db), storage, gate,
             new Dependably.Infrastructure.Edge.EdgePublishGuard(TestEdgeMode.Disabled()),
-            auditor, scanner, NullLogger<PackagePublishService>.Instance);
+            auditor, scanner, licenses, NullLogger<PackagePublishService>.Instance);
     }
 
     private static PublishRequest Sample(string name = "lodash", string version = "1.0.0", long size = 100, string? origin = "uploaded") => new()
@@ -258,6 +260,115 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         Assert.Single(replaceRows);
         Assert.Contains("sha256:" + firstHash, replaceRows[0].Detail);
         Assert.Contains("sha256:" + accepted.Sha256, replaceRows[0].Detail);
+    }
+
+    [Fact]
+    public async Task Pypi_DifferentFilename_SameVersion_StoredAsSecondFile_WheelUntouched()
+    {
+        // Multi-file model: a wheel already exists for this version; the sdist arriving for
+        // the SAME version (different filename) joins the release as its own file record and
+        // blob. The wheel's blob and the version row's primary columns stay untouched — the
+        // historical corruption (blob_key silently repointed at the sdist while the row kept
+        // advertising the wheel's filename) is structurally impossible now.
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync(
+                "INSERT INTO org_settings (org_id, version_overwrite_policy, allow_version_overwrite) VALUES ('o1', 'allow', 1)");
+        }
+        var svc = Build();
+        var wheel = Sample(name: "acme-pkg", version: "1.2.1") with
+        {
+            Ecosystem = "pypi",
+            Filename = "acme_pkg-1.2.1-py3-none-any.whl",
+        };
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(wheel));
+
+        var sdist = wheel with { Filename = "acme_pkg-1.2.1.tar.gz", AllowOverwrite = true };
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(sdist));
+
+        // Both blobs exist under their own keys; the version row still points at the wheel.
+        Assert.True(await _blobs.ExistsAsync(
+            BlobKeys.Hosted("o1", "pypi", "acme-pkg", "1.2.1", "acme_pkg-1.2.1-py3-none-any.whl")));
+        Assert.True(await _blobs.ExistsAsync(
+            BlobKeys.Hosted("o1", "pypi", "acme-pkg", "1.2.1", "acme_pkg-1.2.1.tar.gz")));
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", "pypi", "acme-pkg");
+        var version = await packages.GetVersionAsync(pkg!.Id, "1.2.1");
+        Assert.EndsWith("acme_pkg-1.2.1-py3-none-any.whl", version!.BlobKey);
+    }
+
+    [Fact]
+    public async Task NonPypi_DifferentFilename_SameVersion_StillRejectedWithArtifactMismatch()
+    {
+        // The one-artifact-per-version guard remains for every other ecosystem: a
+        // differently-named artifact for an existing version must be rejected outright,
+        // even when the org policy permits same-filename overwrites.
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync(
+                "INSERT INTO org_settings (org_id, version_overwrite_policy, allow_version_overwrite) VALUES ('o1', 'allow', 1)");
+        }
+        var svc = Build();
+        var first = Sample(name: "acme-npm-guard", version: "1.2.1");
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(first));
+
+        var renamed = first with { Filename = "acme-npm-guard-1.2.1-alt.tgz", AllowOverwrite = true };
+        var rej = Assert.IsType<PublishResult.Rejected>(await svc.StoreAndRecordAsync(renamed));
+        Assert.Equal(409, rej.HttpStatus);
+        Assert.Equal("artifact_mismatch", rej.Code);
+
+        Assert.False(await _blobs.ExistsAsync(
+            BlobKeys.Hosted("o1", "npm", "acme-npm-guard", "1.2.1", "acme-npm-guard-1.2.1-alt.tgz")));
+    }
+
+    [Fact]
+    public async Task SameFilename_SameVersion_OverwriteAllowed_StillOverwrites()
+    {
+        // Regression guard: the new artifact-mismatch check must not interfere with the
+        // existing same-filename overwrite path (a genuine re-push of the identical artifact).
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync(
+                "INSERT INTO org_settings (org_id, version_overwrite_policy, allow_version_overwrite) VALUES ('o1', 'allow', 1)");
+        }
+        var svc = Build();
+        var first = Sample(name: "acme-resame", version: "1.0.0");
+        var firstResult = (PublishResult.Accepted)await svc.StoreAndRecordAsync(first);
+
+        var second = first with { ArtifactBytes = new byte[] { 9, 9, 9 }, AllowOverwrite = true };
+        var secondResult = await svc.StoreAndRecordAsync(second);
+        var accepted = Assert.IsType<PublishResult.Accepted>(secondResult);
+        Assert.Equal(firstResult.VersionId, accepted.VersionId);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_DryRunParity_PypiSecondFileAccepted_NonPypiMismatchRejected()
+    {
+        // Dry-run parity: the bulk-import pre-flight surface must report exactly what the
+        // real publish path would do — a PyPI sdist joining an existing wheel is accepted
+        // (new file of the release); a renamed non-PyPI artifact stays artifact_mismatch.
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync(
+                "INSERT INTO org_settings (org_id, version_overwrite_policy, allow_version_overwrite) VALUES ('o1', 'allow', 1)");
+        }
+        var svc = Build();
+        var wheel = Sample(name: "acme-dryrun", version: "1.0.0") with
+        {
+            Ecosystem = "pypi",
+            Filename = "acme_dryrun-1.0.0-py3-none-any.whl",
+        };
+        await svc.StoreAndRecordAsync(wheel);
+
+        var sdistDryRun = wheel with { Filename = "acme_dryrun-1.0.0.tar.gz", AllowOverwrite = true };
+        Assert.IsType<PublishResult.Accepted>(await svc.ValidateAsync(sdistDryRun));
+
+        var npmFirst = Sample(name: "acme-dryrun-npm", version: "1.0.0");
+        await svc.StoreAndRecordAsync(npmFirst);
+        var npmRenamed = npmFirst with { Filename = "acme-dryrun-npm-1.0.0-alt.tgz", AllowOverwrite = true };
+        var rej = Assert.IsType<PublishResult.Rejected>(await svc.ValidateAsync(npmRenamed));
+        Assert.Equal(409, rej.HttpStatus);
+        Assert.Equal("artifact_mismatch", rej.Code);
     }
 
     [Fact]
@@ -690,11 +801,13 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             NullLogger<VulnerabilityScanService>.Instance,
             _clock,
             new OrgRepository(_db),
-            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, _clock)));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
-        return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
+        var licenses = new LicenseRepository(_db, _clock, TestNormalizers.License(_db));
+        return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), new OrgRepository(_db), storage, gate,
             new Dependably.Infrastructure.Edge.EdgePublishGuard(TestEdgeMode.Disabled()),
-            auditor, scanner, NullLogger<PackagePublishService>.Instance);
+            auditor, scanner, licenses, NullLogger<PackagePublishService>.Instance);
     }
 
     /// <summary>
@@ -774,5 +887,234 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         public bool IsEnabled => false;
         public IReadOnlySet<string> DisabledJobs => new System.Collections.Generic.HashSet<string>();
         public bool IsJobDisabled(string jobName) => false;
+    }
+
+    // ── PyPI multi-file-per-version ──────────────────────────────────────────
+
+    private static PublishRequest PypiSample(string name, string version, string filename, long size = 100) => new()
+    {
+        OrgId = "o1",
+        Ecosystem = "pypi",
+        Name = name,
+        PurlName = name,
+        Version = version,
+        Filename = filename,
+        Purl = $"pkg:pypi/{name}@{version}",
+        ArtifactBytes = new byte[size],
+        Origin = "uploaded",
+        SizeCap = long.MaxValue,
+        ActorUserId = "u1",
+    };
+
+    [Fact]
+    public async Task Pypi_SecondFileForSameVersion_AcceptedUnderBlockPolicy_AndSizeSumsOnVersionRow()
+    {
+        // The org default overwrite policy is 'block': the sdist joining the wheel is a NEW
+        // file of the release, not an overwrite, so it must be accepted anyway.
+        var svc = Build();
+        var wheel = PypiSample("mfpkg", "1.0.0", "mfpkg-1.0.0-py3-none-any.whl", size: 100);
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(wheel));
+
+        var sdist = PypiSample("mfpkg", "1.0.0", "mfpkg-1.0.0.tar.gz", size: 40);
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(sdist));
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", "pypi", "mfpkg");
+        var version = await packages.GetVersionAsync(pkg!.Id, "1.0.0");
+        var files = await new PackageVersionFilesRepository(_db).GetByVersionAsync(version!.Id);
+
+        Assert.Equal(2, files.Count);
+        Assert.Contains(files, f => f.Filename == "mfpkg-1.0.0-py3-none-any.whl" && f.SizeBytes == 100);
+        Assert.Contains(files, f => f.Filename == "mfpkg-1.0.0.tar.gz" && f.SizeBytes == 40);
+        // The version row carries the SUM of its files so quota release on delete is symmetric.
+        Assert.Equal(140, version.SizeBytes);
+        // Both blobs stored under distinct hosted keys.
+        Assert.True(await _blobs.ExistsAsync(BlobKeys.Hosted("o1", "pypi", "mfpkg", "1.0.0", "mfpkg-1.0.0-py3-none-any.whl")));
+        Assert.True(await _blobs.ExistsAsync(BlobKeys.Hosted("o1", "pypi", "mfpkg", "1.0.0", "mfpkg-1.0.0.tar.gz")));
+    }
+
+    [Fact]
+    public async Task Pypi_SameFilenameReupload_StaysPolicyGated()
+    {
+        // Re-uploading a filename the release already holds IS an overwrite: the default
+        // 'block' policy must reject it even though multi-file additions are allowed.
+        var svc = Build();
+        var wheel = PypiSample("mfgate", "1.0.0", "mfgate-1.0.0-py3-none-any.whl");
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(wheel));
+
+        var rej = Assert.IsType<PublishResult.Rejected>(await svc.StoreAndRecordAsync(wheel));
+        Assert.Equal(409, rej.HttpStatus);
+        Assert.Equal("version_exists", rej.Code);
+    }
+
+    [Fact]
+    public async Task Pypi_SameFilenameOverwrite_AllowedPolicy_UpdatesFileRecordAndSum()
+    {
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO org_settings (org_id, version_overwrite_policy, allow_version_overwrite) VALUES ('o1', 'allow', 1)");
+        }
+
+        var svc = Build();
+        var wheel = PypiSample("mfow", "1.0.0", "mfow-1.0.0-py3-none-any.whl", size: 100);
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(wheel));
+        var sdist = PypiSample("mfow", "1.0.0", "mfow-1.0.0.tar.gz", size: 40);
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(sdist));
+
+        // Overwrite the NON-primary file (the sdist) with different bytes.
+        var sdist2 = PypiSample("mfow", "1.0.0", "mfow-1.0.0.tar.gz", size: 60);
+        sdist2.ArtifactBytes![0] = 0xFF;
+        var accepted = Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(sdist2));
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", "pypi", "mfow");
+        var version = await packages.GetVersionAsync(pkg!.Id, "1.0.0");
+        var files = await new PackageVersionFilesRepository(_db).GetByVersionAsync(version!.Id);
+
+        Assert.Equal(2, files.Count);
+        var sdistFile = files.Single(f => f.Filename == "mfow-1.0.0.tar.gz");
+        Assert.Equal(60, sdistFile.SizeBytes);
+        Assert.Equal(accepted.Sha256, sdistFile.ChecksumSha256);
+        Assert.Equal(160, version.SizeBytes);
+        // The version row's PRIMARY artifact columns (the wheel's) were not clobbered by the
+        // non-primary overwrite. (Scan-state reset on file change is pinned at the repository
+        // level; here the synchronous post-publish rescan has already re-stamped it.)
+        Assert.EndsWith("mfow-1.0.0-py3-none-any.whl", version.BlobKey);
+    }
+
+    [Fact]
+    public async Task Pypi_QuotaAccountsPerFile_AddReservesFullSize_OverwriteReservesDelta()
+    {
+        await new OrgRepository(_db).SetStorageQuotaBytesAsync("o1", 220);
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO org_settings (org_id, version_overwrite_policy, allow_version_overwrite) VALUES ('o1', 'allow', 1)");
+        }
+
+        var svc = Build();
+        Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(PypiSample("mfq", "1.0.0", "mfq-1.0.0-py3-none-any.whl", size: 100)));
+        // Adding the sdist replaces nothing: it must reserve its FULL size. 100 + 130 > 220 → 413.
+        var rej = Assert.IsType<PublishResult.Rejected>(
+            await svc.StoreAndRecordAsync(PypiSample("mfq", "1.0.0", "mfq-1.0.0.tar.gz", size: 130)));
+        Assert.Equal(413, rej.HttpStatus);
+        Assert.Equal("tenant_quota_exceeded", rej.Code);
+
+        // A smaller sdist fits (100 + 110 <= 220).
+        Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(PypiSample("mfq", "1.0.0", "mfq-1.0.0.tar.gz", size: 110)));
+
+        // Overwriting the sdist reserves only the delta vs THAT file (not the version total):
+        // 120 - 110 = +10 fits the remaining headroom exactly.
+        Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(PypiSample("mfq", "1.0.0", "mfq-1.0.0.tar.gz", size: 120)));
+        // One more byte over the cap is rejected: 121 - 120 = +1 > 0 remaining.
+        var overCap = Assert.IsType<PublishResult.Rejected>(
+            await svc.StoreAndRecordAsync(PypiSample("mfq", "1.0.0", "mfq-1.0.0.tar.gz", size: 121)));
+        Assert.Equal(413, overCap.HttpStatus);
+    }
+
+    [Fact]
+    public async Task Pypi_FileRowInsertFailureOnNewVersion_ReleasesQuotaExactlyOnce()
+    {
+        // A failed file-row insert after the version row was created rolls the ROW back
+        // without touching the tenant counter — the publish's own reservation release is
+        // the single give-back. A counter-coupled rollback would decrement twice and drift
+        // the counter low (the direction that lets a tenant exceed its real quota).
+        await new OrgRepository(_db).SetStorageQuotaBytesAsync("o1", 10_000);
+        var svc = Build();
+        Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(PypiSample("mfroll-base", "1.0.0", "mfroll_base-1.0.0-py3-none-any.whl", size: 500)));
+
+        // Dropping package_version_files inside PutAsync makes CreateVersionAsync succeed
+        // and the subsequent file-row insert throw — the exact rollback window under test.
+        var droppingRegistry = new DropTableOnPutBlobStore(_blobs, _db, "package_version_files");
+        var failing = BuildWithRegistry(droppingRegistry);
+        await Assert.ThrowsAnyAsync<Exception>(() =>
+            failing.StoreAndRecordAsync(PypiSample("mfroll", "1.0.0", "mfroll-1.0.0-py3-none-any.whl", size: 100)));
+
+        await using var conn = await _db.OpenAsync();
+        long used = await conn.ExecuteScalarAsync<long>(
+            "SELECT storage_used_bytes FROM org_settings WHERE org_id = 'o1'");
+        Assert.Equal(500, used);
+
+        // The rolled-back version row is gone (no zero-file version survives).
+        long orphanVersions = await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COUNT(*) FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.org_id = 'o1' AND p.purl_name = 'mfroll'
+            """);
+        Assert.Equal(0, orphanVersions);
+    }
+
+    [Fact]
+    public async Task Pypi_ConcurrentSameNewFilename_LoserDoesNotDeleteWinnersBlob()
+    {
+        // Two concurrent publishes of the SAME new filename to one version share a hosted
+        // blob key. The loser's UNIQUE(version, filename) failure must NOT trigger the
+        // fresh-blob compensating delete — that would 404 the winner's committed artifact.
+        var svc = Build();
+        var wheel = PypiSample("mfrace", "1.0.0", "mfrace-1.0.0-py3-none-any.whl");
+        Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(wheel));
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", "pypi", "mfrace");
+        var version = await packages.GetVersionAsync(pkg!.Id, "1.0.0");
+
+        // Simulate the race: the "winner's" file row lands during the loser's PutAsync —
+        // after the loser's file-slot probe read the slot as absent, before its insert.
+        var racingRegistry = new InsertFileRowOnPutBlobStore(_blobs, _db, version!.Id, "mfrace-1.0.0.tar.gz");
+        var loser = BuildWithRegistry(racingRegistry);
+        await Assert.ThrowsAnyAsync<Exception>(() =>
+            loser.StoreAndRecordAsync(PypiSample("mfrace", "1.0.0", "mfrace-1.0.0.tar.gz", size: 40)));
+
+        // The shared blob survives — the winner's committed file record still resolves.
+        Assert.True(await _blobs.ExistsAsync(
+            BlobKeys.Hosted("o1", "pypi", "mfrace", "1.0.0", "mfrace-1.0.0.tar.gz")),
+            "the loser's compensation must not delete the blob the race winner's row references");
+    }
+
+    // Simulates the concurrent-publish race window for the same NEW filename: inserts the
+    // winner's package_version_files row during PutAsync — after the loser's file-slot probe,
+    // before its own insert — then delegates the blob write.
+    private sealed class InsertFileRowOnPutBlobStore : IBlobStore
+    {
+        private readonly IBlobStore _inner;
+        private readonly IMetadataStore _db;
+        private readonly string _versionId;
+        private readonly string _filename;
+        public InsertFileRowOnPutBlobStore(IBlobStore inner, IMetadataStore db, string versionId, string filename)
+        {
+            _inner = inner;
+            _db = db;
+            _versionId = versionId;
+            _filename = filename;
+        }
+
+        public async Task PutAsync(string key, Stream content, CancellationToken ct = default)
+        {
+            await using (var conn = await _db.OpenAsync(ct))
+            {
+                await conn.ExecuteAsync(
+                    """
+                    INSERT INTO package_version_files
+                        (id, package_version_id, org_id, filename, blob_key, size_bytes, checksum_sha256, created_at)
+                    VALUES (@id, @versionId, 'o1', @filename, @key, 40, 'winner-sha', '2024-01-01T00:00:00Z')
+                    """,
+                    new { id = Guid.NewGuid().ToString("N"), versionId = _versionId, filename = _filename, key });
+            }
+            await _inner.PutAsync(key, content, ct);
+        }
+
+        public Task<Stream?> GetAsync(string key, CancellationToken ct = default) => _inner.GetAsync(key, ct);
+        public Task<RangedStream?> GetRangeAsync(string key, long offset, long length, CancellationToken ct = default)
+            => _inner.GetRangeAsync(key, offset, length, ct);
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => _inner.ExistsAsync(key, ct);
+        public Task DeleteAsync(string key, CancellationToken ct = default) => _inner.DeleteAsync(key, ct);
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => _inner.GetTotalSizeAsync(ct);
+        public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default)
+            => _inner.ListAsync(prefix, ct);
     }
 }

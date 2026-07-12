@@ -71,6 +71,66 @@ public sealed class OsvClientTests : IDisposable
         Assert.Empty(result);
     }
 
+    // ── TryQueryAsync (reachability signal for PackageLookupService) ───────────
+
+    [Fact]
+    public async Task TryQueryAsync_SuccessfulResponseWithVulns_ReportsReached()
+    {
+        string vulnJson = """
+            {"vulns":[{"id":"GHSA-aaaa","summary":"hello"}]}
+            """;
+        _server.Given(Request.Create().WithPath("/query").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(vulnJson));
+
+        var result = await _sut.TryQueryAsync("pkg:npm/foo@1.0.0");
+
+        Assert.True(result.Reached);
+        Assert.Single(result.Advisories);
+        Assert.Equal("GHSA-aaaa", result.Advisories[0].Id);
+    }
+
+    [Fact]
+    public async Task TryQueryAsync_ReachedButGenuinelyEmpty_ReportsReachedWithNoAdvisories()
+    {
+        _server.Given(Request.Create().WithPath("/query").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody("""{"vulns":[]}"""));
+
+        var result = await _sut.TryQueryAsync("pkg:npm/foo@1.0.0");
+
+        Assert.True(result.Reached);
+        Assert.Empty(result.Advisories);
+    }
+
+    [Fact]
+    public async Task TryQueryAsync_ServerError_ReportsUnreached()
+    {
+        // 5xx is exactly the outage mode QueryAsync swallows into an empty list with no
+        // exception — TryQueryAsync must still flag it as unreached.
+        _server.Given(Request.Create().WithPath("/query").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.ServiceUnavailable));
+
+        var result = await _sut.TryQueryAsync("pkg:npm/foo@1.0.0");
+
+        Assert.False(result.Reached);
+        Assert.Empty(result.Advisories);
+    }
+
+    [Fact]
+    public async Task TryQueryAsync_ConnectionRefused_ReportsUnreached()
+    {
+        // A real network failure (connection refused): the exact case
+        // OsvClient.QueryAsync's HttpRequestException catch swallows into []. Points the
+        // client at a port nothing is listening on, exercising the real HttpClient/socket
+        // path rather than a stubbed exception.
+        var unreachableClient = new OsvClient(
+            new SingleHandlerFactory("http://127.0.0.1:1/"), NullLogger<OsvClient>.Instance);
+
+        var result = await unreachableClient.TryQueryAsync("pkg:npm/foo@1.0.0");
+
+        Assert.False(result.Reached);
+        Assert.Empty(result.Advisories);
+    }
+
     // ── QueryBatchAsync ─────────────────────────────────────────────────────────
 
     [Fact]

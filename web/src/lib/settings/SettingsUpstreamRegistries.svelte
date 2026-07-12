@@ -15,7 +15,7 @@
 
   // The subset of the shared ecosystem vocabulary whose upstreams are configurable through the
   // per-org `upstream_registry` table — mirrors UpstreamRegistryRepository.SupportedEcosystems.
-  const DB_UPSTREAM_ECOSYSTEMS = new Set(['pypi', 'npm', 'nuget', 'maven', 'rpm', 'cargo', 'golang', 'oci'])
+  const DB_UPSTREAM_ECOSYSTEMS = new Set(['pypi', 'npm', 'nuget', 'maven', 'rpm', 'cargo', 'golang', 'oci', 'apk'])
   const ECOSYSTEMS = ECO_VOCAB
     .filter(key => DB_UPSTREAM_ECOSYSTEMS.has(key))
     .map(key => ({ key, label: ECO_LABEL[key] }))

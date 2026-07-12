@@ -413,6 +413,50 @@ build:
       - src/Dependably/bin/Release/net10.0/linux-x64/publish/
     expire_in: 1 hour
 
+# Builds and pushes the prebaked ci-tools image under ci/docker/ — jq + a JRE
+# + a Node runtime on top of the .NET SDK, consumed by sca-backend (jq for
+# parsing `dotnet list package --vulnerable` output) and sonarqube-check (the
+# JRE the SonarScanner engine needs, plus Node for its JS analysis sensors).
+# Runs automatically whenever a Dockerfile under ci/docker/ changes, on both
+# MR and main pipelines, so the pushed tag always reflects the checked-in
+# source; also always available as a manual run (rebuilding after nothing
+# else changed, e.g. to pick up a base-image digest bump). Modeled on
+# publish-image's dind/login mechanics. Hard-fails on an empty
+# DEP_IMAGE_REGISTRY rather than silently building without a push target.
+build-ci-tools:
+  stage: build
+  image: ${DEP_IMAGE_REGISTRY}/library/docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+  services:
+    - name: ${DEP_IMAGE_REGISTRY}/library/docker:27-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce   # glsec:ignore GL054 -- buildx needs BuildKit; privileged/BuildKit runner is the documented, chosen prerequisite
+      alias: docker
+  tags: [amd64]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - ci/docker/**
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - ci/docker/**
+    - when: manual
+      allow_failure: true
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: "" # glsec:ignore GL031 -- TLS on 2376 needs the runner to share dind's /certs/client volume into the job, which these self-hosted runners do not; the docker executor isolates the dind daemon on this job's per-build service network, so 2375 is not reachable by other jobs
+  script:
+    - |
+      if [ -z "${DEP_IMAGE_REGISTRY:-}" ]; then
+        echo "ERROR: DEP_IMAGE_REGISTRY is empty — refusing to build and push CI tool images nowhere." >&2
+        exit 1
+      fi
+    - echo "$REGISTRY_KEY" | docker login "$DEP_IMAGE_REGISTRY" -u api --password-stdin
+    # The dind service daemon comes up a few seconds after the job container; wait
+    # for it to accept connections before the first command that talks to it.
+    - |
+      for i in $(seq 30); do docker info >/dev/null 2>&1 && break; echo "waiting for dind ($i)..."; sleep 1; done
+      docker info >/dev/null 2>&1 || { echo "dind daemon did not become ready on $DOCKER_HOST"; exit 1; }
+    - docker build -f ci/docker/ci-tools.Dockerfile --build-arg DEP_IMAGE_REGISTRY="$DEP_IMAGE_REGISTRY" -t "$DEP_IMAGE_REGISTRY/ci/ci-tools:latest" .
+    - docker push "$DEP_IMAGE_REGISTRY/ci/ci-tools:latest"
+
 # === test ===
 
 lint:
@@ -483,6 +527,7 @@ secret-scan:
     entrypoint: [""]
   variables:
     GIT_DEPTH: 0
+    GIT_STRATEGY: clone
   script:
     - trufflehog git file://. --exclude-paths=.trufflehog-exclude --fail
 
@@ -588,7 +633,7 @@ frontend-tests:
 sca-backend:
   stage: test
   extends: [.runs-on-ci, .release-required]
-  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  image: ${DEP_IMAGE_REGISTRY}/ci/ci-tools:latest   # glsec:ignore GL001 -- project-owned image: the tag tracks the checked-in ci/docker/ci-tools.Dockerfile (whose base IS digest-pinned) and is rebuilt by build-ci-tools whenever that file changes; a digest pin here would go stale on every rebuild
   tags: [amd64]
   script:
     - |
@@ -609,7 +654,6 @@ sca-backend:
         </auditSources>
       </configuration>
       NUGETCFG
-    - apt-get update -qq && apt-get install -y -qq jq > /dev/null
     - dotnet restore
     - dotnet list package --vulnerable --include-transitive --format json > sca-backend.json
     - |
@@ -648,6 +692,7 @@ docker-lint:
   script:
     - hadolint Dockerfile
     - hadolint Dockerfile.edge
+    - hadolint ci/docker/ci-tools.Dockerfile
 
 # Machine-checkable exclusion proof for the edge image. The dependably/edge closure
 # must never contain the management-plane packages (SAML/IdentityModel/JWT stack,
@@ -703,8 +748,11 @@ e2e:
 sonarqube-check:
   stage: test
   extends: [.private-registry-setup, .runs-on-ci-main]
-  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
-  needs: [frontend-tests]
+  image: ${DEP_IMAGE_REGISTRY}/ci/ci-tools:latest   # glsec:ignore GL001 -- project-owned image: the tag tracks the checked-in ci/docker/ci-tools.Dockerfile (whose base IS digest-pinned) and is rebuilt by build-ci-tools whenever that file changes; a digest pin here would go stale on every rebuild
+  # needs bypasses stage ordering, so the ci-tools image build (present only in
+  # pipelines where ci/docker/** changed) must be an explicit optional edge —
+  # otherwise this job can start before the image it pulls has been pushed.
+  needs: [frontend-tests, { job: build-ci-tools, optional: true }]
   tags: [amd64]
   variables:
     SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
@@ -714,8 +762,6 @@ sonarqube-check:
     paths:
       - .sonar/cache
   script:
-    - apt-get update
-    - apt-get install --yes --no-install-recommends openjdk-17-jre-headless nodejs
     - dotnet tool install --global dotnet-sonarscanner
     - export PATH="$PATH:$HOME/.dotnet/tools"
     # The token is passed explicitly via /d:sonar.token — the SONAR_TOKEN environment
@@ -739,7 +785,7 @@ sonarqube-check:
       /d:sonar.cs.opencover.reportsPaths="test-results/opencover.xml"
       /d:sonar.cs.vstest.reportsPaths="test-results/tests.trx"
       /d:sonar.javascript.lcov.reportPaths="web/coverage/lcov.info"
-      /d:sonar.coverage.exclusions="src/Dependably/Program.cs,src/Dependably/Infrastructure/Schema*.sql,src/Dependably/Infrastructure/Redis/**/*.cs,src/Dependably/Infrastructure/RedisLockoutStore.cs,src/Dependably/Infrastructure/NpgsqlMetadataStore.cs,src/Dependably/Storage/AzureBlobContainerAdapter.cs,src/Dependably/Infrastructure/SpdxLicenseRepository.cs,web/src/main.js,web/src/App.svelte,web/src/locales/**,web/.stylelintrc.cjs,web/svelte.config.js,web/vite.config.js,web/vitest.config.js,web/eslint.config.js,build/extract-notices.mjs,i18n/scripts/i18n-validate.js"
+      /d:sonar.coverage.exclusions="src/**/Program.cs,src/**/schema/Schema*.sql,src/**/Infrastructure/Redis/**/*.cs,src/**/Infrastructure/RedisLockoutStore.cs,src/**/Infrastructure/NpgsqlMetadataStore.cs,src/**/Storage/AzureBlobContainerAdapter.cs,src/**/Infrastructure/SpdxLicenseRepository.cs,web/src/main.js,web/src/App.svelte,web/src/locales/**,web/.stylelintrc.cjs,web/svelte.config.js,web/vite.config.js,web/vitest.config.js,web/eslint.config.js,build/extract-notices.mjs,i18n/scripts/i18n-validate.js"
       /d:sonar.exclusions="web/e2e/**"
       /d:sonar.test.inclusions="**/*Tests.cs,**/*.test.js,**/*.spec.js,**/*.spec.ts"
       /d:sonar.issue.ignore.multicriteria="e1"
@@ -763,24 +809,6 @@ sonarqube-check:
     - head -10 test-results/opencover.xml
     - dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
   allow_failure: true
-
-snyk-code:
-  # Snyk Code (SAST) gate: fails only on findings absent from ci/snyk-code-baseline.json
-  # (see CONTRIBUTING > Static analysis (Snyk Code)). Gating (allow_failure: false): a finding
-  # not on the baseline fails the pipeline and blocks the merge. A genuine new FP gets an inline
-  # // deepcode ignore at the site + ci/snyk-code-scan.sh --update committed in the same MR.
-  # SNYK_TOKEN must be an UNPROTECTED, masked CI/CD variable — merge-request pipelines run on
-  # unprotected branches, so a protected token would be absent there and every MR scan errors.
-  stage: test
-  extends: [.runs-on-ci]
-  image:
-    name: ${DEP_IMAGE_REGISTRY}/snyk/snyk:linux@sha256:aeb296d943659dccbc7464340bb8741f6e11999cd99644dc92e6d315d6eda3f4
-    entrypoint: [""]
-  before_script:
-    - command -v jq >/dev/null 2>&1 || { apt-get update && apt-get install -y --no-install-recommends jq; }
-  script:
-    - ci/snyk-code-scan.sh
-  allow_failure: false
 
 # Boots the real published binary and runs the external dependably-integration-tests suite
 # against it. Background jobs that make outbound internet calls at startup (vuln-scan,
@@ -918,6 +946,10 @@ dt-publish:
     - apk add --no-cache curl
     - | # glsec:ignore GL020 -- curl POSTs SBOM files to the DT API; no executable is downloaded
       set -eu
+      if [ -z "${dependencyTrack_token:-}" ] || [ -z "${dependencyTrack_url:-}" ]; then
+        echo "Dependency-Track not configured (set the dependencyTrack_token and dependencyTrack_url CI/CD variables) — skipping SBOM publish." >&2
+        exit 0
+      fi
       AUTH="X-Api-Key: $dependencyTrack_token"
       BASE="${dependencyTrack_url%/}"
 

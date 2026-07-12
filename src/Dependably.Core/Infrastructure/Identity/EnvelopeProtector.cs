@@ -68,7 +68,7 @@ public sealed class EnvelopeProtector : IDisposable
     /// Returns true when <paramref name="stored"/> carries the <see cref="EncryptedPrefix"/>
     /// marker. This is a prefix-only check and requires no key material.
     /// </summary>
-    public bool IsEncrypted(string stored) =>
+    public static bool IsEncrypted(string stored) =>
         stored.StartsWith(EncryptedPrefix, StringComparison.Ordinal);
 
     /// <inheritdoc/>

@@ -547,7 +547,7 @@
         "dependencies": {
           "BCrypt.Net-Next": "[4.1.0, )",
           "Dapper": "[2.1.72, )",
-          "Dependably.Core": "[0.2.1, )",
+          "Dependably.Core": "[0.2.2, )",
           "IPAddressRange": "[6.3.0, )",
           "ITfoxtec.Identity.Saml2.MvcCore": "[4.17.0, )",
           "Microsoft.AspNetCore.Authentication.JwtBearer": "[10.0.8, )",

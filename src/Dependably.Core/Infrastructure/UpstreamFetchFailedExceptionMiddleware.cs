@@ -5,12 +5,16 @@ namespace Dependably.Infrastructure;
 
 /// <summary>
 /// Translates <see cref="UpstreamFetchFailedException"/> raised by <c>UpstreamClient</c>
-/// into a well-formed <c>503 Service Unavailable</c> (transient upstream throttle/error)
-/// or <c>502 Bad Gateway</c> (non-transient upstream failure) response. Package managers
+/// into a well-formed <c>503 Service Unavailable</c> (transient upstream throttle/error) or
+/// <c>502 Bad Gateway</c> (non-transient upstream failure) response. Package managers
 /// treat <c>403</c> as a fatal policy block and abort the entire install; surfacing a
 /// transient CDN or rate-limiting upstream response as 503 (with <c>Retry-After</c>)
-/// lets clients retry rather than fail permanently. Upstream internals are not leaked in
-/// the response body — only the retryability signal and the aggregate status are surfaced.
+/// lets clients retry rather than fail permanently. Within the 502 case, <see cref="UpstreamFetchFailedException.Refused"/>
+/// distinguishes a deterministic upstream auth/policy refusal (401/403) from generic
+/// upstream unreachability in the response body's <c>title</c>/<c>detail</c>, so clients and
+/// operators reading the response don't mistake a policy verdict for a network outage.
+/// Upstream internals are not leaked in the response body — only the retryability signal,
+/// the refusal/unreachability distinction, and the aggregate status are surfaced.
 /// </summary>
 public sealed class UpstreamFetchFailedExceptionMiddleware
 {
@@ -39,10 +43,11 @@ public sealed class UpstreamFetchFailedExceptionMiddleware
             }
 
             _logger.LogWarning(
-                "Upstream fetch exhausted retries: Url={Url} UpstreamStatus={UpstreamStatus} Transient={Transient}",
+                "Upstream fetch exhausted retries: Url={Url} UpstreamStatus={UpstreamStatus} Transient={Transient} Refused={Refused}",
                 ex.Url,
                 ex.StatusCode,
-                ex.Transient);
+                ex.Transient,
+                ex.Refused);
 
             context.Response.Clear();
 
@@ -62,6 +67,14 @@ public sealed class UpstreamFetchFailedExceptionMiddleware
                     ? ((int)ex.RetryAfter.Value.TotalSeconds).ToString()
                     : "5";
                 context.Response.Headers.RetryAfter = retryAfterValue;
+            }
+            else if (ex.Refused)
+            {
+                context.Response.StatusCode = StatusCodes.Status502BadGateway;
+                title = "Upstream refused the request";
+                detail = "The upstream registry rejected the request with an authentication or policy " +
+                         "verdict (401/403). This is not a transient condition — retrying with the same " +
+                         "credential will not succeed. Check the upstream credential and its capabilities.";
             }
             else
             {

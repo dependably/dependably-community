@@ -25,3 +25,4 @@ cov-out/
 
 # Roslyn / .NET build cache files emitted by analyzers — never artefacts of source code.
 *.lscache
+.sonarqube/

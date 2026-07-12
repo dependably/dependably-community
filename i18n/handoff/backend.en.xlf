@@ -105,6 +105,51 @@ Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
         <target>Les opérateurs ne peuvent pas modifier l&apos;état de leur propre compte; utilisez plutôt /api/v1/system/me/password.</target>
       </segment>
     </unit>
+    <unit id="error.alert.masterKeyRequired">
+      <notes>
+        <note category="translator">422 detail. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</note>
+      </notes>
+      <segment state="translated">
+        <source>DEPENDABLY_MASTER_KEY must be configured to store a Slack webhook URL at rest.</source>
+        <target>DEPENDABLY_MASTER_KEY doit être configurée pour stocker une URL de webhook Slack au repos.</target>
+      </segment>
+    </unit>
+    <unit id="error.alert.severityInvalid">
+      <notes>
+        <note category="translator">422 detail for the vulnMinSeverity setting. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;LOW&apos;, &apos;MEDIUM&apos;, &apos;HIGH&apos;, or &apos;CRITICAL&apos;.</source>
+        <target>Doit être « LOW », « MEDIUM », « HIGH » ou « CRITICAL ».</target>
+      </segment>
+    </unit>
+    <unit id="error.alert.slackNotConfigured">
+      <notes>
+        <note category="translator">422 detail when testing Slack delivery with no webhook configured.</note>
+      </notes>
+      <segment state="translated">
+        <source>Slack delivery is not enabled or no webhook URL is configured for this org.</source>
+        <target>La livraison Slack n&apos;est pas activée ou aucune URL de webhook n&apos;est configurée pour cet organisme.</target>
+      </segment>
+    </unit>
+    <unit id="error.alert.slackTestFailed">
+      <notes>
+        <note category="translator">422 detail. {0} = the underlying HTTP/network error message.</note>
+      </notes>
+      <segment state="translated">
+        <source>Slack test message failed: {0}</source>
+        <target>Échec du message de test Slack : {0}</target>
+      </segment>
+    </unit>
+    <unit id="error.alert.stateInvalid">
+      <notes>
+        <note category="translator">422 detail for the alert state filter. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;active&apos; or &apos;dismissed&apos;.</source>
+        <target>Doit être « active » ou « dismissed ».</target>
+      </segment>
+    </unit>
     <unit id="error.allowlist.purlPatternRequired">
       <notes>
         <note category="translator">Missing required API field when adding a package allowlist entry. Keep the field name &apos;purl_pattern&apos; verbatim.</note>
@@ -438,6 +483,69 @@ Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
         <target>version_pattern doit compter au plus 128 caractères.</target>
       </segment>
     </unit>
+    <unit id="error.lookup.mavenCoordinateInvalid">
+      <notes>
+        <note category="translator">422 detail for GET /api/v1/lookup?ecosystem=maven. &apos;groupId:artifactId&apos; is the literal expected shape - do not translate the punctuation.</note>
+      </notes>
+      <segment state="translated">
+        <source>Maven name must be a &quot;groupId:artifactId&quot; coordinate.</source>
+        <target>Le nom Maven doit être une coordonnée « groupId:artifactId ».</target>
+      </segment>
+    </unit>
+    <unit id="error.lookup.nameInvalid">
+      <notes>
+        <note category="translator">422 detail for GET /api/v1/lookup when the name query parameter has an invalid shape (path separators, control characters, or fails the ecosystem&apos;s own naming rules).</note>
+      </notes>
+      <segment state="translated">
+        <source>Package name is not valid for this ecosystem.</source>
+        <target>Le nom du paquet n&apos;est pas valide pour cet écosystème.</target>
+      </segment>
+    </unit>
+    <unit id="error.lookup.nameRequired">
+      <notes>
+        <note category="translator">422 detail for GET /api/v1/lookup when the name query parameter is missing. &apos;name&apos; is the API literal query-parameter name.</note>
+      </notes>
+      <segment state="translated">
+        <source>name is required.</source>
+        <target>name est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.lookup.packageNotFound">
+      <notes>
+        <note category="translator">404 detail for GET /api/v1/lookup when the upstream registry was reachable but does not know the requested package/version.</note>
+      </notes>
+      <segment state="translated">
+        <source>Package or version not found upstream.</source>
+        <target>Paquet ou version introuvable en amont.</target>
+      </segment>
+    </unit>
+    <unit id="error.lookup.upstreamUnavailable">
+      <notes>
+        <note category="translator">503 detail for GET /api/v1/lookup when the upstream registry could not be reached (transient network failure) or has no upstream configured. {0} = the ecosystem name (API literal).</note>
+      </notes>
+      <segment state="translated">
+        <source>The upstream registry for &apos;{0}&apos; is temporarily unavailable. Try again shortly.</source>
+        <target>La source amont pour « {0} » est temporairement indisponible. Réessayez sous peu.</target>
+      </segment>
+    </unit>
+    <unit id="error.lookup.versionInvalid">
+      <notes>
+        <note category="translator">422 detail for GET /api/v1/lookup when the version query parameter has an invalid shape.</note>
+      </notes>
+      <segment state="translated">
+        <source>Version is not valid.</source>
+        <target>La version n&apos;est pas valide.</target>
+      </segment>
+    </unit>
+    <unit id="error.lookup.versionRequired">
+      <notes>
+        <note category="translator">422 detail for GET /api/v1/lookup when no version was given and the ecosystem has no &quot;latest&quot; to resolve against (Go, Cargo, or an air-gapped org/instance). {0} = the ecosystem name (API literal).</note>
+      </notes>
+      <segment state="translated">
+        <source>version is required for ecosystem &apos;{0}&apos;.</source>
+        <target>version est obligatoire pour l&apos;écosystème « {0} ».</target>
+      </segment>
+    </unit>
     <unit id="error.member.lastOwnerDemote">
       <notes>
         <note category="translator">Blocked demotion of a tenant&apos;s only owner; an organization must always keep at least one owner.</note>
@@ -625,6 +733,15 @@ Si vous n&apos;attendiez pas cette invitation, vous pouvez ignorer ce courriel.
       <segment state="translated">
         <source>nameIdFormat is required.</source>
         <target>nameIdFormat est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="error.serviceUnavailable.title">
+      <notes>
+        <note category="translator">Title of the HTTP 503 problem response (a dependency the request needs is temporarily unreachable).</note>
+      </notes>
+      <segment state="translated">
+        <source>Service Unavailable</source>
+        <target>Service indisponible</target>
       </segment>
     </unit>
     <unit id="error.settings.deprecatedPolicyInvalid">

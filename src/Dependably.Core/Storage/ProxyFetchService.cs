@@ -347,6 +347,7 @@ public sealed class ProxyFetchService
                 BlockInstallScriptsMode: request.BlockInstallScriptsMode,
                 ProvenanceStatus: caFacts?.ProvenanceStatus,
                 VerifyProvenanceMode: request.VerifyProvenanceMode,
+                LicenseEnforcementMode: request.LicenseEnforcementMode,
                 CacheArtifactId: cacheArtifactId), ct);
 
         return new ProxyFetchResult(caDecision, sha256, blobKey, VersionId: null);
@@ -403,7 +404,8 @@ public sealed class ProxyFetchService
                 InstallScriptKind: existing?.InstallScriptKind,
                 BlockInstallScriptsMode: request.BlockInstallScriptsMode,
                 ProvenanceStatus: existing?.ProvenanceStatus,
-                VerifyProvenanceMode: request.VerifyProvenanceMode), ct);
+                VerifyProvenanceMode: request.VerifyProvenanceMode,
+                LicenseEnforcementMode: request.LicenseEnforcementMode), ct);
 
         return new ProxyFetchResult(decision, sha256, blobKey, scanVersionId);
     }
@@ -571,7 +573,15 @@ public sealed record ProxyFetchRequest(
     /// package name as a source pin so a later serve of the same name from a different upstream
     /// is refused (dependency-confusion guard). Null skips pinning for this fetch.
     /// </summary>
-    string? UpstreamUrl = null);
+    string? UpstreamUrl = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.license_enforcement_mode</c>: 'off' | 'warn' | 'block'.
+    /// Threaded through to <see cref="Protocol.BlockGateService"/> so a blocklisted-license artifact
+    /// is refused on its FIRST fetch (the proxy first-fetch path builds the block-gate request
+    /// field-by-field here rather than via the factories, so it must carry this explicitly). Only
+    /// 'block' denies; 'warn'/'off'/null keep the license signal advisory.
+    /// </summary>
+    string? LicenseEnforcementMode = null);
 
 /// <summary>Outcome of <see cref="ProxyFetchService.RecordAndScanAsync"/>.</summary>
 public sealed record ProxyFetchResult(

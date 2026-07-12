@@ -1,5 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Alerts;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
@@ -40,7 +41,9 @@ public sealed class BlockGateInstallScriptAllowlistTests : IClassFixture<InMemor
             new VulnerabilityRepository(_fixture.Store, _clock),
             _audit,
             new QuarantineRepository(_fixture.Store, _clock),
+            new AlertService(new AlertRepository(_fixture.Store, _clock), new NoOpAlertNotifier(), NullLogger<AlertService>.Instance),
             _allowlistSvc,
+            new LicenseRepository(_fixture.Store, _clock, new LicenseNormalizer(_fixture.Store, NullLogger<LicenseNormalizer>.Instance)),
             NullLogger<BlockGateService>.Instance,
             _clock);
     }

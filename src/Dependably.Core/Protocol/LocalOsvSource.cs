@@ -37,6 +37,13 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     private volatile Dictionary<(string Ecosystem, string Name), List<OsvAdvisory>> _index =
         new(EcosystemNameComparer.Instance);
 
+    // Reachability signal for TryQueryAsync: true once a reload has successfully consulted
+    // OSV_LOCAL_PATH (even if the resulting index is empty or individual files failed to
+    // parse); false only when the configured directory itself does not exist — the
+    // "air-gapped source is unavailable/misconfigured" case, distinct from a genuinely
+    // empty or malware-free dump set.
+    private volatile bool _sourceReachable;
+
     public LocalOsvSource(IConfiguration config, ILogger<LocalOsvSource> logger)
     {
         _logger = logger;
@@ -93,6 +100,19 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
             .ToList();
     }
 
+    /// <summary>
+    /// Same query as <see cref="QueryAsync"/>, but reports whether the local dump directory
+    /// was actually consulted. Reached is true whenever the last reload found
+    /// <c>OSV_LOCAL_PATH</c> present — a genuinely empty or malware-free index still counts as
+    /// reached. Reached is false only when the directory itself is missing (unavailable or
+    /// misconfigured), matching <see cref="ReloadAsync"/>'s early-return branch.
+    /// </summary>
+    public async Task<OsvQueryResult> TryQueryAsync(string purl, CancellationToken ct = default)
+    {
+        var advisories = await QueryAsync(purl, ct);
+        return new OsvQueryResult(advisories, Reached: _sourceReachable);
+    }
+
     public async Task<List<List<OsvAdvisory>>> QueryBatchAsync(
         IReadOnlyList<string> purls, CancellationToken ct = default)
     {
@@ -120,6 +140,7 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         {
             _logger.LogWarning("OSV local path not found: {Path}", _path);
             _index = new Dictionary<(string, string), List<OsvAdvisory>>(EcosystemNameComparer.Instance);
+            _sourceReachable = false;
             return;
         }
 
@@ -145,6 +166,7 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         }
 
         _index = newIndex;
+        _sourceReachable = true;
         _logger.LogInformation(
             "OSV local index reloaded: {Loaded} advisories, {Keys} keys, {Errors} parse errors.",
             loaded, newIndex.Count, errors);
@@ -181,12 +203,19 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
                 }
 
                 var key = (pkg.Ecosystem.ToLowerInvariant(), pkg.Name.ToLowerInvariant());
-                if (!index.TryGetValue(key, out var list))
+                AddToIndex(index, key, advisory);
+
+                // Alpine (apk) advisories are release-qualified in OSV ("Alpine:v3.18",
+                // "Alpine:v3.19", …) — one advisory feed per Alpine release. apk purls carry no
+                // release qualifier (ParsePurl/NormalizeEcosystem produce the bare "Alpine"), so
+                // also index every release-qualified entry under the bare "alpine" bucket. That
+                // lets QueryAsync's single exact-key lookup find every release's advisories for
+                // the name; MatchesEcosystemAndName then narrows the affected-package match with
+                // a prefix check against the release-qualified ecosystem string.
+                if (key.Item1.StartsWith("alpine", StringComparison.OrdinalIgnoreCase) && key.Item1 != "alpine")
                 {
-                    list = new List<OsvAdvisory>();
-                    index[key] = list;
+                    AddToIndex(index, ("alpine", key.Item2), advisory);
                 }
-                list.Add(advisory);
             }
             return true;
         }
@@ -195,6 +224,21 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
             _logger.LogDebug(ex, "Failed to parse OSV dump: {Path}", file);
             return false;
         }
+    }
+
+    // Adds an advisory under the given (ecosystem, name) bucket, creating the bucket on first
+    // insert. Shared by the primary per-file index pass and the Alpine dual-bucket indexing.
+    private static void AddToIndex(
+        Dictionary<(string Ecosystem, string Name), List<OsvAdvisory>> index,
+        (string Ecosystem, string Name) key,
+        OsvAdvisory advisory)
+    {
+        if (!index.TryGetValue(key, out var list))
+        {
+            list = new List<OsvAdvisory>();
+            index[key] = list;
+        }
+        list.Add(advisory);
     }
 
     // Deliberately distinct from PurlParser.TryParse: this index key is matched case-insensitively
@@ -226,6 +270,26 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
 
         string name = nameAndVersion[..at];
         string version = nameAndVersion[(at + 1)..];
+
+        // Strip purl-spec qualifiers (everything from '?' onward) from the version — apk purls
+        // carry an arch qualifier (?arch=...) that is never part of the version an OSV advisory
+        // lists.
+        int qmark = version.IndexOf('?');
+        if (qmark >= 0)
+        {
+            version = version[..qmark];
+        }
+
+        // apk purls carry an explicit "alpine" namespace segment
+        // (pkg:apk/alpine/{name}@{version}) that OSV's own affected[].package.name field does
+        // not include — strip it so the extracted name matches what TryIndexFileAsync indexed
+        // from the OSV dump.
+        if (string.Equals(ecosystem, "apk", StringComparison.OrdinalIgnoreCase)
+            && name.StartsWith("alpine/", StringComparison.OrdinalIgnoreCase))
+        {
+            name = name["alpine/".Length..];
+        }
+
         return (NormalizeEcosystem(ecosystem), name.ToLowerInvariant(), version);
     }
 
@@ -242,6 +306,11 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         // Cargo maps to the "crates.io" ecosystem in OSV, which is the canonical name for
         // Rust crate advisories in the RustSec and GitHub Advisory databases.
         "cargo" => "crates.io",
+        // apk maps to OSV's "Alpine" ecosystem. OSV publishes release-qualified Alpine feeds
+        // ("Alpine:v3.18", "Alpine:v3.19", …); apk purls carry no release qualifier, so this
+        // normalises to the bare "Alpine" and MatchesEcosystemAndName does a release-qualified
+        // prefix match against the indexed advisories (see the dual-bucket indexing above).
+        "apk" => "Alpine",
         // RPM and OCI are intentionally not normalised here: OSV has no single "RPM" ecosystem
         // (vulnerabilities live under distro-specific names like "Rocky Linux", "AlmaLinux",
         // "Red Hat"), and OCI image vulns are image-scan territory (Trivy), not OSV. Falling
@@ -254,10 +323,17 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         string? apEco = ap.Ecosystem?.ToLowerInvariant();
         string? apName = ap.Name?.ToLowerInvariant();
         // OSV uses "PyPI", "npm", "NuGet" (case sensitive in the schema). Match case-insensitively.
-        return apEco is not null
-            && apName is not null
-            && string.Equals(apEco, ecosystem, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(apName, name, StringComparison.OrdinalIgnoreCase);
+        if (apEco is null || apName is null || !string.Equals(apName, name, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // Alpine (apk) advisories are release-qualified ("Alpine:v3.18"); the query ecosystem is
+        // the bare "Alpine" (apk purls carry no OS-release qualifier), so match any release via a
+        // prefix check instead of exact equality.
+        return string.Equals(ecosystem, "Alpine", StringComparison.OrdinalIgnoreCase)
+            ? apEco.StartsWith("alpine", StringComparison.OrdinalIgnoreCase)
+            : string.Equals(apEco, ecosystem, StringComparison.OrdinalIgnoreCase);
     }
 
     private static OsvAdvisory BuildAdvisory(RawOsvDump raw, string rawJson)

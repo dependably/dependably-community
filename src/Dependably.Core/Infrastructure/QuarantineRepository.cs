@@ -26,13 +26,22 @@ public sealed class QuarantineRepository
     /// <summary>
     /// Records (or refreshes) the pending review row for a blocked purl. A decided row is
     /// left untouched — the conflict update's state predicate makes the upsert a no-op then.
+    /// The RETURNING id is compared against the candidate GUID minted for this call to tell a
+    /// fresh insert from a conflict-refresh: both a genuine insert and a pending-row refresh
+    /// produce a RETURNING row, but only the insert's row id matches the candidate. A no-op
+    /// against an already-decided row produces zero RETURNING rows on both SQLite and Postgres
+    /// (the WHERE guard suppresses the row entirely, not just the update) — that case falls back
+    /// to a plain lookup so the caller always gets a valid <see cref="QuarantineUpsertResult.RowId"/>.
+    /// <see cref="BlockGateService"/> uses <see cref="QuarantineUpsertResult.Inserted"/> to raise
+    /// an alert only on the fresh-insert case.
     /// </summary>
-    public async Task UpsertPendingAsync(
+    public async Task<QuarantineUpsertResult> UpsertPendingAsync(
         string orgId, string ecosystem, string purl, string gate,
         string? detail, string? packageVersionId, CancellationToken ct = default)
     {
+        string candidateId = Guid.NewGuid().ToString("N");
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
+        var returned = (await conn.QueryAsync<string>(
             """
             INSERT INTO quarantine (id, org_id, package_version_id, ecosystem, purl, gate, detail, state, updated_at)
             VALUES (@id, @orgId, @packageVersionId, @ecosystem, @purl, @gate, @detail, 'pending', @now)
@@ -42,8 +51,22 @@ public sealed class QuarantineRepository
                 package_version_id = COALESCE(excluded.package_version_id, quarantine.package_version_id),
                 updated_at = excluded.updated_at
             WHERE quarantine.state = 'pending'
+            RETURNING id
             """,
-            new { id = Guid.NewGuid().ToString("N"), orgId, packageVersionId, ecosystem, purl, gate, detail, now = NowIso() });
+            new { id = candidateId, orgId, packageVersionId, ecosystem, purl, gate, detail, now = NowIso() }))
+            .ToList();
+
+        if (returned.Count > 0)
+        {
+            string rowId = returned[0];
+            return new QuarantineUpsertResult(rowId, rowId == candidateId);
+        }
+
+        // WHERE guard suppressed the row (already decided) — look up the existing row directly.
+        string? existingId = await conn.ExecuteScalarAsync<string?>(
+            "SELECT id FROM quarantine WHERE org_id = @orgId AND purl = @purl",
+            new { orgId, purl });
+        return new QuarantineUpsertResult(existingId ?? candidateId, Inserted: false);
     }
 
     public async Task<(IReadOnlyList<QuarantineEntry> Items, int Total)> ListAsync(
@@ -239,6 +262,14 @@ public sealed class QuarantineRepository
         return count > 0;
     }
 }
+
+/// <summary>
+/// Outcome of <see cref="QuarantineRepository.UpsertPendingAsync"/>. <see cref="RowId"/> is the
+/// pending row's id (freshly minted or the pre-existing one); <see cref="Inserted"/> is true only
+/// when this call created a brand-new row — false for both a conflict-refresh of an existing
+/// pending row and a no-op against an already-decided one.
+/// </summary>
+public sealed record QuarantineUpsertResult(string RowId, bool Inserted);
 
 public sealed class QuarantineEntry
 {

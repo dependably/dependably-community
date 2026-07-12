@@ -29,6 +29,10 @@ public static class UpstreamRegistrySeeder
         // Rust 1.68. The legacy git index at github.com/rust-lang/crates.io-index is still
         // maintained but clients prefer the sparse protocol; this is the canonical default.
         ("cargo",  "Cargo:Upstream", "https://index.crates.io"),
+        // Alpine's official CDN mirror. The route is 1:1 with dl-cdn's layout
+        // ({release}/{repo}/{arch}/{file}), so a sed host-rewrite of /etc/apk/repositories is
+        // the only client-side change needed to point at this proxy.
+        ("apk",    "Apk:Upstream",   "https://dl-cdn.alpinelinux.org/alpine"),
     ];
 
     /// <summary>

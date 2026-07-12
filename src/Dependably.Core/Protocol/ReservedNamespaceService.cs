@@ -29,6 +29,8 @@ namespace Dependably.Protocol;
 /// boundary: <c>github.com/acme</c> reserves <c>github.com/acme</c> and every
 /// <c>github.com/acme/*</c> path but not <c>github.com/acmecorp</c>. Case-sensitive (Ordinal) —
 /// Go module paths are case-significant (the proxy's bang-encoding exists for exactly this).</item>
+/// <item>apk — exact name or trailing-<c>*</c> glob, ordinal on lowercased names (Alpine's
+/// package namespace is flat and conventionally lowercase), the same shape as npm and cargo.</item>
 /// </list>
 ///
 /// Reads are served from a short-TTL per-org cache (same shape as
@@ -37,7 +39,7 @@ namespace Dependably.Protocol;
 /// </summary>
 public sealed partial class ReservedNamespaceService
 {
-    public static readonly IReadOnlyList<string> SupportedEcosystems = ["npm", "pypi", "nuget", "maven", "cargo", "golang"];
+    public static readonly IReadOnlyList<string> SupportedEcosystems = ["npm", "pypi", "nuget", "maven", "cargo", "golang", "apk"];
 
     private readonly IMetadataStore _db;
     private readonly IMemoryCache _cache;

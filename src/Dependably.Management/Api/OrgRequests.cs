@@ -113,6 +113,7 @@ public sealed record PatchRoleRequest(string Role);
 public sealed record OrgControllerServices(
     OrgRepository Orgs,
     PackageRepository Packages,
+    PackageVersionFilesRepository VersionFiles,
     PackageAnalyticsRepository PackageAnalytics,
     StatsSnapshotRepository StatsSnapshots,
     TokenRepository Tokens,

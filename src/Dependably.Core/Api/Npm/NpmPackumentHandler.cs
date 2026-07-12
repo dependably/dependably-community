@@ -30,7 +30,8 @@ public sealed class NpmPackumentHandler(
     NpmDistTagRepository distTags,
     RenderedResponseCache<NpmPackumentKey> cache,
     RenderedMetadataCacheOptions cacheOptions,
-    TimeProvider time)
+    TimeProvider time,
+    ILogger<NpmPackumentHandler> logger)
 {
     // TTL for proxy-merged packuments (upstream can change); local-only packuments use
     // a longer TTL because invalidation on mutation is the primary expiry mechanism. Both are
@@ -273,8 +274,13 @@ public sealed class NpmPackumentHandler(
             try
             {
                 // Single-flight packument fetch — collapses N concurrent npm-install
-                // requests onto one upstream call when a coordinate first warms up.
-                var response = await upstream.GetOrFetchMetadataAsync($"{source.Url}/{fullName}", source.AuthorizationHeader, ct);
+                // requests onto one upstream call when a coordinate first warms up. Falls
+                // back to the abbreviated (install-v1) document when the full packument
+                // overflows the metadata byte cap, so huge packages (vite, aws-sdk, …)
+                // still resolve with real dependency lists instead of degrading to the
+                // local-only fallback below.
+                var response = await NpmPackumentFetcher.FetchAsync(
+                    upstream, $"{source.Url}/{fullName}", source.AuthorizationHeader, logger, ct);
                 if (!response.IsSuccessStatusCode)
                 {
                     continue;
@@ -422,13 +428,7 @@ public sealed class NpmPackumentHandler(
         var publishedAtByVersion = ParsePublishTimestamps(timeObj);
 
         // Remove time[] entries for dropped versions; preserve non-version meta-keys.
-        if (timeObj is not null)
-        {
-            foreach (string ver in removed)
-            {
-                timeObj.Remove(ver);
-            }
-        }
+        RemoveTimeEntriesForRemoved(timeObj, removed);
 
         var distTagsObj = packument["dist-tags"]?.AsObject();
         if (distTagsObj is null)
@@ -438,7 +438,29 @@ public sealed class NpmPackumentHandler(
 
         var surviving = packument["versions"]?.AsObject()?.Select(kv => kv.Key).ToList()
             ?? new List<string>();
+        RepairDistTagsForRemoved(distTagsObj, removed, surviving, publishedAtByVersion);
+    }
 
+    private static void RemoveTimeEntriesForRemoved(JsonObject? timeObj, HashSet<string> removed)
+    {
+        if (timeObj is null)
+        {
+            return;
+        }
+
+        foreach (string ver in removed)
+        {
+            timeObj.Remove(ver);
+        }
+    }
+
+    // Repoints (or drops) every dist-tag pointing at a removed version. When 'latest' pointed
+    // at a removed version it is repointed to the newest surviving stable version by publish
+    // timestamp — a prerelease is chosen only when no stable version survives.
+    private static void RepairDistTagsForRemoved(
+        JsonObject distTagsObj, HashSet<string> removed, List<string> surviving,
+        Dictionary<string, DateTimeOffset> publishedAtByVersion)
+    {
         var tagKeys = distTagsObj.Select(kv => kv.Key).ToList();
         foreach (string tag in tagKeys)
         {
@@ -451,21 +473,26 @@ public sealed class NpmPackumentHandler(
             distTagsObj.Remove(tag);
             if (tag == "latest" && surviving.Count > 0)
             {
-                // Prefer stable survivors (semver prerelease = label after '-'); among the
-                // candidates pick the newest by publish timestamp. Versions with no time[]
-                // entry sort oldest.
-                var candidates = surviving.Where(v => !v.Contains('-')).ToList();
-                if (candidates.Count == 0)
-                {
-                    candidates = surviving;
-                }
-
-                distTagsObj["latest"] = candidates
-                    .OrderByDescending(v =>
-                        publishedAtByVersion.TryGetValue(v, out var ts) ? ts : DateTimeOffset.MinValue)
-                    .First();
+                distTagsObj["latest"] = PickNewLatest(surviving, publishedAtByVersion);
             }
         }
+    }
+
+    // Prefer stable survivors (semver prerelease = label after '-'); among the candidates pick
+    // the newest by publish timestamp. Versions with no time[] entry sort oldest.
+    private static string PickNewLatest(
+        List<string> surviving, Dictionary<string, DateTimeOffset> publishedAtByVersion)
+    {
+        var candidates = surviving.Where(v => !v.Contains('-')).ToList();
+        if (candidates.Count == 0)
+        {
+            candidates = surviving;
+        }
+
+        return candidates
+            .OrderByDescending(v =>
+                publishedAtByVersion.TryGetValue(v, out var ts) ? ts : DateTimeOffset.MinValue)
+            .First();
     }
 
     // Splices local versions into the upstream packument and enforces stored-state block

@@ -109,6 +109,39 @@ public class CapabilityValidationTests
     }
 
     [Fact]
+    public void Owner_Can_Mint_ReadAll()
+    {
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
+            new[] { "read:*" }, OwnerGrants,
+            out string? canonicalJson, out string[]? caps, out _, out _);
+        Assert.True(ok);
+        Assert.Equal(new[] { "read:*" }, caps);
+        Assert.Equal("""["read:*"]""", canonicalJson);
+    }
+
+    [Fact]
+    public void Admin_Can_Mint_ReadAll()
+    {
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
+            new[] { "read:*" }, AdminGrants,
+            out _, out _, out _, out _);
+        Assert.True(ok);
+    }
+
+    [Fact]
+    public void Member_Cannot_Mint_ReadAll()
+    {
+        // Member holds four of the six individual read leaves but never the wildcard —
+        // minting read:* must not let a member escalate to read:audit/read:tenant.
+        bool ok = Capabilities.TryNormalizeAndAuthorize(
+            new[] { "read:*" }, MemberGrants,
+            out _, out _, out string? error, out string? field);
+        Assert.False(ok);
+        Assert.Equal("capabilities", field);
+        Assert.Contains("exceed your role", error);
+    }
+
+    [Fact]
     public void Global_Wildcard_Not_Requestable()
     {
         // Even owners cannot mint a global "*" token via the request boundary; that wildcard

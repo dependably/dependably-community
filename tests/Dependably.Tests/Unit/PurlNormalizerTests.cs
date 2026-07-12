@@ -89,6 +89,13 @@ public class PurlNormalizerTests
         string purl = PurlNormalizer.NuGet("Newtonsoft.Json", "13.0.3");
         Assert.Contains("Newtonsoft.Json", purl);
     }
+
+    // apk — alpine namespace, pkgver-rpkgrel version, arch qualifier
+    [Theory]
+    [InlineData("curl", "8.9.0", "0", "x86_64", "pkg:apk/alpine/curl@8.9.0-r0?arch=x86_64")]
+    [InlineData("busybox-static", "1.36.1", "2", "aarch64", "pkg:apk/alpine/busybox-static@1.36.1-r2?arch=aarch64")]
+    public void Apk_NormalizesCorrectly(string name, string pkgver, string pkgrel, string arch, string expected)
+        => Assert.Equal(expected, PurlNormalizer.Apk(name, pkgver, pkgrel, arch));
 }
 
 [Trait("Category", "Unit")]

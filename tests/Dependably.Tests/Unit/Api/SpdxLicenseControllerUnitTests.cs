@@ -196,4 +196,78 @@ public sealed class SpdxLicenseControllerUnitTests
 
         Assert.False(result is OkObjectResult);
     }
+
+    // ── GetText ───────────────────────────────────────────────────────────────
+
+    private static async Task SetTextAsync(IMetadataStore store, string identifier, string? text)
+    {
+        await using var conn = await store.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE spdx_license SET license_text = @text WHERE identifier = @identifier",
+            new { identifier, text });
+    }
+
+    [Fact]
+    public async Task GetText_Member_KnownIdentifierWithText_Returns200WithText()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
+        var b = await s.BuildAsync();
+        await SeedSpdxAsync(b.Db);
+        await SetTextAsync(b.Db, "MIT", "Permission is hereby granted, free of charge...");
+
+        var controller = BuildController(b);
+        var result = await controller.GetText("MIT", CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var row = Assert.IsType<SpdxLicenseText>(ok.Value);
+        Assert.Equal("MIT", row.Identifier);
+        Assert.Equal("MIT License", row.Name);
+        Assert.Contains("Permission is hereby granted", row.LicenseText!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetText_Member_KnownIdentifierWithoutText_Returns200WithNull()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
+        var b = await s.BuildAsync();
+        await SeedSpdxAsync(b.Db); // seeds MIT with license_text = NULL
+
+        var controller = BuildController(b);
+        var result = await controller.GetText("MIT", CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var row = Assert.IsType<SpdxLicenseText>(ok.Value);
+        Assert.Equal("MIT", row.Identifier);
+        Assert.Null(row.LicenseText);
+    }
+
+    [Fact]
+    public async Task GetText_Member_UnknownIdentifier_Returns404()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "member");
+        var b = await s.BuildAsync();
+        await SeedSpdxAsync(b.Db);
+
+        var controller = BuildController(b);
+        var result = await controller.GetText("Never-Heard-Of-It-9.9", CancellationToken.None);
+
+        Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Fact]
+    public async Task GetText_Anonymous_DeniedBeforeReadingData()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); s.WithNoUser();
+        var b = await s.BuildAsync();
+        await SeedSpdxAsync(b.Db);
+
+        var controller = BuildController(b);
+        var result = await controller.GetText("MIT", CancellationToken.None);
+
+        Assert.False(result is OkObjectResult);
+    }
 }

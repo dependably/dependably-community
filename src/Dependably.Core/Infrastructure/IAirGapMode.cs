@@ -47,6 +47,7 @@ internal static class BackgroundJobs
             "tenant-count-poller",
             "stats-refresh",
             "saml-cert-expiry",
+            "license-backfill",
         };
 
     /// <summary>

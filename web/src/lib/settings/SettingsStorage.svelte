@@ -7,6 +7,7 @@
   import { t } from 'svelte-i18n'
   import SettingsUpload from './SettingsUpload.svelte'
   import SettingsRetention from './SettingsRetention.svelte'
+  import InfoTip from '../InfoTip.svelte'
 
   export let settings
   export let retention
@@ -16,10 +17,16 @@
   export let onSaveRetention = () => {}
 </script>
 
-<h3 class="section-h">{$t('settings.storage.uploadTitle')}</h3>
+<h3 class="section-h">
+  {$t('settings.storage.uploadTitle')}
+  <InfoTip text={$t('settings.storage.uploadHint')} />
+</h3>
 <SettingsUpload {settings} {instanceMax} {saving} onSave={onSaveUpload} />
 
-<h3 class="section-h mt-4">{$t('settings.storage.retentionTitle')}</h3>
+<h3 class="section-h mt-4">
+  {$t('settings.storage.retentionTitle')}
+  <InfoTip text={$t('settings.storage.retentionHint')} />
+</h3>
 <SettingsRetention {retention} {saving} onSave={onSaveRetention} />
 
 <style>

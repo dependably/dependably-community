@@ -106,6 +106,10 @@ public partial class Program
         // when subscriptions exist). WEBHOOK_ALLOW_PRIVATE controls the SSRF predicate.
         builder.Services.AddDependablyWebhookDispatcher(builder.Configuration);
 
+        // Per-org alert Slack delivery (always registered; the queue is only active for orgs
+        // with Slack enabled + a webhook URL configured). Same WEBHOOK_ALLOW_PRIVATE SSRF gate.
+        builder.Services.AddDependablyAlertNotifier(builder.Configuration);
+
         // Invite email delivery (opt-in via SMTP_HOST). No-op when SMTP_HOST is absent —
         // the controller falls back to returning the invite link in the response body.
         builder.Services.AddDependablyInviteMailer(builder.Configuration);
@@ -587,7 +591,7 @@ public partial class Program
 
     private static readonly string[] NonSpaPathPrefixes =
         ["/api/", "/simple/", "/npm/", "/nuget/", "/packages/", "/pypi/", "/maven/", "/rpm/", "/v2/", "/saml/",
-         "/docs/", "/openapi/", "/cargo/", "/go/", "/edge/"];
+         "/docs/", "/openapi/", "/cargo/", "/go/", "/edge/", "/apk/"];
 
     private static readonly string[] NonSpaExactPaths = ["/health", "/ready", "/metrics", "/docs", "/cargo/config.json"];
 

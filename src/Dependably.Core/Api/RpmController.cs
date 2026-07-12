@@ -141,6 +141,17 @@ public sealed class RpmController : OrgScopedControllerBase
             // already passed validation, so a parse failure here must not fail the upload.
             var scriptResult = ScriptDetectionService.Detect("rpm", filename, bytes);
 
+            // License hard-block. RPM publishes write the registry tier and version row
+            // directly (outside IPackagePublishService's shared pipeline), so the gate is
+            // applied here at the choke point, before any blob or metadata write — mirroring
+            // the "no version row on block" invariant the shared pipeline gives every other
+            // hosted-push ecosystem. Strictly guarded by 'block': under 'warn'/'off' this reads
+            // nothing extra.
+            if (await EvaluateRpmLicenseGateAsync(orgId, settings, header.License, ct) is { } licenseReject)
+            {
+                return licenseReject;
+            }
+
             // Store the verified artifact by streaming the staged file into the blob store.
             // deepcode ignore PT: staged.Path is under the operator-configured staging root — no user input reaches the path.
             await using (var artifactStream = new FileStream(
@@ -207,6 +218,7 @@ public sealed class RpmController : OrgScopedControllerBase
         }
 
         await UpsertRpmMetadataAsync(conn, versionId, a.Header);
+        await MirrorRpmLicenseAsync(versionId, cacheArtifactId: null, a.Header.License, ct);
         await MarkRepodataDirtyAsync(conn, a.OrgId, a.Header.Arch);
         EvictRepodataCaches(a.OrgId);
 
@@ -276,6 +288,86 @@ public sealed class RpmController : OrgScopedControllerBase
                 changelogs = JsonSerializer.Serialize(header.Changelogs),
                 license = header.License,
             });
+    }
+
+    /// <summary>
+    /// License hard-block for hosted RPM uploads, governed by the existing
+    /// <c>org_settings.license_enforcement_mode</c> ('off'/'warn'/'block'). RPM publish writes
+    /// the registry tier and version row directly (it does not funnel through
+    /// <c>IPackagePublishService</c>), so this is the pre-persist choke point mirroring the
+    /// shared pipeline's license arm. Maps the raw tag through <see cref="RpmLicenseMapper"/>
+    /// the same way <see cref="MirrorRpmLicenseAsync"/> does, so the policy check speaks the
+    /// same vocabulary as the persisted review-queue entry. Only 'block' can reject; 'warn'/'off'
+    /// or a null/blank/implausible license never read the policy tables.
+    /// </summary>
+    private async Task<IActionResult?> EvaluateRpmLicenseGateAsync(
+        string orgId, OrgSettings? settings, string? rawLicense, CancellationToken ct)
+    {
+        if (settings?.LicenseEnforcementMode != "block" || string.IsNullOrWhiteSpace(rawLicense))
+        {
+            return null;
+        }
+
+        string mapped = RpmLicenseMapper.ToSpdx(rawLicense);
+        if (!LicenseExtractor.IsPlausibleSpdx(mapped))
+        {
+            return null;
+        }
+
+        var (allowed, blocked) = await _svc.Licenses.CheckPolicyAsync(orgId, "block", [mapped], ct);
+        return allowed
+            ? null
+            : new ObjectResult(new ProblemDetails
+            {
+                Detail = $"License '{blocked}' is not permitted by this org's license policy.",
+                Status = StatusCodes.Status403Forbidden,
+            })
+            { StatusCode = StatusCodes.Status403Forbidden };
+    }
+
+    /// <summary>
+    /// Mirrors an RPM header/primary.xml <c>License</c> tag into license governance
+    /// (<c>package_version_licenses</c>), mapping the Fedora/RHEL short tag to its
+    /// SPDX identifier via <see cref="RpmLicenseMapper"/> first so the review queue
+    /// speaks the same vocabulary as every other ecosystem. Exactly one of
+    /// <paramref name="versionId"/> (hosted upload) or <paramref name="cacheArtifactId"/>
+    /// (proxy first-fetch) is non-null per call site. Best-effort: a null/blank
+    /// license, a mapped value that fails the SPDX shape gate, or a DB failure never
+    /// fails the surrounding ingest — the artifact has already been (or is about to
+    /// be) stored/served regardless of whether the license mirrors cleanly.
+    /// </summary>
+    private async Task MirrorRpmLicenseAsync(
+        string? versionId, string? cacheArtifactId, string? rawLicense, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(rawLicense))
+        {
+            return;
+        }
+
+        string mapped = RpmLicenseMapper.ToSpdx(rawLicense);
+        if (!LicenseExtractor.IsPlausibleSpdx(mapped))
+        {
+            return;
+        }
+
+        try
+        {
+            string[] spdx = [mapped];
+            if (versionId is not null)
+            {
+                await _svc.Licenses.SetLicensesAsync(versionId, spdx, "upstream", ct);
+            }
+
+            if (cacheArtifactId is not null)
+            {
+                await _svc.Licenses.SetLicensesForCacheArtifactAsync(cacheArtifactId, spdx, "upstream", ct);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogWarning(ex,
+                "RPM license mirror failed: {ExceptionType}", ex.GetType().Name);
+        }
     }
 
     // Marks the per-arch repodata row dirty so the background rebuild service picks it up.
@@ -1199,6 +1291,8 @@ public sealed class RpmController : OrgScopedControllerBase
                     desc = p.Resolution.Description,
                     license = p.Resolution.License,
                 });
+
+            await MirrorRpmLicenseAsync(versionId: null, cacheArtifactId, p.Resolution.License, ct);
         }
     }
 
@@ -1249,5 +1343,6 @@ public sealed record RpmControllerServices(
     Dependably.Infrastructure.Edge.EdgePublishGuard EdgeGuard,
     Dependably.Protocol.BlockGateService BlockGate,
     Dependably.Infrastructure.StagingOptions Staging,
+    LicenseRepository Licenses,
     UpstreamClient? UpstreamClient = null,
     IRpmUpstreamProxy? Proxy = null);

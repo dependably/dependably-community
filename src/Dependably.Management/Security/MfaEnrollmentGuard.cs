@@ -17,6 +17,12 @@ namespace Dependably.Security;
 /// Runs after <see cref="PasswordRotationGuard"/> so rotation wins: a user who must both
 /// rotate and enroll is sent to the password change form first, and the password endpoint
 /// is on the MFA allowlist.
+///
+/// Exempt: opaque API tokens authenticated by the <c>ApiToken</c> scheme (PATs and service
+/// tokens). MFA enrollment is enforced once, at login, when the JWT session is issued; a PAT
+/// or service token already required that gated session (or an admin/owner's own capability
+/// grant) to mint, so re-checking enrollment on every token-authenticated request would 403
+/// CI/automation callers for a posture that governs interactive sessions.
 /// </summary>
 public sealed class MfaEnrollmentGuard : IAsyncAuthorizationFilter
 {
@@ -91,6 +97,17 @@ public sealed class MfaEnrollmentGuard : IAsyncAuthorizationFilter
             return;
         }
 
+        // MFA enrollment is an interactive-user session concern — the enforcement point is
+        // the login flow that issues a JWT. An opaque API token authenticated by the ApiToken
+        // scheme required an already-MFA-gated session to mint in the first place, so it is
+        // exempt here. Checked as a positive match on the ApiToken scheme (rather than the
+        // absence of a JWT identity) so the exemption can never accidentally swallow a JWT
+        // principal whose identity happens to carry an unexpected AuthenticationType.
+        if (user.Identities.Any(i => i.AuthenticationType == TokenAuthenticationDefaults.Scheme))
+        {
+            return;
+        }
+
         string? sub = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
             ?? user.FindFirst("sub")?.Value;
         if (sub is null)
@@ -99,30 +116,7 @@ public sealed class MfaEnrollmentGuard : IAsyncAuthorizationFilter
         }
 
         var ct = context.HttpContext.RequestAborted;
-
-        bool requireMfa;
-        bool mfaEnabled;
-
-        if (scope == "system")
-        {
-            // System admins are gated by the instance-level override only; there is no
-            // per-tenant setting for system_admin accounts.
-            requireMfa = _requireMfa.IsEnabled;
-            mfaEnabled = requireMfa && await _admins.IsMfaEnabledAsync(sub, ct);
-        }
-        else
-        {
-            // Tenant users compose the instance override with the per-tenant require_mfa flag.
-            string? orgId = user.FindFirst("org_id")?.Value;
-            if (orgId is null)
-            {
-                return;
-            }
-
-            var settings = await _orgs.GetSettingsAsync(orgId, ct);
-            requireMfa = _requireMfa.IsEnabled || (settings?.RequireMfa ?? false);
-            mfaEnabled = requireMfa && await _users.IsMfaEnabledAsync(sub, ct);
-        }
+        var (requireMfa, mfaEnabled) = await ResolveMfaStatusAsync(scope, sub, user, ct);
 
         if (requireMfa && !mfaEnabled)
         {
@@ -134,5 +128,32 @@ public sealed class MfaEnrollmentGuard : IAsyncAuthorizationFilter
             })
             { StatusCode = StatusCodes.Status403Forbidden };
         }
+    }
+
+    // Resolves whether MFA is required and enrolled for the current principal. System admins
+    // are gated by the instance-level override only (no per-tenant setting for system_admin
+    // accounts); tenant users compose the instance override with the per-tenant require_mfa
+    // flag. A tenant principal carrying no org_id claim reports (false, false) — never blocked,
+    // matching the guard's original pass-through behaviour for that unexpected shape.
+    private async Task<(bool RequireMfa, bool MfaEnabled)> ResolveMfaStatusAsync(
+        string? scope, string sub, System.Security.Claims.ClaimsPrincipal user, CancellationToken ct)
+    {
+        if (scope == "system")
+        {
+            bool requireMfa = _requireMfa.IsEnabled;
+            bool mfaEnabled = requireMfa && await _admins.IsMfaEnabledAsync(sub, ct);
+            return (requireMfa, mfaEnabled);
+        }
+
+        string? orgId = user.FindFirst("org_id")?.Value;
+        if (orgId is null)
+        {
+            return (false, false);
+        }
+
+        var settings = await _orgs.GetSettingsAsync(orgId, ct);
+        bool tenantRequireMfa = _requireMfa.IsEnabled || (settings?.RequireMfa ?? false);
+        bool tenantMfaEnabled = tenantRequireMfa && await _users.IsMfaEnabledAsync(sub, ct);
+        return (tenantRequireMfa, tenantMfaEnabled);
     }
 }

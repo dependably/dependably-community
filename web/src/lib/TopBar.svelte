@@ -3,8 +3,15 @@
   import { t } from 'svelte-i18n'
   import { route, user, navigate } from './store.js'
   import GlobalSearch from './GlobalSearch.svelte'
+  import AlertsPanel from './AlertsPanel.svelte'
 
   const dispatch = createEventDispatcher()
+
+  // The alert center is admin/owner only — read:tenant and tenant:configure are not granted to
+  // member/auditor (Capabilities.cs), the same gate QuarantineController enforces server-side.
+  // Gating the component mount (not just its contents) keeps the bell fully absent from the DOM
+  // for a member, not merely hidden.
+  $: isAdmin = $user?.role === 'admin' || $user?.role === 'owner'
 </script>
 
 <header class="topbar">
@@ -13,9 +20,9 @@
   </div>
 
   <div class="nav-actions">
-    <button class="icon-btn" aria-label={$t('nav.notifications')} title={$t('nav.notifications')}>
-      <svg width="16" height="16" aria-hidden="true"><use href="/icons.svg#icon-bell"/></svg>
-    </button>
+    {#if isAdmin}
+      <AlertsPanel />
+    {/if}
     {#if $user}
       <button
         class="nav-link"
@@ -53,21 +60,6 @@
   }
 
   .nav-actions { display: flex; gap: 6px; align-items: center; }
-
-  .icon-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 30px;
-    height: 30px;
-    padding: 0;
-    border: none;
-    background: none;
-    color: var(--text2);
-    border-radius: var(--radius);
-    cursor: pointer;
-  }
-  .icon-btn:hover { background: var(--bg3); color: var(--text); }
 
   .nav-link {
     display: inline-flex;

@@ -95,4 +95,24 @@ public sealed class SpdxLicenseRepository
 
         return rows.ToDictionary(r => r.Identifier, StringComparer.Ordinal);
     }
+
+    /// <summary>
+    /// Returns the identifier, name, and full bundled license text for a single SPDX row, or
+    /// <c>null</c> when the identifier is unknown. <see cref="SpdxLicenseText.LicenseText"/> is
+    /// <c>null</c> for a known identifier whose text was not bundled. Kept out of the list/detail
+    /// SELECTs so those payloads stay small; the multi-KB text is fetched only on demand.
+    /// </summary>
+    public async Task<SpdxLicenseText?> GetTextAsync(string identifier, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.QuerySingleOrDefaultAsync<SpdxLicenseText>(
+            """
+            SELECT identifier   AS Identifier,
+                   name         AS Name,
+                   license_text AS LicenseText
+            FROM spdx_license
+            WHERE identifier = @identifier
+            """,
+            new { identifier });
+    }
 }

@@ -176,14 +176,14 @@ public sealed class MasterKeyProviderTests : IDisposable
     {
         using var ep = new EnvelopeProtector(ProviderFromInlineKey(NewKey()));
         string protected_ = ep.Protect("value");
-        Assert.True(ep.IsEncrypted(protected_));
+        Assert.True(EnvelopeProtector.IsEncrypted(protected_));
     }
 
     [Fact]
     public void IsEncrypted_PlaintextValue_ReturnsFalse()
     {
         using var ep = new EnvelopeProtector(ProviderFromInlineKey(NewKey()));
-        Assert.False(ep.IsEncrypted("plaintext-legacy-value"));
+        Assert.False(EnvelopeProtector.IsEncrypted("plaintext-legacy-value"));
     }
 
     [Fact]

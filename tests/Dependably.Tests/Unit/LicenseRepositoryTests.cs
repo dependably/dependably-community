@@ -1,6 +1,8 @@
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Tests.Unit;
 
@@ -8,6 +10,7 @@ namespace Dependably.Tests.Unit;
 public class LicenseRepositoryTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
+    private LicenseNormalizer? _normalizer;
 
     public async Task InitializeAsync()
     {
@@ -27,7 +30,9 @@ public class LicenseRepositoryTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
 
-    private LicenseRepository Repo() => new(_db, TimeProvider.System);
+    private LicenseRepository Repo() => new(
+        _db, TimeProvider.System,
+        _normalizer ??= new LicenseNormalizer(_db, NullLogger<LicenseNormalizer>.Instance));
 
     // ── CheckPolicyAsync ──────────────────────────────────────────────────────
 
@@ -55,6 +60,9 @@ public class LicenseRepositoryTests : IAsyncLifetime
     public async Task CheckPolicy_BlocklistedLicense_Blocked(string mode)
     {
         var repo = Repo();
+        // MIT is allowlisted so it is satisfied under block mode too; the blocklisted GPL-3.0 is
+        // then the concrete offender the check reports in both modes.
+        await repo.AddAllowlistAsync("org1", "MIT");
         await repo.AddBlocklistAsync("org1", "GPL-3.0");
 
         var (allowed, blocked) = await repo.CheckPolicyAsync("org1", mode, ["MIT", "GPL-3.0"]);
@@ -115,6 +123,95 @@ public class LicenseRepositoryTests : IAsyncLifetime
 
         var (allowed, _) = await repo.CheckPolicyAsync("org1", "warn", ["GPL-3.0"]);
         Assert.False(allowed);
+    }
+
+    // ── CheckPolicyAsync — compound expressions ───────────────────────────────
+
+    [Fact]
+    public async Task CheckPolicy_Compound_Or_OneLeafAllowed_Allowed()
+    {
+        var repo = Repo();
+        await repo.AddAllowlistAsync("org1", "MIT");
+
+        // Block mode: only MIT is allowlisted, but OR is satisfied by the one allowed leaf.
+        var (allowed, blocked) = await repo.CheckPolicyAsync("org1", "block", ["MIT OR GPL-3.0"]);
+        Assert.True(allowed);
+        Assert.Null(blocked);
+    }
+
+    [Fact]
+    public async Task CheckPolicy_Compound_And_OneLeafMissing_Blocked()
+    {
+        var repo = Repo();
+        await repo.AddAllowlistAsync("org1", "MIT");
+
+        // Block mode: GPL-3.0 is not on the allowlist, so the AND is unsatisfied.
+        var (allowed, blocked) = await repo.CheckPolicyAsync("org1", "block", ["MIT AND GPL-3.0"]);
+        Assert.False(allowed);
+        Assert.Equal("GPL-3.0", blocked);
+    }
+
+    [Fact]
+    public async Task CheckPolicy_Compound_BlocklistedOperand_UnderOr_PassesWhenSiblingAllowed()
+    {
+        var repo = Repo();
+        await repo.AddAllowlistAsync("org1", "MIT");
+        await repo.AddBlocklistAsync("org1", "GPL-3.0");
+
+        var (allowed, blocked) = await repo.CheckPolicyAsync("org1", "block", ["MIT OR GPL-3.0"]);
+        Assert.True(allowed);
+        Assert.Null(blocked);
+    }
+
+    [Fact]
+    public async Task CheckPolicy_Compound_BlocklistedOperand_UnderAnd_Blocks()
+    {
+        var repo = Repo();
+        await repo.AddBlocklistAsync("org1", "GPL-3.0");
+
+        // Warn mode: a blocklisted leaf under AND still blocks the whole expression.
+        var (allowed, blocked) = await repo.CheckPolicyAsync("org1", "warn", ["MIT AND GPL-3.0"]);
+        Assert.False(allowed);
+        Assert.Equal("GPL-3.0", blocked);
+    }
+
+    [Fact]
+    public async Task CheckPolicy_Compound_BlockVsWarn_UnlistedLeaf()
+    {
+        var repo = Repo();
+
+        // Warn mode enforces only the blocklist — an unlisted single leaf passes.
+        var (warnAllowed, _) = await repo.CheckPolicyAsync("org1", "warn", ["MIT OR GPL-3.0"]);
+        Assert.True(warnAllowed);
+
+        // Block mode requires an allowlisted leaf — with an empty allowlist it fails.
+        var (blockAllowed, blocked) = await repo.CheckPolicyAsync("org1", "block", ["MIT OR GPL-3.0"]);
+        Assert.False(blockAllowed);
+        Assert.Equal("MIT", blocked);
+    }
+
+    [Fact]
+    public async Task CheckPolicy_NormalizesLicenseNameVariant()
+    {
+        var repo = Repo();
+        await repo.AddAllowlistAsync("org1", "Apache-2.0");
+
+        // The observed leaf is the human name variant; it must normalize onto the canonical id.
+        var (allowed, blocked) = await repo.CheckPolicyAsync("org1", "block", ["Apache License 2.0"]);
+        Assert.True(allowed);
+        Assert.Null(blocked);
+    }
+
+    [Fact]
+    public async Task CheckPolicy_OffendingLeaf_NamesConcreteLicense_NotWholeExpression()
+    {
+        var repo = Repo();
+        await repo.AddAllowlistAsync("org1", "MIT");
+
+        var (allowed, blocked) = await repo.CheckPolicyAsync("org1", "block", ["MIT AND GPL-3.0"]);
+        Assert.False(allowed);
+        // The reason names the concrete failing leaf, never the compound string.
+        Assert.Equal("GPL-3.0", blocked);
     }
 
     // ── SetLicensesAsync / GetForVersionAsync ─────────────────────────────────

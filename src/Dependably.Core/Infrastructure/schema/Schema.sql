@@ -230,7 +230,7 @@ CREATE TABLE IF NOT EXISTS system_admins (
 CREATE TABLE IF NOT EXISTS packages (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,   -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm' | 'oci' | 'cargo' | 'golang'
+    ecosystem   TEXT NOT NULL,   -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm' | 'oci' | 'cargo' | 'golang' | 'apk'
     name        TEXT NOT NULL,
     purl_name   TEXT NOT NULL,   -- normalized per ecosystem
     is_proxy    INTEGER NOT NULL DEFAULT 0,
@@ -239,6 +239,12 @@ CREATE TABLE IF NOT EXISTS packages (
     -- the background upstream-metadata pass. NULL when no upstream baseline is known.
     upstream_latest_version    TEXT,
     upstream_latest_checked_at TEXT,
+    -- Publish timestamp of upstream_latest_version, when the ecosystem's metadata carries a
+    -- per-release timestamp (npm packument time[], PyPI release upload_time_iso_8601, NuGet
+    -- registration leaf published, Maven maven-metadata.xml lastUpdated). NULL when the baseline
+    -- itself is unknown or the ecosystem's metadata doesn't expose a timestamp. Drives the
+    -- packages-list/detail "abandoned" (>= 365 days since publish) signal.
+    upstream_latest_published_at TEXT,
     -- Per-package same-version-push override. NULL = inherit the org version_overwrite_policy.
     -- 'allow' = grant overwrite even when the org policy is 'exception' (blocked by default).
     -- 'block' = deny overwrite even when the org policy is 'allow' (allowed by default).
@@ -311,6 +317,12 @@ CREATE TABLE IF NOT EXISTS package_versions (
     -- Distinct from deprecated (still published, advised against): revoked = gone entirely.
     -- Reset to NULL if the version reappears upstream. Set by DeprecationRefreshService.
     revoked_at TEXT,
+    -- Operational-risk signal: count of upstream STABLE versions strictly newer than this one,
+    -- using each ecosystem's native version ordering (NuGet.Versioning, PEP 440, semver, Maven
+    -- ComparableVersion). NULL = unknown (hosted-only package with no upstream counterpart,
+    -- air-gapped, unsupported ecosystem, or not yet refreshed) — rendered UNSCORED, never 0.
+    -- Refreshed by DeprecationRefreshService and seeded on proxy first-fetch.
+    versions_behind INTEGER,
     -- Supply-chain signal: 1 when the artefact ships an install/lifecycle script that runs
     -- automatically on install (npm preinstall/install/postinstall, a PyPI sdist setup.py,
     -- a NuGet tools install.ps1/init.ps1 or build .targets/.props). Captured at proxy
@@ -407,7 +419,7 @@ CREATE TABLE IF NOT EXISTS blocklist (
 CREATE TABLE IF NOT EXISTS reserved_namespace (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,  -- 'npm' | 'pypi' | 'nuget' | 'maven' | 'cargo' | 'golang'
+    ecosystem   TEXT NOT NULL,  -- 'npm' | 'pypi' | 'nuget' | 'maven' | 'cargo' | 'golang' | 'apk'
     pattern     TEXT NOT NULL,
     created_by  TEXT REFERENCES users(id),
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
@@ -441,6 +453,61 @@ CREATE TABLE IF NOT EXISTS quarantine (
 
 CREATE INDEX IF NOT EXISTS idx_quarantine_org_state ON quarantine(org_id, state, updated_at DESC);
 
+-- Per-tenant alert center. One row per raised occurrence of a supply-chain signal (a new
+-- quarantine review item, or a vulnerability whose severity meets the org's threshold).
+-- UNIQUE(org_id, type, source_ref) is the entire dedup mechanism: raising re-inserts the same
+-- natural key and the conflict is a no-op, so a repeat trigger never produces a second alert.
+-- source_ref is type-specific: the quarantine row id for 'quarantine_new', or
+-- "vulnId:ecosystem:packageName" for 'vuln_severity' (one alert per advisory-per-package, not
+-- per version). state is a single shared active/dismissed flag — all admins in an org see and
+-- dismiss the same list. slack_status/slack_error record the terminal outcome of the async Slack
+-- delivery attempt; they never gate whether the alert itself is visible in the panel.
+CREATE TABLE IF NOT EXISTS alert (
+    id           TEXT PRIMARY KEY,
+    org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    type         TEXT NOT NULL CHECK (type IN ('quarantine_new', 'vuln_severity')),
+    severity     TEXT,           -- CRITICAL | HIGH | MEDIUM | LOW | NULL (quarantine alerts carry no CVSS severity)
+    source_ref   TEXT NOT NULL,  -- dedup key body; see table comment for the per-type shape
+    ecosystem    TEXT,
+    purl         TEXT,
+    title        TEXT NOT NULL,
+    detail       TEXT,           -- JSON detail, same convention as quarantine.detail
+    state        TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'dismissed')),
+    dismissed_by TEXT REFERENCES users(id),
+    dismissed_at TEXT,
+    slack_status TEXT,           -- 'sent' | 'failed' | NULL (Slack off, or delivery not yet attempted)
+    slack_error  TEXT,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    UNIQUE (org_id, type, source_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_org_state ON alert(org_id, state, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_dismissed_by ON alert(dismissed_by);
+
+-- One row per org holding the alert-raising toggles, the vulnerability severity floor, and the
+-- optional Slack delivery channel. An absent row means the all-on/Slack-off defaults below —
+-- there is no backfill migration; every org reads through the same default path via
+-- AlertSettingsRepository. slack_webhook_url is envelope-encrypted at rest (enc:v1: prefix) and
+-- requires DEPENDABLY_MASTER_KEY to be configured before it can be stored. The
+-- slack_consecutive_failures/slack_failing_since/slack_last_error/slack_last_status columns
+-- mirror webhook_subscription's failure-health model so AlertSlackQueue can reuse the same
+-- auto-disable arithmetic (20 consecutive failures or 48h of sustained failure).
+CREATE TABLE IF NOT EXISTS alert_settings (
+    org_id                     TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    quarantine_alerts_enabled INTEGER NOT NULL DEFAULT 1,
+    vuln_alerts_enabled       INTEGER NOT NULL DEFAULT 1,
+    vuln_min_severity         TEXT NOT NULL DEFAULT 'HIGH' CHECK (vuln_min_severity IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
+    slack_enabled              INTEGER NOT NULL DEFAULT 0,
+    slack_webhook_url          TEXT,   -- enc:v1: envelope-encrypted; NULL when Slack is disabled/unset
+    slack_last_delivery_at     TEXT,
+    slack_last_status          TEXT,   -- 'ok' | 'failed' | NULL (never delivered)
+    slack_consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    slack_failing_since        TEXT,
+    slack_last_error           TEXT,
+    created_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    updated_at                 TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+
 -- Per-org upstream proxy registries. One ordered list per ecosystem; `position` ascending is
 -- priority (lowest tried first, falling through on miss/unreachable). An ecosystem with zero
 -- rows has proxying effectively disabled for that org. For non-OCI ecosystems auth_type is
@@ -454,7 +521,7 @@ CREATE INDEX IF NOT EXISTS idx_quarantine_org_state ON quarantine(org_id, state,
 CREATE TABLE IF NOT EXISTS upstream_registry (
     id             TEXT PRIMARY KEY,
     org_id         TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem      TEXT NOT NULL,              -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm' | 'oci'
+    ecosystem      TEXT NOT NULL,              -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm' | 'oci' | 'apk'
     name           TEXT,                       -- optional display label
     url            TEXT NOT NULL,
     position       INTEGER NOT NULL DEFAULT 0, -- ascending = priority; lowest tried first
@@ -824,6 +891,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mvf_ca_filename
     ON maven_version_files (cache_artifact_id, filename)
     WHERE owner_kind = 'cache_artifact';
 
+-- PyPI: one package_versions row per (name, version) but multiple distribution files per
+-- version (wheel + sdist + per-platform wheels), mirroring how pypi.org stores a release.
+-- Each hosted file maps to its own blob with its own filename/size/checksum so the simple
+-- index lists every file and /packages/{file} serves exactly the blob whose filename was
+-- requested. Hosted-only: proxy-origin PyPI files live in cache_artifact. The parent
+-- package_versions row keeps the version identity (version, purl) and carries the SUM of
+-- its files' sizes so tenant quota accounting stays symmetric on delete. org_id is
+-- denormalized from the owning package (npm_dist_tags precedent) so the download-by-filename
+-- lookup is org-filtered without a second join.
+CREATE TABLE IF NOT EXISTS package_version_files (
+    id                  TEXT PRIMARY KEY,
+    package_version_id  TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    org_id              TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    filename            TEXT NOT NULL,
+    blob_key            TEXT NOT NULL,
+    size_bytes          INTEGER NOT NULL DEFAULT 0,
+    checksum_sha256     TEXT,
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    UNIQUE (package_version_id, filename)
+);
+-- The UNIQUE(package_version_id, filename) index covers the version FK (leftmost member);
+-- this one covers the org FK cascade and the org-scoped filename resolution on download.
+CREATE INDEX IF NOT EXISTS idx_package_version_files_org_filename
+    ON package_version_files (org_id, filename);
+
 -- OCI / Docker registry storage. Manifests and blobs are both content-addressed; this
 -- table is the metadata index. Bytes live under BlobKeys.OciBlob in the blob store.
 -- media_type tags whether the row is a manifest (manifest.v2+json,
@@ -888,7 +980,12 @@ CREATE TABLE IF NOT EXISTS spdx_license (
     -- Copyleft strength is NOT published by SPDX; sourced from a curated overlay
     -- (BlueOak/ChooseALicense/FSF). Identifiers absent from the overlay get 'unclassified'.
     copyleft        TEXT NOT NULL DEFAULT 'unclassified'
-        CHECK (copyleft IN ('permissive','weak-copyleft','strong-copyleft','network-copyleft','public-domain','unclassified'))
+        CHECK (copyleft IN ('permissive','weak-copyleft','strong-copyleft','network-copyleft','public-domain','unclassified')),
+    -- Full SPDX license text, bundled at build time from license-list-data (air-gapped
+    -- runtime, no on-demand fetch). NULL for identifiers absent from the bundled texts
+    -- (custom/post-bundle SPDX additions). Served on demand by the license-text endpoint;
+    -- never joined into the list/detail SELECTs to keep those payloads small.
+    license_text    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_spdx_license_osi ON spdx_license(is_osi_approved);
 CREATE INDEX IF NOT EXISTS idx_spdx_license_copyleft ON spdx_license(copyleft);
@@ -1095,6 +1192,9 @@ CREATE TABLE IF NOT EXISTS cache_artifact (
     -- NULL = still published upstream. Reset to NULL if the version reappears. Distinct from
     -- deprecated (still published, advised against). Set by DeprecationRefreshService.
     revoked_at          TEXT,
+    -- Operational-risk signal: count of upstream STABLE versions strictly newer than this one.
+    -- See package_versions.versions_behind for the full rationale; NULL = unknown, never 0.
+    versions_behind     INTEGER,
     -- Supply-chain signal: 1 when the artifact ships an install/lifecycle script.
     has_install_script  INTEGER NOT NULL DEFAULT 0,
     -- Discriminator for which kind of install script fired (e.g. 'npm:postinstall').
@@ -1109,6 +1209,11 @@ CREATE TABLE IF NOT EXISTS cache_artifact (
     upstream_integrity_algorithm TEXT,
     -- ISO 8601 UTC; set after the last OSV vulnerability scan against this artifact.
     vuln_checked_at     TEXT,
+    -- ISO 8601 UTC; set after the last license-extraction pass against this artifact. NULL =
+    -- never scanned for licenses. Stamped by LicenseBackfillService so artifacts ingested
+    -- before ingest-time license capture existed are extracted exactly once, and a
+    -- persistently-unparseable artifact is not rescanned forever.
+    license_checked_at  TEXT,
     UNIQUE (ecosystem, name, version, filename)
 );
 CREATE INDEX IF NOT EXISTS idx_cache_artifact_lru ON cache_artifact (last_accessed_at);

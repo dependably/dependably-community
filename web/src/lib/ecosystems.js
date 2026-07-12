@@ -2,7 +2,7 @@
 // label is the user-facing display string (OCI renders as "Docker" — only place the
 // key/label distinction matters). Add a new ecosystem here, then add matching CSS
 // variables in app.css and a snippet generator in OrgController.GetSetup.
-export const ECOSYSTEMS = ['pypi', 'npm', 'nuget', 'maven', 'rpm', 'oci', 'golang', 'cargo']
+export const ECOSYSTEMS = ['pypi', 'npm', 'nuget', 'maven', 'rpm', 'oci', 'golang', 'cargo', 'apk']
 
 export const ECO_LABEL = {
   pypi:   'PyPI',
@@ -13,4 +13,5 @@ export const ECO_LABEL = {
   oci:    'Docker',
   golang: 'Go',
   cargo:  'Cargo',
+  apk:    'Alpine apk',
 }

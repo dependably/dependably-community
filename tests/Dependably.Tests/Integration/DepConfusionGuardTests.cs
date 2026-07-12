@@ -158,6 +158,7 @@ public sealed class DepConfusionGuardTests : IClassFixture<DependablyFactory>, I
     [Theory]
     [InlineData("cargo", "serde-*")]              // flat crate-name prefix
     [InlineData("golang", "github.com/acme/*")]   // module-path prefix
+    [InlineData("apk", "acme-*")]                 // flat package-name prefix
     public async Task ReservedNamespaces_AcceptsCargoAndGo(string ecosystem, string pattern)
     {
         using var c = await AdminClient();

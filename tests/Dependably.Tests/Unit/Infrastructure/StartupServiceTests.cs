@@ -144,9 +144,9 @@ public sealed class StartupServiceTests : IAsyncLifetime
         string? rawJwtAfter = await ReadRawAsync("jwt_secret");
         string? rawMfaAfter = await ReadRawAsync("mfa_encryption_key");
 
-        Assert.True(ep.IsEncrypted(rawJwtAfter!),
+        Assert.True(EnvelopeProtector.IsEncrypted(rawJwtAfter!),
             $"jwt_secret must be enc:v1:-prefixed after migration, got: {rawJwtAfter}");
-        Assert.True(ep.IsEncrypted(rawMfaAfter!),
+        Assert.True(EnvelopeProtector.IsEncrypted(rawMfaAfter!),
             $"mfa_encryption_key must be enc:v1:-prefixed after migration, got: {rawMfaAfter}");
 
         // GetInstanceSettingAsync must round-trip through decryption to the original plaintext.
@@ -239,8 +239,8 @@ public sealed class StartupServiceTests : IAsyncLifetime
 
         // Both rows end encrypted, and both decrypt back to their ORIGINAL plaintext — the
         // already-encrypted jwt_secret must not have been wrapped a second time.
-        Assert.True(ep.IsEncrypted((await ReadRawAsync("jwt_secret"))!));
-        Assert.True(ep.IsEncrypted((await ReadRawAsync("mfa_encryption_key"))!));
+        Assert.True(EnvelopeProtector.IsEncrypted((await ReadRawAsync("jwt_secret"))!));
+        Assert.True(EnvelopeProtector.IsEncrypted((await ReadRawAsync("mfa_encryption_key"))!));
         var repo = new OrgRepository(_db, envelope: ep);
         Assert.Equal(plaintextJwt, await repo.GetInstanceSettingAsync("jwt_secret"));
         Assert.Equal(plaintextMfa, await repo.GetInstanceSettingAsync("mfa_encryption_key"));
@@ -298,9 +298,9 @@ public sealed class StartupServiceTests : IAsyncLifetime
         string? upstreamAfter = await ReadColumnAsync("upstream_registry", "secret", orgId);
         string? webhookAfter = await ReadColumnAsync("webhook_subscription", "secret", orgId);
 
-        Assert.True(ep.IsEncrypted(upstreamAfter!),
+        Assert.True(EnvelopeProtector.IsEncrypted(upstreamAfter!),
             $"upstream_registry.secret must be enc:v1:-prefixed after migration, got: {upstreamAfter}");
-        Assert.True(ep.IsEncrypted(webhookAfter!),
+        Assert.True(EnvelopeProtector.IsEncrypted(webhookAfter!),
             $"webhook_subscription.secret must be enc:v1:-prefixed after migration, got: {webhookAfter}");
         Assert.DoesNotContain("npm-upstream-token", upstreamAfter!);
         Assert.DoesNotContain("webhook-hmac-secret", webhookAfter!);

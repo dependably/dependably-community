@@ -437,6 +437,77 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SeedApkUpstreamRegistries_SeedsDefaultForOrgWithNoRows()
+    {
+        // A pre-existing org that has no apk upstream row (because the original
+        // seed_default_upstream_registries backfill predated the apk ecosystem) receives the
+        // default when the targeted backfill re-runs.
+        await NewInitializer(_db).InitializeAsync();
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");
+        }
+        await ResetMigrationAsync("seed_apk_upstream_registries");
+
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+        string? apk = await verify.ExecuteScalarAsync<string>(
+            "SELECT url FROM upstream_registry WHERE org_id = 'o1' AND ecosystem = 'apk'");
+        Assert.Equal("https://dl-cdn.alpinelinux.org/alpine", apk);
+    }
+
+    [Fact]
+    public async Task SeedApkUpstreamRegistries_DoesNotDuplicateExistingRows()
+    {
+        // An org that already has an apk row (e.g. an operator-customised mirror) is not
+        // touched: the per-(org, ecosystem) existence check skips it, so no second row appears.
+        await NewInitializer(_db).InitializeAsync();
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");
+            await setup.ExecuteAsync("""
+                INSERT INTO upstream_registry (id, org_id, ecosystem, url, position)
+                VALUES ('a-custom','o1','apk','https://mirror.internal/alpine',0)
+                """);
+        }
+        await ResetMigrationAsync("seed_apk_upstream_registries");
+
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+        var apkIds = (await verify.QueryAsync<string>(
+            "SELECT id FROM upstream_registry WHERE org_id = 'o1' AND ecosystem = 'apk'")).ToList();
+        Assert.Equal(new[] { "a-custom" }, apkIds);
+    }
+
+    [Fact]
+    public async Task SeedApkUpstreamRegistries_DoesNotResurrectDeliberatelyRemovedOtherEcosystem()
+    {
+        // The targeted-backfill safety property: an org that has deliberately zero rows for an
+        // OTHER ecosystem (e.g. npm proxying disabled by deleting its upstream) must NOT have that
+        // ecosystem re-seeded by this migration — it touches only apk. Re-running the full backfill
+        // would resurrect the removed npm row; the restricted scope prevents that.
+        await NewInitializer(_db).InitializeAsync();
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1','acme')");
+            // o1 has rows for everything EXCEPT npm and apk: npm was deliberately removed.
+        }
+        await ResetMigrationAsync("seed_apk_upstream_registries");
+
+        await NewInitializer(_db).InitializeAsync();
+
+        await using var verify = await _db.OpenAsync();
+        long npmRows = await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM upstream_registry WHERE org_id = 'o1' AND ecosystem = 'npm'");
+        long apkRows = await verify.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM upstream_registry WHERE org_id = 'o1' AND ecosystem = 'apk'");
+        Assert.Equal(0, npmRows);   // deliberately-removed npm stays removed
+        Assert.Equal(1, apkRows);   // apk is the only ecosystem seeded by this migration
+    }
+
+    [Fact]
     public async Task DropPackageVersionsPurlUnique_RemovesUniqueConstraint_OnExistingDb()
     {
         // Simulate a pre-migration database where package_versions.purl carries a UNIQUE
@@ -1140,6 +1211,76 @@ public sealed class SchemaInitializerTests : IAsyncLifetime
             INSERT OR IGNORE INTO package_versions (id, package_id, version, purl, blob_key)
             VALUES (@pvId, @pkgId, '1.0.0', 'pkg:npm/test@1.0.0', 'npm/registry/test/1.0.0/test-1.0.0.tgz')
             """, new { pvId, pkgId });
+    }
+
+    [Fact]
+    public async Task BackfillPackageVersionFilesPypi_SeedsOneFilePerHostedPypiVersion_SkipsOthers()
+    {
+        var initializer = NewInitializer(_db);
+        await initializer.InitializeAsync();
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o1', 'acme')");
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy)
+                VALUES ('p-py', 'o1', 'pypi', 'mfback', 'mfback', 0),
+                       ('p-npm', 'o1', 'npm', 'mfback-npm', 'mfback-npm', 0)
+                """);
+            // A pre-multi-file hosted PyPI version: artifact facts live on the row itself.
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO package_versions
+                    (id, package_id, version, purl, blob_key, filename, size_bytes, checksum_sha256, origin, created_at)
+                VALUES ('v-py', 'p-py', '1.0.0', 'pkg:pypi/mfback@1.0.0',
+                        'hosted/o1/pypi/mfback/1.0.0/mfback-1.0.0-py3-none-any.whl',
+                        'mfback-1.0.0-py3-none-any.whl', 123, 'abc123', 'uploaded', '2024-01-02T03:04:05Z'),
+                       ('v-npm', 'p-npm', '1.0.0', 'pkg:npm/mfback-npm@1.0.0',
+                        'hosted/o1/npm/mfback-npm/1.0.0/mfback-npm-1.0.0.tgz',
+                        'mfback-npm-1.0.0.tgz', 55, 'def456', 'uploaded', '2024-01-02T03:04:05Z')
+                """);
+            // Re-arm the one-shot so the second InitializeAsync runs the backfill against
+            // the rows above.
+            await conn.ExecuteAsync(
+                "DELETE FROM _applied_migrations WHERE name = 'backfill_package_version_files_pypi'");
+        }
+
+        await initializer.InitializeAsync();
+
+        await using (var conn = await _db.OpenAsync())
+        {
+            var pyFiles = (await conn.QueryAsync<(string Filename, string BlobKey, long SizeBytes, string Checksum, string CreatedAt)>(
+                """
+                SELECT filename AS Filename, blob_key AS BlobKey, size_bytes AS SizeBytes,
+                       checksum_sha256 AS Checksum, created_at AS CreatedAt
+                FROM package_version_files WHERE package_version_id = 'v-py'
+                """)).ToList();
+            var (filename, blobKey, sizeBytes, checksum, createdAt) = Assert.Single(pyFiles);
+            Assert.Equal("mfback-1.0.0-py3-none-any.whl", filename);
+            Assert.Equal("hosted/o1/pypi/mfback/1.0.0/mfback-1.0.0-py3-none-any.whl", blobKey);
+            Assert.Equal(123, sizeBytes);
+            Assert.Equal("abc123", checksum);
+            // The file row carries the version's historical created_at, not boot time.
+            Assert.Equal("2024-01-02T03:04:05Z", createdAt);
+
+            // Non-PyPI versions are never backfilled.
+            long npmFiles = await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM package_version_files WHERE package_version_id = 'v-npm'");
+            Assert.Equal(0, npmFiles);
+
+            // Idempotent under retry: re-arming and re-running does not duplicate the row.
+            await conn.ExecuteAsync(
+                "DELETE FROM _applied_migrations WHERE name = 'backfill_package_version_files_pypi'");
+        }
+
+        await initializer.InitializeAsync();
+        await using (var conn = await _db.OpenAsync())
+        {
+            long count = await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM package_version_files WHERE package_version_id = 'v-py'");
+            Assert.Equal(1, count);
+        }
     }
 
     /// <summary>

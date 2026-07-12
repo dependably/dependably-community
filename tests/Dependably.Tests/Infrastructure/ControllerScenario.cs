@@ -299,7 +299,7 @@ public sealed class ControllerScenario : IAsyncDisposable
         var orgs = new OrgRepository(db);
         var audit = new AuditRepository(db);
         var guard = new OrgAccessGuard(db);
-        var licenses = new LicenseRepository(db, Clock);
+        var licenses = new LicenseRepository(db, Clock, TestNormalizers.License(db));
         var packages = new PackageRepository(db);
         var vulns = new VulnerabilityRepository(db, Clock);
         var problems = new ProblemResults(new EchoLocalizer());
@@ -322,7 +322,8 @@ public sealed class ControllerScenario : IAsyncDisposable
             Clock,
             orgs,
             noOpEventSink,
-            new Dependably.Infrastructure.Redis.InProcessDistributedLock(Clock)));
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(Clock),
+            TestAlerts.NoOp(db, Clock)));
 
         var systemAdmins = new SystemAdminRepository(db);
         var tokens = new TokenRepository(db, Clock);
@@ -363,7 +364,7 @@ public sealed class ControllerScenario : IAsyncDisposable
         var envelope = _masterKeyConfigured ? TestEnvelope.Configured() : TestEnvelope.Unconfigured();
         var system = new SystemController(orgs, systemAdmins, db, audit, problems,
             new ConfigurationBuilder().Build(),
-            new Dependably.Security.PasswordPolicy(), Clock, envelope)
+            Clock, envelope)
         { ControllerContext = ctx };
         var upstreamRegistries = new UpstreamRegistryController(
             new UpstreamRegistryRepository(db, Clock, envelope), guard, audit, problems, envelope)
@@ -373,7 +374,7 @@ public sealed class ControllerScenario : IAsyncDisposable
         var statsSnapshots = new StatsSnapshotRepository(db);
         var scenarioCache = new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
         var orgSvc = new OrgControllerServices(
-            Orgs: orgs, Packages: packages, PackageAnalytics: packageAnalytics,
+            Orgs: orgs, Packages: packages, VersionFiles: new PackageVersionFilesRepository(db, Clock), PackageAnalytics: packageAnalytics,
             StatsSnapshots: statsSnapshots,
             Tokens: tokens, Invites: invites,
             Allowlist: allowlist, Blocklist: blocklist, Audit: audit, Guard: guard,

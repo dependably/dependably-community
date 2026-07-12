@@ -37,13 +37,7 @@ public sealed class PolymorphicReadCapabilityTests : IAsyncLifetime
         var init = new SchemaInitializer(_db);
         await init.InitializeAsync();
 
-        _blockGate = new BlockGateService(
-            new VulnerabilityRepository(_db, _clock),
-            new AuditRepository(_db),
-            new QuarantineRepository(_db, _clock),
-            new InstallScriptAllowlistService(_db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock),
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance,
-            _clock);
+        _blockGate = Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, _clock);
     }
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
@@ -182,7 +176,7 @@ public sealed class PolymorphicReadCapabilityTests : IAsyncLifetime
     public async Task GetSpdxForCacheArtifacts_ReturnsSpdxForLinkedArtifacts()
     {
         string caId = await InsertCacheArtifactAsync("pypi", "requests", "2.31.0");
-        var licenseRepo = new LicenseRepository(_db, _clock);
+        var licenseRepo = new LicenseRepository(_db, _clock, TestNormalizers.License(_db));
         await licenseRepo.SetLicensesForCacheArtifactAsync(caId, ["MIT", "Apache-2.0"], "upstream");
 
         var lookup = await licenseRepo.GetSpdxForCacheArtifactsAsync([caId]);
@@ -194,7 +188,7 @@ public sealed class PolymorphicReadCapabilityTests : IAsyncLifetime
     [Fact]
     public async Task GetSpdxForCacheArtifacts_EmptyInput_ReturnsEmptyLookup()
     {
-        var licenseRepo = new LicenseRepository(_db, _clock);
+        var licenseRepo = new LicenseRepository(_db, _clock, TestNormalizers.License(_db));
         var lookup = await licenseRepo.GetSpdxForCacheArtifactsAsync([]);
         Assert.Empty(lookup);
     }
@@ -203,7 +197,7 @@ public sealed class PolymorphicReadCapabilityTests : IAsyncLifetime
     public async Task GetSpdxForCacheArtifacts_ArtifactWithNoLicenses_AbsentFromLookup()
     {
         string caId = await InsertCacheArtifactAsync("npm", "no-license-pkg", "1.0.0");
-        var licenseRepo = new LicenseRepository(_db, _clock);
+        var licenseRepo = new LicenseRepository(_db, _clock, TestNormalizers.License(_db));
 
         var lookup = await licenseRepo.GetSpdxForCacheArtifactsAsync([caId]);
 
@@ -220,7 +214,7 @@ public sealed class PolymorphicReadCapabilityTests : IAsyncLifetime
             _db, pkgId, "1.0.0", "pkg:npm/lic-pkg@1.0.0");
         string caId = await InsertCacheArtifactAsync("npm", "lic-pkg", "1.0.0");
 
-        var licenseRepo = new LicenseRepository(_db, _clock);
+        var licenseRepo = new LicenseRepository(_db, _clock, TestNormalizers.License(_db));
         // Attach GPL-3.0 to the package_version row only.
         await licenseRepo.SetLicensesAsync(verId, ["GPL-3.0"], "upstream");
 

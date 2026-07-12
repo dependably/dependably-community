@@ -189,6 +189,32 @@ internal static class InfrastructureStartupExtensions
         builder.Services.AddScoped<OciControllerServices>();
         builder.Services.AddSingleton<GoLatestFetchCoordinator>();
         builder.Services.AddScoped<GoControllerServices>();
+        builder.Services.AddSingleton<ApkIndexFetchCoordinator>();
+        builder.Services.AddScoped(sp =>
+        {
+            var config = sp.GetRequiredService<IConfiguration>();
+            var negativeCacheTtl = TimeSpan.TryParse(config["Apk:NegativeCacheTtl"], out var n)
+                ? n
+                : TimeSpan.FromMinutes(5);
+            return new ApkControllerServices(
+                sp.GetRequiredService<OrgRepository>(),
+                sp.GetRequiredService<TokenRepository>(),
+                sp.GetRequiredService<AuditRepository>(),
+                sp.GetRequiredService<PackageRepository>(),
+                sp.GetRequiredService<IBlobStore>(),
+                sp.GetRequiredService<Dependably.Protocol.UpstreamClient>(),
+                sp.GetRequiredService<Dependably.Protocol.UpstreamRegistryResolver>(),
+                sp.GetRequiredService<IMetadataStore>(),
+                sp.GetRequiredService<CacheAccessRecorder>(),
+                sp.GetRequiredService<CacheArtifactRepository>(),
+                sp.GetRequiredService<TenantArtifactAccessRepository>(),
+                sp.GetRequiredService<TimeProvider>(),
+                sp.GetRequiredService<ILogger<ApkController>>(),
+                sp.GetRequiredService<Dependably.Protocol.ReservedNamespaceService>(),
+                sp.GetRequiredService<Dependably.Protocol.BlockGateService>(),
+                sp.GetRequiredService<ApkIndexFetchCoordinator>(),
+                negativeCacheTtl);
+        });
     }
 
     internal static void AddDependablyLocalization(this WebApplicationBuilder builder)

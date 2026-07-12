@@ -233,6 +233,13 @@ post_or_update_note() {
   local primary="${AI_REVIEW_API_URL:-$CI_API_V4_URL}"
   local bases=("$primary")
   if [ "${primary/#http:/https:}" != "$primary" ]; then bases+=("${primary/#http:/https:}"); fi
+  # CI_API_V4_URL inherits the instance external_url, which can name a host that
+  # resolves nowhere from the runner. The origin remote is the host the runner
+  # just cloned from, so it always resolves; derive an https base from it as a
+  # final fallback (strip scheme, userinfo, and path to leave the bare host).
+  local origin_host
+  origin_host=$(git config --get remote.origin.url 2>/dev/null | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[^@/]*@##; s#[:/].*$##')
+  if [ -n "$origin_host" ]; then bases+=("https://$origin_host/api/v4"); fi
 
   local base notes_url list_status api="" id=""
   for base in "${bases[@]}"; do

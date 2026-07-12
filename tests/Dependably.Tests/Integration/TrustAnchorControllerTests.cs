@@ -377,7 +377,7 @@ public sealed class TrustAnchorControllerTests : IClassFixture<DependablyFactory
         // capability-gate distinction (read:tenant vs tenant:configure), not a broken token.
         using var c = await ReadTenantOnlyClient();
         var resp = await c.GetAsync("/api/v1/trust-anchors");
-        resp.EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
     }
 
     // ── PGP key generation ───────────────────────────────────────────────────

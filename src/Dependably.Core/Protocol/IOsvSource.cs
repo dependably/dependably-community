@@ -19,4 +19,32 @@ public interface IOsvSource
     /// in-memory index.
     /// </summary>
     Task<List<List<OsvAdvisory>>> QueryBatchAsync(IReadOnlyList<string> purls, CancellationToken ct = default);
+
+    /// <summary>
+    /// Same single-PURL query as <see cref="QueryAsync"/>, but also reports whether the source
+    /// was actually reached this call. <see cref="QueryAsync"/>'s contract is swallow-and-return-
+    /// empty on every failure mode (network error, 5xx, non-2xx, rate limit) — callers that only
+    /// need "did anything come back" keep using it. <see cref="PackageLookupService"/> needs to
+    /// tell a genuine "no known advisories" result apart from an outage that would otherwise be
+    /// indistinguishable from one, so it uses this instead.
+    ///
+    /// The default implementation assumes the source was reached whenever <see cref="QueryAsync"/>
+    /// does not throw — correct for any <see cref="IOsvSource"/> whose <see cref="QueryAsync"/>
+    /// contract is "throw on failure, return data on success". <see cref="OsvClient"/> and
+    /// <c>LocalOsvSource</c> override this with their own reachability signal because both
+    /// swallow their respective failure modes inside <see cref="QueryAsync"/> itself.
+    /// </summary>
+    async Task<OsvQueryResult> TryQueryAsync(string purl, CancellationToken ct = default)
+    {
+        var advisories = await QueryAsync(purl, ct);
+        return new OsvQueryResult(advisories, Reached: true);
+    }
 }
+
+/// <summary>
+/// Result of <see cref="IOsvSource.TryQueryAsync"/>: the advisories found (empty on both a
+/// genuine no-hits answer and an unreached source) plus <see cref="Reached"/>, which
+/// distinguishes the two. <see cref="Reached"/> false means the caller must not treat
+/// <see cref="Advisories"/> as authoritative.
+/// </summary>
+public sealed record OsvQueryResult(List<OsvAdvisory> Advisories, bool Reached);

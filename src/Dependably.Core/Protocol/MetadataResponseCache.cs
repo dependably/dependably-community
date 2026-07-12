@@ -18,8 +18,11 @@ namespace Dependably.Protocol;
 ///   3. Negative TTL — a 404 is cached briefly so repeated misses for a missing package don't
 ///      stampede the upstream.
 ///
-/// Cache key is the URL only. This follows <see cref="UpstreamSource"/>'s reasoning that the
-/// per-upstream <c>Authorization</c> header is deliberately not part of any dedup/cache key:
+/// Cache key is the URL, suffixed with the Accept variant when the caller negotiated a
+/// specific document (see <see cref="UpstreamClient.GetOrFetchMetadataAsync(string, long, string, string, System.Threading.CancellationToken)"/>) —
+/// npm serves a full and an abbreviated packument at the same URL, and one variant's body
+/// must never satisfy the other's request. The per-upstream <c>Authorization</c> header is
+/// deliberately not part of the key, following <see cref="UpstreamSource"/>'s reasoning:
 /// <c>UNIQUE(org_id, ecosystem, url)</c> guarantees one auth per URL within an org, and the
 /// same URL configured by two orgs names the same public content — the identical sharing
 /// contract the URL-keyed single-flight dedup already applies. The entry stores the whole

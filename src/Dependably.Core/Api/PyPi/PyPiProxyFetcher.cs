@@ -290,7 +290,8 @@ public sealed class PyPiProxyFetcher(
             ProvenanceStatus: Dependably.Protocol.Provenance.ProvenanceStatuses.ToColumn(prov.Status),
             ProvenanceSigner: prov.Signer,
             VerifyProvenanceMode: gate.Settings.VerifyPyPiAttestations,
-            UpstreamUrl: args.UpstreamUrl), ct);
+            UpstreamUrl: args.UpstreamUrl,
+            LicenseEnforcementMode: gate.Settings.LicenseEnforcementMode), ct);
         return result.Decision == BlockDecision.Blocked ? new StatusCodeResult(StatusCodes.Status403Forbidden) : null;
     }
 

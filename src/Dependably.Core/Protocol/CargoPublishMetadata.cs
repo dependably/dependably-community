@@ -19,6 +19,10 @@ public sealed class CargoPublishMetadata
     [JsonPropertyName("features")] public Dictionary<string, List<string>> Features { get; init; } = new();
     [JsonPropertyName("links")] public string? Links { get; init; }
 
+    // license-file is intentionally not modelled: it points at a file inside the crate rather
+    // than carrying an SPDX expression itself, so it has no license signal to extract.
+    [JsonPropertyName("license")] public string? License { get; init; }
+
     /// <summary>
     /// Builds the canonical sparse-index JSON line for this crate version from the publish
     /// metadata plus the computed crate <paramref name="cksum"/> (SHA-256 hex) and the

@@ -167,6 +167,64 @@ public sealed class CacheArtifactRepository
     }
 
     /// <summary>
+    /// Returns proxy <c>cache_artifact</c> rows that have never had a license-extraction pass
+    /// (<c>license_checked_at IS NULL</c>) for the ecosystems whose bytes carry an extractable
+    /// license manifest (npm/PyPI/NuGet). Keyset-paginated on <c>(first_cached_at, id)</c> — a
+    /// total order, since <c>first_cached_at</c> alone is not unique — via
+    /// <paramref name="afterFirstCachedAt"/> / <paramref name="afterId"/> (both null for the first
+    /// page of a pass). LIMIT-batched so the backfill pass bounds its per-tick work. The caller
+    /// advances the cursor from the last row of every batch regardless of per-row outcome, so a
+    /// row that fails to process (and so is never stamped) cannot re-enter a later page of the
+    /// SAME pass and starve newer rows behind it — it is simply retried on the next scheduled
+    /// pass, when the cursor resets. Returns the coordinate plus the blob key the caller needs to
+    /// open the artifact bytes. The ecosystem list is deliberately narrow — Maven joins once a POM
+    /// license extractor exists.
+    /// </summary>
+    // xtenant: cache_artifact is a global table (no org_id); the license-backfill pass enumerates
+    // the whole shared cache plane oldest-first and processes each row independently.
+    public async Task<IReadOnlyList<LicenseBackfillCandidate>> ListNeedingLicenseBackfillAsync(
+        int limit,
+        DateTimeOffset? afterFirstCachedAt = null,
+        string? afterId = null,
+        CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var rows = await conn.QueryAsync<LicenseBackfillCandidate>(
+            """
+            SELECT id AS Id, ecosystem AS Ecosystem, name AS Name, version AS Version,
+                   filename AS Filename, blob_key AS BlobKey, first_cached_at AS FirstCachedAt
+            FROM cache_artifact
+            WHERE license_checked_at IS NULL
+              AND ecosystem IN ('npm', 'pypi', 'nuget')
+              AND (
+                    @afterFirstCachedAt IS NULL
+                    OR first_cached_at > @afterFirstCachedAt
+                    OR (first_cached_at = @afterFirstCachedAt AND id > @afterId)
+                  )
+            ORDER BY first_cached_at ASC, id ASC
+            LIMIT @limit
+            """,
+            new { limit, afterFirstCachedAt, afterId });
+        return rows.ToList();
+    }
+
+    /// <summary>
+    /// Stamps <c>license_checked_at</c> on a <c>cache_artifact</c> row. Called after every
+    /// license-backfill attempt — whether a license was found, none was present, or the blob was
+    /// missing — so the row leaves the <see cref="ListNeedingLicenseBackfillAsync"/> queue and is
+    /// never rescanned. The timestamp is supplied by the caller's <see cref="TimeProvider"/>.
+    /// </summary>
+    // xtenant: UPDATE keyed by cache_artifact PK (global); no org_id needed.
+    public async Task MarkLicenseCheckedAsync(string id, DateTimeOffset checkedAt, CancellationToken ct = default)
+    {
+        string checkedAtIso = checkedAt.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE cache_artifact SET license_checked_at = @checkedAtIso WHERE id = @id",
+            new { id, checkedAtIso });
+    }
+
+    /// <summary>
     /// Returns all <c>cache_artifact</c> rows for a given (ecosystem, name) pair — the global
     /// view of all versions cached for that package. Used by the deprecation refresh pass to
     /// find which version rows need their <c>deprecated</c> / <c>deprecation_checked_at</c>
@@ -216,6 +274,21 @@ public sealed class CacheArtifactRepository
         await conn.ExecuteAsync(
             "UPDATE cache_artifact SET deprecation_checked_at = @now WHERE id = @id",
             new { id, now });
+    }
+
+    /// <summary>
+    /// Writes the operational-risk versions-behind count on a <c>cache_artifact</c> row. Called
+    /// every refresh pass (independent of whether <c>deprecated</c> changed) since upstream keeps
+    /// publishing new versions even when this version's own deprecation state is unchanged.
+    /// <paramref name="versionsBehind"/> is null when the count is unknown — never coerced to 0.
+    /// </summary>
+    // xtenant: UPDATE keyed by cache_artifact PK (global); no org_id needed.
+    public async Task UpdateVersionsBehindAsync(string id, int? versionsBehind, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE cache_artifact SET versions_behind = @versionsBehind WHERE id = @id",
+            new { id, versionsBehind });
     }
 
     /// <summary>
@@ -312,6 +385,7 @@ public sealed class CacheArtifactRepository
                 ca.first_cached_at      AS CreatedAt,
                 ca.deprecated           AS Deprecated,
                 ca.revoked_at           AS RevokedAt,
+                ca.versions_behind      AS VersionsBehind,
                 ca.vuln_checked_at      AS VulnCheckedAt,
                 ca.checksum_sha1        AS ChecksumSha1,
                 ca.has_install_script   AS HasInstallScript,
@@ -392,6 +466,22 @@ public sealed class CacheArtifactRepository
 #pragma warning restore S107
 }
 
+/// <summary>
+/// Projection returned by <see cref="CacheArtifactRepository.ListNeedingLicenseBackfillAsync"/>:
+/// the coordinate of a proxy artifact awaiting a license-extraction pass plus the
+/// <c>blob_key</c> needed to open its bytes. <c>Filename</c> disambiguates the PyPI wheel/sdist
+/// parse path; the extractor entry points key off it. <c>FirstCachedAt</c> (paired with
+/// <c>Id</c>) is the keyset-pagination cursor the caller advances after every batch.
+/// </summary>
+public sealed record LicenseBackfillCandidate(
+    string Id,
+    string Ecosystem,
+    string Name,
+    string Version,
+    string Filename,
+    string BlobKey,
+    DateTimeOffset FirstCachedAt);
+
 public sealed class CacheArtifact
 {
     public string Id { get; init; } = "";
@@ -460,6 +550,11 @@ public sealed class CacheArtifactIndexFacts
     public string? Deprecated { get; init; }
     /// <summary>ISO 8601 UTC; set when the version was observed removed from upstream. NULL = still published.</summary>
     public DateTimeOffset? RevokedAt { get; init; }
+    /// <summary>
+    /// Operational-risk versions-behind count from <c>cache_artifact.versions_behind</c>. NULL =
+    /// unknown (never 0) — see <see cref="PackageVersion.VersionsBehind"/>.
+    /// </summary>
+    public int? VersionsBehind { get; init; }
     public DateTimeOffset? VulnCheckedAt { get; init; }
     /// <summary>Hex SHA-1, present for npm artifacts captured at first-fetch.</summary>
     public string? ChecksumSha1 { get; init; }
@@ -509,6 +604,7 @@ public sealed class CacheArtifactIndexFacts
             ManualBlockState = ManualBlockState,
             Deprecated = Deprecated,
             RevokedAt = RevokedAt,
+            VersionsBehind = VersionsBehind,
             PublishedAt = PublishedAt,
             CreatedAt = CreatedAt,
             VulnCheckedAt = VulnCheckedAt,
@@ -549,5 +645,7 @@ public sealed class CacheArtifactGateFacts
     /// created with no manual_block_state set). Present here so callers do not need to
     /// special-case the null check.
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822:Mark members as static",
+        Justification = "Instance property kept for shape parity with sibling gate-facts DTOs consumed uniformly by BlockGateRequest builders.")]
     public string? ManualBlockState => null;
 }

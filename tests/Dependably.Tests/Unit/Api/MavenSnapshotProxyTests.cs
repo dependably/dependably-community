@@ -202,19 +202,20 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
             upstreamClient, tiered, _db, config, NullLogger<MavenUpstreamFetcher>.Instance, TimeProvider.System);
 
         var vulns = new VulnerabilityRepository(_db, TimeProvider.System);
-        var licenses = new LicenseRepository(_db, TimeProvider.System);
+        var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
         var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
             _db, osv, vulns, _audit, config,
             new StubAirGapMode(false),
             NullLogger<VulnerabilityScanService>.Instance,
             TimeProvider.System,
             new OrgRepository(_db),
-            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System)));
         var cacheArtifact = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var proxyVersions = new ProxyVersionRecorder(_packages, _audit, licenses, cacheArtifact,
             Substitute.For<IUpstreamLatestVersionResolver>(), NullLogger<ProxyVersionRecorder>.Instance);
-        var blockGate = new BlockGateService(vulns, _audit, new QuarantineRepository(_db, TimeProvider.System), new InstallScriptAllowlistService(_db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System), NullLogger<BlockGateService>.Instance, TimeProvider.System);
+        var blockGate = Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, TimeProvider.System);
         var cacheRecorder = new CacheAccessRecorder(
             cacheArtifact, tenantAccess,
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
@@ -243,7 +244,8 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
                 new Dependably.Tests.Infrastructure.StubPerOrgTrustAnchorStore(),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance),
             EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
-            Staging: new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0));
+            Staging: new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0),
+            Licenses: licenses);
 
         return new MavenController(svc)
         {

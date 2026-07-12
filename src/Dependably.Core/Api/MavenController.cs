@@ -145,6 +145,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         }
 
         string orgId = CurrentTenantId();
+        var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
         var token = await Request.ResolveTokenAsync(_svc.Tokens, orgId, ct);
         if (token is null || token.OrgId != orgId)
         {
@@ -193,7 +194,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
             // input here would let a misbehaving client poison the index for everyone.
             return coords.IsMetadata
                 ? StatusCode(StatusCodes.Status201Created)
-                : await StoreFileAsync(orgId, coords!, staged, token, ct);
+                : await StoreFileAsync(orgId, coords!, staged, settings, token, ct);
         }
         finally
         {
@@ -774,7 +775,12 @@ public sealed partial class MavenController : OrgScopedControllerBase
             OrgId: orgId, Ecosystem: "maven",
             PackageName: resolvedCoords.PackageName, PurlName: resolvedCoords.PackageName,
             Version: resolvedCoords.Version!, Purl: purl, File: resolvedCoords.Filename, Blob: blob,
-            ExtractLicenses: null,
+            // Licenses live only in the POM; the .jar/.aar carry none. Gate extraction on the
+            // resolved coordinate extension so the callback runs against the .pom's own
+            // cache_artifact row and stays null for every other artifact file.
+            ExtractLicenses: string.Equals(resolvedCoords.Extension, "pom", StringComparison.OrdinalIgnoreCase)
+                ? LicenseExtractor.FromPomXml
+                : null,
             UserId: token?.UserId,
             ActorKind: token?.ActorKind,
             SourceIp: HttpContext.GetNormalizedRemoteIp(),
@@ -790,7 +796,8 @@ public sealed partial class MavenController : OrgScopedControllerBase
             MaxEpssTolerance: settings?.MaxEpssTolerance,
             ProvenanceStatus: provenanceStatus,
             ProvenanceSigner: provenanceSigner,
-            VerifyProvenanceMode: verifyProvenanceMode), ct);
+            VerifyProvenanceMode: verifyProvenanceMode,
+            LicenseEnforcementMode: settings?.LicenseEnforcementMode), ct);
 
         if (fetch.Decision == BlockDecision.Blocked)
         {
@@ -992,7 +999,8 @@ public sealed partial class MavenController : OrgScopedControllerBase
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "SCS0018",
         Justification = "Staging path is a server-generated GUID under the operator-configured root, not user input.")]
     private async Task<IActionResult> StoreFileAsync(
-        string orgId, MavenCoordinates coords, RequestBodyStager.StagedBody staged, TokenRecord token, CancellationToken ct)
+        string orgId, MavenCoordinates coords, RequestBodyStager.StagedBody staged,
+        OrgSettings? settings, TokenRecord token, CancellationToken ct)
     {
         // Sidecar checksums: clients upload them next to the primary. We don't store the
         // sidecar bytes — we accept, validate that the hex matches what we'd compute,
@@ -1004,6 +1012,18 @@ public sealed partial class MavenController : OrgScopedControllerBase
             // deepcode ignore PT: staged.Path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
             byte[] sidecarBytes = await System.IO.File.ReadAllBytesAsync(staged.Path, ct);
             return await ValidateAndAcknowledgeSidecarAsync(orgId, coords, sidecarBytes, ct);
+        }
+
+        // License hard-block. Maven licenses live only in the .pom, uploaded after the .jar, so
+        // a version row may already exist by the time this fires — the "no version row on
+        // block" invariant the shared publish pipeline gives every other hosted-push ecosystem
+        // is not achievable here. Instead the .pom PUT itself is rejected before it is stored;
+        // the serve-path license arm (BlockGateService) then covers the already-stored jar via
+        // the shared package_versions row's license entries.
+        if (string.Equals(coords.Extension, "pom", StringComparison.OrdinalIgnoreCase)
+            && await EvaluateMavenPomLicenseGateAsync(orgId, settings, staged.Path, ct) is { } licenseReject)
+        {
+            return licenseReject;
         }
 
         string purl = PurlNormalizer.Maven(coords.GroupId, coords.ArtifactId, coords.Version!);
@@ -1072,6 +1092,30 @@ public sealed partial class MavenController : OrgScopedControllerBase
                 md5 = md5Hex,
             });
 
+        // Licenses live only in the POM. On a .pom publish, parse the staged bytes and attach
+        // the resolved SPDX identifiers to the shared package_versions row so hosted Maven
+        // artifacts feed license governance the same way proxied ones do. Extraction failures
+        // never fail the publish — the artifact is already stored and the row already written.
+        if (string.Equals(coords.Extension, "pom", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                // deepcode ignore PT: staged.Path is under the operator-configured staging root — no user input reaches the path.
+                var pomStream = new FileStream(
+                    staged.Path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true);
+                // FromPomXml takes ownership of and disposes the stream (class stream-ownership contract).
+                var licenses = LicenseExtractor.FromPomXml(pomStream);
+                if (licenses.Spdx.Count > 0)
+                {
+                    await _svc.Licenses.SetLicensesAsync(versionId, licenses.Spdx, "upstream", ct);
+                }
+            }
+            catch (Exception ex)
+            {
+                _svc.Log.LogWarning(ex, "Maven POM license extraction failed for {Purl}; publish unaffected.", purl);
+            }
+        }
+
         await _svc.Audit.LogActivityAsync(orgId, "maven", purl, "push",
             actorId: token.UserId, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
@@ -1085,10 +1129,58 @@ public sealed partial class MavenController : OrgScopedControllerBase
         return StatusCode(StatusCodes.Status201Created);
     }
 
+    /// <summary>
+    /// License hard-block for the .pom PUT, governed by the existing
+    /// <c>org_settings.license_enforcement_mode</c> ('off'/'warn'/'block'). Parses the staged
+    /// POM the same way the post-store license-mirroring step does; a parse failure or a POM
+    /// with no license entries fails open (no rejection) — matching the persisted mirroring
+    /// step's "extraction failures never fail the publish" contract. Only 'block' can reject.
+    /// </summary>
+    private async Task<IActionResult?> EvaluateMavenPomLicenseGateAsync(
+        string orgId, OrgSettings? settings, string stagedPath, CancellationToken ct)
+    {
+        if (settings?.LicenseEnforcementMode != "block")
+        {
+            return null;
+        }
+
+        LicenseExtractor.ExtractedMetadata licenses;
+        try
+        {
+            // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+            var pomStream = new FileStream(
+                stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true);
+            // FromPomXml takes ownership of and disposes the stream (class stream-ownership contract).
+            licenses = LicenseExtractor.FromPomXml(pomStream);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _svc.Log.LogWarning(ex, "Maven POM license gate parse failed; publish unaffected.");
+            return null;
+        }
+
+        if (licenses.Spdx.Count == 0)
+        {
+            return null;
+        }
+
+        var (allowed, blocked) = await _svc.Licenses.CheckPolicyAsync(orgId, "block", licenses.Spdx, ct);
+        return allowed
+            ? null
+            : new ObjectResult(new ProblemDetails
+            {
+                Detail = $"License '{blocked}' is not permitted by this org's license policy.",
+                Status = StatusCodes.Status403Forbidden,
+            })
+            { StatusCode = StatusCodes.Status403Forbidden };
+    }
+
     // Get-or-create the shared package_versions row for this coordinate/version: Maven's
     // multi-file shape means the row is shared across every file of a version (the per-file
     // mapping lives in maven_version_files), so a second file of an already-seen version reuses
     // the existing row rather than inserting a duplicate.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Each argument is a distinct coordinate/checksum input for the row upsert; bundling would add no cohesion.")]
     private static async Task<string> GetOrCreateVersionRowAsync(
         System.Data.Common.DbConnection conn, string packageId, MavenCoordinates coords, string purl,
         string blobKey, string sha256Hex, string sha1Hex, long sizeBytes)
@@ -1302,4 +1394,5 @@ public sealed record MavenControllerServices(
     CacheAccessRecorder CacheRecorder,
     Dependably.Protocol.Provenance.MavenProvenanceVerifier MavenProvenance,
     Dependably.Infrastructure.Edge.EdgePublishGuard EdgeGuard,
-    Dependably.Infrastructure.StagingOptions Staging);
+    Dependably.Infrastructure.StagingOptions Staging,
+    LicenseRepository Licenses);

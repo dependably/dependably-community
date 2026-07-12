@@ -3,6 +3,7 @@
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
+  import LicenseTextModal from '../lib/LicenseTextModal.svelte'
 
   let mode = 'off'
   let allowEntries = []
@@ -11,6 +12,8 @@
   let detail = {}
   let loading = true
   let error = ''
+  // Identifier of the license whose bundled text popup is open, or null.
+  let licenseTextModal = null
 
   onMount(async () => {
     try {
@@ -83,20 +86,23 @@
               {@const d = detail[e.licenseSpdx]}
               <tr>
                 <td class="t-mono">
-                  {#if d?.referenceUrl}
-                    <a href={d.referenceUrl} target="_blank" rel="noopener noreferrer">{e.licenseSpdx}</a>
-                  {:else}
+                  <button class="link t-mono"
+                          aria-label={$t('licenseText.open')}
+                          title={$t('licenseText.open')}
+                          on:click={() => licenseTextModal = e.licenseSpdx}>
                     {e.licenseSpdx}
-                  {/if}
+                  </button>
                 </td>
                 <td>{d?.name ?? '—'}</td>
-                <td class="badges">
-                  {#if d?.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
-                  {#if d?.isFsfLibre}<span class="badge fsf" title="FSF Free/Libre">FSF</span>{/if}
-                  {#if d?.copyleft && d.copyleft !== 'unclassified'}
-                    <span class="badge cl-{d.copyleft}">{copyleftLabel(d.copyleft)}</span>
-                  {/if}
-                  {#if d?.isDeprecated}<span class="badge dep">deprecated</span>{/if}
+                <td>
+                  <div class="badges">
+                    {#if d?.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
+                    {#if d?.isFsfLibre}<span class="badge fsf" title="FSF Free/Libre">FSF</span>{/if}
+                    {#if d?.copyleft && d.copyleft !== 'unclassified'}
+                      <span class="badge cl-{d.copyleft}">{copyleftLabel(d.copyleft)}</span>
+                    {/if}
+                    {#if d?.isDeprecated}<span class="badge dep">deprecated</span>{/if}
+                  </div>
                 </td>
               </tr>
             {/each}
@@ -128,20 +134,23 @@
               {@const d = detail[e.licenseSpdx]}
               <tr>
                 <td class="t-mono">
-                  {#if d?.referenceUrl}
-                    <a href={d.referenceUrl} target="_blank" rel="noopener noreferrer">{e.licenseSpdx}</a>
-                  {:else}
+                  <button class="link t-mono"
+                          aria-label={$t('licenseText.open')}
+                          title={$t('licenseText.open')}
+                          on:click={() => licenseTextModal = e.licenseSpdx}>
                     {e.licenseSpdx}
-                  {/if}
+                  </button>
                 </td>
                 <td>{d?.name ?? '—'}</td>
-                <td class="badges">
-                  {#if d?.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
-                  {#if d?.isFsfLibre}<span class="badge fsf" title="FSF Free/Libre">FSF</span>{/if}
-                  {#if d?.copyleft && d.copyleft !== 'unclassified'}
-                    <span class="badge cl-{d.copyleft}">{copyleftLabel(d.copyleft)}</span>
-                  {/if}
-                  {#if d?.isDeprecated}<span class="badge dep">deprecated</span>{/if}
+                <td>
+                  <div class="badges">
+                    {#if d?.isOsiApproved}<span class="badge osi" title="OSI Approved">OSI</span>{/if}
+                    {#if d?.isFsfLibre}<span class="badge fsf" title="FSF Free/Libre">FSF</span>{/if}
+                    {#if d?.copyleft && d.copyleft !== 'unclassified'}
+                      <span class="badge cl-{d.copyleft}">{copyleftLabel(d.copyleft)}</span>
+                    {/if}
+                    {#if d?.isDeprecated}<span class="badge dep">deprecated</span>{/if}
+                  </div>
                 </td>
               </tr>
             {/each}
@@ -151,6 +160,12 @@
     </section>
   {/if}
 </div>
+
+{#if licenseTextModal}
+  <LicenseTextModal identifier={licenseTextModal}
+                     referenceUrl={detail[licenseTextModal]?.referenceUrl}
+                     on:close={() => licenseTextModal = null} />
+{/if}
 
 <style>
   /* Keep the tighter vertical padding, but let the global .page-fluid control width
@@ -171,6 +186,17 @@
   .empty { font-size: 13px; }
   .mt-4 { margin-top: 24px; }
   .badges { display: flex; gap: 4px; flex-wrap: wrap; }
+  /* Inline link-style trigger for the SPDX id cells that open LicenseTextModal. */
+  .link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    padding: 0;
+    min-height: 0;
+    font-size: inherit;
+    cursor: pointer;
+  }
+  .link:hover { text-decoration: underline; background: none; }
   .col-spdx { width: 200px; }
   .col-badges { width: 220px; }
 </style>

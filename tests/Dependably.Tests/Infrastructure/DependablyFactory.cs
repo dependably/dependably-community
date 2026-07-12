@@ -199,6 +199,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         // host so /go/sumdb/{host}/... proxies to the mock. The requested sumdb name in tests is
         // the WireMock host (matched case-insensitively against this value's host).
         builder.WebHost.UseSetting("Go:SumDb", MockUpstream.Urls[0]);
+        builder.WebHost.UseSetting("Apk:Upstream", MockUpstream.Urls[0]);
         builder.WebHost.UseSetting("DEFAULT_ORG_SLUG", "default");
         builder.WebHost.UseSetting("Logging:LogLevel:Default", "Warning");
         // Tests share the factory; the default 10/min login rate limit otherwise leaks

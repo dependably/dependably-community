@@ -126,6 +126,13 @@ public partial class Program
         builder.Services.AddSingleton<Dependably.Infrastructure.Webhooks.IPackageEventSink,
                                       Dependably.Infrastructure.Webhooks.NoOpPackageEventSink>();
 
+        // No-op alert notifier. AlertService (Core) — a hard dependency of the quarantine and
+        // vulnerability-scan pipelines — takes IAlertNotifier; Slack delivery (queue + SSRF-guarded
+        // client + settings repository) is a management-plane feature an edge never wires up.
+        // Alerts are still raised and persisted; only the outbound Slack push is skipped.
+        builder.Services.AddSingleton<Dependably.Infrastructure.Alerts.IAlertNotifier,
+                                      Dependably.Infrastructure.Alerts.NoOpAlertNotifier>();
+
         builder.AddDependablyPublishPipeline();
 
         builder.AddDependablyProtocolServices();

@@ -1,0 +1,124 @@
+{
+  "aliases": {
+    "Apache-2.0": [
+      "apache 2.0",
+      "apache 2",
+      "apache license, version 2.0",
+      "apache license version 2.0",
+      "apache license 2.0",
+      "the apache software license, version 2.0",
+      "apache software license"
+    ],
+    "MIT": [
+      "the mit license",
+      "the mit license (mit)",
+      "mit license"
+    ],
+    "BSD-2-Clause": [
+      "bsd",
+      "bsd 2-clause license",
+      "the bsd 2-clause license",
+      "simplified bsd license",
+      "freebsd license"
+    ],
+    "BSD-3-Clause": [
+      "bsd 3-clause license",
+      "the bsd 3-clause license",
+      "new bsd license",
+      "the new bsd license",
+      "modified bsd license",
+      "revised bsd license"
+    ],
+    "0BSD": [
+      "zero clause bsd",
+      "bsd zero clause license"
+    ],
+    "ISC": [
+      "isc license",
+      "the isc license"
+    ],
+    "EPL-1.0": [
+      "eclipse public license 1.0",
+      "eclipse public license - v 1.0",
+      "eclipse public license v1.0"
+    ],
+    "EPL-2.0": [
+      "eclipse public license 2.0",
+      "eclipse public license - v 2.0",
+      "eclipse public license v2.0"
+    ],
+    "MPL-2.0": [
+      "mozilla public license 2.0",
+      "mozilla public license version 2.0",
+      "mozilla public license, version 2.0"
+    ],
+    "CDDL-1.0": [
+      "common development and distribution license 1.0",
+      "common development and distribution license (cddl) v1.0",
+      "common development and distribution license"
+    ],
+    "CC0-1.0": [
+      "cc0",
+      "creative commons zero",
+      "public domain"
+    ],
+    "GPL-2.0-only": [
+      "gnu gpl v2",
+      "gpl 2.0",
+      "gpl v2",
+      "gnu general public license, version 2"
+    ],
+    "GPL-2.0-or-later": [
+      "gnu gpl v2 or later",
+      "gpl v2 or later"
+    ],
+    "GPL-3.0-only": [
+      "gnu gpl v3",
+      "gpl 3.0",
+      "gpl v3",
+      "gnu general public license, version 3"
+    ],
+    "GPL-3.0-or-later": [
+      "gnu gpl v3 or later",
+      "gpl v3 or later"
+    ],
+    "LGPL-2.1-only": [
+      "gnu lgpl v2.1",
+      "lgpl 2.1",
+      "lgpl v2.1"
+    ],
+    "LGPL-2.1-or-later": [
+      "gnu lgpl v2.1 or later",
+      "lgpl v2.1 or later"
+    ],
+    "LGPL-3.0-only": [
+      "gnu lgpl v3",
+      "lgpl 3.0",
+      "lgpl v3"
+    ],
+    "LGPL-3.0-or-later": [
+      "gnu lgpl v3 or later",
+      "lgpl v3 or later"
+    ],
+    "AGPL-3.0-only": [
+      "gnu agpl v3",
+      "agpl 3.0",
+      "agpl v3"
+    ],
+    "AGPL-3.0-or-later": [
+      "gnu agpl v3 or later",
+      "agpl v3 or later"
+    ],
+    "Unlicense": [
+      "the unlicense"
+    ],
+    "WTFPL": [
+      "do what the fuck you want to public license"
+    ],
+    "PSF-2.0": [
+      "python software foundation license",
+      "python software foundation license 2.0",
+      "psf license"
+    ]
+  }
+}

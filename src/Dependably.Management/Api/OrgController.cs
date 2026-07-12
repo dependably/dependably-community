@@ -27,6 +27,7 @@ public sealed class OrgController : OrgScopedControllerBase
 
     private readonly OrgRepository _orgs;
     private readonly PackageRepository _packages;
+    private readonly PackageVersionFilesRepository _versionFiles;
     private readonly PackageAnalyticsRepository _packageAnalytics;
     private readonly StatsSnapshotRepository _statsSnapshots;
     private readonly AuditRepository _audit;
@@ -48,6 +49,7 @@ public sealed class OrgController : OrgScopedControllerBase
     {
         _orgs = svc.Orgs;
         _packages = svc.Packages;
+        _versionFiles = svc.VersionFiles;
         _packageAnalytics = svc.PackageAnalytics;
         _statsSnapshots = svc.StatsSnapshots;
         _audit = svc.Audit;
@@ -72,6 +74,9 @@ public sealed class OrgController : OrgScopedControllerBase
     // ── Packages ──────────────────────────────────────────────────────────────
 
     /// <summary>GET /api/v1/orgs/{org}/packages</summary>
+    // Read-only: accepts a PAT/service token carrying read:packages in addition to the
+    // class-level JWT session, mirroring the yank override below.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/packages")]
     public async Task<IActionResult> ListPackages(
         [FromQuery] int limit = 50,
@@ -101,6 +106,8 @@ public sealed class OrgController : OrgScopedControllerBase
     }
 
     /// <summary>GET /api/v1/orgs/{org}/packages/{ecosystem}/{name}</summary>
+    // Read-only: accepts a PAT/service token carrying read:packages.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/packages/{ecosystem}/{name}")]
     public async Task<IActionResult> GetPackage(string ecosystem, string name, CancellationToken ct)
     {
@@ -199,6 +206,7 @@ public sealed class OrgController : OrgScopedControllerBase
             v.ManualBlockState,
             v.Deprecated,
             v.RevokedAt,
+            v.VersionsBehind,
             v.Origin,
             v.UpstreamIntegrityValue,
             v.UpstreamIntegrityAlgorithm,
@@ -336,7 +344,18 @@ public sealed class OrgController : OrgScopedControllerBase
             return NotFound();
         }
 
-        await _blobs.DeleteAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
+        // A PyPI version may hold several distribution files (wheel + sdist), each its own
+        // blob; delete them all, deduped against the version row's primary key so single-file
+        // versions and non-PyPI ecosystems delete exactly once.
+        var blobKeys = new HashSet<string>(StringComparer.Ordinal) { ver.BlobKey };
+        foreach (string fileBlobKey in await _versionFiles.GetBlobKeysForVersionAsync(ver.Id, ct))
+        {
+            blobKeys.Add(fileBlobKey);
+        }
+        foreach (string key in blobKeys)
+        {
+            await _blobs.DeleteAsync(BlobKeys.StoreKey(key), ct);
+        }
         await _packages.DeleteVersionAsync(ver.Id, ct);
         // GC the parent row when this was the last version. Orphan packages rows otherwise
         // accumulate across delete/republish cycles and cause "empty package" UI cards.
@@ -503,6 +522,8 @@ public sealed class OrgController : OrgScopedControllerBase
     // ── Stats ─────────────────────────────────────────────────────────────────
 
     /// <summary>GET /api/v1/orgs/{org}/stats</summary>
+    // Read-only: accepts a PAT/service token carrying read:packages.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/stats")]
     public async Task<IActionResult> GetStats(CancellationToken ct)
     {
@@ -550,6 +571,9 @@ public sealed class OrgController : OrgScopedControllerBase
     // ── Setup snippets ────────────────────────────────────────────────────────
 
     /// <summary>GET /api/v1/orgs/{org}/setup/{ecosystem}</summary>
+    // Read-only: accepts a PAT/service token carrying read:packages. Snippets contain
+    // host-derived URLs and a literal <token> placeholder only — no secrets.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/setup/{ecosystem}")]
     public async Task<IActionResult> GetSetup(string ecosystem, CancellationToken ct)
     {
@@ -574,6 +598,7 @@ public sealed class OrgController : OrgScopedControllerBase
             "oci" => GenerateOciSnippet(baseUrl, slug),
             "golang" => GenerateGoSnippet(baseUrl, slug),
             "cargo" => GenerateCargoSnippet(baseUrl, slug),
+            "apk" => GenerateApkSnippet(baseUrl, slug),
             _ => null
         };
 
@@ -817,6 +842,27 @@ public sealed class OrgController : OrgScopedControllerBase
 
             # Publish a crate:
             cargo publish --registry dependably
+            """;
+    }
+
+    // apk is proxy-only (no hosted push, like Go), so the snippet is a read-only mirror
+    // rewrite: sed /etc/apk/repositories to swap dl-cdn.alpinelinux.org for this proxy, with
+    // credentials carried in the userinfo (the apk client's only auth mechanism).
+    private static string GenerateApkSnippet(string baseUrl, string slug)
+    {
+        _ = slug;
+        var uri = new Uri(baseUrl);
+        string userinfoUrl = $"{uri.Scheme}://<user>:<token>@{uri.Authority}/apk";
+        return $"""
+            # /etc/apk/repositories — point at this proxy instead of dl-cdn.alpinelinux.org
+            # (same release/repo layout, so only the host changes):
+            {userinfoUrl}/v3.22/main
+            {userinfoUrl}/v3.22/community
+
+            # One-liner rewrite of an existing repositories file:
+            sed -i "s#https://dl-cdn.alpinelinux.org/alpine#{userinfoUrl}#" /etc/apk/repositories
+
+            apk update
             """;
     }
 

@@ -19,7 +19,9 @@ namespace Dependably.Security;
 /// like <c>publish:*</c> remain in the vocabulary as role-level shorthand (the admin
 /// role grants <c>publish:*</c> rather than enumerating leaves); callers may request
 /// either the wildcard or per-ecosystem leaves (<c>publish:npm</c>, <c>publish:pypi</c>,
-/// <c>publish:nuget</c>).
+/// <c>publish:nuget</c>). <c>read:*</c> follows the same shorthand for the six read
+/// leaves — granted alongside them (not in place of them) to admin/owner/platform-admin,
+/// who already hold every individual leaf, so minting it never widens effective access.
 /// </summary>
 public static class Capabilities
 {
@@ -30,6 +32,7 @@ public static class Capabilities
     public const string ReadClaims = "read:claims";
     public const string ReadAudit = "read:audit";
     public const string ReadTenant = "read:tenant";
+    public const string ReadAll = "read:*";
 
     // ── Publish (per-ecosystem and wildcard) ────────────────────────────────────
     public const string PublishNpm = "publish:npm";
@@ -108,11 +111,14 @@ public static class Capabilities
 
     // admin = publisher + claim-manager + read:tenant + read:audit + tenant:configure.
     // The owner-only privilege is tenant:admin (added below) — the only capability that
-    // distinguishes owner from admin within the tenant.
+    // distinguishes owner from admin within the tenant. read:* is added alongside the
+    // enumerated read leaves (rather than replacing them) so admin/owner can mint a single
+    // "read-everything" token via TryNormalizeAndAuthorize without widening their own
+    // effective access — they already hold every individual read:* leaf.
     private static readonly IReadOnlySet<string> AdminCaps =
         new HashSet<string>(PublisherCaps.Concat(ClaimManagerCaps))
         {
-            ReadTenant, ReadAudit, TenantConfigure
+            ReadTenant, ReadAudit, TenantConfigure, ReadAll
         };
 
     private static readonly IReadOnlySet<string> TenantAdminCaps = new HashSet<string>(AdminCaps)
@@ -123,7 +129,7 @@ public static class Capabilities
     private static readonly IReadOnlySet<string> PlatformAdminCaps = new HashSet<string>
     {
         PlatformAll, ReadMetadata, ReadArtifact, ReadPackages, ReadClaims, ReadAudit, ReadTenant,
-        ManageOwnTokens
+        ReadAll, ManageOwnTokens
     };
 
     /// <summary>
@@ -185,7 +191,7 @@ public static class Capabilities
     /// </summary>
     public static readonly IReadOnlySet<string> Requestable = new HashSet<string>(StringComparer.Ordinal)
     {
-        ReadMetadata, ReadArtifact, ReadPackages, ReadClaims, ReadAudit, ReadTenant,
+        ReadMetadata, ReadArtifact, ReadPackages, ReadClaims, ReadAudit, ReadTenant, ReadAll,
         PublishNpm, PublishPypi, PublishNuget, PublishMaven, PublishRpm, PublishOci, PublishCargo, PublishAll,
         ImportNpm, ImportPypi, ImportNuget, ImportMaven, ImportRpm, ImportOci, ImportAll,
         YankNpm, YankPypi, YankNuget, YankMaven, YankRpm, YankOci, YankCargo, YankAll,

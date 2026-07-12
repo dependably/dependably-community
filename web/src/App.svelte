@@ -24,6 +24,7 @@
   import Vulnerabilities from './pages/Vulnerabilities.svelte'
   import Quarantine from './pages/Quarantine.svelte'
   import LicensePolicy from './pages/LicensePolicy.svelte'
+  import Lookup from './pages/Lookup.svelte'
   import Dashboard from './pages/Dashboard.svelte'
   import Profile from './pages/Profile.svelte'
   import SamlTestResult from './pages/SamlTestResult.svelte'
@@ -226,6 +227,8 @@
         <Quarantine />
       {:else if $route.page === 'license-policy'}
         <LicensePolicy />
+      {:else if $route.page === 'lookup'}
+        <Lookup />
       {:else if $route.page === 'profile'}
         <Profile />
       {:else if $route.page === 'saml-test-result'}

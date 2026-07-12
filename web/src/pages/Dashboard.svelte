@@ -28,7 +28,7 @@
 
   // ── Constants ────────────────────────────────────────────────────────────────
 
-  // ECOSYSTEMS lives in lib/ecosystems.js so every page renders the same six.
+  // ECOSYSTEMS lives in lib/ecosystems.js so every page renders the same set.
   // 'UNKNOWN' is the bucket the backend emits when an advisory has no CVSS/severity
   // (e.g. some GHSA records on first publish). Render it explicitly — silently
   // dropping it would hide real vulnerabilities from the operator.
@@ -84,6 +84,11 @@
   $: hostedPackages = stats?.hostedPackages ?? 0
   $: proxiedPackages = stats?.proxiedPackages ?? 0
   $: storageQuotaBytes = stats?.storageQuotaBytes ?? null
+
+  // ── Risk-pillar tiles (operational + license, alongside the vuln cards above) ──
+  $: operationalRiskPackageCount = stats?.operationalRiskPackageCount ?? 0
+  $: versionsBehindThreshold = stats?.versionsBehindThreshold ?? 0
+  $: licenseRiskVersionCount = stats?.licenseRiskVersionCount ?? 0
 
   // ── Donut chart ──────────────────────────────────────────────────────────────
 
@@ -245,6 +250,17 @@
       <div class="stat-card">
         <div class="eyebrow">{$t('dashboard.blockedMalicious')}</div>
         <div class="stat-value" class:danger={maliciousBlocked > 0}>{maliciousBlocked.toLocaleString()}</div>
+      </div>
+      <div class="stat-card">
+        <div class="eyebrow">{$t('dashboard.operationalRisk')}</div>
+        <div class="stat-value" class:warn={operationalRiskPackageCount > 0}>{operationalRiskPackageCount.toLocaleString()}</div>
+        {#if versionsBehindThreshold > 0}
+          <div class="stat-sub">{$t('dashboard.operationalRiskSub', { values: { threshold: versionsBehindThreshold } })}</div>
+        {/if}
+      </div>
+      <div class="stat-card">
+        <div class="eyebrow">{$t('dashboard.licenseRisk')}</div>
+        <div class="stat-value" class:warn={licenseRiskVersionCount > 0}>{licenseRiskVersionCount.toLocaleString()}</div>
       </div>
       {#if isAdmin}
         <button
@@ -476,6 +492,7 @@
   .slice-oci   { fill: var(--eco-oci); }
   .slice-golang { fill: var(--eco-golang); }
   .slice-cargo { fill: var(--eco-cargo); }
+  .slice-apk   { fill: var(--eco-apk); }
 
   .zero {
     color: var(--text2);

@@ -197,6 +197,29 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
     }
 
     [Fact]
+    public async Task UpdateVersionsBehindAsync_RoundTripsThroughEveryReadSurface()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "acme");
+        string purl = Purl();
+
+        var created = await _repo.CreateVersionAsync(new NewPackageVersion(
+            pkgId, "1.0.0", purl, "blob/key", 100, "sha256hex", FirstFetch: false));
+        Assert.Null(created.VersionsBehind); // unwritten default — unknown, not 0
+
+        await _repo.UpdateVersionsBehindAsync(created.Id, 4);
+
+        Assert.Equal(4, (await _repo.GetVersionByIdAsync(orgId, created.Id))!.VersionsBehind);
+        Assert.Equal(4, (await _repo.GetVersionAsync(pkgId, "1.0.0"))!.VersionsBehind);
+        Assert.Equal(4, (await _repo.GetVersionByBlobKeyAsync(orgId, "blob/key"))!.VersionsBehind);
+        Assert.Equal(4, Assert.Single(await _repo.GetVersionsAsync(pkgId)).VersionsBehind);
+
+        // Writing null resets to unknown rather than leaving a stale count behind.
+        await _repo.UpdateVersionsBehindAsync(created.Id, null);
+        Assert.Null((await _repo.GetVersionByIdAsync(orgId, created.Id))!.VersionsBehind);
+    }
+
+    [Fact]
     public async Task GetVersionsAsync_OrdersNewestFirst()
     {
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
@@ -601,6 +624,94 @@ public sealed class PackageRepositoryTests : IClassFixture<InMemoryDbFixture>
 
         Assert.NotNull(pkg);
         Assert.Equal("current", pkg.LatestState);
+    }
+
+    // ── AbandonedState (computed in C# against the injected TimeProvider, not SQL) ─────────────
+    // Offsets are deliberately far from the 365-day boundary (400/300 days) rather than exactly
+    // .AddDays(-365) — a boundary-exact seed drifts across leap years and makes the derivation
+    // flaky depending on which year the frozen "now" falls in.
+
+    [Fact]
+    public async Task ListPaginatedAsync_AbandonedState_UnknownWhenNoPublishedAtKnown()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "nopublish", isProxy: true);
+        // A version baseline exists, but its publish timestamp is unknown (e.g. air-gapped or an
+        // ecosystem whose metadata doesn't carry one) — must render "unknown", never "abandoned".
+        await _repo.UpdateUpstreamLatestAsync(pkgId, "1.0.0", publishedAt: null);
+
+        var (items, _) = await _repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+
+        Assert.Equal("unknown", Assert.Single(items).AbandonedState);
+    }
+
+    [Fact]
+    public async Task ListPaginatedAsync_AbandonedState_ActiveWhenPublishedRecently()
+    {
+        var clock = TestTime.Frozen();
+        var repo = new PackageRepository(_fixture.Store, time: clock);
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "recent", isProxy: true);
+        await repo.UpdateUpstreamLatestAsync(pkgId, "1.0.0", publishedAt: clock.GetUtcNow().AddDays(-300));
+
+        var (items, _) = await repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+
+        Assert.Equal("active", Assert.Single(items).AbandonedState);
+    }
+
+    [Fact]
+    public async Task ListPaginatedAsync_AbandonedState_AbandonedWhenPublishedOverAYearAgo()
+    {
+        var clock = TestTime.Frozen();
+        var repo = new PackageRepository(_fixture.Store, time: clock);
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "stale-abandoned", isProxy: true);
+        await repo.UpdateUpstreamLatestAsync(pkgId, "1.0.0", publishedAt: clock.GetUtcNow().AddDays(-400));
+
+        var (items, _) = await repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+
+        Assert.Equal("abandoned", Assert.Single(items).AbandonedState);
+    }
+
+    // A single list call spanning packages in every AbandonedState bucket — the "some succeed,
+    // some fail (are stale), some are unknown, in the same call" batch scenario, not just an
+    // all-abandoned or all-active fixture.
+    [Fact]
+    public async Task ListPaginatedAsync_AbandonedState_MixedBatch_ComputesIndependentlyPerPackage()
+    {
+        var clock = TestTime.Frozen();
+        var repo = new PackageRepository(_fixture.Store, time: clock);
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string abandonedId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "mix-abandoned", isProxy: true);
+        string activeId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "mix-active", isProxy: true);
+        string unknownId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "mix-unknown", isProxy: true);
+        await repo.UpdateUpstreamLatestAsync(abandonedId, "1.0.0", publishedAt: clock.GetUtcNow().AddDays(-400));
+        await repo.UpdateUpstreamLatestAsync(activeId, "1.0.0", publishedAt: clock.GetUtcNow().AddDays(-300));
+        // unknownId gets no upstream_latest_version/published_at baseline at all.
+
+        var (items, total) = await repo.ListPaginatedAsync(new PackageListQuery(orgId, Limit: 10, Offset: 0, Ecosystem: "npm"));
+
+        Assert.Equal(3, total);
+        Assert.Equal("abandoned", items.Single(p => p.Id == abandonedId).AbandonedState);
+        Assert.Equal("active", items.Single(p => p.Id == activeId).AbandonedState);
+        Assert.Equal("unknown", items.Single(p => p.Id == unknownId).AbandonedState);
+    }
+
+    [Fact]
+    public async Task GetByPurlNameAsync_AbandonedState_MatchesListPaginatedAsyncDerivation()
+    {
+        // The package-detail query must agree with the packages-list query on the same
+        // derivation — otherwise the detail badge and the list badge disagree for one package.
+        var clock = TestTime.Frozen();
+        var repo = new PackageRepository(_fixture.Store, time: clock);
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"org-{Guid.NewGuid():N}");
+        string pkgId = await PackageSeeder.InsertAsync(_fixture.Store, orgId, "npm", "detailabandoned", isProxy: true);
+        await repo.UpdateUpstreamLatestAsync(pkgId, "1.0.0", publishedAt: clock.GetUtcNow().AddDays(-400));
+
+        var pkg = await repo.GetByPurlNameAsync(orgId, "npm", "detailabandoned");
+
+        Assert.NotNull(pkg);
+        Assert.Equal("abandoned", pkg.AbandonedState);
     }
 
     private async Task SetDownloadCountAsync(string versionId, long count)

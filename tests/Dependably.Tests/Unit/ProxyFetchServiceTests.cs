@@ -31,7 +31,7 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
         var blobs = blobOverride ?? _blobs;
         var packages = new PackageRepository(_db);
         var audit = new AuditRepository(_db);
-        var licenses = new LicenseRepository(_db, TimeProvider.System);
+        var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
         var vulns = new VulnerabilityRepository(_db, TimeProvider.System);
         var cfg = new ConfigurationBuilder().Build();
         // Default OSV stub: returns no advisories so the block gate has nothing to act on.
@@ -60,12 +60,13 @@ public sealed class ProxyFetchServiceTests : IAsyncLifetime
             NullLogger<VulnerabilityScanService>.Instance,
             TimeProvider.System,
             new OrgRepository(_db),
-            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System)));
         var cacheArtifact = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var proxyVersions = new ProxyVersionRecorder(packages, audit, licenses, cacheArtifact,
             Substitute.For<IUpstreamLatestVersionResolver>(), NullLogger<ProxyVersionRecorder>.Instance);
-        var blockGate = new BlockGateService(vulns, audit, new QuarantineRepository(_db, TimeProvider.System), new InstallScriptAllowlistService(_db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, TimeProvider.System);
+        var blockGate = Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, TimeProvider.System);
         var cacheRecorder = new CacheAccessRecorder(cacheArtifact, tenantAccess,
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         return new ProxyFetchService(cacheRecorder, proxyVersions, cacheArtifact, tenantAccess, scanner, blockGate, packages, audit, TimeProvider.System,

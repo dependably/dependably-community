@@ -53,7 +53,7 @@ public sealed class EdgeModeTests
             "SELECT ecosystem AS Ecosystem, url AS Url, auth_type AS AuthType, secret AS Secret FROM upstream_registry ORDER BY ecosystem")).ToList();
 
         var ecosystems = rows.Select(r => r.Ecosystem).OrderBy(e => e, StringComparer.Ordinal).ToList();
-        Assert.Equal(new[] { "cargo", "golang", "maven", "npm", "nuget", "oci", "pypi", "rpm" }, ecosystems);
+        Assert.Equal(new[] { "apk", "cargo", "golang", "maven", "npm", "nuget", "oci", "pypi", "rpm" }, ecosystems);
         Assert.All(rows, r =>
         {
             Assert.Contains(masterHost, r.Url);

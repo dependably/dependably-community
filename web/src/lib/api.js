@@ -214,6 +214,12 @@ export const api = {
   // Returns { query, groups: [{ kind, results: [...] }] }.
   search: (q, limit = 8) => req('GET', `/search?${qs({ q, limit })}`),
 
+  // Pre-adoption package lookup: read-only malware/CVE/license verdict for a candidate
+  // package that has never been requested through the registry. Nothing is ingested —
+  // `version` omitted evaluates the upstream latest stable release.
+  lookupPackage: (ecosystem, name, version) =>
+    req('GET', `/lookup?${qs({ ecosystem, name, version })}`),
+
   // Packages
   listPackages: (params = {}) => {
     const q = qs({ limit: 50, page: 1, ...params })
@@ -345,6 +351,17 @@ export const api = {
   deleteWebhook: (id) => req('DELETE', `/webhooks/${id}`),
   testWebhook: (id) => req('POST', `/webhooks/${id}/test`),
 
+  // Per-tenant alert center (topbar bell, admin/owner only). Slack webhook URL is write-only:
+  // GET/PUT responses return hasSlackWebhook (bool), never the raw value.
+  listAlerts: (state, limit = 50, offset = 0) =>
+    req('GET', `/alerts?${qs({ state, limit, offset })}`),
+  getAlertsSummary: () => req('GET', '/alerts/summary'),
+  dismissAlert: (id) => req('POST', `/alerts/${id}/dismiss`),
+  getAlertSettings: () => req('GET', '/alert-settings'),
+  updateAlertSettings: (quarantineAlertsEnabled, vulnAlertsEnabled, vulnMinSeverity, slackEnabled, slackWebhookUrl) =>
+    req('PUT', '/alert-settings', { quarantineAlertsEnabled, vulnAlertsEnabled, vulnMinSeverity, slackEnabled, slackWebhookUrl }),
+  testAlertSlack: () => req('POST', '/alert-settings/slack/test'),
+
   // Invites
   listInvites: () => req('GET', '/invites'),
   createInvite: (email, role = 'member') => req('POST', '/invites', { email, role }),
@@ -371,6 +388,9 @@ export const api = {
   searchSpdx: (q = '', includeDeprecated = false, limit = 50) =>
     req('GET', `/spdx-licenses?${qs({ q, includeDeprecated, limit })}`),
   getSpdx: (identifier) => req('GET', `/spdx-licenses/${encodeURIComponent(identifier)}`),
+  // Bundled SPDX license text. licenseText is null when the id is known but no text is
+  // bundled — distinct from a 404 (unknown identifier).
+  getSpdxText: (identifier) => req('GET', `/spdx-licenses/${encodeURIComponent(identifier)}/text`),
   // Review queue: SPDX IDs seen during ingestion but not yet on allow/block. Admin-only.
   getLicenseReview: (includeDeprecated = false) =>
     req('GET', `/license-policy/review?${qs({ includeDeprecated })}`),
@@ -390,6 +410,11 @@ export const api = {
     req('POST', `/packages/${eco}/${name.replaceAll('/', '%2F')}/${version}/unblock`),
   setPackageVersionOverwrite: (eco, name, override) =>
     req('PATCH', `/packages/${eco}/${name.replaceAll('/', '%2F')}/version-overwrite`, { override }),
+
+  // Remediation skills index — public, unauthenticated (id, name, description from frontmatter).
+  // Raw SKILL.md content is fetched by the user's own agent via the copyable curl one-liner,
+  // not by this frontend.
+  getRemediationSkills: () => req('GET', '/remediation/skills'),
 
   // Stats
   getStats: () => req('GET', '/stats'),

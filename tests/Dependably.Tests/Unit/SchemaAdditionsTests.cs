@@ -216,6 +216,17 @@ public class SchemaAdditionsTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SpdxLicense_HasLicenseTextColumn_Nullable()
+    {
+        await using var conn = await _db.OpenAsync();
+
+        var (name, notnull) = await conn.QuerySingleOrDefaultAsync<(string name, int notnull)>(
+            "SELECT name, \"notnull\" FROM pragma_table_info('spdx_license') WHERE name = 'license_text'");
+        Assert.Equal("license_text", name);
+        Assert.Equal(0, notnull);
+    }
+
+    [Fact]
     public async Task Orgs_HasParentTenantIdColumn_Nullable_NoForeignKey_WithIndex()
     {
         await using var conn = await _db.OpenAsync();

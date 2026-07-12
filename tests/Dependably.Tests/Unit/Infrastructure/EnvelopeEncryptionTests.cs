@@ -253,8 +253,8 @@ public sealed class EnvelopeEncryptionTests : IAsyncLifetime
 
         Assert.NotNull(rawJwt);
         Assert.NotNull(rawMfa);
-        Assert.True(ep.IsEncrypted(rawJwt!), "jwt_secret must be encrypted on first boot with configured KEK");
-        Assert.True(ep.IsEncrypted(rawMfa!), "mfa_encryption_key must be encrypted on first boot with configured KEK");
+        Assert.True(EnvelopeProtector.IsEncrypted(rawJwt!), "jwt_secret must be encrypted on first boot with configured KEK");
+        Assert.True(EnvelopeProtector.IsEncrypted(rawMfa!), "mfa_encryption_key must be encrypted on first boot with configured KEK");
     }
 
     [Fact]
@@ -275,8 +275,8 @@ public sealed class EnvelopeEncryptionTests : IAsyncLifetime
 
         Assert.NotNull(rawJwt);
         Assert.NotNull(rawMfa);
-        Assert.False(ep.IsEncrypted(rawJwt!), "jwt_secret must be plaintext when no KEK is configured");
-        Assert.False(ep.IsEncrypted(rawMfa!), "mfa_encryption_key must be plaintext when no KEK is configured");
+        Assert.False(EnvelopeProtector.IsEncrypted(rawJwt!), "jwt_secret must be plaintext when no KEK is configured");
+        Assert.False(EnvelopeProtector.IsEncrypted(rawMfa!), "mfa_encryption_key must be plaintext when no KEK is configured");
     }
 
 }

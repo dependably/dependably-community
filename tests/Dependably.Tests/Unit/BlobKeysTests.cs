@@ -155,4 +155,21 @@ public class BlobKeysTests
         string k = BlobKeys.Proxy(HexSentinel2);
         Assert.Equal(k, BlobKeys.StoreKey(k));
     }
+
+    // ---- Apk ----
+    [Fact]
+    public void Apk_Golden_BuildsSixSegmentKey()
+    {
+        string key = BlobKeys.Apk("org1", "v3.22", "main", "x86_64", "curl-8.9.0-r0.apk");
+        Assert.Equal("apk/org1/v3.22/main/x86_64/curl-8.9.0-r0.apk", key);
+    }
+
+    [Fact]
+    public void Apk_RoundTripsThroughStoreKey()
+    {
+        // The output of Apk() has six segments (not the three-segment proxy/{sha}/{file}
+        // shape), so StoreKey leaves it untouched.
+        string k = BlobKeys.Apk("org1", "edge", "community", "aarch64", "APKINDEX.tar.gz");
+        Assert.Equal(k, BlobKeys.StoreKey(k));
+    }
 }

@@ -39,6 +39,8 @@ public static class EdgeUpstreamSeeder
     //   cargo  — fetcher appends "/{indexPath}" and (download) "/api/v1/crates/..."; master Cargo
     //            surface is under /cargo. The crates.io static-CDN special-case does not trigger
     //            because the base is not index.crates.io.
+    //   apk    — fetcher appends "/{release}/{repo}/{arch}/{file}" verbatim (1:1 with dl-cdn's
+    //            layout); master apk surface is under /apk.
     private static readonly (string Ecosystem, string PathSuffix)[] NonOciPrefixes =
     [
         ("pypi",   ""),
@@ -48,6 +50,7 @@ public static class EdgeUpstreamSeeder
         ("rpm",    "/rpm"),
         ("golang", "/go"),
         ("cargo",  "/cargo"),
+        ("apk",    "/apk"),
     ];
 
     /// <summary>

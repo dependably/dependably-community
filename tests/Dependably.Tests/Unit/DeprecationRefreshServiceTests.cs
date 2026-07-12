@@ -148,6 +148,24 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task NpmPackage_RefreshPass_RecordsUpstreamLatestPublishedAt()
+    {
+        var (orgId, packageId, _, _) = await SeedVersionAsync(
+            ecosystem: "npm", name: "left-pad", version: "1.0.0", origin: "proxy", deprecated: null);
+
+        string packument = NpmPackument("left-pad",
+            new Dictionary<string, string?> { ["1.0.0"] = null },
+            latest: "2.5.0", latestPublishedAtIso: "2023-09-01T00:00:00.000Z");
+        var service = BuildService(packument);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync(orgId, "npm", "left-pad");
+        Assert.Equal(packageId, pkg!.Id);
+        Assert.Equal(new DateTimeOffset(2023, 9, 1, 0, 0, 0, TimeSpan.Zero), pkg.UpstreamLatestPublishedAt);
+    }
+
+    [Fact]
     public async Task NuGetPackage_RefreshPass_RecordsUpstreamLatestStableVersion()
     {
         // NuGet has no per-version deprecation signal, but the refresh pass still resolves the
@@ -180,6 +198,24 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         string? latest = await conn.QuerySingleAsync<string?>(
             "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId });
         Assert.Equal("2.0.0", latest);
+    }
+
+    [Fact]
+    public async Task MavenPackage_RefreshPass_RecordsUpstreamLatestPublishedAtFromLastUpdated()
+    {
+        var (orgId, packageId, _, _) = await SeedVersionAsync(
+            ecosystem: "maven", name: "org.example:widget", version: "1.0.0", origin: "proxy", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "maven", "http://maven.test");
+
+        var service = BuildService(
+            "<metadata><versioning><release>2.0.0</release>" +
+            "<lastUpdated>20230615120000</lastUpdated></versioning></metadata>");
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync(orgId, "maven", "org.example:widget");
+        Assert.Equal(packageId, pkg!.Id);
+        Assert.Equal(new DateTimeOffset(2023, 6, 15, 12, 0, 0, TimeSpan.Zero), pkg.UpstreamLatestPublishedAt);
     }
 
     // ── PyPI tests ─────────────────────────────────────────────────────────────
@@ -261,6 +297,24 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         string? latest = await conn.QuerySingleAsync<string?>(
             "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId });
         Assert.Equal("3.1.4", latest);
+    }
+
+    [Fact]
+    public async Task PyPiPackage_RefreshPass_RecordsUpstreamLatestPublishedAt()
+    {
+        var (orgId, packageId, _, _) = await SeedVersionAsync(
+            ecosystem: "pypi", name: "good-lib", version: "1.0.0", origin: "proxy", deprecated: null);
+
+        string pypiJson = PyPiJson("good-lib",
+            new Dictionary<string, (bool Yanked, string? Reason)> { ["1.0.0"] = (false, null) },
+            latest: "3.1.4", latestPublishedAtIso: "2022-02-14T10:00:00.000Z");
+        var service = BuildService(pypiJson);
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync(orgId, "pypi", "good-lib");
+        Assert.Equal(packageId, pkg!.Id);
+        Assert.Equal(new DateTimeOffset(2022, 2, 14, 10, 0, 0, TimeSpan.Zero), pkg.UpstreamLatestPublishedAt);
     }
 
     // ── Revocation (upstream-removal) tests ─────────────────────────────────────
@@ -648,7 +702,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var packages = new PackageRepository(_db, time: _clock);
         var cacheArtifacts = new CacheArtifactRepository(_db);
         var registries = new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured()));
-        var latestResolver = new UpstreamLatestVersionResolver(upstream, registries, config);
+        var latestResolver = new UpstreamLatestVersionResolver(upstream, registries);
         return new DeprecationRefreshService(
             packages, cacheArtifacts, audit, upstream, latestResolver, airGap, config,
             NullLogger<DeprecationRefreshService>.Instance,
@@ -766,9 +820,11 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             new { orgId, flag = airGapped ? 1 : 0 });
     }
 
-    // Builds an npm packument JSON with controlled deprecated values per version and an optional
-    // dist-tags.latest claim.
-    private static string NpmPackument(string name, Dictionary<string, string?> deprecatedByVersion, string? latest = null)
+    // Builds an npm packument JSON with controlled deprecated values per version, an optional
+    // dist-tags.latest claim, and an optional time[] map entry for the latest version's publish
+    // timestamp.
+    private static string NpmPackument(
+        string name, Dictionary<string, string?> deprecatedByVersion, string? latest = null, string? latestPublishedAtIso = null)
     {
         var versions = new Dictionary<string, object>();
         foreach (var (ver, dep) in deprecatedByVersion)
@@ -787,13 +843,19 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         {
             root["dist-tags"] = new Dictionary<string, object?> { ["latest"] = latest };
         }
+        if (latest is not null && latestPublishedAtIso is not null)
+        {
+            root["time"] = new Dictionary<string, object?> { [latest] = latestPublishedAtIso };
+        }
 
         return JsonSerializer.Serialize(root);
     }
 
-    // Builds a PyPI project JSON with controlled yanked state per release and an optional
-    // info.version (PyPI's latest release) claim.
-    private static string PyPiJson(string name, Dictionary<string, (bool Yanked, string? Reason)> releases, string? latest = null)
+    // Builds a PyPI project JSON with controlled yanked state per release, an optional
+    // info.version (PyPI's latest release) claim, and an optional top-level urls[] entry for the
+    // latest release's publish timestamp (mirrors the real PyPI JSON API shape).
+    private static string PyPiJson(
+        string name, Dictionary<string, (bool Yanked, string? Reason)> releases, string? latest = null, string? latestPublishedAtIso = null)
     {
         var releaseMap = new Dictionary<string, object[]>();
         foreach (var (ver, (yanked, reason)) in releases)
@@ -814,7 +876,11 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             info["version"] = latest;
         }
 
-        return JsonSerializer.Serialize(new { info, releases = releaseMap });
+        object[] urls = latestPublishedAtIso is not null
+            ? new object[] { new { filename = $"{name}-{latest}.tar.gz", upload_time_iso_8601 = latestPublishedAtIso } }
+            : Array.Empty<object>();
+
+        return JsonSerializer.Serialize(new { info, releases = releaseMap, urls });
     }
 
     private sealed class FixedResponseHandler : HttpMessageHandler

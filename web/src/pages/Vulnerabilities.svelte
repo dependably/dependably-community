@@ -1,8 +1,11 @@
 <script>
+  import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { api } from '../lib/api.js'
   import { currentOrg } from '../lib/store.js'
   import { formatDate } from '../lib/format.js'
+  import { copyToClipboard } from '../lib/clipboard.js'
+  import { remediationSkillIds, firstFixedVersion, skillInstallCommand, skillPrompt } from '../lib/remediation.js'
   import Pagination from '../lib/Pagination.svelte'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import DataTable from '../lib/DataTable.svelte'
@@ -91,6 +94,26 @@
       console.error(e)
       if (expandedKey === key) expandedDetail = { loading: false, error: true, detail: null }
     }
+  }
+
+  // Remediation skill descriptions (id → description from frontmatter), fetched once — the
+  // endpoint is anonymous and tenant-agnostic, so it's shared across every expanded row rather
+  // than refetched per advisory. A failed fetch (air-gapped instance still reachable, but a
+  // transient error) just falls back to showing the skill id with no subtitle.
+  let skillDescriptions = {}
+  onMount(async () => {
+    try {
+      const skills = await api.getRemediationSkills()
+      skillDescriptions = Object.fromEntries((skills ?? []).map(s => [s.id, s.description]))
+    } catch (e) { console.error(e) }
+  })
+
+  // Copy-state per (row key)::(skillId)::(install|prompt) — mirrors the Setup page's pattern.
+  let remediationCopyState = {}
+  async function copyRemediation(stateKey, text) {
+    const ok = await copyToClipboard(text)
+    remediationCopyState[stateKey] = ok ? 'copied' : 'failed'
+    setTimeout(() => { remediationCopyState[stateKey] = ''; remediationCopyState = remediationCopyState }, 2000)
   }
 
   const SEVERITY_RANK = { critical: 4, high: 3, medium: 2, low: 1 }
@@ -280,6 +303,57 @@
                 </div>
               {/if}
 
+              {@const skillIds = remediationSkillIds(v.remediation)}
+              {#if v.remediation?.entries?.length || skillIds.length}
+                {@const fixedVersion = firstFixedVersion(v.affected)}
+                <div class="detail-section col remediation-section">
+                  <span class="detail-label">{$t('vulnerabilities.detail.remediation.title')}</span>
+
+                  {#if v.remediation.entries.length}
+                    <div class="cwe-list">
+                      {#each v.remediation.entries as entry, ei (ei)}
+                        <span class="cwe-entry">
+                          <a class="chip mono" href={entry.cweUrl} target="_blank" rel="noreferrer" on:click|stopPropagation>{entry.cweId}</a>
+                          {#if entry.owaspId}
+                            <a class="chip owasp-chip" href={entry.owaspUrl} target="_blank" rel="noreferrer" on:click|stopPropagation>{entry.owaspId} {entry.owaspTitle}</a>
+                          {/if}
+                        </span>
+                      {/each}
+                    </div>
+                  {/if}
+
+                  {#if skillIds.length}
+                    <span class="detail-label agent-heading">{$t('vulnerabilities.detail.remediation.fixWithAgent')}</span>
+                  {/if}
+                  {#each skillIds as skillId (skillId)}
+                    {@const installKey = `${r.purl}::${r.osvId}::${skillId}::install`}
+                    {@const promptKey = `${r.purl}::${r.osvId}::${skillId}::prompt`}
+                    <div class="skill-block">
+                      <div class="skill-heading">
+                        <span class="skill-name mono">{skillId}</span>
+                        {#if skillDescriptions[skillId]}<span class="skill-desc text-muted">{skillDescriptions[skillId]}</span>{/if}
+                      </div>
+
+                      <span class="skill-copy-label text-muted">{$t('vulnerabilities.detail.remediation.installLabel')}</span>
+                      <div class="copy-block skill-copy-block">
+                        <span class="copy-block-text">{skillInstallCommand(skillId, window.location.origin)}</span>
+                        <button class="copy-btn" on:click|stopPropagation={() => copyRemediation(installKey, skillInstallCommand(skillId, window.location.origin))}>
+                          {remediationCopyState[installKey] === 'copied' ? $t('common.actions.copied') : remediationCopyState[installKey] === 'failed' ? $t('common.actions.copyFailed') : $t('common.actions.copy')}
+                        </button>
+                      </div>
+
+                      <span class="skill-copy-label text-muted">{$t('vulnerabilities.detail.remediation.promptLabel')}</span>
+                      <div class="copy-block skill-copy-block">
+                        <span class="copy-block-text">{skillPrompt(skillId, r.osvId, r.purl, r.version, fixedVersion)}</span>
+                        <button class="copy-btn" on:click|stopPropagation={() => copyRemediation(promptKey, skillPrompt(skillId, r.osvId, r.purl, r.version, fixedVersion))}>
+                          {remediationCopyState[promptKey] === 'copied' ? $t('common.actions.copied') : remediationCopyState[promptKey] === 'failed' ? $t('common.actions.copyFailed') : $t('common.actions.copy')}
+                        </button>
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+
               {#if v.affected?.length}
                 <div class="detail-section col">
                   <span class="detail-label">{$t('vulnerabilities.detail.affected')}</span>
@@ -445,4 +519,26 @@
     max-height: 320px;
     overflow: auto;
   }
+
+  .remediation-section { gap: 10px; }
+  .agent-heading { margin-top: 4px; }
+  .cwe-list { display: flex; flex-wrap: wrap; gap: 6px; }
+  .cwe-entry { display: inline-flex; gap: 4px; align-items: center; }
+  .owasp-chip { background: var(--accent-soft); color: var(--accent); }
+  .cwe-entry a.chip { text-decoration: none; }
+
+  .skill-block {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .skill-heading { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
+  .skill-name { font-size: 13px; font-weight: 600; }
+  .skill-desc { font-size: 12px; }
+  .skill-copy-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; margin-top: 2px; }
+  .skill-copy-block { font-size: 12px; }
 </style>

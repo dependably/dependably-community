@@ -12,7 +12,9 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Infrastructure/seed/spdx-licenses-3.28.0.json" />
+    <EmbeddedResource Include="Infrastructure/seed/spdx-license-texts-3.28.0.json" />
     <EmbeddedResource Include="Infrastructure/seed/spdx-copyleft.json" />
+    <EmbeddedResource Include="Infrastructure/seed/spdx-license-aliases.json" />
     <EmbeddedResource Include="Infrastructure/schema/Schema.sql" />
     <EmbeddedResource Include="Infrastructure/schema/Schema.pg.sql" />
   </ItemGroup>

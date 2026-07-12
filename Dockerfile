@@ -81,6 +81,7 @@ COPY src/Dependably/ src/Dependably/
 COPY src/Dependably.Core/ src/Dependably.Core/
 COPY src/Dependably.Management/ src/Dependably.Management/
 COPY src/Dependably.Edge/ src/Dependably.Edge/
+COPY skills/ skills/
 COPY --from=frontend /src/Dependably.Management/wwwroot/ src/Dependably.Management/wwwroot/
 RUN --mount=type=secret,id=registry_key \
     if [ -s /run/secrets/registry_key ]; then \
@@ -109,8 +110,35 @@ RUN node extract-notices.mjs sbom-backend.json sbom-frontend-prod.json > notices
 FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine@sha256:f276c0256ffca8fe816d48ba261962b54fea1b0e6f870b6a60b3b705c89e78ac AS final
 WORKDIR /app
 
-# hadolint ignore=DL3018
-RUN apk add --no-cache sqlite-libs icu-libs && \
+ARG REGISTRY_URL=
+# apk fetches route through the private registry's apk pull-through proxy when
+# REGISTRY_URL and the registry_key secret are present (CI builds): the dl-cdn
+# prefix in /etc/apk/repositories is rewritten to the private host for the
+# duration of apk add, then restored, all within this one RUN so neither the
+# credential nor the private host survives in the shipped layer. An empty
+# REGISTRY_URL or an absent secret leaves the default dl-cdn.alpinelinux.org
+# mirror in place, so the build succeeds unmodified for public/fork checkouts.
+# The proxy is a cache, not a trust root, so it fails open: if the proxied apk
+# add does not resolve (proxy down, apk ecosystem not yet served, index cold),
+# the original repositories are restored and the packages are fetched from
+# dl-cdn. This keeps the image build from hard-depending on the registry running
+# ahead of it — the apk proxy is itself shipped in this image.
+# hadolint ignore=DL3018,DL4006
+RUN --mount=type=secret,id=registry_key \
+    if [ -n "$REGISTRY_URL" ] && [ -s /run/secrets/registry_key ]; then \
+      cp /etc/apk/repositories /etc/apk/repositories.orig && \
+      SCHEME=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^(https?)://.*|\1|') && \
+      HOST=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^https?://||; s|/.*||') && \
+      sed -E -i "s|https://dl-cdn\.alpinelinux\.org/alpine|${SCHEME}://ci:$(cat /run/secrets/registry_key)@${HOST}/apk|" /etc/apk/repositories; \
+      if ! apk add --no-cache sqlite-libs icu-libs; then \
+        echo "apk proxy unreachable at ${REGISTRY_URL}; falling back to dl-cdn.alpinelinux.org" >&2; \
+        cp /etc/apk/repositories.orig /etc/apk/repositories && \
+        apk add --no-cache sqlite-libs icu-libs; \
+      fi; \
+      mv /etc/apk/repositories.orig /etc/apk/repositories; \
+    else \
+      apk add --no-cache sqlite-libs icu-libs; \
+    fi && \
     addgroup -S dependably && adduser -S dependably -G dependably && \
     mkdir -p /data && chown dependably:dependably /data
 

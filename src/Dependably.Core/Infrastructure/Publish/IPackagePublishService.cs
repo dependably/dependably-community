@@ -132,6 +132,17 @@ public sealed record PublishRequest
     /// Null for non-npm ecosystems.
     /// </summary>
     public string? DeclaredIntegritySri { get; init; }
+
+    /// <summary>
+    /// SPDX license entries already extracted by the caller from the artifact (wheel METADATA,
+    /// npm tarball/packument, .nuspec, Cargo publish envelope). Each entry may be a whole
+    /// compound expression (e.g. "MIT OR Apache-2.0") — the service evaluates it against the
+    /// org's license policy when <c>org_settings.license_enforcement_mode == "block"</c>, before
+    /// the version row is persisted, so a blocked publish leaves no version row behind. Null or
+    /// empty skips the check (mirrors the serve-path arm's fail-open behavior for ecosystems
+    /// that capture no license signal). Ignored entirely under 'warn'/'off'.
+    /// </summary>
+    public IReadOnlyList<string>? Licenses { get; init; }
 }
 
 /// <summary>Outcome of a <see cref="IPackagePublishService.StoreAndRecordAsync"/> call.</summary>

@@ -15,6 +15,9 @@
   let scanningId = null, scanError = ''
   let vulnsByPurl = new SvelteMap()
   let versionTable
+  // Blocklisted SPDX identifiers (uppercased) for the license risk-pillar summary below.
+  // Fetched once per page load from the existing license-policy endpoint — no new API surface.
+  let licenseBlocklist = new Set()
 
   $: if (params.ecosystem && params.name) load()
 
@@ -38,12 +41,41 @@
         })
         vulnsByPurl = buildVulnMap(vulnData.items || [])
       } catch { /* supplemental, ignore */ }
+      // License blocklist for the license risk-pillar summary (supplemental — ignore errors).
+      try {
+        const policy = await api.getLicensePolicy()
+        licenseBlocklist = new Set((policy.blocklist || []).map(e => (e.licenseSpdx ?? '').toUpperCase()))
+      } catch { licenseBlocklist = new Set() }
     } catch (e) {
       error = e.message
     } finally {
       loading = false
     }
   }
+
+  // ── Three-pillar risk summary (Security / License / Operational) ─────────────
+
+  const SEVERITY_RANK = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, UNKNOWN: 4 }
+
+  // Worst (lowest-rank) severity across every advisory linked to any version in this package.
+  // Null when no version carries an advisory.
+  $: worstSeverity = [...vulnsByPurl.values()].flat().reduce((worst, v) => {
+    const sev = v.severity || 'UNKNOWN'
+    return worst === null || (SEVERITY_RANK[sev] ?? 5) < (SEVERITY_RANK[worst] ?? 5) ? sev : worst
+  }, null)
+
+  // Versions carrying either a blocklisted SPDX license or no extracted license at all —
+  // mirrors the dashboard license-risk tile's definition (see PackageAnalyticsRepository).
+  $: licenseRiskCount = versions.filter(v => {
+    const licenses = v.licenses ?? []
+    return licenses.length === 0 || licenses.some(l => licenseBlocklist.has((l ?? '').toUpperCase()))
+  }).length
+
+  // Worst (highest) known versions-behind count across every version. Null when every version's
+  // count is unknown — never coerced to 0.
+  $: operationalWorst = versions.reduce(
+    (max, v) => v.versionsBehind !== null && v.versionsBehind !== undefined && (max === null || v.versionsBehind > max) ? v.versionsBehind : max,
+    null)
 
   function buildVulnMap(items) {
     const map = new SvelteMap()
@@ -158,6 +190,40 @@
 
   <ErrorBanner message={error} />
   {#if scanError}<div class="error-msg">{scanError}</div>{/if}
+
+  <!-- Three-pillar risk summary: Security / License / Operational, side by side. Signal-display
+       only — no composite/weighted score across the pillars. -->
+  {#if pkg && !loading && versions.length > 0}
+    <div class="risk-pillars">
+      <div class="pillar">
+        <span class="pillar-label">{$t('versionDetail.pillars.security')}</span>
+        {#if worstSeverity}
+          <span class="pillar-value sev {worstSeverity === 'UNKNOWN' ? 'sev-unknown' : 'sev-' + worstSeverity.toLowerCase()}">
+            {worstSeverity === 'UNKNOWN' ? $t('dashboard.unscored') : worstSeverity}
+          </span>
+        {:else}
+          <span class="pillar-value pillar-clean">{$t('versionDetail.pillars.noAdvisories')}</span>
+        {/if}
+      </div>
+      <div class="pillar">
+        <span class="pillar-label">{$t('versionDetail.pillars.license')}</span>
+        <span class="pillar-value" class:pillar-warn={licenseRiskCount > 0}>
+          {$t('versionDetail.pillars.licenseCount', { values: { count: licenseRiskCount } })}
+        </span>
+      </div>
+      <div class="pillar">
+        <span class="pillar-label">{$t('versionDetail.pillars.operational')}</span>
+        {#if operationalWorst !== null}
+          <span class="pillar-value" class:pillar-warn={operationalWorst > 0}>
+            {$t('versionDetail.behindCell.count', { values: { count: operationalWorst } })}
+          </span>
+        {:else}
+          <span class="pillar-value text-muted">{$t('versionDetail.behindCell.unscored')}</span>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   {#if !loading && versions.length === 0}
     <p class="text-muted">{$t('versionDetail.empty')}</p>
   {:else}
@@ -165,6 +231,7 @@
       bind:this={versionTable}
       {pkg}
       {versions}
+      {licenseBlocklist}
       {vulnsByPurl}
       {isAdmin}
       {scanningId}
@@ -183,4 +250,26 @@
 <style>
   /* Claim state badge needs a left margin to separate it from the package name in the H1. */
   .badge.has-icon { margin-left: 8px; }
+
+  /* Three-pillar risk summary: compact, side-by-side, signal-display only. */
+  .risk-pillars {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 14px;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg2);
+  }
+  .pillar { display: flex; flex-direction: column; gap: 2px; }
+  .pillar-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    color: var(--text2);
+  }
+  .pillar-value { font-size: 13px; font-weight: 600; }
+  .pillar-clean { color: var(--success); }
+  .pillar-warn { color: var(--badge-warning-text); }
 </style>

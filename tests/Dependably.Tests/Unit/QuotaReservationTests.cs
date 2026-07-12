@@ -64,11 +64,13 @@ public sealed class QuotaReservationTests : IAsyncLifetime
             NullLogger<VulnerabilityScanService>.Instance,
             TimeProvider.System,
             new OrgRepository(_db),
-            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System)));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
-        return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
+        var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
+        return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), new OrgRepository(_db), storage, gate,
             new Dependably.Infrastructure.Edge.EdgePublishGuard(TestEdgeMode.Disabled()),
-            auditor, scanner, NullLogger<PackagePublishService>.Instance);
+            auditor, scanner, licenses, NullLogger<PackagePublishService>.Instance);
     }
 
     private static PublishRequest Sample(string name, string version = "1.0.0", long size = 100) => new()
@@ -283,11 +285,13 @@ public sealed class QuotaReservationTests : IAsyncLifetime
             NullLogger<VulnerabilityScanService>.Instance,
             TimeProvider.System,
             new OrgRepository(_db),
-            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System)));
         var auditor = new Dependably.Infrastructure.Publish.PublishAuditor(audit, emitter);
-        return new PackagePublishService(packages, new OrgRepository(_db), storage, gate,
+        var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
+        return new PackagePublishService(packages, new PackageVersionFilesRepository(_db), new OrgRepository(_db), storage, gate,
             new Dependably.Infrastructure.Edge.EdgePublishGuard(TestEdgeMode.Disabled()),
-            auditor, scanner, NullLogger<PackagePublishService>.Instance);
+            auditor, scanner, licenses, NullLogger<PackagePublishService>.Instance);
     }
 
     /// <summary>Blob store that throws on PutAsync to simulate a blob-write failure.</summary>

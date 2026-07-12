@@ -216,7 +216,7 @@ internal static class NpmPublishBodyParser
     // The token-type switch nested inside the read/refill loop is the streaming reader's core
     // state machine; splitting it out would hand the switch a half-dozen loop-local variables
     // by ref without reducing the state it must track.
-#pragma warning disable S134 // streaming Utf8JsonReader state machine, kept together for auditability
+#pragma warning disable S134, S3776 // streaming Utf8JsonReader state machine, kept together for auditability
     private static async Task<long> LocateAttachmentDataTokenAsync(FileStream json, CancellationToken ct)
     {
         json.Seek(0, SeekOrigin.Begin);
@@ -294,7 +294,7 @@ internal static class NpmPublishBodyParser
             ArrayPool<byte>.Shared.Return(buffer);
         }
     }
-#pragma warning restore S134
+#pragma warning restore S134, S3776
 
     private readonly record struct DataValueSpan(long ColonEnd, long ContentStart, long ContentEnd, long ValueEnd);
 

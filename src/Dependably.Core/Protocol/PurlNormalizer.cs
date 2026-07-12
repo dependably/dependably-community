@@ -121,6 +121,17 @@ public static partial class PurlNormalizer
     public static string Golang(string module, string version)
         => $"pkg:golang/{module}@{version}";
 
+    /// <summary>
+    /// Canonical Alpine apk PURL: <c>pkg:apk/alpine/{name}@{pkgver}-r{pkgrel}?arch={arch}</c>.
+    /// The <c>alpine</c> namespace segment matches the purl-spec convention for apk packages;
+    /// <paramref name="name"/>/<paramref name="pkgver"/>/<paramref name="pkgrel"/> are passed
+    /// through as parsed from the filename (Alpine package names and versions are
+    /// case-significant), and <paramref name="arch"/> is carried as a qualifier — a repository's
+    /// package filenames are stable across architectures, so arch is what disambiguates.
+    /// </summary>
+    public static string Apk(string name, string pkgver, string pkgrel, string arch)
+        => $"pkg:apk/alpine/{name}@{pkgver}-r{pkgrel}?arch={arch}";
+
     public static string NormalizeNuGetVersionString(string version)
     {
         return NuGetVersion.TryParse(version, out var parsed)

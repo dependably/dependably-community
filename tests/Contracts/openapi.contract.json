@@ -78,6 +78,64 @@
         }
       }
     },
+    "/api/v1/alert-settings": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "put": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/alert-settings/slack/test": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/alerts": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/alerts/summary": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/alerts/{id}/dismiss": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/allowlist": {
       "operations": {
         "get": {
@@ -514,6 +572,16 @@
         }
       }
     },
+    "/api/v1/lookup": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/mfa/disable": {
       "operations": {
         "post": {
@@ -708,6 +776,28 @@
         }
       }
     },
+    "/api/v1/remediation/skills": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/remediation/skills/{skillId}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "skillId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/reserved-namespaces": {
       "operations": {
         "get": {
@@ -859,6 +949,18 @@
       }
     },
     "/api/v1/spdx-licenses/{identifier}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "identifier"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/spdx-licenses/{identifier}/text": {
       "operations": {
         "get": {
           "requiredParams": [
@@ -1480,6 +1582,26 @@
           ],
           "responseCodes": [
             "204"
+          ]
+        }
+      }
+    },
+    "/apk/{path}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "head": {
+          "requiredParams": [
+            "path"
+          ],
+          "responseCodes": [
+            "200"
           ]
         }
       }

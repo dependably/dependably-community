@@ -16,6 +16,7 @@ namespace Dependably.Api.PyPiProtocol;
 public sealed class PyPiDownloadHandler(
     OrgRepository orgs,
     PackageRepository packages,
+    PackageVersionFilesRepository versionFiles,
     CacheArtifactRepository cacheArtifacts,
     TenantArtifactAccessRepository tenantAccess,
     TokenRepository tokens,
@@ -52,19 +53,23 @@ public sealed class PyPiDownloadHandler(
         var settings = await orgs.GetSettingsAsync(orgId, ct);
         var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
 
-        // Uploaded-only lookup: proxy versions are served via the global plane below.
-        var pkgVersions = await packages.FindVersionByBlobKeySuffixAsync(orgId, "pypi", file, ct: ct);
+        // Uploaded-only lookup: proxy versions are served via the global plane below. The
+        // per-file table resolves any distribution file of the version (wheel or sdist),
+        // not just the version row's primary artifact.
+        var fileHit = await versionFiles.FindFileWithVersionAsync(orgId, "pypi", file, ct);
 
-        return pkgVersions is not null
-            ? await HeadUploadedPackageAsync(httpContext, orgId, pkgVersions.Value.Version, token, settings, ct)
+        return fileHit is not null
+            ? await HeadUploadedPackageAsync(httpContext, orgId, fileHit.Value.Version, fileHit.Value.File, token, settings, ct)
             : await HeadProxyCachedPackageAsync(
                 httpContext, orgId, parsedPurlName!, parsedVersion!, file, token, settings!, ct);
     }
 
     // Returns HEAD headers for an uploaded-origin PyPI artifact. When AnonymousPull is
     // disabled, a token is required; when a token is present, ReadMetadata is required.
+    // Blob facts (key, size, checksum) come from the requested FILE record; the gate facts
+    // (block state, purl) come from its owning version.
     private async Task<IActionResult> HeadUploadedPackageAsync(
-        HttpContext httpContext, string orgId, PackageVersion v,
+        HttpContext httpContext, string orgId, PackageVersion v, PackageVersionFile fileRec,
         TokenRecord? token, OrgSettings? settings, CancellationToken ct)
     {
         var authErr = RequireUploadedAuth(httpContext, token, settings);
@@ -81,7 +86,7 @@ public sealed class PyPiDownloadHandler(
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
 
-        string blobKeyUploaded = BlobKeys.StoreKey(v.BlobKey);
+        string blobKeyUploaded = BlobKeys.StoreKey(fileRec.BlobKey);
         if (!await blobs.ExistsAsync(blobKeyUploaded, ct))
         {
             return new NotFoundResult();
@@ -90,10 +95,10 @@ public sealed class PyPiDownloadHandler(
         httpContext.Response.Headers["X-Cache"] = "HIT";
         httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(v.Purl);
         httpContext.Response.ContentType = "application/octet-stream";
-        httpContext.Response.Headers["Content-Length"] = v.SizeBytes.ToString();
-        if (v.ChecksumSha256 is not null)
+        httpContext.Response.Headers["Content-Length"] = fileRec.SizeBytes.ToString();
+        if (fileRec.ChecksumSha256 is not null)
         {
-            httpContext.Response.Headers.ETag = $"\"sha256:{v.ChecksumSha256}\"";
+            httpContext.Response.Headers.ETag = $"\"sha256:{fileRec.ChecksumSha256}\"";
             httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
         return new OkResult();
@@ -179,13 +184,15 @@ public sealed class PyPiDownloadHandler(
         var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
         string? sourceIp = httpContext.GetNormalizedRemoteIp();
 
-        // Uploaded-only lookup first: proxy rows are no longer in package_versions.
-        var pkgVersions = await packages.FindVersionByBlobKeySuffixAsync(orgId, "pypi", file, ct: ct);
+        // Uploaded-only lookup first: proxy rows are no longer in package_versions. The
+        // per-file table resolves any distribution file of a version (wheel or sdist), not
+        // just the version row's primary artifact.
+        var fileHit = await versionFiles.FindFileWithVersionAsync(orgId, "pypi", file, ct);
 
-        if (pkgVersions is not null)
+        if (fileHit is not null)
         {
             var uploadedResult = await TryServeUploadedPackageAsync(
-                httpContext, orgId, pkgVersions.Value, file, token, settings, sourceIp, ct);
+                httpContext, orgId, fileHit.Value, file, token, settings, sourceIp, ct);
             if (uploadedResult is not null)
             {
                 return uploadedResult;
@@ -203,17 +210,20 @@ public sealed class PyPiDownloadHandler(
         }
 
         return await FetchFromUpstreamAsync(
-            httpContext, orgId, file, parsed, pkgVersions, token, settings!, sourceIp, ct);
+            httpContext, orgId, file, parsed,
+            fileHit is { } fh ? (fh.Package, fh.Version) : null,
+            token, settings!, sourceIp, ct);
     }
 
     // Serves an uploaded-origin PyPI artifact if auth and block gates pass. Returns an
-    // IActionResult (including 401/403 gate denials or a file stream) when the uploaded row is
-    // found and the blob is in the store, or null when the blob is missing (falls through to upstream).
-    // Cohesive uploaded-serve helper; pkgVer tuple + sourceIp + ct each carry distinct roles.
+    // IActionResult (including 401/403 gate denials or a file stream) when the uploaded file
+    // record is found and the blob is in the store, or null when the blob is missing (falls
+    // through to upstream).
+    // Cohesive uploaded-serve helper; hit tuple + sourceIp + ct each carry distinct roles.
 #pragma warning disable S107
     private async Task<IActionResult?> TryServeUploadedPackageAsync(
         HttpContext httpContext, string orgId,
-        (Package Package, PackageVersion Version) pkgVer, string file,
+        (Package Package, PackageVersion Version, PackageVersionFile File) hit, string file,
         TokenRecord? token, OrgSettings? settings, string? sourceIp, CancellationToken ct)
 #pragma warning restore S107
     {
@@ -223,12 +233,12 @@ public sealed class PyPiDownloadHandler(
             return authErr;
         }
 
-        var v = pkgVer.Version;
+        var v = hit.Version;
         return await blockGate.EvaluateAsync(
                 BlockGateRequest.For(orgId, "pypi", v, token, settings, sourceIp), ct)
             == BlockDecision.Blocked
             ? new StatusCodeResult(StatusCodes.Status403Forbidden)
-            : await TryServeCachedBlobAsync(httpContext, pkgVer, file, orgId, token, sourceIp, ct);
+            : await TryServeCachedBlobAsync(httpContext, hit, file, orgId, token, sourceIp, ct);
     }
 
     // Checks the global-plane proxy cache for a PyPI artifact. Returns an IActionResult
@@ -322,13 +332,15 @@ public sealed class PyPiDownloadHandler(
 
     private async Task<IActionResult?> TryServeCachedBlobAsync(
         HttpContext httpContext,
-        (Package Package, PackageVersion Version) pkgVer, string file, string orgId,
+        (Package Package, PackageVersion Version, PackageVersionFile File) hit, string file, string orgId,
         TokenRecord? token, string? sourceIp, CancellationToken ct)
     {
+        // Blob facts come from the requested FILE record (wheel and sdist of one release are
+        // distinct blobs with distinct checksums); version facts cover purl + counters.
         // 304 short-circuit: check the client's cached copy before opening the blob stream.
-        if (pkgVer.Version.ChecksumSha256 is not null)
+        if (hit.File.ChecksumSha256 is not null)
         {
-            string uploadedEtag = $"\"sha256:{pkgVer.Version.ChecksumSha256}\"";
+            string uploadedEtag = $"\"sha256:{hit.File.ChecksumSha256}\"";
             if (ConditionalRequestHelper.IfNoneMatchHits(httpContext.Request.Headers, uploadedEtag))
             {
                 httpContext.Response.Headers.ETag = uploadedEtag;
@@ -337,22 +349,22 @@ public sealed class PyPiDownloadHandler(
             }
         }
 
-        var blob = await blobs.GetAsync(BlobKeys.StoreKey(pkgVer.Version.BlobKey), ct);
+        var blob = await blobs.GetAsync(BlobKeys.StoreKey(hit.File.BlobKey), ct);
         if (blob is null)
         {
             return null;
         }
 
         httpContext.Response.Headers["X-Cache"] = "HIT";
-        httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVer.Version.Purl);
-        if (pkgVer.Version.ChecksumSha256 is not null)
+        httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(hit.Version.Purl);
+        if (hit.File.ChecksumSha256 is not null)
         {
-            httpContext.Response.Headers.ETag = $"\"sha256:{pkgVer.Version.ChecksumSha256}\"";
+            httpContext.Response.Headers.ETag = $"\"sha256:{hit.File.ChecksumSha256}\"";
             httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
         }
-        await audit.LogActivityAsync(orgId, "pypi", pkgVer.Version.Purl, "download", token?.UserId,
+        await audit.LogActivityAsync(orgId, "pypi", hit.Version.Purl, "download", token?.UserId,
             actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
-        await packages.IncrementDownloadCountAsync(pkgVer.Version.Id, ct);
+        await packages.IncrementDownloadCountAsync(hit.Version.Id, ct);
         return new FileStreamResult(blob, "application/octet-stream") { FileDownloadName = file };
     }
 

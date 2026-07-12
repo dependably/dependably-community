@@ -4,9 +4,9 @@
     "net10.0": {
       "coverlet.collector": {
         "type": "Direct",
-        "requested": "[8.0.1, )",
-        "resolved": "8.0.1",
-        "contentHash": "heVQl5tKYnnIDYlR1QMVGueYH6iriZTcZB6AjDczQNwZzxkjDIt9C84Pt4cCiZYrbo7jkZOYGWbs6Lo9wAtVLg=="
+        "requested": "[10.0.1, )",
+        "resolved": "10.0.1",
+        "contentHash": "27jXSV/0DbVqF5jDrAxuQFZ9oaz6gmG03p8ttxAFk+X0M4woFYj7MoWDLCna5EGLb0CE6OE7X6ZH3Wt5smTtaA=="
       },
       "JunitXml.TestLogger": {
         "type": "Direct",
@@ -58,9 +58,9 @@
       },
       "Scriban.Signed": {
         "type": "Direct",
-        "requested": "[7.2.0, )",
-        "resolved": "7.2.0",
-        "contentHash": "AGI7QURe/UR9lsfM53yylQngbe77PngBnpzZQ+QV3wcevP4cydyCT+YAMR4rntWEle7v++xUjmfmtXuAvp6Rtw=="
+        "requested": "[7.2.5, )",
+        "resolved": "7.2.5",
+        "contentHash": "Fu1AjcAyrZIAW9LIhxVgVyo5EMVdwLhXagKKI2A1UZoI0Wvz2CiRT+VXp1tuiMq2JhlkjVyebj/JQcF4koZacg=="
       },
       "WireMock.Net": {
         "type": "Direct",
@@ -1910,8 +1910,8 @@
       "dependably": {
         "type": "Project",
         "dependencies": {
-          "Dependably.Core": "[0.2.1, )",
-          "Dependably.Management": "[0.2.1, )",
+          "Dependably.Core": "[0.2.2, )",
+          "Dependably.Management": "[0.2.2, )",
           "Serilog.AspNetCore": "[10.0.0, )"
         }
       },
@@ -1944,7 +1944,7 @@
       "dependably.edge": {
         "type": "Project",
         "dependencies": {
-          "Dependably.Core": "[0.2.1, )",
+          "Dependably.Core": "[0.2.2, )",
           "Serilog.AspNetCore": "[10.0.0, )"
         }
       },
@@ -1953,7 +1953,7 @@
         "dependencies": {
           "BCrypt.Net-Next": "[4.1.0, )",
           "Dapper": "[2.1.72, )",
-          "Dependably.Core": "[0.2.1, )",
+          "Dependably.Core": "[0.2.2, )",
           "IPAddressRange": "[6.3.0, )",
           "ITfoxtec.Identity.Saml2.MvcCore": "[4.17.0, )",
           "Microsoft.AspNetCore.Authentication.JwtBearer": "[10.0.8, )",

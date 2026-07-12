@@ -123,6 +123,47 @@ public sealed class LocalOsvSourceTests : IDisposable
         Assert.Empty(hits);
     }
 
+    // ── TryQueryAsync (reachability signal for PackageLookupService) ───────────
+
+    [Fact]
+    public async Task TryQueryAsync_DirectoryPresent_GenuinelyEmpty_ReportsReached()
+    {
+        // No advisory files at all, but the configured directory exists and was consulted —
+        // this is the "genuinely clean" case, distinct from a misconfigured/unavailable source.
+        var src = Build();
+
+        var result = await src.TryQueryAsync("pkg:npm/lodash@1.0.0");
+
+        Assert.True(result.Reached);
+        Assert.Empty(result.Advisories);
+    }
+
+    [Fact]
+    public async Task TryQueryAsync_DirectoryPresent_WithHit_ReportsReached()
+    {
+        WriteAdvisory("GHSA-RCH", "npm", "lodash", ["1.0.0"]);
+        var src = Build();
+
+        var result = await src.TryQueryAsync("pkg:npm/lodash@1.0.0");
+
+        Assert.True(result.Reached);
+        Assert.Single(result.Advisories);
+    }
+
+    [Fact]
+    public async Task TryQueryAsync_MissingDirectory_ReportsUnreached()
+    {
+        // OSV_LOCAL_PATH missing/misconfigured — the only case that must NOT be read as "OSV
+        // consulted, nothing found". Mirrors OsvClient's outage-detection contract offline.
+        Directory.Delete(_dir, recursive: true);
+        var src = new LocalOsvSource(_dir, NullLogger<LocalOsvSource>.Instance);
+
+        var result = await src.TryQueryAsync("pkg:npm/lodash@1.0.0");
+
+        Assert.False(result.Reached);
+        Assert.Empty(result.Advisories);
+    }
+
     [Fact]
     public async Task Query_MalformedJson_SkippedNotThrown()
     {
@@ -144,5 +185,68 @@ public sealed class LocalOsvSourceTests : IDisposable
         Assert.Empty(await src.QueryAsync("not-a-purl"));
         Assert.Empty(await src.QueryAsync("pkg:npm/lodash"));      // no version
         Assert.Empty(await src.QueryAsync("pkg:npmlodash@1.0.0")); // no slash
+    }
+
+    // ── apk / Alpine ─────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Query_Apk_ReleaseQualifiedAdvisory_MatchesBareAlpineQuery()
+    {
+        // OSV publishes one release-qualified ecosystem per Alpine release; apk purls carry no
+        // release qualifier, so a v3.18-qualified advisory must still be found.
+        WriteAdvisory("CVE-Alpine-1", "Alpine:v3.18", "curl", ["8.9.0-r0"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:apk/alpine/curl@8.9.0-r0?arch=x86_64");
+        Assert.Single(hits);
+        Assert.Equal("CVE-Alpine-1", hits[0].Id);
+    }
+
+    [Fact]
+    public async Task Query_Apk_AcrossMultipleReleases_AllAreFound()
+    {
+        // Two different releases each carry a distinct advisory for the same package name —
+        // both must be reachable via the single bare-"Alpine" query (the dual-bucket index).
+        WriteAdvisory("CVE-Alpine-v318", "Alpine:v3.18", "openssl", ["3.1.0-r0"]);
+        WriteAdvisory("CVE-Alpine-v319", "Alpine:v3.19", "openssl", ["3.1.0-r0"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:apk/alpine/openssl@3.1.0-r0?arch=aarch64");
+        var ids = hits.Select(h => h.Id).ToHashSet();
+        Assert.Equal(2, hits.Count);
+        Assert.Contains("CVE-Alpine-v318", ids);
+        Assert.Contains("CVE-Alpine-v319", ids);
+    }
+
+    [Fact]
+    public async Task Query_Apk_VersionMiss_ReturnsEmpty()
+    {
+        WriteAdvisory("CVE-Alpine-2", "Alpine:v3.18", "curl", ["8.8.0-r0"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:apk/alpine/curl@8.9.0-r0?arch=x86_64");
+        Assert.Empty(hits);
+    }
+
+    [Fact]
+    public async Task Query_Apk_NameMiss_ReturnsEmpty()
+    {
+        WriteAdvisory("CVE-Alpine-3", "Alpine:v3.18", "curl", ["8.9.0-r0"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:apk/alpine/wget@8.9.0-r0?arch=x86_64");
+        Assert.Empty(hits);
+    }
+
+    [Fact]
+    public async Task Query_Apk_DoesNotMatchUnrelatedEcosystem()
+    {
+        // A non-Alpine "curl" advisory (e.g. an npm namesake) must not leak into apk results —
+        // MatchesEcosystemAndName's release-qualified prefix branch only fires for "Alpine".
+        WriteAdvisory("GHSA-NotAlpine", "npm", "curl", ["8.9.0-r0"]);
+        var src = Build();
+
+        var hits = await src.QueryAsync("pkg:apk/alpine/curl@8.9.0-r0?arch=x86_64");
+        Assert.Empty(hits);
     }
 }

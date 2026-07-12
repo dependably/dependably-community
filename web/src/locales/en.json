@@ -17,6 +17,7 @@
     "vulnerabilities": "Vulnerabilities",
     "quarantine": "Quarantine",
     "licensePolicy": "Licenses",
+    "lookup": "Lookup",
     "setup": "Setup",
     "admin": "Admin",
     "adminSection": "Admin",
@@ -35,6 +36,14 @@
     "empty": "No results",
     "groups": {
       "packages": "Packages"
+    }
+  },
+  "alerts": {
+    "panel": {
+      "title": "Alerts",
+      "loading": "Loading alerts…",
+      "empty": "No active alerts.",
+      "close": "Close"
     }
   },
   "common": {
@@ -153,6 +162,10 @@
       "label": "Malicious",
       "help": "This package has a version flagged as known-malicious (OSV MAL- advisory)."
     },
+    "abandoned": {
+      "label": "Abandoned",
+      "help": "No new release published upstream in over a year."
+    },
     "actionsMenu": {
       "open": "Package actions",
       "allowSameVersionPush": "Allow same-version push",
@@ -234,6 +247,7 @@
     "columns": {
       "version": "Version",
       "latest": "Latest",
+      "behind": "Behind",
       "tag": "Tag",
       "checksum": "Checksum",
       "size": "Size",
@@ -265,7 +279,10 @@
       "provenanceFailed": "signature failed",
       "provenanceFailedHelp": "This version carried a signature that did not verify against the pinned trust anchors.",
       "provenanceUnsigned": "unsigned",
-      "provenanceUnsignedHelp": "The upstream registry published no signature for this version."
+      "provenanceUnsignedHelp": "The upstream registry published no signature for this version.",
+      "licenseBlockedHelp": "This license is on the org's license blocklist.",
+      "licenseUnknown": "unknown",
+      "licenseUnknownHelp": "No license was extracted for this version."
     },
     "status": {
       "blocked": "Blocked",
@@ -281,10 +298,26 @@
       "stale": "Behind upstream — latest version {version} is not cached here.",
       "current": "Up to date with upstream — latest version {version} is cached."
     },
+    "abandonedBanner": {
+      "text": "Abandoned — no new release published upstream in over a year."
+    },
     "latestCell": {
       "isLatest": "Latest upstream version",
       "behind": "Behind upstream latest",
       "unknown": "No upstream version to compare"
+    },
+    "behindCell": {
+      "count": "{count, plural, =0 {up to date} one {# behind} other {# behind}}",
+      "unscored": "UNSCORED",
+      "help": "Count of upstream STABLE versions newer than this one.",
+      "unscoredHelp": "Unknown — no upstream version data to compare (hosted-only, air-gapped, or not yet refreshed)."
+    },
+    "pillars": {
+      "security": "Security",
+      "license": "License",
+      "operational": "Operational",
+      "noAdvisories": "No advisories",
+      "licenseCount": "{count, plural, =0 {no risk} one {# version} other {# versions}}"
     },
     "vulnNever": "Never",
     "fileCount": "{count} files",
@@ -514,13 +547,16 @@
       "licenses": "Licenses",
       "serviceTokens": "Service tokens",
       "webhooks": "Webhooks",
+      "alerts": "Alerts",
       "banners": "Banners",
       "instance": "Instance settings",
       "metrics": "Metrics access"
     },
     "storage": {
       "uploadTitle": "Upload limits",
-      "retentionTitle": "Retention"
+      "uploadHint": "Caps the size of a single upload, in MB. Per-ecosystem limits override the limit below; the instance owner's ceiling bounds all of them.",
+      "retentionTitle": "Retention",
+      "retentionHint": "Controls how long old versions, cached proxy files, and activity history are kept before automatic cleanup. Leave a field blank for unlimited."
     },
     "webhooks": {
       "section": "Webhook subscriptions",
@@ -563,6 +599,22 @@
         "package.yank": "Yank",
         "package.vulnerability": "Vulnerability"
       }
+    },
+    "alerts": {
+      "section": "Alert center",
+      "hint": "Alerts fire on a new quarantine review item and on a vulnerability meeting the severity floor below. Slack delivery is optional and requires DEPENDABLY_MASTER_KEY to store the webhook URL.",
+      "quarantineEnabled": "Alert on new quarantine items",
+      "vulnEnabled": "Alert on vulnerabilities",
+      "minSeverity": "Minimum vulnerability severity",
+      "minSeverityHint": "Only advisories at or above this severity raise an alert. Unscored advisories never alert.",
+      "slackEnabled": "Send alerts to Slack",
+      "slackUrl": "Slack webhook URL",
+      "slackUrlHint": "Incoming webhook URL from Slack. Requires DEPENDABLY_MASTER_KEY to store.",
+      "slackUrlRotateHint": "Enter a new value to rotate the webhook URL. Leave blank to keep the current one.",
+      "slackLastStatus": "Last Slack delivery: {status}",
+      "testSend": "Send test message",
+      "testOk": "Test message sent.",
+      "testFail": "Test message failed."
     },
     "banners": {
       "severity": "Severity",
@@ -758,9 +810,11 @@
     "uploadLimits": {
       "instanceCeiling": "Instance ceiling: {mb} MB",
       "allEcosystems": "All ecosystems",
-      "exceedsCeiling": "Cannot exceed instance ceiling of {bytes} bytes.",
-      "bytesLabel": "{label} (bytes)",
-      "inheritPlaceholder": "inherit from instance"
+      "exceedsCeiling": "Cannot exceed the instance ceiling of {mb} MB.",
+      "globalBlankHint": "Blank uses the instance limit of {mb} MB.",
+      "globalBlankNoLimitHint": "Blank allows uploads of any size — no instance limit is configured.",
+      "perEcoHint": "Overrides the limit above for this ecosystem only. Blank uses the limit above, or the instance limit if that's blank too.",
+      "perEcoBlankPlaceholder": "Blank — instance limit applies"
     },
     "retention": {
       "keepVersions": "Keep versions",
@@ -917,12 +971,12 @@
         "includeDeprecated": "Include deprecated SPDX identifiers",
         "approve": "Approve",
         "block": "Block",
-        "compound": "compound",
         "deprecated": "deprecated",
-        "compoundTooltip": "Compound expressions (e.g. \"MIT OR Apache-2.0\") cannot be added to the policy directly — they would not match a future lookup for a single license. Split them upstream.",
         "columns": {
+          "name": "Name",
           "packages": "Packages",
           "firstSeen": "First seen",
+          "classification": "Classification",
           "flags": "Flags"
         }
       },
@@ -1118,6 +1172,9 @@
     "totalDownloads": "Downloads (30d)",
     "blockedPulls": "Blocked pulls (30d)",
     "blockedMalicious": "Malicious blocked (30d)",
+    "operationalRisk": "Operational risk",
+    "operationalRiskSub": "≥ {threshold} versions behind",
+    "licenseRisk": "License risk",
     "quarantinePending": "Quarantine pending",
     "hostedProxied": "{hosted} hosted · {proxied} proxied",
     "quotaUsage": "of {total} quota",
@@ -1221,9 +1278,72 @@
       "details": "Details",
       "databaseSpecific": "Database-specific",
       "loading": "Loading advisory detail…",
-      "error": "Couldn't load advisory detail."
+      "error": "Couldn't load advisory detail.",
+      "remediation": {
+        "title": "Remediation",
+        "fixWithAgent": "Fix with your AI agent",
+        "installLabel": "Install skill",
+        "promptLabel": "Prompt"
+      }
     },
     "empty": "No vulnerable packages found"
+  },
+  "lookup": {
+    "title": "Check a package",
+    "intro": "Check a candidate package for malware, known CVEs, and license policy before you add it. Nothing is downloaded, cached, or installed.",
+    "form": {
+      "ecosystem": "Ecosystem",
+      "name": "Package name",
+      "namePlaceholder": "e.g. left-pad",
+      "version": "Version",
+      "versionPlaceholder": "Leave blank for latest",
+      "submit": "Check package",
+      "mavenHint": "groupId:artifactId",
+      "versionRequiredHint": "A version is required for this ecosystem."
+    },
+    "verdict": {
+      "allowed": "Allowed",
+      "warn": "Warn",
+      "blocked": "Blocked",
+      "evaluated": "Evaluated {purl}",
+      "versionInferred": "Latest stable — no version was specified"
+    },
+    "malware": {
+      "title": "Malware",
+      "detected": "Known malicious package",
+      "clean": "No known malicious advisories"
+    },
+    "vulns": {
+      "title": "Vulnerabilities",
+      "unavailable": "Vulnerability data could not be checked for this lookup.",
+      "clean": "No known vulnerabilities",
+      "scored": "Scored",
+      "unscored": "UNSCORED / NO CVSS",
+      "unscoredHint": "Undisclosed severity — not the same as no risk.",
+      "kev": "CISA KEV",
+      "epss": "EPSS {value}"
+    },
+    "license": {
+      "title": "License",
+      "policy": "Policy: {mode}",
+      "unavailable": "Not determinable from upstream metadata for this ecosystem.",
+      "allowed": "Allowed by policy",
+      "blocked": "Not allowed by policy ({spdx})",
+      "informational": "Recorded informationally — license policy is off."
+    },
+    "unavailableChecks": {
+      "title": "Not checked at lookup time",
+      "release_age": "Release-age hold",
+      "deprecated": "Deprecation status",
+      "license": "License",
+      "vulnerabilities": "Vulnerability scan"
+    },
+    "airGapped": "Air-gapped — upstream metadata was not checked; advisories and license came from the local mirror only.",
+    "errors": {
+      "notFound": "That package or version was not found upstream.",
+      "unavailable": "The upstream registry is temporarily unavailable. Try again shortly."
+    },
+    "empty": "Enter a package above to check its malware, CVE, and license status before you add it."
   },
   "licensePolicy": {
     "title": "License policy",
@@ -1251,6 +1371,21 @@
       "name": "Name",
       "attributes": "Attributes"
     }
+  },
+  "licenseClassification": {
+    "permissive": "permissive",
+    "weak-copyleft": "weak copyleft",
+    "strong-copyleft": "strong copyleft",
+    "network-copyleft": "network copyleft",
+    "public-domain": "public domain"
+  },
+  "licenseText": {
+    "title": "License text",
+    "loading": "Loading license text…",
+    "notAvailable": "The bundled text for this license is not available.",
+    "viewUpstream": "View upstream",
+    "close": "Close",
+    "open": "View license text"
   },
   "profile": {
     "title": "Profile",

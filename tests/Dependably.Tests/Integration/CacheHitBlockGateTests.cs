@@ -11,7 +11,7 @@ namespace Dependably.Tests.Integration;
 /// <summary>
 /// Cache-hit block-gate coverage for the ecosystems whose proxy serve paths previously served
 /// cached bytes without ever evaluating <see cref="Dependably.Protocol.BlockGateService"/>:
-/// cargo, golang, and rpm. Each case seeds a cached proxy artifact on the global plane
+/// cargo, golang, rpm, and apk. Each case seeds a cached proxy artifact on the global plane
 /// (<c>cache_artifact</c> + <c>tenant_artifact_access</c>), manually blocks one coordinate via
 /// <c>tenant_artifact_access.manual_block_state</c>, and asserts the blocked coordinate now
 /// returns 403 while a clean sibling still serves 200 in the same fixture.
@@ -111,6 +111,37 @@ public sealed class CacheHitBlockGateTests : IClassFixture<DependablyFactory>, I
         }
     }
 
+    [Fact]
+    public async Task Apk_GlobalPlaneCacheHit_BlockedPackage403_CleanPackage200()
+    {
+        await SetAnonymousPullAsync(true);
+        try
+        {
+            string orgId = await DefaultOrgIdAsync();
+            string name = $"blkapk{Guid.NewGuid():N}"[..12].ToLowerInvariant();
+            const string release = "v3.22";
+            const string repo = "main";
+            const string arch = "x86_64";
+
+            string blockedFile = $"{name}-1.0-r0.apk";
+            string cleanFile = $"{name}-2.0-r0.apk";
+            await SeedApkCachedAsync(orgId, release, repo, arch, name, "1.0-r0", blockedFile, blocked: true);
+            await SeedApkCachedAsync(orgId, release, repo, arch, name, "2.0-r0", cleanFile, blocked: false);
+
+            using var client = _factory.CreateClient();
+
+            var blocked = await client.GetAsync($"/apk/{release}/{repo}/{arch}/{blockedFile}");
+            Assert.Equal(HttpStatusCode.Forbidden, blocked.StatusCode);
+
+            var ok = await client.GetAsync($"/apk/{release}/{repo}/{arch}/{cleanFile}");
+            Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+        }
+        finally
+        {
+            await SetAnonymousPullAsync(false);
+        }
+    }
+
     // ── seeding helpers ───────────────────────────────────────────────────────
 
     private async Task SeedCargoCachedAsync(string orgId, string name, string version, bool blocked)
@@ -139,6 +170,18 @@ public sealed class CacheHitBlockGateTests : IClassFixture<DependablyFactory>, I
         byte[] bytes = System.Text.Encoding.UTF8.GetBytes($"rpm-{file}");
         await _factory.BlobStore.PutAsync(BlobKeys.StoreKey(blobKey), new MemoryStream(bytes));
         await InsertGlobalPlaneAsync(orgId, "rpm", name, version, file, blobKey, bytes, blocked);
+    }
+
+    private async Task SeedApkCachedAsync(
+        string orgId, string release, string repo, string arch, string name, string version, string file, bool blocked)
+    {
+        // apk serves the cache hit directly from BlobKeys.Apk; the global-plane coordinate
+        // filename folds in repo+arch (ApkController.ApkCoordinateFilename) since apk filenames
+        // carry no arch segment of their own.
+        string blobKey = BlobKeys.Apk(orgId, release, repo, arch, file);
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes($"apk-{name}-{version}");
+        await _factory.BlobStore.PutAsync(blobKey, new MemoryStream(bytes));
+        await InsertGlobalPlaneAsync(orgId, "apk", name, version, $"{repo}/{arch}/{file}", blobKey, bytes, blocked);
     }
 
     // Inserts a cache_artifact row and the per-tenant tenant_artifact_access row, optionally

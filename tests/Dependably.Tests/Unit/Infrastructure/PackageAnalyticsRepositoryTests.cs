@@ -252,4 +252,82 @@ public sealed class PackageAnalyticsRepositoryTests : IAsyncLifetime
         long npmDisk = stats.DiskByEcosystem.First(d => d.Ecosystem == "npm").TotalBytes;
         Assert.Equal(350, npmDisk);                // 100 uploaded + 250 proxy (o2's 9999 excluded)
     }
+
+    [Fact]
+    public async Task Operational_risk_tile_counts_distinct_packages_across_both_planes_and_respects_threshold()
+    {
+        await using var conn = await _db.OpenAsync();
+
+        // Uploaded plane: one package with a version at the threshold, one just under it.
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES " +
+            "('p1','o1','npm','at-threshold','at-threshold',0), " +
+            "('p2','o1','npm','under-threshold','under-threshold',0)");
+        await conn.ExecuteAsync(
+            "INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin, versions_behind) VALUES " +
+            "('v1','p1','1.0.0','pkg:npm/at-threshold@1.0.0','registry/v1','uploaded'," + PackageAnalyticsRepository.VersionsBehindDashboardThreshold + "), " +
+            "('v2','p2','1.0.0','pkg:npm/under-threshold@1.0.0','registry/v2','uploaded'," + (PackageAnalyticsRepository.VersionsBehindDashboardThreshold - 1) + ")");
+
+        // Proxy plane: one package over the threshold (must count), one with an unknown (NULL)
+        // count that must never count as "high risk".
+        await conn.ExecuteAsync(
+            "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, versions_behind) VALUES " +
+            "('ca1','npm','proxy-over','1.0.0','proxy-over-1.0.0.tgz','proxy/aaa','aaa'," + (PackageAnalyticsRepository.VersionsBehindDashboardThreshold + 5) + "), " +
+            "('ca2','npm','proxy-unknown','1.0.0','proxy-unknown-1.0.0.tgz','proxy/bbb','bbb',NULL)");
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o1','ca1'), ('o1','ca2')");
+
+        // Another tenant's high-risk package must not leak into o1's count.
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES ('p3','o2','npm','theirs','theirs',0)");
+        await conn.ExecuteAsync(
+            "INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin, versions_behind) VALUES " +
+            "('v3','p3','1.0.0','pkg:npm/theirs@1.0.0','registry/v3','uploaded',99)");
+
+        var stats = await new PackageAnalyticsRepository(_db).GetOrgStatsAsync("o1");
+
+        Assert.Equal(2, stats.OperationalRiskPackageCount); // at-threshold (v1) + proxy-over (ca1)
+        Assert.Equal(PackageAnalyticsRepository.VersionsBehindDashboardThreshold, stats.VersionsBehindThreshold);
+    }
+
+    [Fact]
+    public async Task License_risk_tile_counts_blocklisted_and_unknown_licenses_across_both_planes()
+    {
+        await using var conn = await _db.OpenAsync();
+
+        await conn.ExecuteAsync(
+            "INSERT INTO license_blocklist (id, org_id, license_spdx) VALUES ('bl1', 'o1', 'GPL-3.0-only')");
+
+        // Uploaded plane: one blocklisted license, one clean license, one with no license row at all.
+        await conn.ExecuteAsync(
+            "INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy) VALUES " +
+            "('p1','o1','npm','gpl-pkg','gpl-pkg',0), " +
+            "('p2','o1','npm','mit-pkg','mit-pkg',0), " +
+            "('p3','o1','npm','no-license-pkg','no-license-pkg',0)");
+        await conn.ExecuteAsync(
+            "INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin) VALUES " +
+            "('v1','p1','1.0.0','pkg:npm/gpl-pkg@1.0.0','registry/v1','uploaded'), " +
+            "('v2','p2','1.0.0','pkg:npm/mit-pkg@1.0.0','registry/v2','uploaded'), " +
+            "('v3','p3','1.0.0','pkg:npm/no-license-pkg@1.0.0','registry/v3','uploaded')");
+        await conn.ExecuteAsync(
+            "INSERT INTO package_version_licenses (id, package_version_id, license_spdx, owner_kind) VALUES " +
+            "('l1','v1','GPL-3.0-only','package_version'), " +
+            "('l2','v2','MIT','package_version')");
+
+        // Proxy plane: one blocklisted license via the global cache_artifact-owned row.
+        await conn.ExecuteAsync(
+            "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash) VALUES " +
+            "('ca1','npm','proxy-gpl','1.0.0','proxy-gpl-1.0.0.tgz','proxy/aaa','aaa')");
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o1','ca1')");
+        await conn.ExecuteAsync(
+            "INSERT INTO package_version_licenses (id, cache_artifact_id, license_spdx, owner_kind) VALUES " +
+            "('l3','ca1','GPL-3.0-only','cache_artifact')");
+
+        var stats = await new PackageAnalyticsRepository(_db).GetOrgStatsAsync("o1");
+
+        // v1 (blocklisted) + v3 (no license row) + ca1 (blocklisted, proxy plane) = 3. v2 (MIT,
+        // not blocklisted) is clean and must not count.
+        Assert.Equal(3, stats.LicenseRiskVersionCount);
+    }
 }

@@ -1,3 +1,4 @@
+using Dependably.Infrastructure.Alerts;
 using Dependably.Infrastructure.Audit;
 using Dependably.Infrastructure.Mail;
 using Dependably.Infrastructure.Siem;
@@ -8,18 +9,20 @@ namespace Dependably.Infrastructure;
 
 /// <summary>
 /// Management-plane DI registrations grouped by subsystem: the management-only repository set,
-/// SIEM push, per-org webhook dispatch, and invite mail. These pull in the assemblies the edge
-/// image excludes (Redis client, JwtBearer, SAML) transitively through the types they register,
-/// so they live in Dependably.Management and are called only from the full composition root.
+/// SIEM push, per-org webhook dispatch, alert Slack delivery, and invite mail. These pull in the
+/// assemblies the edge image excludes (Redis client, JwtBearer, SAML) transitively through the
+/// types they register, so they live in Dependably.Management and are called only from the full
+/// composition root.
 /// </summary>
 public static class ManagementServiceCollectionExtensions
 {
     /// <summary>
     /// Registers the management-plane repositories and services: org settings, system-admin,
     /// package analytics, users, invites, SPDX license lookup, SAML config, external identities,
-    /// banners, webhook subscriptions, trusted-device tracking, JWT revocation, and the audit
-    /// emitter (which fans package events out to the webhook dispatcher). Core repositories are
-    /// registered separately by <see cref="ServiceCollectionExtensions.AddDependablyRepositories"/>.
+    /// banners, webhook subscriptions, alert settings, trusted-device tracking, JWT revocation,
+    /// and the audit emitter (which fans package events out to the webhook dispatcher). Core
+    /// repositories are registered separately by
+    /// <see cref="ServiceCollectionExtensions.AddDependablyRepositories"/>.
     /// </summary>
     public static IServiceCollection AddDependablyManagementRepositories(this IServiceCollection services)
     {
@@ -35,6 +38,7 @@ public static class ManagementServiceCollectionExtensions
         services.AddSingleton<ExternalIdentityRepository>();
         services.AddSingleton<BannerRepository>();
         services.AddSingleton<Dependably.Infrastructure.Webhooks.WebhookSubscriptionRepository>();
+        services.AddSingleton<AlertSettingsRepository>();
         services.AddSingleton<TrustedDeviceService>();
         return services;
     }
@@ -182,6 +186,39 @@ public static class ManagementServiceCollectionExtensions
         services.AddSingleton<WebhookDispatchQueue>();
         services.AddSingleton<IPackageEventSink>(sp => sp.GetRequiredService<WebhookDispatchQueue>());
         services.AddHostedService(sp => sp.GetRequiredService<WebhookDispatchQueue>());
+        return services;
+    }
+
+    /// <summary>
+    /// Registers the per-org alert Slack delivery channel: <see cref="SlackWebhookClient"/> (typed
+    /// HTTP client with SSRF connect-time guard, same posture as
+    /// <see cref="WebhookDeliveryClient"/>), <see cref="AlertSlackQueue"/> as both the
+    /// <see cref="IAlertNotifier"/> singleton and a hosted background service.
+    ///
+    /// Reuses <c>WEBHOOK_ALLOW_PRIVATE</c> (default <c>false</c>) — a Slack webhook URL is a
+    /// tenant-user-supplied value with the same SSRF risk profile as a generic outbound webhook.
+    /// </summary>
+    public static IServiceCollection AddDependablyAlertNotifier(
+        this IServiceCollection services, IConfiguration config)
+    {
+        bool allowPrivate = string.Equals(
+            config["WEBHOOK_ALLOW_PRIVATE"], "true", StringComparison.OrdinalIgnoreCase);
+
+        Func<System.Net.IPAddress, bool> ssrfPredicate = allowPrivate
+            ? SsrfGuard.IsBlockedIpExcludingPrivate
+            : SsrfGuard.IsBlockedIp;
+
+        var slackCallback = new SsrfConnectCallback(ssrfPredicate);
+        services.AddHttpClient<SlackWebhookClient>()
+            .ConfigurePrimaryHttpMessageHandler(_ => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                ConnectCallback = slackCallback.ConnectAsync,
+            });
+
+        services.AddSingleton<AlertSlackQueue>();
+        services.AddSingleton<IAlertNotifier>(sp => sp.GetRequiredService<AlertSlackQueue>());
+        services.AddHostedService(sp => sp.GetRequiredService<AlertSlackQueue>());
         return services;
     }
 }

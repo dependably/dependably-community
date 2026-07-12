@@ -123,6 +123,33 @@ public sealed class ProblemResults
     public IActionResult ForbiddenActionKey(string resourceKey, string? reason = null)
         => ForbiddenAction(_localizer[resourceKey], reason);
 
+    /// <summary>Localized HTTP 404 problem response for an <c>[ApiController]</c> action.
+    /// {0}/{1}… placeholders are resolved via string.Format against the SharedResource value.</summary>
+    public IActionResult NotFoundActionKey(string resourceKey, params object[] args)
+    {
+        var problem = new ProblemDetails
+        {
+            Status = StatusCodes.Status404NotFound,
+            Title = _localizer["error.notFound.title"],
+            Detail = Localize(resourceKey, args),
+        };
+        return new ObjectResult(problem) { StatusCode = StatusCodes.Status404NotFound };
+    }
+
+    /// <summary>Localized HTTP 503 problem response for an <c>[ApiController]</c> action —
+    /// used when a dependency the request needs (an upstream registry, an external service)
+    /// is transiently unreachable. Never used for a policy denial (that's 403/451).</summary>
+    public IActionResult ServiceUnavailableActionKey(string resourceKey, params object[] args)
+    {
+        var problem = new ProblemDetails
+        {
+            Status = StatusCodes.Status503ServiceUnavailable,
+            Title = _localizer["error.serviceUnavailable.title"],
+            Detail = Localize(resourceKey, args),
+        };
+        return new ObjectResult(problem) { StatusCode = StatusCodes.Status503ServiceUnavailable };
+    }
+
     // The two-arg localizer indexer always runs string.Format; route zero-arg lookups
     // through the plain indexer so resource values may contain literal braces.
     private string Localize(string resourceKey, object[] args)

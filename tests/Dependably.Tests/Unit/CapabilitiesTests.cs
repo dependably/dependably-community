@@ -110,6 +110,34 @@ public class CapabilitiesTests
     }
 
     [Fact]
+    public void Grants_ReadAllWildcard_GrantsEveryReadLeaf()
+    {
+        var granted = new HashSet<string> { Capabilities.ReadAll };
+        Assert.True(Capabilities.Grants(granted, Capabilities.ReadMetadata));
+        Assert.True(Capabilities.Grants(granted, Capabilities.ReadArtifact));
+        Assert.True(Capabilities.Grants(granted, Capabilities.ReadPackages));
+        Assert.True(Capabilities.Grants(granted, Capabilities.ReadClaims));
+        Assert.True(Capabilities.Grants(granted, Capabilities.ReadAudit));
+        Assert.True(Capabilities.Grants(granted, Capabilities.ReadTenant));
+        // A different family is untouched by the read:* wildcard.
+        Assert.False(Capabilities.Grants(granted, Capabilities.PublishNpm));
+    }
+
+    [Fact]
+    public void AdminAndOwner_HoldReadAllLiteral_ForMinting()
+    {
+        // read:* is granted alongside (not instead of) the enumerated leaves, since admin/owner
+        // already hold every individual leaf — minting it never widens effective access.
+        Assert.True(Capabilities.Grants(Capabilities.ForRole("admin"), Capabilities.ReadAll));
+        Assert.True(Capabilities.Grants(Capabilities.ForRole("owner"), Capabilities.ReadAll));
+        Assert.True(Capabilities.Grants(Capabilities.ForPlatformAdmin(), Capabilities.ReadAll));
+        // Member and auditor hold only a subset of the six read leaves, so they must not carry
+        // the literal wildcard — that would be a real privilege escalation for them.
+        Assert.False(Capabilities.Grants(Capabilities.ForRole("member"), Capabilities.ReadAll));
+        Assert.False(Capabilities.Grants(Capabilities.ForRole("auditor"), Capabilities.ReadAll));
+    }
+
+    [Fact]
     public void Grants_RequestedCapabilityWithoutColon_ReturnsFalse()
     {
         // Hits the `colon < 0` fall-through: a malformed capability with no domain

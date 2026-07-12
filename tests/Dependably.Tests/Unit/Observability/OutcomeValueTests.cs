@@ -20,6 +20,9 @@ public sealed partial class OutcomeValueTests
     {
         // Lifecycle (most operations)
         "success", "client_error", "server_error", "upstream_error", "blocked", "cancelled",
+        // Deterministic auth/policy refusal (401/403) from an authenticated upstream —
+        // distinct from upstream_error so the edge master-reachability signal can exclude it
+        "upstream_refused",
         // Storage guard (staging volume full — proxy fetch rejected before hitting network)
         "staging_disk_full",
         // Cache-result (dependably.cache.lookups only)
@@ -78,10 +81,12 @@ public sealed partial class OutcomeValueTests
             string.Join("\n  ", violations));
     }
 
+    // Scans the whole src/ tree: since the assembly split the outcome-emitting code lives in
+    // Dependably.Core (and Dependably.Management), not the thin src/Dependably composition root.
     private static string GetSourceDir([CallerFilePath] string callerFilePath = "")
     {
         string dir = Path.GetDirectoryName(callerFilePath)!;
         string repoRoot = Path.GetFullPath(Path.Combine(dir, "..", "..", "..", ".."));
-        return Path.Combine(repoRoot, "src", "Dependably");
+        return Path.Combine(repoRoot, "src");
     }
 }

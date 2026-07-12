@@ -24,6 +24,7 @@ const TENANT_STATIC = [
   ['vulnerabilities',   '/vulnerabilities'],
   ['quarantine',        '/quarantine'],
   ['license-policy',    '/license-policy'],
+  ['lookup',            '/lookup'],
   ['profile',           '/profile'],
   ['join',              '/join'],
   ['saml-test-result',  '/saml-test-result'],

@@ -1,10 +1,11 @@
 <script>
   import { t } from 'svelte-i18n'
-  import { route, user, currentOrg, bootstrapInfo, navigate, sidebarCollapsed, noticesOpen } from './store.js'
+  import { route, user, bootstrapInfo, navigate, sidebarCollapsed, noticesOpen } from './store.js'
 
   // Primary nav (all authenticated users). Ported 1:1 from the old top navbar.
   const mainItems = [
     { page: 'packages', icon: 'icon-package', label: 'nav.packages' },
+    { page: 'lookup', icon: 'icon-search', label: 'nav.lookup' },
     { page: 'vulnerabilities', icon: 'icon-bug', label: 'nav.vulnerabilities' },
     { page: 'license-policy', icon: 'icon-license', label: 'nav.licensePolicy' },
     { page: 'tokens', icon: 'icon-key', label: 'nav.tokens' },
@@ -53,12 +54,6 @@
       <svg width="16" height="16" aria-hidden="true"><use href="/icons.svg#icon-sidebar"/></svg>
     </button>
   </div>
-
-  {#if $user && $currentOrg && $bootstrapInfo?.mode === 'multi'}
-    <div class="nav-org">
-      <span class="nav-org-label nav-label">{$currentOrg.slug}</span>
-    </div>
-  {/if}
 
   {#if $bootstrapInfo?.airGapped}
     <div class="air-gap-badge" title={$t('nav.airGappedHint')} aria-label="air-gapped">
@@ -182,17 +177,6 @@
     cursor: pointer;
   }
   .icon-btn:hover { background: var(--bg3); color: var(--text); }
-
-  .nav-org { padding: 2px 8px 6px; }
-  .nav-org-label {
-    display: inline-block;
-    padding: 3px 8px;
-    font-size: 12px;
-    color: var(--text2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    white-space: nowrap;
-  }
 
   .air-gap-badge {
     display: inline-flex;

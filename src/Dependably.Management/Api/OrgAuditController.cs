@@ -36,6 +36,9 @@ public sealed class OrgAuditController : OrgScopedControllerBase
     }
 
     /// <summary>GET /api/v1/orgs/{org}/activity</summary>
+    // Read-only: accepts a PAT/service token carrying read:audit — same tier SIEM already
+    // exposes over a bearer token.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/activity")]
     public async Task<IActionResult> GetActivity(
         [FromQuery] int limit = 50,
@@ -82,6 +85,9 @@ public sealed class OrgAuditController : OrgScopedControllerBase
     }
 
     /// <summary>GET /api/v1/orgs/{org}/audit</summary>
+    // Read-only: accepts a PAT/service token carrying read:audit — same tier SIEM already
+    // exposes over a bearer token.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/audit")]
     public async Task<IActionResult> GetAudit(
         [FromQuery] int limit = 50, [FromQuery] int page = 1,

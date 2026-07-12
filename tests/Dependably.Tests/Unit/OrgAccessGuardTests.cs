@@ -128,6 +128,87 @@ public sealed class OrgAccessGuardTests : IAsyncLifetime
         Assert.Equal(OrgAccessGuard.AccessResult.NotFound, result);
     }
 
+    // ── CheckCapAsync — service/CI tokens (no users-table row) ──────────────────
+
+    private static ClaimsPrincipal ServiceTokenPrincipal(string tokenId, string orgId, params string[] caps)
+    {
+        var claims = new List<Claim>
+        {
+            new("sub", tokenId),
+            new("org_id", orgId),
+            new("tid", orgId),
+            new("role", "ci"),
+            new("scope", "tenant"),
+        };
+        claims.AddRange(caps.Select(c => new Claim("cap", c)));
+        return new ClaimsPrincipal(new ClaimsIdentity(claims, TokenAuthenticationDefaults.Scheme));
+    }
+
+    [Fact]
+    public async Task CheckCapAsync_ServiceTokenNoUsersRow_MatchingOrgAndCap_Allowed()
+    {
+        // A service token's `sub` is the token's own id, not a users-table row — the primary
+        // lookup misses, so this exercises the ApiToken-scheme fallback that trusts the
+        // token's own org_id claim instead (mirrors SiemController's token-auth path).
+        var principal = ServiceTokenPrincipal("svc-token-1", "o1", Capabilities.ReadPackages);
+        var result = await _guard.CheckCapAsync(
+            principal, "svc-token-1", "o1", Capabilities.ReadPackages);
+        Assert.Equal(OrgAccessGuard.AccessResult.Allowed, result);
+    }
+
+    [Fact]
+    public async Task CheckCapAsync_ServiceTokenNoUsersRow_MissingCap_Forbidden()
+    {
+        var principal = ServiceTokenPrincipal("svc-token-2", "o1", Capabilities.ReadAudit);
+        var result = await _guard.CheckCapAsync(
+            principal, "svc-token-2", "o1", Capabilities.ReadPackages);
+        Assert.Equal(OrgAccessGuard.AccessResult.Forbidden, result);
+    }
+
+    [Fact]
+    public async Task CheckCapAsync_ServiceTokenNoUsersRow_OrgMismatch_NotFound()
+    {
+        // The token's org_id claim (o2) does not match the route's tenant (o1) — 404, not 403,
+        // preserving the slug-enumeration-closure invariant for tokens too.
+        var principal = ServiceTokenPrincipal("svc-token-3", "o2", Capabilities.ReadPackages);
+        var result = await _guard.CheckCapAsync(
+            principal, "svc-token-3", "o1", Capabilities.ReadPackages);
+        Assert.Equal(OrgAccessGuard.AccessResult.NotFound, result);
+    }
+
+    [Fact]
+    public async Task CheckCapAsync_ServiceTokenNoCapClaims_Forbidden()
+    {
+        // A legacy service token whose `capabilities` column is NULL/empty emits no `cap`
+        // claims at all (TokenAuthenticationHandler.BuildClaims). The service-token branch
+        // must deny outright rather than falling back to a role-based default (e.g.
+        // Capabilities.ForRole("member")), which would silently grant it reader-level access.
+        var principal = ServiceTokenPrincipal("svc-token-legacy", "o1" /* no caps */);
+        var result = await _guard.CheckCapAsync(
+            principal, "svc-token-legacy", "o1", Capabilities.ReadMetadata);
+        Assert.Equal(OrgAccessGuard.AccessResult.Forbidden, result);
+    }
+
+    [Fact]
+    public async Task CheckCapAsync_JwtPrincipalNoUsersRow_NeverFallsBackToOrgClaimTrust()
+    {
+        // A JWT (non-ApiToken) principal whose sub has no users row (e.g. the user was
+        // removed mid-session) must still 404 — the org_id-claim-trust fallback is scoped to
+        // the ApiToken scheme only, never a JWT session, even if it carries the same claims.
+        var claims = new[]
+        {
+            new Claim("sub", "ghost"),
+            new Claim("org_id", "o1"),
+            new Claim("tid", "o1"),
+            new Claim("role", "owner"),
+            new Claim("scope", "tenant"),
+        };
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, "test"));
+        var result = await _guard.CheckCapAsync(
+            principal, "ghost", "o1", Capabilities.ReadPackages);
+        Assert.Equal(OrgAccessGuard.AccessResult.NotFound, result);
+    }
+
     [Fact]
     public async Task CheckCapAsync_ExplicitCapClaims_NarrowBelowRole()
     {

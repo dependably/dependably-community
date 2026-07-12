@@ -369,7 +369,8 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
             rpmProvenance,
             Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
             Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, _clock),
-            new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0));
+            new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0),
+            new LicenseRepository(_db, _clock, TestNormalizers.License(_db)));
         return new RpmController(svc) { ControllerContext = BuildRpmContext() };
     }
 
@@ -452,6 +453,7 @@ public sealed class MetadataRebuildCachingTests : IAsyncLifetime
         var svc = new OrgControllerServices(
             Orgs: new OrgRepository(_db),
             Packages: new PackageRepository(_db),
+            VersionFiles: new PackageVersionFilesRepository(_db),
             PackageAnalytics: null!,
             StatsSnapshots: null!,
             Tokens: null!,

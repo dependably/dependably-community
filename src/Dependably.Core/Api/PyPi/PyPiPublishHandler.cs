@@ -98,7 +98,7 @@ public sealed class PyPiPublishHandler(
             }
 
             var fileTypeError = ValidateFileTypeContentsFromFile(
-                form["filetype"].FirstOrDefault() ?? "", stagedPath!, name!, file!.FileName);
+                form["filetype"].FirstOrDefault() ?? "", stagedPath!, name!, version!, file!.FileName);
             return fileTypeError is not null
                 ? fileTypeError
                 : await StoreAndRecordUploadAsync(
@@ -305,13 +305,13 @@ public sealed class PyPiPublishHandler(
     }
 
     private static UnprocessableEntityObjectResult? ValidateFileTypeContentsFromFile(
-        string fileType, string stagedPath, string name, string filename)
+        string fileType, string stagedPath, string name, string version, string filename)
     {
         var result = fileType switch
         {
-            "bdist_wheel" => ValidateWheelFromFile(stagedPath),
+            "bdist_wheel" => ValidateWheelFromFile(stagedPath, name, version),
             "bdist_egg" => ValidateEggFromFile(stagedPath),
-            "sdist" => ValidateSdist(name, filename),
+            "sdist" => ValidateSdist(name, version, filename, stagedPath),
             _ => ValidationResult.Ok(),
         };
         return result.IsValid ? null : new UnprocessableEntityObjectResult(new ProblemDetails { Detail = result.Message, Status = StatusCodes.Status422UnprocessableEntity });
@@ -325,6 +325,13 @@ public sealed class PyPiPublishHandler(
 
         var orgSettings = await orgs.GetSettingsAsync(tenant.OrgId, ct);
         var claim = await claimResolver.ResolveAsync(tenant.OrgId, "pypi", purlName, ct);
+
+        // License info comes from the wheel METADATA / sdist PKG-INFO. Extracted here (before
+        // the publish call) so the hard-block gate inside StoreAndRecordAsync can evaluate it
+        // before the version row is persisted; the same extraction is reused below to attach
+        // the license rows on acceptance. Read from the staged file — the artifact is never
+        // held in a byte[].
+        var extracted = ExtractPyPiLicense(upload.StagingPath, upload.Filename);
         var result = await publish.StoreAndRecordAsync(new PublishRequest
         {
             OrgId = tenant.OrgId,
@@ -344,6 +351,7 @@ public sealed class PyPiPublishHandler(
             AllowOverwrite = orgSettings?.AllowVersionOverwrite ?? false,
             ClaimState = claim.State,
             SourceIp = tenant.SourceIp,
+            Licenses = extracted.Spdx.Count > 0 ? extracted.Spdx : null,
         }, ct);
 
         if (result is PublishResult.Rejected rej)
@@ -351,14 +359,7 @@ public sealed class PyPiPublishHandler(
             return MapPyPiPublishRejection(rej, upload.Version);
         }
 
-        // Format-specific post-publish: license info comes from the wheel METADATA / sdist
-        // PKG-INFO. Read from the staged file — the artifact is never held in a byte[].
         string versionId = ((PublishResult.Accepted)result).VersionId;
-        // deepcode ignore PT: StagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
-        await using var stagingFs = new FileStream(
-            upload.StagingPath, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: 81920, useAsync: true);
-        var extracted = LicenseExtractor.FromPyPiPackageBytes(stagingFs, upload.Filename);
         if (extracted.Spdx.Count > 0)
         {
             await licenses.SetLicensesAsync(versionId, extracted.Spdx, "upstream", ct);
@@ -369,6 +370,14 @@ public sealed class PyPiPublishHandler(
         cache.Evict(new PyPiSimpleIndexKey(tenant.OrgId, upload.Name));
 
         return new OkResult();
+    }
+
+    // deepcode ignore PT: stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+    private static LicenseExtractor.ExtractedMetadata ExtractPyPiLicense(string stagingPath, string filename)
+    {
+        using var fs = new FileStream(
+            stagingPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: false);
+        return LicenseExtractor.FromPyPiPackageBytes(fs, filename);
     }
 
     private static IActionResult MapPyPiPublishRejection(PublishResult.Rejected rej, string version)
@@ -396,23 +405,20 @@ public sealed class PyPiPublishHandler(
         }
     }
 
-    private static ValidationResult ValidateWheelFromFile(string stagedPath)
+    // Content-based wheel validation: the staged file must be a valid ZIP (PK magic) whose
+    // dist-info/METADATA Name/Version match the declared publish coordinates. Delegates the
+    // archive parse to PyPiArtifactValidator so the publish path and the content-based
+    // EcosystemDetector never drift on what counts as a valid wheel.
+    private static ValidationResult ValidateWheelFromFile(string stagedPath, string declaredName, string declaredVersion)
     {
-        try
-        {
-            // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
-            using var fileStream = new FileStream(
-                stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
-                bufferSize: 81920, useAsync: false);
-            using var zip = new System.IO.Compression.ZipArchive(fileStream, System.IO.Compression.ZipArchiveMode.Read);
-            bool hasMetadata = zip.Entries.Any(e =>
-                e.FullName.EndsWith(".dist-info/METADATA", StringComparison.OrdinalIgnoreCase));
-            return !hasMetadata ? ValidationResult.Fail("content", "Wheel is missing .dist-info/METADATA") : ValidationResult.Ok();
-        }
-        catch
-        {
-            return ValidationResult.Fail("content", "Wheel is not a valid ZIP file");
-        }
+        // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        using var fileStream = new FileStream(
+            stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 81920, useAsync: false);
+        var parsed = PyPiArtifactValidator.ValidateWheel(fileStream);
+        return !parsed.Validation.IsValid
+            ? parsed.Validation
+            : CrossCheckContentCoordinates("Wheel", declaredName, declaredVersion, parsed.Name!, parsed.Version!);
     }
 
     private static ValidationResult ValidateEggFromFile(string stagedPath)
@@ -434,9 +440,9 @@ public sealed class PyPiPublishHandler(
         }
     }
 
-    private static ValidationResult ValidateSdist(string name, string filename)
+    private static ValidationResult ValidateSdist(string name, string version, string filename, string stagedPath)
     {
-        if (!filename.EndsWith(".tar.gz") && !filename.EndsWith(".zip"))
+        if (!filename.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase) && !filename.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
         {
             return ValidationResult.Fail("filename", "sdist must end in .tar.gz or .zip");
         }
@@ -448,8 +454,43 @@ public sealed class PyPiPublishHandler(
         // to hyphens, so a raw prefix check would spuriously 422 every modern sdist.
         string normalized = Regex.Replace(name, @"[-_.]+", "-", RegexOptions.None, PyPiConstants.RegexTimeout).ToLowerInvariant();
         string normalizedFilename = Regex.Replace(filename, @"[-_.]+", "-", RegexOptions.None, PyPiConstants.RegexTimeout).ToLowerInvariant();
-        return !normalizedFilename.StartsWith(normalized, StringComparison.Ordinal)
-            ? ValidationResult.Fail("filename", "Filename does not match declared package name")
-            : ValidationResult.Ok();
+        if (!normalizedFilename.StartsWith(normalized, StringComparison.Ordinal))
+        {
+            return ValidationResult.Fail("filename", "Filename does not match declared package name");
+        }
+
+        // Legacy PEP 314 .zip sdists have no content parser in PyPiArtifactValidator — the
+        // filename-prefix check above is the only guard available for them. .tar.gz/.tgz
+        // sdists get full content validation: must be a valid gzip tar containing a
+        // top-level PKG-INFO whose Name/Version match the declared publish coordinates.
+        if (!filename.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase))
+        {
+            return ValidationResult.Ok();
+        }
+
+        // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        using var fileStream = new FileStream(
+            stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 81920, useAsync: false);
+        var parsed = PyPiArtifactValidator.ValidateSdist(fileStream);
+        return !parsed.Validation.IsValid
+            ? parsed.Validation
+            : CrossCheckContentCoordinates("Sdist", name, version, parsed.Name!, parsed.Version!);
+    }
+
+    // Cross-checks an artefact's content-derived (name, version) against the declared publish
+    // coordinates. Declared name is PEP 503-normalised before comparison since the content
+    // parser already normalises what it extracts from METADATA/PKG-INFO.
+    private static ValidationResult CrossCheckContentCoordinates(
+        string artifactKind, string declaredName, string declaredVersion, string contentName, string contentVersion)
+    {
+        string normalizedDeclaredName = PyPiArtifactValidator.Normalize(declaredName);
+        return !normalizedDeclaredName.Equals(contentName, StringComparison.Ordinal)
+            ? ValidationResult.Fail("content",
+                $"{artifactKind} content declares name '{contentName}', which does not match the published name '{declaredName}'.")
+            : !declaredVersion.Equals(contentVersion, StringComparison.Ordinal)
+                ? ValidationResult.Fail("content",
+                    $"{artifactKind} content declares version '{contentVersion}', which does not match the published version '{declaredVersion}'.")
+                : ValidationResult.Ok();
     }
 }

@@ -24,9 +24,11 @@
   import { formatDate, formatBytes, formatNumber } from './format.js'
   import { sortIndicator } from './sortIndicator.js'
 
-  /** @type {{ ecosystem: string, isProxy: boolean, name: string, upstreamLatestVersion?: string | null, latestState?: string } | null} */
+  /** @type {{ ecosystem: string, isProxy: boolean, name: string, upstreamLatestVersion?: string | null, latestState?: string, abandonedState?: string } | null} */
   export let pkg = null
   export let versions = []
+  /** Blocklisted SPDX identifiers (uppercased) — drives the per-row license risk flag. */
+  export let licenseBlocklist = new Set()
   /** @type {Map<string, Array<{osvId: string, severity?: string, summary?: string, cvssScore?: number}>>} */
   export let vulnsByPurl
   export let isAdmin = false
@@ -116,6 +118,10 @@
       upstreamIntegrityAlgorithm: single ? rep.upstreamIntegrityAlgorithm : null,
       origin: rep.origin,
       licenses: [...new Set(files.flatMap(f => f.licenses ?? []))],
+      // Operational-risk signal (Deliverable 1): all files under one version share the same
+      // version string, so they resolve to the same versions_behind count — take the first
+      // non-null value. Null (unknown) is preserved, never coerced to 0.
+      versionsBehind: files.find(f => f.versionsBehind !== null && f.versionsBehind !== undefined)?.versionsBehind ?? null,
       sizeBytes: files.reduce((s, f) => s + (f.sizeBytes ?? 0), 0),
       downloadCount: files.reduce((s, f) => s + (f.downloadCount ?? 0), 0),
       createdAt,
@@ -229,12 +235,22 @@
     <span>{$t('versionDetail.latestBanner.current', { values: { version: pkg.upstreamLatestVersion } })}</span>
   </div>
 {/if}
+<!-- Never rendered for 'unknown' — an unknown publish timestamp is not evidence of
+     abandonment. Independent of latestState: a package can be both "current" (cached) and
+     abandoned (no new upstream release in a year). -->
+{#if pkg?.abandonedState === 'abandoned'}
+  <div class="latest-banner latest-banner-abandoned" role="status">
+    <svg class="abandoned-icon" width="14" height="14" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>
+    <span>{$t('versionDetail.abandonedBanner.text')}</span>
+  </div>
+{/if}
 
 <table class="table-auto versions-table">
   <colgroup>
     <col class="col-version">
     {#if pkg?.ecosystem === 'oci'}<col class="col-tag">{/if}
     <col class="col-latest">
+    <col class="col-behind">
     <col class="col-origin">
     <col class="col-checksum">
     <col class="col-size">
@@ -249,6 +265,7 @@
       <th class="sortable" on:click={() => toggleSort('version')}>{$t('versionDetail.columns.version')}{sortIndicator('version', sortCol, sortDir)}</th>
       {#if pkg?.ecosystem === 'oci'}<th>{$t('versionDetail.columns.tag')}</th>{/if}
       <th class="text-center">{$t('versionDetail.columns.latest')}</th>
+      <th class="text-center">{$t('versionDetail.columns.behind')}</th>
       <th>{$t('versionDetail.columns.origin')}</th>
       <th class="sortable" on:click={() => toggleSort('checksum')}>{$t('versionDetail.columns.checksum')}{sortIndicator('checksum', sortCol, sortDir)}</th>
       <th class="sortable" on:click={() => toggleSort('size')}>{$t('versionDetail.columns.size')}{sortIndicator('size', sortCol, sortDir)}</th>
@@ -262,7 +279,7 @@
   {#if loading}
     <tbody>
       {#each [0,1,2,3,4] as i (i)}
-        <tr><td colspan={pkg?.ecosystem === 'oci' ? 11 : 10}><span class="skeleton"></span></td></tr>
+        <tr><td colspan={pkg?.ecosystem === 'oci' ? 12 : 11}><span class="skeleton"></span></td></tr>
       {/each}
     </tbody>
   {:else}
@@ -322,6 +339,20 @@
             <span class="text-muted" aria-label={$t('versionDetail.latestCell.unknown')}>—</span>
           {/if}
         </td>
+        <td class="text-center behind-cell">
+          <!-- Operational-risk signal: the count of upstream STABLE versions strictly newer than
+               this one. NULL (unknown — hosted-only, air-gapped, or not yet refreshed) renders
+               UNSCORED, never 0. -->
+          {#if g.versionsBehind !== null}
+            <span
+              class="behind-count"
+              class:behind-count-current={g.versionsBehind === 0}
+              title={$t('versionDetail.behindCell.help')}
+            >{$t('versionDetail.behindCell.count', { values: { count: g.versionsBehind } })}</span>
+          {:else}
+            <span class="text-muted" title={$t('versionDetail.behindCell.unscoredHelp')}>{$t('versionDetail.behindCell.unscored')}</span>
+          {/if}
+        </td>
         <td class="nowrap">
           {#if pkg}
             <span class="badge {pkg.isProxy ? 'proxy' : 'hosted'}">
@@ -338,9 +369,12 @@
         <td class="nowrap text-muted">{$formatDate(g.createdAt)}</td>
         <td class="license-cell">
           {#if g.licenses?.length > 0}
-            {g.licenses.join(', ')}
+            <span class:license-blocked={g.licenses.some(l => licenseBlocklist.has((l ?? '').toUpperCase()))}>{g.licenses.join(', ')}</span>
+            {#if g.licenses.some(l => licenseBlocklist.has((l ?? '').toUpperCase()))}
+              <svg class="license-risk-icon" width="11" height="11" role="img" aria-label={$t('versionDetail.badges.licenseBlockedHelp')}><use href="/icons.svg#icon-alert"/></svg>
+            {/if}
           {:else}
-            <span class="text-muted">—</span>
+            <span class="text-muted" title={$t('versionDetail.badges.licenseUnknownHelp')}>{$t('versionDetail.badges.licenseUnknown')}</span>
           {/if}
         </td>
         <td class="nowrap num-col">{$formatNumber(g.downloadCount)}</td>
@@ -370,7 +404,7 @@
 
       {#if isExpanded}
         <tr class="detail-row">
-          <td colspan={pkg?.ecosystem === 'oci' ? 11 : 10}>
+          <td colspan={pkg?.ecosystem === 'oci' ? 12 : 11}>
             <div class="detail-panel">
               {#if !g.single}
                 <div class="files-section">
@@ -534,9 +568,12 @@
   .version-cell .mono { font-size: 12px; }
   .checksum-cell { font-size: 11px; color: var(--text2); }
   .license-cell { font-size: 12px; overflow-wrap: anywhere; }
+  .license-blocked { color: var(--badge-red-text); font-weight: 600; }
+  .license-risk-icon { color: var(--danger); margin-left: 3px; vertical-align: middle; }
   .versions-table .col-version   { width: 180px; }
   .versions-table .col-tag       { width: 140px; }
   .versions-table .col-latest    { width: 70px; }
+  .versions-table .col-behind    { width: 90px; }
   .versions-table .col-origin    { width: 90px; }
   .versions-table .col-checksum  { width: 100px; }
   .versions-table .col-size      { width: 80px; }
@@ -553,6 +590,10 @@
   .latest-cell { font-weight: 600; }
   .latest-yes { color: var(--success); }
   .latest-no { color: var(--danger); }
+  .abandoned-icon { color: var(--warning); }
+  .behind-cell { font-size: 12px; }
+  .behind-count { font-weight: 600; color: var(--badge-warning-text); }
+  .behind-count-current { color: var(--success); font-weight: 400; }
 
   .latest-banner {
     display: flex;
@@ -565,8 +606,9 @@
     font-size: 13px;
   }
   .latest-banner svg { flex-shrink: 0; }
-  .latest-banner-stale   { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
-  .latest-banner-current { background: var(--badge-hosted-bg);  color: var(--badge-hosted-text); }
+  .latest-banner-stale     { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
+  .latest-banner-current   { background: var(--badge-hosted-bg);  color: var(--badge-hosted-text); }
+  .latest-banner-abandoned { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
 
   .detail-row td { padding: 0; border-top: none; }
   .copy-btn { padding: 1px 6px; font-size: 11px; flex-shrink: 0; }

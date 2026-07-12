@@ -339,7 +339,379 @@ public class LicenseExtractorTests
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
     }
 
+    // ── Maven: POM license extraction ────────────────────────────────────────
+
+    [Fact]
+    public void Maven_Namespaced_NameMapped_ToSpdx()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>com.example</groupId>
+              <artifactId>widget</artifactId>
+              <version>1.0.0</version>
+              <licenses>
+                <license>
+                  <name>The Apache Software License, Version 2.0</name>
+                  <url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
+                </license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "Apache-2.0" }, result.Spdx);
+        Assert.Null(result.Deprecated);
+    }
+
+    [Fact]
+    public void Maven_NonNamespaced_NameMapped_ToSpdx()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license>
+                  <name>MIT License</name>
+                </license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "MIT" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_UrlMatch_WinsOverNameMatch()
+    {
+        // Name would map to MIT, URL maps to Apache-2.0 — the URL match takes precedence.
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+              <licenses>
+                <license>
+                  <name>MIT</name>
+                  <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+                </license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "Apache-2.0" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_UrlNormalization_HttpHttpsAndTrailingSlash_Match()
+    {
+        // http vs https and a trailing slash all normalize to the same table key.
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license>
+                  <name>Whatever They Called It</name>
+                  <url>HTTP://Eclipse.org/legal/epl-2.0/</url>
+                </license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "EPL-2.0" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_MultipleLicenseEntries_AllExtracted()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+              <licenses>
+                <license><name>Apache License, Version 2.0</name></license>
+                <license><name>MIT License</name></license>
+                <license><name>BSD 3-Clause License</name></license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "Apache-2.0", "MIT", "BSD-3-Clause" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_Lgpl3_OrLater_vs_Only_DistinguishedByText()
+    {
+        var orLater = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license><name>GNU Lesser General Public License v3.0 or later</name></license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "LGPL-3.0-or-later" }, orLater.Spdx);
+
+        var only = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license><name>GNU Lesser General Public License v3.0</name></license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "LGPL-3.0-only" }, only.Spdx);
+    }
+
+    // Every GNU-family target below is the non-deprecated -only/-or-later SPDX id — the bare
+    // GPL-2.0/GPL-3.0/LGPL-2.1 forms are deprecated in the SPDX seed and are filtered out of
+    // LicenseRepository.GetReviewQueueAsync's default queue, so emitting them would capture a
+    // license fact that never surfaces for review.
+
+    [Fact]
+    public void Maven_Gpl2_Name_MapsToNonDeprecatedOnly()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license><name>GNU General Public License, Version 2</name></license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "GPL-2.0-only" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_Gpl2_Url_MapsToNonDeprecatedOnly()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license>
+                  <name>ignored — url wins</name>
+                  <url>https://www.gnu.org/licenses/gpl-2.0.html</url>
+                </license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "GPL-2.0-only" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_Gpl2_OrLater_Name_MapsToOrLater()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license><name>GNU General Public License v2.0 or later</name></license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "GPL-2.0-or-later" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_Gpl3_Name_MapsToNonDeprecatedOnly()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license><name>GNU General Public License, Version 3</name></license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "GPL-3.0-only" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_Gpl3_Url_MapsToNonDeprecatedOnly()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license>
+                  <name>ignored — url wins</name>
+                  <url>http://gnu.org/licenses/gpl-3.0.html</url>
+                </license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "GPL-3.0-only" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_Gpl3_OrLater_Name_MapsToOrLater()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license><name>GNU General Public License v3.0 or later</name></license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "GPL-3.0-or-later" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_Lgpl21_Name_MapsToNonDeprecatedOnly()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license><name>GNU Lesser General Public License, version 2.1</name></license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "LGPL-2.1-only" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_Lgpl21_Url_MapsToNonDeprecatedOnly()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license>
+                  <name>ignored — url wins</name>
+                  <url>https://www.gnu.org/licenses/lgpl-2.1.html</url>
+                </license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "LGPL-2.1-only" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_Lgpl21_OrLater_Name_MapsToOrLater()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license><name>GNU Lesser General Public License v2.1 or later</name></license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "LGPL-2.1-or-later" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_MappingTables_EmitOnlyNonDeprecatedSpdxIds()
+    {
+        // Regression guard: every SPDX id the curated name/URL tables can produce must be a
+        // non-deprecated identifier in the seeded SPDX reference data. A deprecated target (e.g.
+        // bare GPL-2.0) is captured into package_version_licenses but silently filtered out of
+        // LicenseRepository.GetReviewQueueAsync's default review queue — captured but invisible.
+        var deprecated = LoadDeprecatedSpdxIds();
+
+        var emittedIds = GetMavenMappingTableValues("PomNameToSpdx")
+            .Concat(GetMavenMappingTableValues("PomUrlToSpdx"))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        Assert.NotEmpty(emittedIds);
+
+        var offending = emittedIds.Where(id => deprecated.Contains(id)).ToList();
+        Assert.True(offending.Count == 0,
+            $"Maven license map emits deprecated SPDX id(s): {string.Join(", ", offending)}. " +
+            "Remap to the non-deprecated -only/-or-later form.");
+    }
+
+    private static IEnumerable<string> GetMavenMappingTableValues(string fieldName)
+    {
+        var field = typeof(LicenseExtractor).GetField(
+            fieldName, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            ?? throw new InvalidOperationException($"LicenseExtractor.{fieldName} not found — rename tracking broke this guard test.");
+        var dict = (System.Collections.Generic.IReadOnlyDictionary<string, string>)field.GetValue(null)!;
+        return dict.Values;
+    }
+
+    // Reads the same embedded SPDX license-list-data JSON SpdxLicenseSeeder seeds from, so this
+    // guard test needs no database and stays fast.
+    private static HashSet<string> LoadDeprecatedSpdxIds()
+    {
+        var assembly = typeof(LicenseExtractor).Assembly;
+        string resourceName = assembly.GetManifestResourceNames()
+            .Single(n => n.EndsWith("spdx-licenses-3.28.0.json", StringComparison.Ordinal));
+        using var stream = assembly.GetManifestResourceStream(resourceName)!;
+        using var doc = JsonDocument.Parse(stream);
+
+        var result = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var el in doc.RootElement.GetProperty("licenses").EnumerateArray())
+        {
+            if (el.TryGetProperty("isDeprecatedLicenseId", out var dep) && dep.ValueKind == JsonValueKind.True
+                && el.TryGetProperty("licenseId", out var idEl) && idEl.GetString() is { } id)
+            {
+                result.Add(id);
+            }
+        }
+        return result;
+    }
+
+    [Fact]
+    public void Maven_UnmappedName_SpdxShaped_PassesThroughVerbatim()
+    {
+        // "Zlib" is a real SPDX id absent from the curated table — it survives the shape check.
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license><name>Zlib</name></license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(new[] { "Zlib" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_UnmappedName_NotSpdxShaped_Dropped()
+    {
+        // Illegal SPDX character ('!') and no URL — nothing to record.
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project>
+              <licenses>
+                <license><name>Totally Proprietary!!!</name></license>
+              </licenses>
+            </project>
+            """));
+        Assert.Empty(result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_EmptyLicensesBlock_ReturnsEmpty()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+              <licenses></licenses>
+            </project>
+            """));
+        Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
+    }
+
+    [Fact]
+    public void Maven_NoLicensesElement_ReturnsEmpty()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+              <groupId>com.example</groupId>
+              <artifactId>widget</artifactId>
+              <version>1.0.0</version>
+            </project>
+            """));
+        Assert.Empty(result.Spdx);
+    }
+
+    [Fact]
+    public void Maven_MalformedXml_ReturnsEmptyWithoutThrowing()
+    {
+        var result = LicenseExtractor.FromPomXml(Pom("this is not <xml at all"));
+        Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
+    }
+
+    [Fact]
+    public void Maven_DtdXxePayload_ReturnsEmptyWithoutThrowing()
+    {
+        // DTD processing is prohibited by the default reader — the DOCTYPE throws and the
+        // extractor fails soft, never resolving the external entity.
+        var result = LicenseExtractor.FromPomXml(Pom("""
+            <?xml version="1.0"?>
+            <!DOCTYPE project [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
+            <project>
+              <licenses>
+                <license><name>&xxe;</name></license>
+              </licenses>
+            </project>
+            """));
+        Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private static MemoryStream Pom(string xml) => new(Encoding.UTF8.GetBytes(xml));
 
     private static byte[] BuildWheel(string metadata)
     {

@@ -49,7 +49,7 @@ public sealed class GlobalPlaneDualWriteTests : IAsyncLifetime
 
     private CacheArtifactRepository CacheArtifacts => new(_db);
     private TenantArtifactAccessRepository TenantAccess => new(_db);
-    private LicenseRepository Licenses => new(_db, _clock);
+    private LicenseRepository Licenses => new(_db, _clock, TestNormalizers.License(_db));
 
     private static CacheAccess SampleAccess(string orgId, string name = "lodash", string version = "4.17.21") => new(
         OrgId: orgId,

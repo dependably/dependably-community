@@ -511,8 +511,15 @@ public sealed class NuGetPublishHandler(
 
         var claim = await claimResolver.ResolveAsync(ctx.OrgId, "nuget", purlName, ct);
         var artifact = new NuspecArtifact(nuspecId, purlName, normalizedVersion, filename, stagedPath, sizeBytes, claim.State);
+
+        // License rows come from the .nuspec inside the .nupkg. Extracted here (before the
+        // publish call) so the hard-block gate inside StoreAndRecordAsync can evaluate it
+        // before the version row is persisted; the same extraction is reused below to attach
+        // the license rows on acceptance. Reads from the staged temp file so the artifact is
+        // never materialized in managed memory on the push path.
+        var extracted = ExtractNuspecLicense(stagedPath);
         var publishResult = await publish.StoreAndRecordAsync(
-            BuildNuspecPublishRequest(httpContext, ctx, artifact), ct);
+            BuildNuspecPublishRequest(httpContext, ctx, artifact, extracted.Spdx.Count > 0 ? extracted.Spdx : null), ct);
 
         if (publishResult is PublishResult.Rejected rej)
         {
@@ -524,7 +531,10 @@ public sealed class NuGetPublishHandler(
         }
 
         string versionId = ((PublishResult.Accepted)publishResult).VersionId;
-        await EmitNuspecLicensesAsync(versionId, stagedPath, ct);
+        if (extracted.Spdx.Count > 0)
+        {
+            await licenses.SetLicensesAsync(versionId, extracted.Spdx, "upstream", ct);
+        }
 
         // Symbol packages: index each contained Portable PDB by its SSQP debug-id key so a
         // debugger can later fetch the single PDB via GET /nuget/symbols/{pdb}/{key}/{pdb}. The
@@ -581,7 +591,7 @@ public sealed class NuGetPublishHandler(
     }
 
     private static PublishRequest BuildNuspecPublishRequest(
-        HttpContext httpContext, NuGetPushContext ctx, NuspecArtifact artifact)
+        HttpContext httpContext, NuGetPushContext ctx, NuspecArtifact artifact, IReadOnlyList<string>? licenses)
         => new()
         {
             OrgId = ctx.OrgId,
@@ -601,6 +611,7 @@ public sealed class NuGetPublishHandler(
             AllowOverwrite = ctx.Settings?.AllowVersionOverwrite ?? false,
             ClaimState = artifact.ClaimState,
             SourceIp = httpContext.GetNormalizedRemoteIp(),
+            Licenses = licenses,
         };
 
     /// <summary>
@@ -609,17 +620,12 @@ public sealed class NuGetPublishHandler(
     /// a registration leaf. Reads from the staged temp file so the artifact is never
     /// materialized in managed memory on the push path.
     /// </summary>
-    private async Task EmitNuspecLicensesAsync(string versionId, string stagedPath, CancellationToken ct)
+    // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+    private static LicenseExtractor.ExtractedMetadata ExtractNuspecLicense(string stagedPath)
     {
-        // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
-        await using var fs = new FileStream(
-            stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: 81920, useAsync: true);
-        var extracted = LicenseExtractor.FromNuspec(fs);
-        if (extracted.Spdx.Count > 0)
-        {
-            await licenses.SetLicensesAsync(versionId, extracted.Spdx, "upstream", ct);
-        }
+        using var fs = new FileStream(
+            stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: false);
+        return LicenseExtractor.FromNuspec(fs);
     }
 
     /// <summary>

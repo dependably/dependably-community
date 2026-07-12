@@ -17,6 +17,7 @@
     "vulnerabilities": "Vulnérabilités",
     "quarantine": "Quarantaine",
     "licensePolicy": "Licences",
+    "lookup": "Vérification",
     "setup": "Configuration",
     "admin": "Administration",
     "adminSection": "Administration",
@@ -35,6 +36,14 @@
     "empty": "Aucun résultat",
     "groups": {
       "packages": "Paquets"
+    }
+  },
+  "alerts": {
+    "panel": {
+      "title": "Alertes",
+      "loading": "Chargement des alertes…",
+      "empty": "Aucune alerte active.",
+      "close": "Fermer"
     }
   },
   "common": {
@@ -153,6 +162,10 @@
       "label": "Malveillant",
       "help": "Ce paquet a une version signalée comme malveillante (avis OSV MAL-)."
     },
+    "abandoned": {
+      "label": "Abandonné",
+      "help": "Aucune nouvelle version publiée en amont depuis plus d'un an."
+    },
     "actionsMenu": {
       "open": "Actions du paquet",
       "allowSameVersionPush": "Autoriser la publication de la même version",
@@ -234,6 +247,7 @@
     "columns": {
       "version": "Version",
       "latest": "Dernière",
+      "behind": "Retard",
       "tag": "Étiquette",
       "checksum": "Somme de contrôle",
       "size": "Taille",
@@ -265,7 +279,10 @@
       "provenanceFailed": "signature invalide",
       "provenanceFailedHelp": "Cette version portait une signature qui n'a pas pu être vérifiée par rapport aux ancres de confiance épinglées.",
       "provenanceUnsigned": "non signée",
-      "provenanceUnsignedHelp": "Le registre amont n'a publié aucune signature pour cette version."
+      "provenanceUnsignedHelp": "Le registre amont n'a publié aucune signature pour cette version.",
+      "licenseBlockedHelp": "Cette licence figure sur la liste de blocage de licences de l'organisation.",
+      "licenseUnknown": "inconnue",
+      "licenseUnknownHelp": "Aucune licence n'a été extraite pour cette version."
     },
     "status": {
       "blocked": "Bloqué",
@@ -281,10 +298,26 @@
       "stale": "En retard sur l'amont — la dernière version {version} n'est pas mise en cache ici.",
       "current": "À jour avec l'amont — la dernière version {version} est mise en cache."
     },
+    "abandonedBanner": {
+      "text": "Abandonné — aucune nouvelle version publiée en amont depuis plus d'un an."
+    },
     "latestCell": {
       "isLatest": "Dernière version en amont",
       "behind": "En retard sur la dernière version en amont",
       "unknown": "Aucune version en amont à comparer"
+    },
+    "behindCell": {
+      "count": "{count, plural, =0 {à jour} one {# de retard} other {# de retard}}",
+      "unscored": "NON COTÉ",
+      "help": "Nombre de versions STABLES en amont plus récentes que celle-ci.",
+      "unscoredHelp": "Inconnu — aucune donnée de version en amont à comparer (hébergé uniquement, air-gapped, ou pas encore actualisé)."
+    },
+    "pillars": {
+      "security": "Sécurité",
+      "license": "Licence",
+      "operational": "Opérationnel",
+      "noAdvisories": "Aucun avis",
+      "licenseCount": "{count, plural, =0 {aucun risque} one {# version} other {# versions}}"
     },
     "vulnNever": "Jamais",
     "fileCount": "{count} fichiers",
@@ -514,13 +547,16 @@
       "licenses": "Licences",
       "serviceTokens": "Jetons de service",
       "webhooks": "Webhooks",
+      "alerts": "Alertes",
       "banners": "Annonces",
       "instance": "Paramètres de l'instance",
       "metrics": "Accès aux métriques"
     },
     "storage": {
       "uploadTitle": "Limites de téléversement",
-      "retentionTitle": "Rétention"
+      "uploadHint": "Plafonne la taille d'un téléversement, en Mo. Les limites par écosystème remplacent la limite ci-dessous ; le plafond de l'instance les borde toutes.",
+      "retentionTitle": "Rétention",
+      "retentionHint": "Détermine la durée de conservation des anciennes versions, des fichiers de proxy en cache et de l'historique d'activité avant le nettoyage automatique. Laissez un champ vide pour une durée illimitée."
     },
     "webhooks": {
       "section": "Abonnements aux webhooks",
@@ -563,6 +599,22 @@
         "package.yank": "Rétractation",
         "package.vulnerability": "Vulnérabilité"
       }
+    },
+    "alerts": {
+      "section": "Centre d'alertes",
+      "hint": "Les alertes se déclenchent sur un nouvel élément en quarantaine et sur une vulnérabilité atteignant le seuil de gravité ci-dessous. La livraison Slack est facultative et nécessite DEPENDABLY_MASTER_KEY pour stocker l'URL du webhook.",
+      "quarantineEnabled": "Alerter sur les nouveaux éléments en quarantaine",
+      "vulnEnabled": "Alerter sur les vulnérabilités",
+      "minSeverity": "Gravité minimale de vulnérabilité",
+      "minSeverityHint": "Seules les avis atteignant ou dépassant cette gravité déclenchent une alerte. Les avis sans note ne déclenchent jamais d'alerte.",
+      "slackEnabled": "Envoyer les alertes à Slack",
+      "slackUrl": "URL du webhook Slack",
+      "slackUrlHint": "URL de webhook entrant de Slack. Nécessite DEPENDABLY_MASTER_KEY pour le stockage.",
+      "slackUrlRotateHint": "Saisissez une nouvelle valeur pour renouveler l'URL du webhook. Laissez vide pour conserver l'URL actuelle.",
+      "slackLastStatus": "Dernière livraison Slack : {status}",
+      "testSend": "Envoyer un message de test",
+      "testOk": "Message de test envoyé.",
+      "testFail": "Échec du message de test."
     },
     "banners": {
       "severity": "Niveau",
@@ -758,9 +810,11 @@
     "uploadLimits": {
       "instanceCeiling": "Plafond de l'instance : {mb} Mo",
       "allEcosystems": "Tous les écosystèmes",
-      "exceedsCeiling": "Ne peut pas dépasser le plafond de l'instance de {bytes} octets.",
-      "bytesLabel": "{label} (octets)",
-      "inheritPlaceholder": "hériter de l'instance"
+      "exceedsCeiling": "Ne peut pas dépasser le plafond de l'instance de {mb} Mo.",
+      "globalBlankHint": "Un champ vide utilise la limite de l'instance de {mb} Mo.",
+      "globalBlankNoLimitHint": "Un champ vide autorise des téléversements de toute taille — aucune limite d'instance n'est configurée.",
+      "perEcoHint": "Remplace la limite ci-dessus pour cet écosystème seulement. Un champ vide utilise la limite ci-dessus, ou celle de l'instance si elle aussi est vide.",
+      "perEcoBlankPlaceholder": "Vide — la limite de l'instance s'applique"
     },
     "retention": {
       "keepVersions": "Conserver les versions",
@@ -917,12 +971,12 @@
         "includeDeprecated": "Inclure les identifiants SPDX dépréciés",
         "approve": "Approuver",
         "block": "Bloquer",
-        "compound": "composée",
         "deprecated": "dépréciée",
-        "compoundTooltip": "Les expressions composées (p. ex. « MIT OR Apache-2.0 ») ne peuvent pas être ajoutées directement à la politique — elles ne correspondraient pas à une recherche ultérieure pour une licence unique. Séparez-les en amont.",
         "columns": {
+          "name": "Nom",
           "packages": "Paquets",
           "firstSeen": "Première détection",
+          "classification": "Classification",
           "flags": "Indicateurs"
         }
       },
@@ -1118,6 +1172,9 @@
     "totalDownloads": "Téléchargements (30j)",
     "blockedPulls": "Récupérations bloquées (30j)",
     "blockedMalicious": "Paquets malveillants bloqués (30j)",
+    "operationalRisk": "Risque opérationnel",
+    "operationalRiskSub": "≥ {threshold} versions de retard",
+    "licenseRisk": "Risque lié aux licences",
     "quarantinePending": "Quarantaine en attente",
     "hostedProxied": "{hosted} hébergés · {proxied} relayés",
     "quotaUsage": "sur {total} de quota",
@@ -1221,9 +1278,72 @@
       "details": "Détails",
       "databaseSpecific": "Spécifique à la base",
       "loading": "Chargement du détail de l'avis…",
-      "error": "Impossible de charger le détail de l'avis."
+      "error": "Impossible de charger le détail de l'avis.",
+      "remediation": {
+        "title": "Remédiation",
+        "fixWithAgent": "Corriger avec votre agent IA",
+        "installLabel": "Installer la compétence",
+        "promptLabel": "Invite"
+      }
     },
     "empty": "Aucun paquet vulnérable trouvé"
+  },
+  "lookup": {
+    "title": "Vérifier un paquet",
+    "intro": "Vérifiez un paquet candidat pour un maliciel, des CVE connues et la politique de licence avant de l'ajouter. Rien n'est téléchargé, mis en cache ou installé.",
+    "form": {
+      "ecosystem": "Écosystème",
+      "name": "Nom du paquet",
+      "namePlaceholder": "p. ex. left-pad",
+      "version": "Version",
+      "versionPlaceholder": "Laisser vide pour la dernière version",
+      "submit": "Vérifier le paquet",
+      "mavenHint": "groupId:artifactId",
+      "versionRequiredHint": "Une version est requise pour cet écosystème."
+    },
+    "verdict": {
+      "allowed": "Autorisé",
+      "warn": "Avertissement",
+      "blocked": "Bloqué",
+      "evaluated": "Évalué : {purl}",
+      "versionInferred": "Dernière version stable — aucune version n'a été précisée"
+    },
+    "malware": {
+      "title": "Maliciel",
+      "detected": "Paquet malveillant connu",
+      "clean": "Aucun avis de malveillance connu"
+    },
+    "vulns": {
+      "title": "Vulnérabilités",
+      "unavailable": "Les données de vulnérabilité n'ont pas pu être vérifiées pour cette recherche.",
+      "clean": "Aucune vulnérabilité connue",
+      "scored": "Cotées",
+      "unscored": "NON COTÉES / SANS CVSS",
+      "unscoredHint": "Gravité non divulguée — ne signifie pas absence de risque.",
+      "kev": "CISA KEV",
+      "epss": "EPSS {value}"
+    },
+    "license": {
+      "title": "Licence",
+      "policy": "Politique : {mode}",
+      "unavailable": "Non déterminable à partir des métadonnées en amont pour cet écosystème.",
+      "allowed": "Autorisée par la politique",
+      "blocked": "Non autorisée par la politique ({spdx})",
+      "informational": "Consignée à titre informatif — la politique de licence est désactivée."
+    },
+    "unavailableChecks": {
+      "title": "Non vérifié lors de la recherche",
+      "release_age": "Délai de retenue par âge",
+      "deprecated": "État de dépréciation",
+      "license": "Licence",
+      "vulnerabilities": "Analyse de vulnérabilités"
+    },
+    "airGapped": "Isolé du réseau — les métadonnées en amont n'ont pas été vérifiées; les avis et la licence proviennent uniquement du miroir local.",
+    "errors": {
+      "notFound": "Ce paquet ou cette version est introuvable en amont.",
+      "unavailable": "Le registre en amont est temporairement indisponible. Réessayez sous peu."
+    },
+    "empty": "Saisissez un paquet ci-dessus pour vérifier son statut de maliciel, de CVE et de licence avant de l'ajouter."
   },
   "licensePolicy": {
     "title": "Politique de licences",
@@ -1251,6 +1371,21 @@
       "name": "Nom",
       "attributes": "Attributs"
     }
+  },
+  "licenseClassification": {
+    "permissive": "permissive",
+    "weak-copyleft": "copyleft faible",
+    "strong-copyleft": "copyleft fort",
+    "network-copyleft": "copyleft réseau",
+    "public-domain": "domaine public"
+  },
+  "licenseText": {
+    "title": "Texte de la licence",
+    "loading": "Chargement du texte de la licence…",
+    "notAvailable": "Le texte intégré de cette licence n'est pas disponible.",
+    "viewUpstream": "Voir en amont",
+    "close": "Fermer",
+    "open": "Voir le texte de la licence"
   },
   "profile": {
     "title": "Profil",

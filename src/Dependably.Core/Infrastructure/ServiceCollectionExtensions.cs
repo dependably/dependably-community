@@ -27,6 +27,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<UserTokenVersionStore>();
         services.AddSingleton<OrgRepository>();
         services.AddSingleton<PackageRepository>();
+        services.AddSingleton<PackageVersionFilesRepository>();
         services.AddSingleton<NuGetSymbolIndexRepository>();
         services.AddSingleton<StatsSnapshotRepository>();
         services.AddSingleton<TokenRepository>();
@@ -56,6 +57,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<Dependably.Protocol.ReservedNamespaceService>();
         services.AddSingleton<Dependably.Protocol.InstallScriptAllowlistService>();
         services.AddSingleton<QuarantineRepository>();
+        services.AddSingleton<Alerts.AlertRepository>();
+        services.AddSingleton<Alerts.AlertService>();
         services.AddSingleton<UpstreamRegistryRepository>();
         services.AddSingleton<TrustAnchorRepository>();
         services.AddSingleton<IPerOrgTrustAnchorStore, PerOrgTrustAnchorStore>();

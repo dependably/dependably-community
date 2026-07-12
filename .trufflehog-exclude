@@ -5,3 +5,13 @@
 # Connection-string placeholder examples (Password=..., Password=<secret>) in a
 # deleted enterprise infra doc. SQLServer detector flags these as unverified.
 ^docs/aws\.md$
+
+# The secret-scan walks full history across all branches. Exclude this allowlist
+# file from its own scan so placeholder examples in these comments are not
+# re-flagged by the URI detector.
+^\.trufflehog-exclude$
+
+# apk Basic-auth doc-comment placeholder (URL userinfo form) is not a credential.
+# It lives in apk ecosystem commit history, which the full-history scan walks.
+^src/Dependably\.Core/Api/ApkController\.cs$
+^tests/Dependably\.Tests/Integration/ApkControllerTests\.cs$

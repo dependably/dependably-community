@@ -156,35 +156,9 @@ public sealed class ImportController : ControllerBase
                 break;
             }
 
-            // Resolve the org-global size cap before ecosystem is known so an oversized
-            // file is rejected before any bytes enter managed memory. The publish pipeline
-            // re-checks the per-ecosystem cap after detection; both layers are necessary.
-            long preStageCap = await ResolveGlobalCapAsync(orgId, ct);
-            var stageResult = await StageToDiskAsync(file, preStageCap, ct);
-            if (stageResult.Error is not null)
-            {
-                outcomes.Add(Reject(file.FileName, stageResult.Error.Value.Code, stageResult.Error.Value.Message, dryRun: dryRun));
-                rejected++;
-                continue;
-            }
-
-            string tempPath = stageResult.TempPath!;
-            object outcome;
-            try
-            {
-                // The artifact never enters managed memory as a whole: detection reads
-                // it back from disk one buffer at a time, and the publish tail streams
-                // the same staged file straight to the blob store.
-                var staged = new StagedFile(file.FileName, tempPath, stageResult.Size);
-                outcome = await ImportOneAsync(importCtx, staged, settings, dryRun, ct);
-            }
-            finally
-            {
-                DeleteTempFile(tempPath);
-            }
-
+            var (outcome, isAccepted) = await ProcessArtefactFileAsync(importCtx, file, settings, dryRun, orgId, ct);
             outcomes.Add(outcome);
-            if (outcome is AcceptedOutcome)
+            if (isAccepted)
             {
                 accepted++;
             }
@@ -203,6 +177,37 @@ public sealed class ImportController : ControllerBase
             rejected,
             outcomes
         });
+    }
+
+    // Stages one uploaded file to disk under the org-global size cap, then imports it. Resolving
+    // the cap before the ecosystem is known rejects an oversized file before any bytes enter
+    // managed memory; the publish pipeline re-checks the per-ecosystem cap after detection, so
+    // both layers are necessary. The artifact never enters managed memory as a whole: detection
+    // reads it back from disk one buffer at a time, and the publish tail streams the same staged
+    // file straight to the blob store.
+    private async Task<(object Outcome, bool Accepted)> ProcessArtefactFileAsync(
+        ImportContext importCtx, IFormFile file, OrgSettings? settings, bool dryRun, string orgId, CancellationToken ct)
+    {
+        long preStageCap = await ResolveGlobalCapAsync(orgId, ct);
+        var stageResult = await StageToDiskAsync(file, preStageCap, ct);
+        if (stageResult.Error is not null)
+        {
+            return (Reject(file.FileName, stageResult.Error.Value.Code, stageResult.Error.Value.Message, dryRun: dryRun), false);
+        }
+
+        string tempPath = stageResult.TempPath!;
+        object outcome;
+        try
+        {
+            var staged = new StagedFile(file.FileName, tempPath, stageResult.Size);
+            outcome = await ImportOneAsync(importCtx, staged, settings, dryRun, ct);
+        }
+        finally
+        {
+            DeleteTempFile(tempPath);
+        }
+
+        return (outcome, outcome is AcceptedOutcome);
     }
 
     /// <summary>
@@ -748,6 +753,12 @@ public sealed class ImportController : ControllerBase
         long sizeCap = SizeCapFor(detection.Ecosystem, settings);
         string purl = PurlFor(detection);
         var claim = await _claimResolver.ResolveAsync(ctx.OrgId, detection.Ecosystem, detection.PurlName, ct);
+
+        // Extracted before the publish call (dry-run included — ValidateAsync ignores the field
+        // harmlessly) so the hard-block gate inside StoreAndRecordAsync can evaluate it before
+        // the version row is persisted; the same extraction is reused below to attach the
+        // license rows on acceptance.
+        var extracted = await ExtractLicenseAsync(detection.Ecosystem, file.TempPath, file.Filename, ct);
         var request = new PublishRequest
         {
             OrgId = ctx.OrgId,
@@ -768,6 +779,7 @@ public sealed class ImportController : ControllerBase
             ClaimState = claim.State,
             SourceIp = HttpContext.GetNormalizedRemoteIp(),
             ManifestJson = detection.NpmManifestJson,
+            Licenses = extracted.Spdx.Count > 0 ? extracted.Spdx : null,
         };
         var result = dryRun
             ? await _publish.ValidateAsync(request, ct)
@@ -775,7 +787,6 @@ public sealed class ImportController : ControllerBase
 
         if (!dryRun && result is PublishResult.Accepted accepted)
         {
-            var extracted = await ExtractLicenseAsync(detection.Ecosystem, file.TempPath, file.Filename, ct);
             if (extracted.Spdx.Count > 0)
             {
                 await _licenses.SetLicensesAsync(accepted.VersionId, extracted.Spdx, "uploaded", ct);

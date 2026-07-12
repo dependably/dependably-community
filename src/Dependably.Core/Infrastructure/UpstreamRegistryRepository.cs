@@ -33,7 +33,7 @@ public sealed class UpstreamRegistryRepository
     /// (<c>Oci:Upstreams</c>) is no longer used.
     /// </summary>
     public static readonly IReadOnlyList<string> SupportedEcosystems =
-        ["pypi", "npm", "nuget", "maven", "rpm", "cargo", "golang", "oci"];
+        ["pypi", "npm", "nuget", "maven", "rpm", "cargo", "golang", "oci", "apk"];
 
     public static bool IsSupportedEcosystem(string? ecosystem) =>
         ecosystem is not null && SupportedEcosystems.Contains(ecosystem);

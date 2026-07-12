@@ -45,11 +45,12 @@ public sealed class PackageRepository
     public async Task<Package?> GetByPurlNameAsync(string orgId, string ecosystem, string purlName, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        return await conn.QuerySingleOrDefaultAsync<Package>(
+        var pkg = await conn.QuerySingleOrDefaultAsync<Package>(
             """
             SELECT p.id, p.org_id as OrgId, p.ecosystem, p.name, p.purl_name as PurlName,
                    p.is_proxy as IsProxy, p.created_at as CreatedAt,
                    p.upstream_latest_version as UpstreamLatestVersion,
+                   p.upstream_latest_published_at as UpstreamLatestPublishedAt,
                    p.same_version_push_override as SameVersionPushOverride,
                    CASE
                      WHEN p.upstream_latest_version IS NULL THEN 'unknown'
@@ -72,7 +73,24 @@ public sealed class PackageRepository
             WHERE p.org_id = @orgId AND p.ecosystem = @ecosystem AND p.purl_name = @purlName
             """,
             new { orgId, ecosystem, purlName });
+        // S1121 false positive: this is C#'s null-conditional assignment statement, not an
+        // assignment inside a sub-expression; IDE0031 requires this form.
+#pragma warning disable S1121
+        pkg?.AbandonedState = AbandonedStateOf(pkg.UpstreamLatestPublishedAt);
+#pragma warning restore S1121
+        return pkg;
     }
+
+    // Tri-state derivation of the "abandoned" signal, computed in C# against the injected
+    // TimeProvider (never SQL date math, so it stays deterministic under frozen-clock tests):
+    // "unknown" when no publish timestamp is known (hosted-only package, unsupported ecosystem,
+    // air-gapped, or not yet refreshed) — never rendered as "abandoned", since that would assert
+    // a fact the server doesn't actually know. "abandoned" when the upstream latest release is at
+    // least a year old; "active" otherwise.
+    private string AbandonedStateOf(DateTimeOffset? upstreamLatestPublishedAt) =>
+        upstreamLatestPublishedAt is not { } publishedAt
+            ? "unknown"
+            : _time.GetUtcNow() - publishedAt >= TimeSpan.FromDays(365) ? "abandoned" : "active";
 
     /// <summary>
     /// The exact INSERT statement <see cref="GetOrCreateAsync"/> runs for a new package.
@@ -227,6 +245,7 @@ public sealed class PackageRepository
                    pv.provenance_status as ProvenanceStatus,
                    pv.provenance_signer as ProvenanceSigner,
                    pv.manifest_json as ManifestJson,
+                   pv.versions_behind as VersionsBehind,
                    EXISTS (SELECT 1 FROM package_version_vulns pvv
                            JOIN vulnerabilities v ON v.id = pvv.vuln_id
                            WHERE pvv.package_version_id = pv.id
@@ -260,7 +279,8 @@ public sealed class PackageRepository
                    install_script_kind as InstallScriptKind,
                    provenance_status as ProvenanceStatus,
                    provenance_signer as ProvenanceSigner,
-                   manifest_json as ManifestJson
+                   manifest_json as ManifestJson,
+                   versions_behind as VersionsBehind
             FROM package_versions
             WHERE package_id = @packageId AND version = @version
             """,
@@ -292,7 +312,8 @@ public sealed class PackageRepository
                    pv.install_script_kind as InstallScriptKind,
                    pv.provenance_status as ProvenanceStatus,
                    pv.provenance_signer as ProvenanceSigner,
-                   pv.manifest_json as ManifestJson
+                   pv.manifest_json as ManifestJson,
+                   pv.versions_behind as VersionsBehind
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE pv.blob_key = @blobKey AND p.org_id = @orgId
@@ -357,7 +378,8 @@ public sealed class PackageRepository
                    install_script_kind as InstallScriptKind,
                    provenance_status as ProvenanceStatus,
                    provenance_signer as ProvenanceSigner,
-                   manifest_json as ManifestJson
+                   manifest_json as ManifestJson,
+                   versions_behind as VersionsBehind
             FROM package_versions WHERE id = @id
             """,
             new { id }))!;
@@ -551,12 +573,25 @@ public sealed class PackageRepository
             var pageRows = await conn.QueryAsync<Package>(
                 PageHydrateSqlFor(plainOrderBy),
                 new { orgId = query.OrgId, pageIds });
-            return (pageRows.ToList(), total);
+            return (ApplyAbandonedState(pageRows), total);
         }
 
         var rows = await conn.QueryAsync<Package>(FullCteSqlFor(query.SortBy, query.SortDir),
             new { orgId = query.OrgId, ecosystem = query.Ecosystem, searchPattern, limit = query.Limit, offset = query.Offset });
-        return (rows.ToList(), total);
+        return (ApplyAbandonedState(rows), total);
+    }
+
+    // Computes the "abandoned" tri-state for each row in C# (against the injected TimeProvider)
+    // rather than in SQL, so the derivation stays deterministic under frozen-clock tests and
+    // provider-agnostic (no strftime/to_char branch needed).
+    private List<Package> ApplyAbandonedState(IEnumerable<Package> rows)
+    {
+        var list = rows.ToList();
+        foreach (var pkg in list)
+        {
+            pkg.AbandonedState = AbandonedStateOf(pkg.UpstreamLatestPublishedAt);
+        }
+        return list;
     }
 
     private const string CountSql =
@@ -642,6 +677,7 @@ public sealed class PackageRepository
                        WHERE taa.org_id = p.org_id AND ca.ecosystem = p.ecosystem AND ca.name = p.purl_name
                    ), 0) as TotalDownloads,
                    p.upstream_latest_version as UpstreamLatestVersion,
+                   p.upstream_latest_published_at as UpstreamLatestPublishedAt,
                    (EXISTS (SELECT 1 FROM package_versions pvm
                            JOIN package_version_vulns pvv ON pvv.package_version_id = pvm.id
                            JOIN vulnerabilities v ON v.id = pvv.vuln_id
@@ -770,7 +806,8 @@ public sealed class PackageRepository
                    pv.install_script_kind as InstallScriptKind,
                    pv.provenance_status as ProvenanceStatus,
                    pv.provenance_signer as ProvenanceSigner,
-                   pv.manifest_json as ManifestJson
+                   pv.manifest_json as ManifestJson,
+                   pv.versions_behind as VersionsBehind
             FROM package_versions pv
             JOIN packages p ON p.id = pv.package_id
             WHERE pv.id = @versionId AND p.org_id = @orgId
@@ -810,6 +847,20 @@ public sealed class PackageRepository
     /// The decrement uses the same MAX(0, …) clamp as the release path so counter underflow
     /// (e.g. a row deleted before the counter column existed) cannot produce negative values.
     /// </summary>
+    /// <summary>
+    /// Deletes a version ROW without touching the tenant storage counter — the publish
+    /// rollback path only. The failed publish's own quota reservation is released by its
+    /// caller, so the counter-coupled <see cref="DeleteVersionAsync"/> would decrement the
+    /// tenant's <c>storage_used_bytes</c> a second time and drift it low.
+    /// </summary>
+    public async Task DeleteVersionRowForPublishRollbackAsync(string versionId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by version PK (globally unique surrogate); the caller created this
+        // row moments ago in the same publish.
+        await conn.ExecuteAsync("DELETE FROM package_versions WHERE id = @id", new { id = versionId });
+    }
+
     public async Task DeleteVersionAsync(string versionId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
@@ -1000,19 +1051,46 @@ public sealed class PackageRepository
     }
 
     /// <summary>
-    /// Records upstream's declared latest version for a package and stamps the refresh time.
-    /// Called by DeprecationRefreshService on each upstream-metadata pass. A null
-    /// <paramref name="latestVersion"/> clears the baseline (upstream had no latest claim).
+    /// Writes the operational-risk versions-behind count on a hosted (<c>origin='uploaded'</c>)
+    /// <c>package_versions</c> row. Mirrors <see
+    /// cref="CacheArtifactRepository.UpdateVersionsBehindAsync"/> for the proxy plane.
+    /// <paramref name="versionsBehind"/> is null when the count is unknown — never coerced to 0.
     /// </summary>
-    // xtenant: UPDATE keyed by the package id (already org-scoped via FK); caller resolves the
-    // package within a single org's refresh pass.
-    public async Task UpdateUpstreamLatestAsync(string packageId, string? latestVersion, CancellationToken ct = default)
+    public async Task UpdateVersionsBehindAsync(string versionId, int? versionsBehind, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: UPDATE by version_id; caller obtained the id from an org-scoped lookup.
+        await conn.ExecuteAsync(
+            "UPDATE package_versions SET versions_behind = @versionsBehind WHERE id = @id",
+            new { id = versionId, versionsBehind });
+    }
+
+    /// <summary>
+    /// Records upstream's declared latest version (and, when known, its publish timestamp) for a
+    /// package and stamps the refresh time. Called by DeprecationRefreshService on each
+    /// upstream-metadata pass and by the first-fetch seed. A null <paramref name="latestVersion"/>
+    /// clears the baseline (upstream had no latest claim); <paramref name="publishedAt"/> is
+    /// independently nullable — a resolved version with an unknown publish time (the ecosystem's
+    /// metadata doesn't carry one, or the timestamp fetch failed) still clears/sets it to null
+    /// rather than leaving a stale value from a previous latest version.
+    /// </summary>
+    public async Task UpdateUpstreamLatestAsync(
+        string packageId, string? latestVersion, DateTimeOffset? publishedAt = null, CancellationToken ct = default)
     {
         string now = _time.GetUtcNow().ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string? publishedAtIso = publishedAt?.ToUniversalTime().ToString("o");
         await using var conn = await _db.OpenAsync(ct);
+        // xtenant: UPDATE keyed by the package id (already org-scoped via FK); caller resolves
+        // the package within a single org's refresh pass.
         await conn.ExecuteAsync(
-            "UPDATE packages SET upstream_latest_version = @latestVersion, upstream_latest_checked_at = @now WHERE id = @id",
-            new { id = packageId, latestVersion, now });
+            """
+            UPDATE packages
+            SET upstream_latest_version = @latestVersion,
+                upstream_latest_checked_at = @now,
+                upstream_latest_published_at = @publishedAtIso
+            WHERE id = @id
+            """,
+            new { id = packageId, latestVersion, now, publishedAtIso });
     }
 
     // ── Go module proxy helpers ──────────────────────────────────────────────

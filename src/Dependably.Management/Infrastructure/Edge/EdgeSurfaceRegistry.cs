@@ -40,17 +40,20 @@ public static class EdgeSurfaceRegistry
         typeof(Api.OrgAuthConfigController),
         typeof(Api.BannersController),
         typeof(Api.QuarantineController),
+        typeof(Api.AlertsController),
         typeof(Api.TrustAnchorController),
         typeof(Api.UpstreamRegistryController),
         typeof(Api.WebhookController),
         typeof(Api.SiemController),
         typeof(Api.ImportController),
         typeof(Api.SearchController),
+        typeof(Api.LookupController),
         typeof(Api.ClaimsController),
         typeof(Api.VulnerabilityController),
         typeof(Api.LicenseController),
         typeof(Api.LicensesController),
         typeof(Api.SpdxLicenseController),
+        typeof(Api.RemediationController),
     };
 
     /// <summary>

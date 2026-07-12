@@ -45,6 +45,10 @@
     <value>Payload Too Large</value>
     <comment>Title of the HTTP 413 problem response (upload exceeds the configured size limit).</comment>
   </data>
+  <data name="error.serviceUnavailable.title" xml:space="preserve">
+    <value>Service Unavailable</value>
+    <comment>Title of the HTTP 503 problem response (a dependency the request needs is temporarily unreachable).</comment>
+  </data>
   <data name="error.org.notFound" xml:space="preserve">
     <value>Organization not found.</value>
     <comment>404 body when the organization (tenant) addressed by the request does not exist.</comment>
@@ -436,6 +440,54 @@
   <data name="error.webhook.unknownEventTypes" xml:space="preserve">
     <value>Unknown event types: {0}. Valid types: {1}.</value>
     <comment>422 detail. {0} = rejected entries, {1} = the full valid set (API literals).</comment>
+  </data>
+  <data name="error.alert.stateInvalid" xml:space="preserve">
+    <value>Must be 'active' or 'dismissed'.</value>
+    <comment>422 detail for the alert state filter. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.alert.severityInvalid" xml:space="preserve">
+    <value>Must be 'LOW', 'MEDIUM', 'HIGH', or 'CRITICAL'.</value>
+    <comment>422 detail for the vulnMinSeverity setting. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.alert.masterKeyRequired" xml:space="preserve">
+    <value>DEPENDABLY_MASTER_KEY must be configured to store a Slack webhook URL at rest.</value>
+    <comment>422 detail. DEPENDABLY_MASTER_KEY is an environment variable name - keep it verbatim.</comment>
+  </data>
+  <data name="error.alert.slackNotConfigured" xml:space="preserve">
+    <value>Slack delivery is not enabled or no webhook URL is configured for this org.</value>
+    <comment>422 detail when testing Slack delivery with no webhook configured.</comment>
+  </data>
+  <data name="error.alert.slackTestFailed" xml:space="preserve">
+    <value>Slack test message failed: {0}</value>
+    <comment>422 detail. {0} = the underlying HTTP/network error message.</comment>
+  </data>
+  <data name="error.lookup.nameRequired" xml:space="preserve">
+    <value>name is required.</value>
+    <comment>422 detail for GET /api/v1/lookup when the name query parameter is missing. 'name' is the API literal query-parameter name.</comment>
+  </data>
+  <data name="error.lookup.nameInvalid" xml:space="preserve">
+    <value>Package name is not valid for this ecosystem.</value>
+    <comment>422 detail for GET /api/v1/lookup when the name query parameter has an invalid shape (path separators, control characters, or fails the ecosystem's own naming rules).</comment>
+  </data>
+  <data name="error.lookup.versionInvalid" xml:space="preserve">
+    <value>Version is not valid.</value>
+    <comment>422 detail for GET /api/v1/lookup when the version query parameter has an invalid shape.</comment>
+  </data>
+  <data name="error.lookup.mavenCoordinateInvalid" xml:space="preserve">
+    <value>Maven name must be a "groupId:artifactId" coordinate.</value>
+    <comment>422 detail for GET /api/v1/lookup?ecosystem=maven. 'groupId:artifactId' is the literal expected shape - do not translate the punctuation.</comment>
+  </data>
+  <data name="error.lookup.versionRequired" xml:space="preserve">
+    <value>version is required for ecosystem '{0}'.</value>
+    <comment>422 detail for GET /api/v1/lookup when no version was given and the ecosystem has no "latest" to resolve against (Go, Cargo, or an air-gapped org/instance). {0} = the ecosystem name (API literal).</comment>
+  </data>
+  <data name="error.lookup.packageNotFound" xml:space="preserve">
+    <value>Package or version not found upstream.</value>
+    <comment>404 detail for GET /api/v1/lookup when the upstream registry was reachable but does not know the requested package/version.</comment>
+  </data>
+  <data name="error.lookup.upstreamUnavailable" xml:space="preserve">
+    <value>The upstream registry for '{0}' is temporarily unavailable. Try again shortly.</value>
+    <comment>503 detail for GET /api/v1/lookup when the upstream registry could not be reached (transient network failure) or has no upstream configured. {0} = the ecosystem name (API literal).</comment>
   </data>
   <data name="email.invite.subject" xml:space="preserve">
     <value>You've been invited to {0} on Dependably</value>

@@ -210,19 +210,20 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             upstreamClient, tiered, _db, config, NullLogger<MavenUpstreamFetcher>.Instance, TimeProvider.System);
 
         var vulns = new VulnerabilityRepository(_db, TimeProvider.System);
-        var licenses = new LicenseRepository(_db, TimeProvider.System);
+        var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
         var scanner = new VulnerabilityScanService(new VulnerabilityScanService.Dependencies(
             _db, osv, vulns, _audit, config,
             new StubAirGapMode(false),
             NullLogger<VulnerabilityScanService>.Instance,
             TimeProvider.System,
             new OrgRepository(_db),
-            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System)));
         var cacheArtifact = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var proxyVersions = new ProxyVersionRecorder(_packages, _audit, licenses, cacheArtifact,
             Substitute.For<IUpstreamLatestVersionResolver>(), NullLogger<ProxyVersionRecorder>.Instance);
-        var blockGate = new BlockGateService(vulns, _audit, new QuarantineRepository(_db, TimeProvider.System), new InstallScriptAllowlistService(_db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), TimeProvider.System), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, TimeProvider.System);
+        var blockGate = Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, TimeProvider.System);
         var cacheRecorder = new CacheAccessRecorder(
             cacheArtifact, tenantAccess,
             NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
@@ -251,7 +252,8 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
                 new Dependably.Tests.Infrastructure.StubPerOrgTrustAnchorStore(),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance),
             EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
-            Staging: new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0));
+            Staging: new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0),
+            Licenses: licenses);
 
         return new MavenController(svc)
         {
@@ -415,6 +417,57 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
         ctl2.Request.Headers.IfNoneMatch = etag;
         var second = await ctl2.Download(artifactPath + "/maven-metadata.xml", CancellationToken.None);
         Assert.Equal(304, Assert.IsType<StatusCodeResult>(second).StatusCode);
+    }
+
+    [Fact]
+    public async Task ProxyMiss_Pom_ExtractsLicenses_ToCachePlane()
+    {
+        byte[] pom = Encoding.UTF8.GetBytes("""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>com.example</groupId>
+              <artifactId>lic</artifactId>
+              <version>1.0</version>
+              <licenses>
+                <license>
+                  <name>The Apache Software License, Version 2.0</name>
+                  <url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
+                </license>
+              </licenses>
+            </project>
+            """);
+        string path = "com/example/lic/1.0/lic-1.0.pom";
+        StubArtifact(path, pom);
+        StubSidecar(path, Sha256Hex(pom));
+
+        var ctl = BuildController(CleanOsv());
+        var result = await ctl.Download(path, CancellationToken.None);
+        Assert.Equal(pom, Dependably.Tests.Infrastructure.MavenServe.File(result).FileContents);
+
+        await using var conn = await _db.OpenAsync();
+        var spdx = (await conn.QueryAsync<string>(
+            "SELECT license_spdx FROM package_version_licenses WHERE owner_kind = 'cache_artifact'"))
+            .ToList();
+        Assert.Equal(new[] { "Apache-2.0" }, spdx);
+    }
+
+    [Fact]
+    public async Task ProxyMiss_Jar_WritesNoLicenseRows()
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes("just-a-jar-no-pom");
+        string path = "com/example/nolic/1.0/nolic-1.0.jar";
+        StubArtifact(path, bytes);
+        StubSidecar(path, Sha256Hex(bytes));
+
+        var ctl = BuildController(CleanOsv());
+        var result = await ctl.Download(path, CancellationToken.None);
+        Assert.Equal(bytes, Dependably.Tests.Infrastructure.MavenServe.File(result).FileContents);
+
+        await using var conn = await _db.OpenAsync();
+        long licRows = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_version_licenses");
+        Assert.Equal(0, licRows);
     }
 
     // ── test doubles (mirror MavenUpstreamFetcherTests) ─────────────────────────

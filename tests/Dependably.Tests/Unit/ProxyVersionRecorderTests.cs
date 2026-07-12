@@ -33,13 +33,30 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         string orgId = await SeedOrgAsync();
         var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
         resolver.ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult<string?>("9.9.9"));
+            .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", null)));
         var recorder = BuildRecorder(resolver);
 
         await recorder.RecordAsync(await BuildRequestAsync(orgId, "left-pad", "1.0.0"), extractLicenses: null);
 
         Assert.Equal("9.9.9", await ReadUpstreamLatestAsync(orgId, "left-pad"));
         await resolver.Received(1).ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task RecordAsync_FirstFetch_SeedsUpstreamLatestPublishedAtWhenKnown()
+    {
+        string orgId = await SeedOrgAsync();
+        var publishedAt = new DateTimeOffset(2024, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
+        resolver.ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", publishedAt)));
+        var recorder = BuildRecorder(resolver);
+
+        await recorder.RecordAsync(await BuildRequestAsync(orgId, "left-pad", "1.0.0"), extractLicenses: null);
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync(orgId, "npm", "left-pad");
+        Assert.Equal(publishedAt, pkg!.UpstreamLatestPublishedAt);
     }
 
     [Fact]
@@ -50,7 +67,7 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         await SeedPackageWithLatestAsync(orgId, "left-pad", "5.0.0");
         var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
         resolver.ResolveAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult<string?>("9.9.9"));
+            .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", null)));
         var recorder = BuildRecorder(resolver);
 
         await recorder.RecordAsync(await BuildRequestAsync(orgId, "left-pad", "1.1.0"), extractLicenses: null);
@@ -60,9 +77,64 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task RecordAsync_FirstFetch_SeedsVersionsBehindOnTheCacheArtifactRow()
+    {
+        string orgId = await SeedOrgAsync();
+        string caId = await SeedCacheArtifactAsync(orgId, "left-pad", "1.0.0");
+        var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
+        resolver.ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", null,
+                StableVersionsDescending: new[] { "3.0.0", "2.0.0", "1.0.0" })));
+        var recorder = BuildRecorder(resolver);
+
+        await recorder.RecordAsync(
+            await BuildRequestAsync(orgId, "left-pad", "1.0.0"), extractLicenses: null, cacheArtifactId: caId);
+
+        await using var conn = await _db.OpenAsync();
+        int? behind = await conn.QuerySingleAsync<int?>(
+            "SELECT versions_behind FROM cache_artifact WHERE id = @id", new { id = caId });
+        Assert.Equal(2, behind); // 2.0.0 and 3.0.0 are newer than the held 1.0.0
+    }
+
+    [Fact]
+    public async Task RecordAsync_FirstFetch_SkipsCacheArtifactSeedWhenNotProxyPath()
+    {
+        // cacheArtifactId is null on the uploaded path — TrySeedUpstreamLatestAsync must not
+        // attempt a cache_artifact write it has no row id for.
+        string orgId = await SeedOrgAsync();
+        var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
+        resolver.ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", null,
+                StableVersionsDescending: new[] { "9.9.9" })));
+        var recorder = BuildRecorder(resolver);
+
+        // Should not throw despite no cache_artifact row existing for this coordinate.
+        await recorder.RecordAsync(await BuildRequestAsync(orgId, "left-pad", "1.0.0"), extractLicenses: null);
+
+        Assert.Equal("9.9.9", await ReadUpstreamLatestAsync(orgId, "left-pad"));
+    }
+
+    private async Task<string> SeedCacheArtifactAsync(string orgId, string name, string version)
+    {
+        await using var conn = await _db.OpenAsync();
+        string caId = Guid.NewGuid().ToString("N");
+        string purl = $"pkg:npm/{name}@{version}";
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, purl)
+            VALUES (@id, 'npm', @name, @version, @filename, @blobKey, 'h', @purl)
+            """,
+            new { id = caId, name, version, filename = $"{name}-{version}.tgz", blobKey = $"proxy/{caId}/{name}-{version}.tgz", purl });
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
+            new { orgId, caId });
+        return caId;
+    }
+
     private ProxyVersionRecorder BuildRecorder(IUpstreamLatestVersionResolver resolver) =>
         new(new PackageRepository(_db), new AuditRepository(_db),
-            new LicenseRepository(_db, TimeProvider.System), new CacheArtifactRepository(_db),
+            new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db)), new CacheArtifactRepository(_db),
             resolver, NullLogger<ProxyVersionRecorder>.Instance);
 
     private async Task<ProxyVersionRequest> BuildRequestAsync(string orgId, string name, string version)

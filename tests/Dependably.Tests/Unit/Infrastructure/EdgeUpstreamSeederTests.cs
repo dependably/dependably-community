@@ -44,6 +44,7 @@ public sealed class EdgeUpstreamSeederTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal("https://master.example.com/rpm", byEco["rpm"]);
         Assert.Equal("https://master.example.com/go", byEco["golang"]);
         Assert.Equal("https://master.example.com/cargo", byEco["cargo"]);
+        Assert.Equal("https://master.example.com/apk", byEco["apk"]);
         Assert.Equal("master.example.com", byEco["oci"]);
 
         // Non-OCI ecosystems authenticate with Bearer; OCI uses Basic (user:token).
@@ -74,8 +75,8 @@ public sealed class EdgeUpstreamSeederTests : IClassFixture<InMemoryDbFixture>
         await using var read = await _fixture.Store.OpenAsync();
         int count = await read.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM upstream_registry WHERE org_id = @org", new { org });
-        // 7 non-OCI ecosystems + 1 OCI row, no duplication after a second run.
-        Assert.Equal(8, count);
+        // 8 non-OCI ecosystems + 1 OCI row, no duplication after a second run.
+        Assert.Equal(9, count);
     }
 
     [Fact]
@@ -100,7 +101,7 @@ public sealed class EdgeUpstreamSeederTests : IClassFixture<InMemoryDbFixture>
 
         Assert.All(urls, u => Assert.DoesNotContain("old.example", u));
         Assert.Contains("https://new.example/npm", urls);
-        Assert.Equal(8, urls.Count);
+        Assert.Equal(9, urls.Count);
     }
 
     [Fact]

@@ -6,17 +6,19 @@ using WireMock.ResponseBuilders;
 namespace Dependably.Tests.Integration;
 
 /// <summary>
-/// End-to-end tests pinning the transient upstream retry contract: a transient CDN
-/// error (403/429/5xx) on a proxy cache-miss path must never reach the client as a
-/// fatal 403 or 404. Instead:
+/// End-to-end tests pinning the upstream retry contract on a proxy cache-miss path against an
+/// ANONYMOUS upstream (the factory's default — no per-upstream credential configured):
 /// <list type="bullet">
-///   <item>If a retry within the same request succeeds, the client sees 200.</item>
-///   <item>If retries are exhausted, the client sees 503 (with Retry-After) or 502 —
-///         never 403, never 404.</item>
+///   <item>A transient upstream error (429/5xx, or an anonymous 403 — public CDN bot
+///         mitigation) must never reach the client as a fatal 403 or 404. If a retry within
+///         the same request succeeds, the client sees 200; if retries are exhausted, the
+///         client sees 503 (with Retry-After) — never 403, never 404.</item>
 ///   <item>A genuine upstream 404 still reaches the client as 404 (absence, not transience).</item>
 /// </list>
-/// Covers PyPI and npm (each has its own MISS-handler catch ladder). Pairs with the
-/// unit-level retry tests in UpstreamClientTests.cs.
+/// The AUTHENTICATED-upstream contract — a deterministic 401/403 refusal, never retried,
+/// surfaced as a single-attempt 502 — is pinned end-to-end in EdgeUpstreamRefusalTests (the
+/// edge→master fetch always authenticates). Covers PyPI and npm (each has its own
+/// MISS-handler catch ladder). Pairs with the unit-level retry tests in UpstreamClientTests.cs.
 /// </summary>
 [Trait("Category", "Integration")]
 public sealed class ProxyTransientRetryTests : IClassFixture<DependablyFactory>, IAsyncLifetime
@@ -31,10 +33,11 @@ public sealed class ProxyTransientRetryTests : IClassFixture<DependablyFactory>,
     // ── PyPI ──────────────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task PyPi_PersistentUpstream403_ClientSees503_NotFatalForbidden()
+    public async Task PyPi_AnonymousPersistentUpstream403_ClientSees503_NotFatalForbidden()
     {
-        // All upstream attempts return 403. The client must receive 503 (retryable),
-        // not 403 (which package managers treat as fatal policy) and not 404 (absence).
+        // All upstream attempts return 403 anonymously — a transient CDN condition, retried
+        // with backoff. The client must receive 503 (retryable), not 403 (which package
+        // managers treat as fatal policy) and not 404 (absence).
         string name = $"pypifbd{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         string version = "1.0.0";
         string underscored = name.Replace('-', '_');
@@ -48,7 +51,6 @@ public sealed class ProxyTransientRetryTests : IClassFixture<DependablyFactory>,
                 .WithHeader("Content-Type", "text/html")
                 .WithBody($"<html><body><a href=\"{mockBase}/files/{filename}#sha256={sha256}\">{filename}</a></body></html>"));
 
-        // All artifact fetches return 403 — retries exhausted.
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/files/{filename}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.Forbidden));
@@ -63,6 +65,9 @@ public sealed class ProxyTransientRetryTests : IClassFixture<DependablyFactory>,
         Assert.NotEqual(HttpStatusCode.Forbidden, resp.StatusCode);
         Assert.NotEqual(HttpStatusCode.NotFound, resp.StatusCode);
         Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
+
+        // Retried in-request — all three attempts hit the artifact path before exhaustion.
+        Assert.Equal(3, UpstreamCalls($"/files/{filename}"));
     }
 
     [Fact]
@@ -132,9 +137,10 @@ public sealed class ProxyTransientRetryTests : IClassFixture<DependablyFactory>,
     // ── npm ───────────────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task Npm_PersistentUpstream403_ClientSees503_NotFatalForbidden()
+    public async Task Npm_AnonymousPersistentUpstream403_ClientSees503_NotFatalForbidden()
     {
-        // npm tarballs go through FetchAndCacheByUrlAsync; the same retry contract applies.
+        // npm tarballs go through FetchAndCacheByUrlAsync; the same anonymous-403-is-transient
+        // contract applies — retried with backoff, surfaced as a retryable 503 on exhaustion.
         string name = $"npmfbd{Guid.NewGuid():N}"[..18].ToLowerInvariant();
         string version = "1.0.0";
         string filename = $"{name}-{version}.tgz";
@@ -155,7 +161,6 @@ public sealed class ProxyTransientRetryTests : IClassFixture<DependablyFactory>,
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithHeader("Content-Type", "application/json").WithBody(packument));
 
-        // All tarball fetches return 403 — retries exhausted.
         _factory.MockUpstream
             .Given(Request.Create().WithPath($"/{name}/-/{filename}").UsingGet())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.Forbidden));
@@ -167,6 +172,9 @@ public sealed class ProxyTransientRetryTests : IClassFixture<DependablyFactory>,
         Assert.NotEqual(HttpStatusCode.Forbidden, resp.StatusCode);
         Assert.NotEqual(HttpStatusCode.NotFound, resp.StatusCode);
         Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
+
+        // Retried in-request — all three attempts hit the tarball path before exhaustion.
+        Assert.Equal(3, UpstreamCalls($"/{name}/-/{filename}"));
     }
 
     [Fact]
@@ -203,4 +211,8 @@ public sealed class ProxyTransientRetryTests : IClassFixture<DependablyFactory>,
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
+
+    private int UpstreamCalls(string path) =>
+        _factory.MockUpstream.LogEntries.Count(e =>
+            string.Equals(e.RequestMessage?.Path, path, StringComparison.OrdinalIgnoreCase));
 }

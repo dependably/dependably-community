@@ -273,8 +273,13 @@ internal static class SchemaTestPaths
         };
     }
 
-    public static string SchemaInitializer() =>
-        Path.Combine(SchemaInitializerOwningRoot(), "Infrastructure", "SchemaInitializer.cs");
+    // SchemaInitializer is a partial class split across SchemaInitializer.cs and its
+    // SchemaInitializer.*.cs companions (e.g. .ColumnMigrations.cs, .OwnerPlane.cs, .Reshapes.cs)
+    // — the additive-migration array can live in any of them, so callers must scan every file.
+    public static IReadOnlyList<string> SchemaInitializerFiles() =>
+        Directory.GetFiles(
+            Path.Combine(SchemaInitializerOwningRoot(), "Infrastructure"),
+            "SchemaInitializer*.cs");
 
     public static string SqliteSchema(string srcRoot) => Path.Combine(srcRoot, "Infrastructure", "schema", "Schema.sql");
     public static string PostgresSchema(string srcRoot) => Path.Combine(srcRoot, "Infrastructure", "schema", "Schema.pg.sql");

@@ -17,6 +17,7 @@ namespace Dependably.Api.PyPiProtocol;
 public sealed class PyPiSimpleIndexHandler(
     OrgRepository orgs,
     PackageRepository packages,
+    PackageVersionFilesRepository versionFiles,
     CacheArtifactRepository cacheArtifacts,
     TokenRepository tokens,
     VulnerabilityRepository vulns,
@@ -141,7 +142,10 @@ public sealed class PyPiSimpleIndexHandler(
 
         var allVersions = await LoadCombinedVersionsAsync(orgId, pkg.Id, "pypi", purlName, ct);
         var signals = await LoadVulnSignalsAsync(allVersions, ct);
-        string localHtml = PyPiSimpleIndexHelper.RenderLocalSimpleIndex(pkg.PurlName, allVersions, settings, signals, time.GetUtcNow());
+        // Per-file records exist only for hosted (uploaded) versions; synthetic proxy
+        // projections miss the lookup and render their single version-row artifact.
+        var hostedFiles = await versionFiles.GetByPackageAsync(pkg.Id, ct);
+        string localHtml = PyPiSimpleIndexHelper.RenderLocalSimpleIndex(pkg.PurlName, allVersions, hostedFiles, settings, signals, time.GetUtcNow());
         byte[] localBytes = Encoding.UTF8.GetBytes(localHtml);
         cache.Set(localCacheKey, localBytes, cacheOptions.LocalTtl);
         return ServeNotModifiedOrSetCacheHeaders(httpContext, localBytes, "private, max-age=300")
@@ -200,6 +204,11 @@ public sealed class PyPiSimpleIndexHandler(
         // Load vuln gate signals for all local versions in one batch query. Used by both the
         // fallback renderer and the merged renderer so neither fans out N per-version I/O calls.
         var signals = await LoadVulnSignalsAsync(localVersions, ct);
+        // Per-file records exist only for hosted (uploaded) versions; synthetic proxy
+        // projections miss the lookup and render their single version-row artifact.
+        var hostedFiles = localPkg is null
+            ? PyPiSimpleIndexHelper.NoHostedFiles
+            : await versionFiles.GetByPackageAsync(localPkg.Id, ct);
         var now = time.GetUtcNow();
 
         if (!upstreamOk)
@@ -209,7 +218,7 @@ public sealed class PyPiSimpleIndexHandler(
                 return new NotFoundResult();
             }
 
-            string fallbackHtml = PyPiSimpleIndexHelper.RenderLocalSimpleIndex(purlName, localVersions, settings, signals, now);
+            string fallbackHtml = PyPiSimpleIndexHelper.RenderLocalSimpleIndex(purlName, localVersions, hostedFiles, settings, signals, now);
             byte[] fallbackBytes = Encoding.UTF8.GetBytes(fallbackHtml);
             return ServeNotModifiedOrSetCacheHeaders(httpContext, fallbackBytes, "private, max-age=300")
                 ?? (IActionResult)new ContentResult { Content = fallbackHtml, ContentType = "text/html; charset=utf-8", StatusCode = StatusCodes.Status200OK };
@@ -218,7 +227,7 @@ public sealed class PyPiSimpleIndexHandler(
         // Render the merged index entirely from parsed upstream entries + local versions —
         // mixed-origin namespaces expose private versions alongside upstream, with filenames
         // already present upstream skipped to avoid duplicates.
-        string merged = PyPiSimpleIndexHelper.RenderMergedSimpleIndex(purlName, upstreamEntries, localVersions, settings, signals, now);
+        string merged = PyPiSimpleIndexHelper.RenderMergedSimpleIndex(purlName, upstreamEntries, localVersions, hostedFiles, settings, signals, now);
         byte[] mergedBytes = Encoding.UTF8.GetBytes(merged);
         return ServeNotModifiedOrSetCacheHeaders(httpContext, mergedBytes, "private, max-age=60")
             ?? (IActionResult)new ContentResult { Content = merged, ContentType = "text/html; charset=utf-8", StatusCode = StatusCodes.Status200OK };

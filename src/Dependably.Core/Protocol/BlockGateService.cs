@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Alerts;
 using Dependably.Infrastructure.Observability;
 using Dependably.Protocol.Provenance;
 
@@ -49,44 +50,63 @@ namespace Dependably.Protocol;
 ///
 /// Every automatic policy block (everything except <c>blocked_manual</c>, which is already a
 /// human decision) additionally upserts a pending <c>quarantine</c> review row, best-effort —
-/// a review-queue write failure must never turn a correct 403 into a 500.
+/// a review-queue write failure must never turn a correct 403 into a 500. A fresh insert (not a
+/// conflict-refresh of an already-pending row, and not a no-op against an already-decided one)
+/// also raises a <c>quarantine_new</c> alert via <see cref="AlertService"/>, so a repeat block on
+/// the same purl never re-alerts.
 /// </summary>
 public sealed class BlockGateService
 {
     private readonly VulnerabilityRepository _vulns;
     private readonly AuditRepository _audit;
     private readonly QuarantineRepository _quarantine;
+    private readonly AlertService _alerts;
     private readonly InstallScriptAllowlistService _installScriptAllowlist;
+    private readonly LicenseRepository _licenses;
     private readonly ILogger<BlockGateService> _logger;
     private readonly TimeProvider _time;
 
+#pragma warning disable S107 // DI constructor — each dependency is a distinct policy-arm collaborator.
     public BlockGateService(
         VulnerabilityRepository vulns,
         AuditRepository audit,
         QuarantineRepository quarantine,
+        AlertService alerts,
         InstallScriptAllowlistService installScriptAllowlist,
+        LicenseRepository licenses,
         ILogger<BlockGateService> logger,
         TimeProvider time)
+#pragma warning restore S107
     {
         _vulns = vulns;
         _audit = audit;
         _quarantine = quarantine;
+        _alerts = alerts;
         _installScriptAllowlist = installScriptAllowlist;
+        _licenses = licenses;
         _logger = logger;
         _time = time;
     }
 
     // Best-effort review-queue write beside each policy block's activity row. Failures are
     // logged and swallowed: the 403 already protects the tenant; losing one review row is
-    // recoverable (the next blocked request re-upserts it).
+    // recoverable (the next blocked request re-upserts it). Raises a quarantine_new alert only
+    // when the upsert produced a fresh row — AlertService itself swallows its own failures, so
+    // this method's try/catch exists solely to protect the upsert.
     private async Task QueueForReviewAsync(
         BlockGateRequest request, string gate, string? detail, CancellationToken ct)
     {
         try
         {
-            await _quarantine.UpsertPendingAsync(
+            var result = await _quarantine.UpsertPendingAsync(
                 request.OrgId, request.Ecosystem, request.Purl, gate, detail,
                 string.IsNullOrEmpty(request.VersionId) ? null : request.VersionId, ct);
+
+            if (result.Inserted)
+            {
+                await _alerts.RaiseQuarantineAlertAsync(
+                    request.OrgId, result.RowId, request.Ecosystem, request.Purl, gate, detail, ct);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -159,7 +179,61 @@ public sealed class BlockGateService
             return BlockDecision.Blocked;
         }
 
-        return BlockDecision.Allowed;
+        // Lowest-priority arm: license enforcement. It runs after the pure core has already
+        // ruled the version servable, so every stronger arm above wins first. The license
+        // policy read is strictly guarded — it fires ONLY when the tenant enforces licenses
+        // ('block'), the operator has not manually allowed the version (that override wins),
+        // and nothing above blocked. Under 'off'/'warn', a manual allow, or an already-blocked
+        // verdict, no license row is ever read, so the hot path pays zero extra DB cost.
+        return request.LicenseEnforcementMode == "block" && request.ManualState != "allowed" &&
+               await EvaluateLicenseArmAsync(request, ct) == BlockDecision.Blocked
+            ? BlockDecision.Blocked
+            : BlockDecision.Allowed;
+    }
+
+    // License-policy arm. Reads the artifact's SPDX license entries by owner (cache_artifact on
+    // the proxy/global-plane path, package_version otherwise), evaluates them against the tenant's
+    // allow/block policy in 'block' mode, and — on a rejection — records the side effects
+    // (meter + activity row + review row) mirroring the other arms. No license rows (Go/Apk/OCI
+    // capture none, or extraction was skipped) means an empty entry set, which CheckPolicyAsync
+    // treats as allowed — fail-open, consistent with the other content-signal arms.
+    private async Task<BlockDecision> EvaluateLicenseArmAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        var lookup = request.CacheArtifactId is not null
+            ? await _licenses.GetSpdxForCacheArtifactsAsync([request.CacheArtifactId], ct)
+            : await _licenses.GetSpdxForVersionsAsync([request.VersionId], ct);
+
+        string ownerId = request.CacheArtifactId ?? request.VersionId;
+        var entries = lookup[ownerId].ToList();
+        if (entries.Count == 0)
+        {
+            return BlockDecision.Allowed;
+        }
+
+        var (allowed, blockedLicense) = await _licenses.CheckPolicyAsync(request.OrgId, "block", entries, ct);
+        if (allowed)
+        {
+            return BlockDecision.Allowed;
+        }
+
+        await RecordLicenseBlockAsync(request, blockedLicense, ct);
+        return BlockDecision.Blocked;
+    }
+
+    // Side effects for the license arm: increments the meter, logs the activity row naming the
+    // offending leaf, and queues a review entry. Mirrors the other block arms' shape.
+    private async Task RecordLicenseBlockAsync(BlockGateRequest request, string? offendingLeaf, CancellationToken ct)
+    {
+        DependablyMeter.LicenseBlocks.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
+        string detail = System.Text.Json.JsonSerializer.Serialize(
+            new { license = offendingLeaf }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_license", request.UserId, actorKind: request.ActorKind,
+            detail: detail,
+            sourceIp: request.SourceIp, ct: ct);
+        await QueueForReviewAsync(request, "license", offendingLeaf, ct);
     }
 
     // Performs the audit-log, meter, and quarantine side effects for each blocking arm.
@@ -677,7 +751,7 @@ public sealed class BlockGateService
 /// Identifies which policy arm triggered a block verdict. <see cref="None"/> means the
 /// version is servable (no arm fired).
 /// </summary>
-public enum BlockArm { None, Manual, Deprecated, Revoked, ReleaseAge, Malicious, Provenance, Kev, Epss, VulnScore, InstallScript }
+public enum BlockArm { None, Manual, Deprecated, Revoked, ReleaseAge, Malicious, Provenance, Kev, Epss, VulnScore, InstallScript, License }
 
 /// <summary>
 /// Outcome of the pure policy core: whether the version is servable and, if not, which arm
@@ -846,7 +920,13 @@ public sealed record BlockGateRequest(
     /// Tenant policy from <c>org_settings.block_revoked</c>: 'off' | 'warn' | 'block'. Only 'block'
     /// denies a revoked version. Null behaves as 'off'.
     /// </summary>
-    string? BlockRevokedMode = null)
+    string? BlockRevokedMode = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.license_enforcement_mode</c>: 'off' | 'warn' | 'block'.
+    /// Only 'block' engages the license arm (the lowest-priority hard-block gate); 'warn'/'off'/null
+    /// keep the license signal advisory and never deny the download.
+    /// </summary>
+    string? LicenseEnforcementMode = null)
 {
     /// <summary>
     /// Constructs a <see cref="BlockGateRequest"/> from the standard download-path inputs shared
@@ -882,7 +962,8 @@ public sealed record BlockGateRequest(
             InstallScriptKind: version.InstallScriptKind,
             BlockInstallScriptsMode: settings?.BlockInstallScripts,
             RevokedAt: version.RevokedAt,
-            BlockRevokedMode: settings?.BlockRevoked);
+            BlockRevokedMode: settings?.BlockRevoked,
+            LicenseEnforcementMode: settings?.LicenseEnforcementMode);
 
     /// <summary>
     /// Constructs a <see cref="BlockGateRequest"/> for a proxy artifact served from the global
@@ -918,5 +999,6 @@ public sealed record BlockGateRequest(
             ProvenanceStatus: caFacts.ProvenanceStatus,
             RevokedAt: caFacts.RevokedAt,
             BlockRevokedMode: settings?.BlockRevoked,
+            LicenseEnforcementMode: settings?.LicenseEnforcementMode,
             CacheArtifactId: caFacts.Id);
 }

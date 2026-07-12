@@ -51,7 +51,6 @@ public sealed partial class SystemController : ControllerBase
     private readonly AuditRepository _audit;
     private readonly ProblemResults _problems;
     private readonly IConfiguration _config;
-    private readonly Dependably.Security.PasswordPolicy _passwordPolicy;
     private readonly TimeProvider _time;
     private readonly ITenantSlugCacheInvalidator? _tenantCache;
     private readonly IRequireMfaMode? _requireMfa;
@@ -72,7 +71,6 @@ public sealed partial class SystemController : ControllerBase
         AuditRepository audit,
         ProblemResults problems,
         IConfiguration config,
-        Dependably.Security.PasswordPolicy passwordPolicy,
         TimeProvider time,
         Dependably.Infrastructure.Identity.EnvelopeProtector envelope,
         ITenantSlugCacheInvalidator? tenantCache = null,
@@ -84,7 +82,6 @@ public sealed partial class SystemController : ControllerBase
         _audit = audit;
         _problems = problems;
         _config = config;
-        _passwordPolicy = passwordPolicy;
         _time = time;
         _envelope = envelope;
         _tenantCache = tenantCache;
@@ -846,7 +843,7 @@ public sealed partial class SystemController : ControllerBase
             return _problems.ValidationErrorActionKey("currentPassword", "error.password.currentRequired");
         }
 
-        var verdict = _passwordPolicy.Evaluate(req.NewPassword, new Dependably.Security.PasswordContext());
+        var verdict = Dependably.Security.PasswordPolicy.Evaluate(req.NewPassword, new Dependably.Security.PasswordContext());
         if (!verdict.IsOk)
         {
             return _problems.ValidationErrorAction("newPassword", verdict.ToReason());

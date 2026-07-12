@@ -113,7 +113,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             // ProxyFetch is only reached on the proxy-miss path, which short-circuits to 404
             // here because Upstream is null. BlockGate runs on every cache hit, so it's real.
             ProxyFetch: null!,
-            BlockGate: new BlockGateService(new VulnerabilityRepository(_db, _clock), _audit, new QuarantineRepository(_db, _clock), new InstallScriptAllowlistService(_db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock), Microsoft.Extensions.Logging.Abstractions.NullLogger<BlockGateService>.Instance, _clock),
+            BlockGate: Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, _clock),
             ReservedNamespaces: new ReservedNamespaceService(
                 _db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock),
@@ -140,7 +140,8 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
                 new Dependably.Tests.Infrastructure.StubPerOrgTrustAnchorStore(),
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Protocol.Provenance.MavenProvenanceVerifier>.Instance),
             EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
-            Staging: new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0));
+            Staging: new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0),
+            Licenses: new LicenseRepository(_db, _clock, TestNormalizers.License(_db)));
 
         return new MavenController(svc)
         {
@@ -780,6 +781,71 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         // request path layout (which uses g/a/v/file form) by design.
         string blobKey = BlobKeys.Hosted(_orgId, "maven", "com.example/newlib", "1.0", "newlib-1.0.jar");
         Assert.True(await _blobs.ExistsAsync(blobKey, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Publish_Pom_ExtractsLicenses_ToPackageVersionRow()
+    {
+        string raw = await IssueTokenAsync(_orgId, _userId);
+        byte[] pom = Encoding.UTF8.GetBytes("""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <project xmlns="http://maven.apache.org/POM/4.0.0">
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>com.example</groupId>
+              <artifactId>pomlic</artifactId>
+              <version>1.0</version>
+              <licenses>
+                <license>
+                  <name>The Apache Software License, Version 2.0</name>
+                  <url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
+                </license>
+                <license>
+                  <name>MIT License</name>
+                </license>
+              </licenses>
+            </project>
+            """);
+
+        var ctl = BuildController(authHeader: $"Bearer {raw}");
+        SetBody(ctl.HttpContext, pom);
+
+        var result = await ctl.Publish("com/example/pomlic/1.0/pomlic-1.0.pom", CancellationToken.None);
+        Assert.Equal(201, Assert.IsType<StatusCodeResult>(result).StatusCode);
+
+        await using var conn = await _db.OpenAsync();
+        var spdx = (await conn.QueryAsync<string>(
+            """
+            SELECT pvl.license_spdx FROM package_version_licenses pvl
+            JOIN package_versions pv ON pv.id = pvl.package_version_id
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.org_id = @org AND p.purl_name = 'com.example:pomlic'
+            ORDER BY pvl.license_spdx
+            """,
+            new { org = _orgId })).ToList();
+        Assert.Equal(new[] { "Apache-2.0", "MIT" }, spdx);
+    }
+
+    [Fact]
+    public async Task Publish_Jar_WritesNoLicenseRows()
+    {
+        string raw = await IssueTokenAsync(_orgId, _userId);
+
+        var ctl = BuildController(authHeader: $"Bearer {raw}");
+        SetBody(ctl.HttpContext, Encoding.UTF8.GetBytes("just-a-jar"));
+
+        var result = await ctl.Publish("com/example/jarlic/1.0/jarlic-1.0.jar", CancellationToken.None);
+        Assert.Equal(201, Assert.IsType<StatusCodeResult>(result).StatusCode);
+
+        await using var conn = await _db.OpenAsync();
+        long rows = await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COUNT(*) FROM package_version_licenses pvl
+            JOIN package_versions pv ON pv.id = pvl.package_version_id
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.org_id = @org AND p.purl_name = 'com.example:jarlic'
+            """,
+            new { org = _orgId });
+        Assert.Equal(0, rows);
     }
 
     [Fact]

@@ -417,6 +417,9 @@ Instance-wide defaults for per-tenant caps.
 | `Rpm__UpstreamMode` | `passthrough` | `passthrough` forwards upstream repodata verbatim and refuses hosted publish (a local package would shadow upstream); `merged` serves a combined `repomd.xml`/`primary.xml.gz` (local ∪ upstream, local shadows on NEVRA collision) and allows hosted publish alongside proxying. **Group (comps) and module (modulemd) metadata limitation**: Dependably does not generate comps or modulemd documents for locally published RPMs — group definitions and module streams are authored independently of packages. In merged mode, upstream group/module entries with content-addressed (hash-prefixed) hrefs are forwarded verbatim; plain-named entries (e.g. `comps.xml.gz` from classic createrepo) are dropped from the merged repomd so no unreachable href is advertised. In local/hosted-only mode, `comps.xml.gz`, `modules.yaml`, and similar requests return 404. `dnf install` works for all published RPMs; `dnf group install` and modular stream installs work only for packages that have definitions in the upstream repo. |
 | `Rpm__VerifyRepomdSignature` | derived | Instance-level override for RPM `repomd.xml` signature verification. When unset, verification is enabled iff the org has at least one RPM trust anchor in `signature_trust_anchor`. Setting `true` with no per-org anchor configured fails every resolution closed. Trust anchors are per-org and managed via Settings → Trust Anchors (or `POST /api/v1/trust-anchors`), not via an env key. |
 | `Oci__ManifestTagTtl` / `Oci__TokenCacheDuration` / `Oci__UpstreamHttpTimeout` / `Oci__CatalogEnabled` | 5m / 55m / 30m / off | Instance-level OCI proxy tunings. **Upstream OCI registries are no longer configured here** — they are per-org and managed in Settings → Proxy → Upstream registries (host + repository-prefix routing + auth type), like every other ecosystem. Every org is seeded with Docker Hub and `mcr.microsoft.com` defaults. |
+| `Apk__Upstream` | `https://dl-cdn.alpinelinux.org/alpine` | Upstream Alpine apk mirror seeded for new orgs. The route is 1:1 with dl-cdn's `{release}/{repo}/{arch}/{file}` layout, so a sed rewrite of `/etc/apk/repositories` is the only client-side change. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. apk is proxy-only (no hosted push, like Go). |
+| `Apk__IndexTtl` | `00:01:00` (60s) | TTL (`TimeSpan` format) for the memory-cached passthrough of `APKINDEX.tar.gz` and other index-adjacent files (`.SIGN.RSA.*`, etc). No server-side signature verification — apk clients verify the index against `/etc/apk/keys` themselves. |
+| `Apk__NegativeCacheTtl` | `00:05:00` (5m) | TTL (`TimeSpan` format) for cached upstream 404s on `.apk` package fetches, so repeated misses for a missing package/arch combination don't repeat the upstream round-trip on every request. |
 
 ### Observability
 
@@ -476,6 +479,12 @@ The overlay sets `OTEL_EXPORTER_OTLP_ENDPOINT` for you and runs a collector whos
 | `DEPRECATION_REFRESH_AGE_HOURS` | `24` | Re-fetch upstream deprecation metadata for versions not checked within this many hours. |
 | `DEPRECATION_REFRESH_BATCH_SIZE` | `500` | Maximum number of packages to refresh per pass. |
 | `DEPRECATION_REFRESH_BATCH_DELAY_MS` | `500` | Delay (ms) between batches within one pass. |
+
+### License backfill
+
+| Variable | Default | Description |
+|---|---|---|
+| `LICENSE_BACKFILL_SCHEDULE` | `0 6 * * *` | Cron schedule for the license backfill pass. Reads the cached bytes of npm/PyPI/NuGet proxy artifacts that have never had a license-extraction pass (ingested before ingest-time license capture existed), writes any SPDX identifiers to the cache plane, and stamps them so each is scanned exactly once. Cache-only; never fetches upstream. |
 
 ### SAML certificate expiry
 

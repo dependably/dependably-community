@@ -9,7 +9,7 @@ namespace Dependably.Security;
 /// Breach-corpus check is deferred — see GitLab issue referenced in
 /// docs/encryption.md gap §6.
 /// </summary>
-public sealed class PasswordPolicy
+public static class PasswordPolicy
 {
     public const int MinLength = 12;
     public const int MaxBytesUtf8 = 72;  // BCrypt.Net-Next silently truncates above this
@@ -20,7 +20,7 @@ public sealed class PasswordPolicy
         "dependably",
     };
 
-    public PasswordPolicyResult Evaluate(string? password, PasswordContext ctx)
+    public static PasswordPolicyResult Evaluate(string? password, PasswordContext ctx)
     {
         if (string.IsNullOrEmpty(password))
         {

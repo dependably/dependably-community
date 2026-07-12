@@ -398,7 +398,7 @@ public sealed class OrgRepository
     public async Task SetInstanceSettingAsync(string key, string value, CancellationToken ct = default)
     {
         string stored = value;
-        if (_envelope is not null && _envelope.IsConfigured && SecretKeys.Contains(key) && !_envelope.IsEncrypted(value))
+        if (_envelope is not null && _envelope.IsConfigured && SecretKeys.Contains(key) && !EnvelopeProtector.IsEncrypted(value))
         {
             stored = _envelope.Protect(value);
         }

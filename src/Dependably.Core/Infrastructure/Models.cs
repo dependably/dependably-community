@@ -292,9 +292,19 @@ public class Package
     public long TotalDownloads { get; set; }
     // Upstream's declared latest version, or null when no baseline is known.
     public string? UpstreamLatestVersion { get; set; }
+    // Publish timestamp of UpstreamLatestVersion, when the ecosystem's metadata carries one. Null
+    // when the baseline itself is unknown or the ecosystem's metadata doesn't expose a timestamp
+    // (see UpstreamLatestVersionResolver's per-ecosystem availability notes).
+    public DateTimeOffset? UpstreamLatestPublishedAt { get; set; }
     // Packages-list "Latest" indicator, computed in SQL: "current" (upstream latest is cached),
     // "stale" (a newer upstream version exists but is not cached), or "unknown" (no baseline).
     public string LatestState { get; set; } = "unknown";
+    // Packages-list "Abandoned" indicator, computed in C# (PackageRepository, against the injected
+    // TimeProvider) after the SQL fetch: "abandoned" when UpstreamLatestPublishedAt is >= 365 days
+    // old, "active" otherwise, "unknown" when no publish timestamp is known. Never "abandoned" on
+    // an unknown timestamp — surfacing uncertainty as staleness would assert a fact the server
+    // doesn't have.
+    public string AbandonedState { get; set; } = "unknown";
     // True when any version of this package is linked to an OSV MAL- advisory (OpenSSF
     // malicious-packages feed). Drives the packages-list malicious indicator. Computed in SQL.
     public bool HasMaliciousVersion { get; set; }
@@ -373,6 +383,16 @@ public class PackageVersion
     /// Set by <c>DeprecationRefreshService</c>; reset to NULL if the version reappears upstream.
     /// </summary>
     public DateTimeOffset? RevokedAt { get; set; }
+    /// <summary>
+    /// Operational-risk signal: count of upstream STABLE versions strictly newer than this one,
+    /// using each ecosystem's native version ordering (NuGet.Versioning, PEP 440, semver, Maven
+    /// ComparableVersion) — consistent with the latest=STABLE convention <see
+    /// cref="Protocol.IUpstreamLatestVersionResolver"/> already applies. NULL = unknown
+    /// (hosted-only package with no upstream counterpart, air-gapped, unsupported ecosystem, or
+    /// not yet refreshed) — render UNSCORED, never 0. Set by <c>DeprecationRefreshService</c> and
+    /// seeded on proxy first-fetch.
+    /// </summary>
+    public int? VersionsBehind { get; set; }
     /// <summary>
     /// True when the artefact ships an install/lifecycle script that runs automatically on
     /// install — an npm preinstall/install/postinstall hook, a PyPI sdist <c>setup.py</c>, or a
@@ -817,7 +837,30 @@ public sealed record OsvDetail(
     OsvSeverityEntry[]? Severity,
     OsvAffectedDetail[]? Affected,
     OsvCredit[]? Credits,
-    JsonElement? DatabaseSpecific);
+    JsonElement? DatabaseSpecific,
+    RemediationGuidance? Remediation = null);
+
+/// <summary>
+/// CWE→OWASP/skill guidance computed from <see cref="OsvDetail.DatabaseSpecific"/> and
+/// <see cref="OsvDetail.Affected"/> after parsing — never present in the stored OSV JSON itself
+/// (the OSV schema has no <c>remediation</c> key), so round-tripping <c>osv_json</c> through this
+/// record can never populate it by accident. Null when the advisory predates <c>osv_json</c>
+/// capture and there's nothing to compute from; non-null (with possibly empty
+/// <see cref="Entries"/>) whenever the advisory JSON itself was available to parse.
+/// </summary>
+public sealed record RemediationGuidance(
+    string[] CweIds,
+    RemediationEntry[] Entries,
+    string? UpgradeSkillId);
+
+/// <summary>One extracted CWE id, resolved against a CWE→OWASP/skill catalog. OWASP/skill fields are null when the CWE is known but unmapped.</summary>
+public sealed record RemediationEntry(
+    string CweId,
+    string CweUrl,
+    string? OwaspId,
+    string? OwaspTitle,
+    string? OwaspUrl,
+    string? SkillId);
 
 public sealed record OsvReference(string? Type, string? Url);
 
@@ -876,19 +919,29 @@ public class SpdxLicense
     public string Copyleft { get; set; } = "unclassified";
 }
 
-/// <summary>One row in the admin review queue: a SPDX identifier seen during ingestion
-/// for this tenant that is on neither the allow- nor block-list.</summary>
+/// <summary>Full-text projection of a single spdx_license row, served on demand by the
+/// license-text endpoint. <see cref="LicenseText"/> is NULL for a known identifier whose
+/// text was not bundled (custom or post-bundle SPDX additions).</summary>
+public sealed record SpdxLicenseText(string Identifier, string Name, string? LicenseText);
+
+/// <summary>One row in the admin review queue: a single canonical SPDX license leaf seen
+/// during ingestion for this tenant that is on neither the allow- nor block-list. Compound
+/// expressions are split into their leaves before reaching this projection, so every entry is
+/// an individually actionable id.</summary>
 public class LicenseReviewEntry
 {
     public string LicenseSpdx { get; set; } = "";
     public int PackageCount { get; set; }
     public DateTimeOffset FirstSeen { get; set; }
-    /// <summary>True if the SPDX string contains a compound operator (OR / AND / WITH).
-    /// Compound expressions currently bypass policy lookups; the UI surfaces them but
-    /// disables Approve/Block.</summary>
-    public bool IsCompound { get; set; }
     /// <summary>True if a matching row in spdx_license is marked deprecated.</summary>
     public bool IsDeprecated { get; set; }
+    /// <summary>Human-readable license name from spdx_license; NULL for identifiers absent
+    /// from the bundled SPDX list (custom or compound expressions).</summary>
+    public string? Name { get; set; }
+    /// <summary>Copyleft classification from spdx_license ('permissive' | 'weak-copyleft' |
+    /// 'strong-copyleft' | 'network-copyleft' | 'public-domain' | 'unclassified'). Defaults to
+    /// 'unclassified' when no matching spdx_license row exists.</summary>
+    public string Copyleft { get; set; } = "unclassified";
 }
 
 public class ActivityEntry

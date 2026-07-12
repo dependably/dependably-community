@@ -259,6 +259,30 @@
         <target>Administration — Organisations</target>
       </segment>
     </unit>
+    <unit id="alerts.panel.close">
+      <segment state="translated">
+        <source>Close</source>
+        <target>Fermer</target>
+      </segment>
+    </unit>
+    <unit id="alerts.panel.empty">
+      <segment state="translated">
+        <source>No active alerts.</source>
+        <target>Aucune alerte active.</target>
+      </segment>
+    </unit>
+    <unit id="alerts.panel.loading">
+      <segment state="translated">
+        <source>Loading alerts…</source>
+        <target>Chargement des alertes…</target>
+      </segment>
+    </unit>
+    <unit id="alerts.panel.title">
+      <segment state="translated">
+        <source>Alerts</source>
+        <target>Alertes</target>
+      </segment>
+    </unit>
     <unit id="allowlist.addEntry">
       <segment state="translated">
         <source>Add entry</source>
@@ -1465,6 +1489,12 @@
         <target>{hosted} hébergés · {proxied} relayés</target>
       </segment>
     </unit>
+    <unit id="dashboard.licenseRisk">
+      <segment state="translated">
+        <source>License risk</source>
+        <target>Risque lié aux licences</target>
+      </segment>
+    </unit>
     <unit id="dashboard.newVulnsTitle">
       <segment state="translated">
         <source>New vulnerabilities detected</source>
@@ -1481,6 +1511,18 @@
       <segment state="translated">
         <source>No new vulnerabilities</source>
         <target>Aucune nouvelle vulnérabilité</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.operationalRisk">
+      <segment state="translated">
+        <source>Operational risk</source>
+        <target>Risque opérationnel</target>
+      </segment>
+    </unit>
+    <unit id="dashboard.operationalRiskSub">
+      <segment state="translated">
+        <source>≥ {threshold} versions behind</source>
+        <target>≥ {threshold} versions de retard</target>
       </segment>
     </unit>
     <unit id="dashboard.packageBreakdown">
@@ -1717,6 +1759,36 @@
         <target>Supprimer cette entrée? Le paquet sera de nouveau bloqué lorsque block_install_scripts est « block ».</target>
       </segment>
     </unit>
+    <unit id="licenseClassification.network-copyleft">
+      <segment state="translated">
+        <source>network copyleft</source>
+        <target>copyleft réseau</target>
+      </segment>
+    </unit>
+    <unit id="licenseClassification.permissive">
+      <segment state="translated">
+        <source>permissive</source>
+        <target>permissive</target>
+      </segment>
+    </unit>
+    <unit id="licenseClassification.public-domain">
+      <segment state="translated">
+        <source>public domain</source>
+        <target>domaine public</target>
+      </segment>
+    </unit>
+    <unit id="licenseClassification.strong-copyleft">
+      <segment state="translated">
+        <source>strong copyleft</source>
+        <target>copyleft fort</target>
+      </segment>
+    </unit>
+    <unit id="licenseClassification.weak-copyleft">
+      <segment state="translated">
+        <source>weak copyleft</source>
+        <target>copyleft faible</target>
+      </segment>
+    </unit>
     <unit id="licensePolicy.allow.empty">
       <segment state="translated">
         <source>No licenses on the allow list.</source>
@@ -1807,6 +1879,288 @@
         <target>Politique de licences</target>
       </segment>
     </unit>
+    <unit id="licenseText.close">
+      <segment state="translated">
+        <source>Close</source>
+        <target>Fermer</target>
+      </segment>
+    </unit>
+    <unit id="licenseText.loading">
+      <segment state="translated">
+        <source>Loading license text…</source>
+        <target>Chargement du texte de la licence…</target>
+      </segment>
+    </unit>
+    <unit id="licenseText.notAvailable">
+      <segment state="translated">
+        <source>The bundled text for this license is not available.</source>
+        <target>Le texte intégré de cette licence n&apos;est pas disponible.</target>
+      </segment>
+    </unit>
+    <unit id="licenseText.open">
+      <segment state="translated">
+        <source>View license text</source>
+        <target>Voir le texte de la licence</target>
+      </segment>
+    </unit>
+    <unit id="licenseText.title">
+      <segment state="translated">
+        <source>License text</source>
+        <target>Texte de la licence</target>
+      </segment>
+    </unit>
+    <unit id="licenseText.viewUpstream">
+      <segment state="translated">
+        <source>View upstream</source>
+        <target>Voir en amont</target>
+      </segment>
+    </unit>
+    <unit id="lookup.airGapped">
+      <segment state="translated">
+        <source>Air-gapped — upstream metadata was not checked; advisories and license came from the local mirror only.</source>
+        <target>Isolé du réseau — les métadonnées en amont n&apos;ont pas été vérifiées; les avis et la licence proviennent uniquement du miroir local.</target>
+      </segment>
+    </unit>
+    <unit id="lookup.empty">
+      <segment state="translated">
+        <source>Enter a package above to check its malware, CVE, and license status before you add it.</source>
+        <target>Saisissez un paquet ci-dessus pour vérifier son statut de maliciel, de CVE et de licence avant de l&apos;ajouter.</target>
+      </segment>
+    </unit>
+    <unit id="lookup.errors.notFound">
+      <segment state="translated">
+        <source>That package or version was not found upstream.</source>
+        <target>Ce paquet ou cette version est introuvable en amont.</target>
+      </segment>
+    </unit>
+    <unit id="lookup.errors.unavailable">
+      <segment state="translated">
+        <source>The upstream registry is temporarily unavailable. Try again shortly.</source>
+        <target>Le registre en amont est temporairement indisponible. Réessayez sous peu.</target>
+      </segment>
+    </unit>
+    <unit id="lookup.form.ecosystem">
+      <segment state="translated">
+        <source>Ecosystem</source>
+        <target>Écosystème</target>
+      </segment>
+    </unit>
+    <unit id="lookup.form.mavenHint">
+      <segment state="translated">
+        <source>groupId:artifactId</source>
+        <target>groupId:artifactId</target>
+      </segment>
+    </unit>
+    <unit id="lookup.form.name">
+      <segment state="translated">
+        <source>Package name</source>
+        <target>Nom du paquet</target>
+      </segment>
+    </unit>
+    <unit id="lookup.form.namePlaceholder">
+      <segment state="translated">
+        <source>e.g. left-pad</source>
+        <target>p. ex. left-pad</target>
+      </segment>
+    </unit>
+    <unit id="lookup.form.submit">
+      <segment state="translated">
+        <source>Check package</source>
+        <target>Vérifier le paquet</target>
+      </segment>
+    </unit>
+    <unit id="lookup.form.version">
+      <segment state="translated">
+        <source>Version</source>
+        <target>Version</target>
+      </segment>
+    </unit>
+    <unit id="lookup.form.versionPlaceholder">
+      <segment state="translated">
+        <source>Leave blank for latest</source>
+        <target>Laisser vide pour la dernière version</target>
+      </segment>
+    </unit>
+    <unit id="lookup.form.versionRequiredHint">
+      <segment state="translated">
+        <source>A version is required for this ecosystem.</source>
+        <target>Une version est requise pour cet écosystème.</target>
+      </segment>
+    </unit>
+    <unit id="lookup.intro">
+      <segment state="translated">
+        <source>Check a candidate package for malware, known CVEs, and license policy before you add it. Nothing is downloaded, cached, or installed.</source>
+        <target>Vérifiez un paquet candidat pour un maliciel, des CVE connues et la politique de licence avant de l&apos;ajouter. Rien n&apos;est téléchargé, mis en cache ou installé.</target>
+      </segment>
+    </unit>
+    <unit id="lookup.license.allowed">
+      <segment state="translated">
+        <source>Allowed by policy</source>
+        <target>Autorisée par la politique</target>
+      </segment>
+    </unit>
+    <unit id="lookup.license.blocked">
+      <segment state="translated">
+        <source>Not allowed by policy ({spdx})</source>
+        <target>Non autorisée par la politique ({spdx})</target>
+      </segment>
+    </unit>
+    <unit id="lookup.license.informational">
+      <segment state="translated">
+        <source>Recorded informationally — license policy is off.</source>
+        <target>Consignée à titre informatif — la politique de licence est désactivée.</target>
+      </segment>
+    </unit>
+    <unit id="lookup.license.policy">
+      <segment state="translated">
+        <source>Policy: {mode}</source>
+        <target>Politique : {mode}</target>
+      </segment>
+    </unit>
+    <unit id="lookup.license.title">
+      <segment state="translated">
+        <source>License</source>
+        <target>Licence</target>
+      </segment>
+    </unit>
+    <unit id="lookup.license.unavailable">
+      <segment state="translated">
+        <source>Not determinable from upstream metadata for this ecosystem.</source>
+        <target>Non déterminable à partir des métadonnées en amont pour cet écosystème.</target>
+      </segment>
+    </unit>
+    <unit id="lookup.malware.clean">
+      <segment state="translated">
+        <source>No known malicious advisories</source>
+        <target>Aucun avis de malveillance connu</target>
+      </segment>
+    </unit>
+    <unit id="lookup.malware.detected">
+      <segment state="translated">
+        <source>Known malicious package</source>
+        <target>Paquet malveillant connu</target>
+      </segment>
+    </unit>
+    <unit id="lookup.malware.title">
+      <segment state="translated">
+        <source>Malware</source>
+        <target>Maliciel</target>
+      </segment>
+    </unit>
+    <unit id="lookup.title">
+      <segment state="translated">
+        <source>Check a package</source>
+        <target>Vérifier un paquet</target>
+      </segment>
+    </unit>
+    <unit id="lookup.unavailableChecks.deprecated">
+      <segment state="translated">
+        <source>Deprecation status</source>
+        <target>État de dépréciation</target>
+      </segment>
+    </unit>
+    <unit id="lookup.unavailableChecks.license">
+      <segment state="translated">
+        <source>License</source>
+        <target>Licence</target>
+      </segment>
+    </unit>
+    <unit id="lookup.unavailableChecks.release_age">
+      <segment state="translated">
+        <source>Release-age hold</source>
+        <target>Délai de retenue par âge</target>
+      </segment>
+    </unit>
+    <unit id="lookup.unavailableChecks.title">
+      <segment state="translated">
+        <source>Not checked at lookup time</source>
+        <target>Non vérifié lors de la recherche</target>
+      </segment>
+    </unit>
+    <unit id="lookup.unavailableChecks.vulnerabilities">
+      <segment state="translated">
+        <source>Vulnerability scan</source>
+        <target>Analyse de vulnérabilités</target>
+      </segment>
+    </unit>
+    <unit id="lookup.verdict.allowed">
+      <segment state="translated">
+        <source>Allowed</source>
+        <target>Autorisé</target>
+      </segment>
+    </unit>
+    <unit id="lookup.verdict.blocked">
+      <segment state="translated">
+        <source>Blocked</source>
+        <target>Bloqué</target>
+      </segment>
+    </unit>
+    <unit id="lookup.verdict.evaluated">
+      <segment state="translated">
+        <source>Evaluated {purl}</source>
+        <target>Évalué : {purl}</target>
+      </segment>
+    </unit>
+    <unit id="lookup.verdict.versionInferred">
+      <segment state="translated">
+        <source>Latest stable — no version was specified</source>
+        <target>Dernière version stable — aucune version n&apos;a été précisée</target>
+      </segment>
+    </unit>
+    <unit id="lookup.verdict.warn">
+      <segment state="translated">
+        <source>Warn</source>
+        <target>Avertissement</target>
+      </segment>
+    </unit>
+    <unit id="lookup.vulns.clean">
+      <segment state="translated">
+        <source>No known vulnerabilities</source>
+        <target>Aucune vulnérabilité connue</target>
+      </segment>
+    </unit>
+    <unit id="lookup.vulns.epss">
+      <segment state="translated">
+        <source>EPSS {value}</source>
+        <target>EPSS {value}</target>
+      </segment>
+    </unit>
+    <unit id="lookup.vulns.kev">
+      <segment state="translated">
+        <source>CISA KEV</source>
+        <target>CISA KEV</target>
+      </segment>
+    </unit>
+    <unit id="lookup.vulns.scored">
+      <segment state="translated">
+        <source>Scored</source>
+        <target>Cotées</target>
+      </segment>
+    </unit>
+    <unit id="lookup.vulns.title">
+      <segment state="translated">
+        <source>Vulnerabilities</source>
+        <target>Vulnérabilités</target>
+      </segment>
+    </unit>
+    <unit id="lookup.vulns.unavailable">
+      <segment state="translated">
+        <source>Vulnerability data could not be checked for this lookup.</source>
+        <target>Les données de vulnérabilité n&apos;ont pas pu être vérifiées pour cette recherche.</target>
+      </segment>
+    </unit>
+    <unit id="lookup.vulns.unscored">
+      <segment state="translated">
+        <source>UNSCORED / NO CVSS</source>
+        <target>NON COTÉES / SANS CVSS</target>
+      </segment>
+    </unit>
+    <unit id="lookup.vulns.unscoredHint">
+      <segment state="translated">
+        <source>Undisclosed severity — not the same as no risk.</source>
+        <target>Gravité non divulguée — ne signifie pas absence de risque.</target>
+      </segment>
+    </unit>
     <unit id="nav.admin">
       <segment state="translated">
         <source>Admin</source>
@@ -1871,6 +2225,12 @@
       <segment state="translated">
         <source>Licenses</source>
         <target>Licences</target>
+      </segment>
+    </unit>
+    <unit id="nav.lookup">
+      <segment state="translated">
+        <source>Lookup</source>
+        <target>Vérification</target>
       </segment>
     </unit>
     <unit id="nav.notices">
@@ -1955,6 +2315,18 @@
       <segment state="translated">
         <source>Vulnerabilities</source>
         <target>Vulnérabilités</target>
+      </segment>
+    </unit>
+    <unit id="packages.abandoned.help">
+      <segment state="translated">
+        <source>No new release published upstream in over a year.</source>
+        <target>Aucune nouvelle version publiée en amont depuis plus d&apos;un an.</target>
+      </segment>
+    </unit>
+    <unit id="packages.abandoned.label">
+      <segment state="translated">
+        <source>Abandoned</source>
+        <target>Abandonné</target>
       </segment>
     </unit>
     <unit id="packages.actionsMenu.allowSameVersionPush">
@@ -2831,6 +3203,90 @@
       <segment state="translated">
         <source>Token created — copy it now, it will not be shown again.</source>
         <target>Jeton créé — copiez-le maintenant, il ne sera plus affiché.</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.hint">
+      <segment state="translated">
+        <source>Alerts fire on a new quarantine review item and on a vulnerability meeting the severity floor below. Slack delivery is optional and requires DEPENDABLY_MASTER_KEY to store the webhook URL.</source>
+        <target>Les alertes se déclenchent sur un nouvel élément en quarantaine et sur une vulnérabilité atteignant le seuil de gravité ci-dessous. La livraison Slack est facultative et nécessite DEPENDABLY_MASTER_KEY pour stocker l&apos;URL du webhook.</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.minSeverity">
+      <segment state="translated">
+        <source>Minimum vulnerability severity</source>
+        <target>Gravité minimale de vulnérabilité</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.minSeverityHint">
+      <segment state="translated">
+        <source>Only advisories at or above this severity raise an alert. Unscored advisories never alert.</source>
+        <target>Seules les avis atteignant ou dépassant cette gravité déclenchent une alerte. Les avis sans note ne déclenchent jamais d&apos;alerte.</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.quarantineEnabled">
+      <segment state="translated">
+        <source>Alert on new quarantine items</source>
+        <target>Alerter sur les nouveaux éléments en quarantaine</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.section">
+      <segment state="translated">
+        <source>Alert center</source>
+        <target>Centre d&apos;alertes</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.slackEnabled">
+      <segment state="translated">
+        <source>Send alerts to Slack</source>
+        <target>Envoyer les alertes à Slack</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.slackLastStatus">
+      <segment state="translated">
+        <source>Last Slack delivery: {status}</source>
+        <target>Dernière livraison Slack : {status}</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.slackUrl">
+      <segment state="translated">
+        <source>Slack webhook URL</source>
+        <target>URL du webhook Slack</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.slackUrlHint">
+      <segment state="translated">
+        <source>Incoming webhook URL from Slack. Requires DEPENDABLY_MASTER_KEY to store.</source>
+        <target>URL de webhook entrant de Slack. Nécessite DEPENDABLY_MASTER_KEY pour le stockage.</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.slackUrlRotateHint">
+      <segment state="translated">
+        <source>Enter a new value to rotate the webhook URL. Leave blank to keep the current one.</source>
+        <target>Saisissez une nouvelle valeur pour renouveler l&apos;URL du webhook. Laissez vide pour conserver l&apos;URL actuelle.</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.testFail">
+      <segment state="translated">
+        <source>Test message failed.</source>
+        <target>Échec du message de test.</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.testOk">
+      <segment state="translated">
+        <source>Test message sent.</source>
+        <target>Message de test envoyé.</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.testSend">
+      <segment state="translated">
+        <source>Send test message</source>
+        <target>Envoyer un message de test</target>
+      </segment>
+    </unit>
+    <unit id="settings.alerts.vulnEnabled">
+      <segment state="translated">
+        <source>Alert on vulnerabilities</source>
+        <target>Alerter sur les vulnérabilités</target>
       </segment>
     </unit>
     <unit id="settings.auth.advancedHint">
@@ -3845,6 +4301,12 @@
         <target>Bloquer</target>
       </segment>
     </unit>
+    <unit id="settings.licenses.review.columns.classification">
+      <segment state="translated">
+        <source>Classification</source>
+        <target>Classification</target>
+      </segment>
+    </unit>
     <unit id="settings.licenses.review.columns.firstSeen">
       <segment state="translated">
         <source>First seen</source>
@@ -3857,22 +4319,16 @@
         <target>Indicateurs</target>
       </segment>
     </unit>
+    <unit id="settings.licenses.review.columns.name">
+      <segment state="translated">
+        <source>Name</source>
+        <target>Nom</target>
+      </segment>
+    </unit>
     <unit id="settings.licenses.review.columns.packages">
       <segment state="translated">
         <source>Packages</source>
         <target>Paquets</target>
-      </segment>
-    </unit>
-    <unit id="settings.licenses.review.compound">
-      <segment state="translated">
-        <source>compound</source>
-        <target>composée</target>
-      </segment>
-    </unit>
-    <unit id="settings.licenses.review.compoundTooltip">
-      <segment state="translated">
-        <source>Compound expressions (e.g. &quot;MIT OR Apache-2.0&quot;) cannot be added to the policy directly — they would not match a future lookup for a single license. Split them upstream.</source>
-        <target>Les expressions composées (p. ex. « MIT OR Apache-2.0 ») ne peuvent pas être ajoutées directement à la politique — elles ne correspondraient pas à une recherche ultérieure pour une licence unique. Séparez-les en amont.</target>
       </segment>
     </unit>
     <unit id="settings.licenses.review.deprecated">
@@ -4795,16 +5251,34 @@ dotnet/</target>
         <target>Ancres de confiance de signature</target>
       </segment>
     </unit>
+    <unit id="settings.storage.retentionHint">
+      <segment state="translated">
+        <source>Controls how long old versions, cached proxy files, and activity history are kept before automatic cleanup. Leave a field blank for unlimited.</source>
+        <target>Détermine la durée de conservation des anciennes versions, des fichiers de proxy en cache et de l&apos;historique d&apos;activité avant le nettoyage automatique. Laissez un champ vide pour une durée illimitée.</target>
+      </segment>
+    </unit>
     <unit id="settings.storage.retentionTitle">
       <segment state="translated">
         <source>Retention</source>
         <target>Rétention</target>
       </segment>
     </unit>
+    <unit id="settings.storage.uploadHint">
+      <segment state="translated">
+        <source>Caps the size of a single upload, in MB. Per-ecosystem limits override the limit below; the instance owner&apos;s ceiling bounds all of them.</source>
+        <target>Plafonne la taille d&apos;un téléversement, en Mo. Les limites par écosystème remplacent la limite ci-dessous ; le plafond de l&apos;instance les borde toutes.</target>
+      </segment>
+    </unit>
     <unit id="settings.storage.uploadTitle">
       <segment state="translated">
         <source>Upload limits</source>
         <target>Limites de téléversement</target>
+      </segment>
+    </unit>
+    <unit id="settings.tabs.alerts">
+      <segment state="translated">
+        <source>Alerts</source>
+        <target>Alertes</target>
       </segment>
     </unit>
     <unit id="settings.tabs.authentication">
@@ -4897,28 +5371,40 @@ dotnet/</target>
         <target>Tous les écosystèmes</target>
       </segment>
     </unit>
-    <unit id="settings.uploadLimits.bytesLabel">
-      <segment state="translated">
-        <source>{label} (bytes)</source>
-        <target>{label} (octets)</target>
-      </segment>
-    </unit>
     <unit id="settings.uploadLimits.exceedsCeiling">
       <segment state="translated">
-        <source>Cannot exceed instance ceiling of {bytes} bytes.</source>
-        <target>Ne peut pas dépasser le plafond de l&apos;instance de {bytes} octets.</target>
+        <source>Cannot exceed the instance ceiling of {mb} MB.</source>
+        <target>Ne peut pas dépasser le plafond de l&apos;instance de {mb} Mo.</target>
       </segment>
     </unit>
-    <unit id="settings.uploadLimits.inheritPlaceholder">
+    <unit id="settings.uploadLimits.globalBlankHint">
       <segment state="translated">
-        <source>inherit from instance</source>
-        <target>hériter de l&apos;instance</target>
+        <source>Blank uses the instance limit of {mb} MB.</source>
+        <target>Un champ vide utilise la limite de l&apos;instance de {mb} Mo.</target>
+      </segment>
+    </unit>
+    <unit id="settings.uploadLimits.globalBlankNoLimitHint">
+      <segment state="translated">
+        <source>Blank allows uploads of any size — no instance limit is configured.</source>
+        <target>Un champ vide autorise des téléversements de toute taille — aucune limite d&apos;instance n&apos;est configurée.</target>
       </segment>
     </unit>
     <unit id="settings.uploadLimits.instanceCeiling">
       <segment state="translated">
         <source>Instance ceiling: {mb} MB</source>
         <target>Plafond de l&apos;instance : {mb} Mo</target>
+      </segment>
+    </unit>
+    <unit id="settings.uploadLimits.perEcoBlankPlaceholder">
+      <segment state="translated">
+        <source>Blank — instance limit applies</source>
+        <target>Vide — la limite de l&apos;instance s&apos;applique</target>
+      </segment>
+    </unit>
+    <unit id="settings.uploadLimits.perEcoHint">
+      <segment state="translated">
+        <source>Overrides the limit above for this ecosystem only. Blank uses the limit above, or the instance limit if that&apos;s blank too.</source>
+        <target>Remplace la limite ci-dessus pour cet écosystème seulement. Un champ vide utilise la limite ci-dessus, ou celle de l&apos;instance si elle aussi est vide.</target>
       </segment>
     </unit>
     <unit id="settings.webhooks.add">
@@ -7927,6 +8413,12 @@ dotnet/</target>
         <target>Utilisateurs et invitations</target>
       </segment>
     </unit>
+    <unit id="versionDetail.abandonedBanner.text">
+      <segment state="translated">
+        <source>Abandoned — no new release published upstream in over a year.</source>
+        <target>Abandonné — aucune nouvelle version publiée en amont depuis plus d&apos;un an.</target>
+      </segment>
+    </unit>
     <unit id="versionDetail.actionsMenu.block">
       <segment state="translated">
         <source>Block</source>
@@ -7985,6 +8477,24 @@ dotnet/</target>
       <segment state="translated">
         <source>This version ships an install/lifecycle script that runs automatically on install ({kind}).</source>
         <target>Cette version embarque un script d&apos;installation/cycle de vie exécuté automatiquement à l&apos;installation ({kind}).</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.badges.licenseBlockedHelp">
+      <segment state="translated">
+        <source>This license is on the org&apos;s license blocklist.</source>
+        <target>Cette licence figure sur la liste de blocage de licences de l&apos;organisation.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.badges.licenseUnknown">
+      <segment state="translated">
+        <source>unknown</source>
+        <target>inconnue</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.badges.licenseUnknownHelp">
+      <segment state="translated">
+        <source>No license was extracted for this version.</source>
+        <target>Aucune licence n&apos;a été extraite pour cette version.</target>
       </segment>
     </unit>
     <unit id="versionDetail.badges.provenanceFailed">
@@ -8053,6 +8563,30 @@ dotnet/</target>
         <target>retirée</target>
       </segment>
     </unit>
+    <unit id="versionDetail.behindCell.count">
+      <segment state="translated">
+        <source>{count, plural, =0 {up to date} one {# behind} other {# behind}}</source>
+        <target>{count, plural, =0 {à jour} one {# de retard} other {# de retard}}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.behindCell.help">
+      <segment state="translated">
+        <source>Count of upstream STABLE versions newer than this one.</source>
+        <target>Nombre de versions STABLES en amont plus récentes que celle-ci.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.behindCell.unscored">
+      <segment state="translated">
+        <source>UNSCORED</source>
+        <target>NON COTÉ</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.behindCell.unscoredHelp">
+      <segment state="translated">
+        <source>Unknown — no upstream version data to compare (hosted-only, air-gapped, or not yet refreshed).</source>
+        <target>Inconnu — aucune donnée de version en amont à comparer (hébergé uniquement, air-gapped, ou pas encore actualisé).</target>
+      </segment>
+    </unit>
     <unit id="versionDetail.blockDisabledTitle">
       <segment state="translated">
         <source>Already blocked</source>
@@ -8063,6 +8597,12 @@ dotnet/</target>
       <segment state="translated">
         <source>Actions</source>
         <target>Actions</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.columns.behind">
+      <segment state="translated">
+        <source>Behind</source>
+        <target>Retard</target>
       </segment>
     </unit>
     <unit id="versionDetail.columns.checksum">
@@ -8287,6 +8827,36 @@ dotnet/</target>
         <target>Téléversé</target>
       </segment>
     </unit>
+    <unit id="versionDetail.pillars.license">
+      <segment state="translated">
+        <source>License</source>
+        <target>Licence</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.pillars.licenseCount">
+      <segment state="translated">
+        <source>{count, plural, =0 {no risk} one {# version} other {# versions}}</source>
+        <target>{count, plural, =0 {aucun risque} one {# version} other {# versions}}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.pillars.noAdvisories">
+      <segment state="translated">
+        <source>No advisories</source>
+        <target>Aucun avis</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.pillars.operational">
+      <segment state="translated">
+        <source>Operational</source>
+        <target>Opérationnel</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.pillars.security">
+      <segment state="translated">
+        <source>Security</source>
+        <target>Sécurité</target>
+      </segment>
+    </unit>
     <unit id="versionDetail.rescan">
       <segment state="translated">
         <source>Rescan</source>
@@ -8477,6 +9047,30 @@ dotnet/</target>
       <segment state="translated">
         <source>Related</source>
         <target>Associés</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.remediation.fixWithAgent">
+      <segment state="translated">
+        <source>Fix with your AI agent</source>
+        <target>Corriger avec votre agent IA</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.remediation.installLabel">
+      <segment state="translated">
+        <source>Install skill</source>
+        <target>Installer la compétence</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.remediation.promptLabel">
+      <segment state="translated">
+        <source>Prompt</source>
+        <target>Invite</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.remediation.title">
+      <segment state="translated">
+        <source>Remediation</source>
+        <target>Remédiation</target>
       </segment>
     </unit>
     <unit id="vulnerabilities.detail.versions">

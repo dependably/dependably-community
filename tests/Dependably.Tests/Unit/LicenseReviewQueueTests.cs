@@ -1,6 +1,8 @@
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Tests.Unit;
 
@@ -8,6 +10,7 @@ namespace Dependably.Tests.Unit;
 public class LicenseReviewQueueTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
+    private LicenseNormalizer? _normalizer;
 
     public async Task InitializeAsync()
     {
@@ -35,7 +38,9 @@ public class LicenseReviewQueueTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await _db.DisposeAsync();
 
-    private LicenseRepository Repo() => new(_db, TimeProvider.System);
+    private LicenseRepository Repo() => new(
+        _db, TimeProvider.System,
+        _normalizer ??= new LicenseNormalizer(_db, NullLogger<LicenseNormalizer>.Instance));
 
     private async Task SeenAsync(string pvId, string spdx)
     {
@@ -47,6 +52,58 @@ public class LicenseReviewQueueTests : IAsyncLifetime
             ON CONFLICT(package_version_id, license_spdx) DO NOTHING
             """,
             new { id = Guid.NewGuid().ToString("N"), pv = pvId, spdx });
+    }
+
+    /// <summary>
+    /// Seeds a proxied (global cache-plane) artifact: a cache_artifact row, a
+    /// tenant_artifact_access grant for <paramref name="orgId"/>, and a cache-plane
+    /// license row (owner_kind='cache_artifact'). Mirrors the dual-write path.
+    /// </summary>
+    private async Task ProxiedAsync(
+        string orgId, string ecosystem, string name, string version, string spdx)
+    {
+        await using var conn = await _db.OpenAsync();
+        // Reuse an existing cache_artifact for the same coordinate (UNIQUE on the coordinate),
+        // otherwise create one.
+        string caId = await conn.ExecuteScalarAsync<string>(
+            "SELECT id FROM cache_artifact WHERE ecosystem = @ecosystem AND name = @name AND version = @version",
+            new { ecosystem, name, version }) ?? "";
+        if (string.IsNullOrEmpty(caId))
+        {
+            caId = Guid.NewGuid().ToString("N");
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash)
+                VALUES (@id, @ecosystem, @name, @version, @filename, @blobKey, @hash)
+                """,
+                new
+                {
+                    id = caId,
+                    ecosystem,
+                    name,
+                    version,
+                    filename = $"{name}-{version}",
+                    blobKey = $"proxy/{caId}",
+                    hash = caId
+                });
+        }
+
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO tenant_artifact_access (org_id, cache_artifact_id)
+            VALUES (@orgId, @caId)
+            ON CONFLICT(org_id, cache_artifact_id) DO NOTHING
+            """,
+            new { orgId, caId });
+
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO package_version_licenses
+                (id, cache_artifact_id, owner_kind, license_spdx, source)
+            VALUES (@id, @caId, 'cache_artifact', @spdx, 'upstream')
+            ON CONFLICT(cache_artifact_id, license_spdx) DO NOTHING
+            """,
+            new { id = Guid.NewGuid().ToString("N"), caId, spdx });
     }
 
     [Fact]
@@ -110,34 +167,66 @@ public class LicenseReviewQueueTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task FlagsCompoundExpression()
+    public async Task SplitsCompoundExpression_IntoIndividualLeaves()
     {
+        // pv1 (pypi:a) is licensed under a compound expression; pv3 (pypi:b) under bare MIT.
         await SeenAsync("pv1", "MIT OR Apache-2.0");
-        await SeenAsync("pv2", "MIT");
+        await SeenAsync("pv3", "MIT");
 
         var queue = await Repo().GetReviewQueueAsync("org1", false);
 
-        var compound = Assert.Single(queue, e => e.IsCompound);
-        Assert.Equal("MIT OR Apache-2.0", compound.LicenseSpdx);
+        // The compound splits into two individually-actionable leaves — no opaque compound row.
+        Assert.Equal(2, queue.Count);
 
-        var simple = Assert.Single(queue, e => e.LicenseSpdx == "MIT");
-        Assert.False(simple.IsCompound);
+        var mit = Assert.Single(queue, e => e.LicenseSpdx == "MIT");
+        Assert.Equal(2, mit.PackageCount); // observed on pypi:a and pypi:b
+
+        var apache = Assert.Single(queue, e => e.LicenseSpdx == "Apache-2.0");
+        Assert.Equal(1, apache.PackageCount); // only pypi:a
     }
 
     [Fact]
-    public async Task ExcludesDeprecatedByDefault_IncludesWhenAsked()
+    public async Task CollapsesNameVariant_OntoCanonicalId()
     {
-        // GPL-3.0 (no -only/-or-later suffix) is in SPDX 3.28.0 as deprecated.
+        // Two different packages carry the same license expressed two ways — they collapse onto
+        // the canonical Apache-2.0 id and the distinct package count sums across both.
+        await SeenAsync("pv1", "Apache License 2.0"); // pypi:a
+        await SeenAsync("pv3", "Apache-2.0");          // pypi:b
+
+        var queue = await Repo().GetReviewQueueAsync("org1", false);
+
+        var apache = Assert.Single(queue);
+        Assert.Equal("Apache-2.0", apache.LicenseSpdx);
+        Assert.Equal(2, apache.PackageCount);
+    }
+
+    [Fact]
+    public async Task Excludes_AllowlistedAndBlocklisted_Leaves()
+    {
+        // Leaves already on either list must not surface — even when observed inside a compound.
+        await SeenAsync("pv1", "MIT OR GPL-3.0-only"); // pypi:a
+        await SeenAsync("pv3", "ISC");                  // pypi:b
+        await Repo().AddAllowlistAsync("org1", "MIT");
+        await Repo().AddBlocklistAsync("org1", "GPL-3.0-only");
+
+        var queue = await Repo().GetReviewQueueAsync("org1", false);
+
+        var entry = Assert.Single(queue);
+        Assert.Equal("ISC", entry.LicenseSpdx);
+    }
+
+    [Fact]
+    public async Task ObservedDeprecatedLeaf_IsAlwaysSurfaced()
+    {
+        // GPL-3.0 (no -only/-or-later suffix) is in SPDX 3.28.0 as deprecated. The normalizer
+        // does not remap it, so a real observation must always appear to be actionable.
         await SeenAsync("pv1", "GPL-3.0");
         await SeenAsync("pv2", "MIT");
 
-        var hidden = await Repo().GetReviewQueueAsync("org1", false);
-        Assert.Single(hidden);
-        Assert.Equal("MIT", hidden[0].LicenseSpdx);
+        var queue = await Repo().GetReviewQueueAsync("org1", false);
+        Assert.Equal(2, queue.Count);
 
-        var shown = await Repo().GetReviewQueueAsync("org1", true);
-        Assert.Equal(2, shown.Count);
-        var dep = Assert.Single(shown, e => e.LicenseSpdx == "GPL-3.0");
+        var dep = Assert.Single(queue, e => e.LicenseSpdx == "GPL-3.0");
         Assert.True(dep.IsDeprecated);
     }
 
@@ -154,5 +243,82 @@ public class LicenseReviewQueueTests : IAsyncLifetime
         Assert.Equal("MIT", mit.LicenseSpdx);
         Assert.Equal(2, mit.PackageCount);
         Assert.True(mit.FirstSeen != default);
+    }
+
+    [Fact]
+    public async Task Includes_ProxiedOnlyLicense_FromCachePlane()
+    {
+        // No hosted license rows at all — only a proxied (cache-plane) artifact carries this
+        // license. Before the UNION arm was added this license was invisible to the queue.
+        await ProxiedAsync("org1", "npm", "left-pad", "1.3.0", "WTFPL");
+
+        var queue = await Repo().GetReviewQueueAsync("org1", false);
+
+        var entry = Assert.Single(queue);
+        Assert.Equal("WTFPL", entry.LicenseSpdx);
+        Assert.Equal(1, entry.PackageCount);
+    }
+
+    [Fact]
+    public async Task CachePlane_ScopedByTenant_NoCrossLeak()
+    {
+        // A cache artifact accessed only by org2 must not surface for org1, even though the
+        // cache_artifact row itself is global.
+        await ProxiedAsync("org2", "npm", "left-pad", "1.3.0", "WTFPL");
+
+        var queue1 = await Repo().GetReviewQueueAsync("org1", false);
+        var queue2 = await Repo().GetReviewQueueAsync("org2", false);
+
+        Assert.Empty(queue1);
+        Assert.Single(queue2, e => e.LicenseSpdx == "WTFPL");
+    }
+
+    [Fact]
+    public async Task CrossPlaneMerge_SameCoordinate_CountsOnce()
+    {
+        // p1 in org1 is pypi:a. Attach MIT on the hosted plane (pv1) AND on the proxy plane
+        // for the same ecosystem:name coordinate — the queue must merge to ONE row with a
+        // distinct package count of 1 (the same coordinate, not two).
+        await SeenAsync("pv1", "MIT");
+        await ProxiedAsync("org1", "pypi", "a", "3.0", "MIT");
+
+        var queue = await Repo().GetReviewQueueAsync("org1", false);
+
+        var mit = Assert.Single(queue, e => e.LicenseSpdx == "MIT");
+        Assert.Equal(1, mit.PackageCount);
+    }
+
+    [Fact]
+    public async Task Excludes_AllowlistedAndBlocklisted_CachePlaneLicense()
+    {
+        await ProxiedAsync("org1", "npm", "a-pkg", "1.0", "MIT");
+        await ProxiedAsync("org1", "npm", "b-pkg", "1.0", "GPL-3.0-only");
+        await ProxiedAsync("org1", "npm", "c-pkg", "1.0", "ISC");
+        await Repo().AddAllowlistAsync("org1", "MIT");
+        await Repo().AddBlocklistAsync("org1", "GPL-3.0-only");
+
+        var queue = await Repo().GetReviewQueueAsync("org1", false);
+
+        var entry = Assert.Single(queue);
+        Assert.Equal("ISC", entry.LicenseSpdx);
+    }
+
+    [Fact]
+    public async Task PopulatesNameAndCopyleft_ForSeededId_AndDefaultsForCustom()
+    {
+        // MIT is in the seeded spdx_license table (name + copyleft populated).
+        await SeenAsync("pv1", "MIT");
+        // A custom identifier absent from the SPDX list: Name is NULL, Copyleft defaults.
+        await SeenAsync("pv2", "LicenseRef-Acme-Proprietary");
+
+        var queue = await Repo().GetReviewQueueAsync("org1", false);
+
+        var mit = Assert.Single(queue, e => e.LicenseSpdx == "MIT");
+        Assert.Equal("MIT License", mit.Name);
+        Assert.Equal("permissive", mit.Copyleft);
+
+        var custom = Assert.Single(queue, e => e.LicenseSpdx == "LicenseRef-Acme-Proprietary");
+        Assert.Null(custom.Name);
+        Assert.Equal("unclassified", custom.Copyleft);
     }
 }

@@ -65,15 +65,17 @@ public sealed class ProxyVersionRecorder
 
         // Seed the upstream-latest baseline on first contact so the package shows its "Latest"
         // immediately, instead of waiting for the next daily DeprecationRefreshService pass.
-        await TrySeedUpstreamLatestAsync(req, ct);
+        await TrySeedUpstreamLatestAsync(req, cacheArtifactId, ct);
         return versionId;
     }
 
     // Sets packages.upstream_latest_version from the upstream metadata the first time a package is
-    // proxied (when no baseline exists yet). Bounded to one upstream metadata fetch per package:
-    // once a baseline is recorded, the daily refresh keeps it current and this no-ops. Best-effort
-    // — a fetch failure must never fail the first-fetch, which has already served the artifact.
-    private async Task TrySeedUpstreamLatestAsync(ProxyVersionRequest req, CancellationToken ct)
+    // proxied (when no baseline exists yet), and — in the same resolve — seeds this version's own
+    // operational-risk versions_behind count on its cache_artifact row. Bounded to one upstream
+    // metadata fetch per package: once a baseline is recorded, the daily refresh keeps both the
+    // baseline and every version's versions_behind current, and this no-ops. Best-effort — a fetch
+    // failure must never fail the first-fetch, which has already served the artifact.
+    private async Task TrySeedUpstreamLatestAsync(ProxyVersionRequest req, string? cacheArtifactId, CancellationToken ct)
     {
         try
         {
@@ -83,10 +85,17 @@ public sealed class ProxyVersionRecorder
                 return;
             }
 
-            string? latest = await _latestResolver.ResolveAsync(req.Ecosystem, req.OrgId, req.PurlName, ct);
-            if (!string.IsNullOrWhiteSpace(latest))
+            var latest = await _latestResolver.ResolveAsync(req.Ecosystem, req.OrgId, req.PurlName, ct);
+            if (!string.IsNullOrWhiteSpace(latest?.Version))
             {
-                await _packages.UpdateUpstreamLatestAsync(pkg.Id, latest, ct);
+                await _packages.UpdateUpstreamLatestAsync(pkg.Id, latest.Version, latest.PublishedAt, ct);
+            }
+
+            if (cacheArtifactId is not null)
+            {
+                int? versionsBehind = EcosystemVersionOrdering.CountNewerStable(
+                    req.Ecosystem, latest?.StableVersionsDescending, req.Version);
+                await _cacheArtifacts.UpdateVersionsBehindAsync(cacheArtifactId, versionsBehind, ct);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

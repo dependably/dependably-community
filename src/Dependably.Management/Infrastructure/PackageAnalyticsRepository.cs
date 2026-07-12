@@ -9,6 +9,11 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed class PackageAnalyticsRepository
 {
+    // Operational-risk dashboard tile threshold: a package counts toward the tile once any of
+    // its versions is at least this many stable releases behind upstream. Deliberately simple
+    // (matches the ticket's own "N packages ≥ X versions behind" example) — not configurable yet.
+    internal const int VersionsBehindDashboardThreshold = 5;
+
     private readonly IMetadataStore _db;
     private readonly SamlConfigRepository? _samlConfig;
     private readonly TimeProvider _time;
@@ -65,6 +70,8 @@ public sealed class PackageAnalyticsRepository
         var (hostedPackages, proxiedPackages, storageQuotaBytes, totalDownloads30d) =
             await QueryPackageCountsAndQuotaAsync(conn, orgId);
 
+        var (operationalRiskPackages, licenseRiskVersions) = await QueryRiskPillarStatsAsync(conn, orgId);
+
         var samlCertExpiry = await BuildSamlCertExpiryAsync(orgId, ct);
 
         return new OrgStats(
@@ -82,7 +89,73 @@ public sealed class PackageAnalyticsRepository
             QuarantinePending: quarantinePending,
             HostedPackages: hostedPackages,
             ProxiedPackages: proxiedPackages,
-            StorageQuotaBytes: storageQuotaBytes);
+            StorageQuotaBytes: storageQuotaBytes,
+            OperationalRiskPackageCount: operationalRiskPackages,
+            VersionsBehindThreshold: VersionsBehindDashboardThreshold,
+            LicenseRiskVersionCount: licenseRiskVersions);
+    }
+
+    // Queries the two remaining risk-pillar dashboard tiles (operational + license), each
+    // unioning the uploaded (package_versions) and proxy (cache_artifact) planes the same way
+    // the vuln/disk aggregates above do.
+    private static async Task<(int OperationalRiskPackages, int LicenseRiskVersions)> QueryRiskPillarStatsAsync(
+        System.Data.Common.DbConnection conn, string orgId)
+    {
+        // Operational risk: distinct package names carrying at least one version whose
+        // versions_behind is known and meets the dashboard threshold. NULL (unknown) never
+        // counts — the tile only fires on a known, high count.
+        int operationalRiskPackages = await conn.ExecuteScalarAsync<int>(
+            """
+            SELECT COUNT(DISTINCT PurlName) FROM (
+                SELECT p.purl_name AS PurlName
+                FROM package_versions pv
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.org_id = @orgId AND pv.versions_behind >= @threshold
+                UNION
+                SELECT ca.name AS PurlName
+                FROM cache_artifact ca
+                JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                WHERE taa.org_id = @orgId AND ca.versions_behind >= @threshold
+            )
+            """,
+            new { orgId, threshold = VersionsBehindDashboardThreshold });
+
+        // License risk: distinct versions carrying either a blocklisted SPDX license or no
+        // extracted license at all (unknown — a blocklist match and a total absence of license
+        // data are both a signal the operator should look at, so they share the one tile).
+        int licenseRiskVersions = await conn.ExecuteScalarAsync<int>(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT pv.id
+                FROM package_versions pv
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.org_id = @orgId
+                  AND (
+                    NOT EXISTS (SELECT 1 FROM package_version_licenses pvl
+                                WHERE pvl.package_version_id = pv.id AND pvl.owner_kind = 'package_version')
+                    OR EXISTS (SELECT 1 FROM package_version_licenses pvl
+                               JOIN license_blocklist bl
+                                 ON bl.license_spdx = pvl.license_spdx AND bl.org_id = @orgId
+                               WHERE pvl.package_version_id = pv.id AND pvl.owner_kind = 'package_version')
+                  )
+                UNION ALL
+                SELECT ca.id
+                FROM cache_artifact ca
+                JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
+                WHERE taa.org_id = @orgId
+                  AND (
+                    NOT EXISTS (SELECT 1 FROM package_version_licenses pvl
+                                WHERE pvl.cache_artifact_id = ca.id AND pvl.owner_kind = 'cache_artifact')
+                    OR EXISTS (SELECT 1 FROM package_version_licenses pvl
+                               JOIN license_blocklist bl
+                                 ON bl.license_spdx = pvl.license_spdx AND bl.org_id = @orgId
+                               WHERE pvl.cache_artifact_id = ca.id AND pvl.owner_kind = 'cache_artifact')
+                  )
+            )
+            """,
+            new { orgId });
+
+        return (operationalRiskPackages, licenseRiskVersions);
     }
 
     // Queries vuln/severity counts, disk-by-ecosystem, vuln-period buckets, active users,

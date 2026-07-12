@@ -29,7 +29,7 @@ public sealed class NpmDistTagsHandler(
     // Maximum packages returned per search page (per npm search specification).
     private const int MaxSearchPageSize = 50;
 
-    public IActionResult Ping() => new JsonResult(new JsonObject());
+    public static IActionResult Ping() => new JsonResult(new JsonObject());
 
     public async Task<IActionResult> WhoAmIAsync(
         HttpContext httpContext, string orgId, CancellationToken ct)

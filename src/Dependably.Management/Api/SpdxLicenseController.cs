@@ -10,6 +10,7 @@ namespace Dependably.Api;
 ///
 ///   GET /api/v1/spdx-licenses?q=&amp;includeDeprecated=  — typeahead picker source
 ///   GET /api/v1/spdx-licenses/{identifier}             — single license detail
+///   GET /api/v1/spdx-licenses/{identifier}/text        — full bundled license text (popup)
 ///
 /// Backs the SpdxPicker component in the settings UI and license-detail badges on the
 /// member-facing License Policy page. The reference table is instance-wide, but auth is
@@ -58,6 +59,25 @@ public sealed class SpdxLicenseController : ControllerBase
         }
 
         var row = await _repo.GetAsync(identifier, ct);
+        return row is null ? NotFound() : Ok(row);
+    }
+
+    /// <summary>
+    /// Returns the full bundled SPDX license text for a license-text popup. Responds 404 for an
+    /// unknown identifier; responds 200 with <c>licenseText: null</c> for a known identifier whose
+    /// text was not bundled (custom or post-bundle SPDX additions) so the frontend can tell the two
+    /// cases apart.
+    /// </summary>
+    [HttpGet("api/v1/spdx-licenses/{identifier}/text")]
+    public async Task<IActionResult> GetText(string identifier, CancellationToken ct)
+    {
+        var authResult = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ReadPackages, ct);
+        if (authResult is not null)
+        {
+            return authResult;
+        }
+
+        var row = await _repo.GetTextAsync(identifier, ct);
         return row is null ? NotFound() : Ok(row);
     }
 }

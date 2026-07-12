@@ -167,6 +167,14 @@
             <span class="latest-tip-bubble" role="tooltip">{$t('packages.latest.versionLabel', { values: { version: pkg.upstreamLatestVersion } })}</span>
           {/if}
         </span>
+        {#if pkg.abandonedState === 'abandoned'}
+          <!-- Never rendered for 'unknown' — an unknown publish timestamp is not evidence
+               of abandonment. -->
+          <span class="latest-tip-wrap">
+            <svg class="abandoned-icon" width="14" height="14" role="img" aria-label={$t('packages.abandoned.label')}><use href="/icons.svg#icon-alert"/></svg>
+            <span class="latest-tip-bubble" role="tooltip">{$t('packages.abandoned.help')}</span>
+          </span>
+        {/if}
       </td>
       <td class="vuln-cell">
         {#if (pkg.criticalCount ?? 0) > 0}<span class="sev sev-critical" aria-label="{pkg.criticalCount} critical">{pkg.criticalCount}</span>{/if}
@@ -240,6 +248,7 @@
   .latest-cell { font-weight: 600; overflow: visible; }
   .latest-yes { color: var(--success); }
   .latest-no { color: var(--danger); }
+  .abandoned-icon { color: var(--warning); }
 
   /* Instant hover tooltip for the upstream latest version — mirrors InfoTip.svelte's
      bubble so there's no native `title` reveal delay. */

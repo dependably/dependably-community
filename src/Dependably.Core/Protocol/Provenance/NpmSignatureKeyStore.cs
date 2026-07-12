@@ -30,12 +30,12 @@ public sealed class NpmSignatureKeyStore
     }
 
     /// <summary>
-    /// Always false at the instance level — npm trust anchors are per-org, not instance-wide.
-    /// Use <see cref="IsConfiguredForAsync"/> to test whether a specific org has anchors.
-    /// This property exists only to satisfy the <see cref="IArtifactProvenanceVerifier"/> interface
-    /// contract; code that needs the per-org gate must call <see cref="IsConfiguredForAsync"/>.
+    /// Always false — npm trust anchors are per-org, not instance-wide. Mirrors the
+    /// instance-level gate shape used by <see cref="IArtifactProvenanceVerifier"/> implementors
+    /// for consistency; code that needs the per-org gate must call
+    /// <see cref="IsConfiguredForAsync"/>.
     /// </summary>
-    public bool IsConfigured => false;
+    public static bool IsConfigured => false;
 
     /// <summary>
     /// Returns true when at least one npm SPKI trust anchor is configured for <paramref name="orgId"/>.

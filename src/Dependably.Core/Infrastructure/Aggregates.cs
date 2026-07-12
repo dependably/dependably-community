@@ -44,4 +44,12 @@ public sealed record OrgStats(
     int QuarantinePending = 0,
     int HostedPackages = 0,
     int ProxiedPackages = 0,
-    long? StorageQuotaBytes = null);
+    long? StorageQuotaBytes = null,
+    // Operational-risk pillar: distinct packages carrying at least one version whose
+    // versions_behind meets or exceeds VersionsBehindThreshold. A NULL versions_behind (unknown)
+    // never counts toward this — the signal only fires on a known, high count.
+    int OperationalRiskPackageCount = 0,
+    int VersionsBehindThreshold = 0,
+    // License-risk pillar: distinct versions carrying either a blocklisted SPDX license or no
+    // extracted license at all (unknown).
+    int LicenseRiskVersionCount = 0);

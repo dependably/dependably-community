@@ -86,7 +86,9 @@ public sealed class ClaimsController : ControllerBase
 
     /// <summary>GET /api/v1/admin/claims</summary>
     // claim:manage (not read:claims) matches what AuthorizeAsync enforces below — the claims
-    // admin surface is manager-only, reads included.
+    // admin surface is manager-only, reads included. Accepts a PAT/service token carrying
+    // claim:manage; the gate is unchanged, only the accepted authentication scheme widens.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("/api/v1/admin/claims")]
     [RequireCapability(Capabilities.ClaimManage)]
     public async Task<IActionResult> List(
@@ -109,7 +111,9 @@ public sealed class ClaimsController : ControllerBase
 
     /// <summary>GET /api/v1/admin/claims/{ecosystem}/{name}</summary>
     // claim:manage (not read:claims) matches what AuthorizeAsync enforces below — the claims
-    // admin surface is manager-only, reads included.
+    // admin surface is manager-only, reads included. Accepts a PAT/service token carrying
+    // claim:manage; the gate is unchanged, only the accepted authentication scheme widens.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("/api/v1/admin/claims/{ecosystem}/{name}")]
     [RequireCapability(Capabilities.ClaimManage)]
     public async Task<IActionResult> Get(string ecosystem, string name, CancellationToken ct)

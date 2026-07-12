@@ -1106,4 +1106,150 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
         var resp = await client.PostAsync("/pypi/legacy/", content);
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
     }
+
+    // ── Upload: content integrity (ingest-time artifact validation) ────────────
+
+    [Fact]
+    public async Task Upload_WheelContentNameMismatch_Returns422()
+    {
+        // The wheel's dist-info/METADATA Name diverges from the declared publish name —
+        // the content cross-check must reject before any blob is written.
+        string token = await _factory.CreateToken("push");
+        var (bytes, sha256) = PyPiFixtures.BuildWheel("actual-content-name", "1.0.0");
+        using var client = _factory.CreateClientWithBasic(token);
+        using var content = BuildUploadForm("declared-name", "1.0.0", bytes, sha256,
+            filename: "declared_name-1.0.0-py3-none-any.whl", filetype: "bdist_wheel");
+        var resp = await client.PostAsync("/pypi/legacy/", content);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Upload_WheelContentVersionMismatch_Returns422()
+    {
+        // METADATA Version diverges from the declared publish version.
+        string token = await _factory.CreateToken("push");
+        var (bytes, sha256) = PyPiFixtures.BuildWheel("wheelvermismatch", "9.9.9");
+        using var client = _factory.CreateClientWithBasic(token);
+        using var content = BuildUploadForm("wheelvermismatch", "1.0.0", bytes, sha256,
+            filename: "wheelvermismatch-1.0.0-py3-none-any.whl", filetype: "bdist_wheel");
+        var resp = await client.PostAsync("/pypi/legacy/", content);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Upload_SdistContentNameMismatch_Returns422()
+    {
+        // PKG-INFO Name diverges from the declared publish name. The sdist filename is
+        // built from the DECLARED name so the pre-existing filename-prefix check still
+        // passes — only the new content cross-check catches this.
+        string token = await _factory.CreateToken("push");
+        var (bytes, sha256) = PyPiFixtures.BuildSdist("actual-sdist-name", "1.0.0");
+        using var client = _factory.CreateClientWithBasic(token);
+        using var content = BuildUploadForm("declared-sdist-name", "1.0.0", bytes, sha256,
+            filename: "declared_sdist_name-1.0.0.tar.gz", filetype: "sdist");
+        var resp = await client.PostAsync("/pypi/legacy/", content);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Upload_GzipBytesUnderWhlFilename_Returns422()
+    {
+        // The exact real-world failure mode from the corruption report: an sdist's gzip
+        // bytes declared under a .whl filetype/filename. A gzip stream has no PK magic,
+        // so the wheel content parser must reject it outright as a corrupted case, not
+        // merely a name/version mismatch.
+        string token = await _factory.CreateToken("push");
+        var (sdistBytes, _) = PyPiFixtures.BuildSdist("gzipaswheel", "1.0.0");
+        string sha256 = Convert.ToHexString(SHA256.HashData(sdistBytes)).ToLowerInvariant();
+        using var client = _factory.CreateClientWithBasic(token);
+        using var content = BuildUploadForm("gzipaswheel", "1.0.0", sdistBytes, sha256,
+            filename: "gzipaswheel-1.0.0-py3-none-any.whl", filetype: "bdist_wheel");
+        var resp = await client.PostAsync("/pypi/legacy/", content);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Upload_RealFixtureWheel_Accepted()
+    {
+        // Round-trips a genuine PyPI artifact — not synthetic bytes — through the content
+        // cross-check to confirm a valid upload is still accepted.
+        string token = await _factory.CreateToken("push");
+        var (bytes, sha256) = PyPiFixtures.RealWheel();
+        using var client = _factory.CreateClientWithBasic(token);
+        using var content = BuildUploadForm("mypy-extensions", "1.0.0", bytes, sha256,
+            filename: "mypy_extensions-1.0.0-py3-none-any.whl", filetype: "bdist_wheel");
+        var resp = await client.PostAsync("/pypi/legacy/", content);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Upload_SdistAfterWheel_SameVersion_RealFixtures_BothStoredAndWheelIntact()
+    {
+        // The real-world twine flow: the wheel then the sdist for the SAME version. Under
+        // the multi-file version model both are stored as distinct files of one release —
+        // and the wheel's bytes must remain intact (the historical bug silently repointed
+        // the wheel's version row at the sdist's gzip while still advertising the wheel's
+        // filename). Uses the REAL mypy_extensions wheel + sdist fixtures end to end.
+        string jwt = await _factory.CreateAdminJwt();
+        using (var admin = _factory.CreateClient())
+        {
+            admin.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+            var settingsResp = await admin.PutAsJsonAsync("/api/v1/settings", new
+            {
+                anonymousPull = false,
+                allowlistMode = false,
+                versionOverwritePolicy = "allow",
+            });
+            settingsResp.EnsureSuccessStatusCode();
+        }
+
+        try
+        {
+            string token = await _factory.CreateToken("push");
+            var (wheelBytes, wheelSha) = PyPiFixtures.RealWheel();
+            using (var client = _factory.CreateClientWithBasic(token))
+            using (var wheelContent = BuildUploadForm("mypy-extensions", "1.0.0", wheelBytes, wheelSha,
+                filename: "mypy_extensions-1.0.0-py3-none-any.whl", filetype: "bdist_wheel"))
+            {
+                var wheelResp = await client.PostAsync("/pypi/legacy/", wheelContent);
+                Assert.Equal(HttpStatusCode.OK, wheelResp.StatusCode);
+            }
+
+            var (sdistBytes, sdistSha) = PyPiFixtures.RealSdist();
+            using (var client = _factory.CreateClientWithBasic(token))
+            using (var sdistContent = BuildUploadForm("mypy-extensions", "1.0.0", sdistBytes, sdistSha,
+                filename: "mypy_extensions-1.0.0.tar.gz", filetype: "sdist"))
+            {
+                var sdistResp = await client.PostAsync("/pypi/legacy/", sdistContent);
+                Assert.Equal(HttpStatusCode.OK, sdistResp.StatusCode);
+            }
+
+            // The wheel's blob must remain intact — downloading it must still return valid
+            // ZIP (PK magic) bytes, not the sdist's gzip bytes silently swapped in underneath it.
+            using var pullClient = _factory.CreateClientWithBasic(token);
+            var dlResp = await pullClient.GetAsync("/packages/mypy_extensions-1.0.0-py3-none-any.whl");
+            Assert.Equal(HttpStatusCode.OK, dlResp.StatusCode);
+            byte[] served = await dlResp.Content.ReadAsByteArrayAsync();
+            Assert.Equal((byte)'P', served[0]);
+            Assert.Equal((byte)'K', served[1]);
+
+            // The sdist serves its own gzip bytes under its own filename.
+            var sdistDl = await pullClient.GetAsync("/packages/mypy_extensions-1.0.0.tar.gz");
+            Assert.Equal(HttpStatusCode.OK, sdistDl.StatusCode);
+            byte[] servedSdist = await sdistDl.Content.ReadAsByteArrayAsync();
+            Assert.Equal((byte)0x1F, servedSdist[0]);
+            Assert.Equal((byte)0x8B, servedSdist[1]);
+        }
+        finally
+        {
+            using var admin = _factory.CreateClient();
+            admin.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+            await admin.PutAsJsonAsync("/api/v1/settings", new
+            {
+                anonymousPull = false,
+                allowlistMode = false,
+                versionOverwritePolicy = "block",
+            });
+        }
+    }
 }

@@ -7,6 +7,7 @@
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import { formatDateShort } from '../lib/format.js'
   import SpdxPicker from '../lib/SpdxPicker.svelte'
+  import LicenseTextModal from '../lib/LicenseTextModal.svelte'
   import SettingsAuth from '../lib/settings/SettingsAuth.svelte'
   import SettingsGeneral from '../lib/settings/SettingsGeneral.svelte'
   import SettingsStorage from '../lib/settings/SettingsStorage.svelte'
@@ -16,6 +17,7 @@
   import SettingsNamespaceOwnership from '../lib/settings/SettingsNamespaceOwnership.svelte'
   import SettingsServiceTokens from '../lib/settings/SettingsServiceTokens.svelte'
   import SettingsWebhooks from '../lib/settings/SettingsWebhooks.svelte'
+  import SettingsAlerts from '../lib/settings/SettingsAlerts.svelte'
   import SettingsInstance from '../lib/settings/SettingsInstance.svelte'
   import SettingsMetrics from '../lib/settings/SettingsMetrics.svelte'
   import Toggle from '../lib/Toggle.svelte'
@@ -53,6 +55,8 @@
   let licenseReviewIncludeDeprecated = false
   // Per-row pending flag so the operator-facing buttons disable while their POST is in flight.
   let licenseReviewBusy = {}
+  // Identifier of the license whose bundled text popup is open, or null.
+  let licenseTextModal = null
   // Reactive helper: identifiers already on either list — fed to SpdxPicker.exclude to grey
   // them out without changing behaviour (still selectable; the server returns 409 if dup).
   $: licensePolicyIdentifiers = [
@@ -97,11 +101,9 @@
   async function switchTab(key) {
     tab = key
     error = ''; success = ''
-    if (key === 'proxy') {
+    if (key === 'gates') {
       if (!allowlistLoaded) loadAllowlist()
       if (!blocklistLoaded) loadBlocklist()
-    }
-    if (key === 'gates') {
       if (!installScriptAllowlistLoaded) loadInstallScriptAllowlist()
     }
     if (key === 'namespaces') {
@@ -245,8 +247,8 @@
     }
   }
 
-  // Gates save: dual-fires because versionOverwritePolicy rides /settings while
-  // the block gates ride /proxy-settings.
+  // Gates save: dual-fires because versionOverwritePolicy and allowlistMode ride
+  // /settings while the block gates ride /proxy-settings.
   async function saveGatesSettings() {
     success = ''
     await submitForm(() => Promise.all([
@@ -269,14 +271,11 @@
     })
   }
 
-  // Proxy (routing) save: dual-fires because allowlistMode rides /settings
-  // while proxy_passthrough_enabled rides /proxy-settings.
+  // Proxy (routing) save: proxy_passthrough_enabled is the only field on this tab
+  // and rides /proxy-settings.
   async function saveProxyRoutingSettings() {
     success = ''
-    await submitForm(() => Promise.all([
-      api.updateProxySettings(buildProxyPayload()),
-      api.updateOrgSettings(settings),
-    ]), {
+    await submitForm(() => api.updateProxySettings(buildProxyPayload()), {
       setSaving: v => saving = v,
       setError:  v => error  = v,
       onSuccess: () => { success = $t('settings.saved') },
@@ -412,6 +411,7 @@
     ...(viewerIsAdmin ? [
       { key: 'service-tokens', label: 'settings.tabs.serviceTokens' },
       { key: 'webhooks',       label: 'settings.tabs.webhooks' },
+      { key: 'alerts',         label: 'settings.tabs.alerts' },
       { key: 'banners',        label: 'settings.tabs.banners' },
     ] : []),
     ...(showInstanceTabs ? [
@@ -499,13 +499,6 @@
       <SettingsProxyRouting
         {proxySettings}
         airGapped={settings.airGapped}
-        bind:allowlistMode={settings.allowlistMode}
-        {allowlistEntries} {allowlistLoaded}
-        {blocklistEntries} {blocklistLoaded}
-        onAddAllowlist={() => showAddAllowlist = true}
-        onRemoveAllowlist={removeAllowlist}
-        onAddBlocklist={() => showAddBlocklist = true}
-        onRemoveBlocklist={removeBlocklist}
         {saving}
         onSave={saveProxyRoutingSettings} />
 
@@ -513,6 +506,13 @@
       <SettingsGates
         {proxySettings}
         {settings}
+        bind:allowlistMode={settings.allowlistMode}
+        {allowlistEntries} {allowlistLoaded}
+        {blocklistEntries} {blocklistLoaded}
+        onAddAllowlist={() => showAddAllowlist = true}
+        onRemoveAllowlist={removeAllowlist}
+        onAddBlocklist={() => showAddBlocklist = true}
+        onRemoveBlocklist={removeBlocklist}
         {installScriptAllowlistEntries} {installScriptAllowlistLoaded}
         onAddInstallScriptAllowlist={() => showAddInstallScriptAllowlist = true}
         onRemoveInstallScriptAllowlist={removeInstallScriptAllowlist}
@@ -574,38 +574,53 @@
       <table class="list-table">
         <colgroup>
           <col><!-- spdx -->
+          <col><!-- name -->
           <col class="col-narrow"><!-- packages -->
           <col class="col-added"><!-- first seen -->
+          <col class="col-narrow"><!-- classification -->
           <col class="col-narrow"><!-- flags -->
           <col class="col-review-actions"><!-- actions -->
         </colgroup>
         <thead><tr>
           <th>{$t('settings.licenses.columns.spdx')}</th>
+          <th>{$t('settings.licenses.review.columns.name')}</th>
           <th>{$t('settings.licenses.review.columns.packages')}</th>
           <th>{$t('settings.licenses.review.columns.firstSeen')}</th>
+          <th>{$t('settings.licenses.review.columns.classification')}</th>
           <th>{$t('settings.licenses.review.columns.flags')}</th>
           <th></th>
         </tr></thead>
         <tbody>
           {#each licenseReviewEntries as r (r.licenseSpdx)}
             <tr>
-              <td class="t-mono">{r.licenseSpdx}</td>
+              <td class="t-mono">
+                <button class="link t-mono"
+                        disabled={!!licenseReviewBusy[r.licenseSpdx]}
+                        title={$t('licenseText.open')}
+                        aria-label={$t('licenseText.open')}
+                        on:click={() => licenseTextModal = r.licenseSpdx}>
+                  {r.licenseSpdx}
+                </button>
+              </td>
+              <td>{r.name ?? '—'}</td>
               <td class="text-center">{r.packageCount}</td>
               <td class="text-muted">{$formatDateShort(r.firstSeen)}</td>
               <td>
-                {#if r.isCompound}<span class="badge warn" title={$t('settings.licenses.review.compoundTooltip')}>{$t('settings.licenses.review.compound')}</span>{/if}
+                {#if r.copyleft && r.copyleft !== 'unclassified'}
+                  <span class="badge cl-{r.copyleft}">{$t(`licenseClassification.${r.copyleft}`)}</span>
+                {/if}
+              </td>
+              <td>
                 {#if r.isDeprecated}<span class="badge danger">{$t('settings.licenses.review.deprecated')}</span>{/if}
               </td>
               <td class="t-actions">
                 <button class="primary btn-sm"
-                        disabled={r.isCompound || !!licenseReviewBusy[r.licenseSpdx]}
-                        title={r.isCompound ? $t('settings.licenses.review.compoundTooltip') : ''}
+                        disabled={!!licenseReviewBusy[r.licenseSpdx]}
                         on:click={() => approveReview(r.licenseSpdx)}>
                   {$t('settings.licenses.review.approve')}
                 </button>
                 <button class="danger btn-sm"
-                        disabled={r.isCompound || !!licenseReviewBusy[r.licenseSpdx]}
-                        title={r.isCompound ? $t('settings.licenses.review.compoundTooltip') : ''}
+                        disabled={!!licenseReviewBusy[r.licenseSpdx]}
                         on:click={() => blockReview(r.licenseSpdx)}>
                   {$t('settings.licenses.review.block')}
                 </button>
@@ -613,7 +628,7 @@
             </tr>
           {/each}
           {#if licenseReviewLoaded && licenseReviewEntries.length === 0}
-            <tr><td colspan="5" class="text-center text-muted">{$t('settings.licenses.review.empty')}</td></tr>
+            <tr><td colspan="7" class="text-center text-muted">{$t('settings.licenses.review.empty')}</td></tr>
           {/if}
         </tbody>
       </table>
@@ -632,7 +647,14 @@
         <tbody>
           {#each licenseAllowEntries as e (e.id)}
             <tr>
-              <td class="t-mono">{e.licenseSpdx}</td>
+              <td class="t-mono">
+                <button class="link t-mono"
+                        aria-label={$t('licenseText.open')}
+                        title={$t('licenseText.open')}
+                        on:click={() => licenseTextModal = e.licenseSpdx}>
+                  {e.licenseSpdx}
+                </button>
+              </td>
               <td class="text-muted">{$formatDateShort(e.createdAt)}</td>
               <td><button class="danger btn-sm" on:click={() => removeLicenseAllow(e.licenseSpdx)}>{$t('common.actions.remove')}</button></td>
             </tr>
@@ -657,7 +679,14 @@
         <tbody>
           {#each licenseBlockEntries as e (e.id)}
             <tr>
-              <td class="t-mono">{e.licenseSpdx}</td>
+              <td class="t-mono">
+                <button class="link t-mono"
+                        aria-label={$t('licenseText.open')}
+                        title={$t('licenseText.open')}
+                        on:click={() => licenseTextModal = e.licenseSpdx}>
+                  {e.licenseSpdx}
+                </button>
+              </td>
               <td class="text-muted">{$formatDateShort(e.createdAt)}</td>
               <td><button class="danger btn-sm" on:click={() => removeLicenseBlock(e.licenseSpdx)}>{$t('common.actions.remove')}</button></td>
             </tr>
@@ -769,6 +798,9 @@
     {:else if tab === 'webhooks' && viewerIsAdmin}
       <SettingsWebhooks />
 
+    {:else if tab === 'alerts' && viewerIsAdmin}
+      <SettingsAlerts />
+
     {:else if tab === 'instance' && showInstanceTabs}
       <p class="tab-intro">{$t('settings.instance.intro')}</p>
       <SettingsInstance getSettings={api.getInstanceSettings} updateSettings={api.updateInstanceSettings} />
@@ -798,6 +830,18 @@
   .list-table .col-actions { width: 90px; }
   .list-table .col-review-actions { width: 160px; }
   .t-actions { white-space: nowrap; }
+  /* Inline link-style trigger for the SPDX id cells that open LicenseTextModal. */
+  .link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    padding: 0;
+    min-height: 0;
+    font-size: inherit;
+    cursor: pointer;
+  }
+  .link:hover:not(:disabled) { text-decoration: underline; background: none; }
+  .link:disabled { color: var(--text2); cursor: default; }
 
   /* Licenses tab — mode picker as a 2-col table: label+hint on the left, radio on the right.
      Matches the visual rhythm of the allow/block tables below. */
@@ -879,6 +923,7 @@
           <option value="maven">Maven</option>
           <option value="cargo">Cargo</option>
           <option value="golang">Go</option>
+          <option value="apk">Alpine apk</option>
         </select>
       </div>
       <div class="form-row">
@@ -966,4 +1011,8 @@
       </div>
     </div>
   </div>
+{/if}
+
+{#if licenseTextModal}
+  <LicenseTextModal identifier={licenseTextModal} on:close={() => licenseTextModal = null} />
 {/if}

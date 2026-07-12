@@ -10,9 +10,11 @@
                opencover natively, so no conversion step is needed. -->
           <Format>opencover</Format>
 
-          <!-- Anchor coverage to the production assembly. The test assembly itself
-               (and any future *.Tests assemblies) must not be measured. -->
-          <Include>[Dependably]*</Include>
+          <!-- Anchor coverage to the production assemblies: the assembly split puts the
+               code in Dependably.Core and Dependably.Management behind the thin Dependably
+               composition root (an Include that names only [Dependably] measures almost
+               nothing). The test assembly itself must not be measured. -->
+          <Include>[Dependably]*,[Dependably.Core]*,[Dependably.Management]*,[Dependably.Edge]*</Include>
           <Exclude>[Dependably.Tests]*,[xunit.*]*,[Microsoft.*]*</Exclude>
 
           <!-- File-level exclusions for code that can't be meaningfully unit-tested:

@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS system_admins (
 CREATE TABLE IF NOT EXISTS packages (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,   -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm' | 'oci' | 'cargo' | 'golang'
+    ecosystem   TEXT NOT NULL,   -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm' | 'oci' | 'cargo' | 'golang' | 'apk'
     name        TEXT NOT NULL,
     purl_name   TEXT NOT NULL,   -- normalized per ecosystem
     is_proxy    INTEGER NOT NULL DEFAULT 0,
@@ -162,6 +162,8 @@ CREATE TABLE IF NOT EXISTS packages (
     -- the background upstream-metadata pass. NULL when no upstream baseline is known.
     upstream_latest_version    TEXT,
     upstream_latest_checked_at TEXT,
+    -- Publish timestamp of upstream_latest_version. See Schema.sql for the full rationale.
+    upstream_latest_published_at TEXT,
     -- Per-package same-version-push override. NULL = inherit. See Schema.sql for the full rationale.
     same_version_push_override TEXT
                                CHECK (same_version_push_override IN ('allow','block')),
@@ -207,6 +209,9 @@ CREATE TABLE IF NOT EXISTS package_versions (
     deprecation_checked_at TEXT,
     -- ISO 8601 UTC; first time this version was observed removed from upstream. See Schema.sql.
     revoked_at TEXT,
+    -- Operational-risk signal: count of upstream STABLE versions strictly newer than this one.
+    -- NULL = unknown, never 0. See Schema.sql for the full rationale.
+    versions_behind INTEGER,
     -- Install/lifecycle-script supply-chain signal + kind discriminator. See Schema.sql.
     has_install_script INTEGER NOT NULL DEFAULT 0,
     install_script_kind TEXT,
@@ -348,6 +353,9 @@ CREATE TABLE IF NOT EXISTS cache_artifact (
     deprecation_checked_at TEXT,
     -- ISO 8601 UTC; first time this version was observed removed from upstream. See Schema.sql.
     revoked_at          TEXT,
+    -- Operational-risk signal: count of upstream STABLE versions strictly newer than this one.
+    -- NULL = unknown, never 0. See Schema.sql for the full rationale.
+    versions_behind     INTEGER,
     -- Supply-chain signal: 1 when the artifact ships an install/lifecycle script.
     has_install_script  INTEGER NOT NULL DEFAULT 0,
     -- Discriminator for which kind of install script fired (e.g. 'npm:postinstall').
@@ -362,6 +370,9 @@ CREATE TABLE IF NOT EXISTS cache_artifact (
     upstream_integrity_algorithm TEXT,
     -- ISO 8601 UTC; set after the last OSV vulnerability scan against this artifact.
     vuln_checked_at     TEXT,
+    -- ISO 8601 UTC; set after the last license-extraction pass against this artifact. NULL =
+    -- never scanned for licenses. Stamped by LicenseBackfillService. See Schema.sql.
+    license_checked_at  TEXT,
     UNIQUE (ecosystem, name, version, filename)
 );
 CREATE INDEX IF NOT EXISTS idx_cache_artifact_lru ON cache_artifact (last_accessed_at);
@@ -480,7 +491,7 @@ CREATE TABLE IF NOT EXISTS blocklist (
 CREATE TABLE IF NOT EXISTS reserved_namespace (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,  -- 'npm' | 'pypi' | 'nuget' | 'maven' | 'cargo' | 'golang'
+    ecosystem   TEXT NOT NULL,  -- 'npm' | 'pypi' | 'nuget' | 'maven' | 'cargo' | 'golang' | 'apk'
     pattern     TEXT NOT NULL,
     created_by  TEXT REFERENCES users(id),
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
@@ -510,6 +521,47 @@ CREATE INDEX IF NOT EXISTS idx_quarantine_org_state ON quarantine(org_id, state,
 CREATE INDEX IF NOT EXISTS idx_quarantine_version ON quarantine(package_version_id);
 CREATE INDEX IF NOT EXISTS idx_quarantine_decided_by ON quarantine(decided_by);
 
+-- Per-tenant alert center. See Schema.sql for the full rationale.
+CREATE TABLE IF NOT EXISTS alert (
+    id           TEXT PRIMARY KEY,
+    org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    type         TEXT NOT NULL CHECK (type IN ('quarantine_new', 'vuln_severity')),
+    severity     TEXT,
+    source_ref   TEXT NOT NULL,
+    ecosystem    TEXT,
+    purl         TEXT,
+    title        TEXT NOT NULL,
+    detail       TEXT,
+    state        TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'dismissed')),
+    dismissed_by TEXT REFERENCES users(id),
+    dismissed_at TEXT,
+    slack_status TEXT,
+    slack_error  TEXT,
+    created_at   TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    updated_at   TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    UNIQUE (org_id, type, source_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_org_state ON alert(org_id, state, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_dismissed_by ON alert(dismissed_by);
+
+-- Per-org alert toggles, vuln severity floor, and optional Slack delivery channel.
+-- See Schema.sql for the full rationale.
+CREATE TABLE IF NOT EXISTS alert_settings (
+    org_id                     TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    quarantine_alerts_enabled INTEGER NOT NULL DEFAULT 1,
+    vuln_alerts_enabled       INTEGER NOT NULL DEFAULT 1,
+    vuln_min_severity         TEXT NOT NULL DEFAULT 'HIGH' CHECK (vuln_min_severity IN ('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')),
+    slack_enabled              INTEGER NOT NULL DEFAULT 0,
+    slack_webhook_url          TEXT,
+    slack_last_delivery_at     TEXT,
+    slack_last_status          TEXT,
+    slack_consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    slack_failing_since        TEXT,
+    slack_last_error           TEXT,
+    created_at                 TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    updated_at                 TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+);
+
 -- Per-org upstream proxy registries. One ordered list per ecosystem; `position` ascending is
 -- priority (lowest tried first, falling through on miss/unreachable). An ecosystem with zero
 -- rows has proxying effectively disabled for that org. For non-OCI ecosystems auth_type is
@@ -523,7 +575,7 @@ CREATE INDEX IF NOT EXISTS idx_quarantine_decided_by ON quarantine(decided_by);
 CREATE TABLE IF NOT EXISTS upstream_registry (
     id             TEXT PRIMARY KEY,
     org_id         TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem      TEXT NOT NULL,              -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm' | 'oci'
+    ecosystem      TEXT NOT NULL,              -- 'pypi' | 'npm' | 'nuget' | 'maven' | 'rpm' | 'oci' | 'apk'
     name           TEXT,                       -- optional display label
     url            TEXT NOT NULL,
     position       INTEGER NOT NULL DEFAULT 0, -- ascending = priority; lowest tried first
@@ -745,6 +797,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mvf_ca_filename
     ON maven_version_files (cache_artifact_id, filename)
     WHERE owner_kind = 'cache_artifact';
 
+-- PyPI multi-file-per-version distribution files (wheel + sdist + per-platform wheels).
+-- See Schema.sql for full rationale.
+CREATE TABLE IF NOT EXISTS package_version_files (
+    id                  TEXT PRIMARY KEY,
+    package_version_id  TEXT NOT NULL REFERENCES package_versions(id) ON DELETE CASCADE,
+    org_id              TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    filename            TEXT NOT NULL,
+    blob_key            TEXT NOT NULL,
+    size_bytes          BIGINT NOT NULL DEFAULT 0,
+    checksum_sha256     TEXT,
+    created_at          TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+    UNIQUE (package_version_id, filename)
+);
+-- The UNIQUE(package_version_id, filename) index covers the version FK (leftmost member);
+-- this one covers the org FK cascade and the org-scoped filename resolution on download.
+CREATE INDEX IF NOT EXISTS idx_package_version_files_org_filename
+    ON package_version_files (org_id, filename);
+
 -- OCI / Docker registry storage. See Schema.sql for full rationale.
 CREATE TABLE IF NOT EXISTS oci_blobs (
     digest        TEXT NOT NULL,
@@ -796,7 +866,12 @@ CREATE TABLE IF NOT EXISTS spdx_license (
     is_deprecated   INTEGER NOT NULL DEFAULT 0,
     reference_url   TEXT,
     copyleft        TEXT NOT NULL DEFAULT 'unclassified'
-        CHECK (copyleft IN ('permissive','weak-copyleft','strong-copyleft','network-copyleft','public-domain','unclassified'))
+        CHECK (copyleft IN ('permissive','weak-copyleft','strong-copyleft','network-copyleft','public-domain','unclassified')),
+    -- Full SPDX license text, bundled at build time from license-list-data (air-gapped
+    -- runtime, no on-demand fetch). NULL for identifiers absent from the bundled texts
+    -- (custom/post-bundle SPDX additions). Served on demand by the license-text endpoint;
+    -- never joined into the list/detail SELECTs to keep those payloads small.
+    license_text    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_spdx_license_osi ON spdx_license(is_osi_approved);
 CREATE INDEX IF NOT EXISTS idx_spdx_license_copyleft ON spdx_license(copyleft);

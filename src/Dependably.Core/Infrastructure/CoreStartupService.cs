@@ -222,7 +222,7 @@ public sealed class CoreStartupService : IHostedService
                     "SELECT value FROM instance_settings WHERE key = @key",
                     new { key });
 
-                if (raw is null || _envelope.IsEncrypted(raw))
+                if (raw is null || EnvelopeProtector.IsEncrypted(raw))
                 {
                     continue;
                 }
@@ -284,7 +284,7 @@ public sealed class CoreStartupService : IHostedService
         int migrated = 0;
         foreach (var row in rows)
         {
-            if (string.IsNullOrEmpty(row.Secret) || _envelope.IsEncrypted(row.Secret))
+            if (string.IsNullOrEmpty(row.Secret) || EnvelopeProtector.IsEncrypted(row.Secret))
             {
                 continue;
             }
@@ -310,7 +310,7 @@ public sealed class CoreStartupService : IHostedService
                 "SELECT value FROM instance_settings WHERE key = @key",
                 new { key });
 
-            if (raw is not null && _envelope.IsEncrypted(raw))
+            if (raw is not null && EnvelopeProtector.IsEncrypted(raw))
             {
                 throw OrphanedSecretException();
             }
@@ -359,11 +359,11 @@ public sealed class CoreStartupService : IHostedService
     }
 
     // Returns true when any row returned by the probe carries the enc:v1: envelope prefix.
-    private async Task<bool> AnyEncryptedSecretAsync(
+    private static async Task<bool> AnyEncryptedSecretAsync(
         System.Data.Common.DbConnection conn, string probeSql)
     {
         var secrets = await conn.QueryAsync<string?>(probeSql);
-        return secrets.Any(s => s is not null && _envelope.IsEncrypted(s));
+        return secrets.Any(s => s is not null && EnvelopeProtector.IsEncrypted(s));
     }
 
     private static InvalidOperationException OrphanedSecretException() =>

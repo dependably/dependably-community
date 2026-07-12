@@ -56,6 +56,18 @@ internal static class ProtocolStartupExtensions
         builder.Services.AddSingleton<AllowlistService>();
         builder.Services.AddSingleton<BlockGateService>();
 
+        // SPDX license identity normalization (name/alias variants -> canonical id). Lazily
+        // builds and caches its spdx_license + alias-overlay maps on first use; never queries
+        // per Normalize call.
+        builder.Services.AddSingleton<LicenseNormalizer>();
+
+        // Pre-adoption package lookup: read-only verdict against upstream metadata + OSV +
+        // the org's block/license policy, reusing BlockGateService.Evaluate rather than
+        // forking the gate logic. PackageLookupCache is its own singleton (a striped
+        // single-flight + TTL cache) so it can be constructed and asserted on independently.
+        builder.Services.AddSingleton<PackageLookupCache>();
+        builder.Services.AddSingleton<PackageLookupService>();
+
         // Artefact-provenance verifiers. All ecosystems resolve trust anchors per-org at
         // request time via IPerOrgTrustAnchorStore. The trust root is never the upstream-fetched
         // key; operators pin trust material through Settings → Trust Anchors.

@@ -48,6 +48,12 @@ public sealed class ReservedNamespaceServiceTests
     [InlineData("golang", "github.com/acme/*", "github.com/acme/lib", true)] // tolerated spelling
     [InlineData("golang", "github.com/acme", "github.com/Acme", false)]      // module paths are case-significant
     [InlineData("golang", "github.com/Acme", "github.com/Acme/sdk", true)]
+    // apk — flat, case-folded namespace (Alpine's aports tree); same glob shape as npm/cargo
+    [InlineData("apk", "acme-*", "acme-tools", true)]
+    [InlineData("apk", "acme-*", "acmetools", false)]        // boundary is the literal stem
+    [InlineData("apk", "curl", "curl", true)]
+    [InlineData("apk", "curl", "curl-dev", false)]            // exact pattern ≠ prefix
+    [InlineData("apk", "Acme-Tools", "acme-tools", true)]     // apk names are lowercase-canonical
     // degenerate inputs
     [InlineData("npm", "", "anything", false)]
     [InlineData("npm", "*", "", false)]

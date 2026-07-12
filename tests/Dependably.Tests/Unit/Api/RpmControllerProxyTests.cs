@@ -171,6 +171,65 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             """,
             new { orgId = _orgId });
         Assert.Equal(1, taaCount);
+
+        // First-fetch mirrors the RPM header's Fedora short license tag ("GPLv2+") into
+        // license governance against the global cache_artifact row, mapped to its SPDX
+        // identifier so the review queue speaks the same vocabulary as every other
+        // ecosystem.
+        var licenseRow = await conn.QuerySingleOrDefaultAsync(
+            """
+            SELECT pvl.license_spdx, pvl.source
+            FROM package_version_licenses pvl
+            JOIN cache_artifact ca ON ca.id = pvl.cache_artifact_id
+            WHERE pvl.owner_kind = 'cache_artifact' AND ca.ecosystem = 'rpm' AND ca.name = 'tree'
+            """);
+        Assert.NotNull(licenseRow);
+        Assert.Equal("GPL-2.0-or-later", (string)licenseRow!.license_spdx);
+        Assert.Equal("upstream", (string)licenseRow.source);
+    }
+
+    [Fact]
+    public async Task Download_LocalMiss_UnmappedLicenseTag_MirrorsVerbatimToCacheArtifact()
+    {
+        // Mixed partial-failure coverage alongside the mapped-tag case above: a compound
+        // Fedora boolean expression has no unambiguous SPDX mapping, so the ingest site
+        // mirrors it verbatim rather than dropping it — it must still reach the review
+        // queue.
+        await EnableAnonPullAsync();
+        await SeedRpmRegistryAsync();
+        byte[] bytes = RandomBytes(256);
+        string sha256 = Sha256Hex(bytes);
+        string filename = "dual-licensed-1.0-1.fc40.x86_64.rpm";
+        var resolution = new PackageResolution(
+            PackageUrl: $"https://mirror.example.com/Packages/d/{filename}",
+            Sha256: sha256,
+            Name: "dual-licensed",
+            Epoch: 0,
+            Version: "1.0",
+            Release: "1.fc40",
+            Arch: "x86_64",
+            Summary: "A dual-licensed package",
+            Description: "dual-licensed sample",
+            License: "GPLv2+ and BSD");
+
+        await _blobs.PutAsync(BlobKeys.Proxy(sha256), new MemoryStream(bytes), default);
+
+        var stubProxy = new StubProxy(resolution: resolution);
+        var ctl = BuildController(proxy: stubProxy);
+
+        var result = await ctl.Download(filename, default);
+        Assert.IsType<FileStreamResult>(result);
+
+        await using var conn = await _db.OpenAsync();
+        var licenseRow = await conn.QuerySingleOrDefaultAsync(
+            """
+            SELECT pvl.license_spdx
+            FROM package_version_licenses pvl
+            JOIN cache_artifact ca ON ca.id = pvl.cache_artifact_id
+            WHERE pvl.owner_kind = 'cache_artifact' AND ca.ecosystem = 'rpm' AND ca.name = 'dual-licensed'
+            """);
+        Assert.NotNull(licenseRow);
+        Assert.Equal("GPLv2+ and BSD", (string)licenseRow!.license_spdx);
     }
 
     [Fact]
@@ -1079,6 +1138,7 @@ public sealed class RpmControllerProxyTests : IAsyncLifetime
             EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
             BlockGate: Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, TimeProvider.System),
             Staging: new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0),
+            Licenses: new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db)),
             UpstreamClient: upstreamClient,
             Proxy: proxy);
 

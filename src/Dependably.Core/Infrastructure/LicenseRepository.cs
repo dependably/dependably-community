@@ -1,4 +1,5 @@
 using Dapper;
+using Dependably.Protocol;
 
 namespace Dependably.Infrastructure;
 
@@ -12,11 +13,13 @@ public sealed class LicenseRepository
 
     private readonly IMetadataStore _db;
     private readonly TimeProvider _time;
+    private readonly LicenseNormalizer _normalizer;
 
-    public LicenseRepository(IMetadataStore db, TimeProvider time)
+    public LicenseRepository(IMetadataStore db, TimeProvider time, LicenseNormalizer normalizer)
     {
         _db = db;
         _time = time;
+        _normalizer = normalizer;
     }
 
     // ── Package version licenses ──────────────────────────────────────────────
@@ -166,13 +169,17 @@ public sealed class LicenseRepository
     public async Task<LicenseAllowlistEntry?> AddAllowlistAsync(
         string orgId, string licenseSpdx, CancellationToken ct = default)
     {
+        // Normalize the incoming id to its canonical SPDX form before storing, so the entry is
+        // consistent with the case-sensitive Remove* / CheckPolicy comparisons and collapses
+        // name variants ("Apache License 2.0" -> "Apache-2.0") onto one canonical row.
+        string normalized = _normalizer.Normalize(licenseSpdx);
         await using var conn = await _db.OpenAsync(ct);
         string id = Guid.NewGuid().ToString("N");
         try
         {
             await conn.ExecuteAsync(
                 "INSERT INTO license_allowlist (id, org_id, license_spdx) VALUES (@id, @orgId, @licenseSpdx)",
-                new { id, orgId, licenseSpdx });
+                new { id, orgId, licenseSpdx = normalized });
         }
         catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == SqliteConstraintErrorCode)
         {
@@ -183,7 +190,7 @@ public sealed class LicenseRepository
         {
             Id = id,
             OrgId = orgId,
-            LicenseSpdx = licenseSpdx,
+            LicenseSpdx = normalized,
             CreatedAt = _time.GetUtcNow()
         };
     }
@@ -216,13 +223,15 @@ public sealed class LicenseRepository
     public async Task<LicenseBlocklistEntry?> AddBlocklistAsync(
         string orgId, string licenseSpdx, CancellationToken ct = default)
     {
+        // Normalize the incoming id to its canonical SPDX form before storing (see AddAllowlist).
+        string normalized = _normalizer.Normalize(licenseSpdx);
         await using var conn = await _db.OpenAsync(ct);
         string id = Guid.NewGuid().ToString("N");
         try
         {
             await conn.ExecuteAsync(
                 "INSERT INTO license_blocklist (id, org_id, license_spdx) VALUES (@id, @orgId, @licenseSpdx)",
-                new { id, orgId, licenseSpdx });
+                new { id, orgId, licenseSpdx = normalized });
         }
         catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == SqliteConstraintErrorCode)
         {
@@ -232,7 +241,7 @@ public sealed class LicenseRepository
         {
             Id = id,
             OrgId = orgId,
-            LicenseSpdx = licenseSpdx,
+            LicenseSpdx = normalized,
             CreatedAt = _time.GetUtcNow()
         };
     }
@@ -250,65 +259,163 @@ public sealed class LicenseRepository
     // ── Review queue ──────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Returns SPDX identifiers observed during ingestion for this tenant that are on
-    /// neither the allow- nor block-list. Includes a per-row package count and first-seen
-    /// timestamp so the admin UI can prioritise high-impact licenses.
+    /// Returns single canonical SPDX license leaves observed during ingestion for this tenant
+    /// that are on neither the allow- nor block-list. Includes a per-leaf package count and
+    /// first-seen timestamp so the admin UI can prioritise high-impact licenses.
     ///
-    /// Compound expressions (PyPI PEP 639 emits "MIT OR Apache-2.0" verbatim) are surfaced
-    /// with <c>IsCompound = true</c>. The UI disables Approve/Block on those rows because
-    /// <see cref="CheckPolicyAsync"/> compares license strings literally — adding a compound
-    /// to the allowlist would not match a future "MIT" lookup.
+    /// Licenses are merged across both planes: hosted/published artifacts (per-tenant
+    /// <c>package_versions</c>) and proxied artifacts (the global <c>cache_artifact</c> plane,
+    /// org-scoped via <c>tenant_artifact_access</c>).
     ///
-    /// Deprecated SPDX identifiers are excluded by default to keep the queue actionable;
-    /// they reappear under <c>includeDeprecated = true</c> for backfill workflows.
+    /// Compound expressions (PyPI PEP 639 emits "MIT OR Apache-2.0" verbatim) are split into
+    /// their individual leaves — each leaf is reviewed and approved independently — and name
+    /// variants collapse onto their canonical SPDX id ("Apache License 2.0" and "Apache-2.0"
+    /// become one <c>Apache-2.0</c> row). A package contributing the same leaf through two
+    /// expressions is counted once (the count is set-based over package keys).
+    ///
+    /// Observed deprecated leaves are always surfaced: the normalizer does not remap a
+    /// deprecated id, so a real <c>GPL-3.0</c> package must appear to be actionable. The
+    /// <paramref name="includeDeprecated"/> parameter is retained for API compatibility but is
+    /// now a no-op for this reason; the <c>IsDeprecated</c> flag still drives the UI badge.
     /// </summary>
     public async Task<IReadOnlyList<LicenseReviewEntry>> GetReviewQueueAsync(
         string orgId, bool includeDeprecated, CancellationToken ct = default)
     {
+        _ = includeDeprecated;
+
+        var allowlist = await GetAllowlistAsync(orgId, ct);
+        var blocklist = await GetBlocklistAsync(orgId, ct);
+        var allowSet = allowlist.Select(e => _normalizer.Normalize(e.LicenseSpdx))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var blockSet = blocklist.Select(e => _normalizer.Normalize(e.LicenseSpdx))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         await using var conn = await _db.OpenAsync(ct);
-        var rows = await conn.QueryAsync<LicenseReviewEntry>(
+        // Both UNION arms filter on @orgId (hosted via packages.org_id, proxied via
+        // tenant_artifact_access.org_id), so no cross-tenant row is reachable.
+        var rawRows = await conn.QueryAsync<ReviewRawRow>(
             """
-            SELECT pvl.license_spdx                                         AS LicenseSpdx,
-                   COUNT(DISTINCT pv.package_id)                            AS PackageCount,
-                   MIN(pvl.created_at)                                      AS FirstSeen,
-                   CASE
-                     WHEN pvl.license_spdx LIKE '% OR %'
-                       OR pvl.license_spdx LIKE '% AND %'
-                       OR pvl.license_spdx LIKE '% WITH %'
-                       OR pvl.license_spdx LIKE '(%'
-                     THEN 1 ELSE 0
-                   END                                                      AS IsCompound,
-                   COALESCE(spdx.is_deprecated, 0)                          AS IsDeprecated
+            SELECT pvl.license_spdx                     AS RawLicenseSpdx,
+                   p.ecosystem || ':' || p.purl_name    AS PackageKey,
+                   pvl.created_at                        AS CreatedAt
             FROM package_version_licenses pvl
             JOIN package_versions pv ON pv.id = pvl.package_version_id
             JOIN packages         p  ON p.id  = pv.package_id
-            LEFT JOIN license_allowlist al
-              ON al.org_id = p.org_id AND al.license_spdx = pvl.license_spdx
-            LEFT JOIN license_blocklist bl
-              ON bl.org_id = p.org_id AND bl.license_spdx = pvl.license_spdx
-            LEFT JOIN spdx_license spdx
-              ON spdx.identifier = pvl.license_spdx
             WHERE p.org_id = @orgId
-              AND al.id IS NULL
-              AND bl.id IS NULL
-              AND (@includeDeprecated = 1 OR COALESCE(spdx.is_deprecated, 0) = 0)
-            GROUP BY pvl.license_spdx, COALESCE(spdx.is_deprecated, 0)
-            ORDER BY COUNT(DISTINCT pv.package_id) DESC,
-                     MIN(pvl.created_at) ASC,
-                     pvl.license_spdx ASC
+            UNION ALL
+            SELECT pvl.license_spdx                     AS RawLicenseSpdx,
+                   ca.ecosystem || ':' || ca.name       AS PackageKey,
+                   pvl.created_at                        AS CreatedAt
+            FROM package_version_licenses pvl
+            JOIN cache_artifact ca
+              ON ca.id = pvl.cache_artifact_id
+            JOIN tenant_artifact_access taa
+              ON taa.cache_artifact_id = pvl.cache_artifact_id
+             AND taa.org_id = @orgId
+            WHERE pvl.owner_kind = 'cache_artifact'
             """,
-            new { orgId, includeDeprecated = includeDeprecated ? 1 : 0 });
+            new { orgId });
 
-        return rows.ToList();
+        // Split each raw expression into leaves, normalize identity, and aggregate by leaf.
+        var accum = new Dictionary<string, LeafAccumulator>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in rawRows)
+        {
+            foreach (string leaf in SpdxLicenseExpression.Parse(row.RawLicenseSpdx).Leaves())
+            {
+                string norm = _normalizer.Normalize(leaf);
+                if (string.IsNullOrEmpty(norm) || allowSet.Contains(norm) || blockSet.Contains(norm))
+                {
+                    continue;
+                }
+                if (!accum.TryGetValue(norm, out var leafAccum))
+                {
+                    leafAccum = new LeafAccumulator();
+                    accum[norm] = leafAccum;
+                }
+                leafAccum.PackageKeys.Add(row.PackageKey);
+                if (row.CreatedAt < leafAccum.MinFirstSeen)
+                {
+                    leafAccum.MinFirstSeen = row.CreatedAt;
+                }
+            }
+        }
+
+        if (accum.Count == 0)
+        {
+            return [];
+        }
+
+        // Hydrate name/copyleft/is_deprecated per distinct canonical leaf id in one round-trip.
+        var ids = accum.Keys.ToList();
+        // xtenant: spdx_license is a global reference table, no org scoping.
+        var meta = (await conn.QueryAsync<SpdxMetaRow>(
+            """
+            SELECT identifier AS Identifier, name AS Name,
+                   COALESCE(copyleft, 'unclassified') AS Copyleft,
+                   is_deprecated AS IsDeprecated
+            FROM spdx_license
+            WHERE identifier IN @ids
+            """,
+            new { ids }))
+            .ToDictionary(m => m.Identifier, StringComparer.OrdinalIgnoreCase);
+
+        var entries = new List<LicenseReviewEntry>(accum.Count);
+        foreach (var (norm, leafAccum) in accum)
+        {
+            meta.TryGetValue(norm, out var m);
+            entries.Add(new LicenseReviewEntry
+            {
+                LicenseSpdx = norm,
+                PackageCount = leafAccum.PackageKeys.Count,
+                FirstSeen = leafAccum.MinFirstSeen,
+                IsDeprecated = m?.IsDeprecated ?? false,
+                Name = m?.Name,
+                Copyleft = m?.Copyleft ?? "unclassified",
+            });
+        }
+
+        return entries
+            .OrderByDescending(e => e.PackageCount)
+            .ThenBy(e => e.FirstSeen)
+            .ThenBy(e => e.LicenseSpdx, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private sealed class ReviewRawRow
+    {
+        public string RawLicenseSpdx { get; set; } = "";
+        public string PackageKey { get; set; } = "";
+        public DateTimeOffset CreatedAt { get; set; }
+    }
+
+    private sealed class SpdxMetaRow
+    {
+        public string Identifier { get; set; } = "";
+        public string? Name { get; set; }
+        public string Copyleft { get; set; } = "unclassified";
+        public bool IsDeprecated { get; set; }
+    }
+
+    private sealed class LeafAccumulator
+    {
+        public HashSet<string> PackageKeys { get; } = new(StringComparer.Ordinal);
+        public DateTimeOffset MinFirstSeen { get; set; } = DateTimeOffset.MaxValue;
     }
 
     // ── Policy check ──────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Returns whether the given set of SPDX license identifiers passes the org's license policy.
-    /// Returns (allowed: true, reason: null) when mode is 'off' or licenses are empty.
-    /// Returns (allowed: false, blockedLicense) when a blocklisted license is found.
-    /// Returns (allowed: false, unknownLicense) when mode is 'block' and no license is on the allowlist.
+    /// Returns whether the given SPDX license entries pass the org's license policy. Each entry
+    /// may be a whole compound expression (e.g. "MIT OR Apache-2.0", "GPL-2.0-only WITH
+    /// Classpath-exception-2.0") — it is parsed and evaluated, so an OR is satisfied when any
+    /// one leaf is allowed (a blocked sibling does not sink it) and an AND requires every leaf.
+    /// Both stored allow/block ids and each observed leaf are normalized to canonical SPDX form
+    /// before comparison, so "Apache License 2.0" matches an "Apache-2.0" allowlist entry.
+    ///
+    /// Returns (allowed: true, null) when mode is 'off' or entries are empty. On the first
+    /// unsatisfied entry returns (allowed: false, offendingLeaf) where the offending leaf is the
+    /// first normalized leaf under that entry the policy rejects — naming a concrete license,
+    /// not the whole expression.
     /// </summary>
     public async Task<(bool Allowed, string? BlockedLicense)> CheckPolicyAsync(
         string orgId, string mode, IReadOnlyList<string> spdxIds, CancellationToken ct = default)
@@ -318,25 +425,28 @@ public sealed class LicenseRepository
             return (true, null);
         }
 
+        var allowlist = await GetAllowlistAsync(orgId, ct);
         var blocklist = await GetBlocklistAsync(orgId, ct);
-        var blockSet = blocklist.Select(e => e.LicenseSpdx).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var allowSet = allowlist.Select(e => _normalizer.Normalize(e.LicenseSpdx))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var blockSet = blocklist.Select(e => _normalizer.Normalize(e.LicenseSpdx))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        string? blocked = spdxIds.FirstOrDefault(blockSet.Contains);
-        if (blocked is not null)
+        bool LeafSatisfied(string leaf)
         {
-            return (false, blocked);
+            string norm = _normalizer.Normalize(leaf);
+            return mode == "block"
+                ? allowSet.Contains(norm) && !blockSet.Contains(norm)
+                : !blockSet.Contains(norm);
         }
 
-        if (mode == "block")
+        foreach (string entry in spdxIds)
         {
-            var allowlist = await GetAllowlistAsync(orgId, ct);
-            var allowSet = allowlist.Select(e => e.LicenseSpdx).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (string spdx in spdxIds)
+            var expr = SpdxLicenseExpression.Parse(entry);
+            if (!expr.Evaluate(LeafSatisfied))
             {
-                if (!allowSet.Contains(spdx))
-                {
-                    return (false, spdx);
-                }
+                string offending = expr.Leaves().FirstOrDefault(leaf => !LeafSatisfied(leaf)) ?? entry;
+                return (false, _normalizer.Normalize(offending));
             }
         }
 

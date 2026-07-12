@@ -21,6 +21,13 @@ namespace Dependably.Infrastructure;
 /// the package-detail "behind upstream" banner. Newly-proxied packages get their baseline
 /// immediately from the first-fetch recorder, so this pass keeps the baseline current rather than
 /// establishing it.
+///
+/// The same per-name upstream fetch also yields the full STABLE version set for all four
+/// ecosystems (<see cref="Protocol.UpstreamLatestVersion.StableVersionsDescending"/>), which is
+/// recomputed into a per-version <c>versions_behind</c> operational-risk count on every
+/// <c>cache_artifact</c> row for the group each pass, and mirrored onto any hosted
+/// (<c>origin='uploaded'</c>) <c>package_versions</c> rows sharing the same package. NULL means
+/// unknown (never 0) — an unreachable/unresolvable upstream this pass, not "up to date".
 /// </summary>
 public sealed class DeprecationRefreshService : ScheduledBackgroundService
 {
@@ -147,7 +154,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         }
 
         Dictionary<string, string?> upstreamDeprecated;
-        string? upstreamLatest;
+        UpstreamLatestVersion upstreamLatest;
         try
         {
             (upstreamDeprecated, upstreamLatest) = await FetchUpstreamMetadataAsync(ecosystem, orgId, name, ct);
@@ -160,22 +167,52 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             return (0, 0);
         }
 
-        // Record upstream's declared latest version on the packages row if one exists for this org.
-        // The packages table may not have a row when the artifact was only ever accessed via the
-        // global plane; skip silently in that case.
+        // Record upstream's declared latest version (and publish timestamp, when known) on the
+        // packages row if one exists for this org. The packages table may not have a row when the
+        // artifact was only ever accessed via the global plane; skip silently in that case.
         var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, name, ct);
         if (pkg is not null)
         {
-            await _packages.UpdateUpstreamLatestAsync(pkg.Id, upstreamLatest, ct);
+            await _packages.UpdateUpstreamLatestAsync(pkg.Id, upstreamLatest.Version, upstreamLatest.PublishedAt, ct);
         }
 
         var versions = await _cacheArtifacts.ListVersionsForNameAsync(ecosystem, name, ct);
-        var (checked_, updated, newlyRevoked) = await ProcessVersionsAsync(ecosystem, versions, upstreamDeprecated, ct);
+        var (checked_, updated, newlyRevoked) = await ProcessVersionsAsync(
+            ecosystem, versions, upstreamDeprecated, upstreamLatest.StableVersionsDescending, ct);
+
+        // Mirror the versions-behind count onto any hosted (origin='uploaded') package_versions
+        // rows under the same package — a private override of an otherwise-proxied name still
+        // benefits from knowing how far behind upstream it sits. Uses the same stable-versions
+        // list already fetched above; no additional upstream call.
+        if (pkg is not null)
+        {
+            await UpdateHostedVersionsBehindAsync(pkg.Id, ecosystem, upstreamLatest.StableVersionsDescending, ct);
+        }
 
         await LogRevokedActivitiesAsync(orgId, ecosystem, name, newlyRevoked, ct);
         await LogRefreshSummaryAsync(orgId, ecosystem, name, checked_, updated, ct);
 
         return (checked_, updated);
+    }
+
+    // Recomputes versions_behind for every hosted (origin='uploaded') version under the package,
+    // using the same upstream stable-versions list resolved for the proxy plane this pass. A
+    // package can carry both proxy (cache_artifact) and hosted (package_versions) rows when an org
+    // pushes a private override of a name it also proxies (see LoadCombinedVersionsForOrgAsync).
+    private async Task UpdateHostedVersionsBehindAsync(
+        string packageId, string ecosystem, IReadOnlyList<string>? stableVersionsDescending, CancellationToken ct)
+    {
+        var hostedVersions = await _packages.GetVersionsAsync(packageId, ct);
+        foreach (var ver in hostedVersions)
+        {
+            if (ver.Origin != "uploaded" || ct.IsCancellationRequested)
+            {
+                continue;
+            }
+
+            int? behind = EcosystemVersionOrdering.CountNewerStable(ecosystem, stableVersionsDescending, ver.Version);
+            await _packages.UpdateVersionsBehindAsync(ver.Id, behind, ct);
+        }
     }
 
     // Applies the upstream deprecation value to each cache_artifact row for the group and, for
@@ -185,6 +222,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         string ecosystem,
         IReadOnlyList<(string Id, string Version, string? Deprecated, string? DeprecationCheckedAt, string? RevokedAt, string? Purl)> versions,
         Dictionary<string, string?> upstreamDeprecated,
+        IReadOnlyList<string>? stableVersionsDescending,
         CancellationToken ct)
     {
         int checked_ = 0;
@@ -224,6 +262,11 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             {
                 await _cacheArtifacts.TouchDeprecationCheckedAtAsync(ver.Id, _time, ct);
             }
+
+            // Recomputed every pass (independent of whether deprecated changed) — upstream keeps
+            // publishing new versions even when this version's own deprecation state is stable.
+            int? versionsBehind = EcosystemVersionOrdering.CountNewerStable(ecosystem, stableVersionsDescending, ver.Version);
+            await _cacheArtifacts.UpdateVersionsBehindAsync(ver.Id, versionsBehind, ct);
 
             if (detectRevocations)
             {
@@ -327,11 +370,12 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     private static bool IsSupportedEcosystem(string ecosystem) =>
         ecosystem is "npm" or "pypi" or "nuget" or "maven";
 
-    // Per-version deprecation map plus upstream's declared latest version (null when absent).
-    // npm/PyPI carry a per-version deprecation signal AND a latest tag in one document. NuGet and
-    // Maven have no deprecation signal, so the deprecation map is empty (their cache_artifact
-    // rows never set deprecated, so the empty map clears nothing) and only the latest is resolved.
-    private async Task<(Dictionary<string, string?> Deprecated, string? Latest)> FetchUpstreamMetadataAsync(
+    // Per-version deprecation map plus upstream's declared latest version (and, where the
+    // ecosystem's metadata carries one, its publish timestamp). npm/PyPI carry a per-version
+    // deprecation signal AND a latest tag in one document. NuGet and Maven have no deprecation
+    // signal, so the deprecation map is empty (their cache_artifact rows never set deprecated, so
+    // the empty map clears nothing) and only the latest is resolved.
+    private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchUpstreamMetadataAsync(
         string ecosystem, string orgId, string purlName, CancellationToken ct)
     {
         return ecosystem switch
@@ -340,26 +384,30 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             "pypi" => await FetchPyPiMetadataAsync(purlName, ct),
             "nuget" or "maven" =>
                 (new Dictionary<string, string?>(), await _latestResolver.ResolveAsync(ecosystem, orgId, purlName, ct)),
-            _ => (new Dictionary<string, string?>(), null)
+            _ => (new Dictionary<string, string?>(), UpstreamLatestVersion.None)
         };
     }
 
-    // Fetches the npm packument and extracts deprecated per version plus dist-tags.latest.
-    // The packument is a JSON object with a "versions" property mapping version string → metadata.
-    // Within each version object, "deprecated" is a string (or absent) per npm spec; the package's
-    // newest published version is "dist-tags".latest.
-    private async Task<(Dictionary<string, string?> Deprecated, string? Latest)> FetchNpmMetadataAsync(string purlName, CancellationToken ct)
+    // Fetches the npm packument and extracts deprecated per version plus dist-tags.latest (and its
+    // publish time from the packument's time[] map). The packument is a JSON object with a
+    // "versions" property mapping version string → metadata. Within each version object,
+    // "deprecated" is a string (or absent) per npm spec; the package's newest published version is
+    // "dist-tags".latest.
+    private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchNpmMetadataAsync(string purlName, CancellationToken ct)
     {
         string upstream = _config["Npm:Upstream"] ?? "https://registry.npmjs.org";
         // npm scoped packages have purlName encoded as %40scope%2Fpkg; the packument URL uses @scope/pkg.
         string packageName = Uri.UnescapeDataString(purlName).Replace("%40", "@").Replace("%2F", "/");
         string url = $"{upstream.TrimEnd('/')}/{packageName}";
 
-        var response = await _upstream.GetOrFetchMetadataAsync(url, ct: ct);
+        // Abbreviated-document fallback for packuments past the metadata byte cap; the
+        // abbreviated document still carries per-version "deprecated" and dist-tags, which is
+        // all this method reads (the missing time[] map only nulls publishedAt).
+        var response = await NpmPackumentFetcher.FetchAsync(_upstream, url, authorizationHeader: null, _logger, ct);
         if (!response.IsSuccessStatusCode)
         {
             _logger.LogWarning("npm packument fetch returned {StatusCode} for {Package}.", response.StatusCode, packageName);
-            return (new Dictionary<string, string?>(), null);
+            return (new Dictionary<string, string?>(), UpstreamLatestVersion.None);
         }
 
         using var doc = JsonDocument.Parse(response.Body);
@@ -377,9 +425,21 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             }
         }
 
+        DateTimeOffset? publishedAt = null;
+        if (latest is not null
+            && doc.RootElement.TryGetProperty("time", out var time)
+            && time.ValueKind == JsonValueKind.Object
+            && time.TryGetProperty(latest, out var timeEl)
+            && timeEl.ValueKind == JsonValueKind.String
+            && DateTimeOffset.TryParse(timeEl.GetString(), System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind, out var ts))
+        {
+            publishedAt = ts;
+        }
+
         if (!doc.RootElement.TryGetProperty("versions", out var versionsEl))
         {
-            return (result, latest);
+            return (result, new UpstreamLatestVersion(latest, publishedAt));
         }
 
         foreach (var entry in versionsEl.EnumerateObject())
@@ -396,13 +456,15 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             }
             result[entry.Name] = deprecated;
         }
-        return (result, latest);
+        var stableVersions = EcosystemVersionOrdering.OrderStableDescending("npm", result.Keys);
+        return (result, new UpstreamLatestVersion(latest, publishedAt, stableVersions));
     }
 
-    // Fetches the PyPI project JSON and extracts yanked status per release plus info.version.
-    // A release is yanked if any of its distribution files has yanked=true; we map yanked releases
-    // to a deprecation message (yanked_reason or a default). info.version is PyPI's latest release.
-    private async Task<(Dictionary<string, string?> Deprecated, string? Latest)> FetchPyPiMetadataAsync(string purlName, CancellationToken ct)
+    // Fetches the PyPI project JSON and extracts yanked status per release plus info.version (and
+    // its publish time from the top-level urls[] array, which lists the latest release's own
+    // distribution files). A release is yanked if any of its distribution files has yanked=true;
+    // we map yanked releases to a deprecation message (yanked_reason or a default).
+    private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchPyPiMetadataAsync(string purlName, CancellationToken ct)
     {
         string upstream = _config["PyPI:Upstream"] ?? "https://pypi.org";
         string url = $"{upstream.TrimEnd('/')}/pypi/{purlName}/json";
@@ -411,7 +473,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         if (!response.IsSuccessStatusCode)
         {
             _logger.LogWarning("PyPI project JSON fetch returned {StatusCode} for {Package}.", response.StatusCode, purlName);
-            return (new Dictionary<string, string?>(), null);
+            return (new Dictionary<string, string?>(), UpstreamLatestVersion.None);
         }
 
         using var doc = JsonDocument.Parse(response.Body);
@@ -429,9 +491,25 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             }
         }
 
+        DateTimeOffset? publishedAt = null;
+        if (doc.RootElement.TryGetProperty("urls", out var urls) && urls.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var file in urls.EnumerateArray())
+            {
+                if (file.TryGetProperty("upload_time_iso_8601", out var uploadEl)
+                    && uploadEl.ValueKind == JsonValueKind.String
+                    && DateTimeOffset.TryParse(uploadEl.GetString(), System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.RoundtripKind, out var ts))
+                {
+                    publishedAt = ts;
+                    break;
+                }
+            }
+        }
+
         if (!doc.RootElement.TryGetProperty("releases", out var releasesEl))
         {
-            return (result, latest);
+            return (result, new UpstreamLatestVersion(latest, publishedAt));
         }
 
         foreach (var release in releasesEl.EnumerateObject())
@@ -439,7 +517,8 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             result[release.Name] = ExtractYankedDeprecation(release.Value);
         }
 
-        return (result, latest);
+        var stableVersions = EcosystemVersionOrdering.OrderStableDescending("pypi", result.Keys);
+        return (result, new UpstreamLatestVersion(latest, publishedAt, stableVersions));
     }
 
     // A release is yanked if any of its distribution files has yanked=true; maps to the

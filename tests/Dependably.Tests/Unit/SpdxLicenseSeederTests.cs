@@ -30,7 +30,18 @@ public class SpdxLicenseSeederTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         string? version = await conn.ExecuteScalarAsync<string?>(
             "SELECT value FROM instance_settings WHERE key = 'spdx_list_version'");
-        Assert.Equal("3.28.0", version);
+        // Gate value is the SPDX list version composed with the local seed revision.
+        Assert.Equal("3.28.0+r2", version);
+    }
+
+    [Fact]
+    public async Task SchemaInit_PopulatesLicenseText_ForBundledId()
+    {
+        await using var conn = await _db.OpenAsync();
+        string? text = await conn.ExecuteScalarAsync<string?>(
+            "SELECT license_text FROM spdx_license WHERE identifier = 'MIT'");
+        Assert.False(string.IsNullOrWhiteSpace(text));
+        Assert.Contains("Permission is hereby granted", text!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -112,6 +123,30 @@ public class SpdxLicenseSeederTests : IAsyncLifetime
 
         string? version = await conn.ExecuteScalarAsync<string?>(
             "SELECT value FROM instance_settings WHERE key = 'spdx_list_version'");
-        Assert.Equal("3.28.0", version);
+        Assert.Equal("3.28.0+r2", version);
+    }
+
+    [Fact]
+    public async Task Seeder_StoredBareListVersion_ForcesReseed_AndPopulatesText()
+    {
+        var seeder = new SpdxLicenseSeeder(NullLogger<SpdxLicenseSeeder>.Instance);
+        await using var conn = await _db.OpenAsync();
+
+        // Simulate a database seeded by an older revision that stored the bare list version and
+        // left license_text NULL. The composed gate ('3.28.0+r2') must not match '3.28.0', so a
+        // reseed fires and backfills the text.
+        await conn.ExecuteAsync(
+            "UPDATE instance_settings SET value = '3.28.0' WHERE key = 'spdx_list_version'");
+        await conn.ExecuteAsync("UPDATE spdx_license SET license_text = NULL");
+
+        await seeder.RunAsync(conn);
+
+        string? version = await conn.ExecuteScalarAsync<string?>(
+            "SELECT value FROM instance_settings WHERE key = 'spdx_list_version'");
+        Assert.Equal("3.28.0+r2", version);
+
+        string? mitText = await conn.ExecuteScalarAsync<string?>(
+            "SELECT license_text FROM spdx_license WHERE identifier = 'MIT'");
+        Assert.False(string.IsNullOrWhiteSpace(mitText));
     }
 }

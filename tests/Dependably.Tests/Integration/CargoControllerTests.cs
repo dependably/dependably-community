@@ -418,6 +418,64 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
         return (count, exists);
     }
 
+    // ── License capture helpers ───────────────────────────────────────────────
+
+    private async Task<string?> GetVersionLicenseAsync(string orgId, string name, string version)
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string? versionId = await conn.ExecuteScalarAsync<string?>(
+            """
+            SELECT pv.id FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.org_id = @orgId AND p.ecosystem = 'cargo' AND p.name = @name AND pv.version = @version
+            """,
+            new { orgId, name, version });
+        return versionId is null
+            ? null
+            : await conn.ExecuteScalarAsync<string?>(
+                "SELECT license_spdx FROM package_version_licenses WHERE package_version_id = @versionId",
+                new { versionId });
+    }
+
+    private async Task<string?> GetCacheArtifactLicenseAsync(string name, string version)
+    {
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        string? cacheArtifactId = await conn.ExecuteScalarAsync<string?>(
+            "SELECT id FROM cache_artifact WHERE ecosystem = 'cargo' AND name = @name AND version = @version",
+            new { name, version });
+        return cacheArtifactId is null
+            ? null
+            : await conn.ExecuteScalarAsync<string?>(
+                """
+                SELECT license_spdx FROM package_version_licenses
+                WHERE cache_artifact_id = @cacheArtifactId AND owner_kind = 'cache_artifact'
+                """,
+                new { cacheArtifactId });
+    }
+
+    // Builds a .crate tarball. TarWriter output is not deterministic across invocations
+    // (embedded timestamps), so callers that compare the returned bytes against a downloaded
+    // response body must build the fixture exactly once and reuse the array.
+    private static byte[] BuildCrateFixtureWithCargoToml(string name, string version, string cargoTomlBody)
+    {
+        byte[] contentBytes = System.Text.Encoding.UTF8.GetBytes(cargoTomlBody);
+        using var ms = new MemoryStream();
+        using (var gz = new System.IO.Compression.GZipStream(
+            ms, System.IO.Compression.CompressionMode.Compress, leaveOpen: true))
+        using (var tw = new System.Formats.Tar.TarWriter(gz, leaveOpen: true))
+        {
+            var entry = new System.Formats.Tar.PaxTarEntry(
+                System.Formats.Tar.TarEntryType.RegularFile, $"{name}-{version}/Cargo.toml")
+            {
+                DataStream = new MemoryStream(contentBytes),
+            };
+            tw.WriteEntry(entry);
+        }
+        return ms.ToArray();
+    }
+
     [Fact]
     public async Task GetCrate_ProxyFetch_IndexCksumMatches_Returns200AndCaches()
     {
@@ -580,6 +638,70 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
         finally
         {
             await SetAnonymousPullAsync(false);
+        }
+    }
+
+    [Fact]
+    public async Task GetCrate_ProxyFetch_CrateWithLicense_WritesCacheArtifactLicenseRow()
+    {
+        string name = $"licproxy{Guid.NewGuid():N}"[..15].ToLowerInvariant();
+        string version = "1.0.0";
+        // Built once — TarWriter output is not deterministic, and the array is compared
+        // byte-for-byte against the downloaded response body below.
+        byte[] crateBytes = BuildCrateFixtureWithCargoToml(name, version, $"""
+            [package]
+            name = "{name}"
+            version = "{version}"
+            license = "Apache-2.0"
+            """);
+
+        string mockBase = _factory.MockUpstream.Urls[0];
+        StubCrateDownload(name, version, crateBytes);
+        await SeedCargoUpstreamAsync(mockBase);
+        await SetAnonymousPullAsync(true);
+        try
+        {
+            using var client = _factory.CreateClient();
+            var resp = await client.GetAsync($"/cargo/api/v1/crates/{name}/{version}/download");
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            Assert.Equal(crateBytes, await resp.Content.ReadAsByteArrayAsync());
+
+            Assert.Equal("Apache-2.0", await GetCacheArtifactLicenseAsync(name, version));
+        }
+        finally
+        {
+            await SetAnonymousPullAsync(false);
+            await RemoveCargoUpstreamsAsync();
+        }
+    }
+
+    [Fact]
+    public async Task GetCrate_ProxyFetch_CrateWithoutLicense_WritesNoLicenseRow()
+    {
+        string name = $"nolicproxy{Guid.NewGuid():N}"[..15].ToLowerInvariant();
+        string version = "1.0.0";
+        byte[] crateBytes = BuildCrateFixtureWithCargoToml(name, version, $"""
+            [package]
+            name = "{name}"
+            version = "{version}"
+            """);
+
+        string mockBase = _factory.MockUpstream.Urls[0];
+        StubCrateDownload(name, version, crateBytes);
+        await SeedCargoUpstreamAsync(mockBase);
+        await SetAnonymousPullAsync(true);
+        try
+        {
+            using var client = _factory.CreateClient();
+            var resp = await client.GetAsync($"/cargo/api/v1/crates/{name}/{version}/download");
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+            Assert.Null(await GetCacheArtifactLicenseAsync(name, version));
+        }
+        finally
+        {
+            await SetAnonymousPullAsync(false);
+            await RemoveCargoUpstreamsAsync();
         }
     }
 
@@ -897,6 +1019,47 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
             "SELECT COUNT(*) FROM packages WHERE org_id = @orgId AND ecosystem = 'cargo' AND name = @name",
             new { orgId, name });
         Assert.Equal(0, count);
+    }
+
+    // ── License capture: publish envelope ───────────────────────────────────────
+
+    private static string MetadataJsonWithLicense(string name, string version, string license) =>
+        $$"""{"name":"{{name}}","vers":"{{version}}","deps":[],"features":{},"license":"{{license}}"}""";
+
+    [Fact]
+    public async Task Publish_WithLicenseField_WritesPackageVersionLicenseRow()
+    {
+        string name = $"liccrate{Guid.NewGuid():N}"[..14].ToLowerInvariant();
+        string version = "1.0.0";
+        byte[] crate = "licensed-crate-bytes"u8.ToArray();
+
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var pubResp = await client.PutAsync("/cargo/api/v1/crates/new",
+            FrameContent(BuildPublishFrame(MetadataJsonWithLicense(name, version, "MIT"), crate)));
+        Assert.Equal(HttpStatusCode.OK, pubResp.StatusCode);
+
+        string orgId = await DefaultOrgIdAsync();
+        Assert.Equal("MIT", await GetVersionLicenseAsync(orgId, name, version));
+    }
+
+    [Fact]
+    public async Task Publish_WithoutLicenseField_WritesNoLicenseRow()
+    {
+        string name = $"nolic{Guid.NewGuid():N}"[..14].ToLowerInvariant();
+        string version = "1.0.0";
+        byte[] crate = "unlicensed-crate-bytes"u8.ToArray();
+
+        string token = await _factory.CreateToken("push");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var pubResp = await client.PutAsync("/cargo/api/v1/crates/new",
+            FrameContent(BuildPublishFrame(MetadataJson(name, version), crate)));
+        Assert.Equal(HttpStatusCode.OK, pubResp.StatusCode);
+
+        string orgId = await DefaultOrgIdAsync();
+        Assert.Null(await GetVersionLicenseAsync(orgId, name, version));
     }
 
     // ── Yank / unyank ─────────────────────────────────────────────────────────────

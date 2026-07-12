@@ -428,14 +428,14 @@ public sealed class AuthController : ControllerBase
     [AllowAnonymous]
     [EnableRateLimiting("login")]
     public async Task<IActionResult> AcceptInvite([FromBody] AcceptInviteRequest req,
-        [FromServices] PasswordPolicy passwordPolicy, [FromServices] InviteRepository invites, CancellationToken ct)
+        [FromServices] InviteRepository invites, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.Token))
         {
             return BadRequest(new { detail = "Invite token is required." });
         }
 
-        var verdict = passwordPolicy.Evaluate(req.Password, new PasswordContext());
+        var verdict = PasswordPolicy.Evaluate(req.Password, new PasswordContext());
         if (!verdict.IsOk)
         {
             return BadRequest(new { detail = verdict.ToReason(), field = "password" });
@@ -477,14 +477,14 @@ public sealed class AuthController : ControllerBase
     [Authorize]
     [EnableRateLimiting("login")]
     public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest req,
-        [FromServices] PasswordPolicy passwordPolicy, CancellationToken ct)
+        CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.CurrentPassword))
         {
             return BadRequest(new { detail = "Current password is required." });
         }
 
-        var verdict = passwordPolicy.Evaluate(req.NewPassword, new PasswordContext());
+        var verdict = PasswordPolicy.Evaluate(req.NewPassword, new PasswordContext());
         if (!verdict.IsOk)
         {
             return BadRequest(new { detail = verdict.ToReason(), field = "newPassword" });
@@ -565,11 +565,28 @@ public sealed class AuthController : ControllerBase
         catch { /* malformed token — still delete the cookie */ }
     }
 
-    /// <summary>GET /api/v1/auth/me</summary>
+    /// <summary>
+    /// GET /api/v1/auth/me — whoami. JWT/session callers keep their existing unconditional
+    /// access (every tenant role already depends on this call to bootstrap the UI shell, so
+    /// gating it behind a capability would break plain members on every login). A PAT/service
+    /// token additionally reaches it, but only when it carries read:tenant — the response has
+    /// no session-only state and sessionExpiresAt degrades to null without an exp claim.
+    /// </summary>
     [HttpGet("me")]
-    [Authorize]
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     public async Task<IActionResult> Me(CancellationToken ct)
     {
+        // A service/CI token principal has no users-row role to fall back to, so its explicit
+        // `cap` claims are read directly (never role-derived) — a legacy token with a NULL/
+        // empty `capabilities` column carries zero `cap` claims and must be denied outright,
+        // not upgraded to a role-based default.
+        if (IsApiTokenPrincipal(User) &&
+            !Capabilities.Grants(OrgAccessGuard.ResolveExplicitCapClaims(User), Capabilities.ReadTenant))
+        {
+            return new ObjectResult(new { detail = "read:tenant capability required." })
+            { StatusCode = StatusCodes.Status403Forbidden };
+        }
+
         string? sub = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
             ?? User.FindFirst("sub")?.Value;
         string? orgId = User.FindFirst("org_id")?.Value;
@@ -611,6 +628,11 @@ public sealed class AuthController : ControllerBase
                 : null,
         });
     }
+
+    // True when the principal was authenticated by the opaque-API-token scheme rather than a
+    // JWT session — the discriminator Me() uses to apply the read:tenant gate only to tokens.
+    private static bool IsApiTokenPrincipal(System.Security.Claims.ClaimsPrincipal user) =>
+        user.Identities.Any(i => i.AuthenticationType == TokenAuthenticationDefaults.Scheme);
 
     /// <summary>POST /api/v1/users/me/language — set the authenticated user's locale override.</summary>
     [HttpPost("/api/v1/users/me/language")]

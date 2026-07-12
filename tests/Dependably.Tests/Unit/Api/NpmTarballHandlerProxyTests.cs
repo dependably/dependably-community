@@ -132,7 +132,7 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
             Dependably.Infrastructure.StagingOptions.Resolve(config), NullLogger<UpstreamClient>.Instance);
 
         var vulns = new VulnerabilityRepository(_db, TimeProvider.System);
-        var licenses = new LicenseRepository(_db, TimeProvider.System);
+        var licenses = new LicenseRepository(_db, TimeProvider.System, TestNormalizers.License(_db));
         var osv = Substitute.For<IOsvSource>();
         osv.QueryAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
            .Returns(Task.FromResult(new List<OsvAdvisory>()));
@@ -140,17 +140,14 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
             _db, osv, vulns, _audit, config, new StubAirGapMode(),
             NullLogger<VulnerabilityScanService>.Instance, TimeProvider.System,
             new OrgRepository(_db),
-            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System)));
+            Substitute.For<IPackageEventSink>(), new InProcessDistributedLock(TimeProvider.System),
+            Dependably.Tests.Infrastructure.TestAlerts.NoOp(_db, TimeProvider.System)));
 
         var cacheArtifact = new CacheArtifactRepository(_db);
         var tenantAccess = new TenantArtifactAccessRepository(_db);
         var proxyVersions = new ProxyVersionRecorder(_packages, _audit, licenses, cacheArtifact,
             Substitute.For<IUpstreamLatestVersionResolver>(), NullLogger<ProxyVersionRecorder>.Instance);
-        var installScriptAllowlist = new InstallScriptAllowlistService(
-            _db, new MemoryCache(new MemoryCacheOptions()), TimeProvider.System);
-        var blockGate = new BlockGateService(
-            vulns, _audit, new QuarantineRepository(_db, TimeProvider.System),
-            installScriptAllowlist, NullLogger<BlockGateService>.Instance, TimeProvider.System);
+        var blockGate = Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, TimeProvider.System);
         var cacheRecorder = new CacheAccessRecorder(
             cacheArtifact, tenantAccess, NullLogger<CacheAccessRecorder>.Instance, TimeProvider.System);
         var proxyFetch = new ProxyFetchService(

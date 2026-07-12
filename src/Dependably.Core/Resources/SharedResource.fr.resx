@@ -39,6 +39,9 @@
   <data name="error.payloadTooLarge.title" xml:space="preserve">
     <value>Charge utile trop volumineuse</value>
   </data>
+  <data name="error.serviceUnavailable.title" xml:space="preserve">
+    <value>Service indisponible</value>
+  </data>
   <data name="error.org.notFound" xml:space="preserve">
     <value>Organisation introuvable.</value>
   </data>
@@ -332,6 +335,42 @@
   </data>
   <data name="error.webhook.unknownEventTypes" xml:space="preserve">
     <value>Types d'événements inconnus : {0}. Types valides : {1}.</value>
+  </data>
+  <data name="error.alert.stateInvalid" xml:space="preserve">
+    <value>Doit être « active » ou « dismissed ».</value>
+  </data>
+  <data name="error.alert.severityInvalid" xml:space="preserve">
+    <value>Doit être « LOW », « MEDIUM », « HIGH » ou « CRITICAL ».</value>
+  </data>
+  <data name="error.alert.masterKeyRequired" xml:space="preserve">
+    <value>DEPENDABLY_MASTER_KEY doit être configurée pour stocker une URL de webhook Slack au repos.</value>
+  </data>
+  <data name="error.alert.slackNotConfigured" xml:space="preserve">
+    <value>La livraison Slack n'est pas activée ou aucune URL de webhook n'est configurée pour cet organisme.</value>
+  </data>
+  <data name="error.alert.slackTestFailed" xml:space="preserve">
+    <value>Échec du message de test Slack : {0}</value>
+  </data>
+  <data name="error.lookup.nameRequired" xml:space="preserve">
+    <value>name est obligatoire.</value>
+  </data>
+  <data name="error.lookup.nameInvalid" xml:space="preserve">
+    <value>Le nom du paquet n'est pas valide pour cet écosystème.</value>
+  </data>
+  <data name="error.lookup.versionInvalid" xml:space="preserve">
+    <value>La version n'est pas valide.</value>
+  </data>
+  <data name="error.lookup.mavenCoordinateInvalid" xml:space="preserve">
+    <value>Le nom Maven doit être une coordonnée « groupId:artifactId ».</value>
+  </data>
+  <data name="error.lookup.versionRequired" xml:space="preserve">
+    <value>version est obligatoire pour l'écosystème « {0} ».</value>
+  </data>
+  <data name="error.lookup.packageNotFound" xml:space="preserve">
+    <value>Paquet ou version introuvable en amont.</value>
+  </data>
+  <data name="error.lookup.upstreamUnavailable" xml:space="preserve">
+    <value>La source amont pour « {0} » est temporairement indisponible. Réessayez sous peu.</value>
   </data>
   <data name="email.invite.subject" xml:space="preserve">
     <value>Invitation à rejoindre {0} sur Dependably</value>

@@ -7,8 +7,9 @@ namespace Dependably.Infrastructure.Startup;
 /// <summary>
 /// Management-plane DI wiring that layers on top of the Core registrations: the first-factor login
 /// / bootstrap services, the management-controller dependency aggregates, the require-MFA mode, and
-/// the management background jobs (retention, tenant hard-delete, deprecation + stats refresh, SAML
-/// cert-expiry). Registered only by the full composition root — a protocol-only edge host wires
+/// the management background jobs (retention, tenant hard-delete, deprecation + stats refresh,
+/// license backfill, SAML cert-expiry). Registered only by the full composition root — a
+/// protocol-only edge host wires
 /// none of it, which is what keeps the BCrypt/SAML/JwtBearer closure out of the edge image.
 /// </summary>
 public static class ManagementStartupExtensions
@@ -19,7 +20,6 @@ public static class ManagementStartupExtensions
         builder.Services.AddSingleton<LoginService.Dependencies>();
         builder.Services.AddSingleton<LoginService>();
         builder.Services.AddSingleton<OrgAccessGuard>();
-        builder.Services.AddSingleton<PasswordPolicy>();
 
         // Effective-MFA-mode resolver, read by MfaEnrollmentGuard and the auth/settings controllers.
         builder.Services.AddSingleton<IRequireMfaMode, RequireMfaMode>();
@@ -70,6 +70,7 @@ public static class ManagementStartupExtensions
         builder.Services.AddHostedService<RetentionService>();
         builder.Services.AddHostedService<Dependably.Background.TenantHardDeleteService>();
         builder.Services.AddHostedService<DeprecationRefreshService>();
+        builder.Services.AddHostedService<LicenseBackfillService>();
         builder.Services.AddHostedService<StatsRefreshService>();
         builder.Services.AddHostedService<SamlCertExpiryCheckService>();
 

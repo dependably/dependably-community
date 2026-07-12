@@ -28,6 +28,8 @@ public sealed class SearchController : OrgScopedControllerBase
     }
 
     /// <summary>GET /api/v1/search?q=&amp;limit= — tenant-scoped quick search.</summary>
+    // Read-only: accepts a PAT/service token carrying read:packages.
+    [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [HttpGet("api/v1/search")]
     public async Task<IActionResult> Search(
         [FromQuery] string? q = null,

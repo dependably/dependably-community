@@ -1,10 +1,13 @@
 <!--
-  Gates tab — content-admission gates: version-overwrite policy, block gates
-  (deprecated/revoked/malicious/KEV), score and age tolerances, install-script
-  policy, and the install-script allowlist docked directly beneath its gate.
+  Gates tab — content-admission gates: allowlist mode (default-deny), version-overwrite
+  policy, block gates (deprecated/revoked/malicious/KEV), score and age tolerances,
+  install-script policy, and the allowlist/blocklist plus install-script allowlist that
+  the gates govern.
 
   Binds directly to the parent-owned proxySettings and settings objects so saves
-  carry full whole-object payloads; the parent retains sole write authority.
+  carry full whole-object payloads; the parent retains sole write authority. The
+  allowlist-mode toggle rides settings.allowlistMode; the allowlist/blocklist lists
+  are parent-owned state with parent-supplied add/remove handlers.
 
   Reactive default guard: versionOverwritePolicy defaults to 'block' on first load
   for orgs that never set the field; without it the select renders blank and saves
@@ -13,12 +16,28 @@
 <script>
   import { t } from 'svelte-i18n'
   import SettingsInstallScriptAllowlist from './SettingsInstallScriptAllowlist.svelte'
+  import SettingsList from './SettingsList.svelte'
   import InfoTip from '../InfoTip.svelte'
+  import Toggle from '../Toggle.svelte'
 
   export let proxySettings
   export let settings
   export let saving = false
   export let onSave = () => {}
+
+  export let allowlistMode = false
+  export let allowlistEntries = []
+  export let allowlistLoaded = false
+  export let blocklistEntries = []
+  export let blocklistLoaded = false
+  /** @type {() => void} */
+  export let onAddAllowlist = () => {}
+  /** @type {(id: string) => void} */
+  export let onRemoveAllowlist = () => {}
+  /** @type {() => void} */
+  export let onAddBlocklist = () => {}
+  /** @type {(id: string) => void} */
+  export let onRemoveBlocklist = () => {}
 
   export let installScriptAllowlistEntries = []
   export let installScriptAllowlistLoaded = false
@@ -34,6 +53,10 @@
 </script>
 
 <div class="card card-narrow">
+  <div class="form-row form-row-inline">
+    <label class="flex-1">{$t('settings.proxy.allowlistMode')}</label>
+    <Toggle bind:checked={allowlistMode} ariaLabel={$t('settings.proxy.allowlistMode')} />
+  </div>
   <div class="form-row form-row-inline">
     <label class="flex-1 label-row">{$t('settings.general.versionOverwritePolicy')} <InfoTip text={$t('settings.general.versionOverwritePolicyHint')} /></label>
     <select bind:value={settings.versionOverwritePolicy} class="w-auto">
@@ -128,6 +151,28 @@
     {saving ? $t('common.actions.saving') : $t('common.actions.save')}
   </button>
 </div>
+
+<div class="page-header list-header mt-4">
+  <h3 class="section-h">{$t('settings.proxy.allowlistSection')}</h3>
+</div>
+<SettingsList
+  entries={allowlistEntries}
+  loading={!allowlistLoaded}
+  i18nPrefix="allowlist"
+  patternField="purlPattern"
+  onAdd={onAddAllowlist}
+  onRemove={onRemoveAllowlist} />
+
+<div class="page-header list-header mt-4">
+  <h3 class="section-h">{$t('settings.proxy.blocklistSection')}</h3>
+</div>
+<SettingsList
+  entries={blocklistEntries}
+  loading={!blocklistLoaded}
+  i18nPrefix="blocklist"
+  patternField="pattern"
+  onAdd={onAddBlocklist}
+  onRemove={onRemoveBlocklist} />
 
 <div class="page-header list-header mt-4">
   <h3 class="section-h">{$t('settings.proxy.installScriptAllowlistSection')}</h3>

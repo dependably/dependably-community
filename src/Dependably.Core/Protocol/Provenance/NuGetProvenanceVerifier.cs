@@ -129,7 +129,7 @@ public sealed class NuGetProvenanceVerifier : IArtifactProvenanceVerifier
     /// <see cref="ProvenanceResult.NotApplicable"/> (no org anchors at this level).
     /// Kept for interface compatibility; the NuGet ingest path uses <see cref="VerifyForOrgAsync"/>.
     /// </summary>
-    public Task<ProvenanceResult> VerifyPackageAsync(Stream nupkg, long maxBytes, CancellationToken ct = default)
+    public static Task<ProvenanceResult> VerifyPackageAsync(Stream nupkg, long maxBytes, CancellationToken ct = default)
         => Task.FromResult(ProvenanceResult.NotApplicable);
 
     // Reads the root-level .signature.p7s entry into memory, or null when the entry is absent.

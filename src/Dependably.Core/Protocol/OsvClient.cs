@@ -41,7 +41,16 @@ public sealed class OsvClient : IOsvSource
     }
 
     /// <summary>Query OSV for advisories affecting a single PURL. Always hydrated.</summary>
-    public async Task<List<OsvAdvisory>> QueryAsync(string purl, CancellationToken ct = default)
+    public async Task<List<OsvAdvisory>> QueryAsync(string purl, CancellationToken ct = default) =>
+        (await TryQueryAsync(purl, ct)).Advisories;
+
+    /// <summary>
+    /// Same query as <see cref="QueryAsync"/>, but reports whether OSV was actually reached
+    /// (<see cref="OsvQueryResult.Reached"/> false on a network failure, 5xx, or any other
+    /// non-2xx status — the exact failure modes <see cref="QueryAsync"/> swallows into an
+    /// empty list). A 2xx response with zero vulns is a genuine reached-and-clean answer.
+    /// </summary>
+    public async Task<OsvQueryResult> TryQueryAsync(string purl, CancellationToken ct = default)
     {
         HttpResponseMessage response;
         try
@@ -51,7 +60,7 @@ public sealed class OsvClient : IOsvSource
         catch (HttpRequestException ex)
         {
             _logger.LogWarning(ex, "OSV query fetch failed: {ExceptionType} for {Purl}", ex.GetType().Name, purl);
-            return [];
+            return new OsvQueryResult([], Reached: false);
         }
 
         using (response)
@@ -59,11 +68,11 @@ public sealed class OsvClient : IOsvSource
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("OSV query returned {Status} for {Purl}", response.StatusCode, purl);
-                return [];
+                return new OsvQueryResult([], Reached: false);
             }
 
             string json = await response.Content.ReadAsStringAsync(ct);
-            return ParseHydratedVulns(json);
+            return new OsvQueryResult(ParseHydratedVulns(json), Reached: true);
         }
     }
 

@@ -71,7 +71,8 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
             rpmProvenance,
             Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard(),
             Dependably.Tests.Infrastructure.TestBlockGate.Create(_db, _clock),
-            new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0));
+            new Dependably.Infrastructure.StagingOptions(System.IO.Path.GetTempPath(), 0),
+            new LicenseRepository(_db, _clock, TestNormalizers.License(_db)));
         _controller = new RpmController(svc)
         {
             ControllerContext = BuildContext(_orgId),
@@ -115,6 +116,84 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
             "SELECT dirty FROM rpm_repodata_state WHERE org_id = @o AND arch = 'x86_64'",
             new { o = _orgId });
         Assert.Equal(1, dirty);
+    }
+
+    [Fact]
+    public async Task Upload_WithFedoraLicenseTag_MirrorsMappedSpdxIntoLicenseGovernance()
+    {
+        // The RPM header License tag ("GPLv2+") is a legacy Fedora short tag, not SPDX.
+        // The hosted upload path must map it via RpmLicenseMapper before mirroring it
+        // into package_version_licenses, so the license review queue speaks SPDX.
+        string raw = await SeedUserTokenAsync(_orgId);
+        byte[] bytes = BuildRpm(name: "tree", version: "2.1.1", release: "1.fc40", arch: "x86_64", license: "GPLv2+");
+        SetBody(bytes, $"Bearer {raw}");
+
+        var result = await _controller.Upload(CancellationToken.None);
+        Assert.Equal(201, ((StatusCodeResult)result).StatusCode);
+
+        await using var conn = await _db.OpenAsync();
+        var row = await conn.QuerySingleOrDefaultAsync(
+            """
+            SELECT pvl.license_spdx, pvl.source
+            FROM package_version_licenses pvl
+            JOIN package_versions pv ON pv.id = pvl.package_version_id
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.purl_name = 'tree'
+            """);
+        Assert.NotNull(row);
+        Assert.Equal("GPL-2.0-or-later", (string)row!.license_spdx);
+        Assert.Equal("upstream", (string)row.source);
+    }
+
+    [Fact]
+    public async Task Upload_WithUnmappedCompoundLicenseTag_MirrorsVerbatimIntoLicenseGovernance()
+    {
+        // A compound Fedora boolean expression has no unambiguous SPDX equivalent — the
+        // mapper leaves it verbatim, and the ingest site still mirrors it so it lands
+        // in the review queue rather than being silently dropped.
+        string raw = await SeedUserTokenAsync(_orgId);
+        byte[] bytes = BuildRpm(name: "dual-licensed", version: "1.0", release: "1.fc40", arch: "x86_64",
+            license: "GPLv2+ and BSD");
+        SetBody(bytes, $"Bearer {raw}");
+
+        var result = await _controller.Upload(CancellationToken.None);
+        Assert.Equal(201, ((StatusCodeResult)result).StatusCode);
+
+        await using var conn = await _db.OpenAsync();
+        string? spdx = await conn.ExecuteScalarAsync<string?>(
+            """
+            SELECT pvl.license_spdx
+            FROM package_version_licenses pvl
+            JOIN package_versions pv ON pv.id = pvl.package_version_id
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.purl_name = 'dual-licensed'
+            """);
+        Assert.Equal("GPLv2+ and BSD", spdx);
+    }
+
+    [Fact]
+    public async Task Upload_WithNoLicenseTag_WritesNoLicenseGovernanceRow()
+    {
+        // No License header at all: rpm_metadata.rpm_license stays NULL and the mirror
+        // step must skip cleanly (no row, no exception) rather than writing an empty
+        // or null SPDX value.
+        string raw = await SeedUserTokenAsync(_orgId);
+        byte[] bytes = BuildRpm(name: "nolicense", version: "1.0", release: "1.fc40", arch: "x86_64", license: null);
+        SetBody(bytes, $"Bearer {raw}");
+
+        var result = await _controller.Upload(CancellationToken.None);
+        Assert.Equal(201, ((StatusCodeResult)result).StatusCode);
+
+        await using var conn = await _db.OpenAsync();
+        long count = await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COUNT(*)
+            FROM package_version_licenses pvl
+            JOIN package_versions pv ON pv.id = pvl.package_version_id
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.purl_name = 'nolicense'
+            """);
+        Assert.Equal(0, count);
     }
 
     [Fact]
@@ -428,7 +507,10 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
     internal static byte[] BuildSyntheticRpm(string name, string version, string release, string arch)
         => BuildRpm(name, version, release, arch);
 
-    private static byte[] BuildRpm(string name, string version, string release, string arch)
+    // RPMTAG_LICENSE (1014).
+    private const int TagLicense = 1014;
+
+    private static byte[] BuildRpm(string name, string version, string release, string arch, string? license = null)
     {
         var tags = new List<RpmTagWrite>
         {
@@ -438,6 +520,10 @@ public sealed class RpmControllerUnitTests : IAsyncLifetime
             RpmTagWrite.String(1022, arch),
             RpmTagWrite.Int32(1003, 0),
         };
+        if (license is not null)
+        {
+            tags.Add(RpmTagWrite.String(TagLicense, license));
+        }
         byte[] lead = new byte[96];
         lead[0] = 0xED; lead[1] = 0xAB; lead[2] = 0xEE; lead[3] = 0xDB;
         lead[4] = 3;

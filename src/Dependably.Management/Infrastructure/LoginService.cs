@@ -374,7 +374,7 @@ public sealed class LoginService
     /// with tenant challenges issued before the realm claim was added). For system challenges the
     /// realm claim is always present; tid/role are absent (system_admins live outside the tenant model).
     /// </summary>
-    public (bool Valid, string? Sub, string? Tid, string? Role, string? Eml, long Tver, string? Jti, string Realm)
+    public static (bool Valid, string? Sub, string? Tid, string? Role, string? Eml, long Tver, string? Jti, string Realm)
         TryReadMfaChallenge(string token, string secret)
     {
         try

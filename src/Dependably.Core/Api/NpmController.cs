@@ -38,7 +38,9 @@ public class NpmController : ControllerBase
     /// <c>/npm/{package}/{version}</c> by ASP.NET's literal-beats-parameter precedence.
     /// </summary>
     [HttpGet("/npm/-/ping")]
-    public IActionResult Ping() => _distTags.Ping();
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822:Mark members as static",
+        Justification = "MVC route action: ASP.NET Core does not invoke static action methods.")]
+    public IActionResult Ping() => NpmDistTagsHandler.Ping();
 
     /// <summary>
     /// GET /npm/-/whoami — identity probe (<c>npm whoami</c>). Bearer-only: returns

@@ -15,7 +15,7 @@ namespace Dependably.Api.NuGetProtocol;
 internal static class NuGetNupkgProxyHelper
 {
     // Minimum valid NuGet published year: timestamps at or before 1900 are sentinel "unset" values.
-    private const int MinValidPublishedYear = 1901;
+    internal const int MinValidPublishedYear = 1901;
 
     // Reads the canonical-case NuGet ID from the cached blob. Opens one blob-store stream to
     // parse the nuspec inside a .nupkg ZIP, or the nuspec file directly. Falls back to the
@@ -196,7 +196,8 @@ internal static class NuGetNupkgProxyHelper
             BlockInstallScriptsMode: settings.BlockInstallScripts,
             ProvenanceStatus: Dependably.Protocol.Provenance.ProvenanceStatuses.ToColumn(prov.Status),
             ProvenanceSigner: prov.Signer,
-            VerifyProvenanceMode: settings.VerifyNuGetSignatures);
+            VerifyProvenanceMode: settings.VerifyNuGetSignatures,
+            LicenseEnforcementMode: settings.LicenseEnforcementMode);
     }
 }
 

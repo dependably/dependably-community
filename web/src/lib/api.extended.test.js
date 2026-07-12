@@ -253,6 +253,14 @@ describe('SPDX + license-review endpoints', () => {
     expect(url).toBe('/api/v1/spdx-licenses/GPL-3.0%2B')
   })
 
+  it('getSpdxText encodes the identifier and hits the /text sub-route', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { identifier: 'GPL-3.0+', name: 'GNU GPL v3', licenseText: 'text' }))
+    await api.getSpdxText('GPL-3.0+')
+    const [url, opts] = fetchMock.mock.calls[0]
+    expect(opts.method).toBe('GET')
+    expect(url).toBe('/api/v1/spdx-licenses/GPL-3.0%2B/text')
+  })
+
   it('getLicenseReview defaults includeDeprecated to false', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, []))
     await api.getLicenseReview()

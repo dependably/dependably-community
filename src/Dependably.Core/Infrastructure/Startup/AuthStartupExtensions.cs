@@ -261,7 +261,8 @@ internal static class AuthStartupExtensions
     }
 
     // Per-IP cap for the unauthenticated probe surface (/health, /ready, /version,
-    // /api/v1/bootstrap, /api/v1/auth/methods, /api/v1/licenses). /ready fans out to
+    // /api/v1/bootstrap, /api/v1/auth/methods, /api/v1/licenses, /api/v1/remediation/skills*).
+    // /ready fans out to
     // DB + blob store + Redis per call, so an anonymous flood amplifies load onto the
     // backing stores. The default budget is generous: orchestrator health probes run a
     // few requests per minute per prober, far below 120/min per source IP.

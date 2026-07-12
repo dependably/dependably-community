@@ -89,7 +89,8 @@ public sealed partial class SchemaSyncComplianceTests
 
     private static List<AddColumn> ParseAdditiveColumns()
     {
-        string initializer = File.ReadAllText(SchemaTestPaths.SchemaInitializer());
+        string initializer = string.Concat(
+            SchemaTestPaths.SchemaInitializerFiles().Select(File.ReadAllText));
         return AddColumnRegex().Matches(initializer)
             .Select(m => new AddColumn(m.Groups["table"].Value, m.Groups["col"].Value, m.Groups["rest"].Value))
             .ToList();

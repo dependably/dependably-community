@@ -56,6 +56,32 @@ public static class OsvScoring
     };
 
     /// <summary>
+    /// Maps a severity band to an ordinal rank (CRITICAL=4 down to LOW=1) for threshold
+    /// comparisons. Null, empty, or unrecognized input ranks 0 ("unscored") — the alert-raising
+    /// gate treats rank 0 as "never meets a threshold", so an advisory OSV couldn't score never
+    /// alerts, even when the org's floor is nominally the lowest band.
+    /// </summary>
+    public static int SeverityRank(string? severity) => severity?.ToUpperInvariant() switch
+    {
+        "CRITICAL" => 4,
+        "HIGH" => 3,
+        "MEDIUM" => 2,
+        "LOW" => 1,
+        _ => 0,
+    };
+
+    /// <summary>
+    /// True when <paramref name="severity"/> is scored (rank &gt; 0) and its rank meets or exceeds
+    /// <paramref name="minSeverity"/>'s rank. The single source of truth for the alert-raising
+    /// vulnerability-severity gate: an unscored advisory never meets any threshold.
+    /// </summary>
+    public static bool MeetsSeverityThreshold(string? severity, string? minSeverity)
+    {
+        int rank = SeverityRank(severity);
+        return rank > 0 && rank >= SeverityRank(minSeverity);
+    }
+
+    /// <summary>
     /// Computes the CVSS v3.x base score from a vector string using the official formula.
     /// Handles both CVSS:3.0 and CVSS:3.1. Returns null if the vector cannot be parsed.
     /// </summary>

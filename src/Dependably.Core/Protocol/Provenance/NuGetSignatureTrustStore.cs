@@ -34,7 +34,7 @@ public sealed class NuGetSignatureTrustStore
     /// This property exists only to satisfy callers that depend on the instance-level gate;
     /// code that needs the per-org gate must call <see cref="IsConfiguredForAsync"/>.
     /// </summary>
-    public bool IsConfigured => false;
+    public static bool IsConfigured => false;
 
     /// <summary>
     /// Returns true when at least one NuGet X.509 trust anchor is configured for
