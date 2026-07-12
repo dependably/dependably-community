@@ -48,11 +48,12 @@ public sealed class OciUploadService
     private readonly IStagingDiskInfo _stagingDiskInfo;
     private readonly long _stagingDiskFloorBytes;
     private readonly string _stagingPath;
+    private readonly OciImageLicenseRecorder _licenseRecorder;
     private readonly ILogger<OciUploadService> _logger;
 
     /// <summary>
-    /// Injected dependencies for <see cref="OciUploadService"/>. Bundles the eight DI services
-    /// so the constructor stays within the parameter-count gate (S107).
+    /// Injected dependencies for <see cref="OciUploadService"/>. Bundles the DI services so the
+    /// constructor stays within the parameter-count gate (S107).
     /// </summary>
     public sealed record Dependencies(
         IMetadataStore Db,
@@ -61,6 +62,7 @@ public sealed class OciUploadService
         IStagingDiskInfo StagingDiskInfo,
         StagingOptions StagingOptions,
         IConfiguration Configuration,
+        OciImageLicenseRecorder LicenseRecorder,
         ILogger<OciUploadService> Logger,
         TimeProvider Time);
 
@@ -74,11 +76,12 @@ public sealed class OciUploadService
         // PackageRepository is a stateless Dapper wrapper over the same IMetadataStore, built
         // here (not injected) so this Singleton doesn't capture a Scoped repository.
         _packages = new PackageRepository(deps.Db, time: deps.Time);
+        _licenseRecorder = deps.LicenseRecorder;
         _logger = deps.Logger;
 
         string? configured = deps.Configuration["PROXY_STAGING_PATH"];
         _stagingPath = string.IsNullOrWhiteSpace(configured) ? Path.GetTempPath() : configured;
-        // deepcode ignore PT: PROXY_STAGING_PATH is set by the operator deploying the container.
+        // PROXY_STAGING_PATH is set by the operator deploying the container.
         try
         {
             Directory.CreateDirectory(_stagingPath);
@@ -132,7 +135,7 @@ public sealed class OciUploadService
             // the locked section, so a rejected request never touches the filesystem and no
             // session can ever be admitted past the cap. PATCH-less monolithic PUTs and chunked
             // PATCHes share this one append target.
-            // deepcode ignore PT: staging file name is "oci-upload-{server-GUID}" under the operator-configured staging root — no user input reaches the path.
+            // staging file name is "oci-upload-{server-GUID}" under the operator-configured staging root — no user input reaches the path.
             await File.Create(stagingFile).DisposeAsync();
 
             // xtenant: (upload_id, org_id) PK binds the session to the opening tenant.
@@ -179,13 +182,13 @@ public sealed class OciUploadService
     {
         EnsureStagingDiskFloor();
 
-        // deepcode ignore PT: StagingPath is the server-generated "oci-upload-{GUID}" path round-tripped through the DB; not user-controlled.
+        // StagingPath is the server-generated "oci-upload-{GUID}" path round-tripped through the DB; not user-controlled.
         await using (var fs = new FileStream(session.StagingPath, FileMode.Append, FileAccess.Write))
         {
             await chunk.CopyToAsync(fs, ct);
         }
 
-        // deepcode ignore PT: StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
+        // StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
         long total = new FileInfo(session.StagingPath).Length;
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: (upload_id, org_id) PK is tenant-scoped.
@@ -247,7 +250,7 @@ public sealed class OciUploadService
         string expectedHex = parts[1].ToLowerInvariant();
 
         string computedHex;
-        // deepcode ignore PT: StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
+        // StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
         await using (var verify = new FileStream(session.StagingPath, FileMode.Open, FileAccess.Read))
         {
             computedHex = await ChecksumVerifier.ComputeSha256HexAsync(verify, ct);
@@ -258,7 +261,7 @@ public sealed class OciUploadService
             return OciBlobFinalizeResult.DigestMismatch;
         }
 
-        // deepcode ignore PT: StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
+        // StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
         long sizeBytes = new FileInfo(session.StagingPath).Length;
         string blobKey = BlobKeys.OciBlob("sha256", computedHex);
 
@@ -283,7 +286,7 @@ public sealed class OciUploadService
         {
             if (newBlob)
             {
-                // deepcode ignore PT: StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
+                // StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
                 await using var src = new FileStream(session.StagingPath, FileMode.Open, FileAccess.Read);
                 await _blobs.Registry.PutAsync(blobKey, src, ct);
             }
@@ -400,6 +403,10 @@ public sealed class OciUploadService
             }
 
             await UpsertBlobRowAsync(a.OrgId, a.Digest, a.MediaType, a.Bytes.Length, a.BlobKey, ct, updateMediaType: true);
+
+            // Capture the image license from the config label onto the manifest row. On push the
+            // config blob is guaranteed present (refs validated above), so this stamps synchronously.
+            await _licenseRecorder.RecordManifestAsync(a.OrgId, a.Digest, a.Bytes, ct);
 
             // Repoint the tag and surface the image in the shared catalogue (only tag pushes are
             // catalogued — by-digest manifest pushes, e.g. an index's children, are not the
@@ -521,7 +528,7 @@ public sealed class OciUploadService
     {
         try
         {
-            // deepcode ignore PT: StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
+            // StagingPath is the server-generated "oci-upload-{GUID}" path; not user-controlled.
             if (File.Exists(session.StagingPath))
             {
                 File.Delete(session.StagingPath);

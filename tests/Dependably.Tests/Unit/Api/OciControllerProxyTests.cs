@@ -155,6 +155,42 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
     private OciController BuildController(OciUpstreamResolver upstream)
         => BuildControllerForOrg(_orgId, upstream);
 
+    private OciUploadService BuildUploads()
+    {
+        var tiered = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
+        return new OciUploadService(new OciUploadService.Dependencies(
+            _db,
+            tiered,
+            _orgs,
+            new UnlimitedDisk(),
+            new StagingOptions(Path.GetTempPath(), FloorBytes: 0),
+            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+            new OciImageLicenseRecorder(_db, tiered, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance),
+            NullLogger<OciUploadService>.Instance,
+            TimeProvider.System));
+    }
+
+    private BlockGateService BuildBlockGate()
+    {
+        var normalizer = new LicenseNormalizer(_db, NullLogger<LicenseNormalizer>.Instance);
+        return new BlockGateService(
+            new VulnerabilityRepository(_db, TimeProvider.System),
+            _audit,
+            new QuarantineRepository(_db, TimeProvider.System),
+            new Dependably.Infrastructure.Alerts.AlertService(
+                new Dependably.Infrastructure.Alerts.AlertRepository(_db, TimeProvider.System),
+                new Dependably.Infrastructure.Alerts.NoOpAlertNotifier(),
+                NullLogger<Dependably.Infrastructure.Alerts.AlertService>.Instance),
+            new InstallScriptAllowlistService(
+                _db,
+                new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
+                TimeProvider.System),
+            new LicenseRepository(_db, TimeProvider.System, normalizer),
+            NullLogger<BlockGateService>.Instance,
+            TimeProvider.System);
+    }
+
     private OciController BuildControllerForOrgWithAuth(string orgId, string bearerToken, OciUpstreamResolver upstream)
     {
         var http = new DefaultHttpContext();
@@ -174,15 +210,8 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
             BlobStore: new TieredBlobStorage(_cacheBlobs, _registryBlobs),
             Db: _db,
             Upstream: upstream,
-            Uploads: new OciUploadService(new OciUploadService.Dependencies(
-                _db,
-                new TieredBlobStorage(_cacheBlobs, _registryBlobs),
-                _orgs,
-                new UnlimitedDisk(),
-                new StagingOptions(Path.GetTempPath(), FloorBytes: 0),
-                new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<OciUploadService>.Instance,
-                TimeProvider.System)),
+            Uploads: BuildUploads(),
+            BlockGate: BuildBlockGate(),
             EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard());
 
         return new OciController(svc, NullLogger<OciController>.Instance)
@@ -209,15 +238,8 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
             BlobStore: new TieredBlobStorage(_cacheBlobs, _registryBlobs),
             Db: _db,
             Upstream: upstream,
-            Uploads: new OciUploadService(new OciUploadService.Dependencies(
-                _db,
-                new TieredBlobStorage(_cacheBlobs, _registryBlobs),
-                _orgs,
-                new UnlimitedDisk(),
-                new StagingOptions(Path.GetTempPath(), FloorBytes: 0),
-                new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<OciUploadService>.Instance,
-                TimeProvider.System)),
+            Uploads: BuildUploads(),
+            BlockGate: BuildBlockGate(),
             EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard());
 
         return new OciController(svc, NullLogger<OciController>.Instance)
@@ -239,9 +261,10 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         var authSvc = new OciUpstreamAuthService(
             http, options, new DisabledAirGap(), NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
+        var recorder = new OciImageLicenseRecorder(_db, blobs, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance);
         return new OciUpstreamResolver(
             http, authSvc, options, blobs, _db,
-            new DisabledAirGap(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            new DisabledAirGap(), recorder, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
     }
 
     // Returns a controller that uses _emptyOrgId (no OCI upstreams in the DB) so that
@@ -711,9 +734,10 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         var authSvc = new OciUpstreamAuthService(
             new NeverCallFactory(), options, airGap, NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
+        var recorder = new OciImageLicenseRecorder(_db, blobs, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance);
         var resolver = new OciUpstreamResolver(
             new NeverCallFactory(), authSvc, options, blobs, _db,
-            airGap, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            airGap, recorder, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var ctl = BuildController(resolver);
         var result = await ctl.Get("library/ubuntu/tags/list", default);

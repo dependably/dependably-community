@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Dependably.Infrastructure;
 using Org.BouncyCastle.Bcpg.OpenPgp;
@@ -101,6 +102,20 @@ public sealed class StubPerOrgTrustAnchorStore : IPerOrgTrustAnchorStore
             ? Dependably.Protocol.Provenance.PyPiTrustMaterial.Empty
             : Dependably.Protocol.Provenance.PyPiSigstoreTrustStore.BuildFromAnchors(anchors, logger);
         return Task.FromResult(material);
+    }
+
+    public Task<IReadOnlyList<RSA>> GetApkKeysAsync(
+        string orgId, CancellationToken ct = default)
+    {
+        var anchors = _anchors
+            .Where(a => a.OrgId == orgId &&
+                        string.Equals(a.Ecosystem, "apk", StringComparison.Ordinal))
+            .Select(a => a.Material)
+            .ToList();
+
+        var logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+        var keys = Dependably.Protocol.Provenance.ApkTrustAnchorKeyStore.BuildRsaKeys(anchors, logger);
+        return Task.FromResult(keys);
     }
 
     public void InvalidateTrustAnchorCache(string orgId)

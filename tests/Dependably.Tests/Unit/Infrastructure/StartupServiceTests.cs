@@ -83,7 +83,7 @@ public sealed class StartupServiceTests : IAsyncLifetime
         }
     }
 
-    // deepcode ignore NoHardcodedCredentials: `key` is a settings-row name passed as a SQL parameter, not a credential.
+    // `key` is a settings-row name passed as a SQL parameter, not a credential.
     private async Task<string?> ReadRawAsync(string key)
     {
         await using var conn = await _db.OpenAsync();

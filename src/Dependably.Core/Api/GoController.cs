@@ -394,7 +394,14 @@ public sealed class GoController : OrgScopedControllerBase
                     await RecordVersionAsync(orgId, module, ct);
                     // Record the proxy fetch into the shared cache index so the eviction
                     // pipeline and vulnerability-response query can see it.
-                    await RecordZipCacheAccessAsync(orgId, module, version, blobKey, upstreamUrl, ct);
+                    string? cacheArtifactId = await RecordZipCacheAccessAsync(orgId, module, version, blobKey, upstreamUrl, ct);
+                    if (cacheArtifactId is not null)
+                    {
+                        // Go modules carry no license metadata in .info/.mod, so the module's own
+                        // LICENSE-file text is the only proxy-side signal. Best-effort: extraction
+                        // never fails or delays the response streamed below.
+                        await TryExtractAndStoreGoLicenseAsync(cacheArtifactId, blobKey, orgId, module, version, ct);
+                    }
                 }
 
                 await _svc.Audit.LogActivityAsync(
@@ -570,7 +577,6 @@ public sealed class GoController : OrgScopedControllerBase
     // Performs the bounded upstream @latest fetch. Returns the JSON string on success,
     // null on 404, or throws HttpRequestException on other HTTP errors.
     // Called exclusively from the Lazy<Task> body — always with CancellationToken.None.
-    [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Functional Snyk // deepcode ignore suppression marker, not commented-out code.")]
     private static async Task<string?> FetchLatestJsonAsync(
         string upstreamUrl,
         IHttpClientFactory httpClientFactory,
@@ -609,7 +615,7 @@ public sealed class GoController : OrgScopedControllerBase
             sb.Append(buffer, 0, read);
             if (sb.Length > MaxLatestResponseBytes)
             {
-                // deepcode ignore LogForging: module is validated by ValidateModulePath in ServeLatestAsync before this helper is called;
+                // module is validated by ValidateModulePath in ServeLatestAsync before this helper is called;
                 // upstreamBase is operator-configured; Serilog renders structured parameters, not concatenated strings.
                 logger.LogWarning(
                     "Upstream @latest response too large for golang {Module} from {UpstreamBase}",
@@ -640,9 +646,11 @@ public sealed class GoController : OrgScopedControllerBase
     /// <c>package_versions</c> row (org-scoped via the join on <c>packages</c>), matching the
     /// Cargo lookup shape. A missing row records empty/zero bytes-metadata — the coordinate
     /// and blob key are what the eviction pipeline keys on. Best-effort: the recorder swallows
-    /// its own failures and the lookup failure is caught so serving is never broken.
+    /// its own failures and the lookup failure is caught so serving is never broken. Returns the
+    /// recorded <c>cache_artifact</c> id (null when the recorder declined) so the miss path can
+    /// key a subsequent license-extraction pass to the same row.
     /// </summary>
-    private async Task RecordZipCacheAccessAsync(
+    private async Task<string?> RecordZipCacheAccessAsync(
         string orgId, string module, string version, string blobKey, string? upstreamUrl, CancellationToken ct)
     {
         var (contentHash, sizeBytes) = await ResolveZipContentMetadataAsync(orgId, module, version, ct);
@@ -681,6 +689,41 @@ public sealed class GoController : OrgScopedControllerBase
             {
                 await _svc.TenantAccess.RecordDownloadHitAsync(orgId, cacheArtifactId, _svc.Time.GetUtcNow(), ct);
             }
+        }
+
+        return cacheArtifactId;
+    }
+
+    /// <summary>
+    /// Reads the just-cached module <c>.zip</c> blob back and classifies its bundled LICENSE-file
+    /// text against the bundled SPDX corpus, writing any match to the global
+    /// <c>cache_artifact</c> license plane. Go modules carry no declared license metadata, so
+    /// LICENSE-text classification is the only proxy-side signal available. Failure at any step
+    /// (blob read, decompress, classify) is swallowed and logged at Warning — extraction never
+    /// fails or delays the response for the artefact that has already been staged for serving.
+    /// </summary>
+    private async Task TryExtractAndStoreGoLicenseAsync(
+        string cacheArtifactId, string blobKey, string orgId, string module, string version, CancellationToken ct)
+    {
+        try
+        {
+            var stream = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(blobKey), ct);
+            if (stream is null)
+            {
+                return;
+            }
+
+            var extracted = LicenseExtractor.FromGoModuleZip(stream, module, version);
+            if (extracted.Spdx.Count > 0)
+            {
+                await _svc.Licenses.SetLicensesForCacheArtifactAsync(cacheArtifactId, extracted.Spdx, "upstream", ct);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _svc.Logger.LogWarning(
+                "Go license extraction failed for {Module}@{Version} (org {OrgId}): {ExceptionType}",
+                module, version, orgId, ex.GetType().Name);
         }
     }
 
@@ -808,4 +851,5 @@ public sealed record GoControllerServices(
     ILogger<GoController> Logger,
     GoLatestFetchCoordinator LatestCoordinator,
     ReservedNamespaceService Reserved,
-    BlockGateService BlockGate);
+    BlockGateService BlockGate,
+    LicenseRepository Licenses);

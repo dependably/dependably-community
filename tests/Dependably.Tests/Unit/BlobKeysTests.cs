@@ -27,8 +27,8 @@ public class BlobKeysTests
     [InlineData("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b8551")] // 65 chars
     public void Proxy_NonHex_ThrowsArgumentException(string sha)
     {
-        // Hardened to reject non-hex input: BlobKeys.Proxy now validates 64-char lowercase hex (defense in depth
-        // for the path-traversal Snyk High finding).
+        // BlobKeys.Proxy validates 64-char lowercase hex, so a non-hex sha cannot be smuggled
+        // into a blob key — defense in depth against path traversal.
         Assert.Throws<ArgumentException>(() => BlobKeys.Proxy(sha));
     }
 

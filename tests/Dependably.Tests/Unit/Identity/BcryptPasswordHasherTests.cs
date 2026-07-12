@@ -48,7 +48,7 @@ public sealed class BcryptPasswordHasherTests
     public void VerifyHashedPassword_HashFromBcryptNet_ReturnsSuccess()
     {
         // Hashes produced by BCrypt.Net.BCrypt.HashPassword (work factor 12) must verify.
-        // deepcode ignore NoHardcodedCredentials/test: static test-fixture password for a BCrypt hasher unit test, not a real credential.
+        // static test-fixture password for a BCrypt hasher unit test, not a real credential.
         const string password = "integration-test-pw";
         string precomputedHash = BCrypt.Net.BCrypt.HashPassword(password, 12);
 

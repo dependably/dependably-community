@@ -16,6 +16,7 @@
     { key: 'nuget', label: 'NuGet' },
     { key: 'pypi',  label: 'PyPI' },
     { key: 'maven', label: 'Maven' },
+    { key: 'apk',   label: 'apk' },
   ]
 
   const ANCHOR_KINDS = [
@@ -25,6 +26,7 @@
     { key: 'sigstore_root',    label: 'Sigstore root' },
     { key: 'trusted_publisher',label: 'Trusted publisher' },
     { key: 'rekor_key',        label: 'Rekor public key' },
+    { key: 'rsa',              label: 'RSA public key (PEM)' },
   ]
 
   /** @type {any[]} */

@@ -917,6 +917,56 @@ public sealed class BlockGateServiceTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal(0, await CountActivityAsync(orgId, "blocked_release_age"));
     }
 
+    // ── OCI-plane license-expression arm ──────────────────────────────────────
+
+    [Fact]
+    public async Task LicenseExpression_WarnMode_AllowedWithoutRepoCall()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"lic-warn-{Guid.NewGuid():N}");
+        await LicensePolicySeeder.AddBlocklistEntryAsync(_fixture.Store, orgId, "GPL-3.0-only");
+        var req = BaseRequest(orgId) with { Ecosystem = "oci", LicenseEnforcementMode = "warn" };
+
+        Assert.Equal(BlockDecision.Allowed,
+            await _sut.EvaluateLicenseExpressionAsync(req, ["GPL-3.0-only"]));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_license"));
+    }
+
+    [Fact]
+    public async Task LicenseExpression_EmptyEntries_AllowedFailOpen()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"lic-empty-{Guid.NewGuid():N}");
+        var req = BaseRequest(orgId) with { Ecosystem = "oci", LicenseEnforcementMode = "block" };
+
+        Assert.Equal(BlockDecision.Allowed,
+            await _sut.EvaluateLicenseExpressionAsync(req, []));
+        Assert.Equal(0, await CountActivityAsync(orgId, "blocked_license"));
+    }
+
+    [Fact]
+    public async Task LicenseExpression_BlockedUnderBlockMode_BlocksAndRecordsSideEffects()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"lic-block-{Guid.NewGuid():N}");
+        // In 'block' mode a leaf is servable only when explicitly allowlisted; GPL is neither
+        // allowlisted nor is anything, so the license is blocked.
+        await LicensePolicySeeder.AddBlocklistEntryAsync(_fixture.Store, orgId, "GPL-3.0-only");
+        var req = BaseRequest(orgId) with
+        {
+            Ecosystem = "oci",
+            Purl = "pkg:oci/library/demo@sha256:abc",
+            VersionId = string.Empty,
+            LicenseEnforcementMode = "block",
+        };
+
+        Assert.Equal(BlockDecision.Blocked,
+            await _sut.EvaluateLicenseExpressionAsync(req, ["GPL-3.0-only"]));
+        Assert.Equal(1, await CountActivityAsync(orgId, "blocked_license"));
+
+        var quarantine = new QuarantineRepository(_fixture.Store, _clock);
+        var (items, total) = await quarantine.ListAsync(orgId, "pending", null, 10, 0);
+        Assert.Equal(1, total);
+        Assert.Equal(req.Purl, items.Single().Purl);
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     private static BlockGateRequest BaseRequest(string orgId) => new(

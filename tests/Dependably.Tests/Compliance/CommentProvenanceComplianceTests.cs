@@ -16,7 +16,7 @@ namespace Dependably.Tests.Compliance;
 /// human can tell "used to" present-tense purpose from "used to" past-tense history).
 ///
 /// Functional markers (<c>// xtenant:</c>, <c>// rawsql:</c>, <c>// blobkey-ok:</c>,
-/// <c>// deepcode ignore</c>, etc.) are not provenance and are unaffected.
+/// <c>// skip-ok:</c>, <c>// now-ok:</c>, etc.) are not provenance and are unaffected.
 /// </summary>
 [Trait("Category", "Compliance")]
 public sealed partial class CommentProvenanceComplianceTests

@@ -5,7 +5,8 @@
   import { currentOrg } from '../lib/store.js'
   import { formatDate } from '../lib/format.js'
   import { copyToClipboard } from '../lib/clipboard.js'
-  import { remediationSkillIds, firstFixedVersion, skillInstallCommand, skillPrompt } from '../lib/remediation.js'
+  import { ASSISTANTS, remediationSkillIds, resolvedFixedVersion, skillInstallCommand, skillPrompt } from '../lib/remediation.js'
+  import { aliasUrl } from '../lib/advisories.js'
   import Pagination from '../lib/Pagination.svelte'
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import DataTable from '../lib/DataTable.svelte'
@@ -44,12 +45,13 @@
   // Which row is expanded, keyed by `${purl}::${osvId}` so the same advisory under two
   // versions expands independently. The open row's detail lives in `expandedDetail`, a plain
   // reassigned binding that re-renders reliably through the DataTable slot. Fetched advisories
-  // are cached by osvId so reopening — or the same advisory under another version — reuses one fetch.
+  // are cached by osvId + installed version — the server resolves remediation.fixedVersion
+  // against the installed version, so the same advisory under another version is a distinct fetch.
   let expandedKey = null
   let expandedDetail = null      // { loading, error, detail } for the open row, or null
   // Deliberately a plain Map — reactivity is driven by `expandedDetail`, not this cache.
   // eslint-disable-next-line svelte/prefer-svelte-reactivity
-  const detailCache = new Map()  // osvId -> loaded { loading, error, detail }
+  const detailCache = new Map()  // `${osvId}::${version}` -> loaded { loading, error, detail }
 
   $: org = $currentOrg
 
@@ -80,14 +82,15 @@
     if (expandedKey === key) { expandedKey = null; expandedDetail = null; return }
     expandedKey = key
 
-    const cached = detailCache.get(r.osvId)
+    const cacheKey = `${r.osvId}::${r.version ?? ''}`
+    const cached = detailCache.get(cacheKey)
     if (cached) { expandedDetail = cached; return }
 
     expandedDetail = { loading: true, error: false, detail: null }
     try {
-      const detail = await api.getVulnDetail(r.osvId)
+      const detail = await api.getVulnDetail(r.osvId, r.version)
       const loaded = { loading: false, error: false, detail }
-      detailCache.set(r.osvId, loaded)
+      detailCache.set(cacheKey, loaded)
       // Ignore a late resolve if the user collapsed this row or opened another meanwhile.
       if (expandedKey === key) expandedDetail = loaded
     } catch (e) {
@@ -116,6 +119,16 @@
     setTimeout(() => { remediationCopyState[stateKey] = ''; remediationCopyState = remediationCopyState }, 2000)
   }
 
+  // Which AI assistant the install command and prompt target. Persisted per browser —
+  // a developer uses one assistant, not one per advisory.
+  const ASSISTANT_STORAGE_KEY = 'remediationAssistant'
+  const storedAssistant = localStorage.getItem(ASSISTANT_STORAGE_KEY) ?? ''
+  let assistant = ASSISTANTS.some(a => a.id === storedAssistant) ? storedAssistant : 'claude'
+  function setAssistant(id) {
+    assistant = id
+    localStorage.setItem(ASSISTANT_STORAGE_KEY, id)
+  }
+
   const SEVERITY_RANK = { critical: 4, high: 3, medium: 2, low: 1 }
 
   $: filtered = items.filter(r => {
@@ -134,6 +147,7 @@
     { key: 'version',   label: $t('vulnerabilities.columns.version'),   sortable: true,  width: '110px' },
     { key: 'severity',  label: $t('vulnerabilities.columns.severity'),  sortable: true,  width: '90px',  defaultDir: 'desc' },
     { key: 'score',     label: $t('vulnerabilities.columns.score'),     sortable: true,  width: '70px',  defaultDir: 'desc' },
+    { key: 'epss',      label: $t('vulnerabilities.columns.epss'),      sortable: true,  width: '70px',  defaultDir: 'desc' },
     { key: 'osvId',     label: $t('vulnerabilities.columns.osvId'),     sortable: true,  width: '170px' },
     { key: 'summary',   label: $t('vulnerabilities.columns.summary'),   sortable: true },
     { key: 'published', label: $t('vulnerabilities.columns.published'), sortable: true,  width: '135px', defaultDir: 'desc' },
@@ -144,6 +158,7 @@
     version:   (a, b) => (a.version ?? '').localeCompare(b.version ?? ''),
     severity:  (a, b) => (SEVERITY_RANK[a.severity?.toLowerCase()] ?? 0) - (SEVERITY_RANK[b.severity?.toLowerCase()] ?? 0),
     score:     (a, b) => (a.cvssScore ?? -1) - (b.cvssScore ?? -1),
+    epss:      (a, b) => (a.epssScore ?? -1) - (b.epssScore ?? -1),
     osvId:     (a, b) => (a.osvId ?? '').localeCompare(b.osvId ?? ''),
     summary:   (a, b) => (a.summary ?? '').localeCompare(b.summary ?? ''),
     published: (a, b) => (a.publishedAt ?? '').localeCompare(b.publishedAt ?? ''),
@@ -217,9 +232,15 @@
         {:else}
           <span class="text-muted">—</span>
         {/if}
+        {#if r.isKev}
+          <span class="badge kev ml-1" title={$t('vulnerabilities.kevHelp')}>{$t('vulnerabilities.kev')}</span>
+        {/if}
       </td>
       <td class="mono nowrap text-muted">
         {r.cvssScore !== null && r.cvssScore !== undefined ? r.cvssScore.toFixed(1) : '—'}
+      </td>
+      <td class="mono nowrap text-muted">
+        {r.epssScore !== null && r.epssScore !== undefined ? `${(r.epssScore * 100).toFixed(1)}%` : '—'}
       </td>
       <td class="mono nowrap">
         <a href="https://osv.dev/vulnerability/{r.osvId}" target="_blank" rel="noreferrer" on:click|stopPropagation>{r.osvId}</a>
@@ -269,6 +290,18 @@
                     <span class="detail-value">{$formatDate(v.withdrawn)}</span>
                   </div>
                 {/if}
+                {#if v.threatIntel?.epssScore !== null && v.threatIntel?.epssScore !== undefined}
+                  <div class="meta-item">
+                    <span class="detail-label">{$t('vulnerabilities.detail.epss')}</span>
+                    <span class="detail-value mono" title={$t('vulnerabilities.detail.epssHelp')}>{(v.threatIntel.epssScore * 100).toFixed(1)}%</span>
+                  </div>
+                {/if}
+                {#if v.threatIntel?.isKev}
+                  <div class="meta-item">
+                    <span class="detail-label">{$t('vulnerabilities.detail.kev')}</span>
+                    <a class="badge kev" href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" target="_blank" rel="noreferrer" on:click|stopPropagation title={$t('vulnerabilities.kevHelp')}>{$t('vulnerabilities.kev')}</a>
+                  </div>
+                {/if}
               </div>
 
               {#if v.summary ?? r.summary}
@@ -278,14 +311,14 @@
               {#if v.aliases?.length}
                 <div class="detail-section">
                   <span class="detail-label">{$t('vulnerabilities.detail.aliases')}</span>
-                  <span class="chip-list">{#each v.aliases as a (a)}<span class="chip mono">{a}</span>{/each}</span>
+                  <span class="chip-list">{#each v.aliases as a (a)}{#if aliasUrl(a)}<a class="chip mono" href={aliasUrl(a)} target="_blank" rel="noreferrer" on:click|stopPropagation>{a}</a>{:else}<span class="chip mono">{a}</span>{/if}{/each}</span>
                 </div>
               {/if}
 
               {#if v.related?.length}
                 <div class="detail-section">
                   <span class="detail-label">{$t('vulnerabilities.detail.related')}</span>
-                  <span class="chip-list">{#each v.related as a (a)}<span class="chip mono">{a}</span>{/each}</span>
+                  <span class="chip-list">{#each v.related as a (a)}{#if aliasUrl(a)}<a class="chip mono" href={aliasUrl(a)} target="_blank" rel="noreferrer" on:click|stopPropagation>{a}</a>{:else}<span class="chip mono">{a}</span>{/if}{/each}</span>
                 </div>
               {/if}
 
@@ -305,9 +338,16 @@
 
               {@const skillIds = remediationSkillIds(v.remediation)}
               {#if v.remediation?.entries?.length || skillIds.length}
-                {@const fixedVersion = firstFixedVersion(v.affected)}
+                {@const fixedVersion = resolvedFixedVersion(v.remediation, v.affected)}
                 <div class="detail-section col remediation-section">
                   <span class="detail-label">{$t('vulnerabilities.detail.remediation.title')}</span>
+
+                  {#if fixedVersion}
+                    <div class="fixed-in">
+                      <span class="text-muted">{$t('vulnerabilities.detail.remediation.fixedIn')}</span>
+                      <span class="mono">{fixedVersion}</span>
+                    </div>
+                  {/if}
 
                   {#if v.remediation.entries.length}
                     <div class="cwe-list">
@@ -323,11 +363,18 @@
                   {/if}
 
                   {#if skillIds.length}
-                    <span class="detail-label agent-heading">{$t('vulnerabilities.detail.remediation.fixWithAgent')}</span>
+                    <div class="agent-heading-row">
+                      <span class="detail-label agent-heading">{$t('vulnerabilities.detail.remediation.fixWithAgent')}</span>
+                      <div class="assistant-picker" role="group" aria-label={$t('vulnerabilities.detail.remediation.assistantLabel')}>
+                        {#each ASSISTANTS as a (a.id)}
+                          <button class="assistant-chip" class:active={assistant === a.id} on:click|stopPropagation={() => setAssistant(a.id)}>{a.label}</button>
+                        {/each}
+                      </div>
+                    </div>
                   {/if}
                   {#each skillIds as skillId (skillId)}
-                    {@const installKey = `${r.purl}::${r.osvId}::${skillId}::install`}
-                    {@const promptKey = `${r.purl}::${r.osvId}::${skillId}::prompt`}
+                    {@const installKey = `${r.purl}::${r.osvId}::${skillId}::${assistant}::install`}
+                    {@const promptKey = `${r.purl}::${r.osvId}::${skillId}::${assistant}::prompt`}
                     <div class="skill-block">
                       <div class="skill-heading">
                         <span class="skill-name mono">{skillId}</span>
@@ -336,16 +383,16 @@
 
                       <span class="skill-copy-label text-muted">{$t('vulnerabilities.detail.remediation.installLabel')}</span>
                       <div class="copy-block skill-copy-block">
-                        <span class="copy-block-text">{skillInstallCommand(skillId, window.location.origin)}</span>
-                        <button class="copy-btn" on:click|stopPropagation={() => copyRemediation(installKey, skillInstallCommand(skillId, window.location.origin))}>
+                        <span class="copy-block-text">{skillInstallCommand(skillId, window.location.origin, assistant)}</span>
+                        <button class="copy-btn" on:click|stopPropagation={() => copyRemediation(installKey, skillInstallCommand(skillId, window.location.origin, assistant))}>
                           {remediationCopyState[installKey] === 'copied' ? $t('common.actions.copied') : remediationCopyState[installKey] === 'failed' ? $t('common.actions.copyFailed') : $t('common.actions.copy')}
                         </button>
                       </div>
 
                       <span class="skill-copy-label text-muted">{$t('vulnerabilities.detail.remediation.promptLabel')}</span>
                       <div class="copy-block skill-copy-block">
-                        <span class="copy-block-text">{skillPrompt(skillId, r.osvId, r.purl, r.version, fixedVersion)}</span>
-                        <button class="copy-btn" on:click|stopPropagation={() => copyRemediation(promptKey, skillPrompt(skillId, r.osvId, r.purl, r.version, fixedVersion))}>
+                        <span class="copy-block-text">{skillPrompt(skillId, r.osvId, r.purl, r.version, fixedVersion, assistant)}</span>
+                        <button class="copy-btn" on:click|stopPropagation={() => copyRemediation(promptKey, skillPrompt(skillId, r.osvId, r.purl, r.version, fixedVersion, assistant))}>
                           {remediationCopyState[promptKey] === 'copied' ? $t('common.actions.copied') : remediationCopyState[promptKey] === 'failed' ? $t('common.actions.copyFailed') : $t('common.actions.copy')}
                         </button>
                       </div>
@@ -521,7 +568,28 @@
   }
 
   .remediation-section { gap: 10px; }
+  .fixed-in { display: flex; gap: 8px; align-items: baseline; font-size: 13px; }
   .agent-heading { margin-top: 4px; }
+  .agent-heading-row { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
+  .assistant-picker { display: flex; gap: 4px; }
+  .assistant-chip {
+    min-height: 0; /* the global button min-height would balloon these compact chips */
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text2);
+    padding: 3px 10px;
+    font-size: 12px;
+    line-height: 1.4;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .assistant-chip:hover { background: var(--bg3); color: var(--text); }
+  .assistant-chip.active {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: 600;
+  }
   .cwe-list { display: flex; flex-wrap: wrap; gap: 6px; }
   .cwe-entry { display: inline-flex; gap: 4px; align-items: center; }
   .owasp-chip { background: var(--accent-soft); color: var(--accent); }

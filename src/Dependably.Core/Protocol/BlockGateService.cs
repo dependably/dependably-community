@@ -110,7 +110,7 @@ public sealed class BlockGateService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // deepcode ignore LogForging: Serilog structured parameter — the purl is encoded
+            // Serilog structured parameter — the purl is encoded
             // as a property value, never spliced into the message text.
             _logger.LogWarning(ex,
                 "Quarantine review-row upsert failed for {Purl} (gate {Gate}); block still served.",
@@ -211,6 +211,34 @@ public sealed class BlockGateService
         }
 
         var (allowed, blockedLicense) = await _licenses.CheckPolicyAsync(request.OrgId, "block", entries, ct);
+        if (allowed)
+        {
+            return BlockDecision.Allowed;
+        }
+
+        await RecordLicenseBlockAsync(request, blockedLicense, ct);
+        return BlockDecision.Blocked;
+    }
+
+    /// <summary>
+    /// Evaluates the license arm alone against a caller-supplied set of SPDX expressions, for
+    /// artifacts whose license facts live outside the <c>package_versions</c>/<c>cache_artifact</c>
+    /// planes — the OCI plane stores its SPDX expression on the manifest's <c>oci_blobs</c> row, so
+    /// the standard owner-keyed lookup in <see cref="EvaluateLicenseArmAsync"/> has nothing to read.
+    /// Only 'block' mode engages; an empty <paramref name="licenseEntries"/> set fails open,
+    /// matching the main gate's license arm. On denial the same side effects fire (blocked_license
+    /// activity row, <c>DependablyMeter.LicenseBlocks</c>, and a pending quarantine review row) so
+    /// the OCI plane's blocks are one shape with every other license block.
+    /// </summary>
+    public async Task<BlockDecision> EvaluateLicenseExpressionAsync(
+        BlockGateRequest request, IReadOnlyList<string> licenseEntries, CancellationToken ct = default)
+    {
+        if (request.LicenseEnforcementMode != "block" || licenseEntries.Count == 0)
+        {
+            return BlockDecision.Allowed;
+        }
+
+        var (allowed, blockedLicense) = await _licenses.CheckPolicyAsync(request.OrgId, "block", licenseEntries, ct);
         if (allowed)
         {
             return BlockDecision.Allowed;

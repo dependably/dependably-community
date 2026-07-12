@@ -143,6 +143,55 @@ public sealed class TrustAnchorControllerTests : IClassFixture<DependablyFactory
         await c.DeleteAsync($"/api/v1/trust-anchors/{id}");
     }
 
+    // ── Add — apk happy path ─────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Add_ValidApkRsaKey_Returns201WithDerivedSha256KeyId()
+    {
+        using var c = await AdminClient();
+        using var rsa = System.Security.Cryptography.RSA.Create(2048);
+        string pem = rsa.ExportSubjectPublicKeyInfoPem();
+
+        var resp = await c.PostAsJsonAsync("/api/v1/trust-anchors", new
+        {
+            ecosystem = "apk",
+            anchorKind = "rsa",
+            material = pem,
+        });
+
+        Assert.Equal(HttpStatusCode.Created, resp.StatusCode);
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        var root = doc.RootElement;
+
+        Assert.Equal("apk", root.GetProperty("ecosystem").GetString());
+        Assert.Equal("rsa", root.GetProperty("anchorKind").GetString());
+        string? keyId = root.GetProperty("keyId").GetString();
+        Assert.NotNull(keyId);
+        Assert.StartsWith("SHA256:", keyId);
+
+        // Cleanup
+        string id = root.GetProperty("id").GetString()!;
+        await c.DeleteAsync($"/api/v1/trust-anchors/{id}");
+    }
+
+    [Fact]
+    public async Task Add_MalformedApkRsaMaterial_ReturnsParseError()
+    {
+        using var c = await AdminClient();
+
+        var resp = await c.PostAsJsonAsync("/api/v1/trust-anchors", new
+        {
+            ecosystem = "apk",
+            anchorKind = "rsa",
+            material = "this is not a PEM public key at all",
+        });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+        Assert.Contains("could not be parsed as an RSA public key",
+            doc.RootElement.GetProperty("detail").GetString());
+    }
+
     // ── Add — validation errors (each a distinct 400/422 branch) ───────────────
 
     [Fact]

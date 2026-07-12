@@ -22,11 +22,11 @@ public sealed class TrustAnchorRepository
 
     /// <summary>The set of ecosystems that support per-org trust anchors.</summary>
     public static readonly IReadOnlyList<string> SupportedEcosystems =
-        ["rpm", "npm", "nuget", "pypi", "maven"];
+        ["rpm", "npm", "nuget", "pypi", "maven", "apk"];
 
     /// <summary>Allowed anchor_kind discriminator values.</summary>
     public static readonly IReadOnlyList<string> AllowedAnchorKinds =
-        ["pgp", "spki", "x509", "sigstore_root", "trusted_publisher", "rekor_key"];
+        ["pgp", "spki", "x509", "sigstore_root", "trusted_publisher", "rekor_key", "rsa"];
 
     public static bool IsSupportedEcosystem(string? ecosystem) =>
         ecosystem is not null && SupportedEcosystems.Contains(ecosystem);

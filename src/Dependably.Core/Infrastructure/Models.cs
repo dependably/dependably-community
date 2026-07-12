@@ -424,11 +424,13 @@ public class PackageVersion
     /// <summary>
     /// Install-relevant manifest subset (bin, dependencies, optionalDependencies,
     /// peerDependencies, peerDependenciesMeta, bundleDependencies, engines, os, cpu, libc,
-    /// directories, _hasShrinkwrap) captured at hosted npm publish from the tarball's
-    /// package.json and stored as one JSON object. Merged into the packument's per-version
-    /// objects so npm/npx can resolve bin links and transitive dependencies. NULL for proxy
-    /// rows, non-npm rows, and hosted rows published before the column existed (those render
-    /// the legacy minimal shape).
+    /// directories, _hasShrinkwrap) captured from the tarball's package.json and stored as one
+    /// JSON object — at hosted npm publish for uploaded rows, or at npm proxy first-fetch
+    /// (<c>cache_artifact.manifest_json</c>, projected here by
+    /// <see cref="CacheArtifactIndexFacts.ToPackageVersionSynthetic"/>) for proxy rows. Merged
+    /// into the packument's per-version objects so npm/npx can resolve bin links and transitive
+    /// dependencies. NULL for non-npm rows and for rows cached/published before the column
+    /// existed (those render the legacy minimal shape until backfilled).
     /// </summary>
     public string? ManifestJson { get; set; }
     /// <summary>
@@ -811,6 +813,10 @@ public class AffectedVersionRecord
     /// NULL = still published. A distinct lifecycle signal — not a vulnerability/severity.
     /// </summary>
     public string? RevokedAt { get; set; }
+    /// <summary>True when any advisory alias is in the CISA Known Exploited Vulnerabilities catalog (vulnerabilities.is_kev, refreshed by ThreatFeedRefreshService).</summary>
+    public bool IsKev { get; set; }
+    /// <summary>Maximum FIRST.org EPSS exploitation probability (0..1) across the advisory's aliases; NULL = not scored by EPSS or not yet checked.</summary>
+    public double? EpssScore { get; set; }
 }
 
 // ── Rich OSV advisory detail (lazy detail endpoint) ───────────────────────────
@@ -838,7 +844,16 @@ public sealed record OsvDetail(
     OsvAffectedDetail[]? Affected,
     OsvCredit[]? Credits,
     JsonElement? DatabaseSpecific,
-    RemediationGuidance? Remediation = null);
+    RemediationGuidance? Remediation = null,
+    ThreatIntel? ThreatIntel = null);
+
+/// <summary>
+/// Threat-feed enrichment for the advisory (vulnerabilities.is_kev / epss_score, refreshed by
+/// ThreatFeedRefreshService) — computed from the stored row after parsing, never present in the
+/// stored OSV JSON itself (the OSV schema has no <c>threat_intel</c> key), so round-tripping
+/// <c>osv_json</c> through <see cref="OsvDetail"/> can never populate it by accident.
+/// </summary>
+public sealed record ThreatIntel(bool IsKev, double? EpssScore);
 
 /// <summary>
 /// CWE→OWASP/skill guidance computed from <see cref="OsvDetail.DatabaseSpecific"/> and
@@ -847,11 +862,15 @@ public sealed record OsvDetail(
 /// record can never populate it by accident. Null when the advisory predates <c>osv_json</c>
 /// capture and there's nothing to compute from; non-null (with possibly empty
 /// <see cref="Entries"/>) whenever the advisory JSON itself was available to parse.
+/// <see cref="FixedVersion"/> is the fix for the affected range containing the caller-supplied
+/// installed version, resolved under the ecosystem's native version ordering
+/// (<c>FixedVersionResolver</c>); null when no version context was supplied or nothing resolved.
 /// </summary>
 public sealed record RemediationGuidance(
     string[] CweIds,
     RemediationEntry[] Entries,
-    string? UpgradeSkillId);
+    string? UpgradeSkillId,
+    string? FixedVersion = null);
 
 /// <summary>One extracted CWE id, resolved against a CWE→OWASP/skill catalog. OWASP/skill fields are null when the CWE is known but unmapped.</summary>
 public sealed record RemediationEntry(

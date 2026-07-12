@@ -73,7 +73,7 @@ internal static class NpmPublishBodyParser
     internal static async Task<NpmParseResult> ParseAsync(
         Stream body, long cap, string stagingRoot, CancellationToken ct)
     {
-        // deepcode ignore PT: staging file name is "publish-stage-{server-guid}.json" under the operator-configured staging root — no user input reaches the path.
+        // staging file name is "publish-stage-{server-guid}.json" under the operator-configured staging root — no user input reaches the path.
         string jsonPath = Path.Combine(stagingRoot, $"publish-stage-{Guid.NewGuid():N}.json");
         string? tarballPath = null;
         bool keepTarball = false;
@@ -144,7 +144,7 @@ internal static class NpmPublishBodyParser
                 return Fail(NpmParseErrorKind.AttachmentShape, "_attachments.data is required.");
             }
 
-            // deepcode ignore PT: staging file name is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+            // staging file name is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
             tarballPath = Path.Combine(stagingRoot, $"publish-stage-{Guid.NewGuid():N}.tmp");
             long tarballSize;
             try
@@ -651,7 +651,7 @@ internal static class NpmPublishBodyParser
         {
             if (File.Exists(path))
             {
-                // deepcode ignore PT: path is a "publish-stage-{server-guid}" file under the operator-configured staging root — no user input reaches the path.
+                // path is a "publish-stage-{server-guid}" file under the operator-configured staging root — no user input reaches the path.
                 File.Delete(path);
             }
         }

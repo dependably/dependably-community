@@ -68,6 +68,7 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
             [("pypi", "sigstore_root")] = ValidatePyPiSigstoreRootMaterial,
             [("pypi", "trusted_publisher")] = ValidatePyPiTrustedPublisherMaterial,
             [("pypi", "rekor_key")] = ValidatePyPiRekorKeyMaterial,
+            [("apk", "rsa")] = ValidateApkRsaMaterial,
         };
 
     // Per-ecosystem material normalizers. Called before validation to transform the raw material
@@ -194,6 +195,23 @@ public sealed class TrustAnchorController : OrgScopedControllerBase
             return (null, "material could not be parsed as an ECDSA P-256 SPKI public key. " +
                          "Paste a PEM block (-----BEGIN PUBLIC KEY-----) or raw base64 DER SPKI. " +
                          "Add the Rekor transparency-log public key after verifying it out of band.");
+        }
+
+        return (keyId, null);
+    }
+
+    // apk validator: parses the material as a PEM-encoded RSA public key (SPKI
+    // "-----BEGIN PUBLIC KEY-----" or PKCS#1 "-----BEGIN RSA PUBLIC KEY-----") and derives
+    // key_id as "SHA256:" followed by the base64 SHA-256 digest of the SPKI DER, the same
+    // convention npm registry keyids use. Rejects malformed material or a non-RSA key.
+    private static (string? KeyId, string? Error) ValidateApkRsaMaterial(string material, ILogger logger)
+    {
+        string? keyId = Protocol.Provenance.ApkTrustAnchorKeyStore.DeriveKeyId(material, logger);
+        if (keyId is null)
+        {
+            return (null, "material could not be parsed as an RSA public key. " +
+                         "Paste a PEM block (-----BEGIN PUBLIC KEY-----) with SPKI-encoded RSA key material — " +
+                         "the key named in the .SIGN.RSA.<keyname> entry inside a signed APKINDEX.tar.gz.");
         }
 
         return (keyId, null);

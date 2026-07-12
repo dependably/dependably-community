@@ -5,9 +5,9 @@ using Serilog.Events;
 namespace Dependably.Tests.Infrastructure;
 
 /// <summary>
-/// Serilog sink that records rendered log messages for assertion. Registered on a
-/// <see cref="DependablyFactory"/> via <see cref="DependablyFactory.LogSink"/>; the production
-/// pipeline's <c>ReadFrom.Services</c> wires it into the real logger.
+/// Serilog sink that records rendered log messages for assertion. Set on a factory via
+/// <see cref="DependablyFactory.LogSink"/> (or <see cref="EdgeFactory.LogSink"/>), which binds it
+/// to that host's own logger through <see cref="TestHostLogging.UseCapturingSink"/>.
 /// </summary>
 public sealed class CapturingLogSink : ILogEventSink
 {

@@ -36,6 +36,50 @@ public sealed class OciManifestParserTests
         Assert.Equal(3, refs.Digests.Count);
         Assert.Contains("sha256:1111111111111111111111111111111111111111111111111111111111111111", refs.Digests);
         Assert.Contains("sha256:2222222222222222222222222222222222222222222222222222222222222222", refs.Digests);
+        // ConfigDigest carries the image's config blob digest for the license-capture path.
+        Assert.Equal("sha256:1111111111111111111111111111111111111111111111111111111111111111", refs.ConfigDigest);
+    }
+
+    [Fact]
+    public void ParseReferences_ImageIndex_ConfigDigestIsNull()
+    {
+        string json = """
+        {
+          "schemaVersion": 2,
+          "mediaType": "application/vnd.oci.image.index.v1+json",
+          "manifests": [
+            { "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+          ]
+        }
+        """;
+
+        var refs = OciManifestParser.ParseReferences(Bytes(json));
+
+        Assert.NotNull(refs);
+        Assert.True(refs!.IsIndex);
+        Assert.Null(refs.ConfigDigest);
+    }
+
+    [Fact]
+    public void ParseReferences_ConfigWithoutDigest_ConfigDigestIsNull()
+    {
+        // A config object with no digest still yields a manifest (via its layers) but no
+        // ConfigDigest for the license path to chase.
+        string json = """
+        {
+          "schemaVersion": 2,
+          "config": { "mediaType": "application/vnd.oci.image.config.v1+json" },
+          "layers": [
+            { "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222" }
+          ]
+        }
+        """;
+
+        var refs = OciManifestParser.ParseReferences(Bytes(json));
+
+        Assert.NotNull(refs);
+        Assert.False(refs!.IsIndex);
+        Assert.Null(refs.ConfigDigest);
     }
 
     [Fact]

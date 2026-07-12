@@ -157,6 +157,7 @@ public sealed class ApkControllerProxyTests : IAsyncLifetime
                 memCache,
                 new DisabledAirGap(),
                 new BlockingValidator(),
+                new StubPerOrgTrustAnchorStore(),
                 new ConfigurationBuilder().Build(),
                 NullLogger<ApkIndexFetchCoordinator>.Instance),
             NegativeCacheTtl: TimeSpan.FromMinutes(5));

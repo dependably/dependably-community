@@ -87,10 +87,9 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     public string? EdgeAccessToken { get; init; }
 
     /// <summary>
-    /// Optional Serilog sink registered as a singleton before the host is built. The production
-    /// logging pipeline calls <c>ReadFrom.Services</c>, so a registered <c>ILogEventSink</c> is
-    /// wired into the real Serilog logger — letting a test capture structured log events (e.g. the
-    /// edge anonymous-mode startup warning) without a bespoke logging harness.
+    /// Optional Serilog sink, bound to this host's own logger by
+    /// <see cref="TestHostLogging.UseCapturingSink"/> — letting a test capture structured log
+    /// events (e.g. the edge anonymous-mode startup warning) without a bespoke logging harness.
     /// </summary>
     public Serilog.Core.ILogEventSink? LogSink { get; init; }
 
@@ -140,11 +139,9 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
 
         Program.ConfigureBuilder(builder);
 
-        // Register the optional capture sink AS ILogEventSink so Serilog's ReadFrom.Services
-        // wires it into this host's logger (the interface type is what the resolver looks up).
         if (LogSink is not null)
         {
-            builder.Services.AddSingleton<Serilog.Core.ILogEventSink>(LogSink);
+            TestHostLogging.UseCapturingSink(builder, LogSink);
         }
 
         if (FrozenClock is not null)

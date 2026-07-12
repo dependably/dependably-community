@@ -60,7 +60,7 @@ public sealed class AlertService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // deepcode ignore LogForging: Serilog structured parameter — the purl is encoded as
+            // Serilog structured parameter — the purl is encoded as
             // a property value, never spliced into the message text.
             _logger.LogWarning(ex,
                 "Failed to raise quarantine alert for {Purl} (org {OrgId}, gate {Gate}); the block/review-queue write still succeeded.",

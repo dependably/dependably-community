@@ -238,16 +238,20 @@ public sealed class OciController : OrgScopedControllerBase
     /// manifest is not available locally (unresolved tag, no blob record, or the blob has
     /// been evicted from the store), signalling the caller to fall through to upstream.
     /// </summary>
-    // BlockGateService is deliberately not evaluated on the OCI serve path. Every language
-    // ecosystem stores proxy artefacts on the global cache plane (cache_artifact +
-    // tenant_artifact_access) whose per-version supply-chain fact columns — deprecated,
-    // revoked_at, vuln_checked_at, provenance_status, manual_block_state — are exactly what the
-    // block gate reads. OCI has its own storage plane (oci_blobs, keyed by (digest, org_id))
-    // that carries none of those columns, and OCI images are not run through the OSV scan or the
-    // manual-block endpoint that populate them. There is therefore no block state for the gate
-    // to enforce here; wiring it in would require a separate design that scans OCI images and
-    // adds the fact columns to the OCI plane. Access is still governed by the auth/anonymous-pull
-    // gate above.
+    // The OCI plane now carries license fact columns (config_digest / license_spdx /
+    // license_checked_at on oci_blobs), and this serve path enforces the license arm only. When
+    // the manifest row has a captured SPDX expression and the tenant's license_enforcement_mode is
+    // 'block', the download is denied via BlockGateService's license arm (same activity row, meter,
+    // and quarantine review as every other license block). The first pull of a not-yet-stamped
+    // image serves once through the upstream path, is stamped from the config label, and subsequent
+    // local serves deny.
+    //
+    // The remaining supply-chain arms (deprecated / revoked / vuln-score / provenance /
+    // manual-block / install-script) stay deliberately excluded: OCI images are not run through the
+    // OSV scan or the manual-block endpoint that populate the cache_artifact fact columns the other
+    // arms read, and the OCI plane carries none of them. Layer-blob GETs are not gated — the
+    // manifest is the pull entry point, so blocking it stops the pull. Access is otherwise governed
+    // by the auth / anonymous-pull gate above.
     private async Task<IActionResult?> TryServeLocalManifestAsync(
         string orgId, string name, OciCoordinates coords, bool headOnly, TokenRecord? token, CancellationToken ct)
     {
@@ -260,15 +264,42 @@ public sealed class OciController : OrgScopedControllerBase
 
         // xtenant: (digest, org_id) PK is tenant-scoped.
         await using var conn = await _svc.Db.OpenAsync(ct);
-        // deepcode ignore Sqli: Dapper binds @digest/@orgId as parameters; SQL string is a constant literal.
-        var (MediaType, SizeBytes, BlobKey, Origin) = await conn.QuerySingleOrDefaultAsync<(string? MediaType, long SizeBytes, string? BlobKey, string? Origin)>(
-            "SELECT media_type AS MediaType, size_bytes AS SizeBytes, blob_key AS BlobKey, origin AS Origin " +
+        // Dapper binds @digest/@orgId as parameters; SQL string is a constant literal.
+        var (MediaType, SizeBytes, BlobKey, Origin, LicenseSpdx) = await conn.QuerySingleOrDefaultAsync<(string? MediaType, long SizeBytes, string? BlobKey, string? Origin, string? LicenseSpdx)>(
+            "SELECT media_type AS MediaType, size_bytes AS SizeBytes, blob_key AS BlobKey, origin AS Origin, license_spdx AS LicenseSpdx " +
             "FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
             new { digest = resolved, orgId });
 
         if (BlobKey is null)
         {
             return null;
+        }
+
+        // License-arm enforcement: when this manifest carries a captured SPDX expression and the
+        // tenant enforces licenses in 'block' mode, deny both GET and HEAD before serving.
+        if (LicenseSpdx is not null)
+        {
+            var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
+            if (settings?.LicenseEnforcementMode == "block")
+            {
+                var gate = new BlockGateRequest(
+                    OrgId: orgId,
+                    Ecosystem: "oci",
+                    Purl: $"pkg:oci/{name}@{resolved}",
+                    VersionId: "",
+                    ManualState: null,
+                    VulnCheckedAt: null,
+                    UserId: token?.UserId,
+                    MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
+                    SourceIp: HttpContext.GetNormalizedRemoteIp(),
+                    ActorKind: token?.ActorKind,
+                    LicenseEnforcementMode: settings.LicenseEnforcementMode);
+                if (await _svc.BlockGate.EvaluateLicenseExpressionAsync(gate, [LicenseSpdx], ct) == BlockDecision.Blocked)
+                {
+                    return OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED,
+                        "Image license is blocked by the organization's license policy.");
+                }
+            }
         }
 
         if (headOnly)
@@ -407,7 +438,7 @@ public sealed class OciController : OrgScopedControllerBase
     {
         // xtenant: (digest, org_id) PK is tenant-scoped.
         await using var conn = await _svc.Db.OpenAsync(ct);
-        // deepcode ignore Sqli: Dapper binds @digest/@orgId as parameters; SQL string is a constant literal.
+        // Dapper binds @digest/@orgId as parameters; SQL string is a constant literal.
         var (MediaType, SizeBytes, BlobKey, Origin) = await conn.QuerySingleOrDefaultAsync<(string? MediaType, long SizeBytes, string? BlobKey, string? Origin)>(
             "SELECT media_type AS MediaType, size_bytes AS SizeBytes, blob_key AS BlobKey, origin AS Origin " +
             "FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
@@ -799,7 +830,7 @@ public sealed class OciController : OrgScopedControllerBase
         if (candidateDigests.Count > OciReferrersScanCap)
         {
             candidateDigests.RemoveAt(candidateDigests.Count - 1);
-            // deepcode ignore LogForging: name is a repository route segment; Serilog structured logging sanitises it.
+            // name is a repository route segment; Serilog structured logging sanitises it.
             _logger.LogWarning(
                 "OCI referrers scan for {Repository} hit the 10,000-manifest cap; response may be incomplete.",
                 name);
@@ -1432,4 +1463,5 @@ public sealed record OciControllerServices(
     IMetadataStore Db,
     OciUpstreamResolver Upstream,
     OciUploadService Uploads,
+    BlockGateService BlockGate,
     Dependably.Infrastructure.Edge.EdgePublishGuard EdgeGuard);

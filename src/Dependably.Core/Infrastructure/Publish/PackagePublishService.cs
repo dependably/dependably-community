@@ -251,7 +251,7 @@ public sealed class PackagePublishService : IPackagePublishService
             // file once, then the same file is re-opened for the blob put. Never materialises
             // the artifact as a byte[].
             (sha256, sha1, sha512Sri) = await ComputeHashesFromFileAsync(stagingPath, request.Ecosystem, ct);
-            // deepcode ignore PT: stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+            // stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
             artifactStream = new FileStream(
                 stagingPath, FileMode.Open, FileAccess.Read, FileShare.Read,
                 bufferSize: 81920, useAsync: true);
@@ -526,7 +526,7 @@ public sealed class PackagePublishService : IPackagePublishService
     private static async Task<(string Sha256, string? Sha1, string? Sha512Sri)> ComputeHashesFromFileAsync(
         string path, string ecosystem, CancellationToken ct)
     {
-        // deepcode ignore PT: path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        // path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
         await using var fs = new FileStream(
             path, FileMode.Open, FileAccess.Read, FileShare.Read,
             bufferSize: 81920, useAsync: true);

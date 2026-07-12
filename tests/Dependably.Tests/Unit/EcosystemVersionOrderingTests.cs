@@ -122,4 +122,36 @@ public sealed class EcosystemVersionOrderingTests
     {
         Assert.Empty(EcosystemVersionOrdering.OrderStableDescending("go", new[] { "v1.0.0" }));
     }
+
+    // ── Compare (pairwise, native ordering) ───────────────────────────────────
+
+    [Theory]
+    [InlineData("npm", "1.2.3", "1.10.0", -1)]          // numeric, not lexicographic
+    [InlineData("npm", "2.0.0-rc.1", "2.0.0", -1)]      // prerelease sorts below release
+    [InlineData("npm", "1.0.0", "1.0.0", 0)]
+    [InlineData("pypi", "1.9", "1.10", -1)]             // PEP 440 numeric segments
+    [InlineData("pypi", "2.0.0rc1", "2.0.0", -1)]       // pre-release below final
+    [InlineData("nuget", "1.0", "1.0.0", 0)]            // NuGet normalization: equal
+    [InlineData("nuget", "1.0.0-beta", "1.0.0", -1)]
+    [InlineData("maven", "1.0-alpha-1", "1.0", -1)]     // qualifier sorts below release
+    [InlineData("maven", "1.0", "1.0.1", -1)]
+    public void Compare_OrdersUnderNativeScheme(string ecosystem, string left, string right, int expectedSign)
+    {
+        int? result = EcosystemVersionOrdering.Compare(ecosystem, left, right);
+        Assert.NotNull(result);
+        Assert.Equal(expectedSign, Math.Sign(result.Value));
+    }
+
+    [Fact]
+    public void Compare_UnsupportedEcosystemReturnsNull()
+    {
+        Assert.Null(EcosystemVersionOrdering.Compare("rpm", "1.0.0", "2.0.0"));
+    }
+
+    [Fact]
+    public void Compare_UnparseableVersionReturnsNull_NeverEqual()
+    {
+        Assert.Null(EcosystemVersionOrdering.Compare("npm", "not-a-version", "1.0.0"));
+        Assert.Null(EcosystemVersionOrdering.Compare("npm", "1.0.0", "not-a-version"));
+    }
 }

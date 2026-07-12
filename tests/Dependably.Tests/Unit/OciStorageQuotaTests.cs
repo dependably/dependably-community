@@ -55,8 +55,10 @@ public sealed class OciStorageQuotaTests : IAsyncLifetime
         var cfg = new ConfigurationBuilder().Build();
         // Unlimited disk (floor = 0 opt-out) so quota tests focus on storage accounting.
         var stagingOptions = new StagingOptions(Path.GetTempPath(), FloorBytes: 0);
+        var recorder = new OciImageLicenseRecorder(
+            _db, tiered, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance);
         return new OciUploadService(new OciUploadService.Dependencies(
-            _db, tiered, _orgs, new UnlimitedDisk(), stagingOptions, cfg,
+            _db, tiered, _orgs, new UnlimitedDisk(), stagingOptions, cfg, recorder,
             NullLogger<OciUploadService>.Instance,
             TimeProvider.System));
     }

@@ -347,7 +347,7 @@ public sealed class NuGetPublishHandler(
         string stagedPath, CancellationToken ct)
     {
         IReadOnlyList<PdbSymbol> symbols;
-        // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        // stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
         using (var fs = new FileStream(
             stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
             bufferSize: 81920, useAsync: false))
@@ -415,7 +415,7 @@ public sealed class NuGetPublishHandler(
                 new ProblemDetails { Detail = "No file in request.", Status = StatusCodes.Status422UnprocessableEntity }));
         }
 
-        // deepcode ignore PT: staging file name is "publish-stage-{server-guid}" under the operator-configured staging root — no user input reaches the path.
+        // staging file name is "publish-stage-{server-guid}" under the operator-configured staging root — no user input reaches the path.
         string tempPath = System.IO.Path.Combine(stagingPath, $"publish-stage-{Guid.NewGuid():N}.tmp");
         bool succeeded = false;
         try
@@ -458,7 +458,7 @@ public sealed class NuGetPublishHandler(
         {
             if (System.IO.File.Exists(path))
             {
-                // deepcode ignore PT: path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+                // path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
                 System.IO.File.Delete(path);
             }
         }
@@ -620,7 +620,7 @@ public sealed class NuGetPublishHandler(
     /// a registration leaf. Reads from the staged temp file so the artifact is never
     /// materialized in managed memory on the push path.
     /// </summary>
-    // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+    // stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
     private static LicenseExtractor.ExtractedMetadata ExtractNuspecLicense(string stagedPath)
     {
         using var fs = new FileStream(
@@ -637,7 +637,7 @@ public sealed class NuGetPublishHandler(
     private static (ValidationResult, string? id, string? version) ParseNupkgFromFile(
         string stagedPath, bool isSymbol)
     {
-        // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        // stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
         using var fileStream = new FileStream(
             stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
             bufferSize: 81920, useAsync: false);

@@ -544,9 +544,9 @@ public sealed class MixedOriginRoutingTests : IClassFixture<DependablyFactory>, 
         string proxyFilename = $"{artifactId}-1.0.0.jar";
         byte[] proxyBytes = [0x50, 0x4B];
         string proxySha256 = Convert.ToHexString(SHA256.HashData(proxyBytes)).ToLowerInvariant();
-        // deepcode ignore InsecureHash: Maven sidecar compatibility — SHA-1 and MD5 are required by the Maven repo spec.
+        // Maven sidecar compatibility — SHA-1 and MD5 are required by the Maven repo spec.
         string proxySha1 = Convert.ToHexString(SHA1.HashData(proxyBytes)).ToLowerInvariant();
-        // deepcode ignore InsecureHash: Maven sidecar compatibility — see above.
+        // Maven sidecar compatibility — see above.
         string proxyMd5 = Convert.ToHexString(MD5.HashData(proxyBytes)).ToLowerInvariant();
 
         // Write the proxy blob so the cache-hit serve path can stream it. The DB key for a

@@ -233,6 +233,10 @@ tr:hover td { background: var(--bg2); }
   background: var(--badge-red-bg);
   color: var(--badge-red-text);
 }
+/* KEV: an advisory alias is in the CISA Known Exploited Vulnerabilities catalog — confirmed
+   exploited in the wild, independent of CVSS score. Red-tint pill like revoked; the filled-red
+   treatment stays reserved for the malicious verdict. */
+.badge.kev { background: var(--badge-red-bg); color: var(--badge-red-text); font-weight: 700; }
 .badge.install-script { background: var(--badge-purple-bg); color: var(--badge-purple-text); }
 .badge.prov-verified { background: var(--success-soft);     color: var(--success); }
 .badge.prov-failed   { background: var(--badge-red-bg);     color: var(--badge-red-text); }

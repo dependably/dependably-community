@@ -10,8 +10,15 @@ namespace Dependably.Protocol;
 /// For an image manifest these are the config blob plus every layer blob; for an image index
 /// (manifest list) they are the child manifest digests. <see cref="IsIndex"/> distinguishes
 /// the two so callers can word errors appropriately.
+///
+/// <see cref="ConfigDigest"/> carries the image manifest's <c>config.digest</c> (null for an
+/// index, which has no config blob) so the license-capture path can locate the config bytes
+/// without re-parsing the manifest.
 /// </summary>
-public sealed record OciManifestReferences(IReadOnlyList<string> Digests, bool IsIndex);
+public sealed record OciManifestReferences(
+    IReadOnlyList<string> Digests,
+    bool IsIndex,
+    string? ConfigDigest = null);
 
 /// <summary>
 /// Media types accepted on a manifest push, and a tolerant reader that extracts the set of
@@ -71,9 +78,16 @@ public static class OciManifestParser
 
             // Image manifest: config blob + layer blobs.
             var digests = new List<string>();
+            string? configDigest = null;
             if (root.TryGetProperty("config", out var config))
             {
                 AddDigest(config, digests);
+                if (config.ValueKind == JsonValueKind.Object &&
+                    config.TryGetProperty("digest", out var cd) &&
+                    cd.ValueKind == JsonValueKind.String)
+                {
+                    configDigest = cd.GetString();
+                }
             }
 
             if (root.TryGetProperty("layers", out var layers) &&
@@ -84,7 +98,9 @@ public static class OciManifestParser
 
             // A document with neither config/layers nor a manifests array isn't a manifest
             // we can validate — reject as invalid rather than accept an unverifiable blob.
-            return digests.Count == 0 ? null : new OciManifestReferences(digests, IsIndex: false);
+            return digests.Count == 0
+                ? null
+                : new OciManifestReferences(digests, IsIndex: false, ConfigDigest: configDigest);
         }
     }
 

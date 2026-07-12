@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -231,6 +232,53 @@ public sealed class GoControllerTests : IClassFixture<DependablyFactory>, IAsync
         Assert.True(accessCount >= 1, "tenant_artifact_access row should exist for the org.");
     }
 
+    /// <summary>
+    /// A .zip proxy fetch whose module carries a root LICENSE file classifies its text against
+    /// the bundled SPDX corpus and writes the match to <c>package_version_licenses</c> on the
+    /// <c>cache_artifact</c> owner plane — Go modules declare no license metadata anywhere else,
+    /// so this is the only proxy-side license signal.
+    /// </summary>
+    [Fact]
+    public async Task GetZip_WithLicenseFile_WritesCacheArtifactLicenseRow()
+    {
+        const string module = "example.com/licmod";
+        const string version = "v1.0.0";
+
+        byte[] zipBytes = BuildGoModuleZip(module, version, SpdxTextFixtures.Text("MIT"));
+        _factory.MockUpstream.Given(
+                Request.Create()
+                    .WithPath($"/{module}/@v/{version}.zip")
+                    .UsingGet())
+            .RespondWith(Response.Create()
+                .WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/zip")
+                .WithBody(zipBytes));
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var zipResp = await client.GetAsync($"/go/{module}/@v/{version}.zip");
+        Assert.Equal(HttpStatusCode.OK, zipResp.StatusCode);
+
+        await using var conn = await _factory.Services
+            .GetRequiredService<Dependably.Infrastructure.IMetadataStore>()
+            .OpenAsync();
+
+        var (licenseSpdx, source, ownerKind) = await Dapper.SqlMapper.QuerySingleOrDefaultAsync<(string LicenseSpdx, string Source, string OwnerKind)>(
+            conn,
+            """
+            SELECT pvl.license_spdx AS LicenseSpdx, pvl.source AS Source, pvl.owner_kind AS OwnerKind
+            FROM package_version_licenses pvl
+            JOIN cache_artifact ca ON ca.id = pvl.cache_artifact_id
+            WHERE ca.ecosystem = 'golang' AND ca.name = @module AND ca.version = @version
+            """,
+            new { module, version });
+
+        Assert.Equal("MIT", licenseSpdx);
+        Assert.Equal("upstream", source);
+        Assert.Equal("cache_artifact", ownerKind);
+    }
+
     // ── @latest proxy ─────────────────────────────────────────────────────────
 
     /// <summary>
@@ -426,5 +474,20 @@ public sealed class GoControllerTests : IClassFixture<DependablyFactory>, IAsync
         return await Dapper.SqlMapper.ExecuteScalarAsync<string>(conn,
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
             ?? throw new InvalidOperationException("Default org not found.");
+    }
+
+    // Builds a real Go module zip with a root LICENSE entry, using the GOPROXY zip-entry naming
+    // convention ({module}@{version}/…) that LicenseExtractor.FromGoModuleZip parses.
+    private static byte[] BuildGoModuleZip(string module, string version, string licenseText)
+    {
+        using var ms = new MemoryStream();
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var entry = zip.CreateEntry($"{module}@{version}/LICENSE");
+            using var s = entry.Open();
+            using var w = new StreamWriter(s, new UTF8Encoding(false));
+            w.Write(licenseText);
+        }
+        return ms.ToArray();
     }
 }

@@ -178,7 +178,7 @@ public sealed class PyPiProxyFetcher(
     ///         full-artefact byte[] is ever materialised.</item>
     /// </list>
     /// </summary>
-    // deepcode ignore PT,LogForging: blob put uses BlobKeys.Proxy(sha) which validates
+    // blob put uses BlobKeys.Proxy(sha) which validates
     // 64-char lowercase hex; Serilog uses RenderedCompactJsonFormatter (CRLF-safe).
     private async Task<PyPiFetchOutcome?> DownloadAndCacheAsync(
         string upstreamUrl, string? knownSha256, string orgId, string? authorizationHeader, CancellationToken ct)
@@ -193,7 +193,7 @@ public sealed class PyPiProxyFetcher(
             // a non-seekable network stream leave SizeBytes at 0, which the cache_artifact
             // recorder tolerates (best-effort, not load-bearing for the proxy fetch).
             string blobKey = BlobKeys.Proxy(knownSha256);
-            // deepcode ignore LogForging: blobKey is BlobKeys.Proxy of a 64-char hex SHA-256 (no user input); upstreamUrl is operator-configured; Serilog structured rendering prevents log injection.
+            // blobKey is BlobKeys.Proxy of a 64-char hex SHA-256 (no user input); upstreamUrl is operator-configured; Serilog structured rendering prevents log injection.
             var (stream, isHit) = await upstream.GetOrFetchStreamAsync(
                 blobKey, upstreamUrl, new ChecksumSpec(ChecksumAlgorithm.Sha256, knownSha256),
                 "pypi", orgId, ct: ct, authorizationHeader: authorizationHeader);
@@ -236,7 +236,7 @@ public sealed class PyPiProxyFetcher(
     private sealed record FirstFetchArgs(
         string File, PyPiFilename Parsed, string? UpstreamSha256, string? CacheArtifactId, string UpstreamUrl);
 
-    // deepcode ignore PT,LogForging: bytes are cached under BlobKeys.Proxy(sha) which validates
+    // bytes are cached under BlobKeys.Proxy(sha) which validates
     // 64-char lowercase hex; Serilog uses RenderedCompactJsonFormatter (CRLF-safe).
     private async Task<IActionResult?> RecordAndScanFirstFetchAsync(
         FirstFetchArgs args, BlobHandle blob, ProxyContext gate, CancellationToken ct)
@@ -262,7 +262,7 @@ public sealed class PyPiProxyFetcher(
         // unconfigured verifier short-circuits to NotApplicable (NULL status, never blocks).
         var prov = await ResolveProvenanceAsync(file, blob.Sha256Hex, jsonMeta, gate, ct);
 
-        // deepcode ignore LogForging: file is a PyPI filename parsed and validated by PyPiFilename.TryParse before this method is called; Serilog structured rendering prevents log injection.
+        // file is a PyPI filename parsed and validated by PyPiFilename.TryParse before this method is called; Serilog structured rendering prevents log injection.
         var result = await proxyFetch.RecordAndScanAsync(new ProxyFetchRequest(
             OrgId: gate.OrgId, Ecosystem: "pypi",
             PackageName: parsed.PurlName, PurlName: parsed.PurlName,

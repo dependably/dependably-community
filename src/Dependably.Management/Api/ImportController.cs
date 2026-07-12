@@ -80,7 +80,7 @@ public sealed class ImportController : ControllerBase
         _claimResolver = svc.ClaimResolver;
         _licenses = svc.Licenses;
         _limitResolver = svc.LimitResolver;
-        // deepcode ignore PT: PROXY_STAGING_PATH is operator-configured; user input never reaches the path.
+        // PROXY_STAGING_PATH is operator-configured; user input never reaches the path.
         _stagingPath = string.IsNullOrWhiteSpace(svc.StagingPath)
             ? Path.GetTempPath()
             : svc.StagingPath;
@@ -489,7 +489,7 @@ public sealed class ImportController : ControllerBase
     private static async Task<(string Sha256, EcosystemDetector.DetectionResult? Ok, EcosystemDetector.DetectionFailure? Err)>
         HashAndDetectAsync(string tempPath, string filename, CancellationToken ct)
     {
-        // deepcode ignore PT: tempPath is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        // tempPath is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
         await using var fs = new FileStream(
             tempPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true);
         using var sha256Alg = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -532,7 +532,7 @@ public sealed class ImportController : ControllerBase
     /// </summary>
     private async Task<StagedToDisk> StageToDiskAsync(IFormFile file, long sizeCap, CancellationToken ct)
     {
-        // deepcode ignore PT: staging file name is "import-stage-{server-guid}" under the operator-configured staging root — no user input reaches the path.
+        // staging file name is "import-stage-{server-guid}" under the operator-configured staging root — no user input reaches the path.
         string tempPath = Path.Combine(_stagingPath, $"import-stage-{Guid.NewGuid():N}.tmp");
         bool succeeded = false;
         try
@@ -587,7 +587,7 @@ public sealed class ImportController : ControllerBase
         {
             if (System.IO.File.Exists(path))
             {
-                // deepcode ignore PT: path is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+                // path is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
                 System.IO.File.Delete(path);
             }
         }
@@ -734,7 +734,7 @@ public sealed class ImportController : ControllerBase
     {
         EcosystemDetector.DetectionResult? ok;
         EcosystemDetector.DetectionFailure? err;
-        // deepcode ignore PT: tempPath is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        // tempPath is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
         await using (var detectStream = new FileStream(
             file.TempPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true))
         {
@@ -812,7 +812,7 @@ public sealed class ImportController : ControllerBase
         return OutcomeFromResult(file.Filename, result, detection.Ecosystem, detection.PurlName, dryRun);
     }
 
-    // deepcode ignore PT: tempPath is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+    // tempPath is "import-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
     private static async Task<LicenseExtractor.ExtractedMetadata> ExtractLicenseAsync(
         string ecosystem, string tempPath, string filename, CancellationToken ct)
     {

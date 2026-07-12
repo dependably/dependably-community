@@ -119,7 +119,7 @@ public sealed class OciStagingJanitorService : ScheduledBackgroundService
 
             // Delete file first: an orphaned row is recoverable on next pass; an orphaned
             // file is a staging-volume leak that the janitor is here to prevent.
-            // deepcode ignore PT: staging_path is the server-generated "oci-upload-{GUID}" path written by OciUploadService; not user-controlled.
+            // staging_path is the server-generated "oci-upload-{GUID}" path written by OciUploadService; not user-controlled.
             if (!TryDeleteFile(stagingPath))
             {
                 // File delete failed — skip deleting the row so the row remains as a
@@ -154,7 +154,7 @@ public sealed class OciStagingJanitorService : ScheduledBackgroundService
 
         // Proxy-miss temp files: UpstreamClient creates dependably-stage-{guid}.tmp and
         // deletes them in a finally block. On SIGKILL the finally never runs, leaving orphans.
-        // deepcode ignore PT: stagingPath is operator-configured PROXY_STAGING_PATH root — no user input reaches the enumeration path.
+        // stagingPath is operator-configured PROXY_STAGING_PATH root — no user input reaches the enumeration path.
         var proxyTemps = Directory.EnumerateFiles(_stagingPath, "dependably-stage-*.tmp");
         foreach (string file in proxyTemps)
         {
@@ -208,7 +208,7 @@ public sealed class OciStagingJanitorService : ScheduledBackgroundService
     {
         try
         {
-            // deepcode ignore PT: file paths come from Directory.EnumerateFiles over the operator-configured staging root — no user input.
+            // file paths come from Directory.EnumerateFiles over the operator-configured staging root — no user input.
             var info = new FileInfo(file);
             if (!info.Exists)
             {
@@ -226,7 +226,7 @@ public sealed class OciStagingJanitorService : ScheduledBackgroundService
                 return 0;
             }
 
-            // deepcode ignore PT: file path from enumeration over operator-configured staging root.
+            // file path from enumeration over operator-configured staging root.
             File.Delete(file);
             _logger.LogInformation("OCI janitor swept orphaned staging file {File}.", file);
             return 1;
@@ -249,7 +249,7 @@ public sealed class OciStagingJanitorService : ScheduledBackgroundService
     {
         try
         {
-            // deepcode ignore PT: path is the server-generated staging path from the DB; not user-controlled.
+            // path is the server-generated staging path from the DB; not user-controlled.
             if (File.Exists(path))
             {
                 File.Delete(path);

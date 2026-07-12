@@ -131,6 +131,14 @@ public sealed class AuditRepository
     /// <summary>
     /// Tenant-facing audit list: filters strictly to <c>scope='tenant'</c> so a sloppy join
     /// can never surface operator events to a tenant user.
+    /// <para>
+    /// <c>login.success</c> is excluded: this list backs the configuration/security audit, and a
+    /// routine successful login is neither. Successful logins are surfaced in the activity feed
+    /// (<see cref="ListActivityAsync"/>, <c>ecosystem='auth'</c>). The audit_log row still exists,
+    /// and still carries <c>org_id</c>, purely so <see cref="ListAuthEventsAsync"/> can export it
+    /// to a SIEM — a security feed blind to successful logins would be worthless. Failures,
+    /// lockouts, and credential changes are security events and DO belong on this list.
+    /// </para>
     /// </summary>
     public async Task<(IReadOnlyList<AuditEntry> Items, int Total)> ListAuditAsync(
         string orgId, int limit, int offset, string? action = null, string? search = null,
@@ -151,6 +159,7 @@ public sealed class AuditRepository
                 ON st.id = a.actor_id
                 AND a.actor_kind = 'service'
             WHERE a.org_id = @orgId AND a.scope = 'tenant'
+              AND a.action <> 'login.success'
               AND (@action IS NULL OR a.action = @action)
               AND (@searchPattern IS NULL
                    OR lower(a.action) LIKE @searchPattern
@@ -183,6 +192,7 @@ public sealed class AuditRepository
                 ON st.id = a.actor_id
                 AND a.actor_kind = 'service'
             WHERE a.org_id = @orgId AND a.scope = 'tenant'
+              AND a.action <> 'login.success'
               AND (@action IS NULL OR a.action = @action)
               AND (@searchPattern IS NULL
                    OR lower(a.action) LIKE @searchPattern

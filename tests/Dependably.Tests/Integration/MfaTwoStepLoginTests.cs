@@ -12,7 +12,7 @@ namespace Dependably.Tests.Integration;
 /// Integration tests for the MFA two-step login flow. Covers:
 /// - Non-MFA login path unchanged
 /// - MFA challenge issued then TOTP step succeeds
-/// - MFA challenge issued then recovery-code step succeeds (mfa.recovery_code_used audit)
+/// - MFA challenge issued then recovery-code step succeeds (mfa.recovery_code_used activity row)
 /// - Shared lockout budget across both factors (mix 1st+2nd factor failures)
 /// - Challenge replay rejection (jti-revocation)
 /// - Challenge token not accepted as a normal session token (RouteScopeFilter gate)
@@ -26,7 +26,7 @@ namespace Dependably.Tests.Integration;
 public sealed class MfaTwoStepLoginTests : IClassFixture<DependablyFactory>, IAsyncLifetime
 {
     private readonly DependablyFactory _factory;
-    // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+    // test-only placeholder password
     private const string TestPassword = "TestMfaPass1!";
 
     public MfaTwoStepLoginTests(DependablyFactory factory) => _factory = factory;
@@ -34,6 +34,11 @@ public sealed class MfaTwoStepLoginTests : IClassFixture<DependablyFactory>, IAs
     public Task DisposeAsync() => Task.CompletedTask;
 
     private IMetadataStore Db => _factory.Services.GetRequiredService<IMetadataStore>();
+
+    // Activity writes are enqueued on a batching hosted service under integration DI, so the row
+    // is not in the table the instant the request returns. Drain before reading `activity`.
+    private Task DrainActivityAsync() =>
+        _factory.Services.GetRequiredService<ActivityWriterHostedService>().WaitForIdleAsync();
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -79,7 +84,7 @@ public sealed class MfaTwoStepLoginTests : IClassFixture<DependablyFactory>, IAs
     }
 
     // Sends POST /api/v1/auth/login and returns the full HttpResponseMessage.
-    // deepcode ignore NoHardcodedCredentials/test: test helper forwards a fixture password, not a real credential.
+    // test helper forwards a fixture password, not a real credential.
     private static async Task<HttpResponseMessage> PostLoginAsync(HttpClient client, string email, string password) =>
         await client.PostAsJsonAsync("/api/v1/auth/login", new { email, password });
 
@@ -264,12 +269,25 @@ public sealed class MfaTwoStepLoginTests : IClassFixture<DependablyFactory>, IAs
                 var step2 = await PostLoginTotpAsync(c, mfaCookie, codes[0]);
                 Assert.Equal(HttpStatusCode.OK, step2.StatusCode);
 
-                // Verify audit row for mfa.recovery_code_used.
+                // Redeeming a recovery code is a login step: activity feed, not audit_log.
+                await DrainActivityAsync();
                 await using var conn = await Db.OpenAsync();
-                long used = await conn.ExecuteScalarAsync<long>(
+                long usedActivity = await conn.ExecuteScalarAsync<long>(
+                    """
+                    SELECT COUNT(*) FROM activity
+                    WHERE actor_id = @userId
+                      AND event_type = 'mfa.recovery_code_used'
+                      AND ecosystem = 'auth'
+                      AND org_id = (SELECT tenant_id FROM users WHERE id = @userId)
+                    """,
+                    new { userId });
+                Assert.True(usedActivity >= 1, "expected mfa.recovery_code_used activity row");
+
+                // ...and is never dual-written to audit_log.
+                long usedAudit = await conn.ExecuteScalarAsync<long>(
                     "SELECT COUNT(*) FROM audit_log WHERE actor_id = @userId AND action = 'mfa.recovery_code_used'",
                     new { userId });
-                Assert.True(used >= 1, "expected mfa.recovery_code_used audit row");
+                Assert.Equal(0L, usedAudit);
 
                 // Verify login audit method=forms+recovery.
                 string? loginDetail = await conn.ExecuteScalarAsync<string?>(
@@ -442,12 +460,28 @@ public sealed class MfaTwoStepLoginTests : IClassFixture<DependablyFactory>, IAs
         string setCookie2 = string.Join("; ", secondLogin.Headers.GetValues("Set-Cookie"));
         Assert.Contains("dependably_session=", setCookie2);
 
-        // Verify audit shows trusted_device method.
+        // Skipping the second factor is a login step, so it lands in the activity feed
+        // (ecosystem 'auth'), not audit_log — which is the tenant config/security sink.
+        await DrainActivityAsync();
         await using var conn = await Db.OpenAsync();
-        long trustedCount = await conn.ExecuteScalarAsync<long>(
+        string? trustedDetail = await conn.ExecuteScalarAsync<string?>(
+            """
+            SELECT detail FROM activity
+            WHERE actor_id = @userId
+              AND event_type = 'mfa.trusted_device_used'
+              AND ecosystem = 'auth'
+              AND org_id = (SELECT tenant_id FROM users WHERE id = @userId)
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            new { userId });
+        Assert.NotNull(trustedDetail);
+        Assert.Equal("tenant", JsonDocument.Parse(trustedDetail).RootElement.GetProperty("realm").GetString());
+
+        // ...and is never dual-written to audit_log.
+        long trustedAudit = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE actor_id = @userId AND action = 'mfa.trusted_device_used'",
             new { userId });
-        Assert.True(trustedCount >= 1, "expected mfa.trusted_device_used audit row");
+        Assert.Equal(0L, trustedAudit);
     }
 
     // ── Trusted device revoked on MFA disable ────────────────────────────────
@@ -539,7 +573,7 @@ public sealed class MfaTwoStepLoginTests : IClassFixture<DependablyFactory>, IAs
         authClient.DefaultRequestHeaders.Authorization =
             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", jwt);
 
-        // deepcode ignore NoHardcodedCredentials/test: test-only placeholder new password
+        // test-only placeholder new password
         const string newPassword = "NewMfaPass2!";
         var pwResp = await authClient.PostAsJsonAsync("/api/v1/users/me/password",
             new { currentPassword = TestPassword, newPassword });

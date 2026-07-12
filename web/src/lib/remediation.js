@@ -36,14 +36,50 @@ export function firstFixedVersion(affected) {
   return null
 }
 
-/** Copyable one-liner that fetches a curated skill from this instance into `~/.claude/skills/`. */
-export function skillInstallCommand(skillId, origin) {
-  return `mkdir -p ~/.claude/skills/${skillId} && curl -fsSL ${origin}/api/v1/remediation/skills/${skillId} -o ~/.claude/skills/${skillId}/SKILL.md`
+/**
+ * The fixed version to show: the server-resolved one when present (the fix for the range
+ * containing the installed version, under the ecosystem's native ordering), else the
+ * best-effort first `fixed` event.
+ * @param {object|null|undefined} remediation OsvDetail.remediation — `{ fixedVersion }`.
+ * @param {Array<object>|null|undefined} affected OsvDetail.affected.
+ * @returns {string|null}
+ */
+export function resolvedFixedVersion(remediation, affected) {
+  return remediation?.fixedVersion ?? firstFixedVersion(affected)
+}
+
+/**
+ * The AI assistants the remediation section can target. The skill markdown itself is
+ * assistant-neutral; only the install location and the invocation wording differ:
+ * Claude Code loads skills from `~/.claude/skills/<id>/SKILL.md`, OpenAI Codex reads custom
+ * prompts from `~/.codex/prompts/<id>.md` (invoked as `/<id>`), and GitHub Copilot reads
+ * repo-level prompt files from `.github/prompts/<id>.prompt.md` (also invoked as `/<id>`).
+ * Labels are product names — not translated.
+ */
+export const ASSISTANTS = [
+  { id: 'claude', label: 'Claude Code' },
+  { id: 'codex', label: 'OpenAI Codex' },
+  { id: 'copilot', label: 'GitHub Copilot' },
+]
+
+/** Copyable one-liner that fetches a curated skill from this instance into the assistant's skill/prompt location. */
+export function skillInstallCommand(skillId, origin, assistant = 'claude') {
+  const url = `${origin}/api/v1/remediation/skills/${skillId}`
+  switch (assistant) {
+    case 'codex':
+      return `mkdir -p ~/.codex/prompts && curl -fsSL ${url} -o ~/.codex/prompts/${skillId}.md`
+    case 'copilot':
+      return `mkdir -p .github/prompts && curl -fsSL ${url} -o .github/prompts/${skillId}.prompt.md`
+    default:
+      return `mkdir -p ~/.claude/skills/${skillId} && curl -fsSL ${url} -o ~/.claude/skills/${skillId}/SKILL.md`
+  }
 }
 
 /** Copyable prompt pre-filled with the advisory id, purl, installed version, and fixed version. */
-export function skillPrompt(skillId, osvId, purl, installedVersion, fixedVersion) {
-  let prompt = `Use the ${skillId} Claude skill to remediate ${osvId ?? 'this advisory'} in ${purl ?? 'this package'} (installed version ${installedVersion ?? 'unknown'}`
+export function skillPrompt(skillId, osvId, purl, installedVersion, fixedVersion, assistant = 'claude') {
+  // Claude discovers installed skills by name; Codex and Copilot invoke prompt files as /<id>.
+  const skillRef = assistant === 'claude' ? `the ${skillId} skill` : `the /${skillId} prompt`
+  let prompt = `Use ${skillRef} to remediate ${osvId ?? 'this advisory'} in ${purl ?? 'this package'} (installed version ${installedVersion ?? 'unknown'}`
   prompt += fixedVersion ? `, fixed in ${fixedVersion}).` : ').'
   return prompt
 }

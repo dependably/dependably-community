@@ -300,7 +300,7 @@ internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, 
 
     public const string ApexHost = "localhost";
     public const string SystemAdminEmail = "sysadmin@scrapeaudit.local";
-    // deepcode ignore NoHardcodedCredentials: static test-fixture password for a WebApplicationFactory seed, not a real secret
+    // static test-fixture password for a WebApplicationFactory seed, not a real secret
     public const string SystemAdminPassword = "TestPassword12345!";
 
     public IMetadataStore Db => _metadataStore;

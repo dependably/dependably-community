@@ -43,7 +43,7 @@ public sealed class EnvelopeEncryptionTests : IAsyncLifetime
     private OrgRepository BuildRepo(EnvelopeProtector envelope) =>
         new(_db, envelope: envelope);
 
-    // deepcode ignore NoHardcodedCredentials: `key` is a settings-row name passed as a SQL parameter, not a credential.
+    // `key` is a settings-row name passed as a SQL parameter, not a credential.
     private async Task<string?> ReadRawAsync(string key)
     {
         await using var conn = await _db.OpenAsync();
@@ -53,7 +53,7 @@ public sealed class EnvelopeEncryptionTests : IAsyncLifetime
             new { key });
     }
 
-    // deepcode ignore NoHardcodedCredentials: `key` is a settings-row name passed as a SQL parameter, not a credential.
+    // `key` is a settings-row name passed as a SQL parameter, not a credential.
     private async Task WriteRawAsync(string key, string value)
     {
         await using var conn = await _db.OpenAsync();

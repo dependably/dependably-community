@@ -4,7 +4,11 @@ namespace Dependably.Infrastructure.Audit.Events;
 
 /// <summary>
 /// Typed payloads for MFA lifecycle events. All records serialize via
-/// <see cref="EventJsonOptions.Snake"/> so the audit_log.detail column is greppable.
+/// <see cref="EventJsonOptions.Snake"/> so the detail column is greppable. Credential-state
+/// changes (enrol, disable, regenerate, trusted-device registration) land in audit_log;
+/// the login steps (<see cref="TypeRecoveryCodeUsed"/>, <see cref="TypeTrustedDeviceUsed"/>)
+/// land in activity for the tenant realm, and in audit_log for the system realm, which has
+/// no activity plane.
 /// </summary>
 public static class MfaEvents
 {
@@ -12,7 +16,6 @@ public static class MfaEvents
     public const string TypeDisabled = "mfa.disabled";
     public const string TypeRecoveryCodesRegenerated = "mfa.recovery_codes_regenerated";
 
-    /// <summary>Reserved for use by the two-step login flow.</summary>
     public const string TypeRecoveryCodeUsed = "mfa.recovery_code_used";
 
     public sealed record Enrolled(int RecoveryCodesGenerated)

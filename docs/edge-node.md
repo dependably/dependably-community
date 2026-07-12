@@ -61,15 +61,12 @@ An edge node does **not**:
    community-image fallback below, `DEPLOYMENT_MODE=edge` is **required** — that is what selects
    edge mode on the full image.
 
-3. **Start the node.** The compose and Helm defaults pull the prebuilt `dependably/edge` image, so
+3. **Start the node.** The compose defaults pull the prebuilt `dependably/edge` image, so
    `up -d` pulls it on first start:
 
    ```
    docker compose -f docker-compose.edge.yml up -d
    ```
-
-   or `helm install my-edge deploy/helm/dependably-edge --set edge.masterUrl=… --set
-   edge.existingSecret=… ` (see the chart's `values.yaml`).
 
    The image is multi-arch (linux/amd64 + linux/arm64). If your registry mirror requires
    authentication for the pull, log in first:
@@ -109,7 +106,7 @@ If you build locally, or standardize on the single `dependably/community` image 
 full community image run with `DEPLOYMENT_MODE=edge` is a fully supported alternative. It selects
 the same headless cache-only behavior and strips the management surface at runtime (rather than the
 `dependably/edge` image's by-absence exclusion), and that stripping convention stays tested. To use
-it, point the compose/Helm image at `dependably.northwardlabs.ca/dependably/community:latest` (or a
+it, point the image reference at `dependably.northwardlabs.ca/dependably/community:latest` (or a
 local build) and add `DEPLOYMENT_MODE=edge` to the environment. The behavior an edge client sees is
 identical; only the image contents and the enforcement mechanism differ.
 
@@ -188,8 +185,8 @@ gate then enforces from whatever advisory data is already ingested.
 
 The whole point of an edge — offloading the master and surviving a flaky link for warm content —
 depends on the **cache tier surviving restarts**. An ephemeral per-job cache is all cold misses
-and saves nothing. The compose file mounts a named `dependably-edge-cache` volume; the Helm chart
-provisions a `PersistentVolumeClaim`. Keep it persistent, and size it against your working set
+and saves nothing. The compose file mounts a named `dependably-edge-cache` volume; on Kubernetes,
+back the cache with a `PersistentVolumeClaim`. Keep it persistent, and size it against your working set
 (`CACHE_MAX_SIZE_BYTES` caps the cache; least-recently-accessed artifacts are evicted above it).
 
 `PROXY_STAGING_PATH` points at a disk-backed path on that volume. The container's `/tmp` is
@@ -258,9 +255,9 @@ curl http://my-edge.internal/edge/status
 ## Single-writer guard (shared SQLite)
 
 An edge stores its cache index in a single SQLite file on the cache volume. SQLite tolerates
-exactly one writing process, so **run one edge process per volume** — the Helm chart hard-codes
-`replicas: 1` and uses the `Recreate` strategy for exactly this reason (do not raise it; scale out
-with a second edge and its own volume, not replicas on one volume).
+exactly one writing process, so **run one edge process per volume** — on Kubernetes that means
+`replicas: 1` with the `Recreate` strategy (do not raise it; scale out with a second edge and its
+own volume, not replicas on one volume).
 
 A startup guard enforces this. Each process claims a heartbeat lock in the database:
 

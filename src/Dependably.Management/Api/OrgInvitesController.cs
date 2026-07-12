@@ -134,8 +134,8 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
             // (intentional, per audit_log vs activity policy); the link — which embeds the
             // raw invite token — is never logged at any level. The API response is the
             // sanctioned channel for the link.
-            // deepcode ignore PrivateInformationExposure: logs only record.Id (invite GUID) and tenant id —
-            // Snyk taints the whole record for its Email field, but no email/token/link reaches the log sink.
+            // Logs only record.Id (invite GUID) and tenant id: the record carries an Email field,
+            // but no email, token, or link reaches the log sink.
             _logger.LogInformation("Invite {InviteId} created for tenant {TenantId}; SMTP not configured — retrieve link from API response.", record.Id, orgId);
             return Ok(new { record, invite_link = inviteLink, delivered_via = "link" });
         }
@@ -150,14 +150,14 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
             // default language is the best signal for the email locale.
             var settings = await _orgs.GetSettingsAsync(orgId, ct);
             string inviteLanguage = settings?.DefaultLanguage ?? LanguageCodes.Default;
-            // deepcode ignore PrivateInformationExposure: the mailer logs only the recipient's domain
+            // the mailer logs only the recipient's domain
             // (ExtractDomain) — the email local-part, invite link, and token never reach a log sink.
             await _mailer.SendInviteAsync(record.Email, orgSlug, inviteLink, record.ExpiresAt, inviteLanguage, ct);
             return Ok(new { record, invite_link = (string?)null, delivered_via = "email" });
         }
         catch (Exception ex)
         {
-            // deepcode ignore PrivateInformationExposure: logs only ExceptionType, record.Id (invite GUID) and tenant id — the tainted record's email/token never reaches the sink.
+            // logs only ExceptionType, record.Id (invite GUID) and tenant id — the tainted record's email/token never reaches the sink.
             _logger.LogWarning(
                 ex,
                 "ExceptionType={ExceptionType} invite email delivery failed for invite {InviteId} on tenant {TenantId}; returning link as fallback.",

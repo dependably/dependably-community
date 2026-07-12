@@ -148,12 +148,12 @@ public sealed class NuGetRegistrationHandler(
                         resp.BodyAsString(), normalizedId, baseUrl);
                     return new ContentResult { Content = rewritten, ContentType = "application/json" };
                 }
-                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                // RenderedCompactJsonFormatter JSON-encodes {Url}.
                 logger.LogWarning("NuGet upstream registration leaf fetch failed: {Status} for {Url}", resp.StatusCode, upstreamUrl);
             }
             catch (Exception ex)
             {
-                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                // RenderedCompactJsonFormatter JSON-encodes {Url}.
                 logger.LogWarning(ex, "NuGet upstream registration leaf fetch threw for {Url}", upstreamUrl);
             }
         }
@@ -494,12 +494,12 @@ public sealed class NuGetRegistrationHandler(
                 {
                     return resp.BodyAsString();
                 }
-                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                // RenderedCompactJsonFormatter JSON-encodes {Url}.
                 logger.LogWarning("NuGet upstream registration fetch failed: {Status} for {Url}", resp.StatusCode, upstreamUrl);
             }
             catch (Exception ex)
             {
-                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                // RenderedCompactJsonFormatter JSON-encodes {Url}.
                 logger.LogWarning(ex, "NuGet upstream registration fetch threw for {Url}", upstreamUrl);
             }
         }

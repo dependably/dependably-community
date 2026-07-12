@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
@@ -73,6 +74,14 @@ public interface IPerOrgTrustAnchorStore
     /// </summary>
     Task<Dependably.Protocol.Provenance.PyPiTrustMaterial> GetPyPiTrustAsync(
         string orgId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Builds a list of <see cref="RSA"/> public keys from the org's apk trust anchors
+    /// (<c>ecosystem='apk', anchor_kind='rsa'</c>). Returns an empty list when no anchors are
+    /// configured or all anchors fail to parse. Cached through the same hot cache as
+    /// <see cref="ListAsync"/>; invalidated by <see cref="InvalidateTrustAnchorCache"/>.
+    /// </summary>
+    Task<IReadOnlyList<RSA>> GetApkKeysAsync(string orgId, CancellationToken ct = default);
 
     /// <summary>
     /// Evicts the cached anchor list for <paramref name="orgId"/> so the next request
@@ -160,6 +169,13 @@ public sealed class PerOrgTrustAnchorStore : IPerOrgTrustAnchorStore
     {
         var anchors = await ListAsync(orgId, "nuget", ct);
         return Protocol.Provenance.NuGetSignatureTrustStore.ParseAnchors(anchors, _logger);
+    }
+
+    public async Task<IReadOnlyList<RSA>> GetApkKeysAsync(
+        string orgId, CancellationToken ct = default)
+    {
+        var anchors = await ListAsync(orgId, "apk", ct);
+        return Protocol.Provenance.ApkTrustAnchorKeyStore.BuildRsaKeys(anchors, _logger);
     }
 
     public async Task<Protocol.Provenance.PyPiTrustMaterial> GetPyPiTrustAsync(

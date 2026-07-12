@@ -119,7 +119,7 @@ public sealed class NuGetFlatContainerHandler(
                 if (!resp.IsSuccessStatusCode)
                 {
                     httpContext.Response.Headers["X-Upstream-Status"] = "error";
-                    // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                    // RenderedCompactJsonFormatter JSON-encodes {Url}.
                     logger.LogWarning("NuGet upstream version-list fetch failed: {Status} for {Url}", resp.StatusCode, url);
                     continue;
                 }
@@ -128,7 +128,7 @@ public sealed class NuGetFlatContainerHandler(
                 if (!doc.RootElement.TryGetProperty("versions", out var versionsElem))
                 {
                     httpContext.Response.Headers["X-Upstream-Status"] = "error";
-                    // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                    // RenderedCompactJsonFormatter JSON-encodes {Url}.
                     logger.LogWarning("NuGet upstream version-list response missing 'versions' property for {Url}", url);
                     continue;
                 }
@@ -142,13 +142,13 @@ public sealed class NuGetFlatContainerHandler(
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
                 httpContext.Response.Headers["X-Upstream-Status"] = "timeout";
-                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                // RenderedCompactJsonFormatter JSON-encodes {Url}.
                 logger.LogWarning("NuGet upstream version-list fetch timed out for {Url}", url);
             }
             catch (Exception ex)
             {
                 httpContext.Response.Headers["X-Upstream-Status"] = "error";
-                // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes {Url}.
+                // RenderedCompactJsonFormatter JSON-encodes {Url}.
                 logger.LogWarning(ex, "NuGet upstream version-list fetch threw for {Url}", url);
             }
         }
@@ -542,7 +542,7 @@ public sealed class NuGetFlatContainerHandler(
             // configured anchors short-circuits to NotApplicable (NULL status, never blocks).
             var prov = await ResolveProvenanceAsync(settings, orgId, file, blob, ct);
 
-            // deepcode ignore PT,LogForging: ProxyFetchService stores under BlobKeys.Proxy(sha256),
+            // ProxyFetchService stores under BlobKeys.Proxy(sha256),
             // which validates a 64-char lowercase hex — path traversal cannot escape that key. All
             // structured logs use Serilog RenderedCompactJsonFormatter (CRLF-safe).
             var result = await proxyFetch.RecordAndScanAsync(

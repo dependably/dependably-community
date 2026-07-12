@@ -17,6 +17,9 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed class InstanceLockHeartbeatService : BackgroundService
 {
+    // Budget for the release DELETE on shutdown, independent of the host's shutdown timeout.
+    private static readonly TimeSpan ReleaseTimeout = TimeSpan.FromSeconds(5);
+
     private readonly InstanceLock _lock;
     private readonly TimeProvider _time;
     private readonly ILogger<InstanceLockHeartbeatService> _logger;
@@ -66,15 +69,29 @@ public sealed class InstanceLockHeartbeatService : BackgroundService
     {
         try
         {
-            await _lock.ReleaseAsync(cancellationToken);
+            // Stop the refresh loop before the row is deleted: a tick landing after the release finds
+            // no row of its own and logs a spurious "the lock was taken over" warning.
+            await base.StopAsync(cancellationToken);
         }
-        catch (Exception ex)
+        finally
         {
-            // A failed release is not fatal — the lock simply falls back to the staleness-window
-            // takeover path. Log so an operator can see why an immediate restart waited.
-            _logger.LogWarning(ex, "Failed to release instance lock on shutdown; it will expire after the staleness window.");
+            try
+            {
+                // Deliberately not the host's shutdown token — which is why the release sits in a
+                // finally. That token is already cancelled once the shutdown timeout expires, and the
+                // host still calls the remaining StopAsync methods with it, so the release (a single
+                // DELETE, and the one thing that spares the replacement node a wait-out of the
+                // staleness window) would be skipped exactly when a slow drain has made it most
+                // valuable. Bound it on its own short timeout instead.
+                using var cts = new CancellationTokenSource(ReleaseTimeout, _time);
+                await _lock.ReleaseAsync(cts.Token);
+            }
+            catch (Exception ex)
+            {
+                // A failed release is not fatal — the lock falls back to the staleness-window takeover
+                // path. Log so an operator can see why a restart waited.
+                _logger.LogWarning(ex, "Failed to release instance lock on shutdown; it will expire after the staleness window.");
+            }
         }
-
-        await base.StopAsync(cancellationToken);
     }
 }

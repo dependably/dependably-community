@@ -781,7 +781,7 @@ public sealed class SystemMfaRequirePolicyTests : IAsyncLifetime
         public async Task<(string EnrolledId, string UnenrolledId)> CreateTwoSystemAdminsAsync()
         {
             var repo = Services.GetRequiredService<SystemAdminRepository>();
-            // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+            // test-only placeholder password
             string hash = BCrypt.Net.BCrypt.HashPassword("TestPw1!", workFactor: 4);
             string enrolledId = await repo.CreateAsync(
                 $"enrolled-{Guid.NewGuid():N}@mfa-test.local", hash, mustChangePassword: false);
@@ -794,7 +794,7 @@ public sealed class SystemMfaRequirePolicyTests : IAsyncLifetime
         public async Task<string> CreateOneSystemAdminAsync()
         {
             var repo = Services.GetRequiredService<SystemAdminRepository>();
-            // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+            // test-only placeholder password
             string hash = BCrypt.Net.BCrypt.HashPassword("TestPw1!", workFactor: 4);
             return await repo.CreateAsync(
                 $"admin-{Guid.NewGuid():N}@mfa-test.local", hash, mustChangePassword: false);

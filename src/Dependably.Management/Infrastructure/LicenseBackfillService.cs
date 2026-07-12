@@ -8,9 +8,9 @@ namespace Dependably.Infrastructure;
 /// Background service that backfills SPDX licenses for proxy-cache artifacts ingested before
 /// ingest-time license capture existed. Those <c>cache_artifact</c> rows carry no
 /// <c>package_version_licenses</c> rows and no query rescans them, so a large slice of the cache
-/// plane has no license facts. This pass reads the cached bytes for each un-checked npm/PyPI/NuGet
-/// artifact, runs the same stream-based <see cref="LicenseExtractor"/> entry points the first-fetch
-/// recorder uses, writes any SPDX identifiers to the global plane
+/// plane has no license facts. This pass reads the cached bytes for each un-checked
+/// npm/PyPI/NuGet/Go artifact, runs the same stream-based <see cref="LicenseExtractor"/> entry
+/// points the first-fetch recorder uses, writes any SPDX identifiers to the global plane
 /// (<c>LicenseRepository.SetLicensesForCacheArtifactAsync</c>, source <c>"upstream"</c>), and — in
 /// every case (license found, none present, or blob missing) — stamps
 /// <c>cache_artifact.license_checked_at</c> so the row is scanned exactly once.
@@ -192,8 +192,10 @@ public sealed class LicenseBackfillService : ScheduledBackgroundService
                 return LicenseExtractor.FromPyPiPackageBytes(blob, candidate.Filename);
             case "nuget":
                 return LicenseExtractor.FromNuspec(blob);
+            case "golang":
+                return LicenseExtractor.FromGoModuleZip(blob, candidate.Name, candidate.Version);
             default:
-                // Unreachable — the repository query filters to the three ecosystems above — but
+                // Unreachable — the repository query filters to the ecosystems above — but
                 // dispose defensively so an unexpected row never leaks the opened stream.
                 await blob.DisposeAsync();
                 return LicenseExtractor.ExtractedMetadata.Empty;

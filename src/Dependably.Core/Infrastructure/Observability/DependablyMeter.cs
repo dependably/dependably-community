@@ -43,6 +43,12 @@ public static class DependablyMeter
             description: "RPM repomd.xml detached OpenPGP signature verification failures. " +
                          "Attributes: reason (missing_signature|bad_signature|no_trusted_key).");
 
+    public static readonly Counter<long> ApkIndexSignatureFailures =
+        Meter.CreateCounter<long>(
+            "dependably.apk.index_signature_failures",
+            description: "apk APKINDEX.tar.gz embedded RSA signature verification failures. " +
+                         "Attributes: reason (no_trusted_key|missing_signature|bad_signature|malformed_index).");
+
     public static readonly UpDownCounter<long> UpstreamInflightFetches =
         Meter.CreateUpDownCounter<long>(
             "dependably.upstream.inflight_fetches",

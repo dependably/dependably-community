@@ -23,9 +23,9 @@ services:
       # to apex and hides per-tenant login methods such as SAML).
       DEPLOYMENT_MODE: ${DEPLOYMENT_MODE:-single}
       # No load balancer fronts a single-node compose appliance, so the pre-stop
-      # drain sleep (app default 10s) buys nothing here and eats into the stop
-      # grace period before the SQLite instance-lock row is released. Zero it so
-      # shutdown proceeds straight to the drain + lock release.
+      # drain sleep buys nothing here and would only eat into the stop grace
+      # period before the SQLite instance-lock row is released. Pinned to the
+      # app default (0) so shutdown proceeds straight to the drain + lock release.
       SHUTDOWN_PRESTOP_DELAY: ${SHUTDOWN_PRESTOP_DELAY:-0}
       # RPM upstream proxy. There is no canonical default RPM repo (distro/release
       # specific), so this is opt-in via env — here the demo points at Fedora 40
@@ -57,9 +57,9 @@ services:
     restart: unless-stopped
     # Must cover SHUTDOWN_PRESTOP_DELAY + SHUTDOWN_GRACE_PERIOD (30s in-flight
     # drain) so graceful shutdown finishes and the SQLite instance-lock row is
-    # deleted. Docker's default 10s SIGKILLs mid-shutdown, orphaning the lock;
-    # the replacement container then crash-loops until the 90s staleness window
-    # expires.
+    # deleted. Docker's default 10s SIGKILLs mid-shutdown, which drops the
+    # queue flushes and orphans the lock — the replacement container then has to
+    # wait out the 90s staleness window before it can take over.
     stop_grace_period: 45s
 
 volumes:

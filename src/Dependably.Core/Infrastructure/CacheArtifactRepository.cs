@@ -169,16 +169,17 @@ public sealed class CacheArtifactRepository
     /// <summary>
     /// Returns proxy <c>cache_artifact</c> rows that have never had a license-extraction pass
     /// (<c>license_checked_at IS NULL</c>) for the ecosystems whose bytes carry an extractable
-    /// license manifest (npm/PyPI/NuGet). Keyset-paginated on <c>(first_cached_at, id)</c> — a
-    /// total order, since <c>first_cached_at</c> alone is not unique — via
-    /// <paramref name="afterFirstCachedAt"/> / <paramref name="afterId"/> (both null for the first
-    /// page of a pass). LIMIT-batched so the backfill pass bounds its per-tick work. The caller
-    /// advances the cursor from the last row of every batch regardless of per-row outcome, so a
-    /// row that fails to process (and so is never stamped) cannot re-enter a later page of the
-    /// SAME pass and starve newer rows behind it — it is simply retried on the next scheduled
-    /// pass, when the cursor resets. Returns the coordinate plus the blob key the caller needs to
-    /// open the artifact bytes. The ecosystem list is deliberately narrow — Maven joins once a POM
-    /// license extractor exists.
+    /// license manifest (npm/PyPI/NuGet) or LICENSE-file text (Go). Keyset-paginated on
+    /// <c>(first_cached_at, id)</c> — a total order, since <c>first_cached_at</c> alone is not
+    /// unique — via <paramref name="afterFirstCachedAt"/> / <paramref name="afterId"/> (both null
+    /// for the first page of a pass). LIMIT-batched so the backfill pass bounds its per-tick work.
+    /// The caller advances the cursor from the last row of every batch regardless of per-row
+    /// outcome, so a row that fails to process (and so is never stamped) cannot re-enter a later
+    /// page of the SAME pass and starve newer rows behind it — it is simply retried on the next
+    /// scheduled pass, when the cursor resets. Returns the coordinate plus the blob key the caller
+    /// needs to open the artifact bytes. The ecosystem list is deliberately narrow — Maven joins
+    /// once the backfill can dispatch <c>.pom</c> files to the existing POM extractor (Maven cache
+    /// rows mix jars and poms under one ecosystem, so filename-based dispatch is required).
     /// </summary>
     // xtenant: cache_artifact is a global table (no org_id); the license-backfill pass enumerates
     // the whole shared cache plane oldest-first and processes each row independently.
@@ -195,7 +196,7 @@ public sealed class CacheArtifactRepository
                    filename AS Filename, blob_key AS BlobKey, first_cached_at AS FirstCachedAt
             FROM cache_artifact
             WHERE license_checked_at IS NULL
-              AND ecosystem IN ('npm', 'pypi', 'nuget')
+              AND ecosystem IN ('npm', 'pypi', 'nuget', 'golang')
               AND (
                     @afterFirstCachedAt IS NULL
                     OR first_cached_at > @afterFirstCachedAt
@@ -394,6 +395,7 @@ public sealed class CacheArtifactRepository
                 ca.provenance_signer    AS ProvenanceSigner,
                 ca.upstream_integrity_value     AS UpstreamIntegrityValue,
                 ca.upstream_integrity_algorithm AS UpstreamIntegrityAlgorithm,
+                ca.manifest_json        AS ManifestJson,
                 taa.manual_block_state  AS ManualBlockState,
                 taa.yanked              AS Yanked,
                 taa.yank_reason         AS YankReason,
@@ -430,7 +432,13 @@ public sealed class CacheArtifactRepository
         string? provenanceSigner,
         string? upstreamIntegrityValue,
         string? upstreamIntegrityAlgorithm,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        // JSON install-manifest subset (dependencies/optionalDependencies/bin/engines) extracted
+        // from the npm tarball's package.json at first-fetch. NULL for every non-npm ecosystem and
+        // left unchanged (COALESCE keep-existing) when extraction fails, so a pre-migration row
+        // backfills the next time this artifact is re-fetched rather than being overwritten back
+        // to NULL.
+        string? manifestJson = null)
     {
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync("""
@@ -445,7 +453,8 @@ public sealed class CacheArtifactRepository
                 provenance_status            = COALESCE(@provenanceStatus, provenance_status),
                 provenance_signer            = COALESCE(@provenanceSigner, provenance_signer),
                 upstream_integrity_value     = COALESCE(@upstreamIntegrityValue, upstream_integrity_value),
-                upstream_integrity_algorithm = COALESCE(@upstreamIntegrityAlgorithm, upstream_integrity_algorithm)
+                upstream_integrity_algorithm = COALESCE(@upstreamIntegrityAlgorithm, upstream_integrity_algorithm),
+                manifest_json                = COALESCE(@manifestJson, manifest_json)
             WHERE id = @id
             """,
             new
@@ -461,6 +470,7 @@ public sealed class CacheArtifactRepository
                 provenanceSigner,
                 upstreamIntegrityValue,
                 upstreamIntegrityAlgorithm,
+                manifestJson,
             });
     }
 #pragma warning restore S107
@@ -574,6 +584,13 @@ public sealed class CacheArtifactIndexFacts
     public string? UpstreamIntegrityValue { get; init; }
     /// <summary>Algorithm tag ('sha256' | 'sha512-sri' | 'sha512-b64') for <see cref="UpstreamIntegrityValue"/>.</summary>
     public string? UpstreamIntegrityAlgorithm { get; init; }
+    /// <summary>
+    /// JSON install-manifest subset (dependencies/optionalDependencies/bin/engines/…) from
+    /// <c>cache_artifact.manifest_json</c>, in the same shape as
+    /// <c>package_versions.manifest_json</c>. NULL for artifacts cached before ingest-time
+    /// capture existed (backfilled lazily on next fetch) and for every non-npm ecosystem.
+    /// </summary>
+    public string? ManifestJson { get; init; }
 
     /// <summary>
     /// Projects this entry into a synthetic <see cref="PackageVersion"/> so the existing
@@ -614,6 +631,7 @@ public sealed class CacheArtifactIndexFacts
             ProvenanceSigner = ProvenanceSigner,
             UpstreamIntegrityValue = UpstreamIntegrityValue,
             UpstreamIntegrityAlgorithm = UpstreamIntegrityAlgorithm,
+            ManifestJson = ManifestJson,
             DownloadCount = DownloadCount,
             Origin = "proxy",
             IsMalicious = sig?.HasMalicious ?? false,

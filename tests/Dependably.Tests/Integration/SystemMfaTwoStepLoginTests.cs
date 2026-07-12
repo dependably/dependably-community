@@ -26,7 +26,7 @@ namespace Dependably.Tests.Integration;
 public sealed class SystemMfaTwoStepLoginTests : IClassFixture<DependablyMultiFactory>, IAsyncLifetime
 {
     private readonly DependablyMultiFactory _factory;
-    // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+    // test-only placeholder password
     private const string TestPassword = "SysTestMfa1!";
 
     public SystemMfaTwoStepLoginTests(DependablyMultiFactory factory) => _factory = factory;
@@ -368,7 +368,7 @@ public sealed class SystemMfaTwoStepLoginTests : IClassFixture<DependablyMultiFa
         var db = _factory.Services.GetRequiredService<IMetadataStore>();
         string orgId = await Dependably.Tests.Infrastructure.Seeding.OrgSeeder.InsertAsync(db, tenantSlug);
 
-        const string tenantUserPassword = "TenantMfa1!Cross"; // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+        const string tenantUserPassword = "TenantMfa1!Cross"; // test-only placeholder password
         string tenantUserId = await Dependably.Tests.Infrastructure.Seeding.UserSeeder.InsertAsync(
             db, orgId, $"user-{Guid.NewGuid():N}@test.local", password: tenantUserPassword);
 
@@ -561,12 +561,27 @@ public sealed class SystemMfaTwoStepLoginTests : IClassFixture<DependablyMultiFa
         string setCookie2 = string.Join("; ", secondLogin.Headers.GetValues("Set-Cookie"));
         Assert.Contains("dependably_session=", setCookie2);
 
-        // Audit must show trusted_device_used with scope=system.
+        // Audit must show trusted_device_used with scope=system. System admins have no org, and
+        // activity.org_id is NOT NULL with an FK to orgs — there is no activity plane for the
+        // system realm, so unlike the tenant path this stays in audit_log.
         // xtenant: system audit is global, no org_id filter required
         long trustedCount = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM audit_log WHERE actor_id = @adminId AND action = 'mfa.trusted_device_used' AND scope = 'system'",
             new { adminId });
         Assert.True(trustedCount >= 1, "expected mfa.trusted_device_used system-scoped audit row");
+
+        // Skipping the second factor still completes a login, so the trusted-device path must
+        // record login.success and stamp last_login_at just like the TOTP path. Only
+        // CompleteSystemLoginAsync writes this row, and it stamps last_login_at on the next line.
+        // xtenant: system audit is global, no org_id filter required
+        long trustedLogins = await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COUNT(*) FROM audit_log
+            WHERE actor_id = @adminId AND action = 'login.success' AND scope = 'system'
+              AND detail LIKE '%forms+trusted_device%'
+            """,
+            new { adminId });
+        Assert.Equal(1L, trustedLogins);
     }
 
     // ── Disable revokes trusted devices + bumps token_version ────────────────
@@ -651,8 +666,8 @@ public sealed class SystemMfaTwoStepLoginTests : IClassFixture<DependablyMultiFa
     {
         // Seed an admin WITHOUT MFA so we can log in directly (no step 2).
         string email = $"sys-pwchange-{Guid.NewGuid():N}@test.local";
-        const string oldPassword = "SysOldPassword1!"; // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
-        const string newPassword = "SysNewPassword2!"; // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+        const string oldPassword = "SysOldPassword1!"; // test-only placeholder password
+        const string newPassword = "SysNewPassword2!"; // test-only placeholder password
         string hash = BCrypt.Net.BCrypt.HashPassword(oldPassword, workFactor: 12);
         var repo = _factory.Services.GetRequiredService<SystemAdminRepository>();
         string adminId = await repo.CreateAsync(email, hash, mustChangePassword: false);

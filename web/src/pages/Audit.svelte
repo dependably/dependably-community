@@ -110,7 +110,13 @@
   // Mirrors the catalogue tracked in en.json#audit.actions / en.json#audit.groups.
   const TENANT_AUDIT_ACTION_GROUPS = [
     { labelKey: 'audit.groups.tenantConfig', actions: ['org_settings_updated', 'retention_updated', 'proxy_settings_updated', 'tenant.setting.change'] },
-    { labelKey: 'audit.groups.auth',         actions: ['login.success', 'login.failure', 'lockout.triggered', 'user.password_changed', 'user.language_changed'] },
+    // No login.success — ListAuditAsync excludes it from this list (a routine login is not a
+    // config change; it lives in the Lifecycle feed). Listing it here would be a dead option.
+    { labelKey: 'audit.groups.auth',         actions: ['login.failure', 'lockout.triggered', 'user.password_changed', 'user.language_changed'] },
+    // Credential-state changes only. The MFA login steps (mfa.trusted_device_used,
+    // mfa.recovery_code_used) are activity events, not audit_log ones — filter them on the
+    // Lifecycle tab. Listing them here would be a dead option.
+    { labelKey: 'audit.groups.mfa',          actions: ['mfa.enrolled', 'mfa.disabled', 'mfa.recovery_codes_regenerated', 'mfa.trusted_device_added'] },
     { labelKey: 'audit.groups.saml',         actions: ['saml.config_updated', 'saml.metadata_uploaded', 'saml.config_deleted', 'auth.saml.login.success', 'auth.saml.login.failure', 'auth.saml.user_linked', 'auth.saml.user_provisioned', 'auth.saml.test.success'] },
     { labelKey: 'audit.groups.tokens',       actions: ['token_created', 'token_revoked', 'service_token_created', 'service_token_revoked'] },
     { labelKey: 'audit.groups.usersInvites', actions: ['member_role_changed', 'member_removed', 'invite_created', 'invite_deleted'] },
@@ -203,6 +209,8 @@
         <option value="login.success">{$t('activity.events.loginSuccess')}</option>
         <option value="login.failure">{$t('activity.events.loginFailure')}</option>
         <option value="login.locked">{$t('activity.events.loginLocked')}</option>
+        <option value="mfa.trusted_device_used">{$t('activity.events.mfaTrustedDeviceUsed')}</option>
+        <option value="mfa.recovery_code_used">{$t('activity.events.mfaRecoveryCodeUsed')}</option>
       </select>
       <button type="button" class="btn-sm" on:click={lcExport}>{$t('activity.export')}</button>
     </div>

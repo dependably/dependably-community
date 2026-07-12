@@ -97,6 +97,7 @@ internal static class ProtocolStartupExtensions
         builder.Services.AddSingleton<Microsoft.Extensions.Options.IValidateOptions<Dependably.Configuration.OciOptions>,
             Dependably.Configuration.OciOptionsValidator>();
         builder.Services.AddSingleton<OciUpstreamAuthService>();
+        builder.Services.AddSingleton<OciImageLicenseRecorder>();
         builder.Services.AddSingleton<OciUpstreamResolver>();
         builder.Services.AddSingleton<OciUploadService.Dependencies>();
         builder.Services.AddSingleton<OciUploadService>();

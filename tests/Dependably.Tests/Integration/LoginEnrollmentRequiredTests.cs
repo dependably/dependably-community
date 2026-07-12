@@ -35,7 +35,7 @@ namespace Dependably.Tests.Integration;
 public sealed class LoginEnrollmentRequiredTenantTests : IClassFixture<DependablyFactory>, IAsyncLifetime
 {
     private readonly DependablyFactory _factory;
-    // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+    // test-only placeholder password
     private const string TestPassword = "LoginEnrollTest1!";
 
     public LoginEnrollmentRequiredTenantTests(DependablyFactory factory) => _factory = factory;
@@ -272,7 +272,7 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
     [Fact]
     public async Task SystemLogin_RequireMfaTrue_UnenrolledAdmin_EnrollmentRequiredTrue()
     {
-        // deepcode ignore NoHardcodedCredentials/test: test-only fixture password
+        // test-only fixture password
         using var client = CreateApexClient();
         var resp = await client.PostAsJsonAsync("/api/v1/auth/login", new
         {
@@ -293,7 +293,7 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
         await _factory.SetBootstrapAdminMfaEnabled(true);
         try
         {
-            // deepcode ignore NoHardcodedCredentials/test: test-only fixture password
+            // test-only fixture password
             using var client = CreateApexClient();
             var resp = await client.PostAsJsonAsync("/api/v1/auth/login", new
             {
@@ -331,7 +331,7 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
             using var client = CreateApexClient();
 
             // Unenrolled (bootstrap) admin: non-MFA path, enrollmentRequired=true.
-            // deepcode ignore NoHardcodedCredentials/test: test-only fixture password
+            // test-only fixture password
             var unenrolledResp = await client.PostAsJsonAsync("/api/v1/auth/login", new
             {
                 email = SystemEnrollmentSignalFactory.AdminEmail,
@@ -343,7 +343,7 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
                 "Unenrolled system_admin must get enrollmentRequired=true.");
 
             // Enrolled admin: MFA challenge path.
-            // deepcode ignore NoHardcodedCredentials/test: test-only fixture password
+            // test-only fixture password
             var enrolledResp = await client.PostAsJsonAsync("/api/v1/auth/login", new
             {
                 email = enrolledEmail,
@@ -369,9 +369,9 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
     {
         public const string ApexHost = "localhost";
         public const string AdminEmail = "sysadmin@enroll-signal-test.local";
-        // deepcode ignore NoHardcodedCredentials/test: test-only fixture password
+        // test-only fixture password
         public const string AdminPassword = "SysEnroll1!";
-        // deepcode ignore NoHardcodedCredentials/test: test-only fixture password
+        // test-only fixture password
         public const string SecondAdminPassword = "SysEnroll2!";
 
         private readonly InMemoryBlobStore _blob = new();
@@ -439,7 +439,7 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
         public async Task<string> CreateSecondAdminAsync()
         {
             var repo = Services.GetRequiredService<SystemAdminRepository>();
-            // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+            // test-only placeholder password
             string hash = BCrypt.Net.BCrypt.HashPassword(SecondAdminPassword, workFactor: 4);
             return await repo.CreateAsync(
                 $"second-admin-{Guid.NewGuid():N}@enroll-signal-test.local", hash, mustChangePassword: false);

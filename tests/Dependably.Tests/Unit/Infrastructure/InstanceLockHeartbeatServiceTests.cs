@@ -86,6 +86,34 @@ public sealed class InstanceLockHeartbeatServiceTests : IAsyncLifetime
         Assert.Equal(0, await RowCountAsync());
     }
 
+    [Fact]
+    public async Task StopAsync_StillReleases_WhenTheShutdownTokenIsAlreadyCancelled()
+    {
+        var clock = TestTime.Frozen();
+        var guard = NewLock(clock);
+        await guard.TryAcquireAsync();
+        Assert.Equal(1, await RowCountAsync());
+
+        // The host hands every remaining StopAsync an already-cancelled token once
+        // SHUTDOWN_GRACE_PERIOD has elapsed. The release must not ride on that token: skipping the
+        // DELETE here is what orphans the row and makes the replacement node wait out the staleness
+        // window. Draining the refresh loop on a cancelled token may itself throw — the release still
+        // has to happen.
+        var svc = new InstanceLockHeartbeatService(guard, clock, NullLogger<InstanceLockHeartbeatService>.Instance);
+        await svc.StartAsync(CancellationToken.None);
+
+        try
+        {
+            await svc.StopAsync(new CancellationToken(canceled: true));
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected when the loop has not yet observed the stop signal.
+        }
+
+        Assert.Equal(0, await RowCountAsync());
+    }
+
     private sealed class FileSqliteStore : IMetadataStore, IAsyncDisposable
     {
         private readonly string _connectionString;

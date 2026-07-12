@@ -12,12 +12,16 @@ namespace Dependably.Infrastructure;
 /// each other's write assumptions. The guard is a heartbeat row in the <c>instance_lock</c> table,
 /// robust across containers and networked filesystems where OS advisory locks (flock) are not.
 ///
-/// <para>On acquisition (<see cref="TryAcquireAsync"/>): a foreign holder whose heartbeat is FRESH
-/// (within <c>INSTANCE_LOCK_STALE_SECONDS</c>, default 90) fails startup fast with a message naming
-/// the other instance; a stale holder (a crashed predecessor) is taken over; an empty table or a
-/// row already owned by this instance is (re)claimed. The heartbeat is refreshed on a timer while
-/// the node runs (<see cref="InstanceLockHeartbeatService"/>) and the row is released on graceful
-/// shutdown so an immediate restart need not wait out the staleness window.</para>
+/// <para>On acquisition (<see cref="TryAcquireAsync"/>): an empty table, a row already owned by this
+/// instance, or a holder whose heartbeat is already STALE (older than <c>INSTANCE_LOCK_STALE_SECONDS</c>,
+/// default 90) is claimed outright. A foreign holder whose heartbeat is FRESH is ambiguous — the row
+/// alone cannot say whether a live peer is beating it or a predecessor died without releasing it — so
+/// acquisition WAITS and watches the heartbeat: a beat identifies a live peer and fails startup with a
+/// message naming it, while a frozen heartbeat is an orphaned row that is taken over as soon as the
+/// staleness window expires. The heartbeat is refreshed on a timer while the node runs
+/// (<see cref="InstanceLockHeartbeatService"/>) and the row is released on graceful shutdown, so a
+/// clean restart claims immediately and only an ungraceful death (SIGKILL, OOM, power loss) pays the
+/// wait.</para>
 ///
 /// <para>Applies to a file-backed SQLite store only. Postgres is a legitimately multi-writer store,
 /// and an in-memory SQLite store (tests) is private to its process — both skip the guard.</para>
@@ -83,16 +87,87 @@ public sealed class InstanceLock
     }
 
     /// <summary>
-    /// Acquires the lock or throws <see cref="InstanceLockHeldException"/> when a live foreign
-    /// instance already holds it. No-op (returns) for stores the guard does not apply to. Runs
-    /// inside BEGIN IMMEDIATE so two racing startups cannot both read an empty table and both claim.
+    /// Acquires the lock, waiting out an orphaned row if necessary, or throws
+    /// <see cref="InstanceLockHeldException"/> when a live foreign instance holds it. No-op
+    /// (returns) for stores the guard does not apply to.
     /// </summary>
     public async Task TryAcquireAsync(CancellationToken ct = default)
+    {
+        var (applicable, blocker) = await ClaimOnceAsync(ct);
+        if (!applicable)
+        {
+            return;
+        }
+
+        if (blocker is null)
+        {
+            LogAcquired();
+            return;
+        }
+
+        // A foreign holder with a fresh heartbeat is one of two things and the row alone cannot tell
+        // them apart: a LIVE peer (two processes on one SQLite file — the misconfiguration this guard
+        // exists to refuse) or an ORPHANED row from a predecessor that died without releasing it
+        // (SIGKILL, OOM, power loss — a redeploy this node must survive). Watching the heartbeat
+        // separates them: a live peer keeps beating, an orphan's heartbeat is frozen. Failing fast on
+        // both makes the orphan case a crash loop for the whole staleness window, which is exactly
+        // the moment an operator needs the node to come up.
+        var waitStartedAt = _time.GetUtcNow();
+        var maxWait = StaleWindow + PollInterval;
+
+        _logger.LogInformation(
+            "Instance lock is held by {ForeignInstance} (host {ForeignHost}), last seen "
+            + "{AgeSeconds:F0}s ago. Waiting up to {MaxWaitSeconds:F0}s for its heartbeat to go "
+            + "stale: a frozen heartbeat means a crashed predecessor whose lock this node takes "
+            + "over, while a beat means it is live and startup fails.",
+            blocker.InstanceId, blocker.Hostname ?? "(unknown)",
+            (waitStartedAt - ParseIso(blocker.HeartbeatAt)).TotalSeconds, maxWait.TotalSeconds);
+
+        while (true)
+        {
+            await Task.Delay(PollInterval, _time, ct);
+
+            // Re-claim first, deadline second: a clock that jumped past the window during the wait
+            // should take the lock over, not time out one poll short of it.
+            var (_, current) = await ClaimOnceAsync(ct);
+            if (current is null)
+            {
+                LogAcquired();
+                return;
+            }
+
+            // A changed heartbeat (or a different holder taking over ahead of us) means someone else
+            // is alive on this database file. Refuse, naming them.
+            bool holderIsAlive =
+                !string.Equals(current.HeartbeatAt, blocker.HeartbeatAt, StringComparison.Ordinal)
+                || !string.Equals(current.InstanceId, blocker.InstanceId, StringComparison.Ordinal);
+            if (holderIsAlive)
+            {
+                throw InstanceLockHeldException.LivePeer(current.InstanceId, current.Hostname);
+            }
+
+            var waited = _time.GetUtcNow() - waitStartedAt;
+            if (waited > maxWait)
+            {
+                throw InstanceLockHeldException.WaitTimedOut(
+                    current.InstanceId, current.Hostname, waited, StaleWindow);
+            }
+        }
+    }
+
+    /// <summary>
+    /// One claim attempt. Returns <c>(false, null)</c> for a store the guard does not apply to,
+    /// <c>(true, null)</c> when the lock is now held by this instance (claimed, re-claimed, or taken
+    /// over from a stale holder), and <c>(true, row)</c> when a foreign holder's heartbeat is still
+    /// fresh — the caller decides whether to wait it out. Runs inside BEGIN IMMEDIATE so two racing
+    /// startups cannot both read an empty table and both claim.
+    /// </summary>
+    private async Task<(bool Applicable, LockRow? Blocker)> ClaimOnceAsync(CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
         if (!AppliesToThisStore(conn))
         {
-            return;
+            return (false, null);
         }
 
         var now = _time.GetUtcNow();
@@ -116,10 +191,10 @@ public sealed class InstanceLock
                 var age = now - lastBeat;
                 if (age < StaleWindow)
                 {
-                    // Fail fast — a second live process on one shared SQLite file corrupts writes.
+                    // Still fresh: the holder is either live or newly orphaned. Do not claim — hand
+                    // the row back so the caller can watch the heartbeat and tell the two apart.
                     await ExecRawAsync(conn, "ROLLBACK");
-                    throw new InstanceLockHeldException(
-                        existing.InstanceId, existing.Hostname, age, StaleWindow);
+                    return (true, existing);
                 }
 
                 _logger.LogWarning(
@@ -159,10 +234,6 @@ public sealed class InstanceLock
 
             await ExecRawAsync(conn, "COMMIT");
         }
-        catch (InstanceLockHeldException)
-        {
-            throw;
-        }
         catch
         {
             try { await ExecRawAsync(conn, "ROLLBACK"); }
@@ -170,11 +241,14 @@ public sealed class InstanceLock
             throw;
         }
 
+        return (true, null);
+    }
+
+    private void LogAcquired() =>
         _logger.LogInformation(
             "Acquired instance lock {InstanceId} (host {Hostname}); heartbeat every {RefreshSeconds:F0}s, "
             + "staleness window {StaleSeconds:F0}s.",
             InstanceId, Hostname, RefreshInterval.TotalSeconds, StaleWindow.TotalSeconds);
-    }
 
     /// <summary>
     /// Refreshes this instance's heartbeat. No-op when the row is no longer owned by this instance
@@ -238,6 +312,12 @@ public sealed class InstanceLock
         }
     }
 
+    /// <summary>How often acquisition re-reads a fresh foreign holder's heartbeat while waiting to
+    /// see whether it beats (live peer) or stays frozen (orphaned row). Several polls per heartbeat
+    /// cadence, so a live peer is detected within roughly one beat.</summary>
+    public TimeSpan PollInterval =>
+        TimeSpan.FromSeconds(Math.Clamp(StaleWindow.TotalSeconds / 18.0, 1, 5));
+
     private static string ToIso(DateTimeOffset value) =>
         value.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
 
@@ -264,34 +344,40 @@ public sealed class InstanceLock
 }
 
 /// <summary>
-/// Thrown at startup when a live foreign instance already holds the shared-SQLite instance lock.
-/// The message names the holder and states the takeover procedure so an operator can distinguish a
-/// genuine two-process misconfiguration from a false positive after an unclean crash.
+/// Thrown at startup when the shared-SQLite instance lock cannot be taken. The message names the
+/// holder and states what to do, so an operator can tell a genuine two-process misconfiguration
+/// (<see cref="LivePeer"/> — the holder kept beating) from the clock-skew case
+/// (<see cref="WaitTimedOut"/> — a frozen heartbeat that never aged past the staleness window).
 /// </summary>
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
     Justification = "Binary serialization ctor on Exception is obsolete in .NET 10 (SYSLIB0051); this exception is never serialized across an AppDomain or binary boundary.")]
 public sealed class InstanceLockHeldException : Exception
 {
-    public InstanceLockHeldException(
-        string foreignInstanceId,
-        string? foreignHostname,
-        TimeSpan age,
-        TimeSpan staleWindow)
-        : base(BuildMessage(foreignInstanceId, foreignHostname, age, staleWindow))
+    private InstanceLockHeldException(string message)
+        : base(message)
     {
     }
 
-    private static string BuildMessage(
+    /// <summary>The holder's heartbeat advanced while this node waited: it is running, and a second
+    /// writing process on one SQLite file corrupts the database.</summary>
+    public static InstanceLockHeldException LivePeer(string foreignInstanceId, string? foreignHostname) =>
+        new($"Refusing to start: another dependably instance ({foreignInstanceId}, host "
+            + $"{foreignHostname ?? "unknown"}) is live on this shared SQLite database — its heartbeat "
+            + "advanced while this node waited for the lock. SQLite supports exactly one writing "
+            + "process per database file; running two corrupts the data. Point this node at its own "
+            + "database file (DB_PATH), or stop the other instance.");
+
+    /// <summary>The heartbeat never advanced, yet never aged past the staleness window either — the
+    /// two hosts' clocks disagree, or the row carries a timestamp from the future.</summary>
+    public static InstanceLockHeldException WaitTimedOut(
         string foreignInstanceId,
         string? foreignHostname,
-        TimeSpan age,
+        TimeSpan waited,
         TimeSpan staleWindow) =>
-        $"Refusing to start: another dependably instance ({foreignInstanceId}, host "
-        + $"{foreignHostname ?? "unknown"}) holds the lock on this shared SQLite database and its "
-        + $"heartbeat is fresh (last seen {age.TotalSeconds:F0}s ago, within the "
-        + $"{staleWindow.TotalSeconds:F0}s staleness window). SQLite supports exactly one writing "
-        + "process per database file; running two corrupts the data. Point this node at its own "
-        + "database file, or if the other instance has definitively crashed, wait "
-        + $"{staleWindow.TotalSeconds:F0}s for its lock to go stale, or delete the row "
-        + "(DELETE FROM instance_lock) before restarting.";
+        new($"Refusing to start: the instance lock held by {foreignInstanceId} (host "
+            + $"{foreignHostname ?? "unknown"}) did not go stale after waiting {waited.TotalSeconds:F0}s "
+            + $"(staleness window {staleWindow.TotalSeconds:F0}s) and its heartbeat never advanced. "
+            + "The holder's clock is ahead of this node's, or its heartbeat is dated in the future. "
+            + "Reconcile the clocks, or delete the row (DELETE FROM instance_lock) if that instance is "
+            + "definitively gone.");
 }

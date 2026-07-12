@@ -118,7 +118,7 @@ public sealed class ProxyFetchService
                 UpstreamIntegrityValue: request.UpstreamIntegrityValue,
                 UpstreamIntegrityAlgorithm: request.UpstreamIntegrityAlgorithm,
                 Deprecated: request.Deprecated),
-            request.ExtractLicenses, cacheArtifactId, ct);
+            request.ExtractLicenses, request.ExtractManifest, cacheArtifactId, ct);
 
         // Proxy path: cacheArtifactId is set, RecordAsync returned null. Scan and gate via the
         // global plane.
@@ -581,7 +581,21 @@ public sealed record ProxyFetchRequest(
     /// field-by-field here rather than via the factories, so it must carry this explicitly). Only
     /// 'block' denies; 'warn'/'off'/null keep the license signal advisory.
     /// </summary>
-    string? LicenseEnforcementMode = null);
+    string? LicenseEnforcementMode = null,
+    /// <summary>
+    /// Optional npm install-manifest extractor. Receives a fresh, position-0 stream over the
+    /// cached tarball; unlike <see cref="ExtractLicenses"/>, the extractor does NOT own the
+    /// stream — <see cref="Infrastructure.ProxyVersionRecorder"/> opens and disposes it (<see
+    /// cref="Protocol.NpmTarballValidator.Validate(Stream)"/> deliberately leaves the source
+    /// stream open for the caller to dispose, matching the same validator's use against an owned
+    /// <c>FileStream</c> at hosted publish). Returns
+    /// the same install-relevant subset (dependencies/optionalDependencies/bin/engines/…)
+    /// persisted at hosted publish (<see cref="Protocol.NpmInstallManifest.BuildJson"/>), or null
+    /// when the tarball carries nothing extractable. Failure-tolerant like
+    /// <see cref="ExtractLicenses"/>: any throw is swallowed and the artifact keeps rendering the
+    /// minimal packument shape. Null for every non-npm ecosystem.
+    /// </summary>
+    Func<Stream, string?>? ExtractManifest = null);
 
 /// <summary>Outcome of <see cref="ProxyFetchService.RecordAndScanAsync"/>.</summary>
 public sealed record ProxyFetchResult(

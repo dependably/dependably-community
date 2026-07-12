@@ -6,14 +6,21 @@ namespace Dependably.Infrastructure;
 /// 2. Sleeps SHUTDOWN_PRESTOP_DELAY so the ALB can remove this replica from rotation.
 /// 3. Returns so the host can drain Kestrel and other services (governed by ShutdownTimeout).
 ///
+/// <para>The pre-stop delay defaults to 0 — it buys nothing on a single node, and it is spent
+/// BEFORE any hosted service's StopAsync runs, so a non-zero default would eat the whole of Docker's
+/// 10s default stop timeout and let SIGKILL land before the queues flush and the SQLite instance
+/// lock is released. Deployments that front several replicas with a load balancer set it explicitly
+/// alongside a termination grace period wide enough to cover both this delay and the drain.</para>
+///
 /// Environment variables:
-///   SHUTDOWN_PRESTOP_DELAY  — seconds to wait before accepting shutdown (default 10)
+///   SHUTDOWN_PRESTOP_DELAY  — seconds to wait before accepting shutdown (default 0)
 ///   SHUTDOWN_GRACE_PERIOD   — passed to host ShutdownTimeout; max time for in-flight drain (default 30)
 /// </summary>
 public sealed class ShutdownOrchestrator : IHostedService
 {
-    // Default pre-stop delay seconds; allows the load balancer to drain this replica.
-    private const int DefaultPreStopDelaySeconds = 10;
+    // Default pre-stop delay seconds. Zero: see the class remarks — a load-balanced deployment opts
+    // in, and pays for it with a matching termination grace period.
+    private const int DefaultPreStopDelaySeconds = 0;
 
     private readonly ShutdownState _state;
     private readonly IHostApplicationLifetime _lifetime;

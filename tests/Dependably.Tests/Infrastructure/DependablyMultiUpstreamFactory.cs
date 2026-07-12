@@ -37,7 +37,7 @@ public sealed class DependablyMultiUpstreamFactory : WebApplicationFactory<Progr
     public InMemoryBlobStore BlobStore { get; } = new();
     public const string ApexHost = "localhost";
     public const string SystemAdminEmail = "system@dependably.local";
-    // deepcode ignore NoHardcodedCredentials/test: static test-fixture password for a WebApplicationFactory first-boot seed, not a real secret.
+    // static test-fixture password for a WebApplicationFactory first-boot seed, not a real secret.
     public const string SystemAdminPassword = "TestPassword12345!";
 
     private const string PullCapabilitiesJson = """["read:artifact","read:metadata"]""";

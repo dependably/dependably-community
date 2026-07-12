@@ -373,6 +373,8 @@ CREATE TABLE IF NOT EXISTS cache_artifact (
     -- ISO 8601 UTC; set after the last license-extraction pass against this artifact. NULL =
     -- never scanned for licenses. Stamped by LicenseBackfillService. See Schema.sql.
     license_checked_at  TEXT,
+    -- JSON install-manifest subset (dependencies/optionalDependencies/bin/engines). See Schema.sql.
+    manifest_json       TEXT,
     UNIQUE (ecosystem, name, version, filename)
 );
 CREATE INDEX IF NOT EXISTS idx_cache_artifact_lru ON cache_artifact (last_accessed_at);
@@ -637,8 +639,8 @@ CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_pv ON nuget_symbol_index(packa
 CREATE TABLE IF NOT EXISTS signature_trust_anchor (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-    ecosystem   TEXT NOT NULL,   -- 'rpm' | 'npm' | 'nuget' | 'pypi' | 'maven'
-    anchor_kind TEXT NOT NULL,   -- 'pgp' | 'spki' | 'x509' | 'sigstore_root' | 'trusted_publisher' | 'rekor_key'
+    ecosystem   TEXT NOT NULL,   -- 'rpm' | 'npm' | 'nuget' | 'pypi' | 'maven' | 'apk'
+    anchor_kind TEXT NOT NULL,   -- 'pgp' | 'spki' | 'x509' | 'sigstore_root' | 'trusted_publisher' | 'rekor_key' | 'rsa'
     key_id      TEXT,            -- optional key fingerprint / subject for display
     material    TEXT NOT NULL,   -- public key material: armored PGP / base64 DER / PEM / JSON
     label       TEXT,            -- operator-supplied display label
@@ -825,9 +827,13 @@ CREATE TABLE IF NOT EXISTS oci_blobs (
     cached_at     TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
     upstream_checked_at TEXT,
     origin        TEXT NOT NULL DEFAULT 'uploaded',  -- 'uploaded' (local push) or 'proxy' (upstream cache)
+    config_digest       TEXT,    -- image manifests only: the config blob digest parsed from the manifest body
+    license_spdx        TEXT,    -- SPDX expression from the config's org.opencontainers.image.licenses label
+    license_checked_at  TEXT,    -- stamped when the config bytes were read (label present or not); NULL = config not yet seen
     PRIMARY KEY (digest, org_id)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_blobs_org ON oci_blobs(org_id);
+CREATE INDEX IF NOT EXISTS idx_oci_blobs_org_config_digest ON oci_blobs(org_id, config_digest);
 
 CREATE TABLE IF NOT EXISTS oci_tags (
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,

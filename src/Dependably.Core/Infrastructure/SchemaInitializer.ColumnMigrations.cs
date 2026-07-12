@@ -792,6 +792,24 @@ public sealed partial class SchemaInitializer
             // Full SPDX license text, bundled at build time and populated by SpdxLicenseSeeder
             // on the reseed path. Nullable: identifiers absent from the bundled texts keep NULL.
             "ALTER TABLE spdx_license ADD COLUMN license_text TEXT",
+            // JSON install-manifest subset (dependencies/optionalDependencies/bin/engines) extracted
+            // from the tarball's package.json at npm proxy first-fetch, in the same shape as
+            // package_versions.manifest_json. NULL for artifacts cached before this column existed
+            // or for non-npm ecosystems; the npm proxy fetch path backfills it lazily on next fetch.
+            "ALTER TABLE cache_artifact ADD COLUMN manifest_json TEXT",
+            // OCI image-license capture on oci_blobs. config_digest is the config blob digest
+            // parsed from an image manifest body (image manifests only; index/layer rows stay
+            // NULL). license_spdx is the SPDX expression read from the config's
+            // org.opencontainers.image.licenses label. license_checked_at stamps when the config
+            // bytes were read — label present or not — so a label-less image is never reparsed;
+            // NULL means the config has not been seen yet. All three nullable/no-DEFAULT; existing
+            // rows stay NULL and are stamped on the next manifest re-fetch or config arrival. The
+            // (org_id, config_digest) index backs the reverse lookup from an arriving config blob
+            // to the manifest rows awaiting a license stamp.
+            "ALTER TABLE oci_blobs ADD COLUMN config_digest TEXT",
+            "ALTER TABLE oci_blobs ADD COLUMN license_spdx TEXT",
+            "ALTER TABLE oci_blobs ADD COLUMN license_checked_at TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_oci_blobs_org_config_digest ON oci_blobs(org_id, config_digest)",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)

@@ -4,7 +4,9 @@ using System.Security.Cryptography;
 using System.Text;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Observability;
 using Dependably.Protocol;
+using Dependably.Protocol.Provenance;
 using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.AspNetCore.Mvc;
@@ -28,8 +30,10 @@ namespace Dependably.Api;
 ///   package signature themselves.</item>
 ///   <item>Everything else (<c>APKINDEX.tar.gz</c>, <c>.SIGN.RSA.*</c>, and any other
 ///   index-adjacent file) — short-TTL memory-cached passthrough via
-///   <see cref="ApkIndexFetchCoordinator"/>. No server-side index signature verification;
-///   apk clients verify against <c>/etc/apk/keys</c>.</item>
+///   <see cref="ApkIndexFetchCoordinator"/>. <c>APKINDEX.tar.gz</c> specifically is verified
+///   server-side against the org's apk RSA trust anchors before it is cached or served — see
+///   <see cref="ApkIndexFetchCoordinator"/> for the gating rule. apk clients also verify the
+///   same embedded signature against <c>/etc/apk/keys</c> on their end.</item>
 /// </list>
 ///
 /// Proxy-only surface, same as Go: no hosted push path, no org_settings column. Auth follows
@@ -471,23 +475,58 @@ public sealed record ApkControllerServices(
 public sealed record ApkIndexResult(Stream Body, string ContentType, string? ETag, bool NotModified);
 
 /// <summary>
+/// Thrown by <see cref="ApkIndexFetchCoordinator.GetAsync"/> when <c>APKINDEX.tar.gz</c> fails
+/// server-side RSA signature verification. <see cref="ApkController"/>'s existing catch-all
+/// around the index fetch maps this — like any other upstream failure — to a 502,
+/// refusing to cache or serve upstream metadata that failed to verify.
+/// </summary>
+public sealed class ApkIndexSignatureVerificationFailedException : Exception
+{
+    public ApkIndexSignatureVerificationFailedException(string upstreamBase)
+        : base($"APKINDEX.tar.gz signature verification failed for upstream {upstreamBase}.")
+    {
+    }
+}
+
+/// <summary>
 /// Short-TTL memory-cached passthrough for apk index and index-adjacent files
 /// (<c>APKINDEX.tar.gz</c>, <c>.SIGN.RSA.*</c>, and anything else under a
 /// <c>{release}/{repo}/{arch}/</c> directory that isn't a <c>.apk</c> package). Cloned from
 /// <see cref="Dependably.Protocol.RpmUpstreamProxy"/>'s repomd.xml passthrough: single-flight
 /// dedup, client-facing ETag/304 within the TTL window, and the shared 32 MB metadata cap.
-/// No server-side signature verification — apk clients verify the embedded index signature
-/// against <c>/etc/apk/keys</c> themselves, the same "client re-verifies" rationale RPM's
-/// repomd passthrough uses.
+///
+/// <c>APKINDEX.tar.gz</c> specifically is verified server-side against the requesting org's
+/// apk RSA trust anchors — mirroring <c>Rpm:VerifyRepomdSignature</c> exactly: verification is
+/// enabled when <c>Apk:VerifyIndexSignature</c> is explicitly set, or otherwise iff the org has
+/// at least one configured anchor. Setting the override <c>true</c> with no per-org anchor
+/// fails every resolution closed. Verification runs on every request that reaches this method
+/// (cache hit or miss) using the caller's own org anchors, not once at fetch time — the byte
+/// cache is shared across orgs (keyed by upstream base + filename only), so a per-request
+/// re-check keeps one org's anchor configuration from vouching for bytes served to another. A
+/// failed check throws <see cref="ApkIndexSignatureVerificationFailedException"/> before the
+/// bytes are cached (on a fresh fetch) or re-served (on a cache hit); the controller's existing
+/// catch-all maps this — like every other upstream failure — to a 502. Every other
+/// index-adjacent file (raw <c>.SIGN.RSA.*</c> blobs, checksums, etc.) passes through
+/// unverified; apk clients re-verify the embedded index signature against <c>/etc/apk/keys</c>
+/// themselves regardless.
 /// </summary>
 public sealed class ApkIndexFetchCoordinator
 {
+    private const string IndexFilename = "APKINDEX.tar.gz";
+
     private readonly IHttpClientFactory _http;
     private readonly IMemoryCache _cache;
     private readonly IAirGapMode _airGap;
     private readonly IUpstreamUrlValidator _urlValidator;
+    private readonly IPerOrgTrustAnchorStore _trustStore;
     private readonly ILogger<ApkIndexFetchCoordinator> _logger;
     private readonly TimeSpan _ttl;
+
+    // When true, APKINDEX.tar.gz signature verification is enforced regardless of whether the
+    // org has a trust anchor. Setting Apk:VerifyIndexSignature=true with no per-org anchor
+    // fails every resolution closed. When unset, verification is enabled iff the org has an
+    // anchor at fetch time.
+    private readonly bool? _verifyIndexSignatureOverride;
 
     private readonly ConcurrentDictionary<string, Lazy<Task<CachedIndexFile?>>> _inflight = new();
 
@@ -495,21 +534,27 @@ public sealed class ApkIndexFetchCoordinator
 
     public ApkIndexFetchCoordinator(
         IHttpClientFactory http, IMemoryCache cache, IAirGapMode airGap,
-        IUpstreamUrlValidator urlValidator, IConfiguration configuration,
+        IUpstreamUrlValidator urlValidator, IPerOrgTrustAnchorStore trustStore, IConfiguration configuration,
         ILogger<ApkIndexFetchCoordinator> logger)
     {
         _http = http;
         _cache = cache;
         _airGap = airGap;
         _urlValidator = urlValidator;
+        _trustStore = trustStore;
         _logger = logger;
         _ttl = TimeSpan.TryParse(configuration["Apk:IndexTtl"], out var t) ? t : TimeSpan.FromSeconds(60);
+        _verifyIndexSignatureOverride = bool.TryParse(configuration["Apk:VerifyIndexSignature"], out bool vf)
+            ? vf
+            : null;
     }
 
     /// <summary>
     /// Fetches <c>{upstreamBase}/{release}/{repo}/{arch}/{filename}</c>, memory-cached for the
     /// configured TTL. Returns null on a 404 or a blocked/invalid URL; throws
-    /// <see cref="AirGappedException"/> in air-gapped deployments.
+    /// <see cref="AirGappedException"/> in air-gapped deployments and
+    /// <see cref="ApkIndexSignatureVerificationFailedException"/> when <paramref name="filename"/>
+    /// is <c>APKINDEX.tar.gz</c> and it fails server-side signature verification.
     /// </summary>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification = "Each argument is a distinct fetch-coordinate input; the trailing optional context params add no cohesion when bundled.")]
@@ -523,10 +568,13 @@ public sealed class ApkIndexFetchCoordinator
         }
 
         string cacheKey = $"apk:index:{upstreamBase}:{release}/{repo}/{arch}/{filename}";
+        bool isIndex = filename.Equals(IndexFilename, StringComparison.OrdinalIgnoreCase);
 
         if (_cache.TryGetValue(cacheKey, out CachedIndexFile? cached) && cached is not null)
         {
-            return BuildResult(cached, ifNoneMatch);
+            return isIndex && !await VerifyIndexSignatureAsync(orgId, cached.Body, upstreamBase, ct)
+                ? throw new ApkIndexSignatureVerificationFailedException(upstreamBase)
+                : BuildResult(cached, ifNoneMatch);
         }
 
         var lazy = _inflight.GetOrAdd(
@@ -549,12 +597,58 @@ public sealed class ApkIndexFetchCoordinator
             return null;
         }
 
+        if (isIndex && !await VerifyIndexSignatureAsync(orgId, result.Body, upstreamBase, ct))
+        {
+            // Do not cache unverified/tampered index bytes.
+            throw new ApkIndexSignatureVerificationFailedException(upstreamBase);
+        }
+
         _cache.Set(cacheKey, result, new MemoryCacheEntryOptions
         {
             AbsoluteExpirationRelativeToNow = _ttl,
             Size = result.Body.Length,
         });
         return BuildResult(result, ifNoneMatch);
+    }
+
+    // Resolves the requesting org's apk RSA anchors and applies the Rpm:VerifyRepomdSignature-
+    // style gate: verify iff the override says so, or (when unset) iff the org has at least one
+    // anchor. Returns true when verification is not required or succeeds; false (with a
+    // reason-tagged metric + warning log) when it is required and fails.
+    private async Task<bool> VerifyIndexSignatureAsync(string? orgId, byte[] body, string upstreamBase, CancellationToken ct)
+    {
+        var anchors = orgId is null
+            ? Array.Empty<RSA>()
+            : await _trustStore.GetApkKeysAsync(orgId, ct);
+
+        bool shouldVerify = _verifyIndexSignatureOverride ?? anchors.Count > 0;
+        if (!shouldVerify)
+        {
+            return true;
+        }
+
+        if (anchors.Count == 0)
+        {
+            RecordIndexSignatureFailure("no_trusted_key", upstreamBase);
+            return false;
+        }
+
+        var (verified, reason) = ApkIndexSignatureVerifier.VerifyWithReason(body, anchors, _logger);
+        if (!verified)
+        {
+            RecordIndexSignatureFailure(reason, upstreamBase);
+            return false;
+        }
+
+        return true;
+    }
+
+    private void RecordIndexSignatureFailure(string reason, string upstreamBase)
+    {
+        DependablyMeter.ApkIndexSignatureFailures.Add(1, new KeyValuePair<string, object?>("reason", reason));
+        _logger.LogWarning(
+            "apk proxy: APKINDEX.tar.gz signature verification failed for {UpstreamBase} (reason={Reason}); " +
+            "refusing to trust upstream index.", upstreamBase, reason);
     }
 
     private static ApkIndexResult BuildResult(CachedIndexFile cached, string? ifNoneMatch) =>

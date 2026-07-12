@@ -1009,7 +1009,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // and rejects a deliberately mismatched upload.
         if (coords.IsChecksumSidecar)
         {
-            // deepcode ignore PT: staged.Path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+            // staged.Path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
             byte[] sidecarBytes = await System.IO.File.ReadAllBytesAsync(staged.Path, ct);
             return await ValidateAndAcknowledgeSidecarAsync(orgId, coords, sidecarBytes, ct);
         }
@@ -1047,7 +1047,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
 
         // Store the artifact by streaming the staged file into the blob store — the cap was
         // already enforced during staging, so no blob is ever written for an oversize upload.
-        // deepcode ignore PT: staged.Path is under the operator-configured staging root — no user input reaches the path.
+        // staged.Path is under the operator-configured staging root — no user input reaches the path.
         await using (var artifactStream = new FileStream(
             staged.Path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true))
         {
@@ -1100,7 +1100,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         {
             try
             {
-                // deepcode ignore PT: staged.Path is under the operator-configured staging root — no user input reaches the path.
+                // staged.Path is under the operator-configured staging root — no user input reaches the path.
                 var pomStream = new FileStream(
                     staged.Path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true);
                 // FromPomXml takes ownership of and disposes the stream (class stream-ownership contract).
@@ -1147,7 +1147,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         LicenseExtractor.ExtractedMetadata licenses;
         try
         {
-            // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+            // stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
             var pomStream = new FileStream(
                 stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true);
             // FromPomXml takes ownership of and disposes the stream (class stream-ownership contract).
@@ -1295,9 +1295,9 @@ public sealed partial class MavenController : OrgScopedControllerBase
         {
             "sha512" => SHA512.Create(),
             "sha256" => SHA256.Create(),
-            // deepcode ignore InsecureHash: Maven sidecar spec — see class-level SuppressMessage.
+            // Maven sidecar spec — see class-level SuppressMessage.
             "sha1" => SHA1.Create(),
-            // deepcode ignore InsecureHash: Maven sidecar spec — see class-level SuppressMessage.
+            // Maven sidecar spec — see class-level SuppressMessage.
             "md5" => MD5.Create(),
             _ => SHA256.Create(),
         };
@@ -1314,9 +1314,9 @@ public sealed partial class MavenController : OrgScopedControllerBase
         {
             "sha512" => SHA512.Create(),
             "sha256" => SHA256.Create(),
-            // deepcode ignore InsecureHash: Maven sidecar spec — see class-level SuppressMessage.
+            // Maven sidecar spec — see class-level SuppressMessage.
             "sha1" => SHA1.Create(),
-            // deepcode ignore InsecureHash: Maven sidecar spec — see class-level SuppressMessage.
+            // Maven sidecar spec — see class-level SuppressMessage.
             "md5" => MD5.Create(),
             _ => SHA256.Create(),
         };

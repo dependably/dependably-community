@@ -47,6 +47,12 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         string missingKey = "proxy/" + new string('c', 64);
         string idMissing = await SeedCacheArtifactAsync("npm", "gone", "1.0.0", missingKey, "gone-1.0.0.tgz");
 
+        // 4. Go module zip whose root LICENSE classifies to a known SPDX id → row written +
+        //    stamped, exercising the golang ecosystem alongside npm in the same pass.
+        string goKey = "proxy/" + new string('h', 64);
+        await blobs.PutAsync(goKey, GoModuleZip("example.com/with-lic", "v1.0.0", SpdxTextFixtures.Text("MIT")));
+        string idGoWith = await SeedCacheArtifactAsync("golang", "example.com/with-lic", "v1.0.0", goKey, "v1.0.0.zip");
+
         var service = BuildService(blobs);
         await service.RunBackfillPassAsync(CancellationToken.None);
 
@@ -55,12 +61,15 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         // 2 + 3: no license attached.
         Assert.Empty(await LicensesForAsync(idNone));
         Assert.Empty(await LicensesForAsync(idMissing));
+        // 4: golang license extracted in the same pass as the npm rows above.
+        Assert.Equal(new[] { "MIT" }, await LicensesForAsync(idGoWith));
 
-        // All three stamped at the frozen instant, regardless of outcome.
+        // All four stamped at the frozen instant, regardless of outcome.
         string expected = TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
         Assert.Equal(expected, await CheckedAtAsync(idWith));
         Assert.Equal(expected, await CheckedAtAsync(idNone));
         Assert.Equal(expected, await CheckedAtAsync(idMissing));
+        Assert.Equal(expected, await CheckedAtAsync(idGoWith));
     }
 
     [Fact]
@@ -80,6 +89,35 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         await service.RunBackfillPassAsync(CancellationToken.None);
         Assert.Equal(new[] { "MIT" }, await LicensesForAsync(id));
         // Original stamp instant preserved (not re-stamped).
+        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+    }
+
+    [Fact]
+    public async Task BackfillPass_GolangCandidate_WithLicense_WritesRow_Stamped()
+    {
+        var blobs = new InMemoryBlobStore();
+        string key = "proxy/" + new string('f', 64);
+        await blobs.PutAsync(key, GoModuleZip("example.com/gomod", "v1.0.0", SpdxTextFixtures.Text("MIT")));
+        string id = await SeedCacheArtifactAsync("golang", "example.com/gomod", "v1.0.0", key, "v1.0.0.zip");
+
+        var service = BuildService(blobs);
+        await service.RunBackfillPassAsync(CancellationToken.None);
+
+        Assert.Equal(new[] { "MIT" }, await LicensesForAsync(id));
+        Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
+    }
+
+    [Fact]
+    public async Task BackfillPass_GolangCandidate_MissingBlob_StampedNoRow()
+    {
+        var blobs = new InMemoryBlobStore();
+        string key = "proxy/" + new string('g', 64);
+        string id = await SeedCacheArtifactAsync("golang", "example.com/gone", "v1.0.0", key, "v1.0.0.zip");
+
+        var service = BuildService(blobs);
+        await service.RunBackfillPassAsync(CancellationToken.None);
+
+        Assert.Empty(await LicensesForAsync(id));
         Assert.Equal(TestTime.KnownNow.ToString("yyyy-MM-ddTHH:mm:ssZ"), await CheckedAtAsync(id));
     }
 
@@ -224,6 +262,21 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
             {
                 DataStream = new MemoryStream(contentBytes),
             });
+        }
+        return new MemoryStream(ms.ToArray());
+    }
+
+    // Builds a minimal Go module zip whose root LICENSE entry carries the given text, using the
+    // GOPROXY zip-entry naming convention ({module}@{version}/…).
+    private static Stream GoModuleZip(string module, string version, string licenseText)
+    {
+        using var ms = new MemoryStream();
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var entry = zip.CreateEntry($"{module}@{version}/LICENSE");
+            using var s = entry.Open();
+            using var w = new StreamWriter(s, new UTF8Encoding(false));
+            w.Write(licenseText);
         }
         return new MemoryStream(ms.ToArray());
     }

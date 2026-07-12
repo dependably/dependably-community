@@ -556,7 +556,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
         var sidecar = Assert.IsType<ContentResult>(
             await ctl.Download("com/example/lib/maven-metadata.xml.sha1", CancellationToken.None));
 
-        // deepcode ignore InsecureHash: mirrors the Maven-spec .sha1 sidecar, not a security check.
+        // mirrors the Maven-spec .sha1 sidecar, not a security check.
         string expected = Convert.ToHexString(
             SHA1.HashData(Encoding.UTF8.GetBytes(body.Content!))).ToLowerInvariant();
         Assert.Equal(expected, sidecar.Content);

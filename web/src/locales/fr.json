@@ -385,7 +385,9 @@
       "blockedDeprecated": "Bloqué (obsolète)",
       "loginSuccess": "Connexion (réussie)",
       "loginFailure": "Connexion (échec)",
-      "loginLocked": "Connexion (verrouillée)"
+      "loginLocked": "Connexion (verrouillée)",
+      "mfaTrustedDeviceUsed": "AMF ignorée (appareil de confiance)",
+      "mfaRecoveryCodeUsed": "Code de récupération AMF utilisé"
     },
     "columns": {
       "time": "Heure",
@@ -419,6 +421,7 @@
     "groups": {
       "tenantConfig": "Configuration du locataire",
       "auth": "Authentification",
+      "mfa": "Authentification multifacteur",
       "saml": "SAML",
       "tokens": "Jetons",
       "usersInvites": "Utilisateurs et invitations",
@@ -433,11 +436,14 @@
       "retention_updated": "Rétention mise à jour",
       "proxy_settings_updated": "Paramètres proxy mis à jour",
       "tenant.setting.change": "Paramètre locataire modifié",
-      "login.success": "Connexion (réussie)",
       "login.failure": "Connexion (échec)",
       "lockout.triggered": "Verrouillage de connexion déclenché",
       "user.password_changed": "Mot de passe modifié",
       "user.language_changed": "Langue modifiée",
+      "mfa.enrolled": "AMF activée",
+      "mfa.disabled": "AMF désactivée",
+      "mfa.recovery_codes_regenerated": "Codes de récupération AMF régénérés",
+      "mfa.trusted_device_added": "Appareil de confiance AMF ajouté",
       "auth.saml.login.success": "Connexion SAML (réussie)",
       "auth.saml.login.failure": "Connexion SAML (échec)",
       "auth.saml.user_linked": "Utilisateur SAML lié",
@@ -773,7 +779,7 @@
           "keyIdHint": "L'identifiant de clé du registre npm, par exemple SHA256:jl3bwswu80Pj… extrait du point de terminaison /-/npm/v1/keys. Obligatoire pour les ancres npm SPKI — l'identifiant ne peut pas être déduit des octets de la clé seule.",
           "material": "Matériel de clé publique",
           "materialPlaceholder": "Collez ici un bloc PGP blindé, du DER base64, un certificat PEM ou un JSON…",
-          "materialHint": "Matériel de clé publique uniquement — aucune clé privée n'est acceptée.",
+          "materialHint": "Matériel de clé publique uniquement — aucune clé privée n'est acceptée. Par exemple, pour apk : une clé publique RSA au format PEM.",
           "tpIssuer": "Émetteur",
           "tpIssuerPlaceholder": "ex. : https://token.actions.githubusercontent.com",
           "tpSubject": "Sujet",
@@ -1247,6 +1253,8 @@
     "revoked": "révoquée",
     "revokedOnly": "Révoquées seulement",
     "revokedHelp": "Retirée du registre en amont le {at}; ne peut plus être récupérée. Un signal de cycle de vie distinct, pas une vulnérabilité.",
+    "kev": "KEV",
+    "kevHelp": "Répertoriée dans le catalogue KEV (Known Exploited Vulnerabilities) de la CISA — exploitation confirmée en conditions réelles, indépendamment du score CVSS.",
     "severityFilter": {
       "label": "Filtrer par gravité",
       "all": "Toutes",
@@ -1263,7 +1271,8 @@
       "osvId": "ID OSV",
       "summary": "Résumé",
       "published": "Publié le",
-      "checkedAt": "Vérifié le"
+      "checkedAt": "Vérifié le",
+      "epss": "EPSS"
     },
     "detail": {
       "modified": "Modifié le",
@@ -1279,11 +1288,16 @@
       "databaseSpecific": "Spécifique à la base",
       "loading": "Chargement du détail de l'avis…",
       "error": "Impossible de charger le détail de l'avis.",
+      "epss": "EPSS",
+      "epssHelp": "Score EPSS de FIRST.org — probabilité d'exploitation en conditions réelles au cours des 30 prochains jours.",
+      "kev": "Exploitation connue",
       "remediation": {
         "title": "Remédiation",
         "fixWithAgent": "Corriger avec votre agent IA",
+        "assistantLabel": "Choisir votre assistant IA",
         "installLabel": "Installer la compétence",
-        "promptLabel": "Invite"
+        "promptLabel": "Invite",
+        "fixedIn": "Corrigée dans"
       }
     },
     "empty": "Aucun paquet vulnérable trouvé"

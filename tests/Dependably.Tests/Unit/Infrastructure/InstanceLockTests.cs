@@ -70,6 +70,41 @@ public sealed class InstanceLockTests : IAsyncLifetime
             new { instanceId, hb = iso });
     }
 
+    // Advances the foreign holder's heartbeat to a chosen instant — a live peer's refresh tick.
+    private async Task BeatForeignHolderAsync(DateTimeOffset heartbeat)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE instance_lock SET heartbeat_at = @hb WHERE id = 'primary'",
+            new { hb = heartbeat.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ") });
+    }
+
+    // Drives a pending acquisition that is waiting out a fresh foreign holder: steps the fake clock
+    // forward (which fires the wait loop's poll timer) and optionally beats the foreign heartbeat in
+    // between, since a beating holder is exactly what tells a live peer from an orphaned row. Gives
+    // each step a moment of real time for the loop's continuation to read the row, and stops as soon
+    // as the acquisition settles.
+    private static async Task DriveAsync(
+        Task acquisition,
+        FakeTimeProvider clock,
+        Func<Task>? beat = null,
+        int maxSteps = 40)
+    {
+        for (int step = 0; step < maxSteps && !acquisition.IsCompleted; step++)
+        {
+            clock.Advance(TimeSpan.FromSeconds(5));
+            if (beat is not null)
+            {
+                await beat();
+            }
+
+            for (int spin = 0; spin < 10 && !acquisition.IsCompleted; spin++)
+            {
+                await Task.Delay(2);
+            }
+        }
+    }
+
     [Fact]
     public async Task Acquire_OnEmptyTable_ClaimsTheLock()
     {
@@ -84,21 +119,46 @@ public sealed class InstanceLockTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Acquire_WhenForeignHeartbeatFresh_ThrowsNamingTheHolder()
+    public async Task Acquire_WhenForeignHeartbeatFreshAndBeating_ThrowsNamingTheLivePeer()
     {
         var clock = TestTime.Frozen();
-        // Foreign heartbeat 30s ago, well inside the 90s window → live peer.
+        // Foreign heartbeat 30s ago, well inside the 90s window.
         await SeedForeignHolderAsync("foreign-instance-abc", clock.GetUtcNow().AddSeconds(-30));
 
         var guard = NewLock(clock, staleSeconds: 90);
+        var acquisition = guard.TryAcquireAsync();
 
-        var ex = await Assert.ThrowsAsync<InstanceLockHeldException>(() => guard.TryAcquireAsync());
+        // The holder keeps beating as the clock advances: it is live, and this node must refuse.
+        await DriveAsync(acquisition, clock, beat: () => BeatForeignHolderAsync(clock.GetUtcNow()));
+
+        Assert.True(acquisition.IsCompleted, "acquisition never settled while the peer was beating");
+        var ex = await Assert.ThrowsAsync<InstanceLockHeldException>(() => acquisition);
         Assert.Contains("foreign-instance-abc", ex.Message, StringComparison.Ordinal);
         Assert.Contains("other-host", ex.Message, StringComparison.Ordinal);
 
         // The foreign row is untouched — the live peer keeps the lock.
         var row = await ReadRowAsync();
         Assert.Equal("foreign-instance-abc", row!.Value.InstanceId);
+    }
+
+    [Fact]
+    public async Task Acquire_WhenForeignHeartbeatFreshButFrozen_WaitsOutTheWindowAndTakesOver()
+    {
+        var clock = TestTime.Frozen();
+        // The redeploy case: the predecessor was SIGKILLed 10s ago, so its heartbeat is still well
+        // inside the 90s window but nothing is beating it. Failing fast here is what crash-loops a
+        // replacement container for the whole window.
+        await SeedForeignHolderAsync("killed-predecessor", clock.GetUtcNow().AddSeconds(-10));
+
+        var guard = NewLock(clock, staleSeconds: 90);
+        var acquisition = guard.TryAcquireAsync();
+
+        await DriveAsync(acquisition, clock);
+
+        Assert.True(acquisition.IsCompleted, "acquisition never settled against a frozen heartbeat");
+        await acquisition; // must not throw
+        var row = await ReadRowAsync();
+        Assert.Equal(guard.InstanceId, row!.Value.InstanceId);
     }
 
     [Fact]
@@ -237,6 +297,16 @@ public sealed class InstanceLockTests : IAsyncLifetime
         Assert.Equal(TimeSpan.FromSeconds(30), NewLock(clock, staleSeconds: 90).RefreshInterval);
         // A very small window still floors the cadence at 5s.
         Assert.Equal(TimeSpan.FromSeconds(5), NewLock(clock, staleSeconds: 6).RefreshInterval);
+    }
+
+    [Fact]
+    public void PollInterval_SamplesTheHeartbeatSeveralTimesPerRefreshCadence()
+    {
+        var clock = TestTime.Frozen();
+        // 90s window → 30s heartbeat cadence → 5s polls: a live peer's beat is seen within one tick.
+        Assert.Equal(TimeSpan.FromSeconds(5), NewLock(clock, staleSeconds: 90).PollInterval);
+        // A very small window polls faster, floored at 1s.
+        Assert.Equal(TimeSpan.FromSeconds(1), NewLock(clock, staleSeconds: 6).PollInterval);
     }
 
     private static void TryDeleteDbFiles(string path)

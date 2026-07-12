@@ -58,6 +58,7 @@ public sealed class OciUpstreamResolver
     private readonly PackageRepository _packages;
     private readonly UpstreamRegistryRepository _upstreamRepo;
     private readonly IAirGapMode _airGap;
+    private readonly OciImageLicenseRecorder _licenseRecorder;
     private readonly ILogger<OciUpstreamResolver> _logger;
     private readonly TimeProvider _time;
 
@@ -73,9 +74,9 @@ public sealed class OciUpstreamResolver
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification =
-            "Resolver aggregates 9 independent DI-resolved services (HTTP client factory, auth service, " +
-            "options, tiered blob storage, metadata store, air-gap mode, logger, clock, secret protector). " +
-            "Bundling into a wrapper record would obscure the DI graph.")]
+            "Resolver aggregates 10 independent DI-resolved services (HTTP client factory, auth service, " +
+            "options, tiered blob storage, metadata store, air-gap mode, license recorder, logger, clock, " +
+            "secret protector). Bundling into a wrapper record would obscure the DI graph.")]
     public OciUpstreamResolver(
         IHttpClientFactory http,
         OciUpstreamAuthService auth,
@@ -83,6 +84,7 @@ public sealed class OciUpstreamResolver
         TieredBlobStorage blobs,
         IMetadataStore db,
         IAirGapMode airGap,
+        OciImageLicenseRecorder licenseRecorder,
         ILogger<OciUpstreamResolver> logger,
         TimeProvider time,
         Dependably.Infrastructure.Identity.EnvelopeProtector envelope)
@@ -97,6 +99,7 @@ public sealed class OciUpstreamResolver
         _packages = new PackageRepository(db, time: time);
         _upstreamRepo = new UpstreamRegistryRepository(db, time, envelope);
         _airGap = airGap;
+        _licenseRecorder = licenseRecorder;
         _logger = logger;
         _time = time;
     }
@@ -388,7 +391,12 @@ public sealed class OciUpstreamResolver
         if (existing is not null)
         {
             // Ensure a DB row exists for this org (another org may have primed the key).
-            await EnsureBlobDbRowAsync(orgId, digest, "application/octet-stream", 0, blobKey, ct);
+            bool inserted = await EnsureBlobDbRowAsync(orgId, digest, "application/octet-stream", 0, blobKey, ct);
+            if (inserted)
+            {
+                // First time this org sees the blob: it may be a config awaited by a manifest row.
+                await _licenseRecorder.RecordConfigBlobArrivalAsync(orgId, digest, blobKey, ct);
+            }
             return new OciBlobResult(existing, "application/octet-stream");
         }
 
@@ -722,6 +730,10 @@ public sealed class OciUpstreamResolver
             """,
             new { digest = m.Digest, orgId, mediaType = m.MediaType, sizeBytes = (long)m.Bytes.Length, blobKey });
 
+        // Capture the image license from the config label onto this manifest row. Runs outside the
+        // tag branch so by-digest child manifests of a pulled index are covered too. Best-effort.
+        await _licenseRecorder.RecordManifestAsync(orgId, m.Digest, m.Bytes, ct);
+
         // Upsert tag → digest when the reference is a tag (not a digest).
         if (!OciCoordinatesParser.IsValidDigest(reference))
         {
@@ -861,7 +873,13 @@ public sealed class OciUpstreamResolver
         await _blobs.Cache.DeleteAsync(stagingKey, ct);
 
         // Persist DB row for this org.
-        await EnsureBlobDbRowAsync(orgId, digest, mediaType, bytesWritten, blobKey, ct);
+        bool inserted = await EnsureBlobDbRowAsync(orgId, digest, mediaType, bytesWritten, blobKey, ct);
+        if (inserted)
+        {
+            // First insert of this blob for the org: reverse-lookup any manifest awaiting its
+            // config license. Runs under the same single-flight token as the surrounding fetch.
+            await _licenseRecorder.RecordConfigBlobArrivalAsync(orgId, digest, blobKey, ct);
+        }
 
         _logger.LogInformation(
             "OCI blob proxy {Repository}/{Digest} ({Bytes} B) from {Host}",
@@ -872,12 +890,15 @@ public sealed class OciUpstreamResolver
         return new OciBlobFetchMetadata(blobKey, mediaType);
     }
 
-    private async Task EnsureBlobDbRowAsync(
+    // Returns true when a NEW row was inserted (ON CONFLICT DO NOTHING → 0 rows on an existing
+    // row). Callers use the flag to run the config-blob license reverse-lookup ONLY on a genuine
+    // first insert, so a warm blob GET — which runs this on every request — pays nothing extra.
+    private async Task<bool> EnsureBlobDbRowAsync(
         string orgId, string digest, string mediaType, long sizeBytes, string blobKey, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: (digest, org_id) PK is tenant-scoped.
-        await conn.ExecuteAsync(
+        int rows = await conn.ExecuteAsync(
             """
             INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin, cached_at)
             VALUES (@digest, @orgId, @mediaType, @sizeBytes, @blobKey, 'proxy',
@@ -885,6 +906,7 @@ public sealed class OciUpstreamResolver
             ON CONFLICT(digest, org_id) DO NOTHING
             """,
             new { digest, orgId, mediaType, sizeBytes, blobKey });
+        return rows > 0;
     }
 }
 

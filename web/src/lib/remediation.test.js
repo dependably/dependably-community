@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import vulnerabilitiesSource from '../pages/Vulnerabilities.svelte?raw'
-import { remediationSkillIds, firstFixedVersion, skillInstallCommand, skillPrompt } from './remediation.js'
+import { remediationSkillIds, firstFixedVersion, resolvedFixedVersion, skillInstallCommand, skillPrompt } from './remediation.js'
 
 describe('remediationSkillIds', () => {
   it('returns an empty array for null/undefined remediation', () => {
@@ -89,6 +89,23 @@ describe('firstFixedVersion', () => {
   })
 })
 
+describe('resolvedFixedVersion', () => {
+  const affected = [{ ranges: [{ events: [{ introduced: '0' }, { fixed: '1.8.1' }] }] }]
+
+  it('prefers the server-resolved fixedVersion over the first fixed event', () => {
+    expect(resolvedFixedVersion({ fixedVersion: '2.3.4' }, affected)).toBe('2.3.4')
+  })
+
+  it('falls back to the first fixed event when the server resolved nothing', () => {
+    expect(resolvedFixedVersion({ fixedVersion: null }, affected)).toBe('1.8.1')
+    expect(resolvedFixedVersion(null, affected)).toBe('1.8.1')
+  })
+
+  it('returns null when neither source has a fix', () => {
+    expect(resolvedFixedVersion(null, null)).toBeNull()
+  })
+})
+
 describe('skillInstallCommand', () => {
   it('builds a mkdir + curl one-liner scoped to the skill id and instance origin', () => {
     const cmd = skillInstallCommand('fix-xss', 'https://repo.example.com')
@@ -119,6 +136,23 @@ describe('skillInstallCommand', () => {
     const cmd = skillInstallCommand('fix-xss')
     expect(cmd).toContain('undefined')
   })
+
+  it('targets ~/.codex/prompts/<id>.md for Codex', () => {
+    expect(skillInstallCommand('fix-xss', 'https://repo.example.com', 'codex')).toBe(
+      'mkdir -p ~/.codex/prompts && curl -fsSL https://repo.example.com/api/v1/remediation/skills/fix-xss -o ~/.codex/prompts/fix-xss.md',
+    )
+  })
+
+  it('targets the repo-level .github/prompts/<id>.prompt.md for Copilot', () => {
+    expect(skillInstallCommand('fix-xss', 'https://repo.example.com', 'copilot')).toBe(
+      'mkdir -p .github/prompts && curl -fsSL https://repo.example.com/api/v1/remediation/skills/fix-xss -o .github/prompts/fix-xss.prompt.md',
+    )
+  })
+
+  it('defaults to the Claude skill location for an unknown or omitted assistant', () => {
+    expect(skillInstallCommand('fix-xss', 'https://repo.example.com', 'claude'))
+      .toBe(skillInstallCommand('fix-xss', 'https://repo.example.com'))
+  })
 })
 
 describe('Vulnerabilities.svelte install-command Copy button', () => {
@@ -129,12 +163,14 @@ describe('Vulnerabilities.svelte install-command Copy button', () => {
   // what's shown. Fails on the pre-fix handler, which called skillInstallCommand(skillId) with
   // no origin argument — copying "undefined" into the clipboard instead of the instance origin.
   it('displays the install command with an explicit origin argument', () => {
-    expect(vulnerabilitiesSource).toMatch(/copy-block-text">\{skillInstallCommand\(skillId,\s*window\.location\.origin\)\}/)
+    expect(vulnerabilitiesSource).toMatch(
+      /copy-block-text">\{skillInstallCommand\(skillId,\s*window\.location\.origin,\s*assistant\)\}/,
+    )
   })
 
   it('copies the install command with the same explicit origin argument as the displayed text', () => {
     expect(vulnerabilitiesSource).toMatch(
-      /copyRemediation\(installKey,\s*skillInstallCommand\(skillId,\s*window\.location\.origin\)\)/,
+      /copyRemediation\(installKey,\s*skillInstallCommand\(skillId,\s*window\.location\.origin,\s*assistant\)\)/,
     )
   })
 })
@@ -160,5 +196,11 @@ describe('skillPrompt', () => {
     expect(prompt).toContain('this advisory')
     expect(prompt).toContain('this package')
     expect(prompt).toContain('installed version unknown')
+  })
+
+  it('references the skill by name for Claude and as a /<id> prompt for Codex and Copilot', () => {
+    expect(skillPrompt('fix-xss', 'GHSA-x', 'pkg:npm/p@1', '1', '2')).toContain('the fix-xss skill')
+    expect(skillPrompt('fix-xss', 'GHSA-x', 'pkg:npm/p@1', '1', '2', 'codex')).toContain('the /fix-xss prompt')
+    expect(skillPrompt('fix-xss', 'GHSA-x', 'pkg:npm/p@1', '1', '2', 'copilot')).toContain('the /fix-xss prompt')
   })
 })

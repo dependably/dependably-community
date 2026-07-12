@@ -498,7 +498,7 @@ public sealed class NpmTarballHandler(
                 async openCt => await blobs.GetAsync(proxyKey, openCt)
                     ?? Stream.Null);
 
-            // deepcode ignore PT,LogForging: ProxyFetchService stores under BlobKeys.Proxy(sha256),
+            // ProxyFetchService stores under BlobKeys.Proxy(sha256),
             // which validates a 64-char lowercase hex — path traversal cannot escape that key. All
             // structured logs use Serilog RenderedCompactJsonFormatter (CRLF-safe).
             var result = await proxyFetch.RecordAndScanAsync(
@@ -593,6 +593,7 @@ public sealed class NpmTarballHandler(
             PackageName: fullName, PurlName: fullName,
             Version: version, Purl: purl, File: file, Blob: blob,
             ExtractLicenses: LicenseExtractor.FromNpmTarballPackageJson,
+            ExtractManifest: stream => ExtractNpmManifest(stream, fullName),
             UserId: token?.UserId,
             ActorKind: token?.ActorKind,
             SourceIp: httpContext.GetNormalizedRemoteIp(),
@@ -616,6 +617,24 @@ public sealed class NpmTarballHandler(
             ProvenanceSigner: prov.Signer,
             VerifyProvenanceMode: settings.VerifyNpmSignatures,
             LicenseEnforcementMode: settings.LicenseEnforcementMode);
+    }
+
+    // Parses the tarball's package.json into the install-manifest subset (the same extraction
+    // NpmPublishHandler runs against the uploaded tarball at hosted publish) for persistence on
+    // the cache_artifact row. Fail-soft: an unparseable or missing package.json degrades to a
+    // null result rather than failing the first-fetch, which has already streamed the artifact
+    // to the client.
+    private static string? ExtractNpmManifest(Stream stream, string fullName)
+    {
+        try
+        {
+            var parsed = NpmTarballValidator.Validate(stream);
+            return NpmInstallManifest.BuildJson(parsed.Manifest, publishBodyVersion: null, fullName);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
     }
 
     // Runs npm registry-signature verification for a proxy-origin version when the tenant enabled

@@ -26,10 +26,10 @@ public sealed class MfaControllerTests : IClassFixture<DependablyFactory>, IAsyn
 
     // Creates a member user and returns (userId, jwt, client) for the caller.
     private async Task<(string UserId, string Jwt, HttpClient Client)> SeedUserAsync(
-        // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+        // test-only placeholder password
         string? password = null)
     {
-        // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+        // test-only placeholder password
         password ??= "TestPassword123!";
         string userId = await _factory.CreateUser($"mfa-{Guid.NewGuid():N}@test.local", password);
         string jwt = await _factory.CreateUserJwt(userId, "member");
@@ -187,7 +187,7 @@ public sealed class MfaControllerTests : IClassFixture<DependablyFactory>, IAsyn
         await EnrollAsync(client);
 
         var resp = await client.PostAsJsonAsync("/api/v1/mfa/disable",
-            // deepcode ignore NoHardcodedCredentials/test: deliberately wrong test credential
+            // deliberately wrong test credential
             new { currentPassword = "WrongPassword!", code = "000000" });
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
@@ -195,7 +195,7 @@ public sealed class MfaControllerTests : IClassFixture<DependablyFactory>, IAsyn
     [Fact]
     public async Task Disable_WrongCode_Returns400()
     {
-        // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+        // test-only placeholder password
         const string pw = "TestPassword123!";
         var (_, _, client) = await SeedUserAsync(pw);
         await EnrollAsync(client);
@@ -208,7 +208,7 @@ public sealed class MfaControllerTests : IClassFixture<DependablyFactory>, IAsyn
     [Fact]
     public async Task Disable_CorrectCredentials_DisablesMfaAndBumpsTokenVersion()
     {
-        // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+        // test-only placeholder password
         const string pw = "TestPassword123!";
         var (userId, _, client) = await SeedUserAsync(pw);
 
@@ -298,7 +298,7 @@ public sealed class MfaControllerTests : IClassFixture<DependablyFactory>, IAsyn
     [Fact]
     public async Task Disable_UsingRecoveryCode_Succeeds()
     {
-        // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+        // test-only placeholder password
         const string pw = "TestPassword123!";
         var (userId, _, client) = await SeedUserAsync(pw);
 
@@ -346,7 +346,7 @@ public sealed class MfaControllerTests : IClassFixture<DependablyFactory>, IAsyn
     [Fact]
     public async Task AuditRows_EnrollAndDisable_ProduceCorrectActions()
     {
-        // deepcode ignore NoHardcodedCredentials/test: test-only placeholder password
+        // test-only placeholder password
         const string pw = "TestPassword123!";
         var (userId, _, client) = await SeedUserAsync(pw);
         string manualKey = await EnrollAsync(client);

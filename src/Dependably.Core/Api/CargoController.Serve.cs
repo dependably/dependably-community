@@ -240,7 +240,7 @@ public sealed partial class CargoController
             var cachedStream = await _blobs.GetAsync(storeKey, ct);
             if (cachedStream is not null)
             {
-                // deepcode ignore LogForging: name and version are validated by PathSafeValidator.ValidateUpstreamSegment
+                // name and version are validated by PathSafeValidator.ValidateUpstreamSegment
                 // before reaching this path; Serilog renders structured parameters, not concatenated strings.
                 _logger.LogDebug(
                     "Cargo cache hit: {Name} {Version} for org {OrgId}.", name, version, orgId);
@@ -273,7 +273,6 @@ public sealed partial class CargoController
     // Walks the configured upstream URLs in priority order, fetching the crate from the first
     // that responds. On a checksum mismatch the walk stops immediately (supply-chain integrity
     // failure). On transient errors (network, SSRF, size), the next upstream is tried.
-    [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Functional Snyk // deepcode ignore suppression marker, not commented-out code.")]
     private async Task<IActionResult> ProxyCrateFromUpstreamAsync(
         string orgId, string name, string version, string blobKey,
         IReadOnlyList<UpstreamSource> upstreamSources, CancellationToken ct)
@@ -295,7 +294,7 @@ public sealed partial class CargoController
                 // already computed (and the byte count), so the crate is never buffered into
                 // memory here and its digest is not recomputed — it is served straight from
                 // the just-staged blob below.
-                // deepcode ignore PT,LogForging: name and version are validated by PathSafeValidator.ValidateUpstreamSegment above;
+                // name and version are validated by PathSafeValidator.ValidateUpstreamSegment above;
                 // blobKey comes from BlobKeys.Cargo (no traversal possible); Serilog uses structured rendering.
                 fetchResult = await _upstream.GetOrFetchToBlobKeyAsync(
                     blobKey, downloadUrl, checksumSpec, "cargo", orgId, ct: ct, authorizationHeader: authorizationHeader);
@@ -304,7 +303,7 @@ public sealed partial class CargoController
             {
                 // Index-advertised checksum and downloaded bytes disagree — a supply-chain
                 // integrity failure. Fail loudly; the mismatch deserves operator attention.
-                // deepcode ignore LogForging: name and version pass PathSafeValidator; downloadUrl is constructed from validated segments; Serilog structured rendering prevents log injection.
+                // name and version pass PathSafeValidator; downloadUrl is constructed from validated segments; Serilog structured rendering prevents log injection.
                 _logger.LogWarning(
                     "Cargo crate checksum mismatch for {Name} {Version} from {Url}: index cksum does not match downloaded bytes.",
                     name, version, downloadUrl);
@@ -321,7 +320,7 @@ public sealed partial class CargoController
                     or TaskCanceledException
                     or OperationCanceledException)
             {
-                // deepcode ignore LogForging: name and version pass PathSafeValidator; downloadUrl is constructed from
+                // name and version pass PathSafeValidator; downloadUrl is constructed from
                 // validated segments; ExceptionType is a type name, not user input; Serilog structured rendering prevents log injection.
                 _logger.LogWarning(
                     "Cargo upstream crate fetch failed for {Name} {Version} from {Url}: {ExceptionType}",
@@ -373,7 +372,7 @@ public sealed partial class CargoController
                 await TryExtractAndStoreCargoLicenseAsync(cacheArtifactId, blobKey, orgId, name, version, ct);
             }
 
-            // deepcode ignore LogForging: name and version pass PathSafeValidator; sha256Hex is a hex digest from the upstream fetch result; Serilog structured rendering prevents log injection.
+            // name and version pass PathSafeValidator; sha256Hex is a hex digest from the upstream fetch result; Serilog structured rendering prevents log injection.
             _logger.LogInformation(
                 "Cargo proxy first-fetch: {Name} {Version} ({Bytes} bytes, sha256={Sha256}) for org {OrgId}.",
                 name, version, sizeBytes, sha256Hex[..ETagHexPrefixLength], orgId);
@@ -416,7 +415,7 @@ public sealed partial class CargoController
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // deepcode ignore LogForging: name and version pass PathSafeValidator; ExceptionType is a type name; Serilog structured rendering prevents log injection.
+            // name and version pass PathSafeValidator; ExceptionType is a type name; Serilog structured rendering prevents log injection.
             _logger.LogWarning(
                 "Cargo license extraction failed for {Name} {Version} (org {OrgId}): {ExceptionType}",
                 name, version, orgId, ex.GetType().Name);
@@ -505,7 +504,6 @@ public sealed partial class CargoController
     /// lines) on success, null on 404 or error. Routes through UpstreamClient to enforce
     /// the size cap and SSRF allowlist on metadata responses.
     /// </summary>
-    [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Functional Snyk // deepcode ignore suppression marker, not commented-out code.")]
     private async Task<string?> FetchUpstreamIndexAsync(
         string upstreamBase, string name, CancellationToken ct, string? authorizationHeader = null)
     {
@@ -525,7 +523,7 @@ public sealed partial class CargoController
                 or TaskCanceledException
                 or OperationCanceledException)
         {
-            // deepcode ignore LogForging: name passes PathSafeValidator; url comes from operator-configured upstream registry;
+            // name passes PathSafeValidator; url comes from operator-configured upstream registry;
             // ExceptionType is a type name; Serilog structured rendering prevents log injection.
             _logger.LogWarning(
                 "Cargo upstream index fetch failed for {Name} from {Url}: {ExceptionType}",
@@ -594,7 +592,7 @@ public sealed partial class CargoController
         catch (Exception ex)
         {
             // The bytes already streamed to the client; this index lookup is best-effort.
-            // deepcode ignore LogForging: name and version pass PathSafeValidator; ExceptionType is a type name; Serilog structured rendering prevents log injection.
+            // name and version pass PathSafeValidator; ExceptionType is a type name; Serilog structured rendering prevents log injection.
             _logger.LogWarning(
                 "Cargo cache-hit recording lookup failed for {Name} {Version} (org {OrgId}): {ExceptionType}",
                 name, version, orgId, ex.GetType().Name);
@@ -715,7 +713,7 @@ public sealed partial class CargoController
 
         if (cksum.Length != Sha256HexLength || !cksum.All(Uri.IsHexDigit))
         {
-            // deepcode ignore LogForging: name and version pass PathSafeValidator; Serilog structured rendering prevents log injection.
+            // name and version pass PathSafeValidator; Serilog structured rendering prevents log injection.
             _logger.LogWarning(
                 "Cargo index cksum for {Name} {Version} is not a SHA-256 hex digest; downloading unverified.",
                 name, version);

@@ -74,7 +74,7 @@ public sealed class ClaimsController : ControllerBase
             try { await _blobs.DeleteAsync(key, ct); }
             catch (Exception ex)
             {
-                // deepcode ignore LogForging: Serilog RenderedCompactJsonFormatter JSON-encodes property
+                // Serilog RenderedCompactJsonFormatter JSON-encodes property
                 // values, so CRLF in tenant-route inputs (org/ecosystem/name) cannot break the log envelope.
                 _logger.LogWarning(ex,
                     "Failed to delete proxy blob {BlobKey} during local_only purge for {Org}/{Ecosystem}/{Name}.",

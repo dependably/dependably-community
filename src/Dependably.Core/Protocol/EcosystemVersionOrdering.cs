@@ -52,6 +52,27 @@ public static partial class EcosystemVersionOrdering
             };
     }
 
+    /// <summary>
+    /// Compares two version strings under <paramref name="ecosystem"/>'s native ordering.
+    /// Returns the usual negative/zero/positive comparison result, or null when the ecosystem
+    /// is unsupported or either version fails to parse under that ecosystem's scheme — callers
+    /// treat null as "unknown", never as equal.
+    /// </summary>
+    public static int? Compare(string ecosystem, string left, string right) =>
+        ecosystem switch
+        {
+            "npm" => TryParseNpm(left, out var ln) && TryParseNpm(right, out var rn)
+                ? CompareNpm(ln, rn) : null,
+            "pypi" => TryParsePep440(left, out var lp) && lp is not null
+                      && TryParsePep440(right, out var rp) && rp is not null
+                ? ComparePep440(lp, rp) : null,
+            "nuget" => NuGetVersion.TryParse(left, out var lg) && NuGetVersion.TryParse(right, out var rg)
+                ? VersionComparer.Default.Compare(lg, rg) : null,
+            "maven" => TryParseMaven(left, out var lm) && TryParseMaven(right, out var rm)
+                ? CompareMaven(lm, rm) : null,
+            _ => null,
+        };
+
     private delegate bool TryParse<T>(string raw, out T? parsed);
 
     private static int? CountNewer<T>(

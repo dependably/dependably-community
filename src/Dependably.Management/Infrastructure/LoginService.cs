@@ -190,7 +190,7 @@ public sealed class LoginService
         if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
         {
             int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
-            await _audit.LogAsync("lockout.triggered",
+            await _audit.LogAsync("lockout.triggered", orgId: tenantId,
                 detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "tenant" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: sourceIp, ct: ct);
             await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.locked",
@@ -250,7 +250,13 @@ public sealed class LoginService
         string method, string? sourceIp, CancellationToken ct)
     {
         string loginDetail = System.Text.Json.JsonSerializer.Serialize(new { method }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
-        await _audit.LogAsync("login.success", actorId: userId, detail: loginDetail, sourceIp: sourceIp, ct: ct);
+        // This audit_log row exists for the SIEM auth feed (ListAuthEventsAsync reads audit_log,
+        // and a security export blind to successful logins is useless). It carries org_id so a
+        // per-tenant SIEM query can see it; ListAuditAsync excludes it from the tenant
+        // Admin-actions tab, because a routine login is not a configuration change — that view of
+        // the login lives in the activity feed written on the next line.
+        await _audit.LogAsync("login.success", orgId: tenantId, actorId: userId,
+            detail: loginDetail, sourceIp: sourceIp, ct: ct);
         await _audit.LogActivityAsync(tenantId, "auth", purl: null, "login.success", actorId: userId,
             detail: loginDetail,
             sourceIp: sourceIp, ct: ct);
@@ -288,7 +294,7 @@ public sealed class LoginService
         if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
         {
             int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
-            await _audit.LogAsync("lockout.triggered",
+            await _audit.LogAsync("lockout.triggered", orgId: tenantId,
                 detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "tenant" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: sourceIp, ct: ct);
             await _auditEmitter.EmitAsync(
@@ -445,6 +451,18 @@ public sealed class LoginService
         await CompleteTenantLoginAsync(userId, tenantId, role, tokenVersion, method, sourceIp, ct);
 
     /// <summary>
+    /// Issues a trusted-device session JWT for a system_admin who has presented a valid device
+    /// cookie. Delegates to CompleteSystemLoginAsync so the login is audited and last_login_at is
+    /// stamped identically to a full two-factor system login — skipping the second factor still
+    /// completes a login. Distinct from <see cref="IssueSystemSessionAsync"/>, which only re-mints
+    /// a JWT for an already-established session and deliberately records nothing.
+    /// </summary>
+    public async Task<string> IssueSystemTrustedDeviceSessionAsync(
+        string adminId, long tokenVersion, string method, string? sourceIp,
+        CancellationToken ct = default) =>
+        await CompleteSystemLoginAsync(adminId, tokenVersion, method, sourceIp, ct);
+
+    /// <summary>
     /// Runs <c>BCrypt.Verify</c> against the stored hash, substituting the per-process
     /// <see cref="TimingSentinelHash"/> when no usable hash exists (unknown account, or a
     /// SAML-only user whose <c>password_hash</c> is empty). Verify always executes, so the
@@ -474,7 +492,7 @@ public sealed class LoginService
         if (lockedUntil.HasValue && _time.GetUtcNow() < lockedUntil.Value)
         {
             int retryAfter = (int)(lockedUntil.Value - _time.GetUtcNow()).TotalSeconds + 1;
-            await _audit.LogAsync("lockout.triggered",
+            await _audit.LogSystemAsync("lockout.triggered",
                 detail: System.Text.Json.JsonSerializer.Serialize(new { email_hash = emailHash, realm = "system" }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
                 sourceIp: sourceIp, ct: ct);
             await _auditEmitter.EmitAsync(
@@ -543,7 +561,7 @@ public sealed class LoginService
         await _audit.LogSystemAsync("login.success", actorId: adminId,
             detail: System.Text.Json.JsonSerializer.Serialize(new { realm = "system", method }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: sourceIp, ct: ct);
-        // deepcode ignore PrivateInformationExposure: payload contains only the user UUID,
+        // payload contains only the user UUID,
         // realm name, and method name — no email. The email arg was reduced to emailHash
         // (SHA-256) by HashEmail before any audit/log call in VerifySystemFirstFactorAsync.
         await _auditEmitter.EmitAsync(

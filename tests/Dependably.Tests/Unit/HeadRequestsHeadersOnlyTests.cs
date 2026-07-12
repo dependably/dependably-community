@@ -382,6 +382,27 @@ public sealed class HeadRequestsHeadersOnlyTests : IAsyncLifetime
 
     // ── OCI controller builder ─────────────────────────────────────────────────
 
+    private BlockGateService BuildBlockGate()
+    {
+        var normalizer = new LicenseNormalizer(_db, NullLogger<LicenseNormalizer>.Instance);
+        return new BlockGateService(
+            new VulnerabilityRepository(_db, TimeProvider.System),
+            _audit,
+            new QuarantineRepository(_db, TimeProvider.System),
+            new Dependably.Infrastructure.Alerts.AlertService(
+                new Dependably.Infrastructure.Alerts.AlertRepository(_db, TimeProvider.System),
+                new Dependably.Infrastructure.Alerts.NoOpAlertNotifier(),
+                NullLogger<Dependably.Infrastructure.Alerts.AlertService>.Instance),
+            new InstallScriptAllowlistService(
+                _db,
+                new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
+                TimeProvider.System),
+            new LicenseRepository(_db, TimeProvider.System, normalizer),
+            NullLogger<BlockGateService>.Instance,
+            TimeProvider.System);
+    }
+
     private OciController BuildOciController(OciUpstreamResolver upstream)
     {
         var http = new DefaultHttpContext();
@@ -393,6 +414,7 @@ public sealed class HeadRequestsHeadersOnlyTests : IAsyncLifetime
         services.AddLogging();
         http.RequestServices = services.BuildServiceProvider();
 
+        var uploadTiered = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
         var svc = new OciControllerServices(
             Tokens: _tokens,
             Audit: _audit,
@@ -402,13 +424,15 @@ public sealed class HeadRequestsHeadersOnlyTests : IAsyncLifetime
             Upstream: upstream,
             Uploads: new OciUploadService(new OciUploadService.Dependencies(
                 _db,
-                new TieredBlobStorage(_cacheBlobs, _registryBlobs),
+                uploadTiered,
                 _orgs,
                 new UnlimitedDisk(),
                 new StagingOptions(Path.GetTempPath(), FloorBytes: 0),
                 new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+                new OciImageLicenseRecorder(_db, uploadTiered, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance),
                 NullLogger<OciUploadService>.Instance,
                 TimeProvider.System)),
+            BlockGate: BuildBlockGate(),
             EdgeGuard: Dependably.Tests.Infrastructure.TestEdgeMode.DisabledPublishGuard());
 
         return new OciController(svc, NullLogger<OciController>.Instance)
@@ -428,9 +452,10 @@ public sealed class HeadRequestsHeadersOnlyTests : IAsyncLifetime
             http, options, new DisabledAirGap(),
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, _registryBlobs);
+        var recorder = new OciImageLicenseRecorder(_db, blobs, TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance);
         return new OciUpstreamResolver(
             http, authSvc, options, blobs, _db,
-            new DisabledAirGap(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            new DisabledAirGap(), recorder, NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
     }
 
     // ── Test stubs ────────────────────────────────────────────────────────────

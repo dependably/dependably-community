@@ -30,9 +30,9 @@ services:
       # pins DEPLOYMENT_MODE=edge internally and rejects any tenancy value), so the variable is
       # neither read nor needed. Leaving it unset is the cleanest form.
       # No load balancer fronts a single-node edge, so the pre-stop drain sleep
-      # (app default 10s) buys nothing here and eats into the stop grace period
-      # before the SQLite instance-lock row is released. Zero it so shutdown
-      # proceeds straight to the drain + lock release.
+      # buys nothing here and would only eat into the stop grace period before the
+      # SQLite instance-lock row is released. Pinned to the app default (0) so
+      # shutdown proceeds straight to the drain + lock release.
       SHUTDOWN_PRESTOP_DELAY: ${SHUTDOWN_PRESTOP_DELAY:-0}
       # The master base URL — the edge's sole upstream for every ecosystem. Required.
       EDGE_MASTER_URL: ${EDGE_MASTER_URL:?set EDGE_MASTER_URL to the central master base URL}
@@ -83,9 +83,9 @@ services:
     restart: unless-stopped
     # Must cover SHUTDOWN_PRESTOP_DELAY + SHUTDOWN_GRACE_PERIOD (30s in-flight
     # drain) so graceful shutdown finishes and the SQLite instance-lock row is
-    # deleted. Docker's default 10s SIGKILLs mid-shutdown, orphaning the lock;
-    # the replacement container then crash-loops until the 90s staleness window
-    # expires.
+    # deleted. Docker's default 10s SIGKILLs mid-shutdown, which drops the
+    # queue flushes and orphans the lock — the replacement container then has to
+    # wait out the 90s staleness window before it can take over.
     stop_grace_period: 45s
 
 volumes:

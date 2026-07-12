@@ -32,7 +32,7 @@ internal static class RequestBodyStager
     internal static async Task<StagedBody> StageAsync(
         Stream source, string stagingRoot, long cap, bool withMavenDigests, CancellationToken ct)
     {
-        // deepcode ignore PT: staging file name is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        // staging file name is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
         string tempPath = Path.Combine(stagingRoot, $"publish-stage-{Guid.NewGuid():N}.tmp");
         bool ok = false;
         try
@@ -77,7 +77,7 @@ internal static class RequestBodyStager
         {
             if (File.Exists(path))
             {
-                // deepcode ignore PT: path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+                // path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
                 File.Delete(path);
             }
         }

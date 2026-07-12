@@ -124,7 +124,7 @@ public sealed class AuthController : ControllerBase
     private async Task<IActionResult> HandleSystemLoginAsync(
         LoginRequest req, TrustedDeviceService trustedDevices, string? sourceIp, CancellationToken ct)
     {
-        // deepcode ignore LogForging,PrivateInformationExposure: email reaches LoginService which
+        // email reaches LoginService which
         // SHA-256-hashes it (HashEmail) before any audit/log call; raw email never reaches the
         // RenderedCompactJsonFormatter sink. CRLF in property values is JSON-encoded regardless.
         var ff = await _login.BeginSystemLoginAsync(req.Email, req.Password, sourceIp, ct);
@@ -155,7 +155,10 @@ public sealed class AuthController : ControllerBase
         if (deviceCookie is not null
             && await trustedDevices.TryConsumeAsync(ff.AdminId!, "system", null, deviceCookie, ct))
         {
-            string trustedToken = await _login.IssueSystemSessionAsync(ff.AdminId!, ff.TokenVersion, ct);
+            string trustedToken = await _login.IssueSystemTrustedDeviceSessionAsync(
+                ff.AdminId!, ff.TokenVersion, "forms+trusted_device", sourceIp, ct);
+            // System admins have no org, and activity.org_id is NOT NULL with an FK to orgs —
+            // there is no activity plane for the system realm, so this stays in audit_log.
             await _audit.LogSystemAsync(
                 action: MfaEvents.TypeTrustedDeviceUsed,
                 actorId: ff.AdminId,
@@ -177,7 +180,7 @@ public sealed class AuthController : ControllerBase
     private async Task<IActionResult> HandleTenantLoginAsync(
         LoginRequest req, TrustedDeviceService trustedDevices, string tenantId, string? sourceIp, CancellationToken ct)
     {
-        // deepcode ignore LogForging,PrivateInformationExposure: see HandleSystemLoginAsync — HashEmail
+        // see HandleSystemLoginAsync — HashEmail
         // is applied before audit; raw email is not logged.
         var ff = await _login.BeginTenantLoginAsync(req.Email, req.Password, tenantId, sourceIp, ct);
 
@@ -210,10 +213,11 @@ public sealed class AuthController : ControllerBase
         {
             string trustedToken = await _login.IssueTrustedDeviceSessionAsync(
                 ff.UserId!, ff.TenantId!, ff.Role!, ff.TokenVersion, "forms+trusted_device", sourceIp, ct);
-            await _audit.LogAsync(
-                action: MfaEvents.TypeTrustedDeviceUsed,
-                orgId: ff.TenantId,
-                actorId: ff.UserId,
+            // Skipping the second factor is a step of the login, not a configuration change —
+            // it belongs in the activity feed alongside login.success, not in audit_log.
+            await _audit.LogActivityAsync(
+                ff.TenantId!, "auth", purl: null, MfaEvents.TypeTrustedDeviceUsed,
+                actorId: ff.UserId, actorKind: ActorKinds.User,
                 detail: new MfaEvents.TrustedDeviceUsed("tenant").ToJson(),
                 sourceIp: sourceIp, ct: ct);
             Response.Cookies.Append("dependably_session", trustedToken, _urls.SessionCookieOptions(HttpContext));
@@ -287,7 +291,7 @@ public sealed class AuthController : ControllerBase
         string sysLockoutKey = LoginService.HashLockoutKey("system", null, ch.Eml!);
         string sysEmailHash = LoginService.HashEmail(ch.Eml!);
 
-        // deepcode ignore LogForging: ch.Eml/ch.Sub come from the HMAC-verified challenge and reach
+        // ch.Eml/ch.Sub come from the HMAC-verified challenge and reach
         // LoginService, which SHA-256-hashes the email (HashEmail) before any audit/log call; the raw
         // value never reaches a log sink.
         var sysResult = await _login.CompleteSystemSecondFactorAsync(
@@ -348,7 +352,7 @@ public sealed class AuthController : ControllerBase
         string lockoutKey = LoginService.HashLockoutKey("tenant", ch.Tid!, ch.Eml!);
         string emailHash = LoginService.HashEmail(ch.Eml!);
 
-        // deepcode ignore LogForging: ch.Eml/ch.Sub come from the HMAC-verified challenge and reach
+        // ch.Eml/ch.Sub come from the HMAC-verified challenge and reach
         // LoginService, which SHA-256-hashes the email (HashEmail) before any audit/log call; the raw
         // value never reaches a log sink.
         var result = await _login.CompleteTenantSecondFactorAsync(
@@ -374,10 +378,10 @@ public sealed class AuthController : ControllerBase
         if (result.RecoveryCodeUsed)
         {
             int remaining = await mfaService.CountRecoveryCodesAsync(ch.Sub!, ct);
-            await _audit.LogAsync(
-                action: MfaEvents.TypeRecoveryCodeUsed,
-                orgId: ch.Tid,
-                actorId: ch.Sub,
+            // Redeeming a recovery code is a step of the login — activity, not audit_log.
+            await _audit.LogActivityAsync(
+                ch.Tid!, "auth", purl: null, MfaEvents.TypeRecoveryCodeUsed,
+                actorId: ch.Sub, actorKind: ActorKinds.User,
                 detail: new MfaEvents.RecoveryCodeUsed(remaining).ToJson(),
                 sourceIp: ch.SourceIp, ct: ct);
         }
@@ -452,7 +456,7 @@ public sealed class AuthController : ControllerBase
         await _users.CreateFromInviteAsync(invite, req.Password, ct);
 
         // Auto-login. Invite is tenant-scoped, so we know which tenant to authenticate against.
-        // deepcode ignore LogForging,PrivateInformationExposure: invite.Email is hashed by
+        // invite.Email is hashed by
         // LoginService.HashEmail before any audit/log call (same path as the manual login above).
         var (token, _, _) = await _login.LoginTenantAsync(invite.Email, req.Password, invite.OrgId,
             HttpContext.GetNormalizedRemoteIp(), ct);
@@ -519,7 +523,7 @@ public sealed class AuthController : ControllerBase
             Response.Cookies.Append("dependably_session", fresh, _urls.SessionCookieOptions(HttpContext));
         }
 
-        await _audit.LogAsync(action: "user.password_changed", actorId: sub,
+        await _audit.LogAsync(action: "user.password_changed", orgId: tenantId, actorId: sub,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 sessions_invalidated = true,

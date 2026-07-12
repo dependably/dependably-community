@@ -194,7 +194,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
     // Records a single tenant setting change to both the audit log and the audit-event emitter,
     // carrying the before/after values.
-    // deepcode ignore NoHardcodedCredentials: `key` is a tenant-setting name (e.g. "air_gapped"),
+    // `key` is a tenant-setting name (e.g. "air_gapped"),
     // not a credential — the literals flowing in are setting identifiers.
     private async Task EmitSettingChangeAsync(
         string orgId, string key, object? priorValue, object? newValue, CancellationToken ct)

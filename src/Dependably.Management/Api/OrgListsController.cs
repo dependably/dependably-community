@@ -165,7 +165,7 @@ public sealed class OrgListsController : OrgScopedControllerBase
         // validation cost without dropping legitimate complex regexes. Compile-time
         // timeout + length cap together neutralise the ReDoS surface; runtime matches
         // re-apply the 2 s timeout per call (see PackageBlocklistMatcher).
-        // deepcode ignore RegexInjection: input is gated by tenant:configure capability,
+        // input is gated by tenant:configure capability,
         // length-capped above, and compiled with a 2 s match-timeout that propagates to
         // every downstream Match invocation.
         try { _ = new System.Text.RegularExpressions.Regex(req.Pattern, System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(2)); }

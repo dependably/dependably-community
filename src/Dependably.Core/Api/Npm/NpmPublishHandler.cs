@@ -309,7 +309,7 @@ public sealed class NpmPublishHandler(
             Licenses = ctx.Licenses,
         };
 
-    // deepcode ignore PT: stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+    // stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
     private static LicenseExtractor.ExtractedMetadata ExtractNpmTarballLicense(string stagingPath)
     {
         using var fs = new FileStream(
@@ -428,7 +428,7 @@ public sealed class NpmPublishHandler(
     {
         // Stream the staged tarball through the validator rather than reading the whole artifact
         // back into a byte[] — the gzip/tar decompression is already bounded by TarScanLimits.
-        // deepcode ignore PT: fileStagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        // fileStagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
         using var tarball = new System.IO.FileStream(
             fileStagingPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read,
             bufferSize: 81920, useAsync: false);
@@ -445,7 +445,7 @@ public sealed class NpmPublishHandler(
         {
             if (System.IO.File.Exists(path))
             {
-                // deepcode ignore PT: path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+                // path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
                 System.IO.File.Delete(path);
             }
         }

@@ -401,7 +401,10 @@ export const api = {
     return req('GET', `/vuln-report?${q}`)
   },
   // Lazy advisory detail for the expandable row — tenant-scoped server-side (BOLA).
-  getVulnDetail: (osvId) => req('GET', `/vulnerabilities/${encodeURIComponent(osvId)}`),
+  // `version` (optional) is the installed version; the server uses it to resolve the
+  // fixed version of the affected range containing it (remediation.fixedVersion).
+  getVulnDetail: (osvId, version) =>
+    req('GET', `/vulnerabilities/${encodeURIComponent(osvId)}${version ? `?version=${encodeURIComponent(version)}` : ''}`),
   rescanVersion: (eco, name, version) =>
     req('POST', `/packages/${eco}/${name.replaceAll('/', '%2F')}/${version}/rescan`),
   blockVersion: (eco, name, version) =>

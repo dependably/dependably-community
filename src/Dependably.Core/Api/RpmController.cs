@@ -117,7 +117,7 @@ public sealed class RpmController : OrgScopedControllerBase
             // RpmArtifactValidator and scriptlet detection parse the RPM header (at the file
             // start) from a byte[]. Read the staged file — bounded by the tenant cap enforced
             // above — rather than holding the body in two live buffers.
-            // deepcode ignore PT: staged.Path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+            // staged.Path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
             byte[] bytes = await System.IO.File.ReadAllBytesAsync(staged.Path, ct);
 
             RpmHeaderInfo header;
@@ -153,7 +153,7 @@ public sealed class RpmController : OrgScopedControllerBase
             }
 
             // Store the verified artifact by streaming the staged file into the blob store.
-            // deepcode ignore PT: staged.Path is under the operator-configured staging root — no user input reaches the path.
+            // staged.Path is under the operator-configured staging root — no user input reaches the path.
             await using (var artifactStream = new FileStream(
                 staged.Path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true))
             {
@@ -660,7 +660,7 @@ public sealed class RpmController : OrgScopedControllerBase
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {
-            // deepcode ignore LogForging: Serilog RenderedCompactJsonFormatter JSON-encodes {Filename}, neutralising newline/control-char injection.
+            // Serilog RenderedCompactJsonFormatter JSON-encodes {Filename}, neutralising newline/control-char injection.
             Logger.LogWarning(ex,
                 "RPM proxy: ResolvePackageUrlAsync failed for {Filename}: {ExceptionType}",
                 file, ex.GetType().Name);
@@ -963,7 +963,7 @@ public sealed class RpmController : OrgScopedControllerBase
         }
         catch (Exception ex) when (ex is not AirGappedException)
         {
-            // deepcode ignore LogForging: Serilog RenderedCompactJsonFormatter JSON-encodes {Filename}, neutralising newline/control-char injection.
+            // Serilog RenderedCompactJsonFormatter JSON-encodes {Filename}, neutralising newline/control-char injection.
             Logger.LogWarning(ex,
                 "RPM proxy: GetRepodataAsync failed for {Filename}: {ExceptionType}",
                 file, ex.GetType().Name);
@@ -1243,7 +1243,7 @@ public sealed class RpmController : OrgScopedControllerBase
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // Swallowed: detection is advisory; the cached version still serves.
-                // deepcode ignore LogForging: Serilog RenderedCompactJsonFormatter JSON-encodes {Filename}, neutralising newline/control-char injection.
+                // Serilog RenderedCompactJsonFormatter JSON-encodes {Filename}, neutralising newline/control-char injection.
                 Logger.LogWarning(ex,
                     "RPM proxy: install-script detection failed for {Filename}: {ExceptionType}",
                     p.Filename, ex.GetType().Name);

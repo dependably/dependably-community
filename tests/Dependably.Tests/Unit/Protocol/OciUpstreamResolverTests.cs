@@ -67,8 +67,14 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             blobs,
             _db,
             new StubAirGap(airGapped),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
     }
+
+    // License recorder for the resolver constructor. Best-effort by design; these tests do not
+    // assert license capture, so a recorder over the shared cache store + metadata store suffices.
+    private OciImageLicenseRecorder NewRecorder()
+        => new(_db, new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore()),
+            TimeProvider.System, NullLogger<OciImageLicenseRecorder>.Instance);
 
     private static OciOptions DefaultOptions()
         => new()
@@ -271,7 +277,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchManifestAsync(orgId, "library/ubuntu", "latest", isDigest: false, default);
 
@@ -304,7 +310,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchManifestAsync(orgId, "library/ubuntu", "latest", isDigest: false, default);
 
@@ -352,7 +358,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchManifestAsync(
             orgId, "library/does-not-exist-xyz", "1.0", isDigest: false, default);
@@ -386,7 +392,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchManifestAsync(_orgId, "library/ubuntu", "22.04", isDigest: false, default);
         Assert.NotNull(result);
@@ -454,7 +460,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default);
 
@@ -483,7 +489,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", wrongDigest, default);
 
@@ -529,7 +535,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var cacheBlobs = new InMemoryBlobStore();
         var blobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", wrongDigest, default);
 
@@ -571,7 +577,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var cacheBlobs = new InMemoryBlobStore();
         var blobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchManifestAsync(orgId, "library/ubuntu", wrongRequestedDigest, isDigest: true, default);
 
@@ -613,7 +619,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var cacheBlobs = new InMemoryBlobStore();
         var blobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchManifestAsync(orgId, "library/ubuntu", computedDigest, isDigest: true, default);
 
@@ -653,7 +659,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var cacheBlobs = new InMemoryBlobStore();
         var blobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchManifestAsync(orgId, "library/ubuntu", "stable", isDigest: false, default);
 
@@ -698,7 +704,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var goodBlobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
         var goodResolver = new OciUpstreamResolver(goodHttp, goodAuthSvc, opts, goodBlobs, _db,
-            new StubAirGap(false), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            new StubAirGap(false), NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var goodResult = await goodResolver.FetchManifestAsync(orgId, "library/ubuntu", goodDigest, isDigest: true, default);
 
@@ -716,7 +722,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var badBlobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
         var badResolver = new OciUpstreamResolver(badHttp, badAuthSvc, opts, badBlobs, _db,
-            new StubAirGap(false), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            new StubAirGap(false), NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var badResult = await badResolver.FetchManifestAsync(orgId, "library/ubuntu", badRequestedDigest, isDigest: true, default);
 
@@ -776,7 +782,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var goodBlobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
         var goodResolver = new OciUpstreamResolver(goodHttp, goodAuthSvc, opts, goodBlobs, _db,
-            new StubAirGap(false), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            new StubAirGap(false), NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var goodResult = await goodResolver.FetchBlobAsync(orgId, "library/ubuntu", goodDigest, default);
 
@@ -792,7 +798,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var badBlobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
         var badResolver = new OciUpstreamResolver(badHttp, badAuthSvc, opts, badBlobs, _db,
-            new StubAirGap(false), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            new StubAirGap(false), NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var badResult = await badResolver.FetchBlobAsync(orgId, "library/ubuntu", wrongDigest, default);
 
@@ -825,7 +831,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchTagsAsync(_orgId, "library/ubuntu", default);
 
@@ -843,7 +849,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchTagsAsync(_orgId, "library/ubuntu", default);
 
@@ -922,7 +928,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var spy = new PutAsyncSpyBlobStore(new InMemoryBlobStore());
         var blobs = new TieredBlobStorage(spy, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", wrongDigest, default);
 
@@ -966,7 +972,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var spy = new PutAsyncSpyBlobStore(new InMemoryBlobStore());
         var blobs = new TieredBlobStorage(spy, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(http, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default);
 
@@ -1019,7 +1025,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(seq, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchManifestAsync(orgId, "library/ubuntu", "latest", isDigest: false, default);
 
@@ -1063,7 +1069,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(seq, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var result = await resolver.FetchManifestMetadataAsync(orgId, "library/ubuntu", "latest", isDigest: false, default);
 
@@ -1101,7 +1107,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs = new TieredBlobStorage(new InMemoryBlobStore(), new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(seq, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         string orgId = await OrgSeeder.InsertAsync(_db, "blob-head-auth-retry-org");
         await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
@@ -1147,7 +1153,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobsGood = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
         var resolverGood = new OciUpstreamResolver(seqGood, authGood, optsGood, blobsGood, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         // Request 2: 404 on first attempt (no retry for 404)
         var seq404 = new SequenceFactory(new HttpResponseMessage(HttpStatusCode.NotFound));
@@ -1156,7 +1162,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
             NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
         var blobs404 = new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore());
         var resolver404 = new OciUpstreamResolver(seq404, auth404, opts404, blobs404, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         var goodResult = await resolverGood.FetchManifestMetadataAsync(orgId, "library/ubuntu", "latest", isDigest: false, default);
         var nullResult = await resolver404.FetchManifestMetadataAsync(orgId, "library/ubuntu", "missing", isDigest: false, default);
@@ -1342,7 +1348,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var cacheBlobs = new InMemoryBlobStore();
         var blobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(gate, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         string orgId = await OrgSeeder.InsertAsync(_db, "blob-singleflight-org");
         await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
@@ -1394,7 +1400,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var cacheBlobs = new InMemoryBlobStore();
         var blobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(gate, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         string orgId = await OrgSeeder.InsertAsync(_db, "blob-cancel-org");
         await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
@@ -1444,7 +1450,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var cacheBlobs = new InMemoryBlobStore();
         var blobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(routing, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         string orgId = await OrgSeeder.InsertAsync(_db, "blob-distinct-singleflight-org");
         await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);
@@ -1496,7 +1502,7 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         var cacheBlobs = new InMemoryBlobStore();
         var blobs = new TieredBlobStorage(cacheBlobs, new InMemoryBlobStore());
         var resolver = new OciUpstreamResolver(routing, authSvc, opts, blobs, _db, new StubAirGap(false),
-            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
+            NewRecorder(), NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured());
 
         string orgId = await OrgSeeder.InsertAsync(_db, "blob-mixed-singleflight-org");
         await SeedOciUpstreamAsync(orgId, "registry-1.docker.io", [""], position: 0);

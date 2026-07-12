@@ -151,6 +151,18 @@
         <target>Déblocage manuel</target>
       </segment>
     </unit>
+    <unit id="activity.events.mfaRecoveryCodeUsed">
+      <segment state="translated">
+        <source>MFA recovery code used</source>
+        <target>Code de récupération AMF utilisé</target>
+      </segment>
+    </unit>
+    <unit id="activity.events.mfaTrustedDeviceUsed">
+      <segment state="translated">
+        <source>MFA skipped (trusted device)</source>
+        <target>AMF ignorée (appareil de confiance)</target>
+      </segment>
+    </unit>
     <unit id="activity.events.push">
       <segment state="translated">
         <source>Push</source>
@@ -487,12 +499,6 @@
         <target>Connexion (échec)</target>
       </segment>
     </unit>
-    <unit id="audit.actions.login.success">
-      <segment state="translated">
-        <source>Login (success)</source>
-        <target>Connexion (réussie)</target>
-      </segment>
-    </unit>
     <unit id="audit.actions.member_removed">
       <segment state="translated">
         <source>Member removed</source>
@@ -503,6 +509,30 @@
       <segment state="translated">
         <source>Member role changed</source>
         <target>Rôle de membre modifié</target>
+      </segment>
+    </unit>
+    <unit id="audit.actions.mfa.disabled">
+      <segment state="translated">
+        <source>MFA disabled</source>
+        <target>AMF désactivée</target>
+      </segment>
+    </unit>
+    <unit id="audit.actions.mfa.enrolled">
+      <segment state="translated">
+        <source>MFA enrolled</source>
+        <target>AMF activée</target>
+      </segment>
+    </unit>
+    <unit id="audit.actions.mfa.recovery_codes_regenerated">
+      <segment state="translated">
+        <source>MFA recovery codes regenerated</source>
+        <target>Codes de récupération AMF régénérés</target>
+      </segment>
+    </unit>
+    <unit id="audit.actions.mfa.trusted_device_added">
+      <segment state="translated">
+        <source>MFA trusted device added</source>
+        <target>Appareil de confiance AMF ajouté</target>
       </segment>
     </unit>
     <unit id="audit.actions.org_settings_updated">
@@ -689,6 +719,12 @@
       <segment state="translated">
         <source>Allow/Block lists</source>
         <target>Listes d&apos;autorisation / de blocage</target>
+      </segment>
+    </unit>
+    <unit id="audit.groups.mfa">
+      <segment state="translated">
+        <source>Multi-factor auth</source>
+        <target>Authentification multifacteur</target>
       </segment>
     </unit>
     <unit id="audit.groups.saml">
@@ -8947,6 +8983,12 @@ dotnet/</target>
         <target>Vérifié le</target>
       </segment>
     </unit>
+    <unit id="vulnerabilities.columns.epss">
+      <segment state="translated">
+        <source>EPSS</source>
+        <target>EPSS</target>
+      </segment>
+    </unit>
     <unit id="vulnerabilities.columns.osvId">
       <segment state="translated">
         <source>OSV ID</source>
@@ -9019,10 +9061,28 @@ dotnet/</target>
         <target>Détails</target>
       </segment>
     </unit>
+    <unit id="vulnerabilities.detail.epss">
+      <segment state="translated">
+        <source>EPSS</source>
+        <target>EPSS</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.epssHelp">
+      <segment state="translated">
+        <source>FIRST.org EPSS — probability of exploitation in the wild within the next 30 days.</source>
+        <target>Score EPSS de FIRST.org — probabilité d&apos;exploitation en conditions réelles au cours des 30 prochains jours.</target>
+      </segment>
+    </unit>
     <unit id="vulnerabilities.detail.error">
       <segment state="translated">
         <source>Couldn&apos;t load advisory detail.</source>
         <target>Impossible de charger le détail de l&apos;avis.</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.kev">
+      <segment state="translated">
+        <source>Known exploited</source>
+        <target>Exploitation connue</target>
       </segment>
     </unit>
     <unit id="vulnerabilities.detail.loading">
@@ -9047,6 +9107,18 @@ dotnet/</target>
       <segment state="translated">
         <source>Related</source>
         <target>Associés</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.remediation.assistantLabel">
+      <segment state="translated">
+        <source>Choose your AI assistant</source>
+        <target>Choisir votre assistant IA</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.detail.remediation.fixedIn">
+      <segment state="translated">
+        <source>Fixed in</source>
+        <target>Corrigée dans</target>
       </segment>
     </unit>
     <unit id="vulnerabilities.detail.remediation.fixWithAgent">
@@ -9095,6 +9167,18 @@ dotnet/</target>
       <segment state="translated">
         <source>No vulnerable packages found</source>
         <target>Aucun paquet vulnérable trouvé</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.kev">
+      <segment state="translated">
+        <source>KEV</source>
+        <target>KEV</target>
+      </segment>
+    </unit>
+    <unit id="vulnerabilities.kevHelp">
+      <segment state="translated">
+        <source>Listed in the CISA Known Exploited Vulnerabilities catalog — confirmed exploited in the wild, independent of CVSS score.</source>
+        <target>Répertoriée dans le catalogue KEV (Known Exploited Vulnerabilities) de la CISA — exploitation confirmée en conditions réelles, indépendamment du score CVSS.</target>
       </segment>
     </unit>
     <unit id="vulnerabilities.malicious">

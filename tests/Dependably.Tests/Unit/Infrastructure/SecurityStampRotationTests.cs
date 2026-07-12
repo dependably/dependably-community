@@ -24,7 +24,7 @@ public sealed class SecurityStampRotationTests : IClassFixture<InMemoryDbFixture
     public async Task ChangePasswordAsync_RotatesSecurityStamp()
     {
         string orgId = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
-        // deepcode ignore NoHardcodedCredentials: test fixture password, not a real credential
+        // test fixture password, not a real credential
         const string password = "OldPassword123";
         string userId = await UserSeeder.InsertAsync(_fixture.Store, orgId,
             $"u-{Guid.NewGuid():N}@x.test", password: password);
@@ -101,7 +101,7 @@ public sealed class SecurityStampRotationTests : IClassFixture<InMemoryDbFixture
     [Fact]
     public async Task RotatePasswordAsync_RotatesSecurityStamp()
     {
-        // deepcode ignore NoHardcodedCredentials: test fixture password, not a real credential
+        // test fixture password, not a real credential
         const string password = "AdminPass123";
         string adminId = await SystemAdminSeeder.InsertAsync(_fixture.Store,
             $"sa-{Guid.NewGuid():N}@x.test", password);

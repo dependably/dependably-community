@@ -385,7 +385,9 @@
       "blockedDeprecated": "Blocked (deprecated)",
       "loginSuccess": "Login (success)",
       "loginFailure": "Login (failure)",
-      "loginLocked": "Login (locked)"
+      "loginLocked": "Login (locked)",
+      "mfaTrustedDeviceUsed": "MFA skipped (trusted device)",
+      "mfaRecoveryCodeUsed": "MFA recovery code used"
     },
     "columns": {
       "time": "Time",
@@ -419,6 +421,7 @@
     "groups": {
       "tenantConfig": "Tenant configuration",
       "auth": "Authentication",
+      "mfa": "Multi-factor auth",
       "saml": "SAML",
       "tokens": "Tokens",
       "usersInvites": "Users & invites",
@@ -433,11 +436,14 @@
       "retention_updated": "Retention updated",
       "proxy_settings_updated": "Proxy settings updated",
       "tenant.setting.change": "Tenant setting changed",
-      "login.success": "Login (success)",
       "login.failure": "Login (failure)",
       "lockout.triggered": "Login lockout triggered",
       "user.password_changed": "Password changed",
       "user.language_changed": "Language changed",
+      "mfa.enrolled": "MFA enrolled",
+      "mfa.disabled": "MFA disabled",
+      "mfa.recovery_codes_regenerated": "MFA recovery codes regenerated",
+      "mfa.trusted_device_added": "MFA trusted device added",
       "auth.saml.login.success": "SAML login (success)",
       "auth.saml.login.failure": "SAML login (failure)",
       "auth.saml.user_linked": "SAML user linked",
@@ -773,7 +779,7 @@
           "keyIdHint": "The npm registry key identifier, for example SHA256:jl3bwswu80Pj… from the /-/npm/v1/keys endpoint. Required for npm SPKI anchors — the ID cannot be derived from the key bytes alone.",
           "material": "Public key material",
           "materialPlaceholder": "Paste PGP armored block, base64 DER, PEM certificate, or JSON payload here…",
-          "materialHint": "Public key material only — no private keys are accepted. For example: an ASCII-armored PGP public key block for RPM/Maven, a base64-encoded SPKI DER for npm, a PEM certificate for NuGet, or Sigstore root JSON for PyPI.",
+          "materialHint": "Public key material only — no private keys are accepted. For example: an ASCII-armored PGP public key block for RPM/Maven, a base64-encoded SPKI DER for npm, a PEM certificate for NuGet, Sigstore root JSON for PyPI, or a PEM RSA public key for apk.",
           "tpIssuer": "Issuer",
           "tpIssuerPlaceholder": "e.g. https://token.actions.githubusercontent.com",
           "tpSubject": "Subject",
@@ -1247,6 +1253,8 @@
     "revoked": "revoked",
     "revokedOnly": "Revoked only",
     "revokedHelp": "Removed from the upstream registry on {at}; can no longer be re-fetched. A distinct lifecycle signal, not a vulnerability.",
+    "kev": "KEV",
+    "kevHelp": "Listed in the CISA Known Exploited Vulnerabilities catalog — confirmed exploited in the wild, independent of CVSS score.",
     "severityFilter": {
       "label": "Filter by severity",
       "all": "All",
@@ -1263,7 +1271,8 @@
       "osvId": "OSV ID",
       "summary": "Summary",
       "published": "Published",
-      "checkedAt": "Checked at"
+      "checkedAt": "Checked at",
+      "epss": "EPSS"
     },
     "detail": {
       "modified": "Modified",
@@ -1279,11 +1288,16 @@
       "databaseSpecific": "Database-specific",
       "loading": "Loading advisory detail…",
       "error": "Couldn't load advisory detail.",
+      "epss": "EPSS",
+      "epssHelp": "FIRST.org EPSS — probability of exploitation in the wild within the next 30 days.",
+      "kev": "Known exploited",
       "remediation": {
         "title": "Remediation",
         "fixWithAgent": "Fix with your AI agent",
+        "assistantLabel": "Choose your AI assistant",
         "installLabel": "Install skill",
-        "promptLabel": "Prompt"
+        "promptLabel": "Prompt",
+        "fixedIn": "Fixed in"
       }
     },
     "empty": "No vulnerable packages found"

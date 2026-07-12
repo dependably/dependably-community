@@ -987,4 +987,57 @@ public static class LicenseExtractor
         ["opensource.org/licenses/cddl-1.0"] = "CDDL-1.0",
         ["opensource.org/licenses/isc"] = "ISC",
     };
+
+    // ── Go ────────────────────────────────────────────────────────────────────
+
+    // Candidate LICENSE-file basenames, in priority order — the first one present in the module
+    // zip wins. Matched case-insensitively against the zip entry's own basename.
+    private static readonly string[] GoLicenseCandidates =
+        { "LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "COPYING" };
+
+    /// <summary>
+    /// Go modules declare no license metadata anywhere in their published artifact, so
+    /// classifying the module's own LICENSE-file text against the bundled SPDX corpus
+    /// (<see cref="SpdxTextClassifier"/>) is the only proxy-side signal available. Reads the root
+    /// LICENSE/LICENCE/COPYING candidate (in that priority order) straight out of the module zip
+    /// — Go zip entries are prefixed with the literal module path plus version
+    /// (<c>{module}@{version}/…</c>), so only a candidate at that exact top level qualifies; a
+    /// same-named file nested deeper (e.g. bundled inside <c>vendor/</c>) is not the module's own
+    /// license and is skipped.
+    /// <para>Owns <paramref name="zipStream"/> — see stream-ownership note on the class.</para>
+    /// </summary>
+    public static ExtractedMetadata FromGoModuleZip(Stream zipStream, string module, string version)
+    {
+        try
+        {
+            using var zip = OpenZipArchive(zipStream, "go-module-zip");
+            string prefix = $"{module}@{version}/";
+
+            foreach (string candidate in GoLicenseCandidates)
+            {
+                var entry = zip.Entries.FirstOrDefault(e =>
+                    e.FullName.StartsWith(prefix, StringComparison.Ordinal)
+                    && e.FullName[prefix.Length..].Equals(candidate, StringComparison.OrdinalIgnoreCase));
+                if (entry is null)
+                {
+                    continue;
+                }
+
+                using var entryStream = new LimitedReadStream(
+                    entry.Open(), ZipEntryLimits.MaxMetadataEntryBytes, "go LICENSE");
+                using var reader = new StreamReader(entryStream, Encoding.UTF8);
+                string text = reader.ReadToEnd();
+
+                string? spdx = SpdxTextClassifier.Classify(text);
+                if (spdx is not null)
+                {
+                    return new ExtractedMetadata(new[] { spdx }, null);
+                }
+            }
+        }
+        catch { return ExtractedMetadata.Empty; }
+        finally { zipStream.Dispose(); }
+
+        return ExtractedMetadata.Empty;
+    }
 }

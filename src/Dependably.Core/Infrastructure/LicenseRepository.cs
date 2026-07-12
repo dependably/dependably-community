@@ -263,9 +263,10 @@ public sealed class LicenseRepository
     /// that are on neither the allow- nor block-list. Includes a per-leaf package count and
     /// first-seen timestamp so the admin UI can prioritise high-impact licenses.
     ///
-    /// Licenses are merged across both planes: hosted/published artifacts (per-tenant
-    /// <c>package_versions</c>) and proxied artifacts (the global <c>cache_artifact</c> plane,
-    /// org-scoped via <c>tenant_artifact_access</c>).
+    /// Licenses are merged across three planes: hosted/published artifacts (per-tenant
+    /// <c>package_versions</c>), proxied artifacts (the global <c>cache_artifact</c> plane,
+    /// org-scoped via <c>tenant_artifact_access</c>), and OCI images (per-tenant <c>oci_blobs</c>,
+    /// which carries the captured SPDX expression on its manifest row).
     ///
     /// Compound expressions (PyPI PEP 639 emits "MIT OR Apache-2.0" verbatim) are split into
     /// their individual leaves — each leaf is reviewed and approved independently — and name
@@ -291,8 +292,9 @@ public sealed class LicenseRepository
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         await using var conn = await _db.OpenAsync(ct);
-        // Both UNION arms filter on @orgId (hosted via packages.org_id, proxied via
-        // tenant_artifact_access.org_id), so no cross-tenant row is reachable.
+        // All three UNION arms filter on @orgId (hosted via packages.org_id, proxied via
+        // tenant_artifact_access.org_id, OCI via oci_blobs.org_id), so no cross-tenant row is
+        // reachable.
         var rawRows = await conn.QueryAsync<ReviewRawRow>(
             """
             SELECT pvl.license_spdx                     AS RawLicenseSpdx,
@@ -313,6 +315,13 @@ public sealed class LicenseRepository
               ON taa.cache_artifact_id = pvl.cache_artifact_id
              AND taa.org_id = @orgId
             WHERE pvl.owner_kind = 'cache_artifact'
+            UNION ALL
+            SELECT ob.license_spdx                              AS RawLicenseSpdx,
+                   'oci:' || COALESCE(ot.repository, ob.digest) AS PackageKey,
+                   ob.cached_at                                 AS CreatedAt
+            FROM oci_blobs ob
+            LEFT JOIN oci_tags ot ON ot.org_id = ob.org_id AND ot.digest = ob.digest
+            WHERE ob.org_id = @orgId AND ob.license_spdx IS NOT NULL
             """,
             new { orgId });
 

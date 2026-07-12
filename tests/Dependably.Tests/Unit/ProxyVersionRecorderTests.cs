@@ -115,6 +115,77 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         Assert.Equal("9.9.9", await ReadUpstreamLatestAsync(orgId, "left-pad"));
     }
 
+    /// <summary>
+    /// Pins the manifest-extraction stream leak: <c>RecordProxyViaGlobalPlaneAsync</c> opens a
+    /// fresh blob-store stream per fact-extraction pass (license, script-detection, npm
+    /// manifest). Every stream <see cref="BlobHandle.OpenAsync"/> hands out must be disposed by
+    /// the recorder — <see cref="InMemoryBlobStore"/>'s <c>MemoryStream</c> hides a leak here
+    /// (nothing OS-visible to exhaust), so this asserts disposal directly via a tracking wrapper
+    /// rather than relying on a real file descriptor running out.
+    /// </summary>
+    [Fact]
+    public async Task RecordAsync_ProxyPath_WithExtractManifest_DisposesEveryOpenedStream()
+    {
+        string orgId = await SeedOrgAsync();
+        string caId = await SeedCacheArtifactAsync(orgId, "left-pad", "1.0.0");
+        var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
+        var recorder = BuildRecorder(resolver);
+
+        byte[] bytes = "tarball-bytes"u8.ToArray();
+        var openedStreams = new List<DisposalTrackingStream>();
+        var blob = new BlobHandle("k", "sha", bytes.LongLength, _ =>
+        {
+            var tracked = new DisposalTrackingStream(new MemoryStream(bytes));
+            openedStreams.Add(tracked);
+            return Task.FromResult<Stream>(tracked);
+        });
+        var req = new ProxyVersionRequest(
+            OrgId: orgId, Ecosystem: "npm", PackageName: "left-pad", PurlName: "left-pad",
+            Version: "1.0.0", Purl: "pkg:npm/left-pad@1.0.0",
+            Sha256: "sha", File: "left-pad-1.0.0.tgz", Blob: blob, UserId: null);
+
+        await recorder.RecordAsync(
+            req, extractLicenses: null, extractManifest: _ => "{\"dependencies\":{}}", cacheArtifactId: caId);
+
+        Assert.NotEmpty(openedStreams);
+        Assert.All(openedStreams, s => Assert.True(s.Disposed,
+            "every stream BlobHandle.OpenAsync hands out during proxy first-fetch must be disposed"));
+    }
+
+    /// <summary>Stream wrapper that records whether it was disposed, sync or async.</summary>
+    private sealed class DisposalTrackingStream(Stream inner) : Stream
+    {
+        public bool Disposed { get; private set; }
+
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => inner.CanWrite;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+        public override void Flush() => inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+        public override void SetLength(long value) => inner.SetLength(value);
+        public override void Write(byte[] buffer, int offset, int count) => inner.Write(buffer, offset, count);
+
+        protected override void Dispose(bool disposing)
+        {
+            Disposed = true;
+            if (disposing)
+            {
+                inner.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            Disposed = true;
+            await inner.DisposeAsync();
+            await base.DisposeAsync();
+        }
+    }
+
     private async Task<string> SeedCacheArtifactAsync(string orgId, string name, string version)
     {
         await using var conn = await _db.OpenAsync();

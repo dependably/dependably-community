@@ -10,7 +10,7 @@ public sealed class LocalBlobStore : IBlobStore
     public LocalBlobStore(string root)
     {
         _root = root;
-        // deepcode ignore PT: `root` is built from LOCAL_STORAGE_PATH (operator-set env var) by
+        // `root` is built from LOCAL_STORAGE_PATH (operator-set env var) by
         // BlobStoreFactory. No tenant input reaches this constructor.
         Directory.CreateDirectory(root);
         _sizeCounter = new LocalBlobStoreSizeCounter(root);
@@ -20,7 +20,7 @@ public sealed class LocalBlobStore : IBlobStore
     internal LocalBlobStore(string root, LocalBlobStoreSizeCounter counter)
     {
         _root = root;
-        // deepcode ignore PT: see public constructor.
+        // see public constructor.
         Directory.CreateDirectory(root);
         _sizeCounter = counter;
     }
@@ -124,7 +124,7 @@ public sealed class LocalBlobStore : IBlobStore
             bufferSize: 1, FileOptions.Asynchronous | FileOptions.SequentialScan);
         fs.Seek(from, SeekOrigin.Begin);
         long rangeLength = effectiveTo - from + 1;
-        // deepcode ignore PT: key is validated by BlobKeys before reaching this method; no user input.
+        // key is validated by BlobKeys before reaching this method; no user input.
         var rangedContent = new RangeLimitedStream(fs, rangeLength);
         return Task.FromResult<RangedStream?>(new RangedStream(rangedContent, from, effectiveTo, totalLength));
     }

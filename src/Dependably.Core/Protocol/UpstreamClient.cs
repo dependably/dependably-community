@@ -106,7 +106,7 @@ public sealed partial class UpstreamClient
         // IStagingDiskInfo and the floor enforced here can't diverge.
         _stagingPath = stagingOptions.Path;
         _stagingDiskFloorBytes = stagingOptions.FloorBytes;
-        // deepcode ignore PT: PROXY_STAGING_PATH is set by the operator deploying the container
+        // PROXY_STAGING_PATH is set by the operator deploying the container
         // (env var, secret manager, or compose file). The process trust boundary already covers
         // anyone who can set this env var — no further tenant-side input reaches the path.
         try { Directory.CreateDirectory(_stagingPath); }
@@ -712,7 +712,7 @@ public sealed partial class UpstreamClient
 
         var (diagRetryAfter, diagCfRay, diagXServedBy, diagVia, diagUserAgent) = GetResponseDiagHeaders(response, fetchRequest);
         // Structured boundary log on every non-success response for diagnosability.
-        // deepcode ignore LogForging: RenderedCompactJsonFormatter JSON-encodes all structured fields.
+        // RenderedCompactJsonFormatter JSON-encodes all structured fields.
         _logger.LogWarning(
             "Upstream fetch non-success: Status={StatusCode} Url={Url} Transient={Transient} Refused={Refused} " +
             "Attempt={Attempt}/{MaxAttempts} RetryAfter={RetryAfterHeader} CfRay={CfRay} XServedBy={XServedBy} " +

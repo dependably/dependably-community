@@ -56,11 +56,12 @@ public sealed class ProxyVersionRecorder
     public async Task<string?> RecordAsync(
         ProxyVersionRequest req,
         Func<Stream, LicenseExtractor.ExtractedMetadata>? extractLicenses,
+        Func<Stream, string?>? extractManifest = null,
         string? cacheArtifactId = null,
         CancellationToken ct = default)
     {
         string? versionId = cacheArtifactId is not null
-            ? await RecordProxyViaGlobalPlaneAsync(req, extractLicenses, cacheArtifactId, ct)
+            ? await RecordProxyViaGlobalPlaneAsync(req, extractLicenses, extractManifest, cacheArtifactId, ct)
             : await RecordViaPvRowAsync(req, extractLicenses, cacheArtifactId: null, ct);
 
         // Seed the upstream-latest baseline on first contact so the package shows its "Latest"
@@ -112,6 +113,7 @@ public sealed class ProxyVersionRecorder
     private async Task<string?> RecordProxyViaGlobalPlaneAsync(
         ProxyVersionRequest req,
         Func<Stream, LicenseExtractor.ExtractedMetadata>? extractLicenses,
+        Func<Stream, string?>? extractManifest,
         string cacheArtifactId,
         CancellationToken ct)
     {
@@ -168,6 +170,28 @@ public sealed class ProxyVersionRecorder
             // Swallowed: detection is advisory; the cached version still serves.
         }
 
+        // npm install-manifest extraction writes only to the global plane, same as license
+        // extraction above. COALESCE semantics in UpdateGlobalFactsAsync mean a null result here
+        // (extraction failure, or every non-npm ecosystem) never clears an already-stored value —
+        // this is also how a pre-migration row (manifest_json NULL) backfills lazily the next time
+        // this artifact is re-fetched from upstream.
+        string? manifestJson = null;
+        if (extractManifest is not null)
+        {
+            try
+            {
+                // Caller-owned stream: NpmTarballValidator.Validate (the extractor's parser)
+                // deliberately leaves the source stream open for the caller to dispose, unlike
+                // the license extractor above, so this recorder must close it explicitly.
+                await using var stream = await req.Blob.OpenAsync(ct);
+                manifestJson = extractManifest(stream);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                manifestJson = null;
+            }
+        }
+
         // Write all supply-chain facts to the global cache_artifact row. Runs after script
         // detection so has_install_script reflects the freshly-computed result.
         await _cacheArtifacts.UpdateGlobalFactsAsync(
@@ -182,7 +206,8 @@ public sealed class ProxyVersionRecorder
             provenanceSigner: null,
             upstreamIntegrityValue: req.UpstreamIntegrityValue,
             upstreamIntegrityAlgorithm: req.UpstreamIntegrityAlgorithm,
-            ct);
+            manifestJson: manifestJson,
+            ct: ct);
 
         // Null signals to the caller (ProxyFetchService) to use the cache_artifact id for scanning
         // and block-gate evaluation, rather than looking up a package_versions row.

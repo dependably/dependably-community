@@ -178,6 +178,37 @@ variables:
         esac
       fi
 
+# Wires `REGISTRY_URL` + `REGISTRY_KEY` (the same unprotected project CI variables used by
+# `.private-registry-setup`) into apk so runtime package fetches route through the private
+# Dependably instance's apk pull-through proxy instead of the public Alpine CDN. HARD-FAILS
+# when either var is empty rather than silently falling back to public — the GitLab pipeline
+# must always use the private feed. The apk route is 1:1 with dl-cdn paths
+# (/apk/{release}/{repo}/{arch}/{file}), so rewriting the host prefix in
+# /etc/apk/repositories is the only client change needed. Referenced (not extended) directly
+# above each `apk add` call, since it must run immediately before that call rather than once
+# per job.
+.apk-mirror-setup:
+  script:
+    - |
+      # No `set -eu` here: this block is inserted as one item in a job's `script:` list, and
+      # GitLab concatenates every item into a single shell invocation — a stray `set -u` would
+      # leak into later script lines and trip on optional unset vars. Use explicit checks +
+      # `exit 1` (which aborts the job) instead.
+      if [ -z "${REGISTRY_URL:-}" ] || [ -z "${REGISTRY_KEY:-}" ]; then
+        echo "ERROR: REGISTRY_URL/REGISTRY_KEY are empty — refusing to fetch apk packages from the public mirror." >&2
+        echo "Both are unprotected project CI/CD variables; an empty value means they were removed or scoped out (e.g. a fork pipeline)." >&2
+        exit 1
+      fi
+      SCHEME=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^(https?)://.*|\1|')
+      HOST=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^https?://||; s|/.*||')
+      sed -i -E "s|https://dl-cdn\.alpinelinux\.org/alpine|${SCHEME}://ci:${REGISTRY_KEY}@${HOST}/apk|g" /etc/apk/repositories
+      # Self-check: the active repositories file must never fall back to the public mirror.
+      if grep -q dl-cdn /etc/apk/repositories; then
+        echo "ERROR: /etc/apk/repositories still references dl-cdn.alpinelinux.org after rewrite:" >&2
+        cat /etc/apk/repositories >&2
+        exit 1
+      fi
+
 # === validate ===
 
 # Single authority for tag identity. Owns: annotated-tag check, tag→commit
@@ -227,12 +258,21 @@ release-contract-lint:
   # its interpreter under /usr/local and ignores Alpine's site-packages.
   image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
+    - !reference [.apk-mirror-setup, script]
     - apk add --no-cache python3 py3-yaml
     - |
       python3 <<'PY'
       import sys, yaml
+      # plain safe_load has no constructor for GitLab's `!reference [job, key]` tag
+      # (used by .apk-mirror-setup call sites); register one that resolves it to the
+      # raw [job, key] pair. The checks below only inspect job-level keys (extends,
+      # rules, script/trigger/run presence), never script *contents*, so a
+      # structurally-inert placeholder is sufficient.
+      class Loader(yaml.SafeLoader):
+          pass
+      Loader.add_constructor('!reference', lambda loader, node: loader.construct_sequence(node))
       with open('.gitlab-ci.yml') as f:
-          doc = yaml.safe_load(f)
+          doc = yaml.load(f, Loader=Loader)
       # Concrete jobs: dict-valued, non-dot-prefixed (excludes templates/anchors),
       # carrying any of GitLab's three runnable primitives. `default:`,
       # `workflow:`, `variables:`, etc. carry none of these. If a future job
@@ -305,6 +345,7 @@ ci-config-lint:
   tags: [amd64]
   image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
+    - !reference [.apk-mirror-setup, script]
     - apk add --no-cache curl tar
     - |
       set -eu
@@ -330,6 +371,7 @@ lockfile-registry-guard:
   extends: [.runs-on-ci, .release-required]
   image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
+    - !reference [.apk-mirror-setup, script]
     - apk add --no-cache grep
     - |
       bad=$(grep -nE '"resolved":[[:space:]]*"https?://[^"]+"' web/package-lock.json \
@@ -357,6 +399,7 @@ private-registry-guard:
     - if: $CI_COMMIT_BRANCH == "main"
     - *release-tag-rule
   script:
+    - !reference [.apk-mirror-setup, script]
     - apk add --no-cache curl
     - | # glsec:ignore GL020 -- curl uses -o /dev/null (connectivity check only); no file is downloaded for execution
       if [ -z "${REGISTRY_URL:-}" ] || [ -z "${REGISTRY_KEY:-}" ]; then
@@ -484,6 +527,7 @@ csp-inline-style-guard:
   extends: [.runs-on-ci, .release-required]
   image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
+    - !reference [.apk-mirror-setup, script]
     - apk add --no-cache grep
     - |
       if grep -rn 'style="' web/src --include='*.svelte'; then
@@ -496,6 +540,7 @@ chrome-emoji-guard:
   extends: [.runs-on-ci, .release-required]
   image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
   script:
+    - !reference [.apk-mirror-setup, script]
     - apk add --no-cache grep
     - |
       if grep -rPn '[\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}\x{2700}-\x{27BF}\x{2300}-\x{23FF}]' web/src --include='*.svelte'; then
@@ -943,6 +988,7 @@ dt-publish:
     DT_PARENT_NAME: "Dependably Community"
     DT_VERSION: "latest"
   script:
+    - !reference [.apk-mirror-setup, script]
     - apk add --no-cache curl
     - | # glsec:ignore GL020 -- curl POSTs SBOM files to the DT API; no executable is downloaded
       set -eu
@@ -1022,6 +1068,7 @@ dt-publish:
     AI_REVIEW_THINK: "false"
   allow_failure: true
   before_script:
+    - !reference [.apk-mirror-setup, script]
     - apk add --no-cache bash curl jq git
   script:
     - bash ci/ai-review.sh "$AI_REVIEW_PERSONA_FILE" "$AI_REVIEW_REPORT_FILE"
@@ -1273,6 +1320,7 @@ release-to-github:
   variables:
     GIT_DEPTH: 0
   script:
+    - !reference [.apk-mirror-setup, script]
     - apk add --no-cache bash
     - bash build/release-to-github.sh
   artifacts:

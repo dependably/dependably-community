@@ -56,8 +56,9 @@ public sealed class EdgeFactory : WebApplicationFactory<EdgeProgram>, IAsyncLife
     public string? EdgeAccessToken { get; init; }
 
     /// <summary>
-    /// Optional Serilog capture sink (registered as <c>ILogEventSink</c>) so a test can assert the
-    /// edge anonymous-mode startup warning without a bespoke logging harness.
+    /// Optional Serilog capture sink, bound to this host's own logger by
+    /// <see cref="TestHostLogging.UseCapturingSink"/>, so a test can assert the edge
+    /// anonymous-mode startup warning without a bespoke logging harness.
     /// </summary>
     public Serilog.Core.ILogEventSink? LogSink { get; init; }
 
@@ -82,7 +83,7 @@ public sealed class EdgeFactory : WebApplicationFactory<EdgeProgram>, IAsyncLife
 
         if (LogSink is not null)
         {
-            builder.Services.AddSingleton<Serilog.Core.ILogEventSink>(LogSink);
+            TestHostLogging.UseCapturingSink(builder, LogSink);
         }
 
         // In-memory store swaps, mirroring DependablyFactory: both the legacy IBlobStore and the

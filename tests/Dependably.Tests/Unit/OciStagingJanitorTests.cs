@@ -93,13 +93,15 @@ public sealed class OciStagingJanitorTests : IAsyncLifetime
         long floor = disk is null ? 0 : StagingOptions.DefaultFloorBytes;
         var stagingOpts = new StagingOptions(_stagingDir, FloorBytes: floor);
 
+        var tiered = new TieredBlobStorage(new InMemoryBlobStore(), new InMemoryBlobStore());
         return new OciUploadService(new OciUploadService.Dependencies(
             _db,
-            new TieredBlobStorage(new InMemoryBlobStore(), new InMemoryBlobStore()),
+            tiered,
             _orgs,
             disk ?? new UnlimitedDisk(),
             stagingOpts,
             config,
+            new OciImageLicenseRecorder(_db, tiered, _clock, NullLogger<OciImageLicenseRecorder>.Instance),
             NullLogger<OciUploadService>.Instance,
             _clock));
     }

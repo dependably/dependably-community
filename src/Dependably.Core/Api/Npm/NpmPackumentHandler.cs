@@ -786,6 +786,14 @@ public sealed class NpmPackumentHandler(
     {
         string tarballBase = NpmTarballBase(httpContext);
         var versionsObj = new JsonObject();
+        // Publish-timestamp map for the versions this packument advertises. Sourced from the
+        // stored publish timestamp (upstream first-publish for proxy rows, row creation for
+        // hosted rows) rather than left absent — pnpm warns when a packument has no "time" field.
+        // This packument is always locally-derived (the fully-local build here, or the fallback
+        // build when upstream is unreachable); the verbatim upstream packument on the passthrough
+        // merge path already carries its own upstream-authoritative "time" map and is never routed
+        // through this method.
+        var timeObj = new JsonObject();
 
         // Non-yanked versions, excluding those the block gate will hard-block on the download
         // path. Block-gate filtering here keeps the packument in sync with the tarball endpoint
@@ -799,6 +807,7 @@ public sealed class NpmPackumentHandler(
         foreach (var v in activeVersions)
         {
             versionsObj[v.Version] = BuildVersionObject(pkg.Name, v, tarballBase);
+            timeObj[v.Version] = (v.PublishedAt ?? v.CreatedAt).ToString("o");
         }
 
         // Dist-tags from persisted rows take priority. If no tags are persisted (e.g. a
@@ -826,7 +835,8 @@ public sealed class NpmPackumentHandler(
             ["_id"] = pkg.Name,
             ["name"] = pkg.Name,
             ["dist-tags"] = distTagsObj,
-            ["versions"] = versionsObj
+            ["versions"] = versionsObj,
+            ["time"] = timeObj
         };
     }
 

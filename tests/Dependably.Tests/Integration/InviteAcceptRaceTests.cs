@@ -72,7 +72,7 @@ public sealed class InviteAcceptRaceTests : IClassFixture<DependablyFactory>, IA
     {
         var (_, rawToken) = await SeedInviteAsync();
         string email = await GetInviteEmail(rawToken);
-        // deepcode ignore NoHardcodedCredentials/test: in-memory test fixture password for the invite-accept race test; not a real credential.
+        // in-memory test fixture password for the invite-accept race test; not a real credential.
         string uniquePassword = "Xm9#kLp2$vRq8nTs!";
 
         const int Concurrency = 6;

@@ -228,7 +228,7 @@ public sealed class PyPiPublishHandler(
     private async Task<(string? Path, long Size, IActionResult? Error)> StagePyPiFileAsync(
         IFormFile file, CancellationToken ct)
     {
-        // deepcode ignore PT: staging file name is "publish-stage-{server-guid}" under the operator-configured staging root — no user input reaches the path.
+        // staging file name is "publish-stage-{server-guid}" under the operator-configured staging root — no user input reaches the path.
         string tempPath = System.IO.Path.Combine(stagingPath, $"publish-stage-{Guid.NewGuid():N}.tmp");
         bool succeeded = false;
         try
@@ -271,7 +271,7 @@ public sealed class PyPiPublishHandler(
     private static async Task<(string? ActualSha256, IActionResult? Error)> VerifyDigestsFromFileAsync(
         string stagedPath, string sha256Digest, string? md5Digest, CancellationToken ct)
     {
-        // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        // stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
         await using var fs = new FileStream(
             stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
             bufferSize: 81920, useAsync: true);
@@ -372,7 +372,7 @@ public sealed class PyPiPublishHandler(
         return new OkResult();
     }
 
-    // deepcode ignore PT: stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+    // stagingPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
     private static LicenseExtractor.ExtractedMetadata ExtractPyPiLicense(string stagingPath, string filename)
     {
         using var fs = new FileStream(
@@ -394,7 +394,7 @@ public sealed class PyPiPublishHandler(
         {
             if (System.IO.File.Exists(path))
             {
-                // deepcode ignore PT: path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+                // path is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
                 System.IO.File.Delete(path);
             }
         }
@@ -411,7 +411,7 @@ public sealed class PyPiPublishHandler(
     // EcosystemDetector never drift on what counts as a valid wheel.
     private static ValidationResult ValidateWheelFromFile(string stagedPath, string declaredName, string declaredVersion)
     {
-        // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        // stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
         using var fileStream = new FileStream(
             stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
             bufferSize: 81920, useAsync: false);
@@ -425,7 +425,7 @@ public sealed class PyPiPublishHandler(
     {
         try
         {
-            // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+            // stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
             using var fileStream = new FileStream(
                 stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
                 bufferSize: 81920, useAsync: false);
@@ -468,7 +468,7 @@ public sealed class PyPiPublishHandler(
             return ValidationResult.Ok();
         }
 
-        // deepcode ignore PT: stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
+        // stagedPath is "publish-stage-{server-guid}.tmp" under the operator-configured staging root — no user input reaches the path.
         using var fileStream = new FileStream(
             stagedPath, FileMode.Open, FileAccess.Read, FileShare.Read,
             bufferSize: 81920, useAsync: false);

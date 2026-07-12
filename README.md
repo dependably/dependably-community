@@ -181,6 +181,8 @@ Both API surfaces are documented as live OpenAPI documents served by the running
 
 The full route surface is contract-tested against [`tests/Contracts/openapi.contract.json`](tests/Contracts/openapi.contract.json) — any route change fails CI until the contract is regenerated.
 
+For the developer-facing remediation walkthrough — reading the vulnerability report (CVSS/EPSS/KEV), the OWASP Top 10 mapping, and the curated fix skills for Claude Code / OpenAI Codex / GitHub Copilot — see [docs/fixing-vulnerabilities.md](docs/fixing-vulnerabilities.md).
+
 ---
 
 ## Contributing
